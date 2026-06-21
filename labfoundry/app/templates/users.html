@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block page_title %}Users{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Local Users</h2>
+        <p class="muted">Manage appliance-local accounts. LDAP and OIDC belong to Authentication providers.</p>
+      </div>
+      <span class="status-pill muted">{{ users|length }} users</span>
+    </div>
+    <div id="users-error" class="alert hidden"></div>
+    <div
+      id="users-table"
+      class="tabulator-shell"
+      data-users='{{ users_json | tojson }}'
+      data-roles='{{ roles | tojson }}'
+      data-csrf="{{ csrf_token }}"
+      data-fallback-id="users-fallback"
+    ></div>
+    <table id="users-fallback" class="data-table compact dns-fallback-table">
+      <thead>
+        <tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for user in users %}
+          <tr>
+            <td>{{ user.username }}</td>
+            <td>{{ user.role }}</td>
+            <td><span class="status-pill {{ 'good' if user.enabled else 'muted' }}">{{ "enabled" if user.enabled else "disabled" }}</span></td>
+            <td>{{ user.created_at.strftime("%Y-%m-%d") }}</td>
+            <td class="button-row">
+              <button class="button tiny secondary" type="button" data-reset-user-button data-user-id="{{ user.id }}" data-username="{{ user.username }}">Reset password</button>
+              <form
+                action="/users/{{ user.id }}/delete"
+                method="post"
+                data-confirm-modal
+                data-confirm-title="Remove {{ user.username }}?"
+                data-confirm-message="This removes the local LabFoundry account and revokes its API tokens. Authentication provider users are not affected."
+                data-confirm-label="Remove user"
+              >
+                <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                <button class="button tiny danger" type="submit" {{ "disabled" if user.id == identity.user_id else "" }}>Remove</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Authentication Boundary</h2>
+        <span class="status-pill good">local users</span>
+      </div>
+      <p class="muted">This page manages local accounts only. LDAP is an authentication provider configured on the Authentication page; directory users are not copied into this table in the MVP.</p>
+      <div class="settings-list compact-list">
+        <div><span>Local users</span><strong>managed here</strong></div>
+        <div><span>LDAP</span><strong>provider settings</strong></div>
+        <div><span>OIDC</span><strong>provider settings</strong></div>
+      </div>
+    </div>
+  </aside>
+</section>
+
+<dialog id="user-password-modal" class="confirm-modal" aria-labelledby="user-password-modal-title">
+  <form id="user-password-form" class="confirm-modal-panel form-stack" action="/users/0/password" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="confirm-modal-body">
+      <p class="kicker">Local account</p>
+      <h2 id="user-password-modal-title">Reset password</h2>
+      <p id="user-password-modal-message" class="muted">Set a temporary local password. API tokens for this user are revoked after reset.</p>
+    </div>
+    <label>
+      <span class="field-label"><span>New password</span><button class="help-icon" type="button" data-help="Minimum length is 8 characters.">i</button></span>
+      <input type="password" name="password" autocomplete="new-password" minlength="8" required>
+    </label>
+    <label>
+      <span>Confirm password</span>
+      <input type="password" name="confirm_password" autocomplete="new-password" minlength="8" required>
+    </label>
+    <div class="confirm-modal-actions">
+      <button class="button ghost" value="cancel" type="button" data-user-password-cancel>Cancel</button>
+      <button class="button primary" type="submit">Reset password</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}

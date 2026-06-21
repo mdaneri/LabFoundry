@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+{% block page_title %}DHCP{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>DHCP IP Zones</h2>
+        <p class="muted">Each IP zone owns its interface, gateway, lease range, DNS options, and domain suffix.</p>
+      </div>
+      <span class="status-pill {{ 'good' if dhcp_settings.enabled else 'muted' }}">{{ "enabled" if dhcp_settings.enabled else "disabled" }}</span>
+    </div>
+    {% if form_error %}
+      <div class="alert error">{{ form_error }}</div>
+    {% endif %}
+    <div class="tab-buttons tool-tabs" role="tablist" aria-label="DHCP views">
+      <button class="tab-button active" type="button" data-tab-target="dhcp-desired-state" aria-selected="true">Desired State</button>
+      <button class="tab-button" type="button" data-tab-target="dhcp-actual-leases" aria-selected="false">Actual Leases</button>
+    </div>
+    <div class="tab-panels">
+      <div id="dhcp-desired-state" class="tab-panel active" role="tabpanel">
+    <div class="section-head">
+      <div>
+        <h2>Managed IP Zones</h2>
+        <p class="muted">Edit zones directly in the grid. The bottom row creates a new zone once required fields are filled.</p>
+      </div>
+      <span class="status-pill muted">{{ dhcp_scopes|length }} zones</span>
+    </div>
+    <div id="dhcp-scope-error" class="alert error hidden"></div>
+    <div
+      id="dhcp-scopes-table"
+      class="tabulator-shell dhcp-scopes-table"
+      data-scopes='{{ dhcp_scope_rows | tojson }}'
+      data-interface-options='{{ available_interfaces | map(attribute="name") | list | tojson }}'
+      data-domain-options='{{ dns_domain_options | tojson }}'
+      data-csrf="{{ csrf_token }}"
+      data-fallback-id="dhcp-scopes-fallback"
+    ></div>
+    <table id="dhcp-scopes-fallback" class="data-table dns-fallback-table">
+      <thead>
+        <tr><th>Zone</th><th>Interface</th><th>Gateway</th><th>Prefix</th><th>Range</th><th>Lease</th><th>DNS</th><th>NTP</th><th>Domain</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for scope in dhcp_scopes %}
+          <tr>
+            <td>{{ scope.name }}</td>
+            <td>{{ scope.interface_name }}</td>
+            <td>{{ scope.site_address }}</td>
+            <td>/{{ scope.prefix_length }}</td>
+            <td>{{ scope.range_start }} - {{ scope.range_end }}</td>
+            <td>{{ scope.lease_time }}</td>
+            <td>{{ scope.dns_server }}</td>
+            <td>{{ scope.ntp_server or "" }}</td>
+            <td>{{ scope.domain_name }}</td>
+            <td>
+              <form
+                action="/dhcp/scopes/{{ scope.id }}/delete"
+                method="post"
+                data-confirm-modal
+                data-confirm-title="Delete {{ scope.name }} IP zone?"
+                data-confirm-message="This removes the DHCP IP zone {{ scope.name }} from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                data-confirm-label="Delete IP zone"
+              >
+                <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                <button class="button tiny danger" type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="section-head">
+      <div>
+        <h2>DHCP Options</h2>
+        <p class="muted">Add global options or tag them to a specific IP zone. Options save into desired state immediately.</p>
+      </div>
+      <span class="status-pill muted">{{ dhcp_options|length }} options</span>
+    </div>
+    <div id="dhcp-option-error" class="alert error hidden"></div>
+    <div
+      id="dhcp-options-table"
+      class="tabulator-shell dhcp-options-table"
+      data-options='{{ dhcp_option_rows | tojson }}'
+      data-scope-options='{{ dhcp_option_scope_choices | tojson }}'
+      data-csrf="{{ csrf_token }}"
+      data-fallback-id="dhcp-options-fallback"
+    ></div>
+    <table id="dhcp-options-fallback" class="data-table dns-fallback-table">
+      <thead>
+        <tr><th>Applies to</th><th>Option</th><th>Value</th><th>Status</th><th>Description</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for option in dhcp_options %}
+          <tr>
+            <td>{{ "Global defaults" if option.scope_id is none else (dhcp_scopes | selectattr("id", "equalto", option.scope_id) | map(attribute="name") | first) }}</td>
+            <td>{{ option.option_code }}</td>
+            <td>{{ option.value }}</td>
+            <td><span class="status-pill {{ 'good' if option.enabled else 'muted' }}">{{ "enabled" if option.enabled else "disabled" }}</span></td>
+            <td>{{ option.description or "" }}</td>
+            <td>
+              <form
+                action="/dhcp/options/{{ option.id }}/delete"
+                method="post"
+                data-confirm-modal
+                data-confirm-title="Delete DHCP option {{ option.option_code }}?"
+                data-confirm-message="This removes the DHCP option from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                data-confirm-label="Delete option"
+              >
+                <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                <button class="button tiny danger" type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="section-head">
+      <div>
+        <h2>Reservations</h2>
+        <p class="muted">Reservations use DNS names. If the matching A or AAAA record is missing, LabFoundry creates it from the reservation IP.</p>
+      </div>
+      <span class="status-pill muted">{{ dhcp_reservations|length }} entries</span>
+    </div>
+    <div id="dhcp-reservation-error" class="alert error hidden"></div>
+    <div
+      id="dhcp-reservations-table"
+      class="tabulator-shell dhcp-reservations-table"
+      data-reservations='{{ dhcp_reservation_rows | tojson }}'
+      data-csrf="{{ csrf_token }}"
+      data-fallback-id="dhcp-reservations-fallback"
+    ></div>
+    <table id="dhcp-reservations-fallback" class="data-table dns-fallback-table">
+      <thead>
+        <tr><th>DNS name / FQDN</th><th>MAC</th><th>IP</th><th>Status</th><th>Description</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for reservation in dhcp_reservations %}
+          <tr>
+            <td>{{ reservation.hostname }}</td>
+            <td>{{ reservation.mac_address }}</td>
+            <td>{{ reservation.ip_address }}</td>
+            <td><span class="status-pill {{ 'good' if reservation.enabled else 'muted' }}">{{ "enabled" if reservation.enabled else "disabled" }}</span></td>
+            <td>{{ reservation.description or "" }}</td>
+            <td>
+              <form
+                action="/dhcp/reservations/{{ reservation.id }}/delete"
+                method="post"
+                data-confirm-modal
+                data-confirm-title="Delete {{ reservation.hostname }} reservation?"
+                data-confirm-message="This removes the DHCP reservation for {{ reservation.mac_address }} from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                data-confirm-label="Delete reservation"
+              >
+                <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                <button class="button tiny danger" type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+      </div>
+      <div id="dhcp-actual-leases" class="tab-panel" role="tabpanel" hidden>
+        <div class="section-head">
+          <div>
+            <h2>Actual Leases</h2>
+            <p class="muted">Read-only leases reported by dnsmasq. This view does not change desired state.</p>
+          </div>
+          <span class="status-pill {{ 'warn' if dhcp_lease_dry_run else 'good' }}">{{ "dry-run" if dhcp_lease_dry_run else "live" }}</span>
+        </div>
+        <p class="muted">Source command: <code>{{ dhcp_lease_command }}</code></p>
+        <table class="data-table compact">
+          <thead>
+            <tr><th>Status</th><th>DNS name / FQDN</th><th>IP</th><th>MAC</th><th>Expires</th><th>Client ID</th></tr>
+          </thead>
+          <tbody>
+            {% for lease in dhcp_leases %}
+              <tr>
+                <td><span class="status-pill {{ 'good' if lease.status == 'active' else 'muted' }}">{{ lease.status }}</span></td>
+                <td>{{ lease.hostname or "-" }}</td>
+                <td>{{ lease.ip_address }}</td>
+                <td>{{ lease.mac_address }}</td>
+                <td>{{ lease.expires_at.isoformat() if lease.expires_at else "never" }}</td>
+                <td>{{ lease.client_id or "-" }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="6" class="muted">No DHCP leases reported.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>DHCP Settings</h2>
+        <span class="status-pill warn">dnsmasq</span>
+      </div>
+      <form class="form-stack" action="/dhcp/settings" method="post" data-autosave-form data-autosave-status-id="dhcp-settings-autosave-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry renders DHCP as enabled desired state for dnsmasq.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if dhcp_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <input type="hidden" name="interface_name" value="{{ dhcp_settings.interface_name }}">
+        <input type="hidden" name="site_address" value="{{ dhcp_settings.site_address }}">
+        <input type="hidden" name="prefix_length" value="{{ dhcp_settings.prefix_length }}">
+        <input type="hidden" name="range_start" value="{{ dhcp_settings.range_start }}">
+        <input type="hidden" name="range_end" value="{{ dhcp_settings.range_end }}">
+        <input type="hidden" name="lease_time" value="{{ dhcp_settings.lease_time }}">
+        <input type="hidden" name="domain_name" value="{{ dhcp_settings.domain_name }}">
+        <input type="hidden" name="dns_server" value="{{ dhcp_settings.dns_server }}">
+        <label class="switch-field"><span class="field-label"><span>Authoritative</span><button class="help-icon" type="button" data-help="Tells dnsmasq it is the authoritative DHCP server for the configured SiteA scope.">i</button></span><input class="switch-input" type="checkbox" name="authoritative" {{ "checked" if dhcp_settings.authoritative else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <p id="dhcp-settings-autosave-status" class="autosave-status" aria-live="polite">Changes save automatically.</p>
+      </form>
+    </div>
+
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>DHCP Apply</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <p class="muted">Use this when DHCP changes are finished. The task validates the current desired state, captures the rendered dnsmasq config, and applies it through the LabFoundry adapter.</p>
+      <form class="apply-task-form" action="/dhcp/apply-task" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button class="button primary" type="submit" {{ "disabled" if validation_errors else "" }}>Create appliance apply task</button>
+      </form>
+      {% if apply_task_error %}
+        <div class="alert error">{{ apply_task_error }}</div>
+      {% endif %}
+      {% if apply_task %}
+        <div class="alert success">
+          Appliance apply task <code>{{ apply_task.id }}</code> captured the current DHCP desired state.
+          {% if apply_task_dry_run %}
+            Dry-run mode recorded the commands without changing the host.
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not validation_errors else 'warn' }}">{{ "valid" if not validation_errors else "needs attention" }}</span>
+      </div>
+      {% if validation_errors %}
+        <div class="alert error">
+          {% for error in validation_errors %}
+            <div>{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if not validation_errors %}
+        <p class="muted">The desired DNS/DHCP state passes LabFoundry validation. Host validation still runs through <code>dnsmasq --test</code> on the appliance.</p>
+      {% endif %}
+      <div class="terminal-note">
+        <strong>{{ dhcp_settings.config_path }}</strong>
+        <code>{{ config_preview }}</code>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}

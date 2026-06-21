@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block page_title %}Physical Interfaces{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Physical Interfaces</h2>
+        <p class="muted">Configure IPs on access NICs and mark trunks only when a NIC carries tagged VLANs for VLAN Interfaces.</p>
+      </div>
+      <span class="status-pill muted">{{ physical_interfaces|length }} interfaces</span>
+    </div>
+    {% if form_error %}
+      <div class="alert error">{{ form_error }}</div>
+    {% endif %}
+    <div id="physical-interface-error" class="alert error hidden"></div>
+    <div
+      id="physical-interfaces-table"
+      class="tabulator-shell physical-interfaces-table"
+      data-interfaces='{{ physical_interface_rows | tojson }}'
+      data-role-options='{{ interface_roles | tojson }}'
+      data-mode-options='{{ interface_modes | tojson }}'
+      data-csrf="{{ csrf_token }}"
+      data-fallback-id="physical-interfaces-fallback"
+    ></div>
+    <table id="physical-interfaces-fallback" class="data-table dns-fallback-table">
+      <thead>
+        <tr><th>Name</th><th>MAC</th><th>Driver</th><th>Speed</th><th>IP CIDR</th><th>Link Type</th><th>MTU</th><th>Admin</th><th>Oper</th></tr>
+      </thead>
+      <tbody>
+        {% for interface in physical_interface_rows %}
+          <tr>
+            <td>{{ interface["name"] }}</td>
+            <td>{{ interface["mac_address"] }}</td>
+            <td>{{ interface["driver"] or "" }}</td>
+            <td>{{ interface["speed"] or "" }}</td>
+            <td>{{ interface["ip_cidr"] or "" }}</td>
+            <td>{{ interface["mode"] }}</td>
+            <td>{{ interface["mtu"] }}</td>
+            <td>{{ interface["admin_state"] }}</td>
+            <td>{{ interface["oper_state"] }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>Network Apply</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <p class="muted">Changes save to LabFoundry desired state. Create an appliance apply task only when interface and VLAN changes are finished.</p>
+      <form class="apply-task-form" action="/physical-interfaces/apply-task" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button class="button primary" type="submit" {{ "disabled" if network_validation_errors else "" }}>Create appliance apply task</button>
+      </form>
+      {% if apply_task %}
+        <div class="alert success">
+          Appliance apply task <code>{{ apply_task.id }}</code> captured the current network desired state.
+          {% if apply_task_dry_run %}
+            Dry-run mode recorded the commands without changing the host.
+          {% endif %}
+        </div>
+      {% endif %}
+      {% if apply_task_error %}
+        <div class="alert error">{{ apply_task_error }}</div>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not network_validation_errors else 'warn' }}">{{ "valid" if not network_validation_errors else "needs attention" }}</span>
+      </div>
+      {% if network_validation_errors %}
+        <div class="alert error">
+          {% for error in network_validation_errors %}
+            <div>{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="muted">The desired physical interface and VLAN state passes LabFoundry validation.</p>
+      {% endif %}
+      <div class="terminal-note">
+        <strong>{{ network_config_path }}</strong>
+        <code>{{ network_config_preview }}</code>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}

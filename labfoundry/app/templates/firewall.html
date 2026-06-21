@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block page_title %}Firewall{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Firewall Rules</h2>
+        <p class="muted">Edit nftables desired state directly in the grid. The bottom row creates a new rule once required fields are filled.</p>
+      </div>
+      <span class="status-pill {{ 'good' if firewall_settings.enabled else 'muted' }}">{{ "enabled" if firewall_settings.enabled else "disabled" }}</span>
+    </div>
+    <div id="firewall-rule-error" class="alert hidden"></div>
+    <div
+      id="firewall-rules-table"
+      class="tabulator-shell"
+      data-rules='{{ firewall_rules_json | tojson }}'
+      data-directions='{{ firewall_directions | tojson }}'
+      data-actions='{{ firewall_actions | tojson }}'
+      data-protocols='{{ firewall_protocols | tojson }}'
+      data-interfaces='{{ physical_interfaces | map(attribute="name") | list | tojson }}'
+      data-csrf="{{ csrf_token }}"
+      data-fallback-id="firewall-rules-fallback"
+    ></div>
+    <table id="firewall-rules-fallback" class="data-table compact dns-fallback-table">
+      <thead>
+        <tr><th>Name</th><th>Direction</th><th>Action</th><th>Protocol</th><th>Source</th><th>Destination</th><th>Ports</th><th>Interface</th><th>Priority</th><th>Enabled</th></tr>
+      </thead>
+      <tbody>
+        {% for rule in firewall_rules %}
+          <tr>
+            <td>{{ rule.name }}</td>
+            <td>{{ rule.direction }}</td>
+            <td>{{ rule.action }}</td>
+            <td>{{ rule.protocol }}</td>
+            <td>{{ rule.source }}</td>
+            <td>{{ rule.destination }}</td>
+            <td>{{ rule.destination_port or "any" }}</td>
+            <td>{{ rule.interface_name or "any" }}</td>
+            <td>{{ rule.priority }}</td>
+            <td><span class="status-pill {{ 'good' if rule.enabled else 'muted' }}">{{ "enabled" if rule.enabled else "disabled" }}</span></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>Firewall Settings</h2>
+        <span class="status-pill warn">nftables</span>
+      </div>
+      <form class="form-stack" action="/firewall/settings" method="post" data-autosave-form data-autosave-status-id="firewall-settings-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats firewall desired state as enabled. The MVP records intent until an appliance apply task runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if firewall_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label>
+          <span class="field-label"><span>Input policy</span><button class="help-icon" type="button" data-help="Default policy for traffic destined to the appliance. Drop is safer once explicit management rules exist.">i</button></span>
+          <select name="default_input_policy">
+            {% for policy in firewall_policies %}
+              <option value="{{ policy }}" {{ "selected" if firewall_settings.default_input_policy == policy else "" }}>{{ policy }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span class="field-label"><span>Forward policy</span><button class="help-icon" type="button" data-help="Default policy for routed traffic crossing the appliance between lab networks.">i</button></span>
+          <select name="default_forward_policy">
+            {% for policy in firewall_policies %}
+              <option value="{{ policy }}" {{ "selected" if firewall_settings.default_forward_policy == policy else "" }}>{{ policy }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span class="field-label"><span>Output policy</span><button class="help-icon" type="button" data-help="Default policy for traffic originated by the appliance itself.">i</button></span>
+          <select name="default_output_policy">
+            {% for policy in firewall_policies %}
+              <option value="{{ policy }}" {{ "selected" if firewall_settings.default_output_policy == policy else "" }}>{{ policy }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="switch-field"><span class="field-label"><span>Established traffic</span><button class="help-icon" type="button" data-help="Allows established and related traffic so replies to permitted sessions continue to work.">i</button></span><input class="switch-input" type="checkbox" name="allow_established" {{ "checked" if firewall_settings.allow_established else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Loopback</span><button class="help-icon" type="button" data-help="Allows local loopback traffic on the appliance. Usually keep this enabled.">i</button></span><input class="switch-input" type="checkbox" name="allow_loopback" {{ "checked" if firewall_settings.allow_loopback else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>ICMP diagnostics</span><button class="help-icon" type="button" data-help="Allows ping and IPv6 neighbor-discovery style diagnostics.">i</button></span><input class="switch-input" type="checkbox" name="allow_icmp" {{ "checked" if firewall_settings.allow_icmp else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Log dropped packets</span><button class="help-icon" type="button" data-help="Adds nftables log statements before default-drop chain endings. Enable only when troubleshooting.">i</button></span><input class="switch-input" type="checkbox" name="log_dropped" {{ "checked" if firewall_settings.log_dropped else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <p id="firewall-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
+      </form>
+    </div>
+
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>Firewall Apply</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <p class="muted">Changes save automatically into desired state. Applying uses the allowlisted nftables helper boundary.</p>
+      <form action="/firewall/apply-task" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button class="button primary full-width" type="submit" {{ "disabled" if firewall_validation_errors else "" }}>Create appliance apply task</button>
+      </form>
+      {% if apply_task %}
+        <div class="alert {{ 'success' if apply_task.status == 'succeeded' else 'error' }}">
+          <strong>Appliance apply task {{ apply_task.status }}</strong>
+          <p>{{ apply_task.id }}{% if apply_task_dry_run %} recorded as dry-run.{% endif %}</p>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not firewall_validation_errors else 'warn' }}">{{ "valid" if not firewall_validation_errors else "needs attention" }}</span>
+      </div>
+      {% if firewall_validation_errors %}
+        <ul class="error-list">
+          {% for error in firewall_validation_errors %}
+            <li>{{ error }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted">The desired firewall state passes LabFoundry validation. Appliance validation still runs through the allowlisted nftables helper before apply.</p>
+      {% endif %}
+      <div class="terminal-note">
+        <strong>{{ firewall_settings.config_path }}</strong>
+        <code>{{ firewall_config_preview }}</code>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}

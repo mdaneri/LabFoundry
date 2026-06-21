@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block page_title %}VCF Backups{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>VCF Backup SFTP</h2>
+        <p class="muted">Expose a simple SFTP endpoint for VMware Cloud Foundation backups. Authentication uses one local LabFoundry user from Users.</p>
+      </div>
+      <span class="status-pill {{ 'good' if vcf_backup_settings.enabled else 'muted' }}">{{ "enabled" if vcf_backup_settings.enabled else "disabled" }}</span>
+    </div>
+
+    <div class="metric-grid service-summary-grid">
+      <div class="metric">
+        <span>Endpoint</span>
+        <strong data-vcf-endpoint>{{ vcf_backup_settings.listen_address }}:{{ vcf_backup_settings.port }}</strong>
+        <small data-vcf-interface>{{ vcf_backup_settings.listen_interface }}</small>
+      </div>
+      <div class="metric">
+        <span>SFTP user</span>
+        <strong data-vcf-sftp-user>{{ vcf_backup_settings.sftp_user.username if vcf_backup_settings.sftp_user else "not selected" }}</strong>
+        <small>local LabFoundry user</small>
+      </div>
+      <div class="metric">
+        <span>Backup volume</span>
+        <strong data-vcf-storage-path>{{ vcf_backup_settings.storage_path }}</strong>
+        <small data-vcf-chroot-label>{{ "appliance mount, chroot enabled" if vcf_backup_settings.chroot_enabled else "appliance mount" }}</small>
+      </div>
+      <div class="metric">
+        <span>Auth methods</span>
+        <strong data-vcf-auth-methods>{% if vcf_backup_settings.allow_password_auth %}password{% endif %}{% if vcf_backup_settings.allow_password_auth and vcf_backup_settings.allow_public_key_auth %} + {% endif %}{% if vcf_backup_settings.allow_public_key_auth %}public key{% endif %}</strong>
+        <small data-vcf-max-sessions>{{ vcf_backup_settings.max_sessions }} max sessions</small>
+      </div>
+    </div>
+
+    <section class="info-band">
+      <div>
+        <h2>VCF SFTP target</h2>
+        <p class="muted">Configure SDDC Manager or other VCF components to use this endpoint after the appliance apply task has completed.</p>
+      </div>
+      <div class="settings-list">
+        <div><span>Host</span><strong data-vcf-host>{{ vcf_backup_settings.listen_address }}</strong></div>
+        <div><span>Port</span><strong data-vcf-port>{{ vcf_backup_settings.port }}</strong></div>
+        <div><span>Username</span><strong data-vcf-target-user>{{ vcf_backup_settings.sftp_user.username if vcf_backup_settings.sftp_user else "select a user" }}</strong></div>
+        <div><span>Remote directory</span><strong data-vcf-remote-directory>{{ vcf_backup_remote_directory }}</strong></div>
+      </div>
+    </section>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>SFTP Settings</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <form class="form-stack" action="/vcf-backups/settings" method="post" data-autosave-form data-vcf-backup-settings data-autosave-status-id="vcf-backup-settings-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the VCF backup SFTP endpoint as enabled desired state. The host is not changed until an appliance apply task runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if vcf_backup_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label>
+          <span class="field-label"><span>SFTP user</span><button class="help-icon" type="button" data-help="Local LabFoundry user allowed to authenticate to the VCF backup SFTP endpoint. Manage accounts and passwords on the Users page.">i</button></span>
+          <select name="sftp_user_id">
+            <option value="">Select local user</option>
+            {% for user in vcf_backup_users %}
+              <option value="{{ user.id }}" {{ "selected" if vcf_backup_settings.sftp_user_id == user.id else "" }}>{{ user.username }}{% if not user.enabled %} (disabled){% endif %}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span class="field-label"><span>Listen interface</span><button class="help-icon" type="button" data-help="Access-mode physical interfaces and VLAN interfaces with configured IP addresses can host the SFTP endpoint. Trunk physical NICs are not direct bind targets.">i</button></span>
+          <select name="listen_interface">
+            {% for interface in available_interfaces %}
+              <option value="{{ interface.name }}" data-address="{{ interface.address }}" {{ "selected" if vcf_backup_settings.listen_interface == interface.name else "" }}>{{ interface.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="form-grid">
+          <label>
+            <span class="field-label"><span>Port</span><button class="help-icon" type="button" data-help="TCP port exposed for SFTP. Port 22 is standard; choose another only if SSH on this appliance is separated.">i</button></span>
+            <input type="number" name="port" value="{{ vcf_backup_settings.port }}" min="1" max="65535">
+          </label>
+          <div class="derived-field">
+            <span class="field-label"><span>Derived address</span><button class="help-icon" type="button" data-help="LabFoundry derives this from the selected interface IP CIDR. Change the network page if the address is wrong.">i</button></span>
+            <strong data-vcf-derived-address>{{ vcf_backup_settings.listen_address }}</strong>
+          </div>
+        </div>
+        <div class="derived-field">
+          <span class="field-label"><span>Backup volume mount</span><button class="help-icon" type="button" data-help="Fixed appliance volume mount used to store VCF backup files. Create or attach this volume during appliance provisioning; VCF clients only see the remote directory.">i</button></span>
+          <strong data-vcf-storage-path>{{ vcf_backup_settings.storage_path }}</strong>
+        </div>
+        <div class="derived-field">
+          <span class="field-label"><span>Remote directory</span><button class="help-icon" type="button" data-help="Directory configured in VCF. With chroot enabled this is short and stable even though files land on the appliance backup volume.">i</button></span>
+          <strong data-vcf-remote-directory>{{ vcf_backup_remote_directory }}</strong>
+        </div>
+        <label>
+          <span class="field-label"><span>Config path</span><button class="help-icon" type="button" data-help="Appliance path where LabFoundry will render the OpenSSH SFTP configuration before the allowlisted helper validates and applies it.">i</button></span>
+          <input name="config_path" value="{{ vcf_backup_settings.config_path }}">
+        </label>
+        <label class="switch-field"><span class="field-label"><span>Chroot user</span><button class="help-icon" type="button" data-help="Restricts the SFTP user to the backup storage tree. This is recommended for appliance backup targets.">i</button></span><input class="switch-input" type="checkbox" name="chroot_enabled" {{ "checked" if vcf_backup_settings.chroot_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Password authentication</span><button class="help-icon" type="button" data-help="Allows the selected local LabFoundry user password for SFTP login. Disable if VCF will use SSH keys only.">i</button></span><input class="switch-input" type="checkbox" name="allow_password_auth" {{ "checked" if vcf_backup_settings.allow_password_auth else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Public key authentication</span><button class="help-icon" type="button" data-help="Allows SSH public key authentication for the selected user once key material is provisioned on the appliance.">i</button></span><input class="switch-input" type="checkbox" name="allow_public_key_auth" {{ "checked" if vcf_backup_settings.allow_public_key_auth else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label>
+          <span class="field-label"><span>Max sessions</span><button class="help-icon" type="button" data-help="Maximum concurrent SFTP sessions for the selected backup user.">i</button></span>
+          <input type="number" name="max_sessions" value="{{ vcf_backup_settings.max_sessions }}" min="1" max="64">
+        </label>
+        <p id="vcf-backup-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
+      </form>
+    </div>
+
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>SFTP Apply</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <p class="muted">Use this when VCF backup settings are finished. The task validates current desired state, captures the OpenSSH SFTP preview, and applies it through the LabFoundry adapter.</p>
+      <form action="/vcf-backups/apply-task" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button class="button primary full-width" type="submit" data-vcf-apply-button {{ "disabled" if vcf_backup_validation_errors else "" }}>Create appliance apply task</button>
+      </form>
+      {% if apply_task %}
+        <div class="alert {{ 'success' if apply_task.status == 'succeeded' else 'error' }}">
+          <strong>Appliance apply task {{ apply_task.status }}</strong>
+          <p>{{ apply_task.id }}{% if apply_task_dry_run %} recorded as dry-run.{% endif %}</p>
+        </div>
+      {% endif %}
+      {% if apply_task_error %}
+        <div class="alert error">{{ apply_task_error }}</div>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not vcf_backup_validation_errors else 'warn' }}" data-vcf-validation-status>{{ "valid" if not vcf_backup_validation_errors else "needs attention" }}</span>
+      </div>
+      {% if vcf_backup_validation_errors %}
+        <ul class="error-list" data-vcf-validation-errors>
+          {% for error in vcf_backup_validation_errors %}
+            <li>{{ error }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted" data-vcf-validation-message>The desired VCF backup SFTP state passes LabFoundry validation. Appliance validation still runs through the allowlisted OpenSSH helper before apply.</p>
+      {% endif %}
+      <div class="terminal-note">
+        <strong data-vcf-config-path>{{ vcf_backup_settings.config_path }}</strong>
+        <code data-vcf-config-preview>{{ vcf_backup_config_preview }}</code>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}

@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% block page_title %}KMS / KMIP{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>KMS / KMIP</h2>
+        <p class="muted">Manage KMIP desired state for a lab KMS backend, clients, and staged keys.</p>
+      </div>
+      <span class="status-pill {{ 'good' if kms_settings.enabled else 'muted' }}">{{ "enabled" if kms_settings.enabled else "disabled" }}</span>
+    </div>
+    {% if form_error %}
+      <div class="alert error">{{ form_error }}</div>
+    {% endif %}
+    <div class="alert warning">
+      {{ kms_lab_notice }}
+    </div>
+
+    <div class="tab-buttons tool-tabs" role="tablist" aria-label="KMS views">
+      <button class="tab-button active" type="button" data-tab-target="kms-keys-panel" aria-selected="true">Keys</button>
+      <button class="tab-button" type="button" data-tab-target="kms-clients-panel" aria-selected="false">Clients</button>
+    </div>
+
+    <div class="tab-panels">
+      <div id="kms-keys-panel" class="tab-panel active" role="tabpanel">
+        <div class="section-head">
+          <div>
+            <h2>Managed Keys</h2>
+            <p class="muted">Edit keys directly in the grid. The bottom row stages a new key once required fields are filled.</p>
+          </div>
+          <span class="status-pill muted">{{ kms_keys|length }} keys</span>
+        </div>
+        <div id="kms-key-error" class="alert error hidden"></div>
+        <div
+          id="kms-keys-table"
+          class="tabulator-shell kms-keys-table"
+          data-keys='{{ kms_key_rows | tojson }}'
+          data-client-options='{{ kms_client_choices | tojson }}'
+          data-algorithm-options='{{ kms_key_algorithms | tojson }}'
+          data-state-options='{{ kms_key_states | tojson }}'
+          data-csrf="{{ csrf_token }}"
+          data-fallback-id="kms-keys-fallback"
+        ></div>
+        <table id="kms-keys-fallback" class="data-table dns-fallback-table">
+          <thead>
+            <tr><th>Name</th><th>Algorithm</th><th>Length</th><th>Usage</th><th>State</th><th>Owner</th><th>Enabled</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            {% for key in kms_keys %}
+              <tr>
+                <td>{{ key.name }}</td>
+                <td>{{ key.algorithm }}</td>
+                <td>{{ key.length }}</td>
+                <td>{{ key.usage }}</td>
+                <td>{{ key.state }}</td>
+                <td>{{ key.owner_client.name if key.owner_client else "Unassigned" }}</td>
+                <td><span class="status-pill {{ 'good' if key.enabled else 'muted' }}">{{ "enabled" if key.enabled else "disabled" }}</span></td>
+                <td>
+                  <form
+                    action="/kms/keys/{{ key.id }}/delete"
+                    method="post"
+                    data-confirm-modal
+                    data-confirm-title="Delete {{ key.name }} key?"
+                    data-confirm-message="This removes the KMS key from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                    data-confirm-label="Delete key"
+                  >
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button class="button tiny danger" type="submit">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div id="kms-clients-panel" class="tab-panel" role="tabpanel" hidden>
+        <div class="section-head">
+          <div>
+            <h2>KMIP Clients</h2>
+            <p class="muted">Clients represent certificate subjects allowed to talk to the lab KMIP endpoint.</p>
+          </div>
+          <span class="status-pill muted">{{ kms_clients|length }} clients</span>
+        </div>
+        <div id="kms-client-error" class="alert error hidden"></div>
+        <div
+          id="kms-clients-table"
+          class="tabulator-shell kms-clients-table"
+          data-clients='{{ kms_client_rows | tojson }}'
+          data-role-options='{{ kms_client_roles | tojson }}'
+          data-csrf="{{ csrf_token }}"
+          data-fallback-id="kms-clients-fallback"
+        ></div>
+        <table id="kms-clients-fallback" class="data-table dns-fallback-table">
+          <thead>
+            <tr><th>Name</th><th>Certificate subject</th><th>Role</th><th>Operations</th><th>Enabled</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            {% for client in kms_clients %}
+              <tr>
+                <td>{{ client.name }}</td>
+                <td>{{ client.certificate_subject }}</td>
+                <td>{{ client.role }}</td>
+                <td>{{ client.allowed_operations }}</td>
+                <td><span class="status-pill {{ 'good' if client.enabled else 'muted' }}">{{ "enabled" if client.enabled else "disabled" }}</span></td>
+                <td>
+                  <form
+                    action="/kms/clients/{{ client.id }}/delete"
+                    method="post"
+                    data-confirm-modal
+                    data-confirm-title="Delete {{ client.name }} client?"
+                    data-confirm-message="This removes the KMS client from LabFoundry desired state and unassigns any keys owned by it. It will not touch the appliance until an apply task runs."
+                    data-confirm-label="Delete client"
+                  >
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button class="button tiny danger" type="submit">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>KMS Settings</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <form class="form-stack" action="/kms/settings" method="post" data-autosave-form data-autosave-status-id="kms-settings-autosave-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the KMIP service as enabled desired state. It does not start PyKMIP until an appliance apply task runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if kms_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label>
+          <span class="field-label"><span>Backend</span><button class="help-icon" type="button" data-help="KMS implementation LabFoundry will configure. The MVP uses PyKMIP as an open-source lab KMIP server.">i</button></span>
+          <select name="backend">
+            {% for backend in kms_backend_options %}
+              <option value="{{ backend }}" {{ "selected" if kms_settings.backend == backend else "" }}>{{ backend }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span class="field-label"><span>Listen interface</span><button class="help-icon" type="button" data-help="Network interface where the KMIP server should listen. Use a lab/service network, not management, unless you intend management clients to connect.">i</button></span>
+          <select name="listen_interface">
+            {% for interface in available_interfaces %}
+              <option value="{{ interface.name }}" {{ "selected" if kms_settings.listen_interface == interface.name else "" }}>{{ interface.name }} - {{ interface.role }} / {{ interface.mode }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="form-grid">
+          <label>
+            <span class="field-label"><span>Listen address</span><button class="help-icon" type="button" data-help="IP address bound by the KMIP service on the selected interface.">i</button></span>
+            <input name="listen_address" value="{{ kms_settings.listen_address }}">
+          </label>
+          <label>
+            <span class="field-label"><span>Port</span><button class="help-icon" type="button" data-help="KMIP commonly uses TCP 5696. Change only if a lab client expects a different port.">i</button></span>
+            <input type="number" name="port" value="{{ kms_settings.port }}" min="1" max="65535">
+          </label>
+        </div>
+        <label>
+          <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="DNS name clients should use for the KMIP endpoint. Pair this with a CA-issued server certificate.">i</button></span>
+          <input name="hostname" value="{{ kms_settings.hostname }}">
+        </label>
+        <label>
+          <span class="field-label"><span>Server certificate</span><button class="help-icon" type="button" data-help="Certificate common name or request name LabFoundry should use for the KMIP TLS endpoint.">i</button></span>
+          <input name="server_certificate" value="{{ kms_settings.server_certificate }}">
+        </label>
+        <label>
+          <span class="field-label"><span>Client CA path</span><button class="help-icon" type="button" data-help="Appliance path to the CA certificate used to verify KMIP client certificates.">i</button></span>
+          <input name="ca_certificate_path" value="{{ kms_settings.ca_certificate_path }}">
+        </label>
+        <label>
+          <span class="field-label"><span>Database path</span><button class="help-icon" type="button" data-help="Appliance path for PyKMIP object storage. In development this is only captured in desired state.">i</button></span>
+          <input name="database_path" value="{{ kms_settings.database_path }}">
+        </label>
+        <label>
+          <span class="field-label"><span>Config path</span><button class="help-icon" type="button" data-help="Appliance path where LabFoundry will render PyKMIP configuration before the apply helper validates and starts the service.">i</button></span>
+          <input name="config_path" value="{{ kms_settings.config_path }}">
+        </label>
+        <label class="switch-field"><span class="field-label"><span>Require client certificates</span><button class="help-icon" type="button" data-help="Requires mutual TLS for KMIP clients. Keep this enabled for VCF-style labs.">i</button></span><input class="switch-input" type="checkbox" name="require_client_cert" {{ "checked" if kms_settings.require_client_cert else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Allow register</span><button class="help-icon" type="button" data-help="Allows clients to register keys or objects through KMIP when the backend supports it.">i</button></span><input class="switch-input" type="checkbox" name="allow_register" {{ "checked" if kms_settings.allow_register else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Allow destroy</span><button class="help-icon" type="button" data-help="Allows destructive KMIP destroy operations. Leave disabled unless a lab workflow explicitly needs it.">i</button></span><input class="switch-input" type="checkbox" name="allow_destroy" {{ "checked" if kms_settings.allow_destroy else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <p id="kms-settings-autosave-status" class="autosave-status" aria-live="polite">Changes save automatically.</p>
+      </form>
+    </div>
+
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>KMS Apply</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <p class="muted">Use this when KMS changes are finished. The task validates current desired state, captures the PyKMIP config preview, and applies it through the LabFoundry adapter.</p>
+      <form class="apply-task-form" action="/kms/apply-task" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button class="button primary" type="submit" {{ "disabled" if kms_validation_errors else "" }}>Create appliance apply task</button>
+      </form>
+      {% if apply_task_error %}
+        <div class="alert error">{{ apply_task_error }}</div>
+      {% endif %}
+      {% if apply_task %}
+        <div class="alert success">
+          Appliance apply task <code>{{ apply_task.id }}</code> captured the current KMS desired state.
+          {% if apply_task_dry_run %}
+            Dry-run mode recorded the commands without changing the host.
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not kms_validation_errors else 'warn' }}">{{ "valid" if not kms_validation_errors else "needs attention" }}</span>
+      </div>
+      {% if kms_validation_errors %}
+        <div class="alert error">
+          {% for error in kms_validation_errors %}
+            <div>{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if not kms_validation_errors %}
+        <p class="muted">The desired KMS state passes LabFoundry validation. Appliance validation still runs through the allowlisted KMS helper before PyKMIP changes are applied.</p>
+      {% endif %}
+      <div class="terminal-note">
+        <strong>{{ kms_settings.config_path }}</strong>
+        <code>{{ kms_config_preview }}</code>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}

@@ -1,0 +1,299 @@
+{% extends "base.html" %}
+{% block page_title %}Certificate Authority{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Certificate Authority</h2>
+        <p class="muted">Manage internal CA desired state, certificate profiles, and staged certificate requests.</p>
+      </div>
+      <span class="status-pill {{ 'good' if ca_settings.enabled else 'muted' }}">{{ "enabled" if ca_settings.enabled else "disabled" }}</span>
+    </div>
+    {% if form_error %}
+      <div class="alert error">{{ form_error }}</div>
+    {% endif %}
+    <div class="tab-buttons tool-tabs" role="tablist" aria-label="Certificate Authority views">
+      <button class="tab-button active" type="button" data-tab-target="ca-certificates-panel" aria-selected="true">Certificates</button>
+      <button class="tab-button" type="button" data-tab-target="ca-profiles-panel" aria-selected="false">Profiles</button>
+      <button class="tab-button" type="button" data-tab-target="ca-csr-panel" aria-selected="false">CSR Intake</button>
+    </div>
+
+    <div class="tab-panels">
+      <div id="ca-certificates-panel" class="tab-panel active" role="tabpanel">
+        <div class="section-head">
+          <div>
+            <h2>Certificate Requests</h2>
+            <p class="muted">Edit requests directly in the grid. The bottom row stages a new certificate request once required fields are filled.</p>
+          </div>
+          <span class="status-pill muted">{{ ca_certificates|length }} requests</span>
+        </div>
+        <div id="ca-certificate-error" class="alert error hidden"></div>
+        <div
+          id="ca-certificates-table"
+          class="tabulator-shell ca-certificates-table"
+          data-certificates='{{ ca_certificate_rows | tojson }}'
+          data-profile-options='{{ ca_profile_choices | tojson }}'
+          data-csrf="{{ csrf_token }}"
+          data-fallback-id="ca-certificates-fallback"
+        ></div>
+        <table id="ca-certificates-fallback" class="data-table dns-fallback-table">
+          <thead>
+            <tr><th>Common name</th><th>Profile</th><th>DNS SANs</th><th>IP SANs</th><th>Status</th><th>Enabled</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            {% for certificate in ca_certificates %}
+              <tr>
+                <td>{{ certificate.common_name }}</td>
+                <td>{{ certificate.profile.name if certificate.profile else "Unassigned" }}</td>
+                <td>{{ certificate.subject_alt_names }}</td>
+                <td>{{ certificate.ip_addresses }}</td>
+                <td>{{ certificate.status }}</td>
+                <td><span class="status-pill {{ 'good' if certificate.enabled else 'muted' }}">{{ "enabled" if certificate.enabled else "disabled" }}</span></td>
+                <td>
+                  <form
+                    action="/certificate-authority/certificates/{{ certificate.id }}/delete"
+                    method="post"
+                    data-confirm-modal
+                    data-confirm-title="Delete {{ certificate.common_name }} certificate request?"
+                    data-confirm-message="This removes the certificate request from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                    data-confirm-label="Delete request"
+                  >
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button class="button tiny danger" type="submit">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div id="ca-profiles-panel" class="tab-panel" role="tabpanel" hidden>
+        <div class="section-head">
+          <div>
+            <h2>Certificate Profiles</h2>
+            <p class="muted">Profiles define certificate type, validity, key size, and X.509 usages.</p>
+          </div>
+          <span class="status-pill muted">{{ ca_profiles|length }} profiles</span>
+        </div>
+        <div id="ca-profile-error" class="alert error hidden"></div>
+        <div
+          id="ca-profiles-table"
+          class="tabulator-shell ca-profiles-table"
+          data-profiles='{{ ca_profile_rows | tojson }}'
+          data-csrf="{{ csrf_token }}"
+          data-fallback-id="ca-profiles-fallback"
+        ></div>
+        <table id="ca-profiles-fallback" class="data-table dns-fallback-table">
+          <thead>
+            <tr><th>Name</th><th>Type</th><th>Validity</th><th>Key</th><th>EKU</th><th>SAN required</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            {% for profile in ca_profiles %}
+              <tr>
+                <td>{{ profile.name }}</td>
+                <td>{{ profile.certificate_type }}</td>
+                <td>{{ profile.validity_days }} days</td>
+                <td>{{ profile.key_algorithm }} {{ profile.key_size }}</td>
+                <td>{{ profile.extended_key_usage }}</td>
+                <td>{{ "yes" if profile.san_required else "no" }}</td>
+                <td>
+                  <form
+                    action="/certificate-authority/profiles/{{ profile.id }}/delete"
+                    method="post"
+                    data-confirm-modal
+                    data-confirm-title="Delete {{ profile.name }} profile?"
+                    data-confirm-message="This removes the CA profile from LabFoundry desired state and unassigns requests using it. It will not touch the appliance until an apply task runs."
+                    data-confirm-label="Delete profile"
+                  >
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button class="button tiny danger" type="submit">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div id="ca-csr-panel" class="tab-panel" role="tabpanel" hidden>
+        <div class="section-head">
+          <div>
+            <h2>CSR Intake</h2>
+            <p class="muted">Paste a CSR and stage the request metadata. The CSR is stored with desired state; signing waits for an appliance apply task.</p>
+          </div>
+          <span class="status-pill warn">dry-run</span>
+        </div>
+        <form class="form-stack zone-editor-form" action="/certificate-authority/certificates" method="post">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <input class="zone-file-input" type="hidden" name="csr_text" value="">
+          <input type="hidden" name="status" value="csr-staged">
+          <input type="hidden" name="enabled" value="on">
+          <div class="form-grid">
+            <label>
+              <span class="field-label"><span>Common name</span><button class="help-icon" type="button" data-help="Primary subject name for the certificate request. Use the service FQDN for server certificates.">i</button></span>
+              <input name="common_name" placeholder="vcsa.labfoundry.internal" required>
+            </label>
+            <label>
+              <span class="field-label"><span>Profile</span><button class="help-icon" type="button" data-help="Select the CA profile that controls key usage, EKU, validity, and SAN requirements.">i</button></span>
+              <select name="profile_id">
+                {% for profile in ca_profiles if profile.enabled %}
+                  <option value="{{ profile.id }}">{{ profile.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              <span class="field-label"><span>DNS SANs</span><button class="help-icon" type="button" data-help="One DNS name per line. Server certificates should include every hostname clients will use.">i</button></span>
+              <textarea name="subject_alt_names" rows="3" placeholder="vcsa.labfoundry.internal"></textarea>
+            </label>
+            <label>
+              <span class="field-label"><span>IP SANs</span><button class="help-icon" type="button" data-help="Optional IP subject alternative names, one per line, for clients that connect by IP address.">i</button></span>
+              <textarea name="ip_addresses" rows="3" placeholder="192.168.50.20"></textarea>
+            </label>
+          </div>
+          <label>
+            <span class="field-label"><span>CSR</span><button class="help-icon" type="button" data-help="Paste a PEM certificate signing request. LabFoundry stores it in desired state and the appliance apply task handles validation/signing later.">i</button></span>
+            <div class="zone-code-editor" contenteditable="true" spellcheck="false" aria-label="Certificate signing request">-----BEGIN CERTIFICATE REQUEST-----
+-----END CERTIFICATE REQUEST-----</div>
+          </label>
+          <label>
+            <span class="field-label"><span>Description</span><button class="help-icon" type="button" data-help="Optional operator note for why this certificate is needed.">i</button></span>
+            <input name="description" placeholder="VCF management appliance certificate">
+          </label>
+          <button class="button primary" type="submit">Stage CSR request</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>CA Settings</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <form class="form-stack" action="/certificate-authority/settings" method="post" data-autosave-form data-autosave-status-id="ca-settings-autosave-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the CA as enabled desired state. It does not generate keys until an appliance apply task runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if ca_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label>
+          <span class="field-label"><span>Root common name</span><button class="help-icon" type="button" data-help="Subject common name for the LabFoundry root CA certificate. Changing it affects future CA generation tasks.">i</button></span>
+          <input name="root_common_name" value="{{ ca_settings.root_common_name }}">
+        </label>
+        <label>
+          <span class="field-label"><span>Organization</span><button class="help-icon" type="button" data-help="Organization value written into generated CA and certificate subjects.">i</button></span>
+          <input name="organization" value="{{ ca_settings.organization }}">
+        </label>
+        <label>
+          <span class="field-label"><span>Organizational unit</span><button class="help-icon" type="button" data-help="Optional OU value for lab ownership or environment grouping.">i</button></span>
+          <input name="organizational_unit" value="{{ ca_settings.organizational_unit }}">
+        </label>
+        <div class="form-grid">
+          <label>
+            <span class="field-label"><span>Country</span><button class="help-icon" type="button" data-help="Two-letter country code for certificate subjects.">i</button></span>
+            <input name="country" value="{{ ca_settings.country }}" maxlength="2">
+          </label>
+          <label>
+            <span class="field-label"><span>Digest</span><button class="help-icon" type="button" data-help="Hash algorithm used when rendering signing intent. SHA-256 is the default.">i</button></span>
+            <select name="digest_algorithm">
+              {% for algorithm in ["sha256", "sha384", "sha512"] %}
+                <option value="{{ algorithm }}" {{ "selected" if ca_settings.digest_algorithm == algorithm else "" }}>{{ algorithm }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <div class="form-grid">
+          <label>
+            <span class="field-label"><span>CA key algorithm</span><button class="help-icon" type="button" data-help="Algorithm for the root CA key desired state. RSA is simplest for the MVP appliance path.">i</button></span>
+            <select name="key_algorithm">
+              {% for algorithm in ["RSA", "ECDSA"] %}
+                <option value="{{ algorithm }}" {{ "selected" if ca_settings.key_algorithm == algorithm else "" }}>{{ algorithm }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span class="field-label"><span>CA key size</span><button class="help-icon" type="button" data-help="Root key size in bits for RSA, or curve size label for future ECDSA handling.">i</button></span>
+            <input type="number" name="key_size" value="{{ ca_settings.key_size }}" min="2048" step="256">
+          </label>
+        </div>
+        <div class="form-grid">
+          <label>
+            <span class="field-label"><span>Root validity days</span><button class="help-icon" type="button" data-help="Lifetime for the root CA certificate generated by the appliance task.">i</button></span>
+            <input type="number" name="root_valid_days" value="{{ ca_settings.root_valid_days }}" min="365">
+          </label>
+          <label>
+            <span class="field-label"><span>Intermediate validity days</span><button class="help-icon" type="button" data-help="Lifetime for future intermediate CA certificates. Scaffolded now for the appliance apply path.">i</button></span>
+            <input type="number" name="intermediate_valid_days" value="{{ ca_settings.intermediate_valid_days }}" min="90">
+          </label>
+        </div>
+        <label>
+          <span class="field-label"><span>Storage path</span><button class="help-icon" type="button" data-help="Appliance path where CA material and rendered config are intended to live. In development this is only captured by the dry-run adapter.">i</button></span>
+          <input name="storage_path" value="{{ ca_settings.storage_path }}">
+        </label>
+        <label class="switch-field"><span class="field-label"><span>Publish CRL</span><button class="help-icon" type="button" data-help="Scaffolds CRL publication desired state for future revocation support.">i</button></span><input class="switch-input" type="checkbox" name="publish_crl" {{ "checked" if ca_settings.publish_crl else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>OCSP enabled</span><button class="help-icon" type="button" data-help="Scaffolds OCSP responder desired state. The MVP records intent but does not start a responder.">i</button></span><input class="switch-input" type="checkbox" name="ocsp_enabled" {{ "checked" if ca_settings.ocsp_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <input type="hidden" name="state" value="{{ ca_settings.state }}">
+        <input type="hidden" name="locality" value="{{ ca_settings.locality }}">
+        <p id="ca-settings-autosave-status" class="autosave-status" aria-live="polite">Changes save automatically.</p>
+      </form>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Downloads</h2>
+        <span class="status-pill warn">public</span>
+      </div>
+      <p class="muted">Download public trust material for clients. The root private key is not exposed from the web console.</p>
+      <div class="button-row">
+        <a class="button primary" href="/certificate-authority/downloads/root-ca.pem">Download root CA</a>
+        <a class="button ghost" href="/certificate-authority/downloads/ca-bundle.pem">Download CA bundle</a>
+      </div>
+      <p class="muted">In dry-run development these files are generated from the current CA desired state. On the appliance, the apply helper will own the persisted CA files.</p>
+    </div>
+
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>CA Apply</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <p class="muted">Use this when CA changes are finished. The task validates current desired state, captures the CA config preview, and applies it through the LabFoundry adapter.</p>
+      <form class="apply-task-form" action="/certificate-authority/apply-task" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button class="button primary" type="submit" {{ "disabled" if ca_validation_errors else "" }}>Create appliance apply task</button>
+      </form>
+      {% if apply_task_error %}
+        <div class="alert error">{{ apply_task_error }}</div>
+      {% endif %}
+      {% if apply_task %}
+        <div class="alert success">
+          Appliance apply task <code>{{ apply_task.id }}</code> captured the current CA desired state.
+          {% if apply_task_dry_run %}
+            Dry-run mode recorded the commands without changing the host.
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not ca_validation_errors else 'warn' }}">{{ "valid" if not ca_validation_errors else "needs attention" }}</span>
+      </div>
+      {% if ca_validation_errors %}
+        <div class="alert error">
+          {% for error in ca_validation_errors %}
+            <div>{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if not ca_validation_errors %}
+        <p class="muted">The desired CA state passes LabFoundry validation. Appliance validation still runs through the allowlisted CA helper before key or certificate work.</p>
+      {% endif %}
+      <div class="terminal-note">
+        <strong>{{ ca_settings.storage_path }}/labfoundry-ca.conf</strong>
+        <code>{{ ca_config_preview }}</code>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}

@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block page_title %}VLAN Interfaces{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>VLAN Interfaces</h2>
+        <p class="muted">Create tagged lab networks on trunk parent interfaces. For standard access-mode NICs, assign IP CIDR on Physical Interfaces instead.</p>
+      </div>
+      <span class="status-pill muted">{{ vlan_interfaces|length }} VLANs</span>
+    </div>
+    {% if form_error %}
+      <div class="alert error">{{ form_error }}</div>
+    {% endif %}
+    <div id="vlan-interface-error" class="alert error hidden"></div>
+    <div
+      id="vlan-interfaces-table"
+      class="tabulator-shell vlan-interfaces-table"
+      data-vlans='{{ vlan_interface_rows | tojson }}'
+      data-parent-options='{{ trunk_interface_names | tojson }}'
+      data-role-options='{{ vlan_roles | tojson }}'
+      data-csrf="{{ csrf_token }}"
+      data-fallback-id="vlan-interfaces-fallback"
+    ></div>
+    <table id="vlan-interfaces-fallback" class="data-table dns-fallback-table">
+      <thead>
+        <tr><th>Name</th><th>Parent</th><th>VLAN ID</th><th>IP CIDR</th><th>MTU</th><th>Role</th><th>Status</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for vlan in vlan_interfaces %}
+          <tr>
+            <td>{{ vlan.name }}</td>
+            <td>{{ vlan.parent_interface }}</td>
+            <td>{{ vlan.vlan_id }}</td>
+            <td>{{ vlan.ip_cidr or "" }}</td>
+            <td>{{ vlan.mtu }}</td>
+            <td>{{ vlan.role }}</td>
+            <td><span class="status-pill {{ 'good' if vlan.enabled else 'muted' }}">{{ "enabled" if vlan.enabled else "disabled" }}</span></td>
+            <td>
+              <form
+                action="/vlan-interfaces/{{ vlan.id }}/delete"
+                method="post"
+                data-confirm-modal
+                data-confirm-title="Delete {{ vlan.name }}?"
+                data-confirm-message="This removes VLAN {{ vlan.name }} from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                data-confirm-label="Delete VLAN"
+              >
+                <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                <button class="button tiny danger" type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>VLAN Apply</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <p class="muted">Changes save automatically into desired state. Applying uses the allowlisted network helper boundary.</p>
+      <form class="apply-task-form" action="/vlan-interfaces/apply-task" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button class="button primary" type="submit" {{ "disabled" if network_validation_errors else "" }}>Create appliance apply task</button>
+      </form>
+      {% if apply_task %}
+        <div class="alert success">
+          Appliance apply task <code>{{ apply_task.id }}</code> captured the current VLAN desired state.
+          {% if apply_task_dry_run %}
+            Dry-run mode recorded the commands without changing the host.
+          {% endif %}
+        </div>
+      {% endif %}
+      {% if apply_task_error %}
+        <div class="alert error">{{ apply_task_error }}</div>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not network_validation_errors else 'warn' }}">{{ "valid" if not network_validation_errors else "needs attention" }}</span>
+      </div>
+      {% if network_validation_errors %}
+        <div class="alert error">
+          {% for error in network_validation_errors %}
+            <div>{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="muted">The desired VLAN state passes LabFoundry validation.</p>
+      {% endif %}
+      <div class="terminal-note">
+        <strong>{{ network_config_path }}</strong>
+        <code>{{ network_config_preview }}</code>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}

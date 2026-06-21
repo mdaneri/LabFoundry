@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LabFoundry - Sign in</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/app.css?v=brand-assets-20260621-1">
+  </head>
+  <body class="bg-slate-100 text-slate-900">
+    <main class="login-shell">
+      <section class="login-panel">
+        <div class="brand login-brand">
+          {% include "partials/brand_mark.html" %}
+          <span>
+            <strong>LabFoundry</strong>
+            <small>Infrastructure appliance</small>
+          </span>
+        </div>
+        <img class="login-graphic" src="/static/brand/labfoundry-appliance-graphic.svg" alt="">
+        <h1>Sign in to the appliance</h1>
+        <p class="muted">Local admin access is enabled for the MVP scaffold. OIDC provider wiring is scaffolded for a later slice.</p>
+        {% if error %}
+          <div class="alert error">{{ error }}</div>
+        {% endif %}
+        <form class="form-stack" action="/login" method="post">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <label>
+            <span>Username</span>
+            <input name="username" autocomplete="username" required autofocus>
+          </label>
+          <label>
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="button primary" type="submit">Sign in</button>
+        </form>
+        <p class="hint">Development default: admin / labfoundry-admin. Set LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD before first run for a real appliance.</p>
+      </section>
+    </main>
+  </body>
+</html>

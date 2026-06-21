@@ -1,0 +1,107 @@
+from ipaddress import ip_address
+
+from labfoundry.app.models import User, VcfBackupSettings
+
+
+VCF_BACKUP_DEFAULT_VOLUME_MOUNT = "/mnt/labfoundry-vcf-backups"
+VCF_BACKUP_REMOTE_DIRECTORY = "/backups"
+
+
+def vcf_backup_remote_directory(settings: VcfBackupSettings) -> str:
+    if settings.chroot_enabled:
+        return VCF_BACKUP_REMOTE_DIRECTORY
+    return settings.storage_path.rstrip("/") or VCF_BACKUP_DEFAULT_VOLUME_MOUNT
+
+
+def vcf_backup_settings_to_dict(settings: VcfBackupSettings) -> dict:
+    return {
+        "id": settings.id,
+        "enabled": settings.enabled,
+        "listen_interface": settings.listen_interface,
+        "listen_address": settings.listen_address,
+        "port": settings.port,
+        "sftp_user_id": settings.sftp_user_id,
+        "sftp_username": settings.sftp_user.username if settings.sftp_user else "",
+        "storage_path": settings.storage_path,
+        "remote_directory": vcf_backup_remote_directory(settings),
+        "chroot_enabled": settings.chroot_enabled,
+        "allow_password_auth": settings.allow_password_auth,
+        "allow_public_key_auth": settings.allow_public_key_auth,
+        "max_sessions": settings.max_sessions,
+        "config_path": settings.config_path,
+        "updated_at": settings.updated_at.isoformat() if settings.updated_at else "",
+    }
+
+
+def validate_vcf_backup_state(settings: VcfBackupSettings, users: list[User], interface_names: set[str] | None = None) -> list[str]:
+    errors: list[str] = []
+    user_by_id = {user.id: user for user in users}
+    selected_user = user_by_id.get(settings.sftp_user_id or -1)
+    if settings.enabled and selected_user is None:
+        errors.append("Select a local LabFoundry user for SFTP authentication before enabling VCF backups.")
+    if selected_user is not None and not selected_user.enabled:
+        errors.append(f"SFTP user {selected_user.username} is disabled.")
+    if not settings.listen_interface.strip():
+        errors.append("Listen interface is required.")
+    elif interface_names is not None and settings.listen_interface not in interface_names:
+        errors.append(f"Listen interface {settings.listen_interface} is not configured as a physical or VLAN interface.")
+    if settings.listen_address.strip():
+        try:
+            ip_address(settings.listen_address.strip())
+        except ValueError:
+            errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
+    if settings.port < 1 or settings.port > 65535:
+        errors.append("SFTP port must be between 1 and 65535.")
+    if not settings.storage_path.startswith("/"):
+        errors.append("Backup volume mount must be an absolute Linux path.")
+    if not settings.config_path.startswith("/"):
+        errors.append("Config path must be an absolute Linux path.")
+    if settings.max_sessions < 1 or settings.max_sessions > 64:
+        errors.append("Max sessions must be between 1 and 64.")
+    if not settings.allow_password_auth and not settings.allow_public_key_auth:
+        errors.append("Enable password authentication, public key authentication, or both.")
+    return errors
+
+
+def render_vcf_backup_config(settings: VcfBackupSettings) -> str:
+    username = settings.sftp_user.username if settings.sftp_user else "select-a-labfoundry-user"
+    remote_directory = vcf_backup_remote_directory(settings)
+    lines = [
+        "# Managed by LabFoundry. Local changes may be overwritten.",
+        "# Dry-run preview of desired OpenSSH SFTP backup endpoint.",
+        f"# Backup volume mount: {settings.storage_path}",
+        f"# VCF remote directory: {remote_directory}",
+        "",
+        f"Port {settings.port}",
+        f"ListenAddress {settings.listen_address}",
+        "Subsystem sftp internal-sftp",
+        "",
+        f"Match User {username}",
+        f"  ChrootDirectory {settings.storage_path}",
+        f"  ForceCommand internal-sftp -d {remote_directory}",
+        f"  PasswordAuthentication {'yes' if settings.allow_password_auth else 'no'}",
+        f"  PubkeyAuthentication {'yes' if settings.allow_public_key_auth else 'no'}",
+        f"  MaxSessions {settings.max_sessions}",
+        "  AllowTcpForwarding no",
+        "  X11Forwarding no",
+    ]
+    if not settings.chroot_enabled:
+        lines = [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "# Dry-run preview of desired OpenSSH SFTP backup endpoint.",
+            f"# Backup volume mount: {settings.storage_path}",
+            f"# VCF remote directory: {remote_directory}",
+            "",
+            f"Port {settings.port}",
+            f"ListenAddress {settings.listen_address}",
+            "Subsystem sftp internal-sftp",
+            "",
+            f"Match User {username}",
+            f"  ForceCommand internal-sftp -d {remote_directory}",
+            f"  PasswordAuthentication {'yes' if settings.allow_password_auth else 'no'}",
+            f"  PubkeyAuthentication {'yes' if settings.allow_public_key_auth else 'no'}",
+            f"  MaxSessions {settings.max_sessions}",
+            "  AllowTcpForwarding no",
+            "  X11Forwarding no",
+        ]
+    return "\n".join(lines).strip() + "\n"
