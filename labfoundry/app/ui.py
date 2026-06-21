@@ -4,7 +4,7 @@ from secrets import token_urlsafe
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
@@ -950,6 +950,11 @@ def save_dns_domains(settings: DnsSettings, domains: list[str]) -> None:
 def records_for_domain(db: Session, domain: str) -> list[DnsRecord]:
     records = db.execute(select(DnsRecord).order_by(DnsRecord.hostname)).scalars().all()
     return [record for record in records if matching_domain(record.hostname, [domain]) == domain]
+
+
+@router.get("/favicon.ico", response_model=None)
+def favicon() -> FileResponse:
+    return FileResponse("labfoundry/app/static/brand/labfoundry-mark.svg", media_type="image/svg+xml")
 
 
 @router.get("/", response_class=HTMLResponse, response_model=None)

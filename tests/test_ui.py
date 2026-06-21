@@ -23,9 +23,13 @@ def test_login_and_dashboard_render(client):
     assert "Users" in response.text
     assert "LDAP / Users" not in response.text
     assert "/static/brand/labfoundry-mark.svg" in response.text
+    assert '<link rel="icon" href="/favicon.ico" type="image/svg+xml">' in response.text
     assert "LF</span>" not in response.text
     assert client.get("/static/brand/labfoundry-mark.svg").status_code == 200
     assert client.get("/static/brand/labfoundry-appliance-graphic.svg").status_code == 200
+    favicon = client.get("/favicon.ico")
+    assert favicon.status_code == 200
+    assert favicon.headers["content-type"].startswith("image/svg+xml")
 
 
 def test_routes_wan_policy_form_renders(client):
