@@ -143,6 +143,25 @@ class VcfPrivateRegistryStatusResponse(BaseModel):
     dry_run: bool
 
 
+class VcfOfflineDepotStatusResponse(BaseModel):
+    enabled: bool
+    service: ServiceStateResponse | None
+    hostname: str
+    endpoint: str
+    listen_interface: str
+    listen_address: str
+    port: int
+    depot_store_path: str
+    tool_archive_name: str
+    tool_version: str
+    download_token_present: bool
+    activation_code_present: bool
+    profile_count: int
+    config_path: str
+    valid: bool
+    dry_run: bool
+
+
 class PhysicalInterfaceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

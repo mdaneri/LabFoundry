@@ -39,6 +39,8 @@ def test_initial_api_resources_are_documented(client):
         "/api/v1/firewall/status",
         "/api/v1/firewall/settings",
         "/api/v1/firewall/rules",
+        "/api/v1/vcf-offline-depot/status",
+        "/api/v1/repository/status",
         "/api/v1/vcf-backups/status",
         "/api/v1/services",
         "/api/v1/logs",

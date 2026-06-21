@@ -175,3 +175,31 @@ class SystemAdapter:
             dry_run=self.dry_run,
             stdout="dry-run: VCF private registry bundle relocation command recorded",
         )
+
+    def validate_vcf_offline_depot_config(self, config_path: str) -> AdapterResult:
+        return AdapterResult(
+            command=["labfoundry-helper", "vcf-offline-depot", "validate", config_path],
+            dry_run=self.dry_run,
+            stdout="dry-run: VCF Offline Depot validation command recorded",
+        )
+
+    def stage_vcf_offline_depot_tool(self, archive_path: str) -> AdapterResult:
+        return AdapterResult(
+            command=["labfoundry-helper", "vcf-offline-depot", "stage-tool", archive_path],
+            dry_run=self.dry_run,
+            stdout="dry-run: VCF Download Tool staging command recorded",
+        )
+
+    def sync_vcf_offline_depot(self, config_path: str) -> AdapterResult:
+        return AdapterResult(
+            command=["labfoundry-helper", "vcf-offline-depot", "sync", config_path],
+            dry_run=self.dry_run,
+            stdout="dry-run: VCF Offline Depot sync command recorded",
+        )
+
+    def apply_vcf_offline_depot_https_config(self, config_path: str) -> AdapterResult:
+        return AdapterResult(
+            command=["labfoundry-helper", "vcf-offline-depot", "apply-https", config_path],
+            dry_run=self.dry_run,
+            stdout="dry-run: VCF Offline Depot HTTPS apply command recorded",
+        )

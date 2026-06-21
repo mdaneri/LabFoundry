@@ -774,6 +774,11 @@ body {
   padding: 4px 6px;
 }
 
+.tabulator .tabulator-row .tabulator-cell.tabulator-editing {
+  overflow: visible;
+  z-index: 30;
+}
+
 .tabulator .tabulator-row.tabulator-row-even {
   background: white;
 }
@@ -1566,6 +1571,77 @@ input[type="checkbox"] {
   color: var(--muted);
   cursor: not-allowed;
   opacity: 0.65;
+}
+
+.tabulator-checklist-editor {
+  position: relative;
+  z-index: 20;
+  min-width: 220px;
+  max-height: 260px;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  background: white;
+  box-shadow: 0 16px 30px rgba(15, 23, 42, 0.16);
+  overflow: hidden;
+}
+
+.tabulator-checklist-options {
+  display: grid;
+  max-height: 210px;
+  overflow-y: auto;
+}
+
+.tabulator-checklist-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-bottom: 1px solid #edf2f7;
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.tabulator-checklist-option:last-child {
+  border-bottom: 0;
+}
+
+.tabulator-checklist-option:hover,
+.tabulator-checklist-option:focus-within {
+  background: #eff6ff;
+}
+
+.tabulator-checklist-option input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+
+.tabulator-checklist-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 7px;
+  border-top: 1px solid var(--border);
+  background: #f8fafc;
+}
+
+.tabulator-checklist-actions button {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 8px;
+  background: white;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.tabulator-checklist-actions button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: white;
 }
 
 textarea {

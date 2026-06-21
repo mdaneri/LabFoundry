@@ -437,6 +437,46 @@ class VcfPrivateRegistrySettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class VcfOfflineDepotSettings(Base):
+    __tablename__ = "vcf_offline_depot_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    hostname: Mapped[str] = mapped_column(String(180), default="depot.labfoundry.internal")
+    listen_interface: Mapped[str] = mapped_column(String(80), default="eth2")
+    listen_address: Mapped[str] = mapped_column(String(64), default="192.168.50.1")
+    port: Mapped[int] = mapped_column(Integer, default=443)
+    server_certificate: Mapped[str] = mapped_column(String(180), default="depot.labfoundry.internal")
+    depot_store_path: Mapped[str] = mapped_column(String(240), default="/mnt/labfoundry-vcf-offline-depot")
+    tool_archive_path: Mapped[str] = mapped_column(String(500), default="")
+    tool_version: Mapped[str] = mapped_column(String(80), default="")
+    telemetry_choice: Mapped[str] = mapped_column(String(20), default="DISABLE")
+    config_path: Mapped[str] = mapped_column(String(240), default="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class VcfDepotDownloadProfile(Base):
+    __tablename__ = "vcf_depot_download_profiles"
+    __table_args__ = (UniqueConstraint("name", name="uq_vcf_depot_download_profile_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    profile_type: Mapped[str] = mapped_column(String(40), default="binaries")
+    sku: Mapped[str] = mapped_column(String(20), default="VCF")
+    vcf_version: Mapped[str] = mapped_column(String(40), default="9.1.0")
+    binary_type: Mapped[str] = mapped_column(String(20), default="INSTALL")
+    automated_install: Mapped[bool] = mapped_column(Boolean, default=True)
+    upgrades_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    component: Mapped[str] = mapped_column(String(80), default="")
+    component_version: Mapped[str] = mapped_column(String(80), default="")
+    disabled_platforms: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(40), default="planned")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class VcfRegistryBundle(Base):
     __tablename__ = "vcf_registry_bundles"
     __table_args__ = (UniqueConstraint("name", name="uq_vcf_registry_bundle_name"),)

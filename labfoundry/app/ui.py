@@ -1,5 +1,7 @@
 import json
+import shutil
 from ipaddress import ip_address, ip_interface, ip_network
+from pathlib import Path
 from secrets import token_urlsafe
 from uuid import uuid4
 
@@ -40,6 +42,8 @@ from labfoundry.app.models import (
     Setting,
     User,
     VcfBackupSettings,
+    VcfDepotDownloadProfile,
+    VcfOfflineDepotSettings,
     VcfPrivateRegistrySettings,
     VcfRegistryBundle,
     VlanInterface,
@@ -155,6 +159,34 @@ from labfoundry.app.services.vcf_private_registry import (
     vcf_registry_bundle_to_dict,
     vcf_registry_endpoint,
     vcf_registry_settings_to_dict,
+)
+from labfoundry.app.services.vcf_offline_depot import (
+    VCF_DEPOT_ACTIVATION_NAME_KEY,
+    VCF_DEPOT_ACTIVATION_VALUE_KEY,
+    VCF_DEPOT_ARCHIVE_PATTERN,
+    VCF_DEPOT_BINARY_TYPES,
+    VCF_DEPOT_COMPONENTS,
+    VCF_DEPOT_DEFAULT_CONFIG_PATH,
+    VCF_DEPOT_DEFAULT_HOSTNAME,
+    VCF_DEPOT_DEFAULT_STORE_PATH,
+    VCF_DEPOT_ESX_DISABLED_PLATFORMS,
+    VCF_DEPOT_LEGACY_STORE_PATH,
+    VCF_DEPOT_PROFILE_TYPES,
+    VCF_DEPOT_SKUS,
+    VCF_DEPOT_TELEMETRY_CHOICES,
+    VCF_DEPOT_TOKEN_NAME_KEY,
+    VCF_DEPOT_TOKEN_VALUE_KEY,
+    VCF_DEPOT_UPLOAD_DIR,
+    detect_vcf_download_tool_version,
+    find_local_vcf_download_tool_archive,
+    render_nginx_depot_config,
+    render_vcfdt_command_preview,
+    safe_archive_upload_name,
+    setting_secret_state,
+    validate_vcf_depot_state,
+    vcf_depot_endpoint,
+    vcf_depot_profile_to_dict,
+    vcf_depot_settings_to_dict,
 )
 from labfoundry.app.token_service import create_token_for_user
 
@@ -311,6 +343,29 @@ def get_vcf_private_registry_settings_row(db: Session) -> VcfPrivateRegistrySett
     return settings
 
 
+def get_vcf_offline_depot_settings_row(db: Session) -> VcfOfflineDepotSettings:
+    settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one_or_none()
+    if settings is None:
+        settings = VcfOfflineDepotSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    if settings.depot_store_path == VCF_DEPOT_LEGACY_STORE_PATH:
+        settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
+        settings.updated_at = utcnow()
+        db.commit()
+        db.refresh(settings)
+    if not settings.tool_archive_path:
+        archive = find_local_vcf_download_tool_archive()
+        if archive is not None:
+            settings.tool_archive_path = str(archive)
+            settings.tool_version = detect_vcf_download_tool_version(archive)
+            settings.updated_at = utcnow()
+            db.commit()
+            db.refresh(settings)
+    return settings
+
+
 def address_from_cidr(value: str | None) -> str:
     if not value:
         return ""
@@ -429,6 +484,73 @@ def store_uploaded_vcf_registry_ca_bundle(db: Session, ca_bundle_file: UploadFil
     return ca_bundle_file.filename
 
 
+def store_uploaded_vcf_depot_secret(
+    db: Session,
+    upload: UploadFile | None,
+    *,
+    name_key: str,
+    value_key: str,
+    actor: str,
+    action: str,
+) -> str | None:
+    if upload is None or not upload.filename:
+        return None
+    content = upload.file.read()
+    if not content:
+        return None
+    if len(content) > 128 * 1024:
+        raise HTTPException(status_code=400, detail="VCFDT credential uploads must be 128 KB or smaller.")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="VCFDT credential uploads must be text files.") from exc
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="VCFDT credential uploads cannot be empty.")
+    name_setting = set_setting_value(db, name_key, Path(upload.filename).name)
+    set_setting_value(db, value_key, text)
+    record_audit(
+        db,
+        actor=actor,
+        action=action,
+        resource_type="setting",
+        resource_id=str(name_setting.id),
+        detail=Path(upload.filename).name,
+    )
+    return Path(upload.filename).name
+
+
+def store_uploaded_vcf_depot_archive(settings: VcfOfflineDepotSettings, archive_file: UploadFile | None) -> str | None:
+    if archive_file is None or not archive_file.filename:
+        return None
+    try:
+        archive_name = safe_archive_upload_name(archive_file.filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    VCF_DEPOT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    archive_path = VCF_DEPOT_UPLOAD_DIR / archive_name
+    with archive_path.open("wb") as destination:
+        shutil.copyfileobj(archive_file.file, destination)
+    version = detect_vcf_download_tool_version(archive_path)
+    settings.tool_archive_path = str(archive_path)
+    settings.tool_version = version
+    return archive_name
+
+
+def vcf_depot_secret_context(db: Session) -> dict[str, object]:
+    token_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_NAME_KEY)).scalar_one_or_none()
+    token_value = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_VALUE_KEY)).scalar_one_or_none()
+    activation_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_NAME_KEY)).scalar_one_or_none()
+    activation_value = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_VALUE_KEY)).scalar_one_or_none()
+    token_state = setting_secret_state(token_name, token_value)
+    activation_state = setting_secret_state(activation_name, activation_value)
+    return {
+        "download_token": token_state,
+        "activation_code": activation_state,
+        "download_token_present": token_state.present,
+        "activation_code_present": activation_state.present,
+    }
+
+
 def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
     ca_settings = get_ca_settings_row(db)
     uploaded_bundle = uploaded_vcf_registry_ca_bundle(db)
@@ -481,6 +603,51 @@ def vcf_private_registry_context(db: Session) -> dict:
         "vcf_registry_ca_bundle_source_label": ca_bundle_context["source_label"],
         "vcf_registry_ca_bundle_available": ca_bundle_context["available"],
         "vcf_registry_uploaded_ca_bundle_name": ca_bundle_context["uploaded_name"],
+    }
+
+
+def vcf_offline_depot_context(db: Session) -> dict:
+    settings = get_vcf_offline_depot_settings_row(db)
+    profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
+    available_interfaces = vcf_backup_listen_options(db)
+    secrets = vcf_depot_secret_context(db)
+    validation_errors, validation_warnings = validate_vcf_depot_state(
+        settings,
+        profiles,
+        {interface["name"] for interface in available_interfaces},
+        bool(secrets["download_token_present"]),
+        bool(secrets["activation_code_present"]),
+    )
+    https_config_preview = render_nginx_depot_config(settings)
+    command_preview = render_vcfdt_command_preview(settings, profiles)
+    return {
+        "vcf_depot_settings": settings,
+        "vcf_depot_settings_json": vcf_depot_settings_to_dict(settings),
+        "vcf_depot_profiles": profiles,
+        "vcf_depot_profile_rows": [vcf_depot_profile_to_dict(profile) for profile in profiles],
+        "vcf_depot_available_interfaces": available_interfaces,
+        "vcf_depot_endpoint": vcf_depot_endpoint(settings),
+        "vcf_depot_https_config_preview": https_config_preview,
+        "vcf_depot_command_preview": command_preview,
+        "vcf_depot_validation_errors": validation_errors,
+        "vcf_depot_validation_warnings": validation_warnings,
+        "vcf_depot_download_token": secrets["download_token"],
+        "vcf_depot_activation_code": secrets["activation_code"],
+        "vcf_depot_download_token_present": secrets["download_token_present"],
+        "vcf_depot_activation_code_present": secrets["activation_code_present"],
+        "vcf_depot_profile_types": sorted(VCF_DEPOT_PROFILE_TYPES),
+        "vcf_depot_skus": sorted(VCF_DEPOT_SKUS),
+        "vcf_depot_binary_types": sorted(VCF_DEPOT_BINARY_TYPES),
+        "vcf_depot_components": [
+            {"value": value, "label": f"{value} - {label}"}
+            for value, label in sorted(VCF_DEPOT_COMPONENTS.items())
+        ],
+        "vcf_depot_esx_disabled_platforms": [
+            {"value": platform, "label": platform}
+            for platform in VCF_DEPOT_ESX_DISABLED_PLATFORMS
+        ],
+        "vcf_depot_telemetry_choices": sorted(VCF_DEPOT_TELEMETRY_CHOICES),
+        "vcf_depot_archive_pattern": VCF_DEPOT_ARCHIVE_PATTERN,
     }
 
 
@@ -788,6 +955,92 @@ def ensure_dns_for_vcf_registry(db: Session, settings: VcfPrivateRegistrySetting
         detail=f"{hostname} {record_type} -> {address}",
     )
     return "created"
+
+
+def ensure_dns_for_vcf_offline_depot(db: Session, settings: VcfOfflineDepotSettings, actor: str) -> str | None:
+    hostname = normalize_dns_hostname(settings.hostname)
+    if not hostname or not settings.listen_address.strip():
+        return None
+    try:
+        parsed_address = ip_address(settings.listen_address.strip())
+    except ValueError:
+        return None
+    record_type = "AAAA" if parsed_address.version == 6 else "A"
+    address = str(parsed_address)
+    if validate_dns_record(hostname, record_type, address):
+        return None
+    settings.hostname = hostname
+    existing = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == hostname,
+            DnsRecord.record_type == record_type,
+        )
+    ).scalar_one_or_none()
+    if existing:
+        if existing.address == address and existing.enabled:
+            return "unchanged"
+        existing.address = address
+        existing.enabled = True
+        if not existing.description:
+            existing.description = "Created from VCF Offline Depot endpoint."
+        db.flush()
+        record_audit(
+            db,
+            actor=actor,
+            action="update_dns_record_from_vcf_offline_depot",
+            resource_type="dns_record",
+            resource_id=str(existing.id),
+            detail=f"{hostname} {record_type} -> {address}",
+        )
+        return "updated"
+    record = DnsRecord(
+        hostname=hostname,
+        record_type=record_type,
+        address=address,
+        description="Created from VCF Offline Depot endpoint.",
+        enabled=True,
+    )
+    db.add(record)
+    db.flush()
+    record_audit(
+        db,
+        actor=actor,
+        action="create_dns_record_from_vcf_offline_depot",
+        resource_type="dns_record",
+        resource_id=str(record.id),
+        detail=f"{hostname} {record_type} -> {address}",
+    )
+    return "created"
+
+
+def remove_dns_for_vcf_offline_depot_hostname(db: Session, hostname: str, actor: str) -> str | None:
+    normalized_hostname = normalize_dns_hostname(hostname)
+    if not normalized_hostname:
+        return None
+    records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == normalized_hostname,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+        )
+    ).scalars().all()
+    removed = 0
+    for record in records:
+        if record.description and "VCF Offline Depot endpoint" not in record.description:
+            continue
+        db.delete(record)
+        removed += 1
+        record_audit(
+            db,
+            actor=actor,
+            action="delete_dns_record_from_vcf_offline_depot_rename",
+            resource_type="dns_record",
+            resource_id=str(record.id),
+            detail=f"{record.hostname} {record.record_type}",
+        )
+    if removed:
+        db.flush()
+        return "removed-old"
+    return None
 
 
 def available_dns_listen_addresses(
@@ -3550,6 +3803,313 @@ def create_kms_apply_task_from_ui(
     )
 
 
+@router.get("/https-repository", response_model=None)
+def legacy_https_repository_redirect(identity: Identity = Depends(require_session_identity)) -> RedirectResponse:
+    return RedirectResponse("/vcf-offline-depot", status_code=307)
+
+
+@router.get("/vcf-offline-depot", response_class=HTMLResponse, response_model=None)
+def vcf_offline_depot_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(request, "vcf_offline_depot.html", {"identity": identity, **vcf_offline_depot_context(db)})
+
+
+@router.post("/vcf-offline-depot/settings", response_model=None)
+def update_vcf_offline_depot_settings_from_ui(
+    request: Request,
+    enabled: str | None = Form(None),
+    hostname: str = Form(VCF_DEPOT_DEFAULT_HOSTNAME),
+    listen_interface: str = Form("eth2"),
+    port: int = Form(443),
+    server_certificate: str = Form(VCF_DEPOT_DEFAULT_HOSTNAME),
+    telemetry_choice: str = Form("DISABLE"),
+    tool_archive_file: UploadFile | None = File(None),
+    download_token_file: UploadFile | None = File(None),
+    activation_code_file: UploadFile | None = File(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    settings = get_vcf_offline_depot_settings_row(db)
+    previous_hostname = settings.hostname
+    listen_options = {option["name"]: option for option in vcf_backup_listen_options(db)}
+    selected_interface = listen_interface.strip() or "eth2"
+    if selected_interface not in listen_options:
+        raise HTTPException(status_code=400, detail="Select an access physical interface or VLAN interface with an IP address.")
+
+    settings.enabled = enabled == "on"
+    settings.hostname = hostname.strip() or VCF_DEPOT_DEFAULT_HOSTNAME
+    settings.listen_interface = selected_interface
+    settings.listen_address = listen_options[selected_interface]["address"]
+    settings.port = port
+    settings.server_certificate = server_certificate.strip() or settings.hostname
+    settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
+    settings.config_path = VCF_DEPOT_DEFAULT_CONFIG_PATH
+    settings.telemetry_choice = telemetry_choice if telemetry_choice in VCF_DEPOT_TELEMETRY_CHOICES else "DISABLE"
+    uploaded_archive_name = store_uploaded_vcf_depot_archive(settings, tool_archive_file)
+    uploaded_token_name = store_uploaded_vcf_depot_secret(
+        db,
+        download_token_file,
+        name_key=VCF_DEPOT_TOKEN_NAME_KEY,
+        value_key=VCF_DEPOT_TOKEN_VALUE_KEY,
+        actor=identity.username,
+        action="upload_vcf_depot_download_token",
+    )
+    uploaded_activation_name = store_uploaded_vcf_depot_secret(
+        db,
+        activation_code_file,
+        name_key=VCF_DEPOT_ACTIVATION_NAME_KEY,
+        value_key=VCF_DEPOT_ACTIVATION_VALUE_KEY,
+        actor=identity.username,
+        action="upload_vcf_depot_activation_code",
+    )
+    settings.updated_at = utcnow()
+    dns_record_action = ensure_dns_for_vcf_offline_depot(db, settings, identity.username)
+    old_dns_record_action = None
+    if normalize_dns_hostname(previous_hostname) != normalize_dns_hostname(settings.hostname):
+        old_dns_record_action = remove_dns_for_vcf_offline_depot_hostname(db, previous_hostname, identity.username)
+    dns_actions = [action for action in [dns_record_action, old_dns_record_action] if action]
+    dns_record_action = "+".join(dns_actions) if dns_actions else None
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_vcf_offline_depot_settings", resource_type="vcf_offline_depot", resource_id=str(settings.id))
+
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = vcf_offline_depot_context(db)
+        saved_settings = context["vcf_depot_settings"]
+        validation_errors = context["vcf_depot_validation_errors"]
+        validation_warnings = context["vcf_depot_validation_warnings"]
+        token_state = context["vcf_depot_download_token"]
+        activation_state = context["vcf_depot_activation_code"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": saved_settings.updated_at.isoformat(),
+                "hostname": saved_settings.hostname,
+                "endpoint": context["vcf_depot_endpoint"],
+                "listen_interface": saved_settings.listen_interface,
+                "listen_address": saved_settings.listen_address,
+                "port": saved_settings.port,
+                "server_certificate": saved_settings.server_certificate,
+                "depot_store_path": saved_settings.depot_store_path,
+                "tool_archive_name": uploaded_archive_name or Path(saved_settings.tool_archive_path).name if saved_settings.tool_archive_path else "",
+                "tool_version": saved_settings.tool_version,
+                "download_token_present": token_state.present,
+                "download_token_name": uploaded_token_name or token_state.filename,
+                "download_token_updated_at": token_state.updated_at,
+                "activation_code_present": activation_state.present,
+                "activation_code_name": uploaded_activation_name or activation_state.filename,
+                "activation_code_updated_at": activation_state.updated_at,
+                "telemetry_choice": saved_settings.telemetry_choice,
+                "dns_record_action": dns_record_action,
+                "config_path": saved_settings.config_path,
+                "valid": not validation_errors,
+                "validation_errors": validation_errors,
+                "validation_warnings": validation_warnings,
+                "https_config_preview": context["vcf_depot_https_config_preview"],
+                "command_preview": context["vcf_depot_command_preview"],
+            }
+        )
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+@router.post("/vcf-offline-depot/profiles", response_model=None)
+def create_vcf_depot_profile_from_ui(
+    request: Request,
+    name: str = Form(...),
+    profile_type: str = Form("binaries"),
+    sku: str = Form("VCF"),
+    vcf_version: str = Form("9.1.0"),
+    binary_type: str = Form("INSTALL"),
+    automated_install: str | None = Form(None),
+    upgrades_only: str | None = Form(None),
+    component: str = Form(""),
+    component_version: str = Form(""),
+    disabled_platforms: str = Form(""),
+    enabled: str | None = Form(None),
+    status: str = Form("planned"),
+    notes: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    profile = VcfDepotDownloadProfile(
+        name=name.strip(),
+        profile_type=profile_type.strip() or "binaries",
+        sku=sku.strip() or "VCF",
+        vcf_version=vcf_version.strip() or "9.1.0",
+        binary_type=binary_type.strip() or "INSTALL",
+        automated_install=automated_install == "on",
+        upgrades_only=upgrades_only == "on",
+        component=component.strip(),
+        component_version=component_version.strip(),
+        disabled_platforms=disabled_platforms.strip(),
+        enabled=enabled == "on",
+        status=status.strip() or "planned",
+        notes=notes.strip() or None,
+    )
+    db.add(profile)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="A VCFDT download profile with this name already exists.") from exc
+    record_audit(db, actor=identity.username, action="create_vcf_depot_profile", resource_type="vcf_depot_profile", resource_id=str(profile.id))
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+@router.post("/vcf-offline-depot/profiles/{profile_id}/edit", response_model=None)
+def edit_vcf_depot_profile_from_ui(
+    request: Request,
+    profile_id: int,
+    name: str = Form(...),
+    profile_type: str = Form("binaries"),
+    sku: str = Form("VCF"),
+    vcf_version: str = Form("9.1.0"),
+    binary_type: str = Form("INSTALL"),
+    automated_install: str | None = Form(None),
+    upgrades_only: str | None = Form(None),
+    component: str = Form(""),
+    component_version: str = Form(""),
+    disabled_platforms: str = Form(""),
+    enabled: str | None = Form(None),
+    status: str = Form("planned"),
+    notes: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    profile = db.get(VcfDepotDownloadProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="VCFDT download profile not found.")
+    profile.name = name.strip()
+    profile.profile_type = profile_type.strip() or "binaries"
+    profile.sku = sku.strip() or "VCF"
+    profile.vcf_version = vcf_version.strip() or "9.1.0"
+    profile.binary_type = binary_type.strip() or "INSTALL"
+    profile.automated_install = automated_install == "on"
+    profile.upgrades_only = upgrades_only == "on"
+    profile.component = component.strip()
+    profile.component_version = component_version.strip()
+    profile.disabled_platforms = disabled_platforms.strip()
+    profile.enabled = enabled == "on"
+    profile.status = status.strip() or "planned"
+    profile.notes = notes.strip() or None
+    profile.updated_at = utcnow()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="A VCFDT download profile with this name already exists.") from exc
+    record_audit(db, actor=identity.username, action="update_vcf_depot_profile", resource_type="vcf_depot_profile", resource_id=str(profile.id))
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+@router.post("/vcf-offline-depot/profiles/{profile_id}/delete", response_model=None)
+def delete_vcf_depot_profile_from_ui(
+    request: Request,
+    profile_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    profile = db.get(VcfDepotDownloadProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="VCFDT download profile not found.")
+    db.delete(profile)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_vcf_depot_profile", resource_type="vcf_depot_profile", resource_id=str(profile_id))
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+@router.post("/vcf-offline-depot/apply-task", response_model=None)
+def create_vcf_offline_depot_apply_task_from_ui(
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    verify_csrf(request, csrf)
+    context = vcf_offline_depot_context(db)
+    validation_errors = context["vcf_depot_validation_errors"]
+    if validation_errors:
+        return render(
+            request,
+            "vcf_offline_depot.html",
+            {
+                "identity": identity,
+                **context,
+                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
+            },
+            status_code=422,
+        )
+
+    adapter = SystemAdapter()
+    settings = context["vcf_depot_settings"]
+    profiles = context["vcf_depot_profiles"]
+    validate_result = adapter.validate_vcf_offline_depot_config(settings.config_path)
+    stage_result = adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path)
+    sync_result = adapter.sync_vcf_offline_depot(settings.config_path)
+    apply_result = adapter.apply_vcf_offline_depot_https_config(settings.config_path)
+    now = utcnow()
+    job_result = {
+        "config_path": settings.config_path,
+        "hostname": settings.hostname,
+        "endpoint": context["vcf_depot_endpoint"],
+        "depot_store_path": settings.depot_store_path,
+        "tool_archive_name": Path(settings.tool_archive_path).name if settings.tool_archive_path else "",
+        "tool_version": settings.tool_version,
+        "download_token_present": context["vcf_depot_download_token_present"],
+        "activation_code_present": context["vcf_depot_activation_code_present"],
+        "profile_count": len([profile for profile in profiles if profile.enabled]),
+        "dry_run": apply_result.dry_run,
+        "commands": [validate_result.command, stage_result.command, sync_result.command, apply_result.command],
+        "https_config_preview": context["vcf_depot_https_config_preview"],
+        "vcfdt_command_preview": context["vcf_depot_command_preview"],
+        "validation_warnings": context["vcf_depot_validation_warnings"],
+    }
+    results = [validate_result, stage_result, sync_result, apply_result]
+    succeeded = all(result.returncode == 0 for result in results)
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="vcf-offline-depot-apply",
+        status=JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
+        created_by=identity.username,
+        started_at=now,
+        finished_at=now,
+        progress_percent=100,
+        result=json.dumps(job_result, indent=2),
+        error=None if succeeded else "VCF Offline Depot apply adapter reported a failure.",
+    )
+    db.add(job)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="create_vcf_offline_depot_apply_task",
+        resource_type="job",
+        resource_id=job.id,
+        detail=" ; ".join(" ".join(result.command) for result in results),
+        success=job.status == JobStatus.SUCCEEDED.value,
+    )
+    return render(
+        request,
+        "vcf_offline_depot.html",
+        {
+            "identity": identity,
+            **vcf_offline_depot_context(db),
+            "apply_task": job,
+            "apply_task_dry_run": apply_result.dry_run,
+        },
+    )
+
+
 @router.get("/vcf-private-registry", response_class=HTMLResponse, response_model=None)
 def vcf_private_registry_page(
     request: Request,
@@ -4275,7 +4835,7 @@ def placeholder_page(page: str, request: Request, identity: Identity = Depends(r
         "physical-interfaces": "Physical Interfaces",
         "vlan-interfaces": "VLAN Interfaces",
         "certificate-authority": "Certificate Authority",
-        "https-repository": "HTTPS Repository",
+        "vcf-offline-depot": "VCF Offline Depot",
         "vcf-backups": "VCF Backups",
         "logs": "Logs",
         "backup-restore": "Backup / Restore",

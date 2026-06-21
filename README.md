@@ -72,6 +72,8 @@ password: labfoundry-vcf-backup
 
 Reset this account from `Users` before exposing the SFTP endpoint beyond a development lab.
 
+VCF Offline Depot uses the proprietary VCF Download Tool to stage disconnected VCF 9 depot content. Upload the VCF Download Tool file (`vcf-download-tool-*.tar.gz`) and Broadcom token or activation-code files through the UI; previews and apply-task records show only sanitized filenames, presence flags, and command intent.
+
 ## Brand Assets
 
 Reusable SVG assets live in `labfoundry/app/static/brand/` and are documented in `docs/branding.md`.
@@ -85,7 +87,7 @@ The MVP follows these boundaries:
 - App package: `labfoundry`
 - Service user: `labfoundry`
 - Default database: `data/labfoundry.db`
-- Repository target: `/srv/repository`
+- VCF Offline Depot store and HTTPS document root: `/mnt/labfoundry-vcf-offline-depot`
 - VCF private registry volume mount: `/mnt/labfoundry-vcf-registry`
 - VCF backup volume mount: `/mnt/labfoundry-vcf-backups`
 - VCF backup SFTP remote directory: `/backups`
@@ -119,6 +121,7 @@ Initial resource areas:
 - VLANs
 - Routes
 - WAN
+- VCF Offline Depot
 - Services
 - Logs
 - Audit

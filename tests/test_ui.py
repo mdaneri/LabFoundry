@@ -19,7 +19,8 @@ def test_login_and_dashboard_render(client):
     assert response.status_code == 200
     assert "LabFoundry" in response.text
     assert "Routes &amp; WAN Simulation" in response.text
-    assert "HTTPS Repository" in response.text
+    assert "VCF Offline Depot" in response.text
+    assert "HTTPS Repository" not in response.text
     assert "Users" in response.text
     assert "LDAP / Users" not in response.text
     assert "/static/brand/labfoundry-mark.svg" in response.text
@@ -658,6 +659,222 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
         assert "imgpkg copy" in (job.result or "")
         assert "provisioned-by-labfoundry-helper" in (job.result or "")
         assert "password123" not in (job.result or "").lower()
+
+
+def make_vcfdt_archive(path, version="9.1.0.0100.25429019"):
+    import io
+    import tarfile
+
+    with tarfile.open(path, "w:gz") as archive:
+        payload = version.encode("utf-8")
+        info = tarfile.TarInfo("conf/tool-version.txt")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+
+def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_path):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord, Job, Setting
+    from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_ACTIVATION_VALUE_KEY, VCF_DEPOT_TOKEN_VALUE_KEY
+
+    login(client)
+    legacy = client.get("/https-repository", follow_redirects=False)
+    assert legacy.status_code == 307
+    assert legacy.headers["location"] == "/vcf-offline-depot"
+
+    page = client.get("/vcf-offline-depot")
+    assert page.status_code == 200
+    assert "VCF Offline Depot" in page.text
+    assert "HTTPS Repository" not in page.text
+    assert "Tool & Credentials" in page.text
+    assert "Download Profiles" in page.text
+    assert "VCF Depot Apply" in page.text
+    assert "VCF Download Tool" in page.text
+    assert "Choose VCFDT tool" in page.text
+    assert "Choose VCFDT archive" not in page.text
+    assert "DNS record follows the selected listen address." in page.text
+    tool_metric = page.text.split("<span>VCF Download Tool</span>", 1)[1].split("</div>", 1)[0]
+    assert 'data-vcf-depot-tool-version' in tool_metric
+    assert 'data-vcf-depot-tool-status' in tool_metric
+    assert 'data-vcf-depot-tool-name' not in tool_metric
+    assert 'data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab"' in page.text
+    assert "/mnt/labfoundry-vcf-offline-depot" in page.text
+    assert "depot.labfoundry.internal" in page.text
+    assert "eth1 - access / trunk" not in page.text
+    assert "eth2 - access / access / 192.168.50.1" in page.text
+    assert 'action="/vcf-offline-depot/settings"' in page.text
+    assert 'data-autosave-status-id="vcf-depot-settings-status"' in page.text
+    assert 'data-components=' in page.text
+    assert 'data-esx-platforms=' in page.text
+    assert "VCF_OBSERVABILITY_DATA_PLATFORM" in page.text
+    assert "VSAN_FILE_SERVICES" in page.text
+    assert "embeddedEsx-6.7-INT" in page.text
+    assert "esxio-9.1-INTL" in page.text
+    assert 'action="/vcf-offline-depot/apply-task"' in page.text
+    assert "vcf-download-tool binaries list" in page.text
+
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    assert "initializeVcfDepotSettings" in app_js.text
+    assert "initializeVcfDepotProfilesTable" in app_js.text
+    assert "All components" in app_js.text
+    assert "componentValues" in app_js.text
+    assert "esxPlatformValues" in app_js.text
+    assert "vcfDepotDisabledPlatformsEditor" in app_js.text
+    assert "vcfDepotRememberActiveTab" in app_js.text
+    assert "tabulator-checklist-option" in app_js.text
+    assert "tool staged" in app_js.text
+    assert "DNS record created for this endpoint." in app_js.text
+    assert "Old endpoint DNS record removed." in app_js.text
+    assert "updateVcfDepotHttpsPreview" in app_js.text
+    assert "updateVcfDepotValidation" in app_js.text
+
+    app_css = client.get("/static/app.css")
+    assert app_css.status_code == 200
+    assert ".tabulator-checklist-editor" in app_css.text
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    make_vcfdt_archive(archive_path)
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-offline-depot/settings",
+        data={
+            "enabled": "on",
+            "hostname": "depot.labfoundry.internal",
+            "listen_interface": "eth2",
+            "port": "443",
+            "server_certificate": "depot.labfoundry.internal",
+            "telemetry_choice": "DISABLE",
+            "csrf": csrf,
+        },
+        files={
+            "tool_archive_file": ("vcf-download-tool-9.1.0.test.tar.gz", archive_path.read_bytes(), "application/gzip"),
+            "download_token_file": ("download-token.txt", "super-secret-token", "text/plain"),
+            "activation_code_file": ("activation-code.txt", "super-secret-activation", "text/plain"),
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "saved"
+    assert payload["listen_address"] == "192.168.50.1"
+    assert payload["endpoint"] == "depot.labfoundry.internal"
+    assert payload["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
+    assert payload["tool_version"] == "9.1.0.0100.25429019"
+    assert payload["download_token_present"] is True
+    assert payload["activation_code_present"] is True
+    assert payload["valid"] is True
+    assert payload["dns_record_action"] == "created"
+    assert "listen 192.168.50.1:443 ssl;" in payload["https_config_preview"]
+    assert "--depot-store=/mnt/labfoundry-vcf-offline-depot" in payload["command_preview"]
+    assert "super-secret-token" not in response.text
+    assert "super-secret-activation" not in response.text
+
+    with SessionLocal() as db:
+        token_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_VALUE_KEY)).scalar_one()
+        activation_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_VALUE_KEY)).scalar_one()
+        dns_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "depot.labfoundry.internal",
+                DnsRecord.record_type == "A",
+            )
+        ).scalar_one()
+        assert token_secret.value == "super-secret-token"
+        assert activation_secret.value == "super-secret-activation"
+        assert dns_record.address == "192.168.50.1"
+        assert dns_record.enabled is True
+
+    moved_response = client.post(
+        "/vcf-offline-depot/settings",
+        data={
+            "enabled": "on",
+            "hostname": "offline-depot.labfoundry.internal",
+            "listen_interface": "eth0",
+            "port": "443",
+            "server_certificate": "offline-depot.labfoundry.internal",
+            "telemetry_choice": "DISABLE",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert moved_response.status_code == 200
+    moved_payload = moved_response.json()
+    assert moved_payload["hostname"] == "offline-depot.labfoundry.internal"
+    assert moved_payload["listen_address"] == "192.168.49.1"
+    assert moved_payload["dns_record_action"] == "created+removed-old"
+    with SessionLocal() as db:
+        old_dns_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "depot.labfoundry.internal",
+                DnsRecord.record_type == "A",
+            )
+        ).scalar_one_or_none()
+        new_dns_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "offline-depot.labfoundry.internal",
+                DnsRecord.record_type == "A",
+            )
+        ).scalar_one()
+        assert old_dns_record is None
+        assert new_dns_record.address == "192.168.49.1"
+
+    token_page = client.post(
+        "/authentication/api-tokens",
+        data={
+            "name": "vcf-depot-status-test",
+            "description": "",
+            "scopes": "read:repository",
+            "csrf": csrf,
+        },
+    )
+    raw_token = token_page.text.split('<textarea readonly rows="5">', 1)[1].split("</textarea>", 1)[0]
+    status = client.get("/api/v1/vcf-offline-depot/status", headers={"Authorization": f"Bearer {raw_token}"})
+    assert status.status_code == 200
+    assert status.json()["hostname"] == "offline-depot.labfoundry.internal"
+    assert status.json()["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
+    assert status.json()["download_token_present"] is True
+    assert status.json()["activation_code_present"] is True
+    assert "super-secret" not in status.text
+    alias = client.get("/api/v1/repository/status", headers={"Authorization": f"Bearer {raw_token}"})
+    assert alias.status_code == 200
+    assert alias.json()["endpoint"] == status.json()["endpoint"]
+
+    apply_response = client.post("/vcf-offline-depot/apply-task", data={"csrf": csrf})
+    assert apply_response.status_code == 200
+    assert "Appliance apply task" in apply_response.text
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "vcf-offline-depot-apply")).scalar_one()
+        assert job.status == "succeeded"
+        assert "labfoundry-helper" in (job.result or "")
+        assert "vcf-offline-depot" in (job.result or "")
+        assert "stage-tool" in (job.result or "")
+        assert "vcf-download-tool binaries download" in (job.result or "")
+        assert "super-secret-token" not in (job.result or "")
+        assert "super-secret-activation" not in (job.result or "")
+
+
+def test_vcf_offline_depot_migrates_legacy_store_path(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import VcfOfflineDepotSettings
+
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        settings.depot_store_path = "/srv/repository"
+        db.commit()
+
+    login(client)
+    page = client.get("/vcf-offline-depot")
+
+    assert page.status_code == 200
+    assert "/mnt/labfoundry-vcf-offline-depot" in page.text
+    assert "/srv/repository" not in page.text
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        assert settings.depot_store_path == "/mnt/labfoundry-vcf-offline-depot"
 
 
 def test_vcf_private_registry_uses_local_ca_bundle_when_ca_is_enabled(client):

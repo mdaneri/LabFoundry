@@ -21,6 +21,8 @@ from labfoundry.app.models import (
     ServiceState,
     User,
     VcfBackupSettings,
+    VcfDepotDownloadProfile,
+    VcfOfflineDepotSettings,
     VcfPrivateRegistrySettings,
     VlanInterface,
     WanPolicy,
@@ -47,11 +49,11 @@ SERVICE_STATE_DEFAULTS = [
     },
     {
         "service": "repository",
-        "display_name": "HTTPS Repository",
-        "running": True,
-        "enabled": True,
-        "health": "healthy",
-        "detail": "/srv/repository",
+        "display_name": "VCF Offline Depot",
+        "running": False,
+        "enabled": False,
+        "health": "planned",
+        "detail": "/mnt/labfoundry-vcf-offline-depot",
     },
     {
         "service": "vcf-private-registry",
@@ -171,8 +173,16 @@ def seed_initial_data(db: Session) -> None:
 
     existing_services = {row.service for row in db.execute(select(ServiceState)).scalars().all()}
     for service_state in SERVICE_STATE_DEFAULTS:
-        if service_state["service"] not in existing_services:
+        existing_service = db.execute(select(ServiceState).where(ServiceState.service == service_state["service"])).scalar_one_or_none()
+        if existing_service is None:
             db.add(ServiceState(**service_state))
+        elif service_state["service"] == "repository":
+            existing_service.display_name = service_state["display_name"]
+            existing_service.detail = service_state["detail"]
+            if existing_service.health == "healthy":
+                existing_service.health = service_state["health"]
+            existing_service.enabled = service_state["enabled"]
+            existing_service.running = service_state["running"]
 
     if db.execute(select(DnsSettings)).first() is None:
         db.add(
@@ -369,4 +379,34 @@ def seed_initial_data(db: Session) -> None:
         )
     if db.execute(select(VcfPrivateRegistrySettings)).first() is None:
         db.add(VcfPrivateRegistrySettings())
+    if db.execute(select(VcfOfflineDepotSettings)).first() is None:
+        db.add(VcfOfflineDepotSettings())
+    if db.execute(select(VcfDepotDownloadProfile)).first() is None:
+        db.add_all(
+            [
+                VcfDepotDownloadProfile(
+                    name="VCF 9.1 install binaries",
+                    profile_type="binaries",
+                    sku="VCF",
+                    vcf_version="9.1.0",
+                    binary_type="INSTALL",
+                    automated_install=True,
+                    enabled=True,
+                    status="planned",
+                ),
+                VcfDepotDownloadProfile(
+                    name="VCF metadata",
+                    profile_type="metadata",
+                    enabled=False,
+                    status="planned",
+                ),
+                VcfDepotDownloadProfile(
+                    name="ESX patches",
+                    profile_type="esx",
+                    enabled=False,
+                    status="planned",
+                    disabled_platforms="esxio-9.1-INTL\narmEsx-9.1-INTL",
+                ),
+            ]
+        )
     db.commit()

@@ -31,6 +31,8 @@ from labfoundry.app.models import (
     Setting,
     User,
     VcfBackupSettings,
+    VcfDepotDownloadProfile,
+    VcfOfflineDepotSettings,
     VcfPrivateRegistrySettings,
     VcfRegistryBundle,
     VlanInterface,
@@ -76,6 +78,7 @@ from labfoundry.app.schemas import (
     ServiceStateResponse,
     SettingsResponse,
     VcfBackupStatusResponse,
+    VcfOfflineDepotStatusResponse,
     VcfPrivateRegistryStatusResponse,
     VlanCreate,
     VlanResponse,
@@ -124,6 +127,16 @@ from labfoundry.app.services.vcf_private_registry import (
     validate_vcf_registry_state,
     vcf_registry_settings_to_dict,
 )
+from labfoundry.app.services.vcf_offline_depot import (
+    VCF_DEPOT_ACTIVATION_VALUE_KEY,
+    VCF_DEPOT_DEFAULT_STORE_PATH,
+    VCF_DEPOT_LEGACY_STORE_PATH,
+    VCF_DEPOT_TOKEN_VALUE_KEY,
+    detect_vcf_download_tool_version,
+    find_local_vcf_download_tool_archive,
+    validate_vcf_depot_state,
+    vcf_depot_settings_to_dict,
+)
 from labfoundry.app.token_service import create_token_for_user, token_to_response
 
 router = APIRouter(prefix="/api/v1")
@@ -135,6 +148,7 @@ APPROVED_SERVICES = {
     "dhcp",
     "kms",
     "repository",
+    "vcf-offline-depot",
     "vcf-private-registry",
     "vcf-backups",
     "ca",
@@ -209,12 +223,41 @@ def get_vcf_private_registry_settings(db: Session) -> VcfPrivateRegistrySettings
     return settings
 
 
+def get_vcf_offline_depot_settings(db: Session) -> VcfOfflineDepotSettings:
+    settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one_or_none()
+    if settings is None:
+        settings = VcfOfflineDepotSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    if settings.depot_store_path == VCF_DEPOT_LEGACY_STORE_PATH:
+        settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
+        settings.updated_at = utcnow()
+        db.commit()
+        db.refresh(settings)
+    if not settings.tool_archive_path:
+        archive = find_local_vcf_download_tool_archive()
+        if archive is not None:
+            settings.tool_archive_path = str(archive)
+            settings.tool_version = detect_vcf_download_tool_version(archive)
+            settings.updated_at = utcnow()
+            db.commit()
+            db.refresh(settings)
+    return settings
+
+
 def vcf_registry_ca_bundle_status(db: Session) -> tuple[str, bool]:
     ca_settings = db.execute(select(CaSettings)).scalar_one_or_none()
     if ca_settings is not None and ca_settings.enabled:
         return "local-ca", True
     uploaded = db.execute(select(Setting).where(Setting.key == VCF_REGISTRY_UPLOADED_CA_BUNDLE_PEM_KEY)).scalar_one_or_none()
     return "uploaded", bool(uploaded and uploaded.value.strip())
+
+
+def vcf_depot_secret_status(db: Session) -> tuple[bool, bool]:
+    token = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_VALUE_KEY)).scalar_one_or_none()
+    activation_code = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_VALUE_KEY)).scalar_one_or_none()
+    return bool(token and token.value.strip()), bool(activation_code and activation_code.value.strip())
 
 
 def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[FirewallRule], str, list[str]]:
@@ -1628,6 +1671,64 @@ def get_vcf_backups_status(
     )
 
 
+def build_vcf_offline_depot_status(db: Session) -> VcfOfflineDepotStatusResponse:
+    settings = get_vcf_offline_depot_settings(db)
+    profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
+    row = db.execute(select(ServiceState).where(ServiceState.service == "repository")).scalar_one_or_none()
+    download_token_present, activation_code_present = vcf_depot_secret_status(db)
+    validation_errors, _warnings = validate_vcf_depot_state(
+        settings,
+        profiles,
+        download_token_present=download_token_present,
+        activation_code_present=activation_code_present,
+    )
+    payload = vcf_depot_settings_to_dict(settings)
+    return VcfOfflineDepotStatusResponse(
+        enabled=settings.enabled,
+        service=ServiceStateResponse.model_validate(row) if row else None,
+        hostname=str(payload["hostname"]),
+        endpoint=str(payload["endpoint"]),
+        listen_interface=str(payload["listen_interface"]),
+        listen_address=str(payload["listen_address"]),
+        port=int(payload["port"]),
+        depot_store_path=str(payload["depot_store_path"]),
+        tool_archive_name=str(payload["tool_archive_name"]),
+        tool_version=str(payload["tool_version"]),
+        download_token_present=download_token_present,
+        activation_code_present=activation_code_present,
+        profile_count=len([profile for profile in profiles if profile.enabled]),
+        config_path=str(payload["config_path"]),
+        valid=not validation_errors,
+        dry_run=get_settings().dry_run_system_adapters,
+    )
+
+
+@router.get(
+    "/vcf-offline-depot/status",
+    response_model=VcfOfflineDepotStatusResponse,
+    tags=["VCF Offline Depot"],
+    operation_id="getVcfOfflineDepotStatus",
+)
+def get_vcf_offline_depot_status(
+    identity: Annotated[Identity, Depends(require_scope("read:repository"))],
+    db: Session = Depends(get_db),
+) -> VcfOfflineDepotStatusResponse:
+    return build_vcf_offline_depot_status(db)
+
+
+@router.get(
+    "/repository/status",
+    response_model=VcfOfflineDepotStatusResponse,
+    tags=["VCF Offline Depot"],
+    operation_id="getRepositoryStatus",
+)
+def get_repository_status_alias(
+    identity: Annotated[Identity, Depends(require_scope("read:repository"))],
+    db: Session = Depends(get_db),
+) -> VcfOfflineDepotStatusResponse:
+    return build_vcf_offline_depot_status(db)
+
+
 @router.get(
     "/vcf-private-registry/status",
     response_model=VcfPrivateRegistryStatusResponse,
@@ -1670,7 +1771,6 @@ def add_placeholder_resource_routes() -> None:
     placeholder_specs = [
         ("ldap", "LDAP", "read:dashboard"),
         ("ca", "CA", "read:ca"),
-        ("repository", "Repository", "read:repository"),
         ("backup", "Backup Restore", "write:backup"),
     ]
 

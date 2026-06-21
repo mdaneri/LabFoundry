@@ -3974,6 +3974,594 @@ function initializeVcfRegistrySettings() {
   });
 }
 
+function showVcfDepotMessage(message, type = "error") {
+  const element = document.getElementById("vcf-depot-profile-error");
+  if (!element) {
+    return;
+  }
+  element.textContent = message;
+  element.classList.toggle("error", type === "error");
+  element.classList.toggle("success", type === "success");
+  element.classList.remove("hidden");
+}
+
+function newVcfDepotProfileRow() {
+  return {
+    id: "__new__",
+    name: "",
+    profile_type: "binaries",
+    sku: "VCF",
+    vcf_version: "9.1.0",
+    binary_type: "INSTALL",
+    automated_install: true,
+    upgrades_only: false,
+    component: "",
+    component_version: "",
+    disabled_platforms: [],
+    enabled: true,
+    status: "planned",
+    notes: "",
+    is_new: true,
+  };
+}
+
+function hasRequiredVcfDepotProfileFields(data) {
+  return Boolean((data.name || "").trim() && (data.profile_type || "").trim());
+}
+
+function vcfDepotListValues(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatVcfDepotChoiceList(cell, values, emptyText) {
+  const selected = vcfDepotListValues(cell.getValue());
+  if (!selected.length) {
+    return `<span class="muted">${escapeHtml(emptyText)}</span>`;
+  }
+  return selected.map((item) => escapeHtml(values[item] || item)).join("<br>");
+}
+
+function rememberActiveTab(storageKey, targetId) {
+  if (!storageKey || !targetId) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(storageKey, targetId);
+  } catch {
+    // Tab persistence is a convenience only; private browsing can disable it.
+  }
+}
+
+function vcfDepotRememberActiveTab() {
+  const tabList = document.querySelector("[data-tab-storage-key='labfoundry:vcf-offline-depot:active-tab']");
+  if (!(tabList instanceof HTMLElement)) {
+    return;
+  }
+  const activeButton = tabList.querySelector(".tab-button.active[data-tab-target]");
+  if (activeButton instanceof HTMLElement) {
+    rememberActiveTab(tabList.dataset.tabStorageKey || "", activeButton.dataset.tabTarget || "");
+  }
+}
+
+function vcfDepotDisabledPlatformsEditor(cell, onRendered, success, cancel, editorParams) {
+  const values = editorParams.values || {};
+  const selected = new Set(vcfDepotListValues(cell.getValue()));
+  const wrapper = document.createElement("div");
+  wrapper.className = "tabulator-checklist-editor";
+  const options = document.createElement("div");
+  options.className = "tabulator-checklist-options";
+  Object.entries(values).forEach(([value, label]) => {
+    const row = document.createElement("label");
+    row.className = "tabulator-checklist-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = value;
+    checkbox.checked = selected.has(value);
+    const text = document.createElement("span");
+    text.textContent = label;
+    row.append(checkbox, text);
+    options.appendChild(row);
+  });
+  const actions = document.createElement("div");
+  actions.className = "tabulator-checklist-actions";
+  const clearButton = document.createElement("button");
+  clearButton.type = "button";
+  clearButton.textContent = "Clear";
+  const doneButton = document.createElement("button");
+  doneButton.type = "button";
+  doneButton.textContent = "Done";
+  doneButton.className = "primary";
+  actions.append(clearButton, doneButton);
+  wrapper.append(options, actions);
+
+  function selectedValues() {
+    return Array.from(wrapper.querySelectorAll("input[type='checkbox']:checked")).map((input) => input.value);
+  }
+
+  clearButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    wrapper.querySelectorAll("input[type='checkbox']").forEach((input) => {
+      input.checked = false;
+    });
+  });
+  doneButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    success(selectedValues());
+  });
+  wrapper.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.ctrlKey) {
+      event.preventDefault();
+      success(selectedValues());
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancel();
+    }
+  });
+  onRendered(() => {
+    const firstCheckbox = wrapper.querySelector("input[type='checkbox']");
+    if (firstCheckbox instanceof HTMLElement) {
+      firstCheckbox.focus();
+    }
+  });
+  return wrapper;
+}
+
+async function postVcfDepotProfileAction(url, data, csrf) {
+  const body = new FormData();
+  body.set("csrf", csrf);
+  for (const [key, value] of Object.entries(data)) {
+    if (["id", "is_new", "created_at", "updated_at"].includes(key)) {
+      continue;
+    }
+    if (["enabled", "automated_install", "upgrades_only"].includes(key)) {
+      if (value) {
+        body.set(key, "on");
+      }
+      continue;
+    }
+    if (key === "disabled_platforms") {
+      body.set(key, vcfDepotListValues(value).join("\n"));
+      continue;
+    }
+    body.set(key, value ?? "");
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    body,
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    const plainText = text.trim().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    throw new Error(plainText || "The VCFDT download profile could not be saved.");
+  }
+  vcfDepotRememberActiveTab();
+  window.location.reload();
+}
+
+async function autoSaveVcfDepotProfile(cell, csrf) {
+  const row = cell.getRow();
+  const data = row.getData();
+  if (data.is_new && !hasRequiredVcfDepotProfileFields(data)) {
+    return;
+  }
+  const url = data.is_new ? "/vcf-offline-depot/profiles" : `/vcf-offline-depot/profiles/${data.id}/edit`;
+  try {
+    await postVcfDepotProfileAction(url, data, csrf);
+  } catch (error) {
+    showVcfDepotMessage(error instanceof Error ? error.message : "The VCFDT download profile could not be saved.");
+  }
+}
+
+async function deleteVcfDepotProfileFromMenu(row, csrf) {
+  const data = row.getData();
+  if (data.is_new) {
+    row.getTable().deleteRow(data.id);
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `Delete ${data.name || "VCFDT"} profile?`,
+    message: "This removes the VCFDT download profile from LabFoundry desired state. It does not remove files from the appliance depot until a future task explicitly does so.",
+    label: "Delete",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await postVcfDepotProfileAction(`/vcf-offline-depot/profiles/${data.id}/delete`, data, csrf);
+  } catch (error) {
+    showVcfDepotMessage(error instanceof Error ? error.message : "The VCFDT download profile could not be deleted.");
+  }
+}
+
+function initializeVcfDepotProfilesTable() {
+  const tableElement = document.getElementById("vcf-depot-profiles-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  if (typeof Tabulator === "undefined") {
+    showVcfDepotMessage("Tabulator did not load. Showing the fallback table.");
+    return;
+  }
+  const csrf = tableElement.dataset.csrf || "";
+  const componentOptions = JSON.parse(tableElement.dataset.components || "[]");
+  const componentValues = {
+    "": "All components",
+    ...Object.fromEntries(componentOptions.map((item) => [item.value, item.label])),
+  };
+  const esxPlatformOptions = JSON.parse(tableElement.dataset.esxPlatforms || "[]");
+  const esxPlatformValues = Object.fromEntries(esxPlatformOptions.map((item) => [item.value, item.label]));
+  const rows = [
+    ...JSON.parse(tableElement.dataset.profiles || "[]").map((row) => ({
+      ...row,
+      disabled_platforms: vcfDepotListValues(row.disabled_platforms),
+    })),
+    newVcfDepotProfileRow(),
+  ];
+  try {
+    new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "380px",
+      rowHeight: 28,
+      placeholder: "No VCFDT download profiles configured.",
+      reactiveData: false,
+      rowContextMenu: [
+        {
+          label: "Delete profile",
+          action: (_event, row) => deleteVcfDepotProfileFromMenu(row, csrf),
+        },
+      ],
+      columns: [
+        {
+          title: "Name",
+          field: "name",
+          editor: "input",
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add profile here"),
+          minWidth: 180,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Type",
+          field: "profile_type",
+          editor: "list",
+          editorParams: { values: { binaries: "binaries", metadata: "metadata", esx: "esx" } },
+          width: 110,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "SKU",
+          field: "sku",
+          editor: "list",
+          editorParams: { values: { VCF: "VCF", VVF: "VVF" } },
+          width: 85,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "VCF version",
+          field: "vcf_version",
+          editor: "input",
+          width: 125,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Binary type",
+          field: "binary_type",
+          editor: "list",
+          editorParams: { values: { INSTALL: "INSTALL", UPGRADE: "UPGRADE" } },
+          width: 125,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Automated",
+          field: "automated_install",
+          formatter: "tickCross",
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 105,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Upgrades only",
+          field: "upgrades_only",
+          formatter: "tickCross",
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 120,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Component",
+          field: "component",
+          editor: "list",
+          editorParams: {
+            values: componentValues,
+            autocomplete: true,
+            listOnEmpty: true,
+            clearable: true,
+          },
+          formatter: (cell) => componentValues[cell.getValue()] || escapeHtml(cell.getValue()),
+          minWidth: 210,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Component version",
+          field: "component_version",
+          editor: "input",
+          minWidth: 145,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Disabled platforms",
+          field: "disabled_platforms",
+          editor: vcfDepotDisabledPlatformsEditor,
+          editorParams: {
+            values: esxPlatformValues,
+          },
+          formatter: (cell) => formatVcfDepotChoiceList(cell, esxPlatformValues, "none"),
+          minWidth: 190,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Enabled",
+          field: "enabled",
+          formatter: "tickCross",
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 95,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Status",
+          field: "status",
+          editor: "list",
+          editorParams: { values: { planned: "planned", ready: "ready", synced: "synced", blocked: "blocked" } },
+          width: 110,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+      ],
+      rowFormatter: (row) => {
+        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+      },
+    });
+    if (fallback) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    showVcfDepotMessage(error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
+  }
+}
+
+function updateVcfDepotSummary(form, payload = {}) {
+  const interfaceSelect = form.querySelector('select[name="listen_interface"]');
+  const portInput = form.querySelector('input[name="port"]');
+  const hostnameInput = form.querySelector('input[name="hostname"]');
+  const certificateInput = form.querySelector('input[name="server_certificate"]');
+  if (!(interfaceSelect instanceof HTMLSelectElement)) {
+    return;
+  }
+  const selectedOption = interfaceSelect.selectedOptions[0];
+  const address = payload.listen_address || selectedOption?.dataset.address || "";
+  const interfaceName = payload.listen_interface || interfaceSelect.value || "";
+  const port = payload.port || portInput?.value || "443";
+  const hostname = payload.hostname || hostnameInput?.value || "";
+  const endpointValue = payload.endpoint || (port === "443" || port === 443 ? hostname : `${hostname}:${port}`);
+  const derivedAddress = document.querySelector("[data-vcf-depot-derived-address]");
+  const endpoint = document.querySelector("[data-vcf-depot-endpoint]");
+  const interfaceLabel = document.querySelector("[data-vcf-depot-interface]");
+  const storePaths = document.querySelectorAll("[data-vcf-depot-store]");
+  const toolNames = document.querySelectorAll("[data-vcf-depot-tool-name]");
+  const toolVersions = document.querySelectorAll("[data-vcf-depot-tool-version]");
+  const toolStatuses = document.querySelectorAll("[data-vcf-depot-tool-status]");
+  const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
+  const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
+  const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
+  if (derivedAddress instanceof HTMLElement) {
+    derivedAddress.textContent = address || "no interface IP";
+  }
+  if (endpoint instanceof HTMLElement) {
+    endpoint.textContent = endpointValue || "depot hostname required";
+  }
+  if (interfaceLabel instanceof HTMLElement) {
+    interfaceLabel.textContent = `${interfaceName} / ${address || "no interface IP"}`;
+  }
+  if (payload.depot_store_path) {
+    storePaths.forEach((storePath) => {
+      if (storePath instanceof HTMLElement) {
+        storePath.textContent = payload.depot_store_path;
+      }
+    });
+  }
+  if (payload.tool_archive_name !== undefined) {
+    toolNames.forEach((toolName) => {
+      if (toolName instanceof HTMLElement) {
+        toolName.textContent = payload.tool_archive_name || "not uploaded";
+      }
+    });
+    toolStatuses.forEach((toolStatus) => {
+      if (toolStatus instanceof HTMLElement) {
+        toolStatus.textContent = payload.tool_archive_name ? "tool staged" : "upload required";
+      }
+    });
+  }
+  if (payload.tool_version !== undefined) {
+    toolVersions.forEach((toolVersion) => {
+      if (toolVersion instanceof HTMLElement) {
+        toolVersion.textContent = payload.tool_version || "not uploaded";
+      }
+    });
+  }
+  if (tokenStatus instanceof HTMLElement && payload.download_token_present !== undefined) {
+    tokenStatus.textContent = payload.download_token_present ? payload.download_token_name || "uploaded" : "not uploaded";
+  }
+  if (activationStatus instanceof HTMLElement && payload.activation_code_present !== undefined) {
+    activationStatus.textContent = payload.activation_code_present ? payload.activation_code_name || "uploaded" : "not uploaded";
+  }
+  if (dnsStatus instanceof HTMLElement && payload.dns_record_action !== undefined) {
+    const dnsMessages = {
+      created: "DNS record created for this endpoint.",
+      updated: "DNS record updated for this endpoint.",
+      unchanged: "DNS record already matches this endpoint.",
+      "created+removed-old": "DNS record created and old endpoint record removed.",
+      "updated+removed-old": "DNS record updated and old endpoint record removed.",
+      "unchanged+removed-old": "Old endpoint DNS record removed.",
+      "removed-old": "Old endpoint DNS record removed.",
+    };
+    dnsStatus.textContent = dnsMessages[payload.dns_record_action] || "DNS record follows the selected listen address.";
+  }
+  const livePreviewPayload = {
+    ...payload,
+    hostname,
+    endpoint: endpointValue,
+    listen_address: address,
+    port,
+    server_certificate: payload.server_certificate || certificateInput?.value || hostname,
+  };
+  updateVcfDepotHttpsPreview(livePreviewPayload);
+}
+
+function updateVcfDepotHttpsPreview(payload = {}) {
+  const httpsPreview = document.querySelector("[data-vcf-depot-https-preview]");
+  if (!(httpsPreview instanceof HTMLElement)) {
+    return;
+  }
+  if (payload.https_config_preview !== undefined) {
+    httpsPreview.textContent = payload.https_config_preview;
+    return;
+  }
+  const hostname = payload.hostname || "depot.labfoundry.internal";
+  const endpoint = payload.endpoint || hostname;
+  const listenAddress = payload.listen_address || "0.0.0.0";
+  const port = payload.port || "443";
+  const depotStorePath = payload.depot_store_path || document.querySelector("[data-vcf-depot-store]")?.textContent || "/mnt/labfoundry-vcf-offline-depot";
+  const certificateName = payload.server_certificate || hostname;
+  httpsPreview.textContent = [
+    "# Managed by LabFoundry. Local changes may be overwritten.",
+    "# Dry-run preview of desired HTTPS endpoint for the VCF Offline Depot.",
+    `# Depot store: ${depotStorePath}`,
+    `# VCF endpoint: https://${endpoint}/`,
+    "",
+    "server {",
+    `  listen ${listenAddress}:${port} ssl;`,
+    `  server_name ${hostname};`,
+    `  root ${depotStorePath};`,
+    "  autoindex on;",
+    `  ssl_certificate /etc/labfoundry/vcf-offline-depot/certs/${certificateName}.crt;`,
+    `  ssl_certificate_key /etc/labfoundry/vcf-offline-depot/certs/${certificateName}.key;`,
+    "}",
+  ].join("\n") + "\n";
+}
+
+function updateVcfDepotValidation(payload = {}) {
+  const status = document.querySelector("[data-vcf-depot-validation-status]");
+  const validationPanel = status?.closest(".panel");
+  const applyButton = document.querySelector("[data-vcf-depot-apply-button]");
+  const configPath = document.querySelector("[data-vcf-depot-config-path]");
+  const httpsPreview = document.querySelector("[data-vcf-depot-https-preview]");
+  const commandPreview = document.querySelector("[data-vcf-depot-command-preview]");
+  const errors = Array.isArray(payload.validation_errors) ? payload.validation_errors : [];
+  const warnings = Array.isArray(payload.validation_warnings) ? payload.validation_warnings : [];
+  if (status instanceof HTMLElement && payload.valid !== undefined) {
+    status.textContent = payload.valid ? "valid" : "needs attention";
+    status.classList.toggle("good", Boolean(payload.valid));
+    status.classList.toggle("warn", !payload.valid);
+  }
+  if (applyButton instanceof HTMLButtonElement && payload.valid !== undefined) {
+    applyButton.disabled = !payload.valid;
+  }
+  if (configPath instanceof HTMLElement && payload.config_path) {
+    configPath.textContent = payload.config_path;
+  }
+  updateVcfDepotHttpsPreview(payload);
+  if (commandPreview instanceof HTMLElement && payload.command_preview !== undefined) {
+    commandPreview.textContent = payload.command_preview;
+  }
+  if (validationPanel instanceof HTMLElement && payload.valid !== undefined) {
+    const terminalNote = validationPanel.querySelector(".terminal-note");
+    let errorList = validationPanel.querySelector("[data-vcf-depot-validation-errors]");
+    let message = validationPanel.querySelector("[data-vcf-depot-validation-message]");
+    let warningList = validationPanel.querySelector("[data-vcf-depot-validation-warnings]");
+    if (payload.valid) {
+      if (errorList) {
+        errorList.remove();
+      }
+      if (!(message instanceof HTMLElement)) {
+        message = document.createElement("p");
+        message.className = "muted";
+        message.setAttribute("data-vcf-depot-validation-message", "");
+        validationPanel.insertBefore(message, terminalNote);
+      }
+      message.textContent = "The desired VCF Offline Depot state passes LabFoundry validation. Appliance validation still runs through the allowlisted depot helper before apply.";
+    } else {
+      if (message) {
+        message.remove();
+      }
+      if (!(errorList instanceof HTMLElement)) {
+        errorList = document.createElement("ul");
+        errorList.className = "error-list";
+        errorList.setAttribute("data-vcf-depot-validation-errors", "");
+        validationPanel.insertBefore(errorList, terminalNote);
+      }
+      errorList.innerHTML = "";
+      errors.forEach((error) => {
+        const item = document.createElement("li");
+        item.textContent = error;
+        errorList.appendChild(item);
+      });
+    }
+    if (!(warningList instanceof HTMLElement)) {
+      warningList = document.createElement("ul");
+      warningList.className = "warning-list";
+      warningList.setAttribute("data-vcf-depot-validation-warnings", "");
+      validationPanel.insertBefore(warningList, terminalNote);
+    }
+    warningList.innerHTML = "";
+    warnings.forEach((warning) => {
+      const item = document.createElement("li");
+      item.textContent = warning;
+      warningList.appendChild(item);
+    });
+    warningList.classList.toggle("hidden", warnings.length === 0);
+  }
+}
+
+function initializeVcfDepotSettings() {
+  document.querySelectorAll("[data-vcf-depot-settings]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const interfaceSelect = form.querySelector('select[name="listen_interface"]');
+    const portInput = form.querySelector('input[name="port"]');
+    const hostnameInput = form.querySelector('input[name="hostname"]');
+    const certificateInput = form.querySelector('input[name="server_certificate"]');
+    const refresh = () => updateVcfDepotSummary(form);
+    [interfaceSelect, portInput, hostnameInput, certificateInput].forEach((input) => {
+      if (input instanceof HTMLElement) {
+        input.addEventListener("input", refresh);
+        input.addEventListener("change", refresh);
+      }
+    });
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      const payload = event.detail || {};
+      updateVcfDepotSummary(form, payload);
+      updateVcfDepotValidation(payload);
+    });
+    refresh();
+  });
+}
+
 function initializeFileUploadControls() {
   document.querySelectorAll("[data-file-upload-input]").forEach((input) => {
     if (!(input instanceof HTMLInputElement)) {
@@ -4138,6 +4726,7 @@ function initializeTabs() {
       if (tabList.classList.contains("zone-tabs")) {
         rememberDnsActiveZone(button.dataset.domain || "");
       }
+      rememberActiveTab(tabList.dataset.tabStorageKey || "", targetId);
       tabList.querySelectorAll("[data-tab-target]").forEach((item) => {
         item.classList.toggle("active", item === button);
         item.setAttribute("aria-selected", item === button ? "true" : "false");
@@ -4161,6 +4750,25 @@ function initializeTabs() {
   if (storedDomainButton) {
     storedDomainButton.click();
   }
+  document.querySelectorAll("[data-tab-storage-key]").forEach((tabList) => {
+    if (!(tabList instanceof HTMLElement)) {
+      return;
+    }
+    const storageKey = tabList.dataset.tabStorageKey || "";
+    let targetId = "";
+    try {
+      targetId = window.localStorage.getItem(storageKey) || "";
+    } catch {
+      targetId = "";
+    }
+    if (!targetId) {
+      return;
+    }
+    const button = tabList.querySelector(`[data-tab-target="${CSS.escape(targetId)}"]`);
+    if (button instanceof HTMLButtonElement) {
+      button.click();
+    }
+  });
 }
 
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
@@ -4172,6 +4780,7 @@ document.addEventListener("DOMContentLoaded", initializeCaCertificatesTable);
 document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeServicesTable);
 document.addEventListener("DOMContentLoaded", initializeUsersTable);
@@ -4187,6 +4796,7 @@ document.addEventListener("DOMContentLoaded", initializeAutosaveForms);
 document.addEventListener("DOMContentLoaded", initializeDnsSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);

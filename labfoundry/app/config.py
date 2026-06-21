@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: str = "labfoundry-admin"
     dry_run_system_adapters: bool = True
-    repository_path: Path = Path("/srv/repository")
+    repository_path: Path = Path("/mnt/labfoundry-vcf-offline-depot")
     vcf_backup_path: Path = Path("/mnt/labfoundry-vcf-backups")
 
     model_config = SettingsConfigDict(

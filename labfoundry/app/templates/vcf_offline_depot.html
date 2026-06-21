@@ -1,0 +1,249 @@
+{% extends "base.html" %}
+{% block page_title %}VCF Offline Depot{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>VCF Offline Depot</h2>
+        <p class="muted">Stage VCF Download Tool inputs and serve the generated offline depot over HTTPS for disconnected VCF 9 labs.</p>
+      </div>
+      <span class="status-pill {{ 'good' if vcf_depot_settings.enabled else 'muted' }}">{{ "enabled" if vcf_depot_settings.enabled else "disabled" }}</span>
+    </div>
+
+    <div class="metric-grid service-summary-grid">
+      <div class="metric">
+        <span>Depot endpoint</span>
+        <strong data-vcf-depot-endpoint>{{ vcf_depot_endpoint }}</strong>
+        <small data-vcf-depot-interface>{{ vcf_depot_settings.listen_interface }} / {{ vcf_depot_settings.listen_address }}</small>
+      </div>
+      <div class="metric">
+        <span>Depot store</span>
+        <strong data-vcf-depot-store>{{ vcf_depot_settings.depot_store_path }}</strong>
+        <small>fixed volume mount</small>
+      </div>
+      <div class="metric">
+        <span>VCF Download Tool</span>
+        <strong data-vcf-depot-tool-version>{{ vcf_depot_settings.tool_version or "not uploaded" }}</strong>
+        <small data-vcf-depot-tool-status>{{ "tool staged" if vcf_depot_settings_json.tool_archive_name else "upload required" }}</small>
+      </div>
+      <div class="metric">
+        <span>Profiles</span>
+        <strong data-vcf-depot-profile-count>{{ vcf_depot_profiles|selectattr("enabled")|list|length }} enabled</strong>
+        <small>VCFDT command previews</small>
+      </div>
+    </div>
+
+    <div class="tab-buttons tool-tabs" role="tablist" aria-label="VCF Offline Depot views" data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab">
+      <button class="tab-button active" type="button" data-tab-target="vcf-depot-tool-panel" aria-selected="true">Tool & Credentials</button>
+      <button class="tab-button" type="button" data-tab-target="vcf-depot-profiles-panel" aria-selected="false">Download Profiles</button>
+      <button class="tab-button" type="button" data-tab-target="vcf-depot-preview-panel" aria-selected="false">Preview</button>
+    </div>
+
+    <div class="tab-panels">
+      <div id="vcf-depot-tool-panel" class="tab-panel active" role="tabpanel">
+        <section class="info-band">
+          <div>
+            <h2>Staged VCFDT inputs</h2>
+            <p class="muted">The VCF Download Tool is proprietary. Upload the tool and credential files here; LabFoundry stores only sanitized status in rendered output.</p>
+          </div>
+          <div class="settings-list">
+            <div><span>Tool file</span><strong data-vcf-depot-tool-name>{{ vcf_depot_settings_json.tool_archive_name or "not uploaded" }}</strong></div>
+            <div><span>Version</span><strong data-vcf-depot-tool-version>{{ vcf_depot_settings.tool_version or "unknown" }}</strong></div>
+            <div><span>Download token</span><strong data-vcf-depot-token-status>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "not uploaded" }}</strong></div>
+            <div><span>Activation code</span><strong data-vcf-depot-activation-status>{{ vcf_depot_activation_code.filename if vcf_depot_activation_code.present else "not uploaded" }}</strong></div>
+          </div>
+        </section>
+      </div>
+
+      <div id="vcf-depot-profiles-panel" class="tab-panel" role="tabpanel" hidden>
+        <div class="panel-head table-head">
+          <div>
+            <h2>VCFDT download profiles</h2>
+            <p class="muted">Each row produces list/download command intent for the appliance apply task.</p>
+          </div>
+          <span class="status-pill muted">{{ vcf_depot_profiles|length }} rows</span>
+        </div>
+        <div id="vcf-depot-profile-error" class="alert error hidden"></div>
+        <div
+          id="vcf-depot-profiles-table"
+          class="tabulator-shell"
+          data-profiles='{{ vcf_depot_profile_rows | tojson }}'
+          data-components='{{ vcf_depot_components | tojson }}'
+          data-esx-platforms='{{ vcf_depot_esx_disabled_platforms | tojson }}'
+          data-csrf="{{ csrf_token }}"
+          data-fallback-id="vcf-depot-profiles-fallback"
+        ></div>
+        <table id="vcf-depot-profiles-fallback" class="data-table compact dns-fallback-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>SKU</th>
+              <th>VCF version</th>
+              <th>Binary type</th>
+              <th>Component</th>
+              <th>Disabled ESX platforms</th>
+              <th>Enabled</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for profile in vcf_depot_profiles %}
+              <tr>
+                <td>{{ profile.name }}</td>
+                <td>{{ profile.profile_type }}</td>
+                <td>{{ profile.sku }}</td>
+                <td>{{ profile.vcf_version }}</td>
+                <td>{{ profile.binary_type }}</td>
+                <td>{{ profile.component or "all components" }}</td>
+                <td>{{ profile.disabled_platforms.replace("\n", ", ") if profile.disabled_platforms else "none" }}</td>
+                <td>{{ "yes" if profile.enabled else "no" }}</td>
+                <td>
+                  <form
+                    action="/vcf-offline-depot/profiles/{{ profile.id }}/delete"
+                    method="post"
+                    data-confirm-modal
+                    data-confirm-title="Delete {{ profile.name }} profile?"
+                    data-confirm-message="This removes the VCFDT download profile from LabFoundry desired state. It does not remove files from the appliance depot until a future task explicitly does so."
+                  >
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button class="button tiny danger" type="submit">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div id="vcf-depot-preview-panel" class="tab-panel" role="tabpanel" hidden>
+        <div class="terminal-note">
+          <strong>VCFDT command preview</strong>
+          <code data-vcf-depot-command-preview>{{ vcf_depot_command_preview }}</code>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>Depot Settings</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <form class="form-stack" action="/vcf-offline-depot/settings" method="post" enctype="multipart/form-data" data-autosave-form data-vcf-depot-settings data-autosave-status-id="vcf-depot-settings-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the VCF Offline Depot as enabled desired state. Host services are not changed until a depot apply task runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if vcf_depot_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label>
+          <span class="field-label"><span>Depot hostname</span><button class="help-icon" type="button" data-help="FQDN VCF components use for the offline depot HTTPS endpoint. LabFoundry creates or updates the matching DNS A/AAAA record and removes the old service-owned record when this name changes.">i</button></span>
+          <input name="hostname" value="{{ vcf_depot_settings.hostname }}">
+          <small class="muted" data-vcf-depot-dns-status>DNS record follows the selected listen address.</small>
+        </label>
+        <label>
+          <span class="field-label"><span>Listen interface</span><button class="help-icon" type="button" data-help="Access-mode physical interfaces and VLAN interfaces with configured IP addresses can host the depot. Trunk physical NICs are not direct bind targets.">i</button></span>
+          <select name="listen_interface">
+            {% for interface in vcf_depot_available_interfaces %}
+              <option value="{{ interface.name }}" data-address="{{ interface.address }}" {{ "selected" if vcf_depot_settings.listen_interface == interface.name else "" }}>{{ interface.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="form-grid">
+          <label>
+            <span class="field-label"><span>HTTPS port</span><button class="help-icon" type="button" data-help="TLS port exposed for the offline depot. Port 443 is the default endpoint for VCF clients.">i</button></span>
+            <input type="number" name="port" value="{{ vcf_depot_settings.port }}" min="1" max="65535">
+          </label>
+          <div class="derived-field">
+            <span class="field-label"><span>Derived address</span><button class="help-icon" type="button" data-help="LabFoundry derives this from the selected interface IP CIDR. Change the network page if the address is wrong.">i</button></span>
+            <strong data-vcf-depot-derived-address>{{ vcf_depot_settings.listen_address }}</strong>
+          </div>
+        </div>
+        <label>
+          <span class="field-label"><span>Server certificate</span><button class="help-icon" type="button" data-help="Certificate object/name the appliance helper uses for depot HTTPS. Certificate material is not rendered in previews.">i</button></span>
+          <input name="server_certificate" value="{{ vcf_depot_settings.server_certificate }}">
+        </label>
+        <label>
+          <span class="field-label"><span>Telemetry choice</span><button class="help-icon" type="button" data-help="Value staged into the VCF Download Tool telemetry flag before command execution. Applies only when the depot apply task stages VCFDT.">i</button></span>
+          <select name="telemetry_choice">
+            {% for choice in vcf_depot_telemetry_choices %}
+              <option value="{{ choice }}" {{ "selected" if vcf_depot_settings.telemetry_choice == choice else "" }}>{{ choice }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="derived-field">
+          <span class="field-label"><span>Depot store volume</span><button class="help-icon" type="button" data-help="Fixed appliance volume mount used as the VCFDT --depot-store and HTTPS document root. Attach or size this disk separately from the root filesystem.">i</button></span>
+          <strong data-vcf-depot-store>{{ vcf_depot_settings.depot_store_path }}</strong>
+        </div>
+        <label>
+          <span class="field-label"><span>VCF Download Tool</span><button class="help-icon" type="button" data-help="Upload the proprietary VCF Download Tool file. The file stays outside git and the apply task stages it through the appliance helper.">i</button></span>
+          <span class="file-upload-control">
+            <input class="file-upload-input" type="file" name="tool_archive_file" accept=".gz,application/gzip,application/x-gzip" data-file-upload-input>
+            <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose VCFDT tool</strong><small data-file-upload-name>{{ vcf_depot_settings_json.tool_archive_name or vcf_depot_archive_pattern }}</small></span></span>
+          </span>
+        </label>
+        <label>
+          <span class="field-label"><span>Download token file</span><button class="help-icon" type="button" data-help="Broadcom download-token file for binaries and metadata workflows. Contents are stored as a secret and never shown in previews or API responses.">i</button></span>
+          <span class="file-upload-control">
+            <input class="file-upload-input" type="file" name="download_token_file" accept=".txt,text/plain" data-file-upload-input>
+            <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose token file</strong><small data-file-upload-name>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "not uploaded" }}</small></span></span>
+          </span>
+        </label>
+        <label>
+          <span class="field-label"><span>Activation code file</span><button class="help-icon" type="button" data-help="Broadcom activation-code file. VCFDT 9.1 ESX patch and update workflows require this instead of a download token.">i</button></span>
+          <span class="file-upload-control">
+            <input class="file-upload-input" type="file" name="activation_code_file" accept=".txt,text/plain" data-file-upload-input>
+            <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose activation file</strong><small data-file-upload-name>{{ vcf_depot_activation_code.filename if vcf_depot_activation_code.present else "not uploaded" }}</small></span></span>
+          </span>
+        </label>
+        <p id="vcf-depot-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
+      </form>
+    </div>
+
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>VCF Depot Apply</h2>
+        <span class="status-pill warn">dry-run</span>
+      </div>
+      <p class="muted">Use this when depot settings and VCFDT profiles are finished. The task validates desired state, records VCFDT command intent, and applies HTTPS serving through LabFoundry adapters.</p>
+      <form action="/vcf-offline-depot/apply-task" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button class="button primary full-width" type="submit" data-vcf-depot-apply-button {{ "disabled" if vcf_depot_validation_errors else "" }}>Create appliance apply task</button>
+      </form>
+      {% if apply_task %}
+        <div class="alert {{ 'success' if apply_task.status == 'succeeded' else 'error' }}">
+          <strong>Appliance apply task {{ apply_task.status }}</strong>
+          <p>{{ apply_task.id }}{% if apply_task_dry_run %} recorded as dry-run.{% endif %}</p>
+        </div>
+      {% endif %}
+      {% if apply_task_error %}
+        <div class="alert error">{{ apply_task_error }}</div>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not vcf_depot_validation_errors else 'warn' }}" data-vcf-depot-validation-status>{{ "valid" if not vcf_depot_validation_errors else "needs attention" }}</span>
+      </div>
+      {% if vcf_depot_validation_errors %}
+        <ul class="error-list" data-vcf-depot-validation-errors>
+          {% for error in vcf_depot_validation_errors %}
+            <li>{{ error }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted" data-vcf-depot-validation-message>The desired VCF Offline Depot state passes LabFoundry validation. Appliance validation still runs through the allowlisted depot helper before apply.</p>
+      {% endif %}
+      <ul class="warning-list {{ 'hidden' if not vcf_depot_validation_warnings else '' }}" data-vcf-depot-validation-warnings>
+        {% for warning in vcf_depot_validation_warnings %}
+          <li>{{ warning }}</li>
+        {% endfor %}
+      </ul>
+      <div class="terminal-note">
+        <strong data-vcf-depot-config-path>{{ vcf_depot_settings.config_path }}</strong>
+        <code data-vcf-depot-https-preview>{{ vcf_depot_https_config_preview }}</code>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}
