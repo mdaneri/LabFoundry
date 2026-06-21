@@ -62,7 +62,7 @@
                     method="post"
                     data-confirm-modal
                     data-confirm-title="Delete {{ key.name }} key?"
-                    data-confirm-message="This removes the KMS key from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                    data-confirm-message="This removes the KMS key from LabFoundry desired state. It will not touch the appliance until global appliance apply runs."
                     data-confirm-label="Delete key"
                   >
                     <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -110,7 +110,7 @@
                     method="post"
                     data-confirm-modal
                     data-confirm-title="Delete {{ client.name }} client?"
-                    data-confirm-message="This removes the KMS client from LabFoundry desired state and unassigns any keys owned by it. It will not touch the appliance until an apply task runs."
+                    data-confirm-message="This removes the KMS client from LabFoundry desired state and unassigns any keys owned by it. It will not touch the appliance until global appliance apply runs."
                     data-confirm-label="Delete client"
                   >
                     <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -133,7 +133,7 @@
       </div>
       <form class="form-stack" action="/kms/settings" method="post" data-autosave-form data-autosave-status-id="kms-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the KMIP service as enabled desired state. It does not start PyKMIP until an appliance apply task runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if kms_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the KMIP service as enabled desired state. It does not start PyKMIP until global appliance apply runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if kms_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label>
           <span class="field-label"><span>Backend</span><button class="help-icon" type="button" data-help="KMS implementation LabFoundry will configure. The MVP uses PyKMIP as an open-source lab KMIP server.">i</button></span>
           <select name="backend">
@@ -179,28 +179,7 @@
       </form>
     </div>
 
-    <div class="panel detail-panel">
-      <div class="panel-head">
-        <h2>KMS Apply</h2>
-        <span class="status-pill warn">dry-run</span>
-      </div>
-      <p class="muted">Use this when KMS changes are finished. The task validates current desired state, captures the PyKMIP config preview, and applies it through the LabFoundry adapter.</p>
-      <form class="apply-task-form" action="/kms/apply-task" method="post">
-        <input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <button class="button primary" type="submit" {{ "disabled" if kms_validation_errors else "" }}>Create appliance apply task</button>
-      </form>
-      {% if apply_task_error %}
-        <div class="alert error">{{ apply_task_error }}</div>
-      {% endif %}
-      {% if apply_task %}
-        <div class="alert success">
-          Appliance apply task <code>{{ apply_task.id }}</code> captured the current KMS desired state.
-          {% if apply_task_dry_run %}
-            Dry-run mode recorded the commands without changing the host.
-          {% endif %}
-        </div>
-      {% endif %}
-    </div>
+    {% include "partials/appliance_apply_status.html" %}
 
     <div class="panel">
       <div class="panel-head">

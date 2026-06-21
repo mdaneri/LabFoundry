@@ -167,7 +167,7 @@ def validate_vcf_registry_state(
     if not settings.robot_account.strip():
         errors.append("Robot account name is required.")
     if ca_bundle_source == "uploaded" and not ca_bundle_available:
-        errors.append("Upload a CA bundle or enable the local CA before creating a registry apply task.")
+        errors.append("Upload a CA bundle or enable the local CA before submitting VCF Private Registry through global appliance apply.")
 
     seen_names: set[str] = set()
     for bundle in bundles:

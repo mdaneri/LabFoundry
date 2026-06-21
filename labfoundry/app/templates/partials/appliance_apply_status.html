@@ -1,0 +1,22 @@
+{% set apply_status = appliance_apply_status|default({"pill": "muted", "state": "review", "validation_errors": [], "changed": true}) %}
+<div class="panel detail-panel appliance-status-card">
+  <div class="panel-head">
+    <h2>Pending Appliance Changes</h2>
+    <span class="status-pill {{ apply_status.pill }}">{{ apply_status.state }}</span>
+  </div>
+  <p class="muted">
+    Desired state saves here. Submit selected appliance changes from the global apply review.
+  </p>
+  {% if apply_status.validation_errors %}
+    <div class="alert error">
+      {% for error in apply_status.validation_errors %}
+        <div>{{ error }}</div>
+      {% endfor %}
+    </div>
+  {% elif apply_status.changed %}
+    <p class="muted">This area has pending desired-state changes.</p>
+  {% else %}
+    <p class="muted">This area matches the last successful appliance apply baseline.</p>
+  {% endif %}
+  <a class="button primary full-width" href="/appliance-apply">Review appliance changes</a>
+</div>

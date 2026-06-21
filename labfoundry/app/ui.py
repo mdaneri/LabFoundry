@@ -1,8 +1,12 @@
+import difflib
+import hashlib
 import json
+import re
 import shutil
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
 from secrets import token_urlsafe
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
@@ -1205,6 +1209,375 @@ def records_for_domain(db: Session, domain: str) -> list[DnsRecord]:
     return [record for record in records if matching_domain(record.hostname, [domain]) == domain]
 
 
+APPLIANCE_APPLY_BASELINES_KEY = "appliance_apply.baselines.v1"
+APPLIANCE_APPLY_UNIT_IDS = {
+    "network",
+    "wan",
+    "firewall",
+    "dnsmasq",
+    "ca",
+    "kms",
+    "vcf_backups",
+    "vcf_offline_depot",
+    "vcf_private_registry",
+}
+SECRET_LINE_PATTERN = re.compile(
+    r"(password|token|secret|credential|private[_-]?key|robot[_-]?account|ca[_-]?bundle[_-]?pem|activation[_-]?code)",
+    re.IGNORECASE,
+)
+PRIVATE_KEY_BEGIN_PATTERN = re.compile(r"-----BEGIN .*PRIVATE KEY-----")
+PRIVATE_KEY_END_PATTERN = re.compile(r"-----END .*PRIVATE KEY-----")
+
+
+def redact_config_preview(config_preview: str) -> str:
+    lines: list[str] = []
+    in_private_key = False
+    for line in (config_preview or "").splitlines():
+        if PRIVATE_KEY_BEGIN_PATTERN.search(line):
+            lines.append("[redacted private key]")
+            in_private_key = True
+            continue
+        if in_private_key:
+            if PRIVATE_KEY_END_PATTERN.search(line):
+                in_private_key = False
+            continue
+        if SECRET_LINE_PATTERN.search(line):
+            separator = "=" if "=" in line else ":" if ":" in line else None
+            if separator:
+                prefix = line.split(separator, 1)[0].rstrip()
+                lines.append(f"{prefix}{separator} [redacted]")
+            else:
+                lines.append("[redacted sensitive line]")
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def load_appliance_apply_baselines(db: Session) -> dict[str, dict[str, Any]]:
+    raw_value = setting_value(db, APPLIANCE_APPLY_BASELINES_KEY)
+    if not raw_value:
+        return {}
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): value for key, value in payload.items() if isinstance(value, dict)}
+
+
+def save_appliance_apply_baselines(db: Session, baselines: dict[str, dict[str, Any]]) -> None:
+    set_setting_value(db, APPLIANCE_APPLY_BASELINES_KEY, json.dumps(baselines, indent=2, sort_keys=True))
+
+
+def appliance_snapshot_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def config_diff_for_unit(unit_id: str, current_preview: str, baseline: dict[str, Any] | None) -> str:
+    if not baseline or not baseline.get("config_preview"):
+        return ""
+    previous_preview = str(baseline.get("config_preview") or "")
+    if previous_preview == current_preview:
+        return ""
+    return "\n".join(
+        difflib.unified_diff(
+            previous_preview.splitlines(),
+            current_preview.splitlines(),
+            fromfile=f"last-applied/{unit_id}",
+            tofile=f"current/{unit_id}",
+            lineterm="",
+        )
+    )
+
+
+def make_appliance_apply_unit(
+    *,
+    unit_id: str,
+    label: str,
+    page_url: str,
+    context: dict[str, Any],
+    summary: list[str],
+    validation_errors: list[str],
+    validation_warnings: list[str] | None = None,
+    config_path: str,
+    config_preview: str,
+    baseline: dict[str, Any] | None,
+) -> dict[str, Any]:
+    redacted_preview = redact_config_preview(config_preview)
+    snapshot_payload = {
+        "unit_id": unit_id,
+        "summary": summary,
+        "config_path": config_path,
+        "config_preview": redacted_preview,
+    }
+    current_hash = appliance_snapshot_hash(snapshot_payload)
+    baseline_hash = str((baseline or {}).get("snapshot_hash") or "")
+    return {
+        "id": unit_id,
+        "label": label,
+        "page_url": page_url,
+        "context": context,
+        "summary": summary,
+        "validation_errors": validation_errors,
+        "validation_warnings": validation_warnings or [],
+        "valid": not validation_errors,
+        "config_path": config_path,
+        "config_preview": redacted_preview,
+        "snapshot_hash": current_hash,
+        "changed": current_hash != baseline_hash,
+        "has_baseline": bool(baseline_hash),
+        "last_applied_at": (baseline or {}).get("applied_at"),
+        "config_diff": config_diff_for_unit(unit_id, redacted_preview, baseline),
+    }
+
+
+def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
+    baselines = load_appliance_apply_baselines(db)
+    network = network_context(db)
+    wan = routes_wan_context(db)
+    firewall = firewall_context(db)
+    dnsmasq = dnsmasq_context(db)
+    ca = ca_context(db)
+    kms = kms_context(db)
+    vcf_backup = vcf_backup_context(db)
+    vcf_depot = vcf_offline_depot_context(db)
+    vcf_registry = vcf_private_registry_context(db)
+
+    return [
+        make_appliance_apply_unit(
+            unit_id="network",
+            label="Network",
+            page_url="/physical-interfaces",
+            context=network,
+            summary=[f"{len(network['physical_interfaces'])} physical interfaces", f"{len(network['vlan_interfaces'])} VLAN interfaces"],
+            validation_errors=network["network_validation_errors"],
+            config_path=network["network_config_path"],
+            config_preview=network["network_config_preview"],
+            baseline=baselines.get("network"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="wan",
+            label="Routes & WAN Simulation",
+            page_url="/routes-wan",
+            context=wan,
+            summary=[f"{len(wan['routes'])} routes", f"{len(wan['policies'])} WAN policies"],
+            validation_errors=wan["wan_validation_errors"],
+            config_path=wan["wan_config_path"],
+            config_preview=wan["wan_config_preview"],
+            baseline=baselines.get("wan"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="firewall",
+            label="Firewall",
+            page_url="/firewall",
+            context=firewall,
+            summary=["service enabled" if firewall["firewall_settings"].enabled else "service disabled", f"{len(firewall['firewall_rules'])} rules"],
+            validation_errors=firewall["firewall_validation_errors"],
+            config_path=firewall["firewall_settings"].config_path,
+            config_preview=firewall["firewall_config_preview"],
+            baseline=baselines.get("firewall"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="dnsmasq",
+            label="DNS/DHCP (dnsmasq)",
+            page_url="/dns",
+            context=dnsmasq,
+            summary=[
+                "DNS enabled" if dnsmasq["dns_settings"].enabled else "DNS disabled",
+                "DHCP enabled" if dnsmasq["dhcp_settings"].enabled else "DHCP disabled",
+                f"{len(dnsmasq['dns_records'])} DNS records",
+                f"{len(dnsmasq['dhcp_scopes'])} DHCP scopes",
+                f"{len(dnsmasq['dhcp_reservations'])} reservations",
+            ],
+            validation_errors=dnsmasq["validation_errors"],
+            validation_warnings=dnsmasq["dns_warnings"],
+            config_path=dnsmasq["dns_settings"].config_path,
+            config_preview=dnsmasq["config_preview"],
+            baseline=baselines.get("dnsmasq"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="ca",
+            label="Certificate Authority",
+            page_url="/certificate-authority",
+            context=ca,
+            summary=[
+                "service enabled" if ca["ca_settings"].enabled else "service disabled",
+                f"{len(ca['ca_profiles'])} profiles",
+                f"{len(ca['ca_certificates'])} certificate requests",
+            ],
+            validation_errors=ca["ca_validation_errors"],
+            config_path=f"{ca['ca_settings'].storage_path}/labfoundry-ca.conf",
+            config_preview=ca["ca_config_preview"],
+            baseline=baselines.get("ca"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="kms",
+            label="KMS / KMIP",
+            page_url="/kms",
+            context=kms,
+            summary=["service enabled" if kms["kms_settings"].enabled else "service disabled", f"{len(kms['kms_clients'])} clients", f"{len(kms['kms_keys'])} keys"],
+            validation_errors=kms["kms_validation_errors"],
+            config_path=kms["kms_settings"].config_path,
+            config_preview=kms["kms_config_preview"],
+            baseline=baselines.get("kms"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="vcf_backups",
+            label="VCF Backups",
+            page_url="/vcf-backups",
+            context=vcf_backup,
+            summary=["service enabled" if vcf_backup["vcf_backup_settings"].enabled else "service disabled", f"remote {vcf_backup['vcf_backup_remote_directory']}"],
+            validation_errors=vcf_backup["vcf_backup_validation_errors"],
+            config_path=vcf_backup["vcf_backup_settings"].config_path,
+            config_preview=vcf_backup["vcf_backup_config_preview"],
+            baseline=baselines.get("vcf_backups"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="vcf_offline_depot",
+            label="VCF Offline Depot",
+            page_url="/vcf-offline-depot",
+            context=vcf_depot,
+            summary=[
+                "service enabled" if vcf_depot["vcf_depot_settings"].enabled else "service disabled",
+                f"{len([profile for profile in vcf_depot['vcf_depot_profiles'] if profile.enabled])} enabled profiles",
+            ],
+            validation_errors=vcf_depot["vcf_depot_validation_errors"],
+            validation_warnings=vcf_depot["vcf_depot_validation_warnings"],
+            config_path=vcf_depot["vcf_depot_settings"].config_path,
+            config_preview=f"{vcf_depot['vcf_depot_https_config_preview']}\n\n# VCFDT command preview\n{vcf_depot['vcf_depot_command_preview']}",
+            baseline=baselines.get("vcf_offline_depot"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="vcf_private_registry",
+            label="VCF Private Registry",
+            page_url="/vcf-private-registry",
+            context=vcf_registry,
+            summary=[
+                "service enabled" if vcf_registry["vcf_registry_settings"].enabled else "service disabled",
+                f"{len([bundle for bundle in vcf_registry['vcf_registry_bundles'] if bundle.enabled])} enabled bundles",
+            ],
+            validation_errors=vcf_registry["vcf_registry_validation_errors"],
+            validation_warnings=vcf_registry["vcf_registry_validation_warnings"],
+            config_path=vcf_registry["vcf_registry_settings"].config_path,
+            config_preview=f"{vcf_registry['vcf_registry_harbor_config_preview']}\n\n# Bundle relocation preview\n{vcf_registry['vcf_registry_relocation_preview']}",
+            baseline=baselines.get("vcf_private_registry"),
+        ),
+    ]
+
+
+def appliance_apply_status(db: Session, unit_id: str) -> dict[str, Any]:
+    for unit in appliance_apply_units(db):
+        if unit["id"] == unit_id:
+            if unit["validation_errors"]:
+                state = "needs attention"
+                pill = "warn"
+            elif unit["changed"]:
+                state = "pending"
+                pill = "warn"
+            else:
+                state = "current"
+                pill = "good"
+            return {"state": state, "pill": pill, **unit}
+    return {"state": "unknown", "pill": "muted", "changed": False, "validation_errors": []}
+
+
+def appliance_apply_context(db: Session) -> dict[str, Any]:
+    units = appliance_apply_units(db)
+    changed_units = [unit for unit in units if unit["changed"]]
+    return {
+        "apply_units": units,
+        "changed_apply_units": changed_units,
+        "unchanged_apply_units": [unit for unit in units if not unit["changed"]],
+        "changed_apply_unit_count": len(changed_units),
+    }
+
+
+def adapter_result_to_payload(result: Any) -> dict[str, Any]:
+    return {
+        "command": result.command,
+        "command_line": " ".join(result.command),
+        "dry_run": result.dry_run,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "returncode": result.returncode,
+    }
+
+
+def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
+    context = unit["context"]
+    adapter = SystemAdapter()
+    unit_id = unit["id"]
+    if unit_id == "network":
+        results = [adapter.validate_network_config(context["network_config_path"]), adapter.apply_network_config(context["network_config_path"])]
+    elif unit_id == "wan":
+        results = [adapter.validate_wan_config(context["wan_config_path"]), adapter.apply_wan_config(context["wan_config_path"])]
+    elif unit_id == "firewall":
+        settings = context["firewall_settings"]
+        results = [adapter.validate_firewall_config(settings.config_path), adapter.apply_firewall_config(settings.config_path)]
+    elif unit_id == "dnsmasq":
+        config_path = context["dns_settings"].config_path
+        results = [adapter.validate_dnsmasq_config(config_path), adapter.apply_dnsmasq_config(config_path), adapter.reload_dnsmasq()]
+    elif unit_id == "ca":
+        config_path = f"{context['ca_settings'].storage_path}/labfoundry-ca.conf"
+        results = [adapter.validate_ca_config(config_path), adapter.apply_ca_config(config_path)]
+    elif unit_id == "kms":
+        results = [adapter.validate_kms_config(context["kms_settings"].config_path), adapter.apply_kms_config(context["kms_settings"].config_path)]
+    elif unit_id == "vcf_backups":
+        settings = context["vcf_backup_settings"]
+        results = [adapter.validate_vcf_backup_config(settings.config_path), adapter.apply_vcf_backup_config(settings.config_path)]
+    elif unit_id == "vcf_offline_depot":
+        settings = context["vcf_depot_settings"]
+        results = [
+            adapter.validate_vcf_offline_depot_config(settings.config_path),
+            adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path),
+            adapter.sync_vcf_offline_depot(settings.config_path),
+            adapter.apply_vcf_offline_depot_https_config(settings.config_path),
+        ]
+    elif unit_id == "vcf_private_registry":
+        settings = context["vcf_registry_settings"]
+        results = [
+            adapter.validate_vcf_private_registry_config(settings.config_path),
+            adapter.apply_vcf_private_registry_config(settings.config_path),
+            adapter.relocate_vcf_private_registry_bundles(settings.config_path),
+        ]
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown apply unit {unit_id}.")
+
+    succeeded = all(result.returncode == 0 for result in results)
+    return {
+        "unit_id": unit_id,
+        "label": unit["label"],
+        "status": JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
+        "success": succeeded,
+        "dry_run": any(result.dry_run for result in results),
+        "commands": [adapter_result_to_payload(result) for result in results],
+        "summary": unit["summary"],
+        "validation_errors": unit["validation_errors"],
+        "validation_warnings": unit["validation_warnings"],
+        "config_path": unit["config_path"],
+        "config_preview": unit["config_preview"],
+        "config_diff": unit["config_diff"],
+    }
+
+
+def update_appliance_apply_baselines(db: Session, units: list[dict[str, Any]], selected_ids: set[str]) -> None:
+    baselines = load_appliance_apply_baselines(db)
+    applied_at = utcnow().isoformat()
+    for unit in units:
+        if unit["id"] not in selected_ids:
+            continue
+        baselines[unit["id"]] = {
+            "snapshot_hash": unit["snapshot_hash"],
+            "config_path": unit["config_path"],
+            "config_preview": unit["config_preview"],
+            "summary": unit["summary"],
+            "applied_at": applied_at,
+        }
+    save_appliance_apply_baselines(db, baselines)
+
+
 @router.get("/favicon.ico", response_model=None)
 def favicon() -> FileResponse:
     return FileResponse("labfoundry/app/static/brand/labfoundry-mark.svg", media_type="image/svg+xml")
@@ -1272,13 +1645,116 @@ def dashboard(
     )
 
 
+@router.get("/appliance-apply", response_class=HTMLResponse, response_model=None)
+def appliance_apply_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(request, "appliance_apply.html", {"identity": identity, **appliance_apply_context(db)})
+
+
+@router.post("/appliance-apply", response_class=HTMLResponse, response_model=None)
+def submit_appliance_apply(
+    request: Request,
+    selected_units: list[str] = Form(default=[]),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    verify_csrf(request, csrf)
+    units = appliance_apply_units(db)
+    unit_map = {unit["id"]: unit for unit in units}
+    selected_ids = {unit_id for unit_id in selected_units if unit_id in APPLIANCE_APPLY_UNIT_IDS}
+    if not selected_ids:
+        return render(
+            request,
+            "appliance_apply.html",
+            {
+                "identity": identity,
+                **appliance_apply_context(db),
+                "apply_error": "Select at least one appliance change to submit.",
+            },
+            status_code=422,
+        )
+    invalid_units = [unit for unit in units if unit["id"] in selected_ids and unit["validation_errors"]]
+    if invalid_units:
+        return render(
+            request,
+            "appliance_apply.html",
+            {
+                "identity": identity,
+                **appliance_apply_context(db),
+                "selected_apply_unit_ids": selected_ids,
+                "apply_error": "Resolve validation errors before submitting appliance changes.",
+            },
+            status_code=422,
+        )
+
+    selected_ordered_units = [unit for unit in units if unit["id"] in selected_ids]
+    unit_results = [execute_appliance_apply_unit(unit) for unit in selected_ordered_units]
+    succeeded = all(result["success"] for result in unit_results)
+    now = utcnow()
+    skipped_changed_units = [
+        {"unit_id": unit["id"], "label": unit["label"], "summary": unit["summary"]}
+        for unit in units
+        if unit["changed"] and unit["id"] not in selected_ids
+    ]
+    job_result = {
+        "selected_units": [unit["id"] for unit in selected_ordered_units],
+        "skipped_changed_units": skipped_changed_units,
+        "units": unit_results,
+        "dry_run": any(result["dry_run"] for result in unit_results),
+    }
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="appliance-apply",
+        status=JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
+        created_by=identity.username,
+        started_at=now,
+        finished_at=now,
+        progress_percent=100,
+        result=json.dumps(job_result, indent=2),
+        error=None if succeeded else "One or more appliance apply units reported a failure.",
+    )
+    db.add(job)
+    if succeeded:
+        update_appliance_apply_baselines(db, units, selected_ids)
+    db.commit()
+    detail = " ; ".join(
+        " ".join(command["command"])
+        for result in unit_results
+        for command in result["commands"]
+    )
+    record_audit(
+        db,
+        actor=identity.username,
+        action="create_appliance_apply_task",
+        resource_type="job",
+        resource_id=job.id,
+        detail=detail,
+        success=succeeded,
+    )
+    return render(
+        request,
+        "appliance_apply.html",
+        {
+            "identity": identity,
+            **appliance_apply_context(db),
+            "apply_task": job,
+            "apply_task_dry_run": job_result["dry_run"],
+            "applied_unit_results": unit_results,
+        },
+    )
+
+
 @router.get("/routes-wan", response_class=HTMLResponse, response_model=None)
 def routes_wan(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "routes_wan.html", {"identity": identity, **routes_wan_context(db)})
+    return render(request, "routes_wan.html", {"identity": identity, **routes_wan_context(db), "appliance_apply_status": appliance_apply_status(db, "wan")})
 
 
 def parse_int_form_value(value: str, field_label: str, *, default: int = 0, minimum: int | None = None) -> int | Response:
@@ -1599,80 +2075,13 @@ def delete_policy_from_ui(
     return RedirectResponse("/routes-wan", status_code=303)
 
 
-@router.post("/routes-wan/apply-task", response_model=None)
-def create_routes_wan_apply_task(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    verify_csrf(request, csrf)
-    context = routes_wan_context(db)
-    validation_errors = context["wan_validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "routes_wan.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-    adapter = SystemAdapter()
-    validate_result = adapter.validate_wan_config(context["wan_config_path"])
-    apply_result = adapter.apply_wan_config(context["wan_config_path"])
-    now = utcnow()
-    job_result = {
-        "config_path": context["wan_config_path"],
-        "dry_run": apply_result.dry_run,
-        "commands": [validate_result.command, apply_result.command],
-        "config_preview": context["wan_config_preview"],
-        "route_count": len(context["routes"]),
-        "policy_count": len(context["policies"]),
-    }
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="wan-apply",
-        status=JobStatus.SUCCEEDED.value if validate_result.returncode == 0 and apply_result.returncode == 0 else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if apply_result.returncode == 0 else "WAN apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_wan_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(validate_result.command + [";"] + apply_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    return render(
-        request,
-        "routes_wan.html",
-        {
-            "identity": identity,
-            **routes_wan_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
-
-
 @router.get("/firewall", response_class=HTMLResponse, response_model=None)
 def firewall(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "firewall.html", {"identity": identity, **firewall_context(db)})
+    return render(request, "firewall.html", {"identity": identity, **firewall_context(db), "appliance_apply_status": appliance_apply_status(db, "firewall")})
 
 
 @router.post("/firewall/settings", response_model=None)
@@ -1853,60 +2262,13 @@ def delete_firewall_rule(
     return RedirectResponse("/firewall", status_code=303)
 
 
-@router.post("/firewall/apply-task", response_model=None)
-def create_firewall_apply_task(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    verify_csrf(request, csrf)
-    context = firewall_context(db)
-    settings = context["firewall_settings"]
-    errors = context["firewall_validation_errors"]
-    validate_result = SystemAdapter().validate_firewall_config(settings.config_path)
-    apply_result = SystemAdapter().apply_firewall_config(settings.config_path)
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="firewall-apply",
-        status=JobStatus.SUCCEEDED.value if not errors else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=utcnow(),
-        finished_at=utcnow(),
-        progress_percent=100,
-        result="\n".join([context["firewall_config_preview"], " ".join(validate_result.command), " ".join(apply_result.command)]),
-        error="\n".join(errors) if errors else None,
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_firewall_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(validate_result.command + [";"] + apply_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    return render(
-        request,
-        "firewall.html",
-        {
-            "identity": identity,
-            **firewall_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
-
-
 @router.get("/physical-interfaces", response_class=HTMLResponse, response_model=None)
 def physical_interfaces_page(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "physical_interfaces.html", {"identity": identity, **network_context(db)})
+    return render(request, "physical_interfaces.html", {"identity": identity, **network_context(db), "appliance_apply_status": appliance_apply_status(db, "network")})
 
 
 @router.post("/physical-interfaces/{interface_id}/edit", response_model=None)
@@ -1945,80 +2307,13 @@ def edit_physical_interface_from_ui(
     return RedirectResponse("/physical-interfaces", status_code=303)
 
 
-@router.post("/physical-interfaces/apply-task", response_model=None)
-def create_physical_interfaces_apply_task_from_ui(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    verify_csrf(request, csrf)
-    context = network_context(db)
-    validation_errors = context["network_validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "physical_interfaces.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-    adapter = SystemAdapter()
-    validate_result = adapter.validate_network_config(context["network_config_path"])
-    apply_result = adapter.apply_network_config(context["network_config_path"])
-    now = utcnow()
-    job_result = {
-        "config_path": context["network_config_path"],
-        "dry_run": apply_result.dry_run,
-        "commands": [validate_result.command, apply_result.command],
-        "config_preview": context["network_config_preview"],
-        "physical_interface_count": len(context["physical_interfaces"]),
-        "vlan_count": len(context["vlan_interfaces"]),
-    }
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="network-apply",
-        status=JobStatus.SUCCEEDED.value if validate_result.returncode == 0 and apply_result.returncode == 0 else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if apply_result.returncode == 0 else "Network apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_network_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(validate_result.command + [";"] + apply_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    return render(
-        request,
-        "physical_interfaces.html",
-        {
-            "identity": identity,
-            **network_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
-
-
 @router.get("/vlan-interfaces", response_class=HTMLResponse, response_model=None)
 def vlan_interfaces_page(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "vlan_interfaces.html", {"identity": identity, **network_context(db)})
+    return render(request, "vlan_interfaces.html", {"identity": identity, **network_context(db), "appliance_apply_status": appliance_apply_status(db, "network")})
 
 
 @router.post("/vlan-interfaces", response_model=None)
@@ -2124,80 +2419,13 @@ def delete_vlan_interface_from_ui(
     return RedirectResponse("/vlan-interfaces", status_code=303)
 
 
-@router.post("/vlan-interfaces/apply-task", response_model=None)
-def create_vlan_interfaces_apply_task_from_ui(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    verify_csrf(request, csrf)
-    context = network_context(db)
-    validation_errors = context["network_validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "vlan_interfaces.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-    adapter = SystemAdapter()
-    validate_result = adapter.validate_network_config(context["network_config_path"])
-    apply_result = adapter.apply_network_config(context["network_config_path"])
-    now = utcnow()
-    job_result = {
-        "config_path": context["network_config_path"],
-        "dry_run": apply_result.dry_run,
-        "commands": [validate_result.command, apply_result.command],
-        "config_preview": context["network_config_preview"],
-        "physical_interface_count": len(context["physical_interfaces"]),
-        "vlan_count": len(context["vlan_interfaces"]),
-    }
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="network-apply",
-        status=JobStatus.SUCCEEDED.value if validate_result.returncode == 0 and apply_result.returncode == 0 else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if apply_result.returncode == 0 else "Network apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_network_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(validate_result.command + [";"] + apply_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    return render(
-        request,
-        "vlan_interfaces.html",
-        {
-            "identity": identity,
-            **network_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
-
-
 @router.get("/dns", response_class=HTMLResponse, response_model=None)
 def dns_page(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "dns.html", {"identity": identity, **dnsmasq_context(db)})
+    return render(request, "dns.html", {"identity": identity, **dnsmasq_context(db), "appliance_apply_status": appliance_apply_status(db, "dnsmasq")})
 
 
 @router.post("/dns/settings", response_model=None)
@@ -2262,75 +2490,6 @@ def update_dns_from_ui(
             }
         )
     return RedirectResponse("/dns", status_code=303)
-
-
-@router.post("/dns/apply-task", response_model=None)
-def create_dns_apply_task_from_ui(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> RedirectResponse | HTMLResponse:
-    verify_csrf(request, csrf)
-    context = dnsmasq_context(db)
-    validation_errors = context["validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "dns.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-
-    adapter = SystemAdapter()
-    apply_result = adapter.apply_dnsmasq_config(context["dns_settings"].config_path)
-    reload_result = adapter.reload_dnsmasq()
-    now = utcnow()
-    commands = [apply_result.command, reload_result.command]
-    job_result = {
-        "config_path": context["dns_settings"].config_path,
-        "dry_run": apply_result.dry_run,
-        "commands": commands,
-        "config_preview": context["config_preview"],
-        "warnings": context["dns_warnings"],
-    }
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="dns-apply",
-        status=JobStatus.SUCCEEDED.value if apply_result.returncode == 0 and reload_result.returncode == 0 else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if apply_result.returncode == 0 and reload_result.returncode == 0 else "DNS apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_dns_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(apply_result.command + [";"] + reload_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    refreshed_context = dnsmasq_context(db)
-    return render(
-        request,
-        "dns.html",
-        {
-            "identity": identity,
-            **refreshed_context,
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
 
 
 @router.post("/dns/zones", response_model=None)
@@ -2723,7 +2882,7 @@ def dhcp_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "dhcp.html", {"identity": identity, **dnsmasq_context(db)})
+    return render(request, "dhcp.html", {"identity": identity, **dnsmasq_context(db), "appliance_apply_status": appliance_apply_status(db, "dnsmasq")})
 
 
 @router.post("/dhcp/settings", response_model=None)
@@ -2968,76 +3127,6 @@ def delete_dhcp_option_from_ui(
     return RedirectResponse("/dhcp", status_code=303)
 
 
-@router.post("/dhcp/apply-task", response_model=None)
-def create_dhcp_apply_task_from_ui(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> RedirectResponse | HTMLResponse:
-    verify_csrf(request, csrf)
-    context = dnsmasq_context(db)
-    validation_errors = context["validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "dhcp.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-
-    adapter = SystemAdapter()
-    apply_result = adapter.apply_dnsmasq_config(context["dhcp_settings"].config_path)
-    reload_result = adapter.reload_dnsmasq()
-    now = utcnow()
-    job_result = {
-        "config_path": context["dhcp_settings"].config_path,
-        "dry_run": apply_result.dry_run,
-        "commands": [apply_result.command, reload_result.command],
-        "config_preview": context["config_preview"],
-        "scope_count": len(context["dhcp_scopes"]),
-        "option_count": len(context["dhcp_options"]),
-        "reservation_count": len(context["dhcp_reservations"]),
-    }
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="dhcp-apply",
-        status=JobStatus.SUCCEEDED.value if apply_result.returncode == 0 and reload_result.returncode == 0 else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if apply_result.returncode == 0 and reload_result.returncode == 0 else "DHCP apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_dhcp_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(apply_result.command + [";"] + reload_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    refreshed_context = dnsmasq_context(db)
-    return render(
-        request,
-        "dhcp.html",
-        {
-            "identity": identity,
-            **refreshed_context,
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
-
-
 @router.post("/dhcp/reservations", response_model=None)
 def create_dhcp_reservation_from_ui(
     request: Request,
@@ -3144,7 +3233,7 @@ def certificate_authority_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "certificate_authority.html", {"identity": identity, **ca_context(db)})
+    return render(request, "certificate_authority.html", {"identity": identity, **ca_context(db), "appliance_apply_status": appliance_apply_status(db, "ca")})
 
 
 @router.get("/certificate-authority/downloads/root-ca.pem", response_model=None)
@@ -3427,82 +3516,13 @@ def delete_ca_certificate_from_ui(
     return RedirectResponse("/certificate-authority", status_code=303)
 
 
-@router.post("/certificate-authority/apply-task", response_model=None)
-def create_ca_apply_task_from_ui(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    verify_csrf(request, csrf)
-    context = ca_context(db)
-    validation_errors = context["ca_validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "certificate_authority.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-
-    adapter = SystemAdapter()
-    config_path = f"{context['ca_settings'].storage_path}/labfoundry-ca.conf"
-    validate_result = adapter.validate_ca_config(config_path)
-    apply_result = adapter.apply_ca_config(config_path)
-    now = utcnow()
-    job_result = {
-        "config_path": config_path,
-        "dry_run": apply_result.dry_run,
-        "commands": [validate_result.command, apply_result.command],
-        "config_preview": context["ca_config_preview"],
-        "profile_count": len(context["ca_profiles"]),
-        "certificate_count": len(context["ca_certificates"]),
-    }
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="ca-apply",
-        status=JobStatus.SUCCEEDED.value if validate_result.returncode == 0 and apply_result.returncode == 0 else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if apply_result.returncode == 0 else "CA apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_ca_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(validate_result.command + [";"] + apply_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    return render(
-        request,
-        "certificate_authority.html",
-        {
-            "identity": identity,
-            **ca_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
-
-
 @router.get("/kms", response_class=HTMLResponse, response_model=None)
 def kms_page(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "kms.html", {"identity": identity, **kms_context(db)})
+    return render(request, "kms.html", {"identity": identity, **kms_context(db), "appliance_apply_status": appliance_apply_status(db, "kms")})
 
 
 @router.post("/kms/settings", response_model=None)
@@ -3734,75 +3754,6 @@ def delete_kms_key_from_ui(
     return RedirectResponse("/kms", status_code=303)
 
 
-@router.post("/kms/apply-task", response_model=None)
-def create_kms_apply_task_from_ui(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    verify_csrf(request, csrf)
-    context = kms_context(db)
-    validation_errors = context["kms_validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "kms.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-
-    adapter = SystemAdapter()
-    validate_result = adapter.validate_kms_config(context["kms_settings"].config_path)
-    apply_result = adapter.apply_kms_config(context["kms_settings"].config_path)
-    now = utcnow()
-    job_result = {
-        "backend": context["kms_settings"].backend,
-        "config_path": context["kms_settings"].config_path,
-        "dry_run": apply_result.dry_run,
-        "commands": [validate_result.command, apply_result.command],
-        "config_preview": context["kms_config_preview"],
-        "client_count": len(context["kms_clients"]),
-        "key_count": len(context["kms_keys"]),
-    }
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="kms-apply",
-        status=JobStatus.SUCCEEDED.value if validate_result.returncode == 0 and apply_result.returncode == 0 else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if apply_result.returncode == 0 else "KMS apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_kms_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(validate_result.command + [";"] + apply_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    return render(
-        request,
-        "kms.html",
-        {
-            "identity": identity,
-            **kms_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
-
-
 @router.get("/https-repository", response_model=None)
 def legacy_https_repository_redirect(identity: Identity = Depends(require_session_identity)) -> RedirectResponse:
     return RedirectResponse("/vcf-offline-depot", status_code=307)
@@ -3814,7 +3765,7 @@ def vcf_offline_depot_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "vcf_offline_depot.html", {"identity": identity, **vcf_offline_depot_context(db)})
+    return render(request, "vcf_offline_depot.html", {"identity": identity, **vcf_offline_depot_context(db), "appliance_apply_status": appliance_apply_status(db, "vcf_offline_depot")})
 
 
 @router.post("/vcf-offline-depot/settings", response_model=None)
@@ -4028,95 +3979,13 @@ def delete_vcf_depot_profile_from_ui(
     return RedirectResponse("/vcf-offline-depot", status_code=303)
 
 
-@router.post("/vcf-offline-depot/apply-task", response_model=None)
-def create_vcf_offline_depot_apply_task_from_ui(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    verify_csrf(request, csrf)
-    context = vcf_offline_depot_context(db)
-    validation_errors = context["vcf_depot_validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "vcf_offline_depot.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-
-    adapter = SystemAdapter()
-    settings = context["vcf_depot_settings"]
-    profiles = context["vcf_depot_profiles"]
-    validate_result = adapter.validate_vcf_offline_depot_config(settings.config_path)
-    stage_result = adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path)
-    sync_result = adapter.sync_vcf_offline_depot(settings.config_path)
-    apply_result = adapter.apply_vcf_offline_depot_https_config(settings.config_path)
-    now = utcnow()
-    job_result = {
-        "config_path": settings.config_path,
-        "hostname": settings.hostname,
-        "endpoint": context["vcf_depot_endpoint"],
-        "depot_store_path": settings.depot_store_path,
-        "tool_archive_name": Path(settings.tool_archive_path).name if settings.tool_archive_path else "",
-        "tool_version": settings.tool_version,
-        "download_token_present": context["vcf_depot_download_token_present"],
-        "activation_code_present": context["vcf_depot_activation_code_present"],
-        "profile_count": len([profile for profile in profiles if profile.enabled]),
-        "dry_run": apply_result.dry_run,
-        "commands": [validate_result.command, stage_result.command, sync_result.command, apply_result.command],
-        "https_config_preview": context["vcf_depot_https_config_preview"],
-        "vcfdt_command_preview": context["vcf_depot_command_preview"],
-        "validation_warnings": context["vcf_depot_validation_warnings"],
-    }
-    results = [validate_result, stage_result, sync_result, apply_result]
-    succeeded = all(result.returncode == 0 for result in results)
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="vcf-offline-depot-apply",
-        status=JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if succeeded else "VCF Offline Depot apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_vcf_offline_depot_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ; ".join(" ".join(result.command) for result in results),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    return render(
-        request,
-        "vcf_offline_depot.html",
-        {
-            "identity": identity,
-            **vcf_offline_depot_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
-
-
 @router.get("/vcf-private-registry", response_class=HTMLResponse, response_model=None)
 def vcf_private_registry_page(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "vcf_private_registry.html", {"identity": identity, **vcf_private_registry_context(db)})
+    return render(request, "vcf_private_registry.html", {"identity": identity, **vcf_private_registry_context(db), "appliance_apply_status": appliance_apply_status(db, "vcf_private_registry")})
 
 
 @router.post("/vcf-private-registry/settings", response_model=None)
@@ -4281,90 +4150,13 @@ def delete_vcf_registry_bundle_from_ui(
     return RedirectResponse("/vcf-private-registry", status_code=303)
 
 
-@router.post("/vcf-private-registry/apply-task", response_model=None)
-def create_vcf_private_registry_apply_task_from_ui(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    verify_csrf(request, csrf)
-    context = vcf_private_registry_context(db)
-    validation_errors = context["vcf_registry_validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "vcf_private_registry.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-
-    adapter = SystemAdapter()
-    settings = context["vcf_registry_settings"]
-    bundles = context["vcf_registry_bundles"]
-    validate_result = adapter.validate_vcf_private_registry_config(settings.config_path)
-    apply_result = adapter.apply_vcf_private_registry_config(settings.config_path)
-    relocate_result = adapter.relocate_vcf_private_registry_bundles(settings.config_path)
-    now = utcnow()
-    job_result = {
-        "config_path": settings.config_path,
-        "hostname": settings.hostname,
-        "endpoint": context["vcf_registry_endpoint"],
-        "harbor_project": settings.harbor_project,
-        "storage_path": settings.storage_path,
-        "bundle_count": len([bundle for bundle in bundles if bundle.enabled]),
-        "dry_run": apply_result.dry_run,
-        "commands": [validate_result.command, apply_result.command, relocate_result.command],
-        "harbor_config_preview": context["vcf_registry_harbor_config_preview"],
-        "relocation_preview": context["vcf_registry_relocation_preview"],
-        "validation_warnings": context["vcf_registry_validation_warnings"],
-    }
-    succeeded = validate_result.returncode == 0 and apply_result.returncode == 0 and relocate_result.returncode == 0
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="vcf-private-registry-apply",
-        status=JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if succeeded else "VCF private registry apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_vcf_private_registry_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(validate_result.command + [";"] + apply_result.command + [";"] + relocate_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    return render(
-        request,
-        "vcf_private_registry.html",
-        {
-            "identity": identity,
-            **vcf_private_registry_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
-
-
 @router.get("/vcf-backups", response_class=HTMLResponse, response_model=None)
 def vcf_backups_page(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "vcf_backups.html", {"identity": identity, **vcf_backup_context(db)})
+    return render(request, "vcf_backups.html", {"identity": identity, **vcf_backup_context(db), "appliance_apply_status": appliance_apply_status(db, "vcf_backups")})
 
 
 @router.post("/vcf-backups/settings", response_model=None)
@@ -4439,75 +4231,6 @@ def update_vcf_backup_settings_from_ui(
             }
         )
     return RedirectResponse("/vcf-backups", status_code=303)
-
-
-@router.post("/vcf-backups/apply-task", response_model=None)
-def create_vcf_backup_apply_task_from_ui(
-    request: Request,
-    csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    verify_csrf(request, csrf)
-    context = vcf_backup_context(db)
-    validation_errors = context["vcf_backup_validation_errors"]
-    if validation_errors:
-        return render(
-            request,
-            "vcf_backups.html",
-            {
-                "identity": identity,
-                **context,
-                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
-            },
-            status_code=422,
-        )
-
-    adapter = SystemAdapter()
-    settings = context["vcf_backup_settings"]
-    validate_result = adapter.validate_vcf_backup_config(settings.config_path)
-    apply_result = adapter.apply_vcf_backup_config(settings.config_path)
-    now = utcnow()
-    job_result = {
-        "config_path": settings.config_path,
-        "storage_path": settings.storage_path,
-        "sftp_user": settings.sftp_user.username if settings.sftp_user else "",
-        "dry_run": apply_result.dry_run,
-        "commands": [validate_result.command, apply_result.command],
-        "config_preview": context["vcf_backup_config_preview"],
-    }
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="vcf-backups-apply",
-        status=JobStatus.SUCCEEDED.value if validate_result.returncode == 0 and apply_result.returncode == 0 else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if apply_result.returncode == 0 else "VCF backup SFTP apply adapter reported a failure.",
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_vcf_backup_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=" ".join(validate_result.command + [";"] + apply_result.command),
-        success=job.status == JobStatus.SUCCEEDED.value,
-    )
-    return render(
-        request,
-        "vcf_backups.html",
-        {
-            "identity": identity,
-            **vcf_backup_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": apply_result.dry_run,
-        },
-    )
 
 
 @router.get("/authentication", response_class=HTMLResponse, response_model=None)

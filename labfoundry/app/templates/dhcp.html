@@ -58,7 +58,7 @@
                 method="post"
                 data-confirm-modal
                 data-confirm-title="Delete {{ scope.name }} IP zone?"
-                data-confirm-message="This removes the DHCP IP zone {{ scope.name }} from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                data-confirm-message="This removes the DHCP IP zone {{ scope.name }} from LabFoundry desired state. It will not touch the appliance until global appliance apply runs."
                 data-confirm-label="Delete IP zone"
               >
                 <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -104,7 +104,7 @@
                 method="post"
                 data-confirm-modal
                 data-confirm-title="Delete DHCP option {{ option.option_code }}?"
-                data-confirm-message="This removes the DHCP option from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                data-confirm-message="This removes the DHCP option from LabFoundry desired state. It will not touch the appliance until global appliance apply runs."
                 data-confirm-label="Delete option"
               >
                 <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -149,7 +149,7 @@
                 method="post"
                 data-confirm-modal
                 data-confirm-title="Delete {{ reservation.hostname }} reservation?"
-                data-confirm-message="This removes the DHCP reservation for {{ reservation.mac_address }} from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                data-confirm-message="This removes the DHCP reservation for {{ reservation.mac_address }} from LabFoundry desired state. It will not touch the appliance until global appliance apply runs."
                 data-confirm-label="Delete reservation"
               >
                 <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -215,28 +215,7 @@
       </form>
     </div>
 
-    <div class="panel detail-panel">
-      <div class="panel-head">
-        <h2>DHCP Apply</h2>
-        <span class="status-pill warn">dry-run</span>
-      </div>
-      <p class="muted">Use this when DHCP changes are finished. The task validates the current desired state, captures the rendered dnsmasq config, and applies it through the LabFoundry adapter.</p>
-      <form class="apply-task-form" action="/dhcp/apply-task" method="post">
-        <input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <button class="button primary" type="submit" {{ "disabled" if validation_errors else "" }}>Create appliance apply task</button>
-      </form>
-      {% if apply_task_error %}
-        <div class="alert error">{{ apply_task_error }}</div>
-      {% endif %}
-      {% if apply_task %}
-        <div class="alert success">
-          Appliance apply task <code>{{ apply_task.id }}</code> captured the current DHCP desired state.
-          {% if apply_task_dry_run %}
-            Dry-run mode recorded the commands without changing the host.
-          {% endif %}
-        </div>
-      {% endif %}
-    </div>
+    {% include "partials/appliance_apply_status.html" %}
 
     <div class="panel">
       <div class="panel-head">

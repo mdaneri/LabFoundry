@@ -72,7 +72,23 @@ password: labfoundry-vcf-backup
 
 Reset this account from `Users` before exposing the SFTP endpoint beyond a development lab.
 
-VCF Offline Depot uses the proprietary VCF Download Tool to stage disconnected VCF 9 depot content. Upload the VCF Download Tool file (`vcf-download-tool-*.tar.gz`) and Broadcom token or activation-code files through the UI; previews and apply-task records show only sanitized filenames, presence flags, and command intent.
+VCF Offline Depot uses the proprietary VCF Download Tool to stage disconnected VCF 9 depot content. Upload the VCF Download Tool file (`vcf-download-tool-*.tar.gz`) and Broadcom token or activation-code files through the UI; global appliance apply records show only sanitized filenames, presence flags, and command intent.
+
+## Appliance Apply Workflow
+
+LabFoundry treats service pages as desired-state editors. Routine setting and grid edits save into the control-plane database, but they do not mutate host services on each field change.
+
+Use `Appliance Apply` to review and submit appliance changes. The page:
+
+- lists changed apply units such as Network, DNS/DHCP, Firewall, KMS, VCF Backups, VCF Offline Depot, and VCF Private Registry;
+- checks changed valid units by default;
+- shows compact summaries and rendered config previews or diffs when a last-applied baseline exists;
+- lets operators unselect changed units that should stay pending;
+- creates one `appliance-apply` job that records selected units, skipped changed units, validation results, rendered previews/diffs, adapter command intent, dry-run state, and the audit event.
+
+DNS and DHCP share one `DNS/DHCP (dnsmasq)` apply unit because they render and reload the same dnsmasq config. In development, system adapters remain dry-run by default and record command intent instead of mutating host services directly.
+
+More detail lives in [`docs/appliance-apply.md`](docs/appliance-apply.md).
 
 ## Brand Assets
 

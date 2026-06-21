@@ -306,7 +306,7 @@ def validate_vcf_depot_state(
     if settings.telemetry_choice not in VCF_DEPOT_TELEMETRY_CHOICES:
         errors.append("Telemetry choice must be ENABLE, DISABLE, or NOT_PROVIDED.")
     if not settings.tool_archive_path.strip():
-        errors.append("Upload the VCF Download Tool before creating a depot apply task.")
+        errors.append("Upload the VCF Download Tool before submitting VCF Offline Depot through global appliance apply.")
     elif not Path(settings.tool_archive_path).exists():
         errors.append("The configured VCF Download Tool file is not present on disk.")
     if settings.tool_archive_path and not settings.tool_version:

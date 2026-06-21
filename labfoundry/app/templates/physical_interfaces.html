@@ -46,28 +46,7 @@
   </div>
 
   <aside class="side-stack">
-    <div class="panel detail-panel">
-      <div class="panel-head">
-        <h2>Network Apply</h2>
-        <span class="status-pill warn">dry-run</span>
-      </div>
-      <p class="muted">Changes save to LabFoundry desired state. Create an appliance apply task only when interface and VLAN changes are finished.</p>
-      <form class="apply-task-form" action="/physical-interfaces/apply-task" method="post">
-        <input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <button class="button primary" type="submit" {{ "disabled" if network_validation_errors else "" }}>Create appliance apply task</button>
-      </form>
-      {% if apply_task %}
-        <div class="alert success">
-          Appliance apply task <code>{{ apply_task.id }}</code> captured the current network desired state.
-          {% if apply_task_dry_run %}
-            Dry-run mode recorded the commands without changing the host.
-          {% endif %}
-        </div>
-      {% endif %}
-      {% if apply_task_error %}
-        <div class="alert error">{{ apply_task_error }}</div>
-      {% endif %}
-    </div>
+    {% include "partials/appliance_apply_status.html" %}
 
     <div class="panel">
       <div class="panel-head">

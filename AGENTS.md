@@ -12,10 +12,11 @@
 - Use the DNS page as the default pattern for configurable appliance services where applicable.
 - Treat forms as desired-state editors. Settings should autosave on change with `data-autosave-form`, a small `.autosave-status` message, and the existing CSRF/session protections. Avoid visible "Save" buttons for routine desired-state settings when autosave is safe.
 - Keep enforcement separate from editing. Applying changes to the appliance should be a deliberate task action after the user is done, not part of every field change.
-- In the right-side rail, keep the apply task and validation concerns in separate cards. Use a small service-specific apply card first, such as `DNS Apply`, `DHCP Apply`, `VLAN Apply`, `SFTP Apply`, or `Network Apply`, then a separate `Validation` card with errors/warnings and config preview.
-- The apply card owns the `Create appliance apply task` button, apply-task errors, and apply-task success messages. The validation card owns only the valid/needs-attention state, validation messages, warnings, and rendered config preview.
-- Apply actions should create or update a job/task that captures the current desired state, rendered config preview, validation result, adapter commands, dry-run status, and audit event.
-- Label apply actions around the user's intent, for example `Create appliance apply task`, and explain that the task validates and applies the current desired state through LabFoundry adapters.
+- Do not add service-specific apply cards or service-specific apply submit routes. Applying is a global appliance workflow owned by `/appliance-apply`.
+- In service right-side rails, show a compact `Pending Appliance Changes` card first, then the service-specific `Validation` card. The pending card links to `/appliance-apply`; the validation card owns only valid/needs-attention state, validation messages, warnings, and rendered config preview.
+- The global appliance apply page should list changed apply units, check changed valid units by default, show compact summaries, show rendered config diffs/previews, allow users to unselect units, and submit one `appliance-apply` job.
+- Apply actions should create one global job/task that captures selected units, skipped changed units, current desired state summaries, rendered config previews/diffs, validation results, adapter commands, dry-run status, and audit event.
+- Label the global submit action around the user's intent, such as `Submit appliance changes`, and explain that the task validates and applies selected desired state through LabFoundry adapters.
 - Keep dry-run boundaries visible. In development, applying should record command intent through adapters instead of mutating host services directly.
 - Use validation panels to show whether desired state is ready to apply, including warnings and rendered config previews.
 - When autosave changes affect validation or preview output, update the validation card in-place without shifting the page with large `Saved` alerts. Use compact autosave status text near the edited form.
@@ -24,8 +25,8 @@
 - Use tag editors for one-or-more selections such as interfaces, addresses, networks, domains, or labels. Tag editors should allow typed custom values and a `+` menu for known existing options.
 - Use domain- or scope-specific tabs for resources that naturally belong under a parent, such as DNS records under zones. Each tab should keep edits scoped to that parent.
 - Preserve active tab context after autosave, record creation, deletion, or import whenever possible.
-- Prefer explicit status language over generic button text. Avoid labels such as `Save DNS` or `Apply` when the action really means "save desired state", "create apply task", "import into this domain", or "apply zone file".
-- Destructive UI actions such as deleting a domain, scope, record set, backup, token, or appliance-owned config should require the shared modal confirmation pattern (`data-confirm-modal`) instead of a browser confirm or immediate submit. The modal copy should name the object, explain what will be removed, and mention whether the appliance is affected immediately or only after an apply task.
+- Prefer explicit status language over generic button text. Avoid labels such as `Save DNS` or `Apply` when the action really means "save desired state", "review appliance changes", "submit appliance changes", "import into this domain", or "apply zone file".
+- Destructive UI actions such as deleting a domain, scope, record set, backup, token, or appliance-owned config should require the shared modal confirmation pattern (`data-confirm-modal`) instead of a browser confirm or immediate submit. The modal copy should name the object, explain what will be removed, and mention whether the appliance is affected immediately or only after global appliance apply.
 
 ## Network And Service Binding
 
@@ -72,13 +73,14 @@
 - The registry listen targets must follow the same service binding rule as VCF Backups: access physical interfaces with IPs and VLAN interfaces with IPs; exclude trunk physical interfaces.
 - The default registry hostname is `registry.labfoundry.internal`, and the default Harbor project is `vcf-supervisor-services`.
 - The registry storage path is a fixed appliance volume mount, currently `/mnt/labfoundry-vcf-registry`; do not make this a routine UI-configurable field.
-- The registry CA bundle should come from the local LabFoundry CA when CA is enabled. When the local CA is disabled, require an uploaded PEM CA bundle and stage it through the appliance apply task; do not expose a routine free-form CA bundle path editor.
-- Bundle relocation should be modeled as desired state and previewed as `imgpkg copy` command intent. Development apply tasks must record Harbor and relocation command intent through adapters instead of pushing images or mutating host services directly.
+- The registry CA bundle should come from the local LabFoundry CA when CA is enabled. When the local CA is disabled, require an uploaded PEM CA bundle and stage it through global appliance apply; do not expose a routine free-form CA bundle path editor.
+- Bundle relocation should be modeled as desired state and previewed as `imgpkg copy` command intent. Development appliance apply jobs must record Harbor and relocation command intent through adapters instead of pushing images or mutating host services directly.
 - Do not render Harbor admin passwords, robot account tokens, or registry credentials in config previews, job results, logs, widgets, or final responses.
 
 ## Database And Verification
 
 - This project is still in MVP scaffold mode. When model/schema changes make the development SQLite database stale, prefer deleting/reseeding `data/labfoundry.db` over adding migrations, unless the user explicitly asks for migrations.
 - Do not delete the DB for data-only seed/default updates if a focused in-place update is safer and the schema did not change.
+- Any major product, architecture, workflow, safety-boundary, or operator-experience change must include a same-change documentation sweep for `README.md` and `AGENTS.md`.
 - Before finalizing UI/backend changes, run focused tests for the touched area when available, then `pytest -q` for broader confidence. Also run `python -m compileall labfoundry` after broad Python/template-adjacent changes.
 - Restart the local uvicorn server after template/static/route changes so the in-app browser sees the new code. Bump the static asset query string in `base.html` after CSS or JS changes.

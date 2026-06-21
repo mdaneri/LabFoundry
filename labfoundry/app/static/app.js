@@ -542,7 +542,7 @@ async function deleteDhcpOptionFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete DHCP option ${data.option_code}?`,
-    message: "This removes the DHCP option from LabFoundry desired state. It will not touch the appliance until an apply task runs.",
+    message: "This removes the DHCP option from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.",
     label: "Delete option",
   });
   if (!confirmed) {
@@ -605,7 +605,7 @@ async function deleteDhcpScopeFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete ${data.name} IP zone?`,
-    message: `This removes DHCP IP zone ${data.name} from LabFoundry desired state. It will not touch the appliance until an apply task runs.`,
+    message: `This removes DHCP IP zone ${data.name} from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.`,
     label: "Delete IP zone",
   });
   if (!confirmed) {
@@ -705,7 +705,7 @@ async function deleteDhcpReservationFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete ${data.hostname || data.mac_address} reservation?`,
-    message: `This removes the DHCP reservation for ${data.mac_address} from LabFoundry desired state. It will not touch the appliance until an apply task runs.`,
+    message: `This removes the DHCP reservation for ${data.mac_address} from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.`,
     label: "Delete reservation",
   });
   if (!confirmed) {
@@ -850,7 +850,7 @@ async function deleteCaProfileFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete ${data.name} profile?`,
-    message: "This removes the CA profile from LabFoundry desired state and unassigns requests using it. It will not touch the appliance until an apply task runs.",
+    message: "This removes the CA profile from LabFoundry desired state and unassigns requests using it. It will not touch the appliance until global appliance apply runs.",
     label: "Delete profile",
   });
   if (!confirmed) {
@@ -902,7 +902,7 @@ async function deleteCaCertificateFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete ${data.common_name} certificate request?`,
-    message: "This removes the certificate request from LabFoundry desired state. It will not touch the appliance until an apply task runs.",
+    message: "This removes the certificate request from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.",
     label: "Delete request",
   });
   if (!confirmed) {
@@ -1296,7 +1296,7 @@ async function deleteFirewallRuleFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete ${data.name}?`,
-    message: "This removes the firewall rule from LabFoundry desired state. It will not touch the appliance until an apply task runs.",
+    message: "This removes the firewall rule from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.",
     label: "Delete rule",
   });
   if (!confirmed) {
@@ -1867,7 +1867,7 @@ async function deleteKmsClientFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete ${data.name} client?`,
-    message: "This removes the KMS client from LabFoundry desired state and unassigns any keys owned by it. It will not touch the appliance until an apply task runs.",
+    message: "This removes the KMS client from LabFoundry desired state and unassigns any keys owned by it. It will not touch the appliance until global appliance apply runs.",
     label: "Delete client",
   });
   if (!confirmed) {
@@ -1888,7 +1888,7 @@ async function deleteKmsKeyFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete ${data.name} key?`,
-    message: "This removes the KMS key from LabFoundry desired state. It will not touch the appliance until an apply task runs.",
+    message: "This removes the KMS key from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.",
     label: "Delete key",
   });
   if (!confirmed) {
@@ -2278,7 +2278,7 @@ async function deleteWanRouteFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete route ${data.destination_cidr}?`,
-    message: "This removes the route from LabFoundry desired state. It will not touch the appliance until an apply task runs.",
+    message: "This removes the route from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.",
     label: "Delete route",
   });
   if (!confirmed) {
@@ -2299,7 +2299,7 @@ async function deleteWanPolicyFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete ${data.name}?`,
-    message: "This removes the WAN policy from LabFoundry desired state and clears it from assigned routes. It will not touch the appliance until an apply task runs.",
+    message: "This removes the WAN policy from LabFoundry desired state and clears it from assigned routes. It will not touch the appliance until global appliance apply runs.",
     label: "Delete policy",
   });
   if (!confirmed) {
@@ -2646,7 +2646,7 @@ async function deleteVlanInterfaceFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Delete ${data.name || `${data.parent_interface}.${data.vlan_id}`}?`,
-    message: "This removes the VLAN interface from LabFoundry desired state. It will not touch the appliance until an apply task runs.",
+    message: "This removes the VLAN interface from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.",
     label: "Delete VLAN",
   });
   if (!confirmed) {

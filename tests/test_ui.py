@@ -40,7 +40,7 @@ def test_routes_wan_policy_form_renders(client):
     assert "Routes &amp; WAN Simulation" in response.text
     assert "Managed Routes" in response.text
     assert "WAN Policies" in response.text
-    assert "WAN Apply" in response.text
+    assert "Pending Appliance Changes" in response.text
     assert "Validation" in response.text
     assert "routes-wan-routes-table" in response.text
     assert "routes-wan-policies-table" in response.text
@@ -49,7 +49,7 @@ def test_routes_wan_policy_form_renders(client):
     assert "Europe WAN" in response.text
     assert "eth1.20" in response.text
     assert "tc qdisc replace" in response.text
-    assert "Create appliance apply task" in response.text
+    assert "Review appliance changes" in response.text
 
 
 def test_routes_wan_autosave_endpoints_and_apply_task(client):
@@ -103,11 +103,11 @@ def test_routes_wan_autosave_endpoints_and_apply_task(client):
     assert "10.20.0.0/24" in refreshed.text
     assert "tc qdisc replace dev eth1.20" in refreshed.text
 
-    apply_response = client.post("/routes-wan/apply-task", data={"csrf": csrf})
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "wan"})
     assert apply_response.status_code == 200
-    assert "Appliance apply task" in apply_response.text
+    assert "Appliance apply task succeeded" in apply_response.text
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "wan-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "wan" in (job.result or "")
@@ -245,12 +245,12 @@ def test_dns_and_dhcp_pages_render(client):
     assert 'action="/dns/zones/delete"' in dns.text
     assert "data-confirm-modal" in dns.text
     assert "Delete labfoundry.internal?" in dns.text
-    assert "It will not touch the appliance until an apply task runs." in dns.text
+    assert "It will not touch the appliance until global appliance apply runs." in dns.text
     assert 'action="/dns/zones/import"' in dns.text
-    assert 'action="/dns/apply-task"' in dns.text
+    assert 'href="/appliance-apply"' in dns.text
     assert "labfoundry.internal or sitea.internal" in dns.text
     assert "Changes save automatically." in dns.text
-    assert "Create appliance apply task" in dns.text
+    assert "Review appliance changes" in dns.text
     assert "Save desired state" not in dns.text
     assert "Save DNS" not in dns.text
 
@@ -306,7 +306,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert ".tag-add-button" in app_css.text
     assert ".tag-suggestions" in app_css.text
     assert ".autosave-status" in app_css.text
-    assert ".apply-task-form" in app_css.text
+    assert ".appliance-apply-form" in app_css.text
     assert ".confirm-modal" in app_css.text
     assert ".confirm-modal::backdrop" in app_css.text
     assert ".section-head" in app_css.text
@@ -332,8 +332,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert "DNS name / FQDN" in dhcp.text
     assert 'data-autosave-status-id="dhcp-settings-autosave-status"' in dhcp.text
     assert "Changes save automatically." in dhcp.text
-    assert 'action="/dhcp/apply-task"' in dhcp.text
-    assert "Create appliance apply task" in dhcp.text
+    assert 'href="/appliance-apply"' in dhcp.text
+    assert "Review appliance changes" in dhcp.text
     assert "Save DHCP" not in dhcp.text
     assert "192.168.50.100" in dhcp.text
     assert "192.168.50.1" in dhcp.text
@@ -356,8 +356,8 @@ def test_certificate_authority_page_renders(client):
     assert "labfoundry.labfoundry.internal" in ca.text
     assert 'data-autosave-status-id="ca-settings-autosave-status"' in ca.text
     assert "Changes save automatically." in ca.text
-    assert 'action="/certificate-authority/apply-task"' in ca.text
-    assert "Create appliance apply task" in ca.text
+    assert 'href="/appliance-apply"' in ca.text
+    assert "Review appliance changes" in ca.text
     assert "labfoundry-ca.conf" in ca.text
     assert "data-confirm-modal" in ca.text
     assert "Downloads" in ca.text
@@ -395,8 +395,8 @@ def test_kms_page_renders(client):
     assert "kms.labfoundry.internal" in kms.text
     assert 'data-autosave-status-id="kms-settings-autosave-status"' in kms.text
     assert "Changes save automatically." in kms.text
-    assert 'action="/kms/apply-task"' in kms.text
-    assert "Create appliance apply task" in kms.text
+    assert 'href="/appliance-apply"' in kms.text
+    assert "Review appliance changes" in kms.text
     assert "pykmip.conf" in kms.text
     assert "/var/lib/labfoundry/kms/pykmip.db" in kms.text
     assert "<span>Database path</span>" not in kms.text
@@ -458,14 +458,14 @@ def test_kms_apply_task_captures_current_desired_state(client):
     login(client)
     page = client.get("/kms")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    response = client.post("/kms/apply-task", data={"csrf": csrf})
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "kms"})
 
     assert response.status_code == 200
     assert "Appliance apply task" in response.text
     assert "Dry-run mode recorded the commands" in response.text
 
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "kms-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "pykmip" in (job.result or "")
@@ -484,8 +484,8 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert "/backups" in page.text
     assert 'action="/vcf-backups/settings"' in page.text
     assert 'data-autosave-status-id="vcf-backup-settings-status"' in page.text
-    assert 'action="/vcf-backups/apply-task"' in page.text
-    assert "Create appliance apply task" in page.text
+    assert 'href="/appliance-apply"' in page.text
+    assert "Review appliance changes" in page.text
     assert "internal-sftp" in page.text
     assert "Derived address" in page.text
     assert "<span>Config path</span>" not in page.text
@@ -520,8 +520,8 @@ def test_vcf_private_registry_page_models_harbor_and_bundle_relocation(client):
     assert 'action="/vcf-private-registry/settings"' in page.text
     assert 'data-autosave-status-id="vcf-registry-settings-status"' in page.text
     assert "Supervisor Service bundles" in page.text
-    assert "imgpkg" in page.text
-    assert "Create appliance apply task" in page.text
+    assert "Review appliance changes" in page.text
+    assert "Review appliance changes" in page.text
     assert "harbor_admin_password: &lt;provisioned-by-labfoundry-helper&gt;" in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
@@ -648,16 +648,16 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
     assert status.json()["endpoint"] == "registry.labfoundry.internal"
     assert status.json()["bundle_count"] == 1
 
-    apply_response = client.post("/vcf-private-registry/apply-task", data={"csrf": csrf})
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "vcf_private_registry"})
     assert apply_response.status_code == 200
     assert "Appliance apply task" in apply_response.text
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "vcf-private-registry-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "vcf-private-registry" in (job.result or "")
         assert "imgpkg copy" in (job.result or "")
-        assert "provisioned-by-labfoundry-helper" in (job.result or "")
+        assert "provisioned-by-labfoundry-helper" not in (job.result or "")
         assert "password123" not in (job.result or "").lower()
 
 
@@ -690,7 +690,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "HTTPS Repository" not in page.text
     assert "Tool & Credentials" in page.text
     assert "Download Profiles" in page.text
-    assert "VCF Depot Apply" in page.text
+    assert "Review appliance changes" in page.text
     assert "VCF Download Tool" in page.text
     assert "Choose VCFDT tool" in page.text
     assert "Choose VCFDT archive" not in page.text
@@ -712,7 +712,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "VSAN_FILE_SERVICES" in page.text
     assert "embeddedEsx-6.7-INT" in page.text
     assert "esxio-9.1-INTL" in page.text
-    assert 'action="/vcf-offline-depot/apply-task"' in page.text
+    assert 'href="/appliance-apply"' in page.text
     assert "vcf-download-tool binaries list" in page.text
 
     app_js = client.get("/static/app.js")
@@ -841,11 +841,11 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert alias.status_code == 200
     assert alias.json()["endpoint"] == status.json()["endpoint"]
 
-    apply_response = client.post("/vcf-offline-depot/apply-task", data={"csrf": csrf})
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "vcf_offline_depot"})
     assert apply_response.status_code == 200
     assert "Appliance apply task" in apply_response.text
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "vcf-offline-depot-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "vcf-offline-depot" in (job.result or "")
@@ -1010,12 +1010,12 @@ def test_vcf_backups_apply_task_captures_sftp_config(client):
     login(client)
     page = client.get("/vcf-backups")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    response = client.post("/vcf-backups/apply-task", data={"csrf": csrf})
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "vcf_backups"})
 
     assert response.status_code == 200
     assert "Appliance apply task" in response.text
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "vcf-backups-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "vcf-backups" in (job.result or "")
@@ -1034,7 +1034,7 @@ def test_physical_and_vlan_pages_render(client):
     assert "192.168.49.1/24" in physical.text
     assert "192.168.50.1/24" in physical.text
     assert "Link Type" in physical.text
-    assert "Create appliance apply task" in physical.text
+    assert "Review appliance changes" in physical.text
     assert "labfoundry-network.conf" in physical.text
 
     vlans = client.get("/vlan-interfaces")
@@ -1048,7 +1048,7 @@ def test_physical_and_vlan_pages_render(client):
     app_js = client.get("/static/app.js").text
     assert "deleteVlanInterfaceFromMenu" in app_js
     assert "refreshNetworkSideStack" in app_js
-    assert "Create appliance apply task" in vlans.text
+    assert "Review appliance changes" in vlans.text
 
 
 def test_physical_interface_edit_updates_desired_state(client):
@@ -1157,12 +1157,12 @@ def test_vlan_interface_create_edit_delete_and_apply(client):
     assert "eth1.50" in page.text
     assert "192.168.50.1/24" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    apply_response = client.post("/vlan-interfaces/apply-task", data={"csrf": csrf})
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "network"})
     assert apply_response.status_code == 200
     assert "Appliance apply task" in apply_response.text
 
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "network-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert "labfoundry-helper" in (job.result or "")
         assert "eth1.50" in (job.result or "")
 
@@ -1245,7 +1245,7 @@ def test_firewall_page_create_rule_and_apply_task(client):
     assert page.status_code == 200
     assert "Firewall Rules" in page.text
     assert "firewall-rules-table" in page.text
-    assert "Create appliance apply task" in page.text
+    assert "Review appliance changes" in page.text
     assert "nftables" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
@@ -1270,13 +1270,69 @@ def test_firewall_page_create_rule_and_apply_task(client):
     assert created.status_code == 303
     assert "allow-vcenter" in client.get("/firewall").text
 
-    apply_response = client.post("/firewall/apply-task", data={"csrf": csrf})
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"})
     assert apply_response.status_code == 200
     assert "Appliance apply task" in apply_response.text
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "firewall-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert "labfoundry-helper firewall apply" in (job.result or "")
         assert "allow-vcenter" in (job.result or "")
+
+
+def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, Setting
+
+    login(client)
+    page = client.get("/appliance-apply")
+    assert page.status_code == 200
+    assert "Appliance Change Set" in page.text
+    assert "No last-applied baseline exists yet" in page.text
+    assert 'value="firewall"' in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    baseline_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"})
+    assert baseline_response.status_code == 200
+    assert "Appliance apply task succeeded" in baseline_response.text
+    with SessionLocal() as db:
+        baseline = db.execute(select(Setting).where(Setting.key == "appliance_apply.baselines.v1")).scalar_one()
+        assert '"firewall"' in baseline.value
+
+    created = client.post(
+        "/firewall/rules",
+        data={
+            "name": "allow-global-apply-test",
+            "direction": "input",
+            "action": "accept",
+            "protocol": "tcp",
+            "source": "192.168.50.0/24",
+            "destination": "any",
+            "destination_port": "8443",
+            "interface_name": "eth1",
+            "priority": "35",
+            "enabled": "on",
+            "description": "global apply diff",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+
+    changed_page = client.get("/appliance-apply")
+    assert "--- last-applied/firewall" in changed_page.text
+    assert "+++ current/firewall" in changed_page.text
+    assert "allow-global-apply-test" in changed_page.text
+
+    skipped_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "network"})
+    assert skipped_response.status_code == 200
+    assert "allow-global-apply-test" in skipped_response.text
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply").order_by(Job.created_at.desc())).scalars().first()
+        assert job is not None
+        assert "skipped_changed_units" in (job.result or "")
+        assert '"unit_id": "firewall"' in (job.result or "")
 
 
 def test_services_ui_records_dry_run_action(client):
@@ -1354,14 +1410,14 @@ def test_ca_apply_task_captures_current_desired_state(client):
     login(client)
     page = client.get("/certificate-authority")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    response = client.post("/certificate-authority/apply-task", data={"csrf": csrf})
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "ca"})
 
     assert response.status_code == 200
     assert "Appliance apply task" in response.text
     assert "Dry-run mode recorded the commands" in response.text
 
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "ca-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "LabFoundry Internal Root CA" in (job.result or "")
@@ -1438,14 +1494,14 @@ def test_dns_apply_task_captures_current_desired_state(client):
     login(client)
     page = client.get("/dns")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    response = client.post("/dns/apply-task", data={"csrf": csrf})
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "dnsmasq"})
 
     assert response.status_code == 200
     assert "Appliance apply task" in response.text
     assert "Dry-run mode recorded the commands" in response.text
 
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "dns-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "dnsmasq" in (job.result or "")
@@ -1525,18 +1581,18 @@ def test_dhcp_apply_task_captures_current_desired_state(client):
     login(client)
     page = client.get("/dhcp")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    response = client.post("/dhcp/apply-task", data={"csrf": csrf})
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "dnsmasq"})
 
     assert response.status_code == 200
     assert "Appliance apply task" in response.text
     assert "Dry-run mode recorded the commands" in response.text
 
     with SessionLocal() as db:
-        job = db.execute(select(Job).where(Job.type == "dhcp-apply")).scalar_one()
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "dnsmasq" in (job.result or "")
-        assert '"reservation_count": 1' in (job.result or "")
+        assert "1 reservations" in (job.result or "")
 
 
 def test_dhcp_reservation_edit_form_updates_row(client):

@@ -9,7 +9,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=vcf-offline-depot-20260621-8">
+    <link rel="stylesheet" href="/static/app.css?v=global-apply-20260621-2">
     {% block extra_head %}{% endblock %}
   </head>
   <body class="bg-slate-100 text-slate-900">
@@ -25,6 +25,7 @@
         <nav class="nav-stack" aria-label="Primary">
           {% set nav = [
             ("Dashboard", "/dashboard"),
+            ("Appliance Apply", "/appliance-apply"),
             ("Physical Interfaces", "/physical-interfaces"),
             ("VLAN Interfaces", "/vlan-interfaces"),
             ("Routes & WAN Simulation", "/routes-wan"),
@@ -85,7 +86,7 @@
       </form>
     </dialog>
     <script src="/static/vendor/tabulator/tabulator.min.js"></script>
-    <script src="/static/app.js?v=vcf-offline-depot-20260621-8"></script>
+    <script src="/static/app.js?v=global-apply-20260621-2"></script>
     {% block extra_scripts %}{% endblock %}
   </body>
 </html>

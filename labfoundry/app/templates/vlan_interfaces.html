@@ -43,7 +43,7 @@
                 method="post"
                 data-confirm-modal
                 data-confirm-title="Delete {{ vlan.name }}?"
-                data-confirm-message="This removes VLAN {{ vlan.name }} from LabFoundry desired state. It will not touch the appliance until an apply task runs."
+                data-confirm-message="This removes VLAN {{ vlan.name }} from LabFoundry desired state. It will not touch the appliance until global appliance apply runs."
                 data-confirm-label="Delete VLAN"
               >
                 <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -57,28 +57,7 @@
   </div>
 
   <aside class="side-stack">
-    <div class="panel detail-panel">
-      <div class="panel-head">
-        <h2>VLAN Apply</h2>
-        <span class="status-pill warn">dry-run</span>
-      </div>
-      <p class="muted">Changes save automatically into desired state. Applying uses the allowlisted network helper boundary.</p>
-      <form class="apply-task-form" action="/vlan-interfaces/apply-task" method="post">
-        <input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <button class="button primary" type="submit" {{ "disabled" if network_validation_errors else "" }}>Create appliance apply task</button>
-      </form>
-      {% if apply_task %}
-        <div class="alert success">
-          Appliance apply task <code>{{ apply_task.id }}</code> captured the current VLAN desired state.
-          {% if apply_task_dry_run %}
-            Dry-run mode recorded the commands without changing the host.
-          {% endif %}
-        </div>
-      {% endif %}
-      {% if apply_task_error %}
-        <div class="alert error">{{ apply_task_error }}</div>
-      {% endif %}
-    </div>
+    {% include "partials/appliance_apply_status.html" %}
 
     <div class="panel">
       <div class="panel-head">
