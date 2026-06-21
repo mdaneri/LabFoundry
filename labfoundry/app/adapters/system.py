@@ -154,3 +154,24 @@ class SystemAdapter:
             dry_run=self.dry_run,
             stdout="dry-run: VCF backup SFTP validation command recorded",
         )
+
+    def validate_vcf_private_registry_config(self, config_path: str) -> AdapterResult:
+        return AdapterResult(
+            command=["labfoundry-helper", "vcf-private-registry", "validate", config_path],
+            dry_run=self.dry_run,
+            stdout="dry-run: VCF private registry validation command recorded",
+        )
+
+    def apply_vcf_private_registry_config(self, config_path: str) -> AdapterResult:
+        return AdapterResult(
+            command=["labfoundry-helper", "vcf-private-registry", "apply", config_path],
+            dry_run=self.dry_run,
+            stdout="dry-run: VCF private registry apply command recorded",
+        )
+
+    def relocate_vcf_private_registry_bundles(self, config_path: str) -> AdapterResult:
+        return AdapterResult(
+            command=["labfoundry-helper", "vcf-private-registry", "relocate-bundles", config_path],
+            dry_run=self.dry_run,
+            stdout="dry-run: VCF private registry bundle relocation command recorded",
+        )

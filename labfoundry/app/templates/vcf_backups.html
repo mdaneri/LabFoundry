@@ -92,10 +92,6 @@
           <span class="field-label"><span>Remote directory</span><button class="help-icon" type="button" data-help="Directory configured in VCF. With chroot enabled this is short and stable even though files land on the appliance backup volume.">i</button></span>
           <strong data-vcf-remote-directory>{{ vcf_backup_remote_directory }}</strong>
         </div>
-        <label>
-          <span class="field-label"><span>Config path</span><button class="help-icon" type="button" data-help="Appliance path where LabFoundry will render the OpenSSH SFTP configuration before the allowlisted helper validates and applies it.">i</button></span>
-          <input name="config_path" value="{{ vcf_backup_settings.config_path }}">
-        </label>
         <label class="switch-field"><span class="field-label"><span>Chroot user</span><button class="help-icon" type="button" data-help="Restricts the SFTP user to the backup storage tree. This is recommended for appliance backup targets.">i</button></span><input class="switch-input" type="checkbox" name="chroot_enabled" {{ "checked" if vcf_backup_settings.chroot_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>Password authentication</span><button class="help-icon" type="button" data-help="Allows the selected local LabFoundry user password for SFTP login. Disable if VCF will use SSH keys only.">i</button></span><input class="switch-input" type="checkbox" name="allow_password_auth" {{ "checked" if vcf_backup_settings.allow_password_auth else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>Public key authentication</span><button class="help-icon" type="button" data-help="Allows SSH public key authentication for the selected user once key material is provisioned on the appliance.">i</button></span><input class="switch-input" type="checkbox" name="allow_public_key_auth" {{ "checked" if vcf_backup_settings.allow_public_key_auth else "" }}><span class="switch-track" aria-hidden="true"></span></label>

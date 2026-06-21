@@ -127,6 +127,22 @@ class VcfBackupStatusResponse(BaseModel):
     dry_run: bool
 
 
+class VcfPrivateRegistryStatusResponse(BaseModel):
+    enabled: bool
+    service: ServiceStateResponse | None
+    hostname: str
+    endpoint: str
+    listen_interface: str
+    listen_address: str
+    port: int
+    harbor_project: str
+    storage_path: str
+    config_path: str
+    bundle_count: int
+    valid: bool
+    dry_run: bool
+
+
 class PhysicalInterfaceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -200,12 +216,18 @@ class WanStatusResponse(BaseModel):
     dry_run: bool
 
 
+class DnsConditionalForwarder(BaseModel):
+    domain: str = Field(min_length=1, max_length=120)
+    server: str = Field(min_length=1, max_length=120)
+
+
 class DnsSettingsUpdate(BaseModel):
     enabled: bool = False
     listen_interface: str = Field(default="eth1", min_length=1, max_length=80)
     listen_address: str | None = Field(default=None, max_length=240)
     domain: str = Field(default="labfoundry.internal", min_length=1, max_length=500)
     upstream_servers: list[str] = Field(default_factory=lambda: ["1.1.1.1", "9.9.9.9"])
+    conditional_forwarders: list[DnsConditionalForwarder] = Field(default_factory=list)
     cache_size: int = Field(default=1000, ge=0, le=100000)
     expand_hosts: bool = True
     authoritative: bool = True

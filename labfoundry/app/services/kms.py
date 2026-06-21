@@ -10,6 +10,8 @@ KMS_CLIENT_ROLES = ["admin", "service", "readonly"]
 KMS_KEY_ALGORITHMS = ["AES", "RSA", "ECDSA"]
 KMS_KEY_STATES = ["pre-active", "active", "deactivated", "compromised", "destroyed"]
 KMS_DEFAULT_OPERATIONS = ["locate", "get", "register", "create"]
+KMS_DEFAULT_DATABASE_PATH = "/var/lib/labfoundry/kms/pykmip.db"
+KMS_DEFAULT_CONFIG_PATH = "/etc/labfoundry/kms/pykmip.conf"
 
 
 def split_csv(value: str | None) -> list[str]:

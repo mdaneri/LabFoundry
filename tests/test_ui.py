@@ -227,6 +227,10 @@ def test_dns_and_dhcp_pages_render(client):
     assert "1.50.168.192.in-addr.arpa" in dns.text
     assert 'name="listen_interfaces"' in dns.text
     assert 'name="listen_addresses"' in dns.text
+    assert 'name="conditional_forwarders"' in dns.text
+    assert "Conditional forwarders" in dns.text
+    assert "domain=server1,server2" in dns.text
+    assert "sddc.internal=192.168.10.10,192.168.10.11" in dns.text
     assert dns.text.count('data-tag-editor') >= 2
     assert dns.text.count('data-tag-menu-toggle') >= 2
     assert dns.text.count('data-tag-option=') >= 4
@@ -389,6 +393,11 @@ def test_kms_page_renders(client):
     assert 'action="/kms/apply-task"' in kms.text
     assert "Create appliance apply task" in kms.text
     assert "pykmip.conf" in kms.text
+    assert "/var/lib/labfoundry/kms/pykmip.db" in kms.text
+    assert "<span>Database path</span>" not in kms.text
+    assert "<span>Config path</span>" not in kms.text
+    assert 'name="database_path"' not in kms.text
+    assert 'name="config_path"' not in kms.text
     assert "data-confirm-modal" in kms.text
 
     app_js = client.get("/static/app.js")
@@ -416,8 +425,8 @@ def test_kms_settings_autosave_returns_json(client):
             "hostname": "kms.labfoundry.internal",
             "server_certificate": "kms.labfoundry.internal",
             "ca_certificate_path": "/etc/labfoundry/ca/root.crt",
-            "database_path": "/var/lib/labfoundry/kms/pykmip.db",
-            "config_path": "/etc/labfoundry/kms/pykmip.conf",
+            "database_path": "/tmp/rogue-kms.db",
+            "config_path": "/tmp/rogue-kms.conf",
             "require_client_cert": "on",
             "allow_register": "on",
             "csrf": csrf,
@@ -427,14 +436,19 @@ def test_kms_settings_autosave_returns_json(client):
 
     assert response.status_code == 200
     assert response.json()["status"] == "saved"
-    assert "enabled" in client.get("/kms").text
+    refreshed = client.get("/kms")
+    assert "enabled" in refreshed.text
+    assert "/tmp/rogue-kms.db" not in refreshed.text
+    assert "/tmp/rogue-kms.conf" not in refreshed.text
+    assert "/var/lib/labfoundry/kms/pykmip.db" in refreshed.text
+    assert "/etc/labfoundry/kms/pykmip.conf" in refreshed.text
 
 
 def test_kms_apply_task_captures_current_desired_state(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Job
+    from labfoundry.app.models import DnsRecord, Job
 
     login(client)
     page = client.get("/kms")
@@ -469,6 +483,7 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert "Create appliance apply task" in page.text
     assert "internal-sftp" in page.text
     assert "Derived address" in page.text
+    assert "<span>Config path</span>" not in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
     assert 'data-address="192.168.50.1"' in page.text
@@ -478,6 +493,210 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert "initializeVcfBackupSettings" in app_js.text
     assert "updateVcfBackupDerivedAddress" in app_js.text
     assert "updateVcfBackupValidation" in app_js.text
+
+
+def test_vcf_private_registry_page_models_harbor_and_bundle_relocation(client):
+    login(client)
+    page = client.get("/vcf-private-registry")
+    assert page.status_code == 200
+    assert "VCF Private Registry" in page.text
+    assert "Harbor-backed private registry" in page.text
+    assert '<aside class="side-stack">' in page.text
+    assert "<h2>Harbor Settings</h2>" in page.text
+    assert 'data-tab-target="vcf-registry-settings-panel"' not in page.text
+    assert "<span>Config path</span>" not in page.text
+    assert "registry.labfoundry.internal" in page.text
+    assert "vcf-supervisor-services" in page.text
+    assert "/mnt/labfoundry-vcf-registry" in page.text
+    assert "Upload CA bundle" in page.text
+    assert "Choose CA bundle" in page.text
+    assert "file-upload-icon" in page.text
+    assert "not uploaded" in page.text
+    assert 'action="/vcf-private-registry/settings"' in page.text
+    assert 'data-autosave-status-id="vcf-registry-settings-status"' in page.text
+    assert "Supervisor Service bundles" in page.text
+    assert "imgpkg" in page.text
+    assert "Create appliance apply task" in page.text
+    assert "harbor_admin_password: &lt;provisioned-by-labfoundry-helper&gt;" in page.text
+    assert "eth1 - access / trunk" not in page.text
+    assert "eth2 - access / access / 192.168.50.1" in page.text
+    assert 'data-address="192.168.50.1"' in page.text
+    assert "data-vcf-registry-derived-address" in page.text
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    assert "initializeVcfRegistrySettings" in app_js.text
+    assert "initializeVcfRegistryBundlesTable" in app_js.text
+    assert "initializeFileUploadControls" in app_js.text
+    assert "updateVcfRegistryValidation" in app_js.text
+
+
+def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord, Job
+
+    login(client)
+    page = client.get("/vcf-private-registry")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    settings_response = client.post(
+        "/vcf-private-registry/settings",
+        data={
+            "enabled": "on",
+            "hostname": "registry.labfoundry.internal",
+            "listen_interface": "eth2",
+            "port": "443",
+            "harbor_project": "vcf-supervisor-services",
+            "config_path": "/etc/labfoundry/harbor/harbor.yml",
+            "ca_bundle_path": "/etc/labfoundry/ca/ca-bundle.pem",
+            "server_certificate": "registry.labfoundry.internal",
+            "robot_account": "robot$vcf-supervisor-services",
+            "relocation_dry_run": "on",
+            "csrf": csrf,
+        },
+        files={"ca_bundle_file": ("registry-ca.pem", "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n", "application/x-pem-file")},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert settings_response.status_code == 200
+    assert settings_response.json()["status"] == "saved"
+    assert settings_response.json()["listen_address"] == "192.168.50.1"
+    assert settings_response.json()["endpoint"] == "registry.labfoundry.internal"
+    assert settings_response.json()["dns_record_action"] == "created"
+    assert settings_response.json()["ca_bundle_source"] == "uploaded"
+    assert settings_response.json()["ca_bundle_uploaded_name"] == "registry-ca.pem"
+    assert settings_response.json()["ca_bundle_available"] is True
+    assert settings_response.json()["validation_warnings"] == []
+    assert "hostname: registry.labfoundry.internal" in settings_response.json()["harbor_config_preview"]
+    assert "<provisioned-by-labfoundry-helper>" in settings_response.json()["harbor_config_preview"]
+    with SessionLocal() as db:
+        dns_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "registry.labfoundry.internal",
+                DnsRecord.record_type == "A",
+            )
+        ).scalar_one()
+        assert dns_record.address == "192.168.50.1"
+        assert dns_record.enabled is True
+
+    moved_response = client.post(
+        "/vcf-private-registry/settings",
+        data={
+            "enabled": "on",
+            "hostname": "registry.labfoundry.internal",
+            "listen_interface": "eth0",
+            "port": "443",
+            "harbor_project": "vcf-supervisor-services",
+            "ca_bundle_path": "/etc/labfoundry/ca/ca-bundle.pem",
+            "server_certificate": "registry.labfoundry.internal",
+            "robot_account": "robot$vcf-supervisor-services",
+            "relocation_dry_run": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert moved_response.status_code == 200
+    assert moved_response.json()["listen_address"] == "192.168.49.1"
+    assert moved_response.json()["dns_record_action"] == "updated"
+    assert moved_response.json()["ca_bundle_source"] == "uploaded"
+    with SessionLocal() as db:
+        dns_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "registry.labfoundry.internal",
+                DnsRecord.record_type == "A",
+            )
+        ).scalar_one()
+        assert dns_record.address == "192.168.49.1"
+
+    bundle_response = client.post(
+        "/vcf-private-registry/bundles",
+        data={
+            "name": "sample-supervisor-service",
+            "source_reference": "projects.registry.vmware.com/sample/supervisor-service:1.0.0",
+            "target_reference": "",
+            "enabled": "on",
+            "status": "planned",
+            "notes": "sample relocation",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert bundle_response.status_code == 303
+    refreshed = client.get("/vcf-private-registry")
+    assert "sample-supervisor-service" in refreshed.text
+    assert "imgpkg copy -b projects.registry.vmware.com/sample/supervisor-service:1.0.0" in refreshed.text
+    assert "registry.labfoundry.internal/vcf-supervisor-services/supervisor-service" in refreshed.text
+
+    token_page = client.post(
+        "/authentication/api-tokens",
+        data={
+            "name": "vcf-registry-status-test",
+            "description": "",
+            "scopes": "read:vcf-registry",
+            "csrf": csrf,
+        },
+    )
+    raw_token = token_page.text.split('<textarea readonly rows="5">', 1)[1].split("</textarea>", 1)[0]
+    status = client.get("/api/v1/vcf-private-registry/status", headers={"Authorization": f"Bearer {raw_token}"})
+    assert status.status_code == 200
+    assert status.json()["hostname"] == "registry.labfoundry.internal"
+    assert status.json()["endpoint"] == "registry.labfoundry.internal"
+    assert status.json()["bundle_count"] == 1
+
+    apply_response = client.post("/vcf-private-registry/apply-task", data={"csrf": csrf})
+    assert apply_response.status_code == 200
+    assert "Appliance apply task" in apply_response.text
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "vcf-private-registry-apply")).scalar_one()
+        assert job.status == "succeeded"
+        assert "labfoundry-helper" in (job.result or "")
+        assert "vcf-private-registry" in (job.result or "")
+        assert "imgpkg copy" in (job.result or "")
+        assert "provisioned-by-labfoundry-helper" in (job.result or "")
+        assert "password123" not in (job.result or "").lower()
+
+
+def test_vcf_private_registry_uses_local_ca_bundle_when_ca_is_enabled(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings
+
+    with SessionLocal() as db:
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        ca_settings.enabled = True
+        ca_settings.storage_path = "/etc/labfoundry/ca"
+        db.commit()
+
+    login(client)
+    page = client.get("/vcf-private-registry")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    assert "CA bundle source" in page.text
+    assert "Local CA" in page.text
+    assert "Upload CA bundle" not in page.text
+
+    response = client.post(
+        "/vcf-private-registry/settings",
+        data={
+            "enabled": "on",
+            "hostname": "registry.labfoundry.internal",
+            "listen_interface": "eth2",
+            "port": "443",
+            "harbor_project": "vcf-supervisor-services",
+            "server_certificate": "registry.labfoundry.internal",
+            "robot_account": "robot$vcf-supervisor-services",
+            "relocation_dry_run": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ca_bundle_source"] == "local-ca"
+    assert response.json()["ca_bundle_source_label"] == "Local CA"
+    assert response.json()["ca_bundle_path"] == "/etc/labfoundry/ca/ca-bundle.pem"
+    assert response.json()["ca_bundle_available"] is True
+    assert response.json()["validation_errors"] == []
 
 
 def test_vcf_backups_listen_interfaces_include_vlans_not_trunks(client):
@@ -968,6 +1187,7 @@ def test_dns_settings_autosave_returns_json(client):
             "listen_interfaces": ["eth1"],
             "listen_addresses": ["192.168.50.1"],
             "upstream_servers": "8.8.8.8",
+            "conditional_forwarders": "sddc.internal=192.168.10.10,192.168.10.11",
             "cache_size": "500",
             "expand_hosts": "on",
             "authoritative": "on",
@@ -979,6 +1199,13 @@ def test_dns_settings_autosave_returns_json(client):
     assert response.status_code == 200
     assert response.json()["status"] == "saved"
     assert response.json()["listen_interfaces"] == ["eth1"]
+    assert response.json()["valid"] is True
+    assert "server=/sddc.internal/192.168.10.10" in response.json()["config_preview"]
+    assert "server=/sddc.internal/192.168.10.11" in response.json()["config_preview"]
+    refreshed = client.get("/dns")
+    assert "server=/sddc.internal/192.168.10.10" in refreshed.text
+    assert "server=/sddc.internal/192.168.10.11" in refreshed.text
+    assert "sddc.internal=192.168.10.10,192.168.10.11" in refreshed.text
 
 
 def test_dns_apply_task_captures_current_desired_state(client):

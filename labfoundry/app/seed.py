@@ -21,6 +21,7 @@ from labfoundry.app.models import (
     ServiceState,
     User,
     VcfBackupSettings,
+    VcfPrivateRegistrySettings,
     VlanInterface,
     WanPolicy,
 )
@@ -51,6 +52,14 @@ SERVICE_STATE_DEFAULTS = [
         "enabled": True,
         "health": "healthy",
         "detail": "/srv/repository",
+    },
+    {
+        "service": "vcf-private-registry",
+        "display_name": "VCF Private Registry",
+        "running": False,
+        "enabled": False,
+        "health": "planned",
+        "detail": "Harbor / vcf-supervisor-services",
     },
     {
         "service": "vcf-backups",
@@ -358,4 +367,6 @@ def seed_initial_data(db: Session) -> None:
                 max_sessions=4,
             )
         )
+    if db.execute(select(VcfPrivateRegistrySettings)).first() is None:
+        db.add(VcfPrivateRegistrySettings())
     db.commit()

@@ -4,6 +4,8 @@ from pathlib import PurePosixPath
 
 from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings
 
+DNS_CONDITIONAL_FORWARDERS_SETTING_KEY = "dns.conditional_forwarders"
+
 
 def split_servers(raw: str | None) -> list[str]:
     if not raw:
@@ -13,6 +15,44 @@ def split_servers(raw: str | None) -> list[str]:
 
 def join_servers(servers: list[str]) -> str:
     return "\n".join(server.strip() for server in servers if server.strip())
+
+
+def split_conditional_forwarders(raw: str | None) -> list[dict[str, str]]:
+    if not raw:
+        return []
+    forwarders: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_line in raw.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            domain, server_text = line.split("=", 1)
+        else:
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            domain, server_text = parts
+        normalized_domain = domain.strip().strip(".").lower()
+        for server in server_text.split(","):
+            normalized_server = server.strip()
+            key = (normalized_domain, normalized_server)
+            if normalized_domain and normalized_server and key not in seen:
+                seen.add(key)
+                forwarders.append({"domain": normalized_domain, "server": normalized_server})
+    return forwarders
+
+
+def join_conditional_forwarders(forwarders: list[dict[str, str]]) -> str:
+    grouped: dict[str, list[str]] = {}
+    for forwarder in forwarders:
+        domain = str(forwarder.get("domain", "")).strip().strip(".").lower()
+        server = str(forwarder.get("server", "")).strip()
+        if domain and server:
+            grouped.setdefault(domain, [])
+            if server not in grouped[domain]:
+                grouped[domain].append(server)
+    return "\n".join(f"{domain}={','.join(servers)}" for domain, servers in grouped.items())
 
 
 def split_interfaces(raw: str | None) -> list[str]:
@@ -193,7 +233,7 @@ def dns_reverse_records(records: list[DnsRecord]) -> list[dict[str, str]]:
     return reverse_records
 
 
-def dns_settings_to_dict(settings: DnsSettings) -> dict:
+def dns_settings_to_dict(settings: DnsSettings, conditional_forwarders: str | None = None) -> dict:
     return {
         "id": settings.id,
         "enabled": settings.enabled,
@@ -201,6 +241,7 @@ def dns_settings_to_dict(settings: DnsSettings) -> dict:
         "listen_address": settings.listen_address,
         "domain": settings.domain,
         "upstream_servers": split_servers(settings.upstream_servers),
+        "conditional_forwarders": split_conditional_forwarders(conditional_forwarders),
         "cache_size": settings.cache_size,
         "expand_hosts": settings.expand_hosts,
         "authoritative": settings.authoritative,
@@ -289,7 +330,7 @@ def parse_dnsmasq_leases(raw_text: str, now: datetime | None = None) -> list[dic
     return leases
 
 
-def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord]) -> list[str]:
+def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord], conditional_forwarders: str | None = None) -> list[str]:
     errors: list[str] = []
     if not split_interfaces(settings.listen_interface):
         errors.append("DNS must listen on at least one interface.")
@@ -302,6 +343,14 @@ def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord]) -> li
         _validate_ip(address, f"DNS listen address {address}", errors)
     for server in split_servers(settings.upstream_servers):
         _validate_ip(server, f"upstream server {server}", errors)
+    for forwarder in split_conditional_forwarders(conditional_forwarders):
+        domain = forwarder["domain"]
+        server = forwarder["server"]
+        if any(character.isspace() for character in domain):
+            errors.append(f"conditional forwarder domain {domain} must not contain whitespace.")
+        if not domain or "." not in domain:
+            errors.append(f"conditional forwarder domain {domain or '(blank)'} must be a DNS domain.")
+        _validate_forwarder_server(server, f"conditional forwarder {domain} server", errors)
     for record in records:
         if record.enabled is not False:
             errors.extend(validate_dns_record(record.hostname, record.record_type, record.address))
@@ -421,6 +470,7 @@ def render_dnsmasq_config(
     dhcp_reservations: list[DhcpReservation],
     dhcp_scopes: list[DhcpScope] | None = None,
     dhcp_options: list[DhcpOption] | None = None,
+    conditional_forwarders: str | None = None,
 ) -> str:
     domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
     scopes = dhcp_scopes if dhcp_scopes else [_legacy_scope(dhcp_settings)]
@@ -445,6 +495,8 @@ def render_dnsmasq_config(
         lines.append(f"listen-address={listen_address}")
     for server in split_servers(dns_settings.upstream_servers):
         lines.append(f"server={server}")
+    for forwarder in split_conditional_forwarders(conditional_forwarders):
+        lines.append(f"server=/{forwarder['domain']}/{forwarder['server']}")
     for record in dns_records:
         if record.enabled is False:
             continue
@@ -520,6 +572,15 @@ def _is_ip_address(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _validate_forwarder_server(value: str, label: str, errors: list[str]) -> None:
+    server = value.strip()
+    if "#" in server:
+        server, port = server.rsplit("#", 1)
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            errors.append(f"{label} port must be between 1 and 65535.")
+    _validate_ip(server, label, errors)
 
 
 def _zone_hostname(host: str, origin: str) -> str:

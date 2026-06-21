@@ -3,7 +3,7 @@ from ipaddress import ip_address, ip_interface, ip_network
 from secrets import token_urlsafe
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, func, select
@@ -37,8 +37,11 @@ from labfoundry.app.models import (
     Role,
     Route,
     ServiceState,
+    Setting,
     User,
     VcfBackupSettings,
+    VcfPrivateRegistrySettings,
+    VcfRegistryBundle,
     VlanInterface,
     WanPolicy,
     utcnow,
@@ -52,10 +55,12 @@ from labfoundry.app.security import (
     require_session_identity,
 )
 from labfoundry.app.services.dnsmasq import (
+    DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
     dns_domain_warnings,
     dns_reverse_records,
     dhcp_option_to_dict,
     dhcp_scope_to_dict,
+    join_conditional_forwarders,
     join_addresses,
     join_domains,
     join_interfaces,
@@ -69,6 +74,7 @@ from labfoundry.app.services.dnsmasq import (
     render_dnsmasq_config,
     reservation_dns_record,
     split_addresses,
+    split_conditional_forwarders,
     split_domains,
     split_interfaces,
     split_servers,
@@ -116,6 +122,8 @@ from labfoundry.app.services.firewall import (
 from labfoundry.app.services.kms import (
     KMS_BACKENDS,
     KMS_CLIENT_ROLES,
+    KMS_DEFAULT_CONFIG_PATH,
+    KMS_DEFAULT_DATABASE_PATH,
     KMS_KEY_ALGORITHMS,
     KMS_KEY_STATES,
     join_csv,
@@ -131,6 +139,22 @@ from labfoundry.app.services.vcf_backups import (
     validate_vcf_backup_state,
     vcf_backup_remote_directory,
     vcf_backup_settings_to_dict,
+)
+from labfoundry.app.services.vcf_private_registry import (
+    VCF_REGISTRY_DEFAULT_CONFIG_PATH,
+    VCF_REGISTRY_DEFAULT_HOSTNAME,
+    VCF_REGISTRY_DEFAULT_PROJECT,
+    VCF_REGISTRY_DEFAULT_STORAGE_PATH,
+    VCF_REGISTRY_UPLOADED_CA_BUNDLE_NAME_KEY,
+    VCF_REGISTRY_UPLOADED_CA_BUNDLE_PATH,
+    VCF_REGISTRY_UPLOADED_CA_BUNDLE_PEM_KEY,
+    default_target_reference,
+    render_harbor_config,
+    render_imgpkg_relocation_preview,
+    validate_vcf_registry_state,
+    vcf_registry_bundle_to_dict,
+    vcf_registry_endpoint,
+    vcf_registry_settings_to_dict,
 )
 from labfoundry.app.token_service import create_token_for_user
 
@@ -277,6 +301,16 @@ def get_vcf_backup_settings_row(db: Session) -> VcfBackupSettings:
     return settings
 
 
+def get_vcf_private_registry_settings_row(db: Session) -> VcfPrivateRegistrySettings:
+    settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one_or_none()
+    if settings is None:
+        settings = VcfPrivateRegistrySettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
 def address_from_cidr(value: str | None) -> str:
     if not value:
         return ""
@@ -332,6 +366,121 @@ def vcf_backup_context(db: Session) -> dict:
         "vcf_backup_remote_directory": vcf_backup_remote_directory(settings),
         "vcf_backup_config_preview": config_preview,
         "vcf_backup_validation_errors": validation_errors,
+    }
+
+
+def managed_dns_fqdns(db: Session) -> set[str]:
+    records = db.execute(select(DnsRecord)).scalars().all()
+    names: set[str] = set()
+    for record in records:
+        hostname = record.hostname.strip().strip(".").lower()
+        if hostname:
+            names.add(hostname)
+    return names
+
+
+def setting_value(db: Session, key: str) -> str:
+    setting = db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none()
+    return setting.value if setting else ""
+
+
+def set_setting_value(db: Session, key: str, value: str) -> Setting:
+    setting = db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none()
+    if setting is None:
+        setting = Setting(key=key, value=value)
+        db.add(setting)
+    else:
+        setting.value = value
+        setting.updated_at = utcnow()
+    db.flush()
+    return setting
+
+
+def uploaded_vcf_registry_ca_bundle(db: Session) -> dict[str, object]:
+    name = setting_value(db, VCF_REGISTRY_UPLOADED_CA_BUNDLE_NAME_KEY)
+    pem = setting_value(db, VCF_REGISTRY_UPLOADED_CA_BUNDLE_PEM_KEY)
+    return {"name": name, "present": bool(pem.strip())}
+
+
+def store_uploaded_vcf_registry_ca_bundle(db: Session, ca_bundle_file: UploadFile | None, actor: str) -> str | None:
+    if ca_bundle_file is None or not ca_bundle_file.filename:
+        return None
+    content = ca_bundle_file.file.read()
+    if not content:
+        return None
+    if len(content) > 1024 * 1024:
+        raise HTTPException(status_code=400, detail="CA bundle upload must be 1 MB or smaller.")
+    try:
+        pem_text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CA bundle upload must be a PEM text file.") from exc
+    if "-----BEGIN CERTIFICATE-----" not in pem_text or "-----END CERTIFICATE-----" not in pem_text:
+        raise HTTPException(status_code=400, detail="CA bundle upload must contain at least one PEM certificate.")
+    name_setting = set_setting_value(db, VCF_REGISTRY_UPLOADED_CA_BUNDLE_NAME_KEY, ca_bundle_file.filename)
+    set_setting_value(db, VCF_REGISTRY_UPLOADED_CA_BUNDLE_PEM_KEY, pem_text)
+    record_audit(
+        db,
+        actor=actor,
+        action="upload_vcf_registry_ca_bundle",
+        resource_type="setting",
+        resource_id=str(name_setting.id),
+        detail=ca_bundle_file.filename,
+    )
+    return ca_bundle_file.filename
+
+
+def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
+    ca_settings = get_ca_settings_row(db)
+    uploaded_bundle = uploaded_vcf_registry_ca_bundle(db)
+    if ca_settings.enabled:
+        path = f"{ca_settings.storage_path.rstrip('/')}/ca-bundle.pem"
+        return {
+            "source": "local-ca",
+            "source_label": "Local CA",
+            "path": path,
+            "available": True,
+            "uploaded_name": uploaded_bundle["name"],
+        }
+    return {
+        "source": "uploaded",
+        "source_label": "Uploaded bundle",
+        "path": VCF_REGISTRY_UPLOADED_CA_BUNDLE_PATH,
+        "available": uploaded_bundle["present"],
+        "uploaded_name": uploaded_bundle["name"],
+    }
+
+
+def vcf_private_registry_context(db: Session) -> dict:
+    settings = get_vcf_private_registry_settings_row(db)
+    bundles = db.execute(select(VcfRegistryBundle).order_by(VcfRegistryBundle.name)).scalars().all()
+    available_interfaces = vcf_backup_listen_options(db)
+    ca_bundle_context = vcf_registry_ca_bundle_context(db)
+    settings.ca_bundle_path = str(ca_bundle_context["path"])
+    validation_errors, validation_warnings = validate_vcf_registry_state(
+        settings,
+        bundles,
+        {interface["name"] for interface in available_interfaces},
+        managed_dns_fqdns(db),
+        str(ca_bundle_context["source"]),
+        bool(ca_bundle_context["available"]),
+    )
+    harbor_config_preview = render_harbor_config(settings)
+    relocation_preview = render_imgpkg_relocation_preview(settings, bundles)
+    return {
+        "vcf_registry_settings": settings,
+        "vcf_registry_settings_json": vcf_registry_settings_to_dict(settings),
+        "vcf_registry_bundles": bundles,
+        "vcf_registry_bundle_rows": [vcf_registry_bundle_to_dict(bundle) for bundle in bundles],
+        "vcf_registry_available_interfaces": available_interfaces,
+        "vcf_registry_endpoint": vcf_registry_endpoint(settings),
+        "vcf_registry_harbor_config_preview": harbor_config_preview,
+        "vcf_registry_relocation_preview": relocation_preview,
+        "vcf_registry_validation_errors": validation_errors,
+        "vcf_registry_validation_warnings": validation_warnings,
+        "vcf_registry_ca_bundle_source": ca_bundle_context["source"],
+        "vcf_registry_ca_bundle_source_label": ca_bundle_context["source_label"],
+        "vcf_registry_ca_bundle_available": ca_bundle_context["available"],
+        "vcf_registry_uploaded_ca_bundle_name": ca_bundle_context["uploaded_name"],
     }
 
 
@@ -477,6 +626,7 @@ def routes_wan_context(db: Session) -> dict:
 
 def dnsmasq_context(db: Session) -> dict:
     dns_settings = get_dns_settings_row(db)
+    conditional_forwarders = setting_value(db, DNS_CONDITIONAL_FORWARDERS_SETTING_KEY)
     dns_records = db.execute(select(DnsRecord).order_by(DnsRecord.hostname)).scalars().all()
     dhcp_settings = get_dhcp_settings_row(db)
     dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
@@ -491,8 +641,9 @@ def dnsmasq_context(db: Session) -> dict:
         dhcp_reservations=dhcp_reservations,
         dhcp_scopes=dhcp_scopes,
         dhcp_options=dhcp_options,
+        conditional_forwarders=conditional_forwarders,
     )
-    validation_errors = validate_dns_settings(dns_settings, dns_records) + validate_dhcp_settings(
+    validation_errors = validate_dns_settings(dns_settings, dns_records, conditional_forwarders) + validate_dhcp_settings(
         dhcp_settings,
         dhcp_reservations,
         dhcp_scopes,
@@ -530,6 +681,7 @@ def dnsmasq_context(db: Session) -> dict:
         "validation_errors": validation_errors,
         "dns_warnings": dns_warnings,
         "upstream_servers": "\n".join(split_servers(dns_settings.upstream_servers)),
+        "conditional_forwarders": join_conditional_forwarders(split_conditional_forwarders(conditional_forwarders)),
         "dns_domain_options": dns_domains,
     }
 
@@ -580,6 +732,62 @@ def ensure_dns_for_dhcp_reservation(db: Session, reservation: DhcpReservation, a
     db.add(record)
     db.flush()
     record_audit(db, actor=actor, action="create_dns_record_from_dhcp_reservation", resource_type="dns_record", resource_id=str(record.id))
+
+
+def ensure_dns_for_vcf_registry(db: Session, settings: VcfPrivateRegistrySettings, actor: str) -> str | None:
+    hostname = normalize_dns_hostname(settings.hostname)
+    if not hostname or not settings.listen_address.strip():
+        return None
+    try:
+        parsed_address = ip_address(settings.listen_address.strip())
+    except ValueError:
+        return None
+    record_type = "AAAA" if parsed_address.version == 6 else "A"
+    address = str(parsed_address)
+    if validate_dns_record(hostname, record_type, address):
+        return None
+    settings.hostname = hostname
+    existing = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == hostname,
+            DnsRecord.record_type == record_type,
+        )
+    ).scalar_one_or_none()
+    if existing:
+        if existing.address == address and existing.enabled:
+            return "unchanged"
+        existing.address = address
+        existing.enabled = True
+        if not existing.description:
+            existing.description = "Created from VCF private registry endpoint."
+        db.flush()
+        record_audit(
+            db,
+            actor=actor,
+            action="update_dns_record_from_vcf_registry",
+            resource_type="dns_record",
+            resource_id=str(existing.id),
+            detail=f"{hostname} {record_type} -> {address}",
+        )
+        return "updated"
+    record = DnsRecord(
+        hostname=hostname,
+        record_type=record_type,
+        address=address,
+        description="Created from VCF private registry endpoint.",
+        enabled=True,
+    )
+    db.add(record)
+    db.flush()
+    record_audit(
+        db,
+        actor=actor,
+        action="create_dns_record_from_vcf_registry",
+        resource_type="dns_record",
+        resource_id=str(record.id),
+        detail=f"{hostname} {record_type} -> {address}",
+    )
+    return "created"
 
 
 def available_dns_listen_addresses(
@@ -1744,6 +1952,7 @@ def update_dns_from_ui(
     listen_addresses_present: str | None = Form(None),
     domains: str | None = Form(None),
     upstream_servers: str = Form(""),
+    conditional_forwarders: str = Form(""),
     cache_size: int = Form(1000),
     expand_hosts: str | None = Form(None),
     authoritative: str | None = Form(None),
@@ -1768,6 +1977,11 @@ def update_dns_from_ui(
     if domains is not None:
         settings.domain = join_domains(split_domains(domains))
     settings.upstream_servers = join_servers(split_servers(upstream_servers))
+    set_setting_value(
+        db,
+        DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+        join_conditional_forwarders(split_conditional_forwarders(conditional_forwarders)),
+    )
     settings.cache_size = cache_size
     settings.expand_hosts = expand_hosts == "on"
     settings.authoritative = authoritative == "on"
@@ -1775,12 +1989,18 @@ def update_dns_from_ui(
     db.commit()
     record_audit(db, actor=identity.username, action="update_dns_settings", resource_type="dns", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = dnsmasq_context(db)
         return JSONResponse(
             {
                 "status": "saved",
                 "updated_at": settings.updated_at.isoformat(),
                 "listen_interfaces": split_interfaces(settings.listen_interface),
                 "listen_addresses": split_addresses(settings.listen_address),
+                "valid": not context["validation_errors"],
+                "validation_errors": context["validation_errors"],
+                "validation_warnings": context["dns_warnings"],
+                "config_path": context["dns_settings"].config_path,
+                "config_preview": context["config_preview"],
             }
         )
     return RedirectResponse("/dns", status_code=303)
@@ -3038,8 +3258,6 @@ def update_kms_settings_from_ui(
     hostname: str = Form("kms.labfoundry.internal"),
     server_certificate: str = Form("kms.labfoundry.internal"),
     ca_certificate_path: str = Form("/etc/labfoundry/ca/root.crt"),
-    database_path: str = Form("/var/lib/labfoundry/kms/pykmip.db"),
-    config_path: str = Form("/etc/labfoundry/kms/pykmip.conf"),
     require_client_cert: str | None = Form(None),
     allow_register: str | None = Form(None),
     allow_destroy: str | None = Form(None),
@@ -3057,8 +3275,8 @@ def update_kms_settings_from_ui(
     settings.hostname = hostname.strip() or "kms.labfoundry.internal"
     settings.server_certificate = server_certificate.strip() or settings.hostname
     settings.ca_certificate_path = ca_certificate_path.strip() or "/etc/labfoundry/ca/root.crt"
-    settings.database_path = database_path.strip() or "/var/lib/labfoundry/kms/pykmip.db"
-    settings.config_path = config_path.strip() or "/etc/labfoundry/kms/pykmip.conf"
+    settings.database_path = KMS_DEFAULT_DATABASE_PATH
+    settings.config_path = KMS_DEFAULT_CONFIG_PATH
     settings.require_client_cert = require_client_cert == "on"
     settings.allow_register = allow_register == "on"
     settings.allow_destroy = allow_destroy == "on"
@@ -3327,6 +3545,254 @@ def create_kms_apply_task_from_ui(
     )
 
 
+@router.get("/vcf-private-registry", response_class=HTMLResponse, response_model=None)
+def vcf_private_registry_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(request, "vcf_private_registry.html", {"identity": identity, **vcf_private_registry_context(db)})
+
+
+@router.post("/vcf-private-registry/settings", response_model=None)
+def update_vcf_private_registry_settings_from_ui(
+    request: Request,
+    enabled: str | None = Form(None),
+    hostname: str = Form(VCF_REGISTRY_DEFAULT_HOSTNAME),
+    listen_interface: str = Form("eth2"),
+    port: int = Form(443),
+    harbor_project: str = Form(VCF_REGISTRY_DEFAULT_PROJECT),
+    server_certificate: str = Form(VCF_REGISTRY_DEFAULT_HOSTNAME),
+    robot_account: str = Form("robot$vcf-supervisor-services"),
+    relocation_dry_run: str | None = Form(None),
+    ca_bundle_file: UploadFile | None = File(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    settings = get_vcf_private_registry_settings_row(db)
+    listen_options = {option["name"]: option for option in vcf_backup_listen_options(db)}
+    selected_interface = listen_interface.strip() or "eth2"
+    if selected_interface not in listen_options:
+        raise HTTPException(status_code=400, detail="Select an access physical interface or VLAN interface with an IP address.")
+    settings.enabled = enabled == "on"
+    settings.hostname = hostname.strip() or VCF_REGISTRY_DEFAULT_HOSTNAME
+    settings.listen_interface = selected_interface
+    settings.listen_address = listen_options[selected_interface]["address"]
+    settings.port = port
+    settings.harbor_project = harbor_project.strip() or VCF_REGISTRY_DEFAULT_PROJECT
+    settings.storage_path = VCF_REGISTRY_DEFAULT_STORAGE_PATH
+    settings.config_path = VCF_REGISTRY_DEFAULT_CONFIG_PATH
+    uploaded_ca_bundle_name = store_uploaded_vcf_registry_ca_bundle(db, ca_bundle_file, identity.username)
+    ca_bundle_context = vcf_registry_ca_bundle_context(db)
+    settings.ca_bundle_path = str(ca_bundle_context["path"])
+    settings.server_certificate = server_certificate.strip() or settings.hostname
+    settings.robot_account = robot_account.strip() or f"robot${settings.harbor_project}"
+    settings.relocation_dry_run = relocation_dry_run == "on"
+    settings.updated_at = utcnow()
+    dns_record_action = ensure_dns_for_vcf_registry(db, settings, identity.username)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_vcf_private_registry_settings", resource_type="vcf_private_registry", resource_id=str(settings.id))
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = vcf_private_registry_context(db)
+        saved_settings = context["vcf_registry_settings"]
+        validation_errors = context["vcf_registry_validation_errors"]
+        validation_warnings = context["vcf_registry_validation_warnings"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": saved_settings.updated_at.isoformat(),
+                "hostname": saved_settings.hostname,
+                "listen_interface": saved_settings.listen_interface,
+                "listen_address": saved_settings.listen_address,
+                "port": saved_settings.port,
+                "endpoint": context["vcf_registry_endpoint"],
+                "harbor_project": saved_settings.harbor_project,
+                "storage_path": saved_settings.storage_path,
+                "config_path": saved_settings.config_path,
+                "ca_bundle_path": saved_settings.ca_bundle_path,
+                "ca_bundle_source": context["vcf_registry_ca_bundle_source"],
+                "ca_bundle_source_label": context["vcf_registry_ca_bundle_source_label"],
+                "ca_bundle_available": context["vcf_registry_ca_bundle_available"],
+                "ca_bundle_uploaded_name": uploaded_ca_bundle_name or context["vcf_registry_uploaded_ca_bundle_name"],
+                "server_certificate": saved_settings.server_certificate,
+                "robot_account": saved_settings.robot_account,
+                "relocation_dry_run": saved_settings.relocation_dry_run,
+                "dns_record_action": dns_record_action,
+                "valid": not validation_errors,
+                "validation_errors": validation_errors,
+                "validation_warnings": validation_warnings,
+                "harbor_config_preview": context["vcf_registry_harbor_config_preview"],
+                "relocation_preview": context["vcf_registry_relocation_preview"],
+            }
+        )
+    return RedirectResponse("/vcf-private-registry", status_code=303)
+
+
+@router.post("/vcf-private-registry/bundles", response_model=None)
+def create_vcf_registry_bundle_from_ui(
+    request: Request,
+    name: str = Form(...),
+    source_reference: str = Form(""),
+    target_reference: str = Form(""),
+    enabled: str | None = Form(None),
+    status: str = Form("planned"),
+    notes: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    settings = get_vcf_private_registry_settings_row(db)
+    bundle = VcfRegistryBundle(
+        name=name.strip(),
+        source_reference=source_reference.strip(),
+        target_reference=target_reference.strip() or default_target_reference(settings, source_reference),
+        enabled=enabled == "on",
+        status=status.strip() or "planned",
+        notes=notes.strip() or None,
+    )
+    db.add(bundle)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="A Supervisor Service bundle with this name already exists.") from exc
+    record_audit(db, actor=identity.username, action="create_vcf_registry_bundle", resource_type="vcf_registry_bundle", resource_id=str(bundle.id))
+    return RedirectResponse("/vcf-private-registry", status_code=303)
+
+
+@router.post("/vcf-private-registry/bundles/{bundle_id}/edit", response_model=None)
+def edit_vcf_registry_bundle_from_ui(
+    request: Request,
+    bundle_id: int,
+    name: str = Form(...),
+    source_reference: str = Form(""),
+    target_reference: str = Form(""),
+    enabled: str | None = Form(None),
+    status: str = Form("planned"),
+    notes: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    settings = get_vcf_private_registry_settings_row(db)
+    bundle = db.get(VcfRegistryBundle, bundle_id)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="Supervisor Service bundle not found.")
+    bundle.name = name.strip()
+    bundle.source_reference = source_reference.strip()
+    bundle.target_reference = target_reference.strip() or default_target_reference(settings, source_reference)
+    bundle.enabled = enabled == "on"
+    bundle.status = status.strip() or "planned"
+    bundle.notes = notes.strip() or None
+    bundle.updated_at = utcnow()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="A Supervisor Service bundle with this name already exists.") from exc
+    record_audit(db, actor=identity.username, action="update_vcf_registry_bundle", resource_type="vcf_registry_bundle", resource_id=str(bundle.id))
+    return RedirectResponse("/vcf-private-registry", status_code=303)
+
+
+@router.post("/vcf-private-registry/bundles/{bundle_id}/delete", response_model=None)
+def delete_vcf_registry_bundle_from_ui(
+    request: Request,
+    bundle_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    bundle = db.get(VcfRegistryBundle, bundle_id)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="Supervisor Service bundle not found.")
+    db.delete(bundle)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_vcf_registry_bundle", resource_type="vcf_registry_bundle", resource_id=str(bundle_id))
+    return RedirectResponse("/vcf-private-registry", status_code=303)
+
+
+@router.post("/vcf-private-registry/apply-task", response_model=None)
+def create_vcf_private_registry_apply_task_from_ui(
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    verify_csrf(request, csrf)
+    context = vcf_private_registry_context(db)
+    validation_errors = context["vcf_registry_validation_errors"]
+    if validation_errors:
+        return render(
+            request,
+            "vcf_private_registry.html",
+            {
+                "identity": identity,
+                **context,
+                "apply_task_error": "Resolve validation errors before creating an appliance apply task.",
+            },
+            status_code=422,
+        )
+
+    adapter = SystemAdapter()
+    settings = context["vcf_registry_settings"]
+    bundles = context["vcf_registry_bundles"]
+    validate_result = adapter.validate_vcf_private_registry_config(settings.config_path)
+    apply_result = adapter.apply_vcf_private_registry_config(settings.config_path)
+    relocate_result = adapter.relocate_vcf_private_registry_bundles(settings.config_path)
+    now = utcnow()
+    job_result = {
+        "config_path": settings.config_path,
+        "hostname": settings.hostname,
+        "endpoint": context["vcf_registry_endpoint"],
+        "harbor_project": settings.harbor_project,
+        "storage_path": settings.storage_path,
+        "bundle_count": len([bundle for bundle in bundles if bundle.enabled]),
+        "dry_run": apply_result.dry_run,
+        "commands": [validate_result.command, apply_result.command, relocate_result.command],
+        "harbor_config_preview": context["vcf_registry_harbor_config_preview"],
+        "relocation_preview": context["vcf_registry_relocation_preview"],
+        "validation_warnings": context["vcf_registry_validation_warnings"],
+    }
+    succeeded = validate_result.returncode == 0 and apply_result.returncode == 0 and relocate_result.returncode == 0
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="vcf-private-registry-apply",
+        status=JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
+        created_by=identity.username,
+        started_at=now,
+        finished_at=now,
+        progress_percent=100,
+        result=json.dumps(job_result, indent=2),
+        error=None if succeeded else "VCF private registry apply adapter reported a failure.",
+    )
+    db.add(job)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="create_vcf_private_registry_apply_task",
+        resource_type="job",
+        resource_id=job.id,
+        detail=" ".join(validate_result.command + [";"] + apply_result.command + [";"] + relocate_result.command),
+        success=job.status == JobStatus.SUCCEEDED.value,
+    )
+    return render(
+        request,
+        "vcf_private_registry.html",
+        {
+            "identity": identity,
+            **vcf_private_registry_context(db),
+            "apply_task": job,
+            "apply_task_dry_run": apply_result.dry_run,
+        },
+    )
+
+
 @router.get("/vcf-backups", response_class=HTMLResponse, response_model=None)
 def vcf_backups_page(
     request: Request,
@@ -3347,7 +3813,6 @@ def update_vcf_backup_settings_from_ui(
     allow_password_auth: str | None = Form(None),
     allow_public_key_auth: str | None = Form(None),
     max_sessions: int = Form(4),
-    config_path: str = Form("/etc/labfoundry/ssh/sshd_config.d/labfoundry-vcf-backups.conf"),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -3371,7 +3836,7 @@ def update_vcf_backup_settings_from_ui(
     settings.allow_password_auth = allow_password_auth == "on"
     settings.allow_public_key_auth = allow_public_key_auth == "on"
     settings.max_sessions = max_sessions
-    settings.config_path = config_path.strip() or "/etc/labfoundry/ssh/sshd_config.d/labfoundry-vcf-backups.conf"
+    settings.config_path = "/etc/labfoundry/ssh/sshd_config.d/labfoundry-vcf-backups.conf"
     settings.updated_at = utcnow()
     db.commit()
     record_audit(db, actor=identity.username, action="update_vcf_backup_settings", resource_type="vcf_backups", resource_id=str(settings.id))

@@ -308,6 +308,7 @@
           </datalist>
         </div>
         <label><span class="field-label"><span>Upstream servers</span><button class="help-icon" type="button" data-help="External DNS resolvers used when a name is not served by LabFoundry records. Enter one server per line.">i</button></span><textarea name="upstream_servers" rows="3">{{ upstream_servers }}</textarea></label>
+        <label><span class="field-label"><span>Conditional forwarders</span><button class="help-icon" type="button" data-help="Routes a DNS domain and its subdomains to specific upstream resolvers. Use one domain=server1,server2 entry per line; global upstream servers still handle everything else.">i</button></span><textarea name="conditional_forwarders" rows="3" placeholder="sddc.internal=192.168.10.10,192.168.10.11">{{ conditional_forwarders }}</textarea></label>
         <label><span class="field-label"><span>Cache size</span><button class="help-icon" type="button" data-help="Maximum number of DNS responses dnsmasq keeps in memory to speed repeated lookups.">i</button></span><input type="number" name="cache_size" min="0" value="{{ dns_settings.cache_size }}"></label>
         <label class="switch-field"><span class="field-label"><span>Expand hosts</span><button class="help-icon" type="button" data-help="Adds the primary managed domain to simple hostnames so short names can resolve inside the lab.">i</button></span><input class="switch-input" type="checkbox" name="expand_hosts" {{ "checked" if dns_settings.expand_hosts else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>Authoritative</span><button class="help-icon" type="button" data-help="Marks LabFoundry dnsmasq as authoritative for this lab network's local DNS/DHCP data.">i</button></span><input class="switch-input" type="checkbox" name="authoritative" {{ "checked" if dns_settings.authoritative else "" }}><span class="switch-track" aria-hidden="true"></span></label>
@@ -338,36 +339,37 @@
       {% endif %}
     </div>
 
-    <div class="panel">
+    <div class="panel" data-dns-validation-panel>
       <div class="panel-head">
         <h2>Validation</h2>
-        <span class="status-pill {{ 'good' if not validation_errors else 'warn' }}">{{ "valid" if not validation_errors else "needs attention" }}</span>
+        <span class="status-pill {{ 'good' if not validation_errors else 'warn' }}" data-dns-validation-status>{{ "valid" if not validation_errors else "needs attention" }}</span>
       </div>
+      <div class="alert error {{ 'hidden' if not validation_errors else '' }}" data-dns-validation-errors>
       {% if validation_errors %}
-        <div class="alert error">
           {% for error in validation_errors %}
             <div>{{ error }}</div>
           {% endfor %}
-        </div>
       {% endif %}
+      </div>
+      <div class="alert warning {{ 'hidden' if not dns_warnings else '' }}" data-dns-validation-warnings>
       {% if dns_warnings %}
-        <div class="alert warning">
           {% for warning in dns_warnings %}
             <div>{{ warning }}</div>
           {% endfor %}
-        </div>
       {% endif %}
-      {% if not validation_errors %}
-        {% if not dns_warnings %}
-          <p class="muted">The desired DNS/DHCP state passes LabFoundry validation. Host validation still runs through <code>dnsmasq --test</code> on the appliance.</p>
-        {% else %}
-          <p class="muted">The desired DNS/DHCP state is valid, but review the warning before using this domain with VCF.</p>
+      </div>
+      <p class="muted" data-dns-validation-message>
+        {% if not validation_errors %}
+          {% if not dns_warnings %}
+            The desired DNS/DHCP state passes LabFoundry validation. Host validation still runs through <code>dnsmasq --test</code> on the appliance.
+          {% else %}
+            The desired DNS/DHCP state is valid, but review the warning before using this domain with VCF.
+          {% endif %}
         {% endif %}
-      {% else %}
-      {% endif %}
+      </p>
       <div class="terminal-note">
-        <strong>{{ dns_settings.config_path }}</strong>
-        <code>{{ config_preview }}</code>
+        <strong data-dns-config-path>{{ dns_settings.config_path }}</strong>
+        <code data-dns-config-preview>{{ config_preview }}</code>
       </div>
     </div>
   </aside>

@@ -3421,6 +3421,72 @@ function initializeAutosaveForms() {
   });
 }
 
+function updateDnsValidation(payload = {}) {
+  const validationPanel = document.querySelector("[data-dns-validation-panel]");
+  if (!(validationPanel instanceof HTMLElement)) {
+    return;
+  }
+  const errors = Array.isArray(payload.validation_errors) ? payload.validation_errors : [];
+  const warnings = Array.isArray(payload.validation_warnings) ? payload.validation_warnings : [];
+  const valid = payload.valid !== undefined ? Boolean(payload.valid) : errors.length === 0;
+  const status = validationPanel.querySelector("[data-dns-validation-status]");
+  if (status instanceof HTMLElement) {
+    status.textContent = valid ? "valid" : "needs attention";
+    status.classList.toggle("good", valid);
+    status.classList.toggle("warn", !valid);
+  }
+  const errorList = validationPanel.querySelector("[data-dns-validation-errors]");
+  if (errorList instanceof HTMLElement) {
+    errorList.innerHTML = "";
+    errors.forEach((error) => {
+      const item = document.createElement("div");
+      item.textContent = error;
+      errorList.append(item);
+    });
+    errorList.classList.toggle("hidden", errors.length === 0);
+  }
+  const warningList = validationPanel.querySelector("[data-dns-validation-warnings]");
+  if (warningList instanceof HTMLElement) {
+    warningList.innerHTML = "";
+    warnings.forEach((warning) => {
+      const item = document.createElement("div");
+      item.textContent = warning;
+      warningList.append(item);
+    });
+    warningList.classList.toggle("hidden", warnings.length === 0);
+  }
+  const message = validationPanel.querySelector("[data-dns-validation-message]");
+  if (message instanceof HTMLElement) {
+    if (!valid) {
+      message.textContent = "";
+    } else if (warnings.length) {
+      message.textContent = "The desired DNS/DHCP state is valid, but review the warning before using this domain with VCF.";
+    } else {
+      message.innerHTML =
+        "The desired DNS/DHCP state passes LabFoundry validation. Host validation still runs through <code>dnsmasq --test</code> on the appliance.";
+    }
+  }
+  const configPath = validationPanel.querySelector("[data-dns-config-path]");
+  if (configPath instanceof HTMLElement && typeof payload.config_path === "string") {
+    configPath.textContent = payload.config_path;
+  }
+  const configPreview = validationPanel.querySelector("[data-dns-config-preview]");
+  if (configPreview instanceof HTMLElement && typeof payload.config_preview === "string") {
+    configPreview.textContent = payload.config_preview;
+  }
+}
+
+function initializeDnsSettings() {
+  document.querySelectorAll('form[action="/dns/settings"]').forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      updateDnsValidation(event.detail || {});
+    });
+  });
+}
+
 function updateVcfBackupDerivedAddress(form, payload = {}) {
   const interfaceSelect = form.querySelector('select[name="listen_interface"]');
   const portInput = form.querySelector('input[name="port"]');
@@ -3565,6 +3631,361 @@ function initializeVcfBackupSettings() {
       updateVcfBackupValidation(payload);
     });
     refresh();
+  });
+}
+
+function showVcfRegistryMessage(message, type = "error") {
+  const element = document.getElementById("vcf-registry-bundle-error");
+  if (!element) {
+    return;
+  }
+  element.textContent = message;
+  element.classList.toggle("error", type === "error");
+  element.classList.toggle("success", type === "success");
+  element.classList.remove("hidden");
+}
+
+function newVcfRegistryBundleRow() {
+  return {
+    id: "__new__",
+    name: "",
+    source_reference: "",
+    target_reference: "",
+    enabled: true,
+    status: "planned",
+    notes: "",
+    is_new: true,
+  };
+}
+
+function hasRequiredVcfRegistryBundleFields(data) {
+  return Boolean((data.name || "").trim() && (data.source_reference || "").trim());
+}
+
+async function postVcfRegistryBundleAction(url, data, csrf) {
+  const body = new FormData();
+  body.set("csrf", csrf);
+  for (const [key, value] of Object.entries(data)) {
+    if (["id", "is_new", "created_at", "updated_at"].includes(key)) {
+      continue;
+    }
+    if (key === "enabled") {
+      if (value) {
+        body.set(key, "on");
+      }
+      continue;
+    }
+    body.set(key, value ?? "");
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    body,
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    const plainText = text.trim().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    throw new Error(plainText || "The Supervisor Service bundle could not be saved.");
+  }
+  window.location.reload();
+}
+
+async function autoSaveVcfRegistryBundle(cell, csrf) {
+  const row = cell.getRow();
+  const data = row.getData();
+  if (data.is_new && !hasRequiredVcfRegistryBundleFields(data)) {
+    return;
+  }
+  const url = data.is_new ? "/vcf-private-registry/bundles" : `/vcf-private-registry/bundles/${data.id}/edit`;
+  try {
+    await postVcfRegistryBundleAction(url, data, csrf);
+  } catch (error) {
+    showVcfRegistryMessage(error instanceof Error ? error.message : "The Supervisor Service bundle could not be saved.");
+  }
+}
+
+async function deleteVcfRegistryBundleFromMenu(row, csrf) {
+  const data = row.getData();
+  if (data.is_new) {
+    row.getTable().deleteRow(data.id);
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `Delete ${data.name || "Supervisor Service"} bundle?`,
+    message: "This removes the Supervisor Service bundle from LabFoundry desired state. It does not remove images from Harbor until a future appliance task explicitly does so.",
+    label: "Delete",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await postVcfRegistryBundleAction(`/vcf-private-registry/bundles/${data.id}/delete`, data, csrf);
+  } catch (error) {
+    showVcfRegistryMessage(error instanceof Error ? error.message : "The Supervisor Service bundle could not be deleted.");
+  }
+}
+
+function initializeVcfRegistryBundlesTable() {
+  const tableElement = document.getElementById("vcf-registry-bundles-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  if (typeof Tabulator === "undefined") {
+    showVcfRegistryMessage("Tabulator did not load. Showing the fallback table.");
+    return;
+  }
+  const csrf = tableElement.dataset.csrf || "";
+  const rows = [...JSON.parse(tableElement.dataset.bundles || "[]"), newVcfRegistryBundleRow()];
+  try {
+    new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "360px",
+      rowHeight: 28,
+      placeholder: "No Supervisor Service bundles configured.",
+      reactiveData: false,
+      rowContextMenu: [
+        {
+          label: "Delete bundle",
+          action: (_event, row) => deleteVcfRegistryBundleFromMenu(row, csrf),
+        },
+      ],
+      columns: [
+        {
+          title: "Name",
+          field: "name",
+          editor: "input",
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add bundle here"),
+          minWidth: 170,
+          cellEdited: (cell) => autoSaveVcfRegistryBundle(cell, csrf),
+        },
+        {
+          title: "Source reference",
+          field: "source_reference",
+          editor: "input",
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "source bundle or image..."),
+          minWidth: 260,
+          cellEdited: (cell) => autoSaveVcfRegistryBundle(cell, csrf),
+        },
+        {
+          title: "Target reference",
+          field: "target_reference",
+          editor: "input",
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "derived if blank..."),
+          minWidth: 260,
+          cellEdited: (cell) => autoSaveVcfRegistryBundle(cell, csrf),
+        },
+        {
+          title: "Status",
+          field: "status",
+          editor: "list",
+          editorParams: { values: { planned: "planned", ready: "ready", relocated: "relocated", blocked: "blocked" } },
+          width: 120,
+          cellEdited: (cell) => autoSaveVcfRegistryBundle(cell, csrf),
+        },
+        {
+          title: "Enabled",
+          field: "enabled",
+          formatter: "tickCross",
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 95,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveVcfRegistryBundle(cell, csrf),
+        },
+        {
+          title: "Notes",
+          field: "notes",
+          editor: "input",
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "optional note..."),
+          minWidth: 180,
+          cellEdited: (cell) => autoSaveVcfRegistryBundle(cell, csrf),
+        },
+      ],
+      rowFormatter: (row) => {
+        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+      },
+    });
+    if (fallback) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    showVcfRegistryMessage(error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
+  }
+}
+
+function updateVcfRegistrySummary(form, payload = {}) {
+  const interfaceSelect = form.querySelector('select[name="listen_interface"]');
+  const portInput = form.querySelector('input[name="port"]');
+  const hostnameInput = form.querySelector('input[name="hostname"]');
+  const projectInput = form.querySelector('input[name="harbor_project"]');
+  if (!(interfaceSelect instanceof HTMLSelectElement)) {
+    return;
+  }
+  const selectedOption = interfaceSelect.selectedOptions[0];
+  const address = payload.listen_address || selectedOption?.dataset.address || "";
+  const interfaceName = payload.listen_interface || interfaceSelect.value || "";
+  const port = payload.port || portInput?.value || "443";
+  const hostname = payload.hostname || hostnameInput?.value || "";
+  const endpointValue = payload.endpoint || (port === "443" || port === 443 ? hostname : `${hostname}:${port}`);
+  const derivedAddress = document.querySelector("[data-vcf-registry-derived-address]");
+  const endpoint = document.querySelector("[data-vcf-registry-endpoint]");
+  const interfaceLabel = document.querySelector("[data-vcf-registry-interface]");
+  const project = document.querySelector("[data-vcf-registry-project]");
+  const robot = document.querySelector("[data-vcf-registry-robot]");
+  const storagePaths = document.querySelectorAll("[data-vcf-registry-storage]");
+  const caBundleSource = document.querySelector("[data-vcf-registry-ca-bundle-source]");
+  const caBundlePath = document.querySelector("[data-vcf-registry-ca-bundle-path]");
+  if (derivedAddress instanceof HTMLElement) {
+    derivedAddress.textContent = address || "no interface IP";
+  }
+  if (endpoint instanceof HTMLElement) {
+    endpoint.textContent = endpointValue || "registry hostname required";
+  }
+  if (interfaceLabel instanceof HTMLElement) {
+    interfaceLabel.textContent = `${interfaceName} / ${address || "no interface IP"}`;
+  }
+  if (project instanceof HTMLElement) {
+    project.textContent = payload.harbor_project || projectInput?.value || "";
+  }
+  if (robot instanceof HTMLElement && payload.robot_account !== undefined) {
+    robot.textContent = payload.robot_account || "";
+  }
+  if (payload.storage_path) {
+    storagePaths.forEach((storagePath) => {
+      if (storagePath instanceof HTMLElement) {
+        storagePath.textContent = payload.storage_path;
+      }
+    });
+  }
+  if (caBundleSource instanceof HTMLElement && payload.ca_bundle_source_label !== undefined) {
+    const uploadedName = payload.ca_bundle_uploaded_name || "not uploaded";
+    const sourceText = `${payload.ca_bundle_source === "uploaded" ? uploadedName : payload.ca_bundle_source_label} / `;
+    if (caBundleSource.firstChild) {
+      caBundleSource.firstChild.textContent = sourceText;
+    } else {
+      caBundleSource.prepend(document.createTextNode(sourceText));
+    }
+  }
+  if (caBundlePath instanceof HTMLElement && payload.ca_bundle_path) {
+    caBundlePath.textContent = payload.ca_bundle_path;
+  }
+}
+
+function updateVcfRegistryValidation(payload = {}) {
+  const status = document.querySelector("[data-vcf-registry-validation-status]");
+  const validationPanel = status?.closest(".panel");
+  const applyButton = document.querySelector("[data-vcf-registry-apply-button]");
+  const configPath = document.querySelector("[data-vcf-registry-config-path]");
+  const harborPreview = document.querySelector("[data-vcf-registry-harbor-preview]");
+  const relocationPreview = document.querySelector("[data-vcf-registry-relocation-preview]");
+  const errors = Array.isArray(payload.validation_errors) ? payload.validation_errors : [];
+  const warnings = Array.isArray(payload.validation_warnings) ? payload.validation_warnings : [];
+  if (status instanceof HTMLElement && payload.valid !== undefined) {
+    status.textContent = payload.valid ? "valid" : "needs attention";
+    status.classList.toggle("good", Boolean(payload.valid));
+    status.classList.toggle("warn", !payload.valid);
+  }
+  if (applyButton instanceof HTMLButtonElement && payload.valid !== undefined) {
+    applyButton.disabled = !payload.valid;
+  }
+  if (configPath instanceof HTMLElement && payload.config_path) {
+    configPath.textContent = payload.config_path;
+  }
+  if (harborPreview instanceof HTMLElement && payload.harbor_config_preview !== undefined) {
+    harborPreview.textContent = payload.harbor_config_preview;
+  }
+  if (relocationPreview instanceof HTMLElement && payload.relocation_preview !== undefined) {
+    relocationPreview.textContent = payload.relocation_preview;
+  }
+  if (validationPanel instanceof HTMLElement && payload.valid !== undefined) {
+    const firstTerminalNote = validationPanel.querySelector(".terminal-note");
+    let errorList = validationPanel.querySelector("[data-vcf-registry-validation-errors]");
+    let message = validationPanel.querySelector("[data-vcf-registry-validation-message]");
+    let warningList = validationPanel.querySelector("[data-vcf-registry-validation-warnings]");
+    if (payload.valid) {
+      if (errorList) {
+        errorList.remove();
+      }
+      if (!(message instanceof HTMLElement)) {
+        message = document.createElement("p");
+        message.className = "muted";
+        message.setAttribute("data-vcf-registry-validation-message", "");
+        validationPanel.insertBefore(message, firstTerminalNote);
+      }
+      message.textContent = "The desired VCF private registry state passes LabFoundry validation. Appliance validation still runs through the allowlisted Harbor helper before apply.";
+    } else {
+      if (message) {
+        message.remove();
+      }
+      if (!(errorList instanceof HTMLElement)) {
+        errorList = document.createElement("ul");
+        errorList.className = "error-list";
+        errorList.setAttribute("data-vcf-registry-validation-errors", "");
+        validationPanel.insertBefore(errorList, firstTerminalNote);
+      }
+      errorList.innerHTML = "";
+      errors.forEach((error) => {
+        const item = document.createElement("li");
+        item.textContent = error;
+        errorList.appendChild(item);
+      });
+    }
+    if (!(warningList instanceof HTMLElement)) {
+      warningList = document.createElement("ul");
+      warningList.className = "warning-list";
+      warningList.setAttribute("data-vcf-registry-validation-warnings", "");
+      validationPanel.insertBefore(warningList, firstTerminalNote);
+    }
+    warningList.innerHTML = "";
+    warnings.forEach((warning) => {
+      const item = document.createElement("li");
+      item.textContent = warning;
+      warningList.appendChild(item);
+    });
+    warningList.classList.toggle("hidden", warnings.length === 0);
+  }
+}
+
+function initializeVcfRegistrySettings() {
+  document.querySelectorAll("[data-vcf-registry-settings]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const interfaceSelect = form.querySelector('select[name="listen_interface"]');
+    const portInput = form.querySelector('input[name="port"]');
+    const hostnameInput = form.querySelector('input[name="hostname"]');
+    const projectInput = form.querySelector('input[name="harbor_project"]');
+    const refresh = () => updateVcfRegistrySummary(form);
+    [interfaceSelect, portInput, hostnameInput, projectInput].forEach((input) => {
+      if (input instanceof HTMLElement) {
+        input.addEventListener("input", refresh);
+        input.addEventListener("change", refresh);
+      }
+    });
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      const payload = event.detail || {};
+      updateVcfRegistrySummary(form, payload);
+      updateVcfRegistryValidation(payload);
+    });
+    refresh();
+  });
+}
+
+function initializeFileUploadControls() {
+  document.querySelectorAll("[data-file-upload-input]").forEach((input) => {
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+    const control = input.closest(".file-upload-control");
+    const fileName = control?.querySelector("[data-file-upload-name]");
+    input.addEventListener("change", () => {
+      if (fileName instanceof HTMLElement) {
+        fileName.textContent = input.files?.[0]?.name || "PEM, CRT, or CER file";
+      }
+    });
   });
 }
 
@@ -3750,6 +4171,7 @@ document.addEventListener("DOMContentLoaded", initializeCaProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeCaCertificatesTable);
 document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
+document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeServicesTable);
 document.addEventListener("DOMContentLoaded", initializeUsersTable);
@@ -3762,6 +4184,9 @@ document.addEventListener("DOMContentLoaded", initializeHostsFileEditor);
 document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
 document.addEventListener("DOMContentLoaded", initializeAutosaveForms);
+document.addEventListener("DOMContentLoaded", initializeDnsSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
+document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
+document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);

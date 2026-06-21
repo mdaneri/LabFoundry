@@ -66,6 +66,16 @@
 - The appliance backup storage is a fixed appliance volume mount, currently `/mnt/labfoundry-vcf-backups`; do not make this a routine UI-configurable field.
 - The VCF Backup config preview should make the host-side volume and VCF remote directory clear, and OpenSSH should use `ForceCommand internal-sftp -d /backups` when chroot is enabled.
 
+## VCF Private Registry
+
+- VCF Private Registry is a Harbor-backed appliance service for staging VCF Supervisor Service bundles in a private OCI registry.
+- The registry listen targets must follow the same service binding rule as VCF Backups: access physical interfaces with IPs and VLAN interfaces with IPs; exclude trunk physical interfaces.
+- The default registry hostname is `registry.labfoundry.internal`, and the default Harbor project is `vcf-supervisor-services`.
+- The registry storage path is a fixed appliance volume mount, currently `/mnt/labfoundry-vcf-registry`; do not make this a routine UI-configurable field.
+- The registry CA bundle should come from the local LabFoundry CA when CA is enabled. When the local CA is disabled, require an uploaded PEM CA bundle and stage it through the appliance apply task; do not expose a routine free-form CA bundle path editor.
+- Bundle relocation should be modeled as desired state and previewed as `imgpkg copy` command intent. Development apply tasks must record Harbor and relocation command intent through adapters instead of pushing images or mutating host services directly.
+- Do not render Harbor admin passwords, robot account tokens, or registry credentials in config previews, job results, logs, widgets, or final responses.
+
 ## Database And Verification
 
 - This project is still in MVP scaffold mode. When model/schema changes make the development SQLite database stale, prefer deleting/reseeding `data/labfoundry.db` over adding migrations, unless the user explicitly asks for migrations.

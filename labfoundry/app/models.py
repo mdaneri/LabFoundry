@@ -418,6 +418,40 @@ class VcfBackupSettings(Base):
     sftp_user: Mapped[User | None] = relationship()
 
 
+class VcfPrivateRegistrySettings(Base):
+    __tablename__ = "vcf_private_registry_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    hostname: Mapped[str] = mapped_column(String(180), default="registry.labfoundry.internal")
+    listen_interface: Mapped[str] = mapped_column(String(80), default="eth2")
+    listen_address: Mapped[str] = mapped_column(String(64), default="192.168.50.1")
+    port: Mapped[int] = mapped_column(Integer, default=443)
+    harbor_project: Mapped[str] = mapped_column(String(120), default="vcf-supervisor-services")
+    storage_path: Mapped[str] = mapped_column(String(240), default="/mnt/labfoundry-vcf-registry")
+    config_path: Mapped[str] = mapped_column(String(240), default="/etc/labfoundry/harbor/harbor.yml")
+    ca_bundle_path: Mapped[str] = mapped_column(String(240), default="/etc/labfoundry/ca/ca-bundle.pem")
+    server_certificate: Mapped[str] = mapped_column(String(180), default="registry.labfoundry.internal")
+    robot_account: Mapped[str] = mapped_column(String(120), default="robot$vcf-supervisor-services")
+    relocation_dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class VcfRegistryBundle(Base):
+    __tablename__ = "vcf_registry_bundles"
+    __table_args__ = (UniqueConstraint("name", name="uq_vcf_registry_bundle_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    source_reference: Mapped[str] = mapped_column(String(500), default="")
+    target_reference: Mapped[str] = mapped_column(String(500), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(40), default="planned")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Job(Base):
     __tablename__ = "jobs"
 

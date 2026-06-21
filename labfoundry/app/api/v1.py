@@ -15,6 +15,7 @@ from labfoundry.app.database import get_db
 from labfoundry.app.models import (
     ApiToken,
     AuditEvent,
+    CaSettings,
     DhcpOption,
     DhcpReservation,
     DhcpScope,
@@ -27,8 +28,11 @@ from labfoundry.app.models import (
     PhysicalInterface,
     Route,
     ServiceState,
+    Setting,
     User,
     VcfBackupSettings,
+    VcfPrivateRegistrySettings,
+    VcfRegistryBundle,
     VlanInterface,
     WanPolicy,
     utcnow,
@@ -72,6 +76,7 @@ from labfoundry.app.schemas import (
     ServiceStateResponse,
     SettingsResponse,
     VcfBackupStatusResponse,
+    VcfPrivateRegistryStatusResponse,
     VlanCreate,
     VlanResponse,
     WanPolicyCreate,
@@ -87,9 +92,11 @@ from labfoundry.app.security import (
     scopes_from_string,
 )
 from labfoundry.app.services.dnsmasq import (
+    DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
     dns_domain_warnings,
     dns_settings_to_dict,
     dnsmasq_test_command,
+    join_conditional_forwarders,
     join_domains,
     join_servers,
     parse_hosts_records,
@@ -112,6 +119,11 @@ from labfoundry.app.services.firewall import (
 )
 from labfoundry.app.services.networking import normalize_interface_mode
 from labfoundry.app.services.vcf_backups import vcf_backup_settings_to_dict
+from labfoundry.app.services.vcf_private_registry import (
+    VCF_REGISTRY_UPLOADED_CA_BUNDLE_PEM_KEY,
+    validate_vcf_registry_state,
+    vcf_registry_settings_to_dict,
+)
 from labfoundry.app.token_service import create_token_for_user, token_to_response
 
 router = APIRouter(prefix="/api/v1")
@@ -123,6 +135,7 @@ APPROVED_SERVICES = {
     "dhcp",
     "kms",
     "repository",
+    "vcf-private-registry",
     "vcf-backups",
     "ca",
     "ldap",
@@ -184,6 +197,24 @@ def get_vcf_backup_settings(db: Session) -> VcfBackupSettings:
         db.commit()
         db.refresh(settings)
     return settings
+
+
+def get_vcf_private_registry_settings(db: Session) -> VcfPrivateRegistrySettings:
+    settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one_or_none()
+    if settings is None:
+        settings = VcfPrivateRegistrySettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
+def vcf_registry_ca_bundle_status(db: Session) -> tuple[str, bool]:
+    ca_settings = db.execute(select(CaSettings)).scalar_one_or_none()
+    if ca_settings is not None and ca_settings.enabled:
+        return "local-ca", True
+    uploaded = db.execute(select(Setting).where(Setting.key == VCF_REGISTRY_UPLOADED_CA_BUNDLE_PEM_KEY)).scalar_one_or_none()
+    return "uploaded", bool(uploaded and uploaded.value.strip())
 
 
 def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[FirewallRule], str, list[str]]:
@@ -742,8 +773,26 @@ def get_dhcp_settings_row(db: Session) -> DhcpSettings:
     return settings
 
 
+def setting_value(db: Session, key: str) -> str:
+    setting = db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none()
+    return setting.value if setting else ""
+
+
+def set_setting_value(db: Session, key: str, value: str) -> Setting:
+    setting = db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none()
+    if setting is None:
+        setting = Setting(key=key, value=value)
+        db.add(setting)
+    else:
+        setting.value = value
+        setting.updated_at = utcnow()
+    db.flush()
+    return setting
+
+
 def get_dnsmasq_state(db: Session) -> tuple[DnsSettings, list[DnsRecord], DhcpSettings, list[DhcpScope], list[DhcpOption], list[DhcpReservation], str]:
     dns_settings = get_dns_settings_row(db)
+    conditional_forwarders = setting_value(db, DNS_CONDITIONAL_FORWARDERS_SETTING_KEY)
     dns_records = db.execute(select(DnsRecord).order_by(DnsRecord.hostname)).scalars().all()
     dhcp_settings = get_dhcp_settings_row(db)
     dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
@@ -756,6 +805,7 @@ def get_dnsmasq_state(db: Session) -> tuple[DnsSettings, list[DnsRecord], DhcpSe
         dhcp_reservations=dhcp_reservations,
         dhcp_scopes=dhcp_scopes,
         dhcp_options=dhcp_options,
+        conditional_forwarders=conditional_forwarders,
     )
     return dns_settings, dns_records, dhcp_settings, dhcp_scopes, dhcp_options, dhcp_reservations, config_preview
 
@@ -806,7 +856,12 @@ def get_dns_status(identity: Annotated[Identity, Depends(require_scope("read:dns
 
 @router.get("/dns/settings", response_model=DnsSettingsResponse, tags=["DNS"], operation_id="getDnsSettings")
 def get_dns_settings(identity: Annotated[Identity, Depends(require_scope("read:dns"))], db: Session = Depends(get_db)) -> DnsSettingsResponse:
-    return DnsSettingsResponse(**dns_settings_to_dict(get_dns_settings_row(db)))
+    return DnsSettingsResponse(
+        **dns_settings_to_dict(
+            get_dns_settings_row(db),
+            setting_value(db, DNS_CONDITIONAL_FORWARDERS_SETTING_KEY),
+        )
+    )
 
 
 @router.patch("/dns/settings", response_model=DnsSettingsResponse, tags=["DNS"], operation_id="updateDnsSettings")
@@ -819,6 +874,9 @@ def update_dns_settings(
     for key, value in payload.model_dump().items():
         if key == "upstream_servers":
             value = join_servers(value)
+        elif key == "conditional_forwarders":
+            set_setting_value(db, DNS_CONDITIONAL_FORWARDERS_SETTING_KEY, join_conditional_forwarders(value))
+            continue
         elif key == "domain":
             value = join_domains(split_domains(value))
         setattr(settings, key, value)
@@ -826,7 +884,12 @@ def update_dns_settings(
     db.commit()
     db.refresh(settings)
     record_audit(db, actor=identity.username, action="update_dns_settings", resource_type="dns", resource_id=str(settings.id))
-    return DnsSettingsResponse(**dns_settings_to_dict(settings))
+    return DnsSettingsResponse(
+        **dns_settings_to_dict(
+            settings,
+            setting_value(db, DNS_CONDITIONAL_FORWARDERS_SETTING_KEY),
+        )
+    )
 
 
 @router.get("/dns/records", response_model=list[DnsRecordResponse], tags=["DNS"], operation_id="listDnsRecords")
@@ -977,7 +1040,8 @@ def delete_dns_record(
 
 def dnsmasq_validation_response(db: Session) -> ConfigValidationResponse:
     dns_settings, dns_records, dhcp_settings, dhcp_scopes, dhcp_options, dhcp_reservations, config_preview = get_dnsmasq_state(db)
-    errors = validate_dns_settings(dns_settings, dns_records) + validate_dhcp_settings(
+    conditional_forwarders = setting_value(db, DNS_CONDITIONAL_FORWARDERS_SETTING_KEY)
+    errors = validate_dns_settings(dns_settings, dns_records, conditional_forwarders) + validate_dhcp_settings(
         dhcp_settings,
         dhcp_reservations,
         dhcp_scopes,
@@ -1560,6 +1624,44 @@ def get_vcf_backups_status(
         storage_path=payload["storage_path"],
         remote_directory=payload["remote_directory"],
         config_path=payload["config_path"],
+        dry_run=get_settings().dry_run_system_adapters,
+    )
+
+
+@router.get(
+    "/vcf-private-registry/status",
+    response_model=VcfPrivateRegistryStatusResponse,
+    tags=["VCF Private Registry"],
+    operation_id="getVcfPrivateRegistryStatus",
+)
+def get_vcf_private_registry_status(
+    identity: Annotated[Identity, Depends(require_scope("read:vcf-registry"))],
+    db: Session = Depends(get_db),
+) -> VcfPrivateRegistryStatusResponse:
+    settings = get_vcf_private_registry_settings(db)
+    bundles = db.execute(select(VcfRegistryBundle).order_by(VcfRegistryBundle.name)).scalars().all()
+    row = db.execute(select(ServiceState).where(ServiceState.service == "vcf-private-registry")).scalar_one_or_none()
+    ca_bundle_source, ca_bundle_available = vcf_registry_ca_bundle_status(db)
+    validation_errors, _warnings = validate_vcf_registry_state(
+        settings,
+        bundles,
+        ca_bundle_source=ca_bundle_source,
+        ca_bundle_available=ca_bundle_available,
+    )
+    payload = vcf_registry_settings_to_dict(settings)
+    return VcfPrivateRegistryStatusResponse(
+        enabled=settings.enabled,
+        service=ServiceStateResponse.model_validate(row) if row else None,
+        hostname=str(payload["hostname"]),
+        endpoint=str(payload["endpoint"]),
+        listen_interface=str(payload["listen_interface"]),
+        listen_address=str(payload["listen_address"]),
+        port=int(payload["port"]),
+        harbor_project=str(payload["harbor_project"]),
+        storage_path=str(payload["storage_path"]),
+        config_path=str(payload["config_path"]),
+        bundle_count=len([bundle for bundle in bundles if bundle.enabled]),
+        valid=not validation_errors,
         dry_run=get_settings().dry_run_system_adapters,
     )
 

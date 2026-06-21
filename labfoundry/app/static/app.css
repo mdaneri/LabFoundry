@@ -1012,7 +1012,7 @@ textarea {
   border-radius: 6px;
   padding: 7px 10px;
   color: #111827;
-  font-family: "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-family: inherit;
   font-size: 13px;
   font-weight: 400;
   line-height: 1.45;
@@ -1025,12 +1025,15 @@ textarea {
 
 .detail-panel input:not(.switch-input),
 .detail-panel select,
-.detail-panel textarea {
+.detail-panel textarea,
+[data-vcf-registry-settings] input:not(.switch-input),
+[data-vcf-registry-settings] select,
+[data-vcf-registry-settings] textarea {
   min-height: 36px;
   border-color: #d5dde8;
   color: #1f2937;
   font-family: "Aptos", "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 400;
   background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
   box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.055);
@@ -1042,14 +1045,20 @@ textarea {
 
 .detail-panel input:not(.switch-input):hover,
 .detail-panel select:hover,
-.detail-panel textarea:hover {
+.detail-panel textarea:hover,
+[data-vcf-registry-settings] input:not(.switch-input):hover,
+[data-vcf-registry-settings] select:hover,
+[data-vcf-registry-settings] textarea:hover {
   border-color: #b7c4d6;
   background: #ffffff;
 }
 
 .detail-panel input:not(.switch-input):focus,
 .detail-panel select:focus,
-.detail-panel textarea:focus {
+.detail-panel textarea:focus,
+[data-vcf-registry-settings] input:not(.switch-input):focus,
+[data-vcf-registry-settings] select:focus,
+[data-vcf-registry-settings] textarea:focus {
   border-color: #3b82f6;
   background: #ffffff;
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12), inset 0 1px 1px rgba(15, 23, 42, 0.025);
@@ -1085,6 +1094,84 @@ input[type="checkbox"] {
   min-width: 18px;
   min-height: 18px;
   padding: 0;
+}
+
+.file-upload-control {
+  position: relative;
+  display: block;
+}
+
+.file-upload-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.file-upload-surface {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  border: 1px solid #d5dde8;
+  border-radius: 6px;
+  padding: 5px 9px;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  color: #1f2937;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.055);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
+}
+
+.file-upload-control:hover .file-upload-surface,
+.file-upload-input:focus-visible + .file-upload-surface {
+  border-color: #3b82f6;
+  background: #ffffff;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12), inset 0 1px 1px rgba(15, 23, 42, 0.025);
+}
+
+.file-upload-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: #dbeafe;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.file-upload-icon svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.file-upload-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.file-upload-copy strong {
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.file-upload-copy small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .switch-field {
@@ -1337,7 +1424,7 @@ input[type="checkbox"] {
   min-width: 92px;
   border: 0;
   padding: 5px 4px;
-  font-family: "Aptos", "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif;
+  font-family: inherit;
   font-size: 13px;
   font-weight: 400;
   background: transparent;
@@ -1525,6 +1612,15 @@ textarea {
   margin: 0 0 12px;
   padding-left: 18px;
   color: var(--bad);
+  font-size: 13px;
+}
+
+.warning-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding-left: 18px;
+  color: #a16207;
   font-size: 13px;
 }
 

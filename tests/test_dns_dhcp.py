@@ -2,9 +2,11 @@ from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSe
 from labfoundry.app.services.dnsmasq import (
     dns_domain_warnings,
     dns_reverse_records,
+    join_conditional_forwarders,
     parse_dnsmasq_leases,
     parse_hosts_records,
     render_dnsmasq_config,
+    split_conditional_forwarders,
     validate_dns_record,
     validate_dhcp_settings,
     validate_dns_settings,
@@ -49,6 +51,7 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
             DhcpReservation(hostname="client1", mac_address="02:15:5d:00:20:20", ip_address="192.168.50.120")
         ],
         dhcp_options=[DhcpOption(option_code="ntp-server", value="192.168.50.1")],
+        conditional_forwarders="sddc.internal=192.168.10.10\ncorp.example=192.168.20.10#5353",
     )
 
     assert "interface=eth1" in config
@@ -64,8 +67,32 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
     assert "host-record=app.labfoundry.internal,192.168.50.10" in config
     assert "host-record=ipv6.labfoundry.internal,2001:db8::10" in config
     assert "cname=www.labfoundry.internal,app.labfoundry.internal" in config
+    assert "server=/sddc.internal/192.168.10.10" in config
+    assert "server=/corp.example/192.168.20.10#5353" in config
     assert "ptr-record=" not in config
     assert "dhcp-host=02:15:5d:00:20:20,client1,192.168.50.120" in config
+
+
+def test_dns_conditional_forwarders_accept_multiple_servers_per_domain():
+    forwarders = split_conditional_forwarders("sddc.internal=192.168.10.10,192.168.10.11")
+
+    assert forwarders == [
+        {"domain": "sddc.internal", "server": "192.168.10.10"},
+        {"domain": "sddc.internal", "server": "192.168.10.11"},
+    ]
+    assert join_conditional_forwarders(forwarders) == "sddc.internal=192.168.10.10,192.168.10.11"
+
+    config = render_dnsmasq_config(
+        dns_settings=DnsSettings(domain="labfoundry.internal"),
+        dns_records=[],
+        dhcp_settings=DhcpSettings(enabled=False),
+        dhcp_reservations=[],
+        conditional_forwarders="sddc.internal=192.168.10.10,192.168.10.11",
+    )
+
+    assert "server=/sddc.internal/192.168.10.10" in config
+    assert "server=/sddc.internal/192.168.10.11" in config
+    assert "server=/sddc.internal/192.168.10.10,192.168.10.11" not in config
 
 
 def test_dnsmasq_renderer_only_marks_dhcp_authoritative_when_dhcp_enabled():
@@ -171,10 +198,12 @@ def test_dns_dhcp_validation_reports_bad_addresses():
         dns_server="192.168.60.1",
     )
 
-    errors = validate_dns_settings(dns_settings, []) + validate_dhcp_settings(dhcp_settings, [])
+    errors = validate_dns_settings(dns_settings, [], "sddc.internal=not-an-ip\nbad=192.168.1.10#70000") + validate_dhcp_settings(dhcp_settings, [])
 
     assert any("DNS listen address" in error for error in errors)
     assert any("upstream server" in error for error in errors)
+    assert any("conditional forwarder sddc.internal server" in error for error in errors)
+    assert any("conditional forwarder bad server port" in error for error in errors)
     assert any("range start" in error for error in errors)
     assert any("DNS server" in error for error in errors)
 
@@ -263,12 +292,23 @@ def test_dns_api_requires_scope_and_returns_config_preview(client):
     assert cname.status_code == 201, cname.text
     assert cname.json()["record_type"] == "CNAME"
 
+    forwarder_settings = client.patch(
+        "/api/v1/dns/settings",
+        headers={"Authorization": f"Bearer {dns_token}"},
+        json={"conditional_forwarders": [{"domain": "sddc.internal", "server": "192.168.10.10"}]},
+    )
+    assert forwarder_settings.status_code == 200
+    assert forwarder_settings.json()["conditional_forwarders"] == [
+        {"domain": "sddc.internal", "server": "192.168.10.10"}
+    ]
+
     validation = client.post("/api/v1/dns/validate", headers={"Authorization": f"Bearer {dns_token}"})
     assert validation.status_code == 200
     assert validation.json()["valid"] is True
     assert validation.json()["warnings"] == []
     assert "api.labfoundry.internal" in validation.json()["config_preview"]
     assert "cname=alias.labfoundry.internal,api.labfoundry.internal" in validation.json()["config_preview"]
+    assert "server=/sddc.internal/192.168.10.10" in validation.json()["config_preview"]
 
     settings = client.patch(
         "/api/v1/dns/settings",

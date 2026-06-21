@@ -4,7 +4,7 @@
 
 LabFoundry is a Linux-based, web-managed infrastructure appliance for homelabs, VMware Cloud Foundation labs, POCs, training environments, isolated network labs, and WAN simulation testing.
 
-The MVP is a safe runnable scaffold. It provides the FastAPI control plane, appliance-style web UI, local authentication, JWT bearer API tokens, audit logging, OpenAPI 3.1, dry-run system adapters, and Windows/Hyper-V script scaffolding. It does not apply real host networking, firewall, service, SFTP, repository, DNS, DHCP, CA, or KMS changes by default.
+The MVP is a safe runnable scaffold. It provides the FastAPI control plane, appliance-style web UI, local authentication, JWT bearer API tokens, audit logging, OpenAPI 3.1, dry-run system adapters, and Windows/Hyper-V script scaffolding. It does not apply real host networking, firewall, service, SFTP, registry, repository, DNS, DHCP, CA, or KMS changes by default.
 
 ## Development
 
@@ -62,6 +62,7 @@ The MVP follows these boundaries:
 - Service user: `labfoundry`
 - Default database: `data/labfoundry.db`
 - Repository target: `/srv/repository`
+- VCF private registry volume mount: `/mnt/labfoundry-vcf-registry`
 - VCF backup volume mount: `/mnt/labfoundry-vcf-backups`
 - VCF backup SFTP remote directory: `/backups`
 - System adapters default to dry-run mode.
@@ -189,6 +190,8 @@ read:kms
 write:kms
 read:repository
 write:repository
+read:vcf-registry
+write:vcf-registry
 read:vcf-backups
 write:vcf-backups
 read:services
