@@ -24,6 +24,30 @@ pip install -e ".[dev]"
 uvicorn labfoundry.app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
+Run from Windows PowerShell using the WSL development virtualenv:
+
+```powershell
+wsl -e sh -lc "cd /mnt/c/Users/m_dan/Documents/LabFoundry && /home/m_dan/.venvs/labfoundry/bin/python -m uvicorn labfoundry.app.main:app --host 127.0.0.1 --port 8000"
+```
+
+Run in the background from Windows PowerShell:
+
+```powershell
+wsl -e sh -lc "cd /mnt/c/Users/m_dan/Documents/LabFoundry && setsid -f /home/m_dan/.venvs/labfoundry/bin/python -m uvicorn labfoundry.app.main:app --host 127.0.0.1 --port 8000 >/tmp/labfoundry-uvicorn.log 2>&1"
+```
+
+View the background server log:
+
+```powershell
+wsl -e sh -lc "tail -f /tmp/labfoundry-uvicorn.log"
+```
+
+Stop the background server:
+
+```powershell
+wsl -e sh -lc "pkill -f 'uvicorn labfoundry.app.main:app'"
+```
+
 Development URL:
 
 ```text
