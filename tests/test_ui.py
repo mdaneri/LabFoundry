@@ -241,6 +241,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert dns.text.count('data-tag-option=') >= 4
     assert 'placeholder="Add interface..."' in dns.text
     assert 'placeholder="Add listen address..."' in dns.text
+    assert "eth1 - access / trunk" not in dns.text
     assert 'action="/dns/zones"' in dns.text
     assert 'action="/dns/zones/delete"' in dns.text
     assert "data-confirm-modal" in dns.text
@@ -337,6 +338,34 @@ def test_dns_and_dhcp_pages_render(client):
     assert "Save DHCP" not in dhcp.text
     assert "192.168.50.100" in dhcp.text
     assert "192.168.50.1" in dhcp.text
+
+
+def test_dns_listen_options_include_access_and_vlans_not_trunks(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import VlanInterface
+
+    with SessionLocal() as db:
+        db.add(
+            VlanInterface(
+                name="eth1.60",
+                parent_interface="eth1",
+                vlan_id=60,
+                ip_cidr="192.168.60.1/24",
+                role="services",
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    login(client)
+    page = client.get("/dns")
+
+    assert page.status_code == 200
+    assert "eth2 - access / access / 192.168.50.1" in page.text
+    assert "eth1.60 - VLAN 60 on eth1 / services / 192.168.60.1" in page.text
+    assert "eth1 - access / trunk" not in page.text
+    assert 'data-tag-option="eth1.60"' in page.text
+    assert 'data-tag-option="192.168.60.1"' in page.text
 
 
 def test_certificate_authority_page_renders(client):
@@ -1787,7 +1816,7 @@ def test_dns_settings_accept_multiple_listen_interfaces(client):
         "/dns/settings",
         data={
             "enabled": "on",
-            "listen_interfaces": ["eth0", "eth1"],
+            "listen_interfaces": ["eth0", "eth2"],
             "listen_addresses": ["192.168.50.1", "192.168.60.1"],
             "upstream_servers": "1.1.1.1\n9.9.9.9",
             "cache_size": "1000",
@@ -1801,7 +1830,7 @@ def test_dns_settings_accept_multiple_listen_interfaces(client):
 
     refreshed = client.get("/dns")
     assert "interface=eth0" in refreshed.text
-    assert "interface=eth1" in refreshed.text
+    assert "interface=eth2" in refreshed.text
     assert "listen-address=192.168.50.1" in refreshed.text
     assert "listen-address=192.168.60.1" in refreshed.text
     assert "domain=labfoundry.internal" in refreshed.text
@@ -1817,7 +1846,7 @@ def test_dns_settings_autosave_returns_json(client):
             "enabled": "on",
             "listen_interfaces_present": "1",
             "listen_addresses_present": "1",
-            "listen_interfaces": ["eth1"],
+            "listen_interfaces": ["eth2"],
             "listen_addresses": ["192.168.50.1"],
             "upstream_servers": "8.8.8.8",
             "conditional_forwarders": "sddc.internal=192.168.10.10,192.168.10.11",
@@ -1831,7 +1860,7 @@ def test_dns_settings_autosave_returns_json(client):
 
     assert response.status_code == 200
     assert response.json()["status"] == "saved"
-    assert response.json()["listen_interfaces"] == ["eth1"]
+    assert response.json()["listen_interfaces"] == ["eth2"]
     assert response.json()["valid"] is True
     assert "server=/sddc.internal/192.168.10.10" in response.json()["config_preview"]
     assert "server=/sddc.internal/192.168.10.11" in response.json()["config_preview"]
@@ -1839,6 +1868,33 @@ def test_dns_settings_autosave_returns_json(client):
     assert "server=/sddc.internal/192.168.10.10" in refreshed.text
     assert "server=/sddc.internal/192.168.10.11" in refreshed.text
     assert "sddc.internal=192.168.10.10,192.168.10.11" in refreshed.text
+
+
+def test_dns_settings_autosave_filters_invalid_listen_interfaces(client):
+    login(client)
+    page = client.get("/dns")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/dns/settings",
+        data={
+            "enabled": "on",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": ["eth1", "eth2"],
+            "listen_addresses": ["192.168.50.1"],
+            "upstream_servers": "8.8.8.8",
+            "cache_size": "500",
+            "expand_hosts": "on",
+            "authoritative": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["listen_interfaces"] == ["eth2"]
+    assert response.json()["valid"] is True
+    assert "interface=eth2" in response.json()["config_preview"]
 
 
 def test_dns_apply_task_captures_current_desired_state(client):

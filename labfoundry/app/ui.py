@@ -88,6 +88,7 @@ from labfoundry.app.services.dnsmasq import (
     split_servers,
     validate_dns_record,
     validate_dhcp_settings,
+    validate_dns_listen_targets,
     validate_dns_settings,
 )
 from labfoundry.app.services.ca import (
@@ -202,6 +203,7 @@ APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 TEMPLATES_DIR = APP_DIR / "templates"
 NETWORK_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/network/labfoundry-network.conf"
+DNSMASQ_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf"
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 router = APIRouter()
@@ -388,7 +390,7 @@ def address_from_cidr(value: str | None) -> str:
         return ""
 
 
-def vcf_backup_listen_options(db: Session) -> list[dict[str, str]]:
+def service_bind_options(db: Session) -> list[dict[str, str]]:
     physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlan_interfaces = db.execute(
         select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)
@@ -423,7 +425,7 @@ def vcf_backup_listen_options(db: Session) -> list[dict[str, str]]:
 def vcf_backup_context(db: Session) -> dict:
     settings = get_vcf_backup_settings_row(db)
     users = db.execute(select(User).order_by(User.username)).scalars().all()
-    available_interfaces = vcf_backup_listen_options(db)
+    available_interfaces = service_bind_options(db)
     config_preview = render_vcf_backup_config(settings)
     validation_errors = validate_vcf_backup_state(settings, users, {interface["name"] for interface in available_interfaces})
     return {
@@ -588,7 +590,7 @@ def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
 def vcf_private_registry_context(db: Session) -> dict:
     settings = get_vcf_private_registry_settings_row(db)
     bundles = db.execute(select(VcfRegistryBundle).order_by(VcfRegistryBundle.name)).scalars().all()
-    available_interfaces = vcf_backup_listen_options(db)
+    available_interfaces = service_bind_options(db)
     ca_bundle_context = vcf_registry_ca_bundle_context(db)
     settings.ca_bundle_path = str(ca_bundle_context["path"])
     validation_errors, validation_warnings = validate_vcf_registry_state(
@@ -622,7 +624,7 @@ def vcf_private_registry_context(db: Session) -> dict:
 def vcf_offline_depot_context(db: Session) -> dict:
     settings = get_vcf_offline_depot_settings_row(db)
     profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
-    available_interfaces = vcf_backup_listen_options(db)
+    available_interfaces = service_bind_options(db)
     secrets = vcf_depot_secret_context(db)
     validation_errors, validation_warnings = validate_vcf_depot_state(
         settings,
@@ -814,7 +816,7 @@ def dnsmasq_context(db: Session) -> dict:
     dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
     dhcp_options = db.execute(select(DhcpOption).order_by(DhcpOption.scope_id, DhcpOption.option_code)).scalars().all()
     dhcp_reservations = db.execute(select(DhcpReservation).order_by(DhcpReservation.hostname)).scalars().all()
-    available_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    available_interfaces = service_bind_options(db)
     vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
     config_preview = render_dnsmasq_config(
         dns_settings=dns_settings,
@@ -825,11 +827,15 @@ def dnsmasq_context(db: Session) -> dict:
         dhcp_options=dhcp_options,
         conditional_forwarders=conditional_forwarders,
     )
-    validation_errors = validate_dns_settings(dns_settings, dns_records, conditional_forwarders) + validate_dhcp_settings(
-        dhcp_settings,
-        dhcp_reservations,
-        dhcp_scopes,
-        dhcp_options,
+    validation_errors = (
+        validate_dns_settings(dns_settings, dns_records, conditional_forwarders)
+        + validate_dns_listen_targets(dns_settings, {interface["name"] for interface in available_interfaces})
+        + validate_dhcp_settings(
+            dhcp_settings,
+            dhcp_reservations,
+            dhcp_scopes,
+            dhcp_options,
+        )
     )
     dns_domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
     dns_warnings = dns_domain_warnings(dns_domains)
@@ -854,7 +860,7 @@ def dnsmasq_context(db: Session) -> dict:
         "dhcp_lease_dry_run": lease_result.dry_run,
         "dhcp_lease_command": " ".join(lease_result.command),
         "available_interfaces": available_interfaces,
-        "available_dns_addresses": available_dns_listen_addresses(dns_settings, dhcp_settings, vlan_interfaces),
+        "available_dns_addresses": available_dns_listen_addresses(dns_settings, dhcp_settings, available_interfaces, vlan_interfaces),
         "selected_dns_interfaces": split_interfaces(dns_settings.listen_interface),
         "selected_dns_addresses": split_addresses(dns_settings.listen_address),
         "config_preview": config_preview,
@@ -1061,6 +1067,7 @@ def remove_dns_for_vcf_offline_depot_hostname(db: Session, hostname: str, actor:
 def available_dns_listen_addresses(
     dns_settings: DnsSettings,
     dhcp_settings: DhcpSettings,
+    listen_options: list[dict[str, str]],
     vlan_interfaces: list[VlanInterface],
 ) -> list[dict[str, str]]:
     choices: list[dict[str, str]] = []
@@ -1073,6 +1080,8 @@ def available_dns_listen_addresses(
                 choices.append({"address": item, "source": source})
 
     add(dns_settings.listen_address, "current DNS")
+    for option in listen_options:
+        add(option.get("address"), option["name"])
     add(dhcp_settings.site_address, "SiteA gateway")
     for vlan in vlan_interfaces:
         if vlan.ip_cidr:
@@ -1643,6 +1652,8 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         results = [adapter.validate_firewall_config(config_path), adapter.apply_firewall_config(config_path)]
     elif unit_id == "dnsmasq":
         config_path = context["dns_settings"].config_path
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(DNSMASQ_STAGED_CONFIG_PATH, unit["config_preview"])
         results = [adapter.validate_dnsmasq_config(config_path), adapter.apply_dnsmasq_config(config_path), adapter.reload_dnsmasq()]
     elif unit_id == "ca":
         config_path = f"{context['ca_settings'].storage_path}/labfoundry-ca.conf"
@@ -2607,12 +2618,15 @@ def update_dns_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_dns_settings_row(db)
-    available_names = {item.name for item in db.execute(select(PhysicalInterface)).scalars().all()}
+    available_options = service_bind_options(db)
+    available_names = {item["name"] for item in available_options}
     selected_interfaces = [interface.strip() for interface in listen_interfaces if interface.strip()]
     if available_names:
         selected_interfaces = [interface for interface in selected_interfaces if interface in available_names]
     if not selected_interfaces:
-        selected_interfaces = split_interfaces(settings.listen_interface) or ["eth1"]
+        selected_interfaces = [interface for interface in split_interfaces(settings.listen_interface) if interface in available_names]
+    if not selected_interfaces:
+        selected_interfaces = [available_options[0]["name"]] if available_options else []
     selected_addresses = split_addresses(join_addresses(listen_addresses))
     if listen_addresses_present is None and not selected_addresses:
         selected_addresses = split_addresses(settings.listen_address)
@@ -3946,7 +3960,7 @@ def update_vcf_offline_depot_settings_from_ui(
     verify_csrf(request, csrf)
     settings = get_vcf_offline_depot_settings_row(db)
     previous_hostname = settings.hostname
-    listen_options = {option["name"]: option for option in vcf_backup_listen_options(db)}
+    listen_options = {option["name"]: option for option in service_bind_options(db)}
     selected_interface = listen_interface.strip() or "eth2"
     if selected_interface not in listen_options:
         raise HTTPException(status_code=400, detail="Select an access physical interface or VLAN interface with an IP address.")
@@ -4165,7 +4179,7 @@ def update_vcf_private_registry_settings_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_vcf_private_registry_settings_row(db)
-    listen_options = {option["name"]: option for option in vcf_backup_listen_options(db)}
+    listen_options = {option["name"]: option for option in service_bind_options(db)}
     selected_interface = listen_interface.strip() or "eth2"
     if selected_interface not in listen_options:
         raise HTTPException(status_code=400, detail="Select an access physical interface or VLAN interface with an IP address.")
@@ -4338,7 +4352,7 @@ def update_vcf_backup_settings_from_ui(
     user_id = int(sftp_user_id) if str(sftp_user_id).strip() else None
     if user_id and not db.get(User, user_id):
         raise HTTPException(status_code=400, detail="Selected SFTP user does not exist.")
-    listen_options = {option["name"]: option for option in vcf_backup_listen_options(db)}
+    listen_options = {option["name"]: option for option in service_bind_options(db)}
     selected_interface = listen_interface.strip() or "eth2"
     if selected_interface not in listen_options:
         raise HTTPException(status_code=400, detail="Select an access physical interface or VLAN interface with an IP address.")

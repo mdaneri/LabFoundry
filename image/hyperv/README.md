@@ -153,7 +153,8 @@ it to Packer.
 - `/etc/systemd/system/labfoundry.service`.
 - `/etc/systemd/system/labfoundry-firewall.service` loading the nftables
   management firewall.
-- `/opt/labfoundry/bin/labfoundry-helper` dry-run helper scaffold.
+- `dnsmasq` for the shared DNS/DHCP appliance service.
+- `/opt/labfoundry/bin/labfoundry-helper` constrained appliance helper.
 - `/etc/sudoers.d/labfoundry-helper` constrained helper allowlist.
 
 The generated appliance keeps `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` until
@@ -161,6 +162,11 @@ each helper-backed apply unit is reviewed and promoted.
 Firewall desired state is nftables-backed. Provisioning installs nftables,
 loads `/etc/labfoundry/nftables.d/labfoundry.nft`, and disables the older
 Photon iptables service so LabFoundry has a single firewall owner.
+
+DNS/DHCP desired state is dnsmasq-backed. Real `/appliance-apply` stages the
+rendered config under `/var/lib/labfoundry/apply/dnsmasq/`, validates it with
+`dnsmasq --test`, installs `/etc/labfoundry/dnsmasq.d/labfoundry.conf`, and
+reloads or restarts `dnsmasq` through `labfoundry-helper`.
 
 Before shutdown, provisioning resets the exported appliance image from the
 temporary Packer builder network to the LabFoundry management network:

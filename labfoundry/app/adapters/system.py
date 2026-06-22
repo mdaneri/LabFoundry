@@ -38,13 +38,13 @@ class SystemAdapter:
         return self._record_only_result(["systemctl", action, service], f"dry-run: service {action} recorded for {service}")
 
     def validate_dnsmasq_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["dnsmasq", "--test", f"--conf-file={config_path}"], "dry-run: dnsmasq validation command recorded")
+        return self._helper_result("dnsmasq", "validate", config_path, dry_run_message="dry-run: dnsmasq validation command recorded")
 
     def apply_dnsmasq_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "dnsmasq", "apply", config_path], "dry-run: dnsmasq apply command recorded")
+        return self._helper_result("dnsmasq", "apply", config_path, dry_run_message="dry-run: dnsmasq apply command recorded")
 
     def reload_dnsmasq(self) -> AdapterResult:
-        return self._record_only_result(["systemctl", "reload-or-restart", "dnsmasq"], "dry-run: dnsmasq reload command recorded")
+        return self._helper_result("dnsmasq", "reload", dry_run_message="dry-run: dnsmasq reload command recorded")
 
     def read_dhcp_leases(self) -> AdapterResult:
         return self._record_only_result(

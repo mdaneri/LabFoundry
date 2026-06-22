@@ -267,14 +267,14 @@
               {% for interface in available_interfaces %}
                 <button type="button" data-tag-option="{{ interface.name }}">
                   <strong>{{ interface.name }}</strong>
-                  <small>{{ interface.role }} / {{ interface.mode }}</small>
+                  <small>{{ interface.label }}</small>
                 </button>
               {% endfor %}
             </div>
           </div>
           <datalist id="dns-interface-options">
             {% for interface in available_interfaces %}
-              <option value="{{ interface.name }}">{{ interface.role }} / {{ interface.mode }}</option>
+              <option value="{{ interface.name }}">{{ interface.label }}</option>
             {% endfor %}
           </datalist>
         </div>

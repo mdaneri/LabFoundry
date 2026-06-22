@@ -8,6 +8,7 @@ from labfoundry.app.services.dnsmasq import (
     render_dnsmasq_config,
     split_conditional_forwarders,
     validate_dns_record,
+    validate_dns_listen_targets,
     validate_dhcp_settings,
     validate_dns_settings,
 )
@@ -206,6 +207,16 @@ def test_dns_dhcp_validation_reports_bad_addresses():
     assert any("conditional forwarder bad server port" in error for error in errors)
     assert any("range start" in error for error in errors)
     assert any("DNS server" in error for error in errors)
+
+
+def test_dns_listen_target_validation_rejects_trunks_and_unknown_targets():
+    settings = DnsSettings(listen_interface="eth1\neth2\nmissing", domain="labfoundry.internal")
+
+    errors = validate_dns_listen_targets(settings, {"eth1"})
+
+    assert "DNS listen interface eth1" not in "\n".join(errors)
+    assert any("DNS listen interface eth2 is not a valid bind target" in error for error in errors)
+    assert any("DNS listen interface missing is not a valid bind target" in error for error in errors)
 
 
 def test_dns_domain_warnings_flag_local_domains_for_vcf():

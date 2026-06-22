@@ -27,7 +27,7 @@ log_step "applying Photon OS updates"
 tdnf -y update
 
 log_step "installing Photon appliance packages"
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables dnsmasq
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
@@ -43,8 +43,10 @@ fi
 install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/firewall"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/dnsmasq"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG"
 install -d -o root -g root -m 0755 /etc/labfoundry
+install -d -o root -g root -m 0755 /etc/labfoundry/dnsmasq.d
 install -d -o root -g root -m 0755 /etc/systemd/network
 install -d -o root -g root -m 0755 /usr/local/lib/labfoundry
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-backups

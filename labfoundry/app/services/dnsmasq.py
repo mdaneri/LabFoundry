@@ -359,6 +359,20 @@ def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord], condi
     return errors
 
 
+def validate_dns_listen_targets(settings: DnsSettings, available_interface_names: set[str]) -> list[str]:
+    errors: list[str] = []
+    if not available_interface_names:
+        errors.append("DNS has no valid listen interfaces. Configure an access physical interface or enabled VLAN with an IP CIDR.")
+        return errors
+    for interface_name in split_interfaces(settings.listen_interface):
+        if interface_name not in available_interface_names:
+            errors.append(
+                f"DNS listen interface {interface_name} is not a valid bind target. "
+                "Use an access physical interface with an IP CIDR or an enabled VLAN interface with an IP CIDR."
+            )
+    return errors
+
+
 def dns_domain_warnings(domains: list[str]) -> list[str]:
     warnings: list[str] = []
     for domain in split_domains("\n".join(domains)):

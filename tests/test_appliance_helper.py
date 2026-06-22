@@ -193,3 +193,102 @@ def test_network_helper_refuses_to_delete_non_vlan_link(monkeypatch, tmp_path):
     monkeypatch.setattr(helper, "_run", fake_run)
 
     assert helper._apply_vlan_interfaces(config_path) == 2
+
+
+def test_dnsmasq_helper_validates_staged_config(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "dnsmasq"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry.conf"
+    config_path.write_text("domain=labfoundry.internal\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "dnsmasq: syntax check OK.\n", "")
+
+    monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/dnsmasq" if command == "dnsmasq" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_dnsmasq("validate", [str(config_path)]) == 0
+
+    assert commands == [["/usr/sbin/dnsmasq", "--test", f"--conf-file={config_path}"]]
+
+
+def test_dnsmasq_helper_apply_installs_config_dropin_and_enables_service(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "dnsmasq"
+    config_dir = tmp_path / "etc" / "labfoundry" / "dnsmasq.d"
+    dropin_dir = tmp_path / "etc" / "systemd" / "system" / "dnsmasq.service.d"
+    networkd_dir = tmp_path / "etc" / "systemd" / "network"
+    apply_dir.mkdir(parents=True)
+    networkd_dir.mkdir(parents=True)
+    mgmt_network = networkd_dir / "00-labfoundry-mgmt.network"
+    mgmt_network.write_text(
+        "\n".join(
+            [
+                "[Match]",
+                "Name=eth0",
+                "",
+                "[Network]",
+                "Address=192.168.49.1/24",
+                "Gateway=192.168.49.254",
+                "DNS=1.1.1.1",
+                "DNS=9.9.9.9",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_path = apply_dir / "labfoundry.conf"
+    config_path.write_text("domain=labfoundry.internal\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_CONFIG_PATH", config_dir / "labfoundry.conf")
+    monkeypatch.setattr(helper, "DNSMASQ_SERVICE_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_SERVICE_DROPIN_PATH", dropin_dir / "labfoundry.conf")
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", mgmt_network)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/dnsmasq" if command == "dnsmasq" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_dnsmasq("apply", [str(config_path)]) == 0
+
+    assert (config_dir / "labfoundry.conf").read_text(encoding="utf-8") == "domain=labfoundry.internal\n"
+    dropin = (dropin_dir / "labfoundry.conf").read_text(encoding="utf-8")
+    assert "ExecStart=" in dropin
+    assert f"--conf-file={config_dir / 'labfoundry.conf'}" in dropin
+    assert ["/usr/sbin/dnsmasq", "--test", f"--conf-file={config_path}"] in commands
+    assert ["systemctl", "daemon-reload"] in commands
+    assert ["systemctl", "enable", "dnsmasq"] in commands
+    assert ["resolvectl", "dns", "eth0", "127.0.0.1"] in commands
+    assert ["resolvectl", "domain", "eth0", "~."] in commands
+    assert "DNS=1.1.1.1" not in mgmt_network.read_text(encoding="utf-8")
+    assert "DNS=127.0.0.1" in mgmt_network.read_text(encoding="utf-8")
+    assert "Domains=~." in mgmt_network.read_text(encoding="utf-8")
+
+
+def test_dnsmasq_helper_reload_restarts_service(monkeypatch):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_dnsmasq("reload", []) == 0
+
+    assert commands == [
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "reload-or-restart", "dnsmasq"],
+        ["resolvectl", "dns", "eth0", "127.0.0.1"],
+        ["resolvectl", "domain", "eth0", "~."],
+    ]

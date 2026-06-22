@@ -208,7 +208,7 @@ def seed_initial_data(db: Session) -> None:
         db.add(
             DnsSettings(
                 enabled=False,
-                listen_interface="eth1",
+                listen_interface="eth2",
                 listen_address="192.168.50.1",
                 domain="labfoundry.internal",
                 upstream_servers="1.1.1.1\n9.9.9.9",
