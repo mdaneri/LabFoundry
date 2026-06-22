@@ -194,7 +194,11 @@ from labfoundry.app.services.vcf_offline_depot import (
 )
 from labfoundry.app.token_service import create_token_for_user
 
-templates = Jinja2Templates(directory="labfoundry/app/templates")
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
+TEMPLATES_DIR = APP_DIR / "templates"
+
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
 router = APIRouter()
 
 
@@ -1580,7 +1584,7 @@ def update_appliance_apply_baselines(db: Session, units: list[dict[str, Any]], s
 
 @router.get("/favicon.ico", response_model=None)
 def favicon() -> FileResponse:
-    return FileResponse("labfoundry/app/static/brand/labfoundry-mark.svg", media_type="image/svg+xml")
+    return FileResponse(STATIC_DIR / "brand" / "labfoundry-mark.svg", media_type="image/svg+xml")
 
 
 @router.get("/", response_class=HTMLResponse, response_model=None)

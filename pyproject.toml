@@ -30,6 +30,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["labfoundry"]
+artifacts = [
+  "labfoundry/app/static/**",
+  "labfoundry/app/templates/**",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

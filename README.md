@@ -6,13 +6,75 @@ LabFoundry is a Linux-based, web-managed infrastructure appliance for homelabs, 
 
 The MVP is a safe runnable scaffold. It provides the FastAPI control plane, appliance-style web UI, local authentication, JWT bearer API tokens, audit logging, OpenAPI 3.1, dry-run system adapters, and Windows/Hyper-V script scaffolding. It does not apply real host networking, firewall, service, SFTP, registry, repository, DNS, DHCP, CA, or KMS changes by default.
 
+## Photon OS Appliance Image
+
+The first real OS appliance target is Photon OS 5.0 on Hyper-V. The image
+builder lives in [`image/hyperv/`](image/hyperv/) and provisions:
+
+- a Photon OS 5.0 Generation 2 Hyper-V VM with Secure Boot off;
+- updated Photon packages from the configured Photon 5.0 repositories, with a
+  second update pass after appliance packages are installed;
+- the `labfoundry` system user;
+- `/opt/labfoundry` for the installed application;
+- `/etc/labfoundry/labfoundry.env` for appliance environment settings;
+- `/etc/labfoundry/build-info` for build/update provenance;
+- `/var/lib/labfoundry` for durable state;
+- `/var/log/labfoundry` for local logs;
+- fixed appliance mount points under `/mnt/labfoundry-vcf-*`;
+- `labfoundry.service` running uvicorn from a Python virtual environment;
+- `/opt/labfoundry/bin/labfoundry-helper` and a constrained sudoers template.
+
+The finished Hyper-V appliance VM also attaches two durable dynamic data disks:
+one for the VCF Offline Depot at `/mnt/labfoundry-vcf-offline-depot` and one
+for VCF Backups at `/mnt/labfoundry-vcf-backups`. Keep those workloads off the
+OS VHDX.
+
+Photon OS 5.0 GA shipped with Python 3.11, but the current Photon 5.0 updates
+stream has moved beyond that baseline. On June 21, 2026, live repository
+metadata showed `python3` as `3.14.5-2.ph5`. LabFoundry keeps
+`requires-python >=3.12`; verify the appliance stream with:
+
+```bash
+python3 scripts/check_photon_compatibility.py
+```
+
+Build inputs are the current Photon OS 5.0 ISO URL and checksum:
+
+```powershell
+cd image/hyperv
+packer init .
+packer build `
+  -var "iso_url=https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
+  -var "iso_checksum=sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
+  -var "ssh_password=<one-time-build-root-password>" `
+  -var "bootstrap_admin_password=<initial-labfoundry-admin-password>" `
+  .
+```
+
+Run Packer from an elevated PowerShell session or as a user in the
+`Hyper-V Administrators` group. The Packer build VM uses Hyper-V's
+`Default Switch` by default because the builder needs a host-side IP, DHCP, and
+internet access for kickstart provisioning and `tdnf update`. Use the
+`LabFoundry-Mgmt` switch after the VHDX is built and attached to the final
+appliance VM.
+
+The generated appliance intentionally keeps
+`LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`. Real host mutation is staged per
+apply unit after the helper-backed command path is reviewed.
+
+The exported Hyper-V appliance resets to `192.168.49.1/24` on
+`LabFoundry-Mgmt`; the Windows host side should be `192.168.49.254/24`.
+`scripts/windows/create-hyperv-switches.ps1` configures that address and a NAT
+for the management network so Photon package checks work when the host has
+internet access.
+
 ## Development
 
 Primary workflow:
 
 1. Develop inside WSL2 on Windows 11.
 2. Run unit and API tests in WSL2.
-3. Build or prepare a Hyper-V-compatible appliance image later.
+3. Build the Photon OS Hyper-V appliance image with Packer.
 4. Test the appliance in Hyper-V with PowerShell automation.
 
 Install and run:
@@ -61,7 +123,9 @@ username: admin
 password: labfoundry-admin
 ```
 
-For a real appliance, set `LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD` before the first startup.
+For a real appliance image, pass `-var "bootstrap_admin_password=<initial-labfoundry-admin-password>"`
+to Packer. If omitted, the image build falls back to `ssh_password` for
+compatibility with early appliance builds.
 
 Default local VCF backup SFTP user:
 
@@ -108,8 +172,9 @@ The MVP follows these boundaries:
 - VCF backup volume mount: `/mnt/labfoundry-vcf-backups`
 - VCF backup SFTP remote directory: `/backups`
 - System adapters default to dry-run mode.
-- Future privileged changes must use reviewed helper scripts and sudo allowlists.
+- Privileged changes must use reviewed `labfoundry-helper` commands and sudo allowlists.
 - Subprocess calls must use argument arrays, not arbitrary shell strings.
+- The global `/appliance-apply` workflow is the only appliance enforcement path.
 
 ## REST API
 
@@ -266,6 +331,22 @@ The scaffold uses these switch names:
 
 The primary appliance image target is Hyper-V VHDX. ESXi/vSphere OVA and KVM/Proxmox QCOW2 are future packaging targets.
 
+The Photon image build scaffold lives in:
+
+```text
+image/hyperv/
+```
+
+Use the existing scripts to create switches, create a VM from the Packer VHDX,
+start the VM, attach test NICs, and run smoke checks. The first appliance smoke
+pass should verify SSH, `systemctl status labfoundry`, web UI login,
+`/openapi.json`, `/api/v1/dashboard`, reboot persistence, and dry-run
+`/appliance-apply` job output.
+
+When troubleshooting a Hyper-V builder VM, use
+`scripts/windows/get-labfoundry-vm-ip.ps1` from an elevated PowerShell session
+to read the current IPv4 address reported by Hyper-V.
+
 ## PowerShell Roadmap
 
 The future PowerShell module scaffold lives in:
@@ -282,6 +363,8 @@ Run:
 
 ```bash
 pytest
+python -m compileall labfoundry
+python scripts/check_photon_compatibility.py
 ```
 
 The MVP test suite covers auth, token revocation, scope enforcement, audit records, UI smoke rendering, and OpenAPI contract checks.

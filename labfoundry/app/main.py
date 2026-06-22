@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -12,6 +13,9 @@ from labfoundry.app.database import SessionLocal, init_db
 from labfoundry.app.problem import install_problem_handlers
 from labfoundry.app.seed import seed_initial_data
 from labfoundry.app.ui import router as ui_router
+
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
 
 
 @asynccontextmanager
@@ -50,7 +54,7 @@ def create_app() -> FastAPI:
         return response
 
     install_problem_handlers(app)
-    app.mount("/static", StaticFiles(directory="labfoundry/app/static"), name="static")
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(api_v1_router)
     app.include_router(ui_router)
 

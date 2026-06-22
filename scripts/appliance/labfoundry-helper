@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Privileged LabFoundry appliance helper scaffold.
+
+The control plane may ask sudo to run this helper, but this helper is still
+dry-run by default. Real mutations should be implemented one apply unit at a
+time after validation and rollback behavior are reviewed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+COMMANDS: dict[str, set[str]] = {
+    "network": {"validate", "apply"},
+    "firewall": {"validate", "apply"},
+    "dnsmasq": {"apply", "leases"},
+    "ca": {"validate", "apply"},
+    "kms": {"validate", "apply"},
+    "vcf-backups": {"validate", "apply"},
+    "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
+    "vcf-offline-depot": {"validate", "stage-tool", "sync", "apply-https"},
+    "wan": {"validate", "apply"},
+}
+
+
+def _usage() -> int:
+    groups = ", ".join(sorted(COMMANDS))
+    print(f"usage: labfoundry-helper <group> <action> [path]", file=sys.stderr)
+    print(f"groups: {groups}", file=sys.stderr)
+    return 2
+
+
+def _validate_path(path_value: str) -> str:
+    path = Path(path_value)
+    if not path.is_absolute():
+        raise ValueError(f"path must be absolute: {path_value}")
+    return str(path)
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 3:
+        return _usage()
+
+    group = argv[1]
+    action = argv[2]
+    args = argv[3:]
+
+    if group not in COMMANDS or action not in COMMANDS[group]:
+        return _usage()
+
+    if action != "leases" and not args:
+        print(f"{group} {action} requires a config or artifact path", file=sys.stderr)
+        return 2
+
+    normalized_args: list[str] = []
+    try:
+        normalized_args = [_validate_path(arg) for arg in args]
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "helper": "labfoundry-helper",
+        "group": group,
+        "action": action,
+        "args": normalized_args,
+        "dry_run": os.environ.get("LABFOUNDRY_HELPER_REAL_APPLY", "").lower() not in {"1", "true", "yes"},
+    }
+
+    print(json.dumps(record, sort_keys=True))
+    if record["dry_run"]:
+        return 0
+
+    print("real helper execution is not implemented for this apply unit", file=sys.stderr)
+    return 78
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

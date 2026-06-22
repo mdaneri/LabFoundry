@@ -1,0 +1,225 @@
+# LabFoundry Photon OS Hyper-V Image
+
+This directory contains the first real-OS appliance image path for LabFoundry.
+It builds a Photon OS 5.0 Hyper-V VHDX and provisions the FastAPI control plane
+as a systemd service.
+
+## Host Prerequisites
+
+- Windows host with Hyper-V enabled.
+- Run Packer from an elevated PowerShell session or as a user in the
+  `Hyper-V Administrators` group.
+- Packer `>= 1.10`.
+- Hyper-V `Default Switch` available for the Packer build VM. The build uses
+  this switch by default because it provides a host-side IP, DHCP, and outbound
+  internet for the kickstart file and `tdnf update`.
+- LabFoundry lab switches created for the finished appliance VM:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switches.ps1
+```
+
+## Build Inputs
+
+Photon publishes the ISO and checksum from the Photon OS download page. The
+current LabFoundry build target uses the Photon OS 5.0 GA full ISO:
+
+```powershell
+cd image/hyperv
+packer init .
+packer build `
+  -var "iso_url=https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
+  -var "iso_checksum=sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
+  -var "builder_static_ip=<photon-builder-ip>" `
+  -var "builder_static_netmask=<photon-builder-netmask>" `
+  -var "builder_static_gateway=<default-switch-gateway>" `
+  -var "ssh_password=<one-time-build-root-password>" `
+  -var "bootstrap_admin_password=<initial-labfoundry-admin-password>" `
+  .
+```
+
+For Hyper-V Default Switch, `builder_static_gateway` is the Windows host-side
+vEthernet address that Packer logs as `Host IP for the HyperV machine`, such as
+`172.30.0.1`. Choose `builder_static_ip` from the same subnet, for example
+`172.30.14.160`, and use the matching netmask, for example `255.255.240.0` for
+a `/20` Default Switch network. When `builder_static_ip` is set, the template
+automatically uses it as Packer's SSH target.
+
+Use single quotes around passwords that contain PowerShell metacharacters:
+
+```powershell
+-var 'ssh_password=<one-time-build-root-password>'
+-var 'bootstrap_admin_password=<initial-labfoundry-admin-password>'
+```
+
+`ssh_password` is for the temporary installer/root credentials used during the
+image build. `bootstrap_admin_password` is the initial LabFoundry web login
+password for `admin`. If `bootstrap_admin_password` is omitted, the build falls
+back to `ssh_password` for compatibility with early appliance images.
+
+If Packer prints `Using SSH communicator to connect: <ip>` and waits even
+though the VM is reachable, test the exact same credentials from the Windows
+host:
+
+```powershell
+ssh root@<photon-builder-ip>
+```
+
+The Packer communicator uses the temporary `labfoundry-build` user, port `22`,
+password authentication, and a longer SSH timeout to allow Photon installation
+and reboot to finish. Provisioning removes the temporary sudoers entry before
+the image is finalized.
+
+Use `-var "switch_name=<switch>"` only if the replacement switch has a host
+adapter IP, DHCP for the builder VM, and internet access. The LabFoundry
+internal/private lab switches are intended for the finished appliance VM, not
+for the Packer installer VM.
+
+Packer logs a line like `Host IP for the HyperV machine: 172.30.0.1`. That is
+the Windows host-side Default Switch address used for the kickstart HTTP URL;
+it is not the Photon guest SSH address. The Photon guest address is the IPv4
+shown by Hyper-V Manager for `LabFoundry-Photon-Builder`, for example
+`172.30.14.160`.
+
+The build updates Photon packages during provisioning. On June 21, 2026, the
+Photon 5.0 updates repo exposed `python3` as `3.14.5-2.ph5`; keep the image
+builder on the updated repo stream rather than relying only on the GA ISO
+package set.
+
+If the VM stops at the Photon license agreement or disk selection screen, the
+builder did not load the kickstart file. Stop the build, make sure this
+directory is current, and rerun `packer build .`; the template should boot
+Photon through the GRUB command line with `ks=http://...
+insecure_installation=1 photon.media=cdrom`. The built-in Packer HTTP server is
+pinned to port `8591` to make troubleshooting simpler.
+
+If Photon installs and SSH works from the Windows host but Packer remains at
+`Waiting for SSH to become available`, query the IPv4 reported by Hyper-V:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-vm-ip.ps1 `
+  -Name LabFoundry-Photon-Builder `
+  -SwitchName "Default Switch"
+```
+
+Then verify SSH:
+
+```powershell
+ssh root@<photon-vm-ip>
+```
+
+The Packer template leaves `ssh_host` unset unless `builder_static_ip` is set,
+so the Hyper-V builder can discover the Photon guest IP through KVP by default.
+If SSH is reachable but Packer still does not detect the guest IP, stop the
+build and rerun with either `builder_static_ip` or a queried `ssh_host`:
+
+```powershell
+$photonVmIp = powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-vm-ip.ps1 `
+  -Name LabFoundry-Photon-Builder `
+  -SwitchName "Default Switch"
+
+packer build `
+  -var "ssh_host=$photonVmIp" `
+  -var "iso_url=https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
+  -var "iso_checksum=sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
+  -var "ssh_password=<one-time-build-root-password>" `
+  -var "bootstrap_admin_password=<initial-labfoundry-admin-password>" `
+  .
+```
+
+The helper reads the current Photon guest IPv4 from Hyper-V and filters out the
+host-side Default Switch address.
+
+Photon's Hyper-V guest integration package is `hyper-v`. The kickstart and
+provisioning scripts install it and enable `hv_kvp_daemon`, `hv_fcopy_daemon`,
+and `hv_vss_daemon` so Hyper-V can report guest metadata such as IP addresses.
+Do not install `open-vm-tools` in this Hyper-V image; reserve VMware Tools for a
+future vSphere/ESXi image path. Keep the `ssh_host` override as a fallback for
+early build runs where the guest IP is visible manually before Hyper-V reports
+it to Packer.
+
+## What Provisioning Installs
+
+- Photon packages updated from the configured Photon 5.0 repositories, with a
+  second `tdnf -y update` pass after required appliance packages are installed.
+- `labfoundry` system user.
+- `/opt/labfoundry` application install.
+- `/etc/labfoundry/labfoundry.env` production environment file.
+- `/etc/labfoundry/build-info` recording build time, Photon release, kernel,
+  Python, and the package update marker.
+- `/var/lib/labfoundry` durable SQLite state.
+- `/var/log/labfoundry` local service logs.
+- Fixed appliance mounts under `/mnt/labfoundry-vcf-*`.
+- `/etc/systemd/system/labfoundry.service`.
+- `/opt/labfoundry/bin/labfoundry-helper` dry-run helper scaffold.
+- `/etc/sudoers.d/labfoundry-helper` constrained helper allowlist.
+
+The generated appliance keeps `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` until
+each helper-backed apply unit is reviewed and promoted.
+
+Before shutdown, provisioning resets the exported appliance image from the
+temporary Packer builder network to the LabFoundry management network:
+
+- appliance address: `192.168.49.1/24`;
+- appliance interface: `eth0`;
+- host-side `LabFoundry-Mgmt` address: `192.168.49.254/24`;
+- default gateway: `192.168.49.254`.
+
+The Hyper-V switch script configures the host-side management address and NAT so
+the final appliance can reach Photon repositories when the Windows host has
+internet access.
+
+Windows NAT for the management switch is configured with:
+
+```powershell
+New-NetIPAddress -InterfaceAlias "vEthernet (LabFoundry-Mgmt)" -IPAddress 192.168.49.254 -PrefixLength 24
+New-NetNat -Name LabFoundry-Mgmt-NAT -InternalIPInterfaceAddressPrefix 192.168.49.0/24
+```
+
+Use `scripts/windows/create-hyperv-switches.ps1` instead of running those by
+hand; it creates or repairs the address/NAT and prints the resulting summary.
+
+Packer uploads only the files required for appliance installation: the
+`labfoundry` package, packaging metadata, appliance helper scripts, the Photon
+compatibility check, systemd unit, and sudoers template. It intentionally does
+not upload `.git`, test artifacts, caches, or development virtual environments
+into the builder VM.
+
+## Boot The VHDX
+
+After Packer completes, use the existing Hyper-V scripts. The finished
+appliance VM gets two additional dynamic VHDX data disks by default:
+
+- `LabFoundry-Depot.vhdx`, intended for `/mnt/labfoundry-vcf-offline-depot`;
+- `LabFoundry-Backups.vhdx`, intended for `/mnt/labfoundry-vcf-backups`.
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switches.ps1
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-vm.ps1 `
+  -VhdxPath 'image/hyperv/output/labfoundry-photon-hyperv/Virtual Hard Disks/LabFoundry-Photon-Builder.vhdx'
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/start-labfoundry-vm.ps1
+```
+
+The default data disks are dynamic 500 GB VHDX files stored next to the OS
+VHDX. Override them with `-DepotVhdxPath`, `-BackupVhdxPath`,
+`-DepotDiskSizeBytes`, or `-BackupDiskSizeBytes` when needed. Format and mount
+them inside Photon before enabling real Depot or Backup apply actions.
+
+## Appliance Smoke Checks
+
+Inside the Photon VM:
+
+```bash
+python3 --version
+cat /etc/labfoundry/build-info
+ip addr show
+tdnf check-update || true
+systemctl status labfoundry --no-pager
+journalctl -u labfoundry -n 100 --no-pager
+curl -fsS http://127.0.0.1:8000/openapi.json >/dev/null
+curl -fsS http://127.0.0.1:8000/api/v1/dashboard >/dev/null || true
+```
+
+From the host, verify the management URL, login, reboot persistence, and that
+`/appliance-apply` still records dry-run command intent before any real adapter
+execution is enabled.

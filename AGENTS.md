@@ -28,6 +28,21 @@
 - Prefer explicit status language over generic button text. Avoid labels such as `Save DNS` or `Apply` when the action really means "save desired state", "review appliance changes", "submit appliance changes", "import into this domain", or "apply zone file".
 - Destructive UI actions such as deleting a domain, scope, record set, backup, token, or appliance-owned config should require the shared modal confirmation pattern (`data-confirm-modal`) instead of a browser confirm or immediate submit. The modal copy should name the object, explain what will be removed, and mention whether the appliance is affected immediately or only after global appliance apply.
 
+## Photon OS Appliance Deployment
+
+- The first real OS appliance target is Photon OS 5.0 on Hyper-V. Keep image-build work under `image/hyperv/`.
+- The Hyper-V image is automated with Packer, Photon kickstart JSON, and provisioning scripts. Do not replace it with manual-only install steps unless the automation path is also kept current.
+- Photon appliance provisioning should run `tdnf -y makecache` and `tdnf -y update` before installing LabFoundry so the image lands on the current Photon 5.0 package stream.
+- Photon 5.0 GA started at Python 3.11, but the updated Photon 5.0 package stream may be newer; on June 21, 2026 live repo metadata showed `python3` as `3.14.5-2.ph5`. Keep LabFoundry at `requires-python >=3.12` and run `python scripts/check_photon_compatibility.py` before treating Photon compatibility as healthy.
+- The appliance installs LabFoundry under `/opt/labfoundry`, stores environment in `/etc/labfoundry/labfoundry.env`, stores durable state in `/var/lib/labfoundry`, writes local logs under `/var/log/labfoundry`, and preserves fixed service mounts under `/mnt/labfoundry-vcf-*`.
+- Keep the image-build OS/root password separate from the LabFoundry web bootstrap password. Packer exposes `ssh_password` for build-time SSH/root use and `bootstrap_admin_password` for the initial `admin` web login; if the latter is omitted, early-image compatibility falls back to `ssh_password`.
+- Product-owned helper binaries should live under `/opt/labfoundry/bin`; do not put LabFoundry-owned helpers in `/usr/local/sbin` for Photon appliance images.
+- The appliance systemd unit is `labfoundry.service` and should run uvicorn from the provisioned virtual environment as the `labfoundry` service user.
+- Keep `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` for first-boot appliance images. Promote real host mutation one apply unit at a time after validation, preview, job capture, and rollback behavior are reviewed.
+- Privileged appliance enforcement must go through `labfoundry-helper` and constrained sudoers entries. Do not give the control plane broad shell, root, or package-manager access.
+- The global `/appliance-apply` workflow remains the only host-mutation workflow. Do not add service-specific apply routes, service-specific apply jobs, or direct helper calls from desired-state edit forms.
+- Packer is a Windows-host prerequisite for the Photon image path; Hyper-V and `qemu-img` may already be available locally but should still be checked in handoff notes.
+
 ## Network And Service Binding
 
 - Physical Interfaces are for untagged/access networks. VLAN Interfaces are only for tagged VLAN networks on physical parent interfaces marked as trunk.
@@ -83,4 +98,5 @@
 - Do not delete the DB for data-only seed/default updates if a focused in-place update is safer and the schema did not change.
 - Any major product, architecture, workflow, safety-boundary, or operator-experience change must include a same-change documentation sweep for `README.md` and `AGENTS.md`.
 - Before finalizing UI/backend changes, run focused tests for the touched area when available, then `pytest -q` for broader confidence. Also run `python -m compileall labfoundry` after broad Python/template-adjacent changes.
+- Before finalizing appliance deployment changes, also run `python scripts/check_photon_compatibility.py`. If image build files changed and Packer is available, run `packer fmt` and `packer validate` from `image/hyperv/`.
 - Restart the local uvicorn server after template/static/route changes so the in-app browser sees the new code. Bump the static asset query string in `base.html` after CSS or JS changes.
