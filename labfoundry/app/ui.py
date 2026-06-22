@@ -1062,6 +1062,7 @@ def dnsmasq_context(db: Session) -> dict:
         "upstream_servers": "\n".join(split_servers(dns_settings.upstream_servers)),
         "conditional_forwarders": join_conditional_forwarders(split_conditional_forwarders(conditional_forwarders)),
         "dns_domain_options": dns_domains,
+        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
     }
 
 

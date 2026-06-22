@@ -525,6 +525,20 @@ def test_dns_and_dhcp_pages_render(client):
     assert "192.168.50.1" in dhcp.text
 
 
+def test_dns_settings_badge_reflects_live_adapter_mode(client, monkeypatch):
+    from labfoundry.app.config import get_settings
+
+    login(client)
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+
+    page = client.get("/dns")
+
+    assert page.status_code == 200
+    assert '<span class="status-pill good">live</span>' in page.text
+    assert '<span class="status-pill warn">dry-run</span>' not in page.text
+
+
 def test_dns_listen_options_include_access_and_vlans_not_trunks(client):
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import VlanInterface

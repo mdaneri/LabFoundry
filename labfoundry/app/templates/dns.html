@@ -242,7 +242,7 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>DNS Settings</h2>
-        <span class="status-pill warn">dry-run</span>
+        <span class="status-pill {{ 'warn' if system_adapter_dry_run else 'good' }}">{{ "dry-run" if system_adapter_dry_run else "live" }}</span>
       </div>
       <form class="form-stack" action="/dns/settings" method="post" data-autosave-form data-autosave-status-id="dns-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
