@@ -85,12 +85,19 @@ class PhysicalInterface(Base):
     mac_address: Mapped[str] = mapped_column(String(32))
     driver: Mapped[str | None] = mapped_column(String(80), nullable=True)
     speed: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    host_ip_cidr: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    host_mtu: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    host_admin_state: Mapped[str | None] = mapped_column(String(20), nullable=True)
     ip_cidr: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mtu: Mapped[int] = mapped_column(Integer, default=1500)
     admin_state: Mapped[str] = mapped_column(String(20), default="up")
     oper_state: Mapped[str] = mapped_column(String(20), default="up")
     role: Mapped[str] = mapped_column(String(40), default="unused")
     mode: Mapped[str] = mapped_column(String(40), default="unused")
+    inventory_source: Mapped[str] = mapped_column(String(40), default="seed")
+    desired_state_source: Mapped[str] = mapped_column(String(40), default="seed")
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    missing_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class VlanInterface(Base):

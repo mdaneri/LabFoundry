@@ -2670,6 +2670,7 @@ function initializePhysicalInterfacesTable() {
     return;
   }
   const csrf = tableElement.dataset.csrf || "";
+  const roleOptions = roleValues(JSON.parse(tableElement.dataset.roleOptions || "[]"));
   const modeOptions = labeledValues(JSON.parse(tableElement.dataset.modeOptions || "[]"), {
     access: "Access (untagged)",
     trunk: "Trunk (tagged VLANs)",
@@ -2690,12 +2691,21 @@ function initializePhysicalInterfacesTable() {
         { title: "MAC", field: "mac_address", minWidth: 170, headerSort: false },
         { title: "Driver", field: "driver", width: 110 },
         { title: "Speed", field: "speed", width: 110 },
+        { title: "Observed IP", field: "host_ip_cidr", minWidth: 150, headerSort: false },
         {
-          title: "IP CIDR",
+          title: "Desired IP CIDR",
           field: "ip_cidr",
           editor: "input",
           formatter: (cell) => dnsAddRowHintFormatter(cell, "192.168.50.1/24"),
           minWidth: 160,
+          cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
+        },
+        {
+          title: "Role",
+          field: "role",
+          editor: "list",
+          editorParams: { values: roleOptions },
+          width: 125,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
         {
@@ -2734,6 +2744,7 @@ function initializePhysicalInterfacesTable() {
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
         { title: "Oper", field: "oper_state", width: 90, headerSort: false },
+        { title: "Source", field: "inventory_source", width: 100, headerSort: false },
       ],
     });
     if (fallback) {
@@ -2755,10 +2766,11 @@ function initializeVlanInterfacesTable() {
     return;
   }
   const csrf = tableElement.dataset.csrf || "";
-  const parentOptions = JSON.parse(tableElement.dataset.parentOptions || "[]");
+  const parentOptionRows = JSON.parse(tableElement.dataset.parentOptions || "[]");
+  const parentOptions = parentOptionRows.map((item) => (typeof item === "string" ? { name: item, label: item } : item));
   const roleOptions = roleValues(JSON.parse(tableElement.dataset.roleOptions || "[]"));
-  const parentValues = roleValues(parentOptions);
-  const defaultParent = parentOptions.includes("eth1") ? "eth1" : parentOptions[0] || "";
+  const parentValues = Object.fromEntries(parentOptions.map((item) => [item.name, item.label || item.name]));
+  const defaultParent = parentOptions[0]?.name || "";
   const rows = [...JSON.parse(tableElement.dataset.vlans || "[]"), newVlanInterfaceRow(defaultParent)];
   try {
     new Tabulator(tableElement, {

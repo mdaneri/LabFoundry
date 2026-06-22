@@ -1027,15 +1027,18 @@ def test_physical_and_vlan_pages_render(client):
     physical = client.get("/physical-interfaces")
     assert physical.status_code == 200
     assert "Physical Interfaces" in physical.text
-    assert "Configure IPs on access NICs and mark trunks only when a NIC carries tagged VLANs" in physical.text
+    assert "Review observed Photon NICs, then edit desired access, trunk, and IP settings" in physical.text
     assert "physical-interfaces-table" in physical.text
+    assert "Refresh host inventory" in physical.text
+    assert "Observed IP" in physical.text
+    assert "Desired IP CIDR" in physical.text
     assert "IP CIDR" in physical.text
     assert "eth0" in physical.text
     assert "192.168.49.1/24" in physical.text
     assert "192.168.50.1/24" in physical.text
     assert "Link Type" in physical.text
     assert "Review appliance changes" in physical.text
-    assert "labfoundry-network.conf" in physical.text
+    assert "/var/lib/labfoundry/apply/network/labfoundry-network.conf" in physical.text
 
     vlans = client.get("/vlan-interfaces")
     assert vlans.status_code == 200
@@ -1043,12 +1046,60 @@ def test_physical_and_vlan_pages_render(client):
     assert "For standard access-mode NICs, assign IP CIDR on Physical Interfaces instead." in vlans.text
     assert "vlan-interfaces-table" in vlans.text
     assert "+ Add VLAN here" in client.get("/static/app.js").text
-    assert "data-parent-options='[\"eth1\"]'" in vlans.text
+    assert 'data-parent-options=\'[{"label": "eth1 - access - trunk' in vlans.text
     assert "data-parent-options" in vlans.text
     app_js = client.get("/static/app.js").text
     assert "deleteVlanInterfaceFromMenu" in app_js
     assert "refreshNetworkSideStack" in app_js
     assert "Review appliance changes" in vlans.text
+    assert "/var/lib/labfoundry/apply/network/labfoundry-network.conf" in vlans.text
+
+
+def test_physical_interface_refresh_imports_host_inventory_without_apply_job(client, monkeypatch):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, PhysicalInterface, Route, VlanInterface
+    from labfoundry.app.services.networking import HostPhysicalInterface
+
+    login(client)
+
+    def fake_discover():
+        return [
+            HostPhysicalInterface(
+                name="ens192",
+                mac_address="00:15:5d:aa:bb:cc",
+                driver="hv_netvsc",
+                speed="10000 Mbps",
+                host_ip_cidr="192.168.49.22/24",
+                host_mtu=1500,
+                host_admin_state="up",
+                oper_state="up",
+            )
+        ]
+
+    monkeypatch.setattr("labfoundry.app.services.networking.discover_host_physical_interfaces", fake_discover)
+    page = client.get("/physical-interfaces")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post("/physical-interfaces/refresh", data={"csrf": csrf}, follow_redirects=False)
+
+    assert response.status_code == 303
+    refreshed = client.get("/physical-interfaces")
+    assert "ens192" in refreshed.text
+    assert "192.168.49.22/24" in refreshed.text
+    assert "host" in refreshed.text
+    assert "02:15:5d:00:10:02" not in refreshed.text
+    assert "02:15:5d:00:10:03" not in refreshed.text
+
+    with SessionLocal() as db:
+        interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "ens192")).scalar_one()
+        assert interface.inventory_source == "host"
+        assert interface.desired_state_source == "seed"
+        assert interface.ip_cidr == "192.168.49.22/24"
+        assert db.execute(select(PhysicalInterface).where(PhysicalInterface.name.in_(["eth0", "eth1", "eth2"]))).scalars().all() == []
+        assert db.execute(select(VlanInterface).where(VlanInterface.parent_interface == "eth1")).scalars().all() == []
+        assert db.execute(select(Route).where(Route.interface_name == "eth1.20")).scalars().all() == []
+        assert db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one_or_none() is None
 
 
 def test_physical_interface_edit_updates_desired_state(client):
@@ -1081,6 +1132,7 @@ def test_physical_interface_edit_updates_desired_state(client):
     assert '"ip_cidr": "192.168.70.1/24"' in refreshed.text
     assert '"mtu": 1400' in refreshed.text
     assert '"admin_state": "down"' in refreshed.text
+    assert '"desired_state_source": "user"' in refreshed.text
 
 
 def test_physical_interface_link_type_locked_when_vlans_exist(client):
@@ -1177,6 +1229,65 @@ def test_vlan_interface_create_edit_delete_and_apply(client):
     deleted = client.post(f"/vlan-interfaces/{vlan_id}/delete", data={"csrf": csrf}, follow_redirects=False)
     assert deleted.status_code == 303
     assert "eth1.50" not in client.get("/vlan-interfaces").text
+
+
+def test_vlan_page_prefers_real_trunk_parent_when_inventory_has_eth2(client):
+    import html
+    import json
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+
+    login(client)
+    with SessionLocal() as db:
+        db.query(PhysicalInterface).delete()
+        db.add_all(
+            [
+                PhysicalInterface(
+                    name="eth0",
+                    mac_address="00:15:5d:01:1d:1a",
+                    ip_cidr="192.168.49.1/24",
+                    role="management",
+                    mode="access",
+                    inventory_source="host",
+                    desired_state_source="user",
+                ),
+                PhysicalInterface(
+                    name="eth1",
+                    mac_address="00:15:5d:01:1d:1b",
+                    ip_cidr="192.168.50.1/24",
+                    role="access",
+                    mode="access",
+                    inventory_source="host",
+                    desired_state_source="user",
+                ),
+                PhysicalInterface(
+                    name="eth2",
+                    mac_address="00:15:5d:01:1d:1c",
+                    role="access",
+                    mode="trunk",
+                    inventory_source="host",
+                    desired_state_source="user",
+                ),
+                PhysicalInterface(
+                    name="eth3",
+                    mac_address="00:15:5d:01:1d:1d",
+                    role="wan",
+                    mode="access",
+                    inventory_source="host",
+                    desired_state_source="user",
+                ),
+            ]
+        )
+        db.commit()
+
+    page = client.get("/vlan-interfaces")
+    payload = page.text.split("data-parent-options='", 1)[1].split("'", 1)[0]
+    options = json.loads(html.unescape(payload))
+
+    assert options == [{"name": "eth2", "label": "eth2 - access - trunk - host NIC - 00:15:5d:01:1d:1c"}]
+    assert "eth2 - access - trunk - host NIC" in page.text
+    assert "eth1 - access - trunk" not in page.text
 
 
 def test_vlan_interface_rejects_non_trunk_parent(client):
@@ -1284,7 +1395,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "firewall-apply-20260622-2" in page.text
+    assert "vlan-trunk-20260622-1" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
@@ -1386,6 +1497,198 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
         assert job is not None
         assert "skipped_changed_units" in (job.result or "")
         assert '"unit_id": "firewall"' in (job.result or "")
+
+
+def test_network_apply_config_includes_removed_vlan_targets_from_baseline():
+    from labfoundry.app.ui import network_config_with_removed_vlans, network_vlan_entries_from_config, removed_network_vlan_entries
+
+    baseline = {
+        "config_preview": "\n".join(
+            [
+                "[physical_interfaces]",
+                "interface=eth2",
+                "  mode=trunk",
+                "",
+                "[vlan_interfaces]",
+                "vlan=eth2.20",
+                "  parent=eth2",
+                "  vlan_id=20",
+                "  ip_cidr=192.168.20.1/24",
+                "  mtu=1500",
+                "  role=services",
+            ]
+        )
+    }
+    current = "\n".join(
+        [
+            "[physical_interfaces]",
+            "interface=eth2",
+            "  mode=trunk",
+            "",
+            "[vlan_interfaces]",
+            "",
+        ]
+    )
+
+    removed = removed_network_vlan_entries(current, network_vlan_entries_from_config(baseline["config_preview"]))
+    staged = network_config_with_removed_vlans(current, removed)
+
+    assert removed == [{"name": "eth2.20", "parent": "eth2", "vlan_id": "20"}]
+    assert "[removed_vlan_interfaces]" in staged
+    assert "vlan=eth2.20" in staged
+    assert "  parent=eth2" in staged
+    assert "  vlan_id=20" in staged
+
+
+def test_network_apply_removal_targets_include_successful_apply_history(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, utcnow
+    from labfoundry.app.ui import removed_network_vlan_entries, successful_network_apply_vlan_entries
+
+    applied_preview = "\n".join(
+        [
+            "[physical_interfaces]",
+            "interface=eth2",
+            "  mode=trunk",
+            "",
+            "[vlan_interfaces]",
+            "vlan=eth2.21",
+            "  parent=eth2",
+            "  vlan_id=21",
+            "  ip_cidr=192.168.21.1/24",
+            "  mtu=1500",
+            "  role=services",
+        ]
+    )
+    current_preview = "\n".join(
+        [
+            "[physical_interfaces]",
+            "interface=eth2",
+            "  mode=trunk",
+            "",
+            "[vlan_interfaces]",
+            "",
+        ]
+    )
+    with SessionLocal() as db:
+        job = Job(
+            id="job_network_history_vlan",
+            type="appliance-apply",
+            status=JobStatus.SUCCEEDED.value,
+            created_by="admin",
+            started_at=utcnow(),
+            finished_at=utcnow(),
+            progress_percent=100,
+            result=json.dumps(
+                {
+                    "units": [
+                        {
+                            "unit_id": "network",
+                            "success": True,
+                            "dry_run": False,
+                            "config_preview": applied_preview,
+                        }
+                    ]
+                }
+            ),
+        )
+        db.add(job)
+        db.commit()
+        applied = successful_network_apply_vlan_entries(db, {"config_preview": current_preview})
+        removed = removed_network_vlan_entries(current_preview, applied)
+
+    assert {"name": "eth2.21", "parent": "eth2", "vlan_id": "21"} in removed
+
+
+def test_network_apply_history_retires_successfully_removed_vlans(client):
+    import json
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, utcnow
+    from labfoundry.app.ui import removed_network_vlan_entries, successful_network_apply_vlan_entries
+
+    applied_preview = "\n".join(
+        [
+            "[physical_interfaces]",
+            "interface=eth2",
+            "  mode=trunk",
+            "",
+            "[vlan_interfaces]",
+            "vlan=eth2.21",
+            "  parent=eth2",
+            "  vlan_id=21",
+            "  ip_cidr=192.168.21.1/24",
+            "  mtu=1500",
+            "  role=services",
+        ]
+    )
+    current_preview = "\n".join(
+        [
+            "[physical_interfaces]",
+            "interface=eth2",
+            "  mode=trunk",
+            "",
+            "[vlan_interfaces]",
+            "",
+        ]
+    )
+    with SessionLocal() as db:
+        db.add(
+            Job(
+                id="job_network_history_vlan_created",
+                type="appliance-apply",
+                status=JobStatus.SUCCEEDED.value,
+                created_by="admin",
+                started_at=utcnow(),
+                finished_at=utcnow(),
+                progress_percent=100,
+                result=json.dumps(
+                    {
+                        "units": [
+                            {
+                                "unit_id": "network",
+                                "success": True,
+                                "dry_run": False,
+                                "config_preview": applied_preview,
+                            }
+                        ]
+                    }
+                ),
+            )
+        )
+        db.add(
+            Job(
+                id="job_network_history_vlan_removed",
+                type="appliance-apply",
+                status=JobStatus.SUCCEEDED.value,
+                created_by="admin",
+                started_at=utcnow(),
+                finished_at=utcnow(),
+                progress_percent=100,
+                result=json.dumps(
+                    {
+                        "units": [
+                            {
+                                "unit_id": "network",
+                                "success": True,
+                                "dry_run": False,
+                                "config_preview": current_preview,
+                                "removed_vlan_interfaces": [{"name": "eth2.21", "parent": "eth2", "vlan_id": "21"}],
+                            }
+                        ]
+                    }
+                ),
+            )
+        )
+        db.commit()
+        applied = successful_network_apply_vlan_entries(db, {"config_preview": current_preview})
+        removed = removed_network_vlan_entries(current_preview, applied)
+
+    assert {"name": "eth2.21", "parent": "eth2", "vlan_id": "21"} not in removed
 
 
 def test_services_ui_records_dry_run_action(client):

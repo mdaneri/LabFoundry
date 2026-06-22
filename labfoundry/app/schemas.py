@@ -170,11 +170,19 @@ class PhysicalInterfaceResponse(BaseModel):
     mac_address: str
     driver: str | None
     speed: str | None
+    host_ip_cidr: str | None
+    host_mtu: int | None
+    host_admin_state: str | None
+    ip_cidr: str | None
     mtu: int
     admin_state: str
     oper_state: str
     role: str
     mode: str
+    inventory_source: str
+    desired_state_source: str
+    last_seen_at: datetime | None
+    missing_since: datetime | None
 
 
 class VlanCreate(BaseModel):

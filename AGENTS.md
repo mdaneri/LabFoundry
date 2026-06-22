@@ -61,6 +61,8 @@
 ## Network And Service Binding
 
 - Physical Interfaces are for untagged/access networks. VLAN Interfaces are only for tagged VLAN networks on physical parent interfaces marked as trunk.
+- Physical Interfaces may refresh observed Photon/Hyper-V NIC inventory from the host, but host inventory is read-only context; desired-state edits remain separate and enforcement still goes through `/appliance-apply`.
+- Real network apply is Photon `systemd-networkd` backed. It may install LabFoundry-owned `.network`/`.netdev` files under `/etc/systemd/network/`, reload networkd, reconfigure non-management links, create/update desired VLAN links, and delete VLAN links explicitly derived from successful LabFoundry network apply history. Keep management on `eth0` explicit and do not blindly reconfigure the management link without reachability safeguards.
 - Do not offer trunk physical interfaces as direct service bind targets. Service bind selectors should include access physical interfaces with an IP CIDR and enabled VLAN interfaces with an IP CIDR.
 - When a service bind target is selected, derive the listen IP from the selected interface or VLAN IP CIDR. Do not ask the user to enter a separate bind IP unless the service genuinely supports multiple explicit listen addresses, such as DNS.
 - If a VLAN has dependent state, protect parent interface mode changes that would invalidate it. A physical interface with VLAN children should not be silently changed from trunk to access.

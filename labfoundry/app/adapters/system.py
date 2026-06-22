@@ -68,10 +68,10 @@ class SystemAdapter:
         return self._record_only_result(["labfoundry-helper", "kms", "validate", config_path], "dry-run: KMS validation command recorded")
 
     def apply_network_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "network", "apply", config_path], "dry-run: network apply command recorded")
+        return self._helper_result("network", "apply", config_path, dry_run_message="dry-run: network apply command recorded")
 
     def validate_network_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "network", "validate", config_path], "dry-run: network validation command recorded")
+        return self._helper_result("network", "validate", config_path, dry_run_message="dry-run: network validation command recorded")
 
     def apply_firewall_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("firewall", "apply", config_path, dry_run_message="dry-run: firewall apply command recorded")

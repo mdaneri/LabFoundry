@@ -132,6 +132,21 @@ body {
   flex-wrap: wrap;
 }
 
+.inline-help-row {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+
+.compact-summary-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: -2px 0 12px;
+}
+
 .role-chip,
 .user-chip,
 .status-pill {

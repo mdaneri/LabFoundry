@@ -10,6 +10,17 @@
       </div>
       <span class="status-pill muted">{{ vlan_interfaces|length }} VLANs</span>
     </div>
+    <div class="inline-help-row">
+      <span class="field-label"><span>Trunk parents</span><button class="help-icon" type="button" data-help="Only physical NICs marked as trunk are available here. On the Photon appliance, use the Hyper-V trunk NIC for tagged lab networks.">i</button></span>
+      <span class="field-label"><span>Desired VLAN state</span><button class="help-icon" type="button" data-help="Creating or editing a VLAN stores desired state and updates validation previews. The host is changed only by the global appliance apply workflow.">i</button></span>
+    </div>
+    {% if trunk_parent_options %}
+      <div class="compact-summary-list">
+        {% for parent in trunk_parent_options %}
+          <span class="status-pill muted">{{ parent.label }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
     {% if form_error %}
       <div class="alert error">{{ form_error }}</div>
     {% endif %}
@@ -18,7 +29,7 @@
       id="vlan-interfaces-table"
       class="tabulator-shell vlan-interfaces-table"
       data-vlans='{{ vlan_interface_rows | tojson }}'
-      data-parent-options='{{ trunk_interface_names | tojson }}'
+      data-parent-options='{{ trunk_parent_options | tojson }}'
       data-role-options='{{ vlan_roles | tojson }}'
       data-csrf="{{ csrf_token }}"
       data-fallback-id="vlan-interfaces-fallback"

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+from ipaddress import ip_interface
 from pathlib import Path
 
 
@@ -32,6 +34,11 @@ FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
 FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
 FIREWALL_CONFIG_PATH = FIREWALL_CONFIG_DIR / "labfoundry.nft"
 FIREWALL_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-firewall.service")
+NETWORK_APPLY_DIR = Path("/var/lib/labfoundry/apply/network")
+NETWORKD_CONFIG_DIR = Path("/etc/systemd/network")
+NETWORKD_MGMT_CONFIG_PATH = NETWORKD_CONFIG_DIR / "00-labfoundry-mgmt.network"
+NETWORKD_MANAGED_PREFIX = "10-labfoundry-"
+NETWORK_INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -67,6 +74,408 @@ def _validate_firewall_config(path: Path) -> subprocess.CompletedProcess[str]:
     if shutil.which("nft") is None:
         return subprocess.CompletedProcess(["nft", "-c", "-f", str(path)], 127, "", "nft command not found\n")
     return _run(["nft", "-c", "-f", str(path)])
+
+
+def _validate_network_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".conf":
+        raise ValueError("network config path must end with .conf")
+    if not path.is_relative_to(NETWORK_APPLY_DIR):
+        raise ValueError(f"network config must be staged under {NETWORK_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"network config does not exist: {path}")
+    return path
+
+
+def _parse_network_config(path: Path) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    physical_interfaces: list[dict[str, str]] = []
+    vlan_interfaces: list[dict[str, str]] = []
+    removed_vlan_interfaces: list[dict[str, str]] = []
+    current_section = ""
+    current: dict[str, str] | None = None
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line.strip("[]")
+            current = None
+            continue
+        if "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if current_section == "physical_interfaces" and key == "interface":
+            current = {"name": value}
+            physical_interfaces.append(current)
+            continue
+        if current_section == "vlan_interfaces" and key == "vlan":
+            current = {"name": value}
+            vlan_interfaces.append(current)
+            continue
+        if current_section == "removed_vlan_interfaces" and key == "vlan":
+            current = {"name": value}
+            removed_vlan_interfaces.append(current)
+            continue
+        if current is not None:
+            current[key] = value
+    return physical_interfaces, vlan_interfaces, removed_vlan_interfaces
+
+
+def _valid_network_interface_name(name: str) -> bool:
+    return bool(name and NETWORK_INTERFACE_NAME_PATTERN.fullmatch(name) and "/" not in name)
+
+
+def _networkd_managed_filename(name: str, suffix: str) -> str:
+    if not _valid_network_interface_name(name):
+        raise ValueError(f"invalid interface name for systemd-networkd file: {name}")
+    return f"{NETWORKD_MANAGED_PREFIX}{name}.{suffix}"
+
+
+def _read_existing_management_network_values() -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {"Gateway": [], "DNS": []}
+    try:
+        lines = NETWORKD_MGMT_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    in_network = False
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line == "[Network]":
+            in_network = True
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_network = False
+            continue
+        if not in_network or "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if key in values and value:
+            values[key].append(value)
+    return values
+
+
+def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str]]:
+    physical_interfaces, vlan_interfaces, _removed_vlan_interfaces = _parse_network_config(path)
+    vlans_by_parent: dict[str, list[dict[str, str]]] = {}
+    for vlan in vlan_interfaces:
+        vlans_by_parent.setdefault(vlan.get("parent", ""), []).append(vlan)
+
+    management = next((row for row in physical_interfaces if row.get("role") == "management"), None)
+    if management is None:
+        management = next((row for row in physical_interfaces if row.get("name") == "eth0"), None)
+    management_name = management.get("name", "eth0") if management else "eth0"
+    preserved_management = _read_existing_management_network_values()
+    files: dict[str, str] = {}
+    reconfigure_links: list[str] = []
+
+    for interface in physical_interfaces:
+        name = interface.get("name", "")
+        if not _valid_network_interface_name(name):
+            raise ValueError(f"invalid physical interface name: {name}")
+        mode = interface.get("mode", "unused")
+        lines = [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "[Match]",
+            f"Name={name}",
+            "",
+            "[Network]",
+            "IPv6AcceptRA=no",
+        ]
+        if interface.get("ip_cidr"):
+            lines.append(f"Address={interface['ip_cidr']}")
+        if name == management_name:
+            for gateway in preserved_management["Gateway"]:
+                lines.append(f"Gateway={gateway}")
+            for dns in preserved_management["DNS"]:
+                lines.append(f"DNS={dns}")
+        elif not interface.get("ip_cidr"):
+            lines.append("LinkLocalAddressing=no")
+        if mode == "trunk":
+            for vlan in sorted(vlans_by_parent.get(name, []), key=lambda row: int(row.get("vlan_id", "0"))):
+                lines.append(f"VLAN={vlan['name']}")
+        filename = "00-labfoundry-mgmt.network" if name == management_name else _networkd_managed_filename(name, "network")
+        files[filename] = "\n".join(lines).strip() + "\n"
+        if name != management_name:
+            reconfigure_links.append(name)
+
+    for vlan in vlan_interfaces:
+        name = vlan.get("name", "")
+        if not _valid_network_interface_name(name):
+            raise ValueError(f"invalid VLAN interface name: {name}")
+        netdev_lines = [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "[NetDev]",
+            f"Name={name}",
+            "Kind=vlan",
+            f"MTUBytes={vlan.get('mtu', '1500')}",
+            "",
+            "[VLAN]",
+            f"Id={vlan['vlan_id']}",
+        ]
+        files[_networkd_managed_filename(name, "netdev")] = "\n".join(netdev_lines).strip() + "\n"
+        network_lines = [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "[Match]",
+            f"Name={name}",
+            "",
+            "[Network]",
+            "IPv6AcceptRA=no",
+        ]
+        if vlan.get("ip_cidr"):
+            network_lines.append(f"Address={vlan['ip_cidr']}")
+        else:
+            network_lines.append("LinkLocalAddressing=no")
+        files[_networkd_managed_filename(name, "network")] = "\n".join(network_lines).strip() + "\n"
+        reconfigure_links.append(name)
+
+    return files, reconfigure_links
+
+
+def _network_config_errors(path: Path) -> list[str]:
+    physical_interfaces, vlan_interfaces, removed_vlan_interfaces = _parse_network_config(path)
+    errors: list[str] = []
+    physical_modes = {row.get("name", ""): row.get("mode", "") for row in physical_interfaces}
+    physical_names = set(physical_modes)
+    management_entries = [row for row in physical_interfaces if row.get("role") == "management"]
+    if not management_entries:
+        errors.append("Network config must include a management physical interface.")
+    elif not any(row.get("name") == "eth0" and row.get("ip_cidr") for row in management_entries):
+        errors.append("Photon appliance management must keep eth0 with an IP CIDR before networkd apply.")
+    for interface in physical_interfaces:
+        name = interface.get("name", "")
+        if not _valid_network_interface_name(name):
+            errors.append(f"Interface name {name or '<missing>'} is invalid.")
+    for vlan in vlan_interfaces:
+        name = vlan.get("name", "")
+        parent = vlan.get("parent", "")
+        raw_vlan_id = vlan.get("vlan_id", "")
+        if not name:
+            errors.append("VLAN entry is missing a name.")
+        elif not _valid_network_interface_name(name):
+            errors.append(f"VLAN name {name} is invalid.")
+        if parent not in physical_names:
+            errors.append(f"VLAN {name or '<unnamed>'} parent {parent or '<missing>'} is not in physical interfaces.")
+        elif physical_modes.get(parent) != "trunk":
+            errors.append(f"VLAN {name} parent {parent} is not marked trunk.")
+        try:
+            vlan_id = int(raw_vlan_id)
+        except ValueError:
+            errors.append(f"VLAN {name or '<unnamed>'} ID is not an integer.")
+            vlan_id = 0
+        if vlan_id < 1 or vlan_id > 4094:
+            errors.append(f"VLAN {name or '<unnamed>'} ID must be between 1 and 4094.")
+        expected_name = f"{parent}.{vlan_id}" if parent and vlan_id else ""
+        if expected_name and name != expected_name:
+            errors.append(f"VLAN {name} should be named {expected_name}.")
+        if vlan.get("ip_cidr"):
+            try:
+                ip_interface(vlan["ip_cidr"])
+            except ValueError:
+                errors.append(f"VLAN {name} IP CIDR {vlan['ip_cidr']} is invalid.")
+        try:
+            mtu = int(vlan.get("mtu", "1500"))
+        except ValueError:
+            errors.append(f"VLAN {name or '<unnamed>'} MTU is not an integer.")
+            mtu = 0
+        if mtu < 576 or mtu > 9000:
+            errors.append(f"VLAN {name or '<unnamed>'} MTU must be between 576 and 9000.")
+    for vlan in removed_vlan_interfaces:
+        name = vlan.get("name", "")
+        parent = vlan.get("parent", "")
+        raw_vlan_id = vlan.get("vlan_id", "")
+        if not name:
+            errors.append("Removed VLAN entry is missing a name.")
+        elif not _valid_network_interface_name(name):
+            errors.append(f"Removed VLAN name {name} is invalid.")
+        if not parent:
+            errors.append(f"Removed VLAN {name or '<unnamed>'} parent is missing.")
+        try:
+            vlan_id = int(raw_vlan_id)
+        except ValueError:
+            errors.append(f"Removed VLAN {name or '<unnamed>'} ID is not an integer.")
+            vlan_id = 0
+        if vlan_id < 1 or vlan_id > 4094:
+            errors.append(f"Removed VLAN {name or '<unnamed>'} ID must be between 1 and 4094.")
+        expected_name = f"{parent}.{vlan_id}" if parent and vlan_id else ""
+        if expected_name and name != expected_name:
+            errors.append(f"Removed VLAN {name} should be named {expected_name}.")
+    return errors
+
+
+def _link_exists(name: str) -> bool:
+    return _run(["ip", "link", "show", "dev", name]).returncode == 0
+
+
+def _is_vlan_link(name: str) -> bool:
+    result = _run(["ip", "-j", "-d", "link", "show", "dev", name])
+    if result.returncode != 0:
+        return False
+    try:
+        rows = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False
+    if not rows:
+        return False
+    linkinfo = rows[0].get("linkinfo") or {}
+    return linkinfo.get("info_kind") == "vlan"
+
+
+def _apply_vlan_interfaces(path: Path) -> int:
+    if shutil.which("ip") is None:
+        print("ip command not found", file=sys.stderr)
+        return 127
+    errors = _network_config_errors(path)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    _physical_interfaces, vlan_interfaces, removed_vlan_interfaces = _parse_network_config(path)
+    removed_names: list[str] = []
+    for vlan in removed_vlan_interfaces:
+        name = vlan["name"]
+        if not _link_exists(name):
+            continue
+        if not _is_vlan_link(name):
+            print(f"refusing to delete non-VLAN link: {name}", file=sys.stderr)
+            return 2
+        delete = _run(["ip", "link", "delete", "dev", name])
+        print(delete.stdout, end="")
+        print(delete.stderr, end="", file=sys.stderr)
+        if delete.returncode != 0:
+            return delete.returncode
+        removed_names.append(name)
+    for vlan in vlan_interfaces:
+        name = vlan["name"]
+        parent = vlan["parent"]
+        vlan_id = vlan["vlan_id"]
+        mtu = vlan.get("mtu", "1500")
+        if not _link_exists(parent):
+            print(f"parent interface does not exist: {parent}", file=sys.stderr)
+            return 2
+        if not _link_exists(name):
+            create = _run(["ip", "link", "add", "link", parent, "name", name, "type", "vlan", "id", vlan_id])
+            print(create.stdout, end="")
+            print(create.stderr, end="", file=sys.stderr)
+            if create.returncode != 0:
+                return create.returncode
+        set_mtu = _run(["ip", "link", "set", "dev", name, "mtu", mtu])
+        print(set_mtu.stdout, end="")
+        print(set_mtu.stderr, end="", file=sys.stderr)
+        if set_mtu.returncode != 0:
+            return set_mtu.returncode
+        link_up = _run(["ip", "link", "set", "dev", name, "up"])
+        print(link_up.stdout, end="")
+        print(link_up.stderr, end="", file=sys.stderr)
+        if link_up.returncode != 0:
+            return link_up.returncode
+        flush = _run(["ip", "address", "flush", "dev", name, "scope", "global"])
+        print(flush.stdout, end="")
+        print(flush.stderr, end="", file=sys.stderr)
+        if flush.returncode != 0:
+            return flush.returncode
+        if vlan.get("ip_cidr"):
+            address = _run(["ip", "address", "replace", vlan["ip_cidr"], "dev", name])
+            print(address.stdout, end="")
+            print(address.stderr, end="", file=sys.stderr)
+            if address.returncode != 0:
+                return address.returncode
+    print(
+        json.dumps(
+            {"network": "vlan apply complete", "removed_vlans": removed_names, "vlans": [vlan["name"] for vlan in vlan_interfaces]},
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _install_systemd_networkd_files(path: Path) -> tuple[int, list[str], list[str]]:
+    try:
+        files, reconfigure_links = _systemd_networkd_files(path)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2, [], []
+    if shutil.which("networkctl") is None:
+        print("networkctl command not found", file=sys.stderr)
+        return 127, [], []
+    NETWORKD_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    for old_path in NETWORKD_CONFIG_DIR.glob(f"{NETWORKD_MANAGED_PREFIX}*"):
+        if old_path.is_file() and old_path.suffix in {".network", ".netdev"}:
+            old_path.unlink()
+    installed: list[str] = []
+    for filename, content in sorted(files.items()):
+        target = NETWORKD_CONFIG_DIR / filename
+        tmp_target = target.with_suffix(f"{target.suffix}.tmp")
+        tmp_target.write_text(content, encoding="utf-8")
+        os.chmod(tmp_target, 0o644)
+        tmp_target.replace(target)
+        installed.append(str(target))
+
+    reload_result = _run(["networkctl", "reload"])
+    print(reload_result.stdout, end="")
+    print(reload_result.stderr, end="", file=sys.stderr)
+    if reload_result.returncode != 0:
+        return reload_result.returncode, installed, reconfigure_links
+
+    for link in reconfigure_links:
+        if not _link_exists(link):
+            continue
+        reconfigure = _run(["networkctl", "reconfigure", link])
+        print(reconfigure.stdout, end="")
+        print(reconfigure.stderr, end="", file=sys.stderr)
+        if reconfigure.returncode != 0:
+            return reconfigure.returncode, installed, reconfigure_links
+    return 0, installed, reconfigure_links
+
+
+def _handle_network(action: str, args: list[str]) -> int:
+    if len(args) != 1:
+        print(f"network {action} requires exactly one staged config path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _validate_network_config_path(args[0])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    errors = _network_config_errors(config_path)
+    if action == "validate":
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 2
+        try:
+            files, reconfigure_links = _systemd_networkd_files(config_path)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                {
+                    "network": "validation ok",
+                    "networkd_files": sorted(files),
+                    "reconfigure_links": reconfigure_links,
+                    "scope": "systemd-networkd",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    install_returncode, installed, reconfigure_links = _install_systemd_networkd_files(config_path)
+    if install_returncode != 0:
+        return install_returncode
+    vlan_returncode = _apply_vlan_interfaces(config_path)
+    if vlan_returncode != 0:
+        return vlan_returncode
+    print(
+        json.dumps(
+            {
+                "network": "systemd-networkd apply complete",
+                "installed_files": installed,
+                "reconfigure_links": reconfigure_links,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _install_firewall_service() -> None:
@@ -168,6 +577,8 @@ def main(argv: list[str]) -> int:
 
     if group == "firewall":
         return _handle_firewall(action, normalized_args)
+    if group == "network":
+        return _handle_network(action, normalized_args)
 
     print("real helper execution is not implemented for this apply unit", file=sys.stderr)
     return 78

@@ -28,6 +28,7 @@ from labfoundry.app.models import (
     WanPolicy,
 )
 from labfoundry.app.security import hash_password
+from labfoundry.app.services.networking import normalize_interface_mode
 
 
 VCF_BACKUP_USERNAME = "vcf-backup"
@@ -107,34 +108,51 @@ def seed_initial_data(db: Session) -> None:
                     mac_address="02:15:5d:00:10:01",
                     driver="hv_netvsc",
                     speed="10 Gbps",
+                    host_ip_cidr="192.168.49.1/24",
+                    host_mtu=1500,
+                    host_admin_state="up",
                     ip_cidr="192.168.49.1/24",
                     mtu=1500,
                     role="management",
                     mode="access",
+                    inventory_source="seed",
+                    desired_state_source="seed",
                 ),
                 PhysicalInterface(
                     name="eth1",
                     mac_address="02:15:5d:00:10:02",
                     driver="hv_netvsc",
                     speed="10 Gbps",
+                    host_mtu=1500,
+                    host_admin_state="up",
                     mtu=1500,
                     role="access",
                     mode="trunk",
+                    inventory_source="seed",
+                    desired_state_source="seed",
                 ),
                 PhysicalInterface(
                     name="eth2",
                     mac_address="02:15:5d:00:10:03",
                     driver="hv_netvsc",
                     speed="10 Gbps",
+                    host_ip_cidr="192.168.50.1/24",
+                    host_mtu=1500,
+                    host_admin_state="up",
                     ip_cidr="192.168.50.1/24",
                     mtu=1500,
                     role="access",
                     mode="access",
+                    inventory_source="seed",
+                    desired_state_source="seed",
                 ),
             ]
         )
+        db.flush()
 
-    if db.execute(select(VlanInterface).where(VlanInterface.name == "eth1.20")).scalar_one_or_none() is None:
+    eth1_parent = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth1")).scalar_one_or_none()
+    seed_sample_vlan = eth1_parent is not None and normalize_interface_mode(eth1_parent.mode) == "trunk"
+    if seed_sample_vlan and db.execute(select(VlanInterface).where(VlanInterface.name == "eth1.20")).scalar_one_or_none() is None:
         db.add(
             VlanInterface(
                 name="eth1.20",
@@ -146,6 +164,7 @@ def seed_initial_data(db: Session) -> None:
                 enabled=True,
             )
         )
+        db.flush()
 
     if db.execute(select(WanPolicy)).first() is None:
         policy = WanPolicy(
@@ -161,15 +180,16 @@ def seed_initial_data(db: Session) -> None:
         )
         db.add(policy)
         db.flush()
-        db.add(
-            Route(
-                destination_cidr="192.168.20.0/24",
-                gateway=None,
-                interface_name="eth1.20",
-                metric=100,
-                wan_policy_id=policy.id,
+        if seed_sample_vlan and db.execute(select(VlanInterface).where(VlanInterface.name == "eth1.20")).scalar_one_or_none() is not None:
+            db.add(
+                Route(
+                    destination_cidr="192.168.20.0/24",
+                    gateway=None,
+                    interface_name="eth1.20",
+                    metric=100,
+                    wan_policy_id=policy.id,
+                )
             )
-        )
 
     existing_services = {row.service for row in db.execute(select(ServiceState)).scalars().all()}
     for service_state in SERVICE_STATE_DEFAULTS:

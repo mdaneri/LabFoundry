@@ -122,7 +122,7 @@ from labfoundry.app.services.firewall import (
     validate_firewall_rule,
     validate_firewall_state,
 )
-from labfoundry.app.services.networking import normalize_interface_mode
+from labfoundry.app.services.networking import normalize_interface_mode, sync_host_physical_interfaces
 from labfoundry.app.services.vcf_backups import vcf_backup_settings_to_dict
 from labfoundry.app.services.vcf_private_registry import (
     VCF_REGISTRY_UPLOADED_CA_BUNDLE_PEM_KEY,
@@ -494,6 +494,7 @@ def update_physical_interface(
                 ),
             )
         interface.mode = new_mode
+    interface.desired_state_source = "user"
     db.add(interface)
     db.commit()
     db.refresh(interface)
@@ -524,8 +525,15 @@ def refresh_physical_interfaces(
     identity: Annotated[Identity, Depends(require_scope("write:interfaces"))],
     db: Session = Depends(get_db),
 ) -> list[PhysicalInterfaceResponse]:
-    record_audit(db, actor=identity.username, action="refresh_interfaces", resource_type="interface")
-    return list_physical_interfaces(identity, db)
+    interfaces, discovered_count = sync_host_physical_interfaces(db)
+    record_audit(
+        db,
+        actor=identity.username,
+        action="refresh_physical_interface_inventory",
+        resource_type="interface",
+        detail=f"{discovered_count} host interface{'s' if discovered_count != 1 else ''} discovered",
+    )
+    return [PhysicalInterfaceResponse.model_validate(row) for row in interfaces]
 
 
 @router.get("/vlans", response_model=list[VlanResponse], tags=["VLANs"], operation_id="listVlans")

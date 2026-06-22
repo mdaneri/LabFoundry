@@ -22,6 +22,14 @@ Current apply units are:
 
 DNS and DHCP are one unit because they share the rendered dnsmasq config and reload boundary.
 
+## Physical Interface Inventory
+
+Refreshing Physical Interfaces is inventory only. It reads observed Linux NIC facts from the appliance and updates LabFoundry's model, but it does not run the network adapter or apply desired state to the host.
+
+## Network Apply
+
+The real network apply path is Photon `systemd-networkd` backed. The `network` apply unit stages LabFoundry's rendered network config at `/var/lib/labfoundry/apply/network/labfoundry-network.conf`, validates management, physical, VLAN, and CIDR intent, installs LabFoundry-owned `.network` and `.netdev` files under `/etc/systemd/network/`, reloads networkd, and reconfigures non-management links. Management remains explicit on `eth0`; the helper does not blindly reconfigure the management link during this first pass. When a VLAN was present in successful LabFoundry network apply history and is no longer desired, the staged config includes an explicit removal target and the helper deletes that VLAN link after verifying it is a VLAN device.
+
 ## Baselines And Diffs
 
 After a successful selected apply, LabFoundry stores the selected units' last-applied baseline in the existing `settings` table. The baseline includes the normalized snapshot hash, compact summary, rendered config preview, config path, and apply timestamp.

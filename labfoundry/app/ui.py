@@ -106,6 +106,8 @@ from labfoundry.app.services.networking import (
     normalize_interface_mode,
     physical_interface_to_dict,
     render_network_config,
+    sync_host_physical_interfaces,
+    trunk_parent_option,
     validate_network_state,
     vlan_interface_to_dict,
 )
@@ -199,6 +201,7 @@ from labfoundry.app.token_service import create_token_for_user
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 TEMPLATES_DIR = APP_DIR / "templates"
+NETWORK_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/network/labfoundry-network.conf"
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 router = APIRouter()
@@ -738,19 +741,21 @@ def network_context(db: Session) -> dict:
         vlan_counts[vlan.parent_interface] = vlan_counts.get(vlan.parent_interface, 0) + 1
     config_preview = render_network_config(interfaces=interfaces, vlans=vlans)
     validation_errors = validate_network_state(interfaces=interfaces, vlans=vlans)
+    trunk_interfaces = [interface for interface in interfaces if normalize_interface_mode(interface.mode) == "trunk"]
     return {
         "physical_interfaces": interfaces,
         "physical_interface_rows": [physical_interface_to_dict(interface, vlan_counts.get(interface.name, 0)) for interface in interfaces],
         "vlan_interfaces": vlans,
         "vlan_interface_rows": [vlan_interface_to_dict(vlan) for vlan in vlans],
         "interface_names": [interface.name for interface in interfaces],
-        "trunk_interface_names": [interface.name for interface in interfaces if normalize_interface_mode(interface.mode) == "trunk"],
+        "trunk_interface_names": [interface.name for interface in trunk_interfaces],
+        "trunk_parent_options": [trunk_parent_option(interface) for interface in trunk_interfaces],
         "interface_roles": INTERFACE_ROLES,
         "interface_modes": INTERFACE_MODES,
         "vlan_roles": VLAN_ROLES,
         "network_config_preview": config_preview,
         "network_validation_errors": validation_errors,
-        "network_config_path": "/etc/labfoundry/network/labfoundry-network.conf",
+        "network_config_path": NETWORK_STAGED_CONFIG_PATH,
     }
 
 
@@ -1298,6 +1303,95 @@ def config_diff_for_unit(unit_id: str, current_preview: str, baseline: dict[str,
     )
 
 
+def network_vlan_entries_from_config(config_preview: str) -> list[dict[str, str]]:
+    vlan_entries: list[dict[str, str]] = []
+    current_section = ""
+    current: dict[str, str] | None = None
+    for raw_line in (config_preview or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line.strip("[]")
+            current = None
+            continue
+        if "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if current_section == "vlan_interfaces" and key == "vlan":
+            current = {"name": value}
+            vlan_entries.append(current)
+            continue
+        if current_section == "vlan_interfaces" and current is not None:
+            current[key] = value
+    return vlan_entries
+
+
+def successful_network_apply_vlan_entries(db: Session, baseline: dict[str, Any] | None) -> list[dict[str, str]]:
+    applied_by_name: dict[str, dict[str, str]] = {}
+    baseline_preview = str((baseline or {}).get("config_preview") or "")
+    for entry in network_vlan_entries_from_config(baseline_preview):
+        if entry.get("name"):
+            applied_by_name[entry["name"]] = entry
+
+    jobs = (
+        db.execute(
+            select(Job)
+            .where(Job.type == "appliance-apply", Job.status == JobStatus.SUCCEEDED.value)
+            .order_by(Job.created_at)
+        )
+        .scalars()
+        .all()
+    )
+    for job in jobs:
+        try:
+            result = json.loads(job.result or "")
+        except json.JSONDecodeError:
+            continue
+        for unit in result.get("units", []):
+            if unit.get("unit_id") != "network" or not unit.get("success") or unit.get("dry_run"):
+                continue
+            for entry in network_vlan_entries_from_config(str(unit.get("config_preview") or "")):
+                if entry.get("name"):
+                    applied_by_name[entry["name"]] = entry
+            for entry in unit.get("removed_vlan_interfaces", []):
+                name = entry.get("name") if isinstance(entry, dict) else ""
+                if name:
+                    applied_by_name.pop(str(name), None)
+    return list(applied_by_name.values())
+
+
+def removed_network_vlan_entries(current_preview: str, applied_entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    current_names = {entry.get("name", "") for entry in network_vlan_entries_from_config(current_preview)}
+    removed: list[dict[str, str]] = []
+    for entry in applied_entries:
+        name = entry.get("name", "")
+        if name and name not in current_names:
+            removed.append(
+                {
+                    "name": name,
+                    "parent": entry.get("parent", ""),
+                    "vlan_id": entry.get("vlan_id", ""),
+                }
+            )
+    return removed
+
+
+def network_config_with_removed_vlans(config_preview: str, removed_vlans: list[dict[str, str]]) -> str:
+    if not removed_vlans:
+        return config_preview
+    lines = [config_preview.rstrip(), "", "[removed_vlan_interfaces]"]
+    for vlan in removed_vlans:
+        lines.extend(
+            [
+                f"vlan={vlan['name']}",
+                f"  parent={vlan.get('parent', '')}",
+                f"  vlan_id={vlan.get('vlan_id', '')}",
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
 def make_appliance_apply_unit(
     *,
     unit_id: str,
@@ -1351,18 +1445,29 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     vcf_depot = vcf_offline_depot_context(db)
     vcf_registry = vcf_private_registry_context(db)
 
+    network_baseline = baselines.get("network")
+    network_removed_vlans = removed_network_vlan_entries(
+        network["network_config_preview"],
+        successful_network_apply_vlan_entries(db, network_baseline),
+    )
+    network_summary = [f"{len(network['physical_interfaces'])} physical interfaces", f"{len(network['vlan_interfaces'])} VLAN interfaces"]
+    if network_removed_vlans:
+        network_summary.append(f"{len(network_removed_vlans)} VLAN removals")
+    network_unit = make_appliance_apply_unit(
+        unit_id="network",
+        label="Network",
+        page_url="/physical-interfaces",
+        context=network,
+        summary=network_summary,
+        validation_errors=network["network_validation_errors"],
+        config_path=network["network_config_path"],
+        config_preview=network["network_config_preview"],
+        baseline=network_baseline,
+    )
+    network_unit["removed_vlan_interfaces"] = network_removed_vlans
+
     return [
-        make_appliance_apply_unit(
-            unit_id="network",
-            label="Network",
-            page_url="/physical-interfaces",
-            context=network,
-            summary=[f"{len(network['physical_interfaces'])} physical interfaces", f"{len(network['vlan_interfaces'])} VLAN interfaces"],
-            validation_errors=network["network_validation_errors"],
-            config_path=network["network_config_path"],
-            config_preview=network["network_config_preview"],
-            baseline=baselines.get("network"),
-        ),
+        network_unit,
         make_appliance_apply_unit(
             unit_id="wan",
             label="Routes & WAN Simulation",
@@ -1523,7 +1628,11 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
     adapter = SystemAdapter()
     unit_id = unit["id"]
     if unit_id == "network":
-        results = [adapter.validate_network_config(context["network_config_path"]), adapter.apply_network_config(context["network_config_path"])]
+        config_path = context["network_config_path"]
+        if not adapter.dry_run:
+            config_preview = network_config_with_removed_vlans(unit["config_preview"], unit.get("removed_vlan_interfaces", []))
+            config_path = stage_appliance_apply_config(NETWORK_STAGED_CONFIG_PATH, config_preview)
+        results = [adapter.validate_network_config(config_path), adapter.apply_network_config(config_path)]
     elif unit_id == "wan":
         results = [adapter.validate_wan_config(context["wan_config_path"]), adapter.apply_wan_config(context["wan_config_path"])]
     elif unit_id == "firewall":
@@ -1572,6 +1681,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         "summary": unit["summary"],
         "validation_errors": unit["validation_errors"],
         "validation_warnings": unit["validation_warnings"],
+        "removed_vlan_interfaces": unit.get("removed_vlan_interfaces", []),
         "config_path": unit["config_path"],
         "config_preview": unit["config_preview"],
         "config_diff": unit["config_diff"],
@@ -2300,6 +2410,25 @@ def physical_interfaces_page(
     return render(request, "physical_interfaces.html", {"identity": identity, **network_context(db), "appliance_apply_status": appliance_apply_status(db, "network")})
 
 
+@router.post("/physical-interfaces/refresh", response_model=None)
+def refresh_physical_interfaces_from_ui(
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    _interfaces, discovered_count = sync_host_physical_interfaces(db)
+    record_audit(
+        db,
+        actor=identity.username,
+        action="refresh_physical_interface_inventory",
+        resource_type="interface",
+        detail=f"{discovered_count} host interface{'s' if discovered_count != 1 else ''} discovered",
+    )
+    return RedirectResponse("/physical-interfaces", status_code=303)
+
+
 @router.post("/physical-interfaces/{interface_id}/edit", response_model=None)
 def edit_physical_interface_from_ui(
     request: Request,
@@ -2331,6 +2460,7 @@ def edit_physical_interface_from_ui(
     interface.ip_cidr = ip_cidr.strip() or None
     interface.mtu = mtu
     interface.admin_state = admin_state.strip()
+    interface.desired_state_source = "user"
     db.commit()
     record_audit(db, actor=identity.username, action="update_physical_interface", resource_type="interface", resource_id=interface.name)
     return RedirectResponse("/physical-interfaces", status_code=303)

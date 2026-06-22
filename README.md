@@ -175,6 +175,8 @@ The MVP follows these boundaries:
 - VCF backup volume mount: `/mnt/labfoundry-vcf-backups`
 - VCF backup SFTP remote directory: `/backups`
 - System adapters default to dry-run mode.
+- Physical Interfaces can refresh read-only Linux NIC inventory from Photon/Hyper-V; observed host facts are separate from desired interface state.
+- Real network apply is Photon `systemd-networkd` backed: it stages LabFoundry's desired network state, installs LabFoundry-owned `.network`/`.netdev` files under `/etc/systemd/network/`, reloads networkd, reconfigures non-management links, and reconciles VLAN links. It keeps management on `eth0` explicit and avoids blindly reconfiguring the management link during the first pass.
 - Privileged changes must use reviewed `labfoundry-helper` commands and sudo allowlists.
 - Subprocess calls must use argument arrays, not arbitrary shell strings.
 - The global `/appliance-apply` workflow is the only appliance enforcement path.
