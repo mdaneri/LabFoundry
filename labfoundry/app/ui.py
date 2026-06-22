@@ -122,7 +122,9 @@ from labfoundry.app.services.firewall import (
     FIREWALL_DIRECTIONS,
     FIREWALL_POLICIES,
     FIREWALL_PROTOCOLS,
+    FIREWALL_STAGED_CONFIG_PATH,
     firewall_rule_to_dict,
+    firewall_settings_to_dict,
     render_nftables_config,
     validate_firewall_rule,
     validate_firewall_state,
@@ -1509,6 +1511,13 @@ def adapter_result_to_payload(result: Any) -> dict[str, Any]:
     }
 
 
+def stage_appliance_apply_config(config_path: str, config_preview: str) -> str:
+    path = Path(config_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(config_preview, encoding="utf-8")
+    return str(path)
+
+
 def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
     context = unit["context"]
     adapter = SystemAdapter()
@@ -1519,7 +1528,10 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         results = [adapter.validate_wan_config(context["wan_config_path"]), adapter.apply_wan_config(context["wan_config_path"])]
     elif unit_id == "firewall":
         settings = context["firewall_settings"]
-        results = [adapter.validate_firewall_config(settings.config_path), adapter.apply_firewall_config(settings.config_path)]
+        config_path = settings.config_path
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(FIREWALL_STAGED_CONFIG_PATH, unit["config_preview"])
+        results = [adapter.validate_firewall_config(config_path), adapter.apply_firewall_config(config_path)]
     elif unit_id == "dnsmasq":
         config_path = context["dns_settings"].config_path
         results = [adapter.validate_dnsmasq_config(config_path), adapter.apply_dnsmasq_config(config_path), adapter.reload_dnsmasq()]
@@ -2116,9 +2128,22 @@ def update_firewall_settings(
     settings.updated_at = utcnow()
     db.add(settings)
     db.commit()
+    db.refresh(settings)
     record_audit(db, actor=identity.username, action="update_firewall_settings", resource_type="firewall", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave"):
-        return JSONResponse({"updated_at": settings.updated_at.isoformat()})
+        rules = db.execute(select(FirewallRule).order_by(FirewallRule.priority, FirewallRule.name)).scalars().all()
+        validation_errors = validate_firewall_state(settings, rules)
+        return JSONResponse(
+            {
+                "updated_at": settings.updated_at.isoformat(),
+                "settings": firewall_settings_to_dict(settings),
+                "enabled": settings.enabled,
+                "valid": not validation_errors,
+                "validation_errors": validation_errors,
+                "config_path": settings.config_path,
+                "config_preview": render_nftables_config(settings, rules),
+            }
+        )
     return RedirectResponse("/firewall", status_code=303)
 
 

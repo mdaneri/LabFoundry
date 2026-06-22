@@ -3421,6 +3421,106 @@ function initializeAutosaveForms() {
   });
 }
 
+function initializeSwitchFields() {
+  document.querySelectorAll(".switch-field").forEach((field) => {
+    if (!(field instanceof HTMLLabelElement)) {
+      return;
+    }
+    const input = field.querySelector(".switch-input");
+    if (!(input instanceof HTMLInputElement) || input.type !== "checkbox") {
+      return;
+    }
+    field.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || target === input || target.closest(".help-icon")) {
+        return;
+      }
+      event.preventDefault();
+      input.checked = !input.checked;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  });
+}
+
+function updateFirewallDesiredState(payload = {}) {
+  if (payload.enabled !== undefined) {
+    document.querySelectorAll("[data-firewall-enabled-status]").forEach((status) => {
+      if (!(status instanceof HTMLElement)) {
+        return;
+      }
+      const enabled = Boolean(payload.enabled);
+      status.textContent = enabled ? "enabled" : "disabled";
+      status.classList.toggle("good", enabled);
+      status.classList.toggle("muted", !enabled);
+    });
+  }
+
+  const validationPanel = document.querySelector("[data-firewall-validation-panel]");
+  if (!(validationPanel instanceof HTMLElement)) {
+    return;
+  }
+  const errors = Array.isArray(payload.validation_errors) ? payload.validation_errors : [];
+  const valid = payload.valid !== undefined ? Boolean(payload.valid) : errors.length === 0;
+  const status = validationPanel.querySelector("[data-firewall-validation-status]");
+  if (status instanceof HTMLElement) {
+    status.textContent = valid ? "valid" : "needs attention";
+    status.classList.toggle("good", valid);
+    status.classList.toggle("warn", !valid);
+  }
+  const terminalNote = validationPanel.querySelector(".terminal-note");
+  let errorList = validationPanel.querySelector("[data-firewall-validation-errors]");
+  let message = validationPanel.querySelector("[data-firewall-validation-message]");
+  if (valid) {
+    if (errorList instanceof HTMLElement) {
+      errorList.remove();
+    }
+    if (!(message instanceof HTMLElement)) {
+      message = document.createElement("p");
+      message.className = "muted";
+      message.setAttribute("data-firewall-validation-message", "");
+      validationPanel.insertBefore(message, terminalNote);
+    }
+    message.textContent =
+      "The desired firewall state passes LabFoundry validation. Appliance validation still runs through the allowlisted nftables helper before apply.";
+  } else {
+    if (message instanceof HTMLElement) {
+      message.remove();
+    }
+    if (!(errorList instanceof HTMLElement)) {
+      errorList = document.createElement("ul");
+      errorList.className = "error-list";
+      errorList.setAttribute("data-firewall-validation-errors", "");
+      validationPanel.insertBefore(errorList, terminalNote);
+    }
+    errorList.innerHTML = "";
+    errors.forEach((error) => {
+      const item = document.createElement("li");
+      item.textContent = error;
+      errorList.append(item);
+    });
+  }
+  const configPath = validationPanel.querySelector("[data-firewall-config-path]");
+  if (configPath instanceof HTMLElement && typeof payload.config_path === "string") {
+    configPath.textContent = payload.config_path;
+  }
+  const configPreview = validationPanel.querySelector("[data-firewall-config-preview]");
+  if (configPreview instanceof HTMLElement && typeof payload.config_preview === "string") {
+    configPreview.textContent = payload.config_preview;
+  }
+}
+
+function initializeFirewallSettings() {
+  document.querySelectorAll('form[action="/firewall/settings"]').forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      updateFirewallDesiredState(event.detail || {});
+    });
+  });
+}
+
 function updateDnsValidation(payload = {}) {
   const validationPanel = document.querySelector("[data-dns-validation-panel]");
   if (!(validationPanel instanceof HTMLElement)) {
@@ -4792,7 +4892,9 @@ document.addEventListener("DOMContentLoaded", initializeVlanInterfacesTable);
 document.addEventListener("DOMContentLoaded", initializeHostsFileEditor);
 document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
+document.addEventListener("DOMContentLoaded", initializeSwitchFields);
 document.addEventListener("DOMContentLoaded", initializeAutosaveForms);
+document.addEventListener("DOMContentLoaded", initializeFirewallSettings);
 document.addEventListener("DOMContentLoaded", initializeDnsSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);

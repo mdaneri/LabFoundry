@@ -8,7 +8,7 @@
         <h2>Firewall Rules</h2>
         <p class="muted">Edit nftables desired state directly in the grid. The bottom row creates a new rule once required fields are filled.</p>
       </div>
-      <span class="status-pill {{ 'good' if firewall_settings.enabled else 'muted' }}">{{ "enabled" if firewall_settings.enabled else "disabled" }}</span>
+      <span class="status-pill {{ 'good' if firewall_settings.enabled else 'muted' }}" data-firewall-enabled-status>{{ "enabled" if firewall_settings.enabled else "disabled" }}</span>
     </div>
     <div id="firewall-rule-error" class="alert hidden"></div>
     <div
@@ -88,23 +88,23 @@
 
     {% include "partials/appliance_apply_status.html" %}
 
-    <div class="panel">
+    <div class="panel" data-firewall-validation-panel>
       <div class="panel-head">
         <h2>Validation</h2>
-        <span class="status-pill {{ 'good' if not firewall_validation_errors else 'warn' }}">{{ "valid" if not firewall_validation_errors else "needs attention" }}</span>
+        <span class="status-pill {{ 'good' if not firewall_validation_errors else 'warn' }}" data-firewall-validation-status>{{ "valid" if not firewall_validation_errors else "needs attention" }}</span>
       </div>
       {% if firewall_validation_errors %}
-        <ul class="error-list">
+        <ul class="error-list" data-firewall-validation-errors>
           {% for error in firewall_validation_errors %}
             <li>{{ error }}</li>
           {% endfor %}
         </ul>
       {% else %}
-        <p class="muted">The desired firewall state passes LabFoundry validation. Appliance validation still runs through the allowlisted nftables helper before apply.</p>
+        <p class="muted" data-firewall-validation-message>The desired firewall state passes LabFoundry validation. Appliance validation still runs through the allowlisted nftables helper before apply.</p>
       {% endif %}
       <div class="terminal-note">
-        <strong>{{ firewall_settings.config_path }}</strong>
-        <code>{{ firewall_config_preview }}</code>
+        <strong data-firewall-config-path>{{ firewall_settings.config_path }}</strong>
+        <code data-firewall-config-preview>{{ firewall_config_preview }}</code>
       </div>
     </div>
   </aside>

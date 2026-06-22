@@ -7,6 +7,7 @@ FIREWALL_DIRECTIONS = ["input", "forward", "output"]
 FIREWALL_ACTIONS = ["accept", "drop", "reject"]
 FIREWALL_PROTOCOLS = ["any", "tcp", "udp", "icmp"]
 FIREWALL_POLICIES = ["accept", "drop"]
+FIREWALL_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/firewall/labfoundry.nft"
 
 
 def firewall_settings_to_dict(settings: FirewallSettings) -> dict:
@@ -21,7 +22,7 @@ def firewall_settings_to_dict(settings: FirewallSettings) -> dict:
         "allow_icmp": settings.allow_icmp,
         "log_dropped": settings.log_dropped,
         "config_path": settings.config_path,
-        "updated_at": settings.updated_at,
+        "updated_at": settings.updated_at.isoformat() if settings.updated_at else "",
     }
 
 
@@ -97,10 +98,18 @@ def validate_firewall_state(settings: FirewallSettings, rules: list[FirewallRule
 def render_nftables_config(settings: FirewallSettings, rules: list[FirewallRule]) -> str:
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
-        "# Dry-run preview of desired nftables firewall state.",
-        "flush table inet labfoundry",
-        "table inet labfoundry {",
+        "# nftables firewall state for Photon OS appliance images.",
+        "flush ruleset",
     ]
+    if not settings.enabled:
+        lines.extend(
+            [
+                "# LabFoundry firewall desired state is disabled.",
+                "# Applying this state clears LabFoundry-managed nftables rules.",
+            ]
+        )
+        return "\n".join(lines) + "\n"
+    lines.append("table inet labfoundry {")
     for chain_name, policy in [
         ("input", settings.default_input_policy),
         ("forward", settings.default_forward_policy),
@@ -113,6 +122,8 @@ def render_nftables_config(settings: FirewallSettings, rules: list[FirewallRule]
             lines.append('    iifname "lo" accept comment "LabFoundry loopback"')
         if settings.allow_established:
             lines.append('    ct state established,related accept comment "LabFoundry established traffic"')
+        if chain_name == "input":
+            lines.append('    ip saddr 192.168.49.0/24 tcp dport { 22, 443, 8000 } accept comment "LabFoundry management access"')
         if settings.allow_icmp:
             lines.append('    meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"')
             lines.append('    meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"')
@@ -133,8 +144,6 @@ def _render_rule(rule: FirewallRule) -> str:
     protocol = rule.protocol.strip().lower()
     if protocol == "icmp":
         parts.append("meta l4proto icmp")
-    elif protocol in {"tcp", "udp"}:
-        parts.append(protocol)
     source = rule.source.strip().lower()
     if source and source != "any":
         parts.append(_address_expr("saddr", source))
@@ -144,6 +153,8 @@ def _render_rule(rule: FirewallRule) -> str:
     if protocol in {"tcp", "udp"} and rule.destination_port.strip():
         ports = _render_ports(rule.destination_port)
         parts.append(f"{protocol} dport {ports}")
+    elif protocol in {"tcp", "udp"}:
+        parts.append(f"meta l4proto {protocol}")
     parts.append(rule.action)
     parts.append(f'comment "{_safe_comment(rule.name)}"')
     return " ".join(parts)

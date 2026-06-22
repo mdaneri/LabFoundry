@@ -151,11 +151,16 @@ it to Packer.
 - `/var/log/labfoundry` local service logs.
 - Fixed appliance mounts under `/mnt/labfoundry-vcf-*`.
 - `/etc/systemd/system/labfoundry.service`.
+- `/etc/systemd/system/labfoundry-firewall.service` loading the nftables
+  management firewall.
 - `/opt/labfoundry/bin/labfoundry-helper` dry-run helper scaffold.
 - `/etc/sudoers.d/labfoundry-helper` constrained helper allowlist.
 
 The generated appliance keeps `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` until
 each helper-backed apply unit is reviewed and promoted.
+Firewall desired state is nftables-backed. Provisioning installs nftables,
+loads `/etc/labfoundry/nftables.d/labfoundry.nft`, and disables the older
+Photon iptables service so LabFoundry has a single firewall owner.
 
 Before shutdown, provisioning resets the exported appliance image from the
 temporary Packer builder network to the LabFoundry management network:

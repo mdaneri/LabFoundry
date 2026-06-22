@@ -1,5 +1,6 @@
 from datetime import datetime
 from ipaddress import ip_interface
+from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
@@ -116,6 +117,7 @@ from labfoundry.app.services.firewall import (
     FIREWALL_DIRECTIONS,
     FIREWALL_POLICIES,
     FIREWALL_PROTOCOLS,
+    FIREWALL_STAGED_CONFIG_PATH,
     render_nftables_config,
     validate_firewall_rule,
     validate_firewall_state,
@@ -264,6 +266,13 @@ def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[Fir
     settings = get_firewall_settings(db)
     rules = db.execute(select(FirewallRule).order_by(FirewallRule.priority, FirewallRule.name)).scalars().all()
     return settings, rules, render_nftables_config(settings, rules), validate_firewall_state(settings, rules)
+
+
+def stage_api_firewall_config(config_preview: str) -> str:
+    path = Path(FIREWALL_STAGED_CONFIG_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(config_preview, encoding="utf-8")
+    return str(path)
 
 
 @router.post(
@@ -1470,12 +1479,16 @@ def delete_firewall_rule_api(
 @router.get("/firewall/validate", response_model=ConfigValidationResponse, tags=["Firewall"], operation_id="validateFirewall")
 def validate_firewall(identity: Annotated[Identity, Depends(require_scope("read:firewall"))], db: Session = Depends(get_db)) -> ConfigValidationResponse:
     settings, _rules, config_preview, errors = firewall_validation_payload(db)
-    result = SystemAdapter().validate_firewall_config(settings.config_path)
+    adapter = SystemAdapter()
+    config_path = settings.config_path
+    if not adapter.dry_run:
+        config_path = stage_api_firewall_config(config_preview)
+    result = adapter.validate_firewall_config(config_path)
     return ConfigValidationResponse(
         valid=not errors,
         dry_run=result.dry_run,
         command=result.command,
-        config_path=settings.config_path,
+        config_path=config_path,
         config_preview=config_preview,
         errors=errors,
     )

@@ -250,7 +250,7 @@ def seed_initial_data(db: Session) -> None:
         )
 
     if db.execute(select(FirewallSettings)).first() is None:
-        db.add(FirewallSettings(enabled=False, default_input_policy="drop", default_forward_policy="drop", default_output_policy="accept"))
+        db.add(FirewallSettings(enabled=True, default_input_policy="drop", default_forward_policy="drop", default_output_policy="accept"))
 
     if db.execute(select(FirewallRule)).first() is None:
         db.add_all(

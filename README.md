@@ -22,6 +22,7 @@ builder lives in [`image/hyperv/`](image/hyperv/) and provisions:
 - `/var/log/labfoundry` for local logs;
 - fixed appliance mount points under `/mnt/labfoundry-vcf-*`;
 - `labfoundry.service` running uvicorn from a Python virtual environment;
+- `labfoundry-firewall.service` loading the appliance nftables firewall;
 - `/opt/labfoundry/bin/labfoundry-helper` and a constrained sudoers template.
 
 The finished Hyper-V appliance VM also attaches two durable dynamic data disks:
@@ -61,6 +62,8 @@ appliance VM.
 The generated appliance intentionally keeps
 `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`. Real host mutation is staged per
 apply unit after the helper-backed command path is reviewed.
+Firewall desired state is nftables-backed. The image installs nftables and
+boots with management access to SSH, HTTPS, and the LabFoundry web UI.
 
 The exported Hyper-V appliance resets to `192.168.49.1/24` on
 `LabFoundry-Mgmt`; the Windows host side should be `192.168.49.254/24`.

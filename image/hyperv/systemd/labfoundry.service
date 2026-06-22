@@ -13,11 +13,11 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/labfoundry/.venv/bin/python -m uvicorn labfoundry.app.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=5
-NoNewPrivileges=true
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/lib/labfoundry /var/log/labfoundry /mnt/labfoundry-vcf-backups /mnt/labfoundry-vcf-registry /mnt/labfoundry-vcf-offline-depot
+ReadWritePaths=/etc/labfoundry /etc/systemd/system /etc/systemd/scripts /var/lib/labfoundry /var/log/labfoundry /mnt/labfoundry-vcf-backups /mnt/labfoundry-vcf-registry /mnt/labfoundry-vcf-offline-depot
 
 [Install]
 WantedBy=multi-user.target

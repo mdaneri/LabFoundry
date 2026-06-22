@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,11 +28,19 @@ COMMANDS: dict[str, set[str]] = {
     "vcf-offline-depot": {"validate", "stage-tool", "sync", "apply-https"},
     "wan": {"validate", "apply"},
 }
+FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
+FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
+FIREWALL_CONFIG_PATH = FIREWALL_CONFIG_DIR / "labfoundry.nft"
+FIREWALL_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-firewall.service")
+
+
+def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, check=False, capture_output=True, text=True)
 
 
 def _usage() -> int:
     groups = ", ".join(sorted(COMMANDS))
-    print(f"usage: labfoundry-helper <group> <action> [path]", file=sys.stderr)
+    print(f"usage: labfoundry-helper <group> <action> [--real] [path]", file=sys.stderr)
     print(f"groups: {groups}", file=sys.stderr)
     return 2
 
@@ -42,6 +52,81 @@ def _validate_path(path_value: str) -> str:
     return str(path)
 
 
+def _validate_firewall_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".nft":
+        raise ValueError("firewall config path must end with .nft")
+    if not path.is_relative_to(FIREWALL_APPLY_DIR):
+        raise ValueError(f"firewall config must be staged under {FIREWALL_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"firewall config does not exist: {path}")
+    return path
+
+
+def _validate_firewall_config(path: Path) -> subprocess.CompletedProcess[str]:
+    if shutil.which("nft") is None:
+        return subprocess.CompletedProcess(["nft", "-c", "-f", str(path)], 127, "", "nft command not found\n")
+    return _run(["nft", "-c", "-f", str(path)])
+
+
+def _install_firewall_service() -> None:
+    FIREWALL_SERVICE_PATH.write_text(
+        "\n".join(
+            [
+                "[Unit]",
+                "Description=LabFoundry nftables firewall",
+                "DefaultDependencies=no",
+                "Before=network-pre.target",
+                "Wants=network-pre.target",
+                "",
+                "[Service]",
+                "Type=oneshot",
+                f"ExecStart=/usr/sbin/nft -f {FIREWALL_CONFIG_PATH}",
+                "RemainAfterExit=yes",
+                "",
+                "[Install]",
+                "WantedBy=multi-user.target",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _run(["systemctl", "daemon-reload"])
+    _run(["systemctl", "enable", "--now", "labfoundry-firewall.service"])
+
+
+def _handle_firewall(action: str, args: list[str]) -> int:
+    if len(args) != 1:
+        print(f"firewall {action} requires exactly one staged config path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _validate_firewall_config_path(args[0])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    validation = _validate_firewall_config(config_path)
+    if action == "validate":
+        print(validation.stdout, end="")
+        print(validation.stderr, end="", file=sys.stderr)
+        return validation.returncode
+    if validation.returncode != 0:
+        print(validation.stdout, end="")
+        print(validation.stderr, end="", file=sys.stderr)
+        return validation.returncode
+
+    FIREWALL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(config_path, FIREWALL_CONFIG_PATH)
+    apply_result = _run(["nft", "-f", str(FIREWALL_CONFIG_PATH)])
+    print(apply_result.stdout, end="")
+    print(apply_result.stderr, end="", file=sys.stderr)
+    if apply_result.returncode != 0:
+        return apply_result.returncode
+
+    _install_firewall_service()
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         return _usage()
@@ -49,6 +134,10 @@ def main(argv: list[str]) -> int:
     group = argv[1]
     action = argv[2]
     args = argv[3:]
+    real_apply = False
+    if "--real" in args:
+        real_apply = True
+        args = [arg for arg in args if arg != "--real"]
 
     if group not in COMMANDS or action not in COMMANDS[group]:
         return _usage()
@@ -70,12 +159,15 @@ def main(argv: list[str]) -> int:
         "group": group,
         "action": action,
         "args": normalized_args,
-        "dry_run": os.environ.get("LABFOUNDRY_HELPER_REAL_APPLY", "").lower() not in {"1", "true", "yes"},
+        "dry_run": not real_apply,
     }
 
     print(json.dumps(record, sort_keys=True))
     if record["dry_run"]:
         return 0
+
+    if group == "firewall":
+        return _handle_firewall(action, normalized_args)
 
     print("real helper execution is not implemented for this apply unit", file=sys.stderr)
     return 78

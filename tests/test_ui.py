@@ -1279,6 +1279,59 @@ def test_firewall_page_create_rule_and_apply_task(client):
         assert "allow-vcenter" in (job.result or "")
 
 
+def test_firewall_settings_autosave_updates_desired_state_preview(client):
+    login(client)
+    page = client.get("/firewall")
+    assert page.status_code == 200
+    assert "data-firewall-enabled-status" in page.text
+    assert "firewall-apply-20260622-2" in page.text
+    assert "initializeSwitchFields" in client.get("/static/app.js").text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    disabled = client.post(
+        "/firewall/settings",
+        data={
+            "csrf": csrf,
+            "default_input_policy": "drop",
+            "default_forward_policy": "drop",
+            "default_output_policy": "accept",
+            "allow_established": "on",
+            "allow_loopback": "on",
+            "allow_icmp": "on",
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert disabled.status_code == 200
+    disabled_payload = disabled.json()
+    assert disabled_payload["enabled"] is False
+    assert disabled_payload["valid"] is True
+    assert "LabFoundry firewall desired state is disabled" in disabled_payload["config_preview"]
+    assert "table inet labfoundry" not in disabled_payload["config_preview"]
+
+    enabled = client.post(
+        "/firewall/settings",
+        data={
+            "csrf": csrf,
+            "enabled": "on",
+            "default_input_policy": "drop",
+            "default_forward_policy": "drop",
+            "default_output_policy": "accept",
+            "allow_established": "on",
+            "allow_loopback": "on",
+            "allow_icmp": "on",
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert enabled.status_code == 200
+    enabled_payload = enabled.json()
+    assert enabled_payload["enabled"] is True
+    assert enabled_payload["settings"]["enabled"] is True
+    assert "table inet labfoundry" in enabled_payload["config_preview"]
+    assert "LabFoundry management access" in enabled_payload["config_preview"]
+    assert 'tcp ip saddr' not in enabled_payload["config_preview"]
+    assert 'ip saddr 192.168.49.0/24 tcp dport { 22, 443, 8000 }' in enabled_payload["config_preview"]
+
+
 def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     from sqlalchemy import select
 

@@ -27,7 +27,7 @@ log_step "applying Photon OS updates"
 tdnf -y update
 
 log_step "installing Photon appliance packages"
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
@@ -42,6 +42,7 @@ fi
 
 install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/firewall"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG"
 install -d -o root -g root -m 0755 /etc/labfoundry
 install -d -o root -g root -m 0755 /etc/systemd/network
@@ -137,13 +138,61 @@ systemctl enable --now hv_fcopy_daemon || true
 systemctl enable --now hv_vss_daemon || true
 systemctl enable labfoundry
 
-log_step "allowing LabFoundry web access through Photon firewall"
+log_step "configuring LabFoundry nftables firewall"
+install -d -o root -g root -m 0755 /etc/labfoundry/nftables.d
+cat >/etc/labfoundry/nftables.d/labfoundry.nft <<'EOF'
+# Managed by LabFoundry. Local changes may be overwritten.
+# nftables firewall state for Photon OS appliance images.
+flush ruleset
+table inet labfoundry {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    iifname "lo" accept comment "LabFoundry loopback"
+    ct state established,related accept comment "LabFoundry established traffic"
+    ip saddr 192.168.49.0/24 tcp dport { 22, 443, 8000 } accept comment "LabFoundry management access"
+    meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
+    meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
+  }
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+    ct state established,related accept comment "LabFoundry established traffic"
+    meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
+    meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
+  }
+  chain output {
+    type filter hook output priority filter; policy accept;
+    ct state established,related accept comment "LabFoundry established traffic"
+    meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
+    meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
+  }
+}
+EOF
+chmod 0644 /etc/labfoundry/nftables.d/labfoundry.nft
+cat >/etc/systemd/system/labfoundry-firewall.service <<'EOF'
+[Unit]
+Description=LabFoundry nftables firewall
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/labfoundry/nftables.d/labfoundry.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now labfoundry-firewall.service
 if command -v iptables >/dev/null 2>&1; then
-  iptables -C INPUT -p tcp --dport 8000 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 8000 -j ACCEPT
-  install -d -o root -g root -m 0755 /etc/systemd/scripts
-  iptables-save >/etc/systemd/scripts/ip4save
-  systemctl enable iptables || true
+  iptables -P INPUT ACCEPT || true
+  iptables -P FORWARD ACCEPT || true
+  iptables -P OUTPUT ACCEPT || true
+  iptables -F || true
+  iptables -X || true
 fi
+systemctl disable --now iptables || true
 
 log_step "running Photon compatibility check"
 "$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/scripts/check_photon_compatibility.py"

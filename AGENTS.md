@@ -38,6 +38,7 @@
 - Keep the image-build OS/root password separate from the LabFoundry web bootstrap password. Packer exposes `ssh_password` for build-time SSH/root use and `bootstrap_admin_password` for the initial `admin` web login; if the latter is omitted, early-image compatibility falls back to `ssh_password`.
 - Product-owned helper binaries should live under `/opt/labfoundry/bin`; do not put LabFoundry-owned helpers in `/usr/local/sbin` for Photon appliance images.
 - The appliance systemd unit is `labfoundry.service` and should run uvicorn from the provisioned virtual environment as the `labfoundry` service user.
+- Photon appliance firewall ownership is nftables-first. Provisioning installs nftables and loads `labfoundry-firewall.service`; do not add a LabFoundry iptables apply path.
 - Keep `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` for first-boot appliance images. Promote real host mutation one apply unit at a time after validation, preview, job capture, and rollback behavior are reviewed.
 - Privileged appliance enforcement must go through `labfoundry-helper` and constrained sudoers entries. Do not give the control plane broad shell, root, or package-manager access.
 - The global `/appliance-apply` workflow remains the only host-mutation workflow. Do not add service-specific apply routes, service-specific apply jobs, or direct helper calls from desired-state edit forms.

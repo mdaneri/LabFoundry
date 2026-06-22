@@ -1184,6 +1184,7 @@ input[type="checkbox"] {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
+  cursor: pointer;
 }
 
 .switch-field .field-label {
@@ -1207,6 +1208,7 @@ input[type="checkbox"] {
   border-radius: 999px;
   margin-bottom: 0;
   background: #e2e8f0;
+  cursor: pointer;
   transition: background 0.14s ease, border-color 0.14s ease;
 }
 
