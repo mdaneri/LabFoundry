@@ -11,6 +11,7 @@ Service pages edit desired state. They autosave routine settings and grids, show
 Current apply units are:
 
 - Network
+- Appliance Settings
 - Routes & WAN Simulation
 - Firewall
 - DNS/DHCP (dnsmasq)
@@ -22,6 +23,8 @@ Current apply units are:
 
 DNS and DHCP are one unit because they share the rendered dnsmasq config and reload boundary.
 
+Appliance Settings owns appliance identity, OS hostname, resolver mode, resolver servers, and the appliance NTP client. It does not render DNS records; those remain part of the DNS/DHCP unit.
+
 ## Physical Interface Inventory
 
 Refreshing Physical Interfaces is inventory only. It reads observed Linux NIC facts from the appliance and updates LabFoundry's model, but it does not run the network adapter or apply desired state to the host.
@@ -32,7 +35,11 @@ The real network apply path is Photon `systemd-networkd` backed. The `network` a
 
 ## DNS/DHCP Apply
 
-The real DNS/DHCP apply path is dnsmasq-backed. The `dnsmasq` apply unit stages LabFoundry's rendered dnsmasq config at `/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf`, validates it with `dnsmasq --test`, installs `/etc/labfoundry/dnsmasq.d/labfoundry.conf`, enables `dnsmasq`, reloads or restarts the service through `labfoundry-helper`, and points the appliance's own systemd-resolved path at local dnsmasq. DNS and DHCP remain one global apply unit because they share one dnsmasq config and service reload boundary.
+The real DNS/DHCP apply path is dnsmasq-backed. The `dnsmasq` apply unit stages LabFoundry's rendered dnsmasq config at `/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf`, validates it with `dnsmasq --test`, installs `/etc/labfoundry/dnsmasq.d/labfoundry.conf`, enables `dnsmasq`, and reloads or restarts the service through `labfoundry-helper`. DNS and DHCP remain one global apply unit because they share one dnsmasq config and service reload boundary.
+
+## Appliance Settings Apply
+
+The real Appliance Settings apply path stages JSON at `/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json`. The `appliance_settings` unit records the appliance FQDN, resolver mode, resolver servers, local DNS desired-state flag, management interface/IP, and appliance NTP servers. Through `labfoundry-helper appliance-settings validate|apply`, the helper sets the OS hostname to the appliance FQDN, local DNS mode configures the management resolver to `127.0.0.1` with `Domains=~.`, external DNS mode configures the management resolver to the selected external DNS servers and removes the local catch-all domain, and the appliance NTP client is rendered to `/etc/systemd/timesyncd.conf.d/labfoundry.conf` for `systemd-timesyncd`.
 
 ## Baselines And Diffs
 

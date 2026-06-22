@@ -311,6 +311,10 @@ body {
   align-self: start;
 }
 
+.detail-rail {
+  align-self: start;
+}
+
 .side-stack {
   display: grid;
   gap: 14px;
@@ -1046,6 +1050,9 @@ textarea {
 .detail-panel input:not(.switch-input),
 .detail-panel select,
 .detail-panel textarea,
+[data-appliance-settings] input:not(.switch-input),
+[data-appliance-settings] select,
+[data-appliance-settings] textarea,
 [data-vcf-registry-settings] input:not(.switch-input),
 [data-vcf-registry-settings] select,
 [data-vcf-registry-settings] textarea {
@@ -1066,6 +1073,9 @@ textarea {
 .detail-panel input:not(.switch-input):hover,
 .detail-panel select:hover,
 .detail-panel textarea:hover,
+[data-appliance-settings] input:not(.switch-input):hover,
+[data-appliance-settings] select:hover,
+[data-appliance-settings] textarea:hover,
 [data-vcf-registry-settings] input:not(.switch-input):hover,
 [data-vcf-registry-settings] select:hover,
 [data-vcf-registry-settings] textarea:hover {
@@ -1076,6 +1086,9 @@ textarea {
 .detail-panel input:not(.switch-input):focus,
 .detail-panel select:focus,
 .detail-panel textarea:focus,
+[data-appliance-settings] input:not(.switch-input):focus,
+[data-appliance-settings] select:focus,
+[data-appliance-settings] textarea:focus,
 [data-vcf-registry-settings] input:not(.switch-input):focus,
 [data-vcf-registry-settings] select:focus,
 [data-vcf-registry-settings] textarea:focus {
@@ -1916,6 +1929,48 @@ textarea {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: #bfdbfe;
+}
+
+.validation-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: #92400e;
+  font-size: 13px;
+}
+
+.config-preview {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0f172a;
+}
+
+.preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: #1e293b;
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.config-preview code {
+  display: block;
+  max-height: 420px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre;
+  color: #dbeafe;
+  font-size: 12px;
+}
+
+.compact-settings-list {
+  margin-top: 18px;
 }
 
 .login-shell {

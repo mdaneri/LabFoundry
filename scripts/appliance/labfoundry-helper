@@ -20,6 +20,7 @@ from pathlib import Path
 
 
 COMMANDS: dict[str, set[str]] = {
+    "appliance-settings": {"validate", "apply"},
     "network": {"validate", "apply"},
     "firewall": {"validate", "apply"},
     "dnsmasq": {"validate", "apply", "reload", "leases"},
@@ -40,10 +41,14 @@ DNSMASQ_CONFIG_PATH = DNSMASQ_CONFIG_DIR / "labfoundry.conf"
 DNSMASQ_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/dnsmasq.service.d")
 DNSMASQ_SERVICE_DROPIN_PATH = DNSMASQ_SERVICE_DROPIN_DIR / "labfoundry.conf"
 NETWORK_APPLY_DIR = Path("/var/lib/labfoundry/apply/network")
+APPLIANCE_SETTINGS_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-settings")
 NETWORKD_CONFIG_DIR = Path("/etc/systemd/network")
 NETWORKD_MGMT_CONFIG_PATH = NETWORKD_CONFIG_DIR / "00-labfoundry-mgmt.network"
 NETWORKD_MANAGED_PREFIX = "10-labfoundry-"
 NETWORK_INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
+TIMESYNCD_DROPIN_DIR = Path("/etc/systemd/timesyncd.conf.d")
+TIMESYNCD_DROPIN_PATH = TIMESYNCD_DROPIN_DIR / "labfoundry.conf"
+HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -115,7 +120,7 @@ def _install_dnsmasq_service_dropin() -> None:
     )
 
 
-def _configure_local_resolver() -> subprocess.CompletedProcess[str]:
+def _write_management_resolver(servers: list[str], domains: list[str]) -> None:
     if NETWORKD_MGMT_CONFIG_PATH.is_file():
         lines = NETWORKD_MGMT_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
         updated: list[str] = []
@@ -129,19 +134,24 @@ def _configure_local_resolver() -> subprocess.CompletedProcess[str]:
                 continue
             if in_network and stripped.startswith("[") and stripped.endswith("]"):
                 if not inserted:
-                    updated.extend(["DNS=127.0.0.1", "Domains=~."])
+                    updated.extend([f"DNS={server}" for server in servers])
+                    updated.extend([f"Domains={domain}" for domain in domains])
                     inserted = True
                 in_network = False
             if in_network and (stripped.startswith("DNS=") or stripped.startswith("Domains=")):
                 continue
             updated.append(line)
         if in_network and not inserted:
-            updated.extend(["DNS=127.0.0.1", "Domains=~."])
+            updated.extend([f"DNS={server}" for server in servers])
+            updated.extend([f"Domains={domain}" for domain in domains])
         NETWORKD_MGMT_CONFIG_PATH.write_text("\n".join(updated).rstrip() + "\n", encoding="utf-8")
 
+
+def _configure_resolver(interface_name: str, servers: list[str], domains: list[str]) -> subprocess.CompletedProcess[str]:
+    _write_management_resolver(servers, domains)
     commands = [
-        ["resolvectl", "dns", "eth0", "127.0.0.1"],
-        ["resolvectl", "domain", "eth0", "~."],
+        ["resolvectl", "dns", interface_name, *servers],
+        ["resolvectl", "domain", interface_name, *(domains or [""])],
     ]
     for command in commands:
         result = _run(command)
@@ -150,6 +160,10 @@ def _configure_local_resolver() -> subprocess.CompletedProcess[str]:
         if result.returncode != 0:
             return result
     return subprocess.CompletedProcess(commands[-1], 0, "", "")
+
+
+def _configure_local_resolver() -> subprocess.CompletedProcess[str]:
+    return _configure_resolver("eth0", ["127.0.0.1"], ["~."])
 
 
 def _handle_dnsmasq(action: str, args: list[str]) -> int:
@@ -179,8 +193,10 @@ def _handle_dnsmasq(action: str, args: list[str]) -> int:
         print(enable.stderr, end="", file=sys.stderr)
         if enable.returncode != 0:
             return enable.returncode
-        resolver = _configure_local_resolver()
-        return resolver.returncode
+        restart = _run(["systemctl", "reload-or-restart", "dnsmasq"])
+        print(restart.stdout, end="")
+        print(restart.stderr, end="", file=sys.stderr)
+        return restart.returncode
 
     if action == "reload":
         daemon_reload = _run(["systemctl", "daemon-reload"])
@@ -193,11 +209,198 @@ def _handle_dnsmasq(action: str, args: list[str]) -> int:
         print(restart.stderr, end="", file=sys.stderr)
         if restart.returncode != 0:
             return restart.returncode
-        resolver = _configure_local_resolver()
-        return resolver.returncode
+        return restart.returncode
 
     print(f"unsupported dnsmasq action: {action}", file=sys.stderr)
     return 2
+
+
+def _validate_appliance_settings_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".json":
+        raise ValueError("appliance settings config path must end with .json")
+    if not path.is_relative_to(APPLIANCE_SETTINGS_APPLY_DIR):
+        raise ValueError(f"appliance settings config must be staged under {APPLIANCE_SETTINGS_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"appliance settings config does not exist: {path}")
+    return path
+
+
+def _load_appliance_settings_config(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("appliance settings config must be a JSON object")
+    return payload
+
+
+def _appliance_settings_config_errors(path: Path) -> list[str]:
+    errors: list[str] = []
+    try:
+        payload = _load_appliance_settings_config(path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return [str(exc)]
+
+    fqdn = str(payload.get("fqdn") or "").strip().strip(".").lower()
+    if not fqdn or not HOSTNAME_PATTERN.fullmatch(fqdn):
+        errors.append("fqdn must be a valid fully qualified DNS name.")
+
+    resolver_mode = str(payload.get("resolver_mode") or "")
+    local_dns_enabled = bool(payload.get("local_dns_enabled"))
+    resolver_servers = [str(server).strip() for server in payload.get("resolver_servers") or [] if str(server).strip()]
+    if resolver_mode not in {"local_dns", "external"}:
+        errors.append("resolver_mode must be local_dns or external.")
+    if resolver_mode == "local_dns":
+        if not local_dns_enabled:
+            errors.append("local_dns mode requires local_dns_enabled=true.")
+        if resolver_servers != ["127.0.0.1"]:
+            errors.append("local_dns mode must use resolver server 127.0.0.1.")
+    if resolver_mode == "external" and not resolver_servers:
+        errors.append("external resolver mode requires at least one resolver server.")
+    for server in resolver_servers:
+        try:
+            ip_interface(f"{server}/32" if ":" not in server else f"{server}/128")
+        except ValueError:
+            errors.append(f"resolver server {server} must be an IP address.")
+
+    management_interface = str(payload.get("management_interface") or "").strip()
+    if not _valid_network_interface_name(management_interface):
+        errors.append("management_interface must be a valid interface name.")
+    management_ip = str(payload.get("management_ip") or "").strip()
+    if not management_ip:
+        errors.append("management_ip is required.")
+    else:
+        try:
+            ip_interface(f"{management_ip}/32" if ":" not in management_ip else f"{management_ip}/128")
+        except ValueError:
+            errors.append("management_ip must be a valid IP address.")
+
+    ntp_servers = [str(server).strip() for server in payload.get("ntp_servers") or [] if str(server).strip()]
+    if not ntp_servers:
+        errors.append("ntp_servers must include at least one server.")
+    for server in ntp_servers:
+        try:
+            ip_interface(f"{server}/32" if ":" not in server else f"{server}/128")
+            continue
+        except ValueError:
+            pass
+        normalized = server.strip().strip(".").lower()
+        if not HOSTNAME_PATTERN.fullmatch(normalized):
+            errors.append(f"ntp server {server} must be a valid DNS name or IP address.")
+    return errors
+
+
+def _timesyncd_config(ntp_servers: list[str]) -> str:
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "[Time]",
+            f"NTP={' '.join(ntp_servers)}",
+            "",
+        ]
+    )
+
+
+def _install_timesyncd_config(ntp_servers: list[str]) -> int:
+    TIMESYNCD_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_target = TIMESYNCD_DROPIN_PATH.with_suffix(".conf.tmp")
+    tmp_target.write_text(_timesyncd_config(ntp_servers), encoding="utf-8")
+    os.chmod(tmp_target, 0o644)
+    tmp_target.replace(TIMESYNCD_DROPIN_PATH)
+    for command in [
+        ["systemctl", "enable", "--now", "systemd-timesyncd"],
+        ["systemctl", "restart", "systemd-timesyncd"],
+    ]:
+        result = _run(command)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        if result.returncode != 0:
+            return result.returncode
+    return 0
+
+
+def _apply_hostname(fqdn: str) -> int:
+    hostnamectl = shutil.which("hostnamectl")
+    if hostnamectl is not None:
+        result = _run([hostnamectl, "set-hostname", fqdn])
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        return result.returncode
+
+    hostname_path = Path("/etc/hostname")
+    hostname_path.write_text(f"{fqdn}\n", encoding="utf-8")
+    os.chmod(hostname_path, 0o644)
+    hostname = shutil.which("hostname")
+    if hostname is None:
+        print("hostnamectl and hostname commands not found", file=sys.stderr)
+        return 127
+    result = _run([hostname, fqdn])
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _handle_appliance_settings(action: str, args: list[str]) -> int:
+    if len(args) != 1:
+        print(f"appliance-settings {action} requires exactly one staged JSON config path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _validate_appliance_settings_config_path(args[0])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    errors = _appliance_settings_config_errors(config_path)
+    if action == "validate":
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 2
+        payload = _load_appliance_settings_config(config_path)
+        print(
+            json.dumps(
+                {
+                    "appliance_settings": "validation ok",
+                    "resolver_mode": payload["resolver_mode"],
+                    "management_interface": payload["management_interface"],
+                    "scope": "systemd-resolved and systemd-timesyncd",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+
+    payload = _load_appliance_settings_config(config_path)
+    fqdn = str(payload["fqdn"])
+    management_interface = str(payload["management_interface"])
+    resolver_mode = str(payload["resolver_mode"])
+    resolver_servers = [str(server) for server in payload["resolver_servers"]]
+    domains = ["~."] if resolver_mode == "local_dns" else []
+    timesyncd = _install_timesyncd_config([str(server) for server in payload["ntp_servers"]])
+    if timesyncd != 0:
+        return timesyncd
+    hostname = _apply_hostname(fqdn)
+    if hostname != 0:
+        return hostname
+    resolver = _configure_resolver(management_interface, resolver_servers, domains)
+    if resolver.returncode != 0:
+        return resolver.returncode
+    print(
+        json.dumps(
+            {
+                "appliance_settings": "apply complete",
+                "fqdn": fqdn,
+                "resolver_mode": resolver_mode,
+                "resolver_servers": resolver_servers,
+                "timesyncd_dropin": str(TIMESYNCD_DROPIN_PATH),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _validate_network_config_path(path_value: str) -> Path:
@@ -705,6 +908,8 @@ def main(argv: list[str]) -> int:
         return _handle_network(action, normalized_args)
     if group == "dnsmasq":
         return _handle_dnsmasq(action, normalized_args)
+    if group == "appliance-settings":
+        return _handle_appliance_settings(action, normalized_args)
 
     print("real helper execution is not implemented for this apply unit", file=sys.stderr)
     return 78

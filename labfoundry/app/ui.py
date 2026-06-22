@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import shutil
+import socket
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
 from secrets import token_urlsafe
@@ -21,6 +22,7 @@ from labfoundry.app.adapters.system import SystemAdapter
 from labfoundry.app.config import get_settings
 from labfoundry.app.database import get_db
 from labfoundry.app.models import (
+    ApplianceSettings,
     ApiToken,
     AuditEvent,
     CaCertificate,
@@ -55,6 +57,17 @@ from labfoundry.app.models import (
     utcnow,
 )
 from labfoundry.app.schemas import ApiTokenCreate, WanPolicyCreate
+from labfoundry.app.services.appliance_settings import (
+    APPLIANCE_DNS_RECORD_DESCRIPTION,
+    APPLIANCE_SETTINGS_STAGED_CONFIG_PATH,
+    appliance_settings_to_dict,
+    is_app_owned_appliance_dns_record,
+    management_interface_context,
+    normalize_fqdn,
+    normalize_multiline_values,
+    render_appliance_settings_config,
+    validate_appliance_settings,
+)
 from labfoundry.app.security import (
     Identity,
     authenticate_user,
@@ -297,6 +310,16 @@ def get_dns_settings_row(db: Session) -> DnsSettings:
     return settings
 
 
+def get_appliance_settings_row(db: Session) -> ApplianceSettings:
+    settings = db.execute(select(ApplianceSettings)).scalar_one_or_none()
+    if settings is None:
+        settings = ApplianceSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
 def get_dhcp_settings_row(db: Session) -> DhcpSettings:
     settings = db.execute(select(DhcpSettings)).scalar_one_or_none()
     if settings is None:
@@ -464,6 +487,174 @@ def set_setting_value(db: Session, key: str, value: str) -> Setting:
         setting.updated_at = utcnow()
     db.flush()
     return setting
+
+
+def appliance_settings_management_context(db: Session) -> dict[str, str]:
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    return management_interface_context(interfaces)
+
+
+def appliance_dns_record_conflict(db: Session, fqdn: str) -> bool:
+    normalized = normalize_fqdn(fqdn)
+    if not normalized:
+        return False
+    records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == normalized,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+        )
+    ).scalars().all()
+    return any(not is_app_owned_appliance_dns_record(record.description) for record in records)
+
+
+def ensure_dns_for_appliance_settings(
+    db: Session,
+    settings: ApplianceSettings,
+    *,
+    previous_fqdn: str,
+    actor: str,
+) -> str | None:
+    dns_settings = get_dns_settings_row(db)
+    if not dns_settings.enabled:
+        return None
+    fqdn = normalize_fqdn(settings.fqdn)
+    management = appliance_settings_management_context(db)
+    if not fqdn or not management["ip"]:
+        return None
+    try:
+        parsed_address = ip_address(management["ip"])
+    except ValueError:
+        return None
+    record_type = "AAAA" if parsed_address.version == 6 else "A"
+    address = str(parsed_address)
+    if validate_dns_record(fqdn, record_type, address):
+        return None
+
+    actions: list[str] = []
+    existing = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == fqdn,
+            DnsRecord.record_type == record_type,
+        )
+    ).scalar_one_or_none()
+    if existing and not is_app_owned_appliance_dns_record(existing.description):
+        actions.append("conflict")
+    elif existing:
+        if existing.address != address or not existing.enabled:
+            existing.address = address
+            existing.enabled = True
+            existing.description = APPLIANCE_DNS_RECORD_DESCRIPTION
+            db.flush()
+            record_audit(
+                db,
+                actor=actor,
+                action="update_dns_record_from_appliance_settings",
+                resource_type="dns_record",
+                resource_id=str(existing.id),
+                detail=f"{fqdn} {record_type} -> {address}",
+            )
+            actions.append("updated")
+        else:
+            actions.append("unchanged")
+    else:
+        record = DnsRecord(
+            hostname=fqdn,
+            record_type=record_type,
+            address=address,
+            description=APPLIANCE_DNS_RECORD_DESCRIPTION,
+            enabled=True,
+        )
+        db.add(record)
+        db.flush()
+        record_audit(
+            db,
+            actor=actor,
+            action="create_dns_record_from_appliance_settings",
+            resource_type="dns_record",
+            resource_id=str(record.id),
+            detail=f"{fqdn} {record_type} -> {address}",
+        )
+        actions.append("created")
+
+    stale_records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == fqdn,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+            DnsRecord.record_type != record_type,
+        )
+    ).scalars().all()
+    removed_stale = 0
+    for record in stale_records:
+        if not is_app_owned_appliance_dns_record(record.description):
+            continue
+        db.delete(record)
+        removed_stale += 1
+        record_audit(
+            db,
+            actor=actor,
+            action="delete_dns_record_from_appliance_settings_ip_family_change",
+            resource_type="dns_record",
+            resource_id=str(record.id),
+            detail=f"{record.hostname} {record.record_type}",
+        )
+    if removed_stale:
+        db.flush()
+        actions.append("removed-stale")
+
+    previous = normalize_fqdn(previous_fqdn)
+    if previous and previous != fqdn:
+        removed = 0
+        records = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == previous,
+                DnsRecord.record_type.in_(["A", "AAAA"]),
+            )
+        ).scalars().all()
+        for record in records:
+            if not is_app_owned_appliance_dns_record(record.description):
+                continue
+            db.delete(record)
+            removed += 1
+            record_audit(
+                db,
+                actor=actor,
+                action="delete_dns_record_from_appliance_settings_rename",
+                resource_type="dns_record",
+                resource_id=str(record.id),
+                detail=f"{record.hostname} {record.record_type}",
+            )
+        if removed:
+            db.flush()
+            actions.append("removed-old")
+    return "+".join(actions) if actions else None
+
+
+def appliance_settings_context(db: Session) -> dict[str, Any]:
+    settings = get_appliance_settings_row(db)
+    dns_settings = get_dns_settings_row(db)
+    local_dns_enabled = bool(dns_settings.enabled)
+    management = appliance_settings_management_context(db)
+    validation_errors, validation_warnings = validate_appliance_settings(
+        settings,
+        local_dns_enabled=local_dns_enabled,
+        management_interface=management,
+        dns_record_conflict=local_dns_enabled and appliance_dns_record_conflict(db, settings.fqdn),
+    )
+    return {
+        "app_settings": get_settings(),
+        "runtime_hostname": socket.gethostname(),
+        "appliance_settings": settings,
+        "appliance_settings_json": appliance_settings_to_dict(settings),
+        "local_dns_enabled": local_dns_enabled,
+        "management_interface": management,
+        "appliance_settings_validation_errors": validation_errors,
+        "appliance_settings_validation_warnings": validation_warnings,
+        "appliance_settings_config_preview": render_appliance_settings_config(
+            settings,
+            local_dns_enabled=local_dns_enabled,
+            management_interface=management,
+        ),
+    }
 
 
 def uploaded_vcf_registry_ca_bundle(db: Session) -> dict[str, object]:
@@ -1231,6 +1422,7 @@ def records_for_domain(db: Session, domain: str) -> list[DnsRecord]:
 
 APPLIANCE_APPLY_BASELINES_KEY = "appliance_apply.baselines.v1"
 APPLIANCE_APPLY_UNIT_IDS = {
+    "appliance_settings",
     "network",
     "wan",
     "firewall",
@@ -1444,6 +1636,7 @@ def make_appliance_apply_unit(
 
 def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     baselines = load_appliance_apply_baselines(db)
+    appliance_settings = appliance_settings_context(db)
     network = network_context(db)
     wan = routes_wan_context(db)
     firewall = firewall_context(db)
@@ -1476,6 +1669,22 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     network_unit["removed_vlan_interfaces"] = network_removed_vlans
 
     return [
+        make_appliance_apply_unit(
+            unit_id="appliance_settings",
+            label="Appliance Settings",
+            page_url="/settings",
+            context=appliance_settings,
+            summary=[
+                f"FQDN {appliance_settings['appliance_settings'].fqdn}",
+                f"resolver {'local DNS' if appliance_settings['local_dns_enabled'] else 'external DNS'}",
+                f"{len(appliance_settings['appliance_settings_json']['ntp_servers'])} NTP servers",
+            ],
+            validation_errors=appliance_settings["appliance_settings_validation_errors"],
+            validation_warnings=appliance_settings["appliance_settings_validation_warnings"],
+            config_path=appliance_settings["appliance_settings"].config_path,
+            config_preview=appliance_settings["appliance_settings_config_preview"],
+            baseline=baselines.get("appliance_settings"),
+        ),
         network_unit,
         make_appliance_apply_unit(
             unit_id="wan",
@@ -1636,7 +1845,13 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
     context = unit["context"]
     adapter = SystemAdapter()
     unit_id = unit["id"]
-    if unit_id == "network":
+    if unit_id == "appliance_settings":
+        settings = context["appliance_settings"]
+        config_path = settings.config_path
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(APPLIANCE_SETTINGS_STAGED_CONFIG_PATH, unit["config_preview"])
+        results = [adapter.validate_appliance_settings_config(config_path), adapter.apply_appliance_settings_config(config_path)]
+    elif unit_id == "network":
         config_path = context["network_config_path"]
         if not adapter.dry_run:
             config_preview = network_config_with_removed_vlans(unit["config_preview"], unit.get("removed_vlan_interfaces", []))
@@ -4720,9 +4935,61 @@ def audit_log(
 
 
 @router.get("/settings", response_class=HTMLResponse, response_model=None)
-def settings_page(request: Request, identity: Identity = Depends(require_session_identity)) -> HTMLResponse:
-    settings = get_settings()
-    return render(request, "settings.html", {"identity": identity, "settings": settings})
+def settings_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(
+        request,
+        "settings.html",
+        {"identity": identity, **appliance_settings_context(db), "appliance_apply_status": appliance_apply_status(db, "appliance_settings")},
+    )
+
+
+@router.post("/settings", response_model=None)
+def update_settings_from_ui(
+    request: Request,
+    fqdn: str = Form("labfoundry.labfoundry.internal"),
+    external_dns_servers: str = Form(""),
+    ntp_servers: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    settings = get_appliance_settings_row(db)
+    previous_fqdn = settings.fqdn
+    settings.fqdn = normalize_fqdn(fqdn) or "labfoundry.labfoundry.internal"
+    settings.external_dns_servers = normalize_multiline_values(external_dns_servers)
+    settings.ntp_servers = normalize_multiline_values(ntp_servers)
+    settings.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
+    settings.updated_at = utcnow()
+    dns_record_action = ensure_dns_for_appliance_settings(db, settings, previous_fqdn=previous_fqdn, actor=identity.username)
+    db.add(settings)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_appliance_settings", resource_type="settings", resource_id=str(settings.id))
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = appliance_settings_context(db)
+        saved = context["appliance_settings"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": saved.updated_at.isoformat(),
+                "fqdn": saved.fqdn,
+                "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
+                "ntp_servers": context["appliance_settings_json"]["ntp_servers"],
+                "local_dns_enabled": context["local_dns_enabled"],
+                "management_interface": context["management_interface"],
+                "dns_record_action": dns_record_action,
+                "valid": not context["appliance_settings_validation_errors"],
+                "validation_errors": context["appliance_settings_validation_errors"],
+                "validation_warnings": context["appliance_settings_validation_warnings"],
+                "config_path": saved.config_path,
+                "config_preview": context["appliance_settings_config_preview"],
+            }
+        )
+    return RedirectResponse("/settings", status_code=303)
 
 
 @router.get("/{page}", response_class=HTMLResponse, response_model=None)

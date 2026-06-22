@@ -1,29 +1,76 @@
 {% extends "base.html" %}
 {% block page_title %}Settings{% endblock %}
 {% block content %}
-<section class="content-grid two-column">
-  <div class="panel">
+<section class="split-workspace">
+  <div class="panel wide-panel">
     <div class="panel-head">
-      <h2>Appliance Settings</h2>
-      <span class="status-pill good">Debian 12 target</span>
+      <div>
+        <h2>Appliance Identity</h2>
+      </div>
+      <span class="status-pill {{ 'good' if local_dns_enabled else 'warn' }}">{{ "local DNS" if local_dns_enabled else "external DNS" }}</span>
     </div>
-    <div class="settings-list">
-      <div><span>Application</span><strong>{{ settings.app_name }}</strong></div>
-      <div><span>Hostname</span><strong>{{ settings.appliance_hostname }}</strong></div>
-      <div><span>Dry-run adapters</span><strong>{{ settings.dry_run_system_adapters }}</strong></div>
-      <div><span>Repository path</span><strong>{{ settings.repository_path }}</strong></div>
-      <div><span>VCF backup path</span><strong>{{ settings.vcf_backup_path }}</strong></div>
+
+    <form class="form-stack" action="/settings" method="post" data-autosave-form data-appliance-settings data-autosave-status-id="appliance-settings-autosave-status">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <label>
+        <span class="field-label"><span>Appliance FQDN</span><button class="help-icon" type="button" data-help="Sets the appliance's desired fully qualified name. When local DNS is enabled, autosave manages the app-owned A or AAAA record for this name; host resolver changes wait for global appliance apply.">i</button></span>
+        <input name="fqdn" value="{{ appliance_settings.fqdn }}" autocomplete="off">
+      </label>
+      <label>
+        <span class="field-label"><span>External DNS servers</span><button class="help-icon" type="button" data-help="One resolver IP per line. These are used by appliance resolver apply only when local DNS is disabled; editing does not mutate the host.">i</button></span>
+        <textarea name="external_dns_servers" rows="4">{{ appliance_settings.external_dns_servers }}</textarea>
+      </label>
+      <label>
+        <span class="field-label"><span>NTP servers</span><button class="help-icon" type="button" data-help="One appliance NTP client server per line. DHCP NTP options stay on the DHCP page, and systemd-timesyncd is configured only through global appliance apply.">i</button></span>
+        <textarea name="ntp_servers" rows="5">{{ appliance_settings.ntp_servers }}</textarea>
+      </label>
+      <p id="appliance-settings-autosave-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
+    </form>
+
+    <div class="settings-list compact-settings-list">
+      <div><span>Application</span><strong>{{ app_settings.app_name }}</strong></div>
+      <div><span>Runtime hostname</span><strong>{{ runtime_hostname }}</strong></div>
+      <div><span>Dry-run adapters</span><strong>{{ app_settings.dry_run_system_adapters }}</strong></div>
+      <div><span>Repository path</span><strong>{{ app_settings.repository_path }}</strong></div>
+      <div><span>VCF backup path</span><strong>{{ app_settings.vcf_backup_path }}</strong></div>
     </div>
   </div>
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Control Plane Boundary</h2>
-      <span class="status-pill warn">sudo allowlist later</span>
+
+  <aside class="detail-rail">
+    {% include "partials/appliance_apply_status.html" %}
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span data-appliance-settings-valid-pill class="status-pill {{ 'good' if not appliance_settings_validation_errors else 'warn' }}">{{ "valid" if not appliance_settings_validation_errors else "needs attention" }}</span>
+      </div>
+      <div data-appliance-settings-dns-status class="alert {{ 'success' if local_dns_enabled else 'warning' }}">
+        {% if local_dns_enabled %}
+          Local DNS is enabled. Autosave manages the app-owned appliance DNS record for {{ appliance_settings.fqdn }}.
+        {% else %}
+          Local DNS is disabled. External DNS servers are required for appliance resolver apply.
+        {% endif %}
+      </div>
+      <div class="settings-list">
+        <div><span>Management interface</span><strong data-appliance-settings-management>{{ management_interface.name or "not found" }}{% if management_interface.ip %} / {{ management_interface.ip }}{% endif %}</strong></div>
+        <div><span>Config path</span><strong data-appliance-settings-config-path>{{ appliance_settings.config_path }}</strong></div>
+      </div>
+      <ul data-appliance-settings-errors class="validation-list {{ 'hidden' if not appliance_settings_validation_errors else '' }}">
+        {% for error in appliance_settings_validation_errors %}
+          <li>{{ error }}</li>
+        {% endfor %}
+      </ul>
+      <ul data-appliance-settings-warnings class="validation-list {{ 'hidden' if not appliance_settings_validation_warnings else '' }}">
+        {% for warning in appliance_settings_validation_warnings %}
+          <li>{{ warning }}</li>
+        {% endfor %}
+      </ul>
+      <div class="config-preview">
+        <div class="preview-head">
+          <span>Rendered config preview</span>
+        </div>
+        <code data-appliance-settings-preview>{{ appliance_settings_config_preview }}</code>
+      </div>
     </div>
-    <p class="muted">The MVP records desired state and command intent. Production host mutations will be restricted to reviewed helper scripts and argument-array subprocess calls.</p>
-    <div class="terminal-note">
-      <code>labfoundry ALL=(root) NOPASSWD: /usr/local/lib/labfoundry/helpers/*</code>
-    </div>
-  </div>
+  </aside>
 </section>
 {% endblock %}

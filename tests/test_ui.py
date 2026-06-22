@@ -33,6 +33,191 @@ def test_login_and_dashboard_render(client):
     assert favicon.headers["content-type"].startswith("image/svg+xml")
 
 
+def test_settings_page_renders_autosave_validation_and_preview(client):
+    login(client)
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert 'action="/settings"' in response.text
+    assert 'data-autosave-status-id="appliance-settings-autosave-status"' in response.text
+    assert response.text.count('class="help-icon"') >= 3
+    assert "Pending Appliance Changes" in response.text
+    assert "Validation" in response.text
+    assert "labfoundry.labfoundry.internal" in response.text
+    assert "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json" in response.text
+    assert "resolver_mode" in response.text
+
+
+def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, DnsRecord, DnsSettings
+
+    login(client)
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        db.commit()
+
+    page = client.get("/settings")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/settings",
+        data={
+            "fqdn": "console.labfoundry.internal",
+            "external_dns_servers": "8.8.8.8\n1.1.1.1",
+            "ntp_servers": "time.cloudflare.com\ntime.google.com",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "saved"
+    assert payload["fqdn"] == "console.labfoundry.internal"
+    assert payload["external_dns_servers"] == ["8.8.8.8", "1.1.1.1"]
+    assert payload["ntp_servers"] == ["time.cloudflare.com", "time.google.com"]
+    assert payload["dns_record_action"] in {"created", "updated", "unchanged", "created+removed-old", "updated+removed-old"}
+    assert payload["valid"] is True
+    assert '"resolver_mode": "local_dns"' in payload["config_preview"]
+    assert '"resolver_servers": [' in payload["config_preview"]
+    assert '"127.0.0.1"' in payload["config_preview"]
+
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        assert settings.fqdn == "console.labfoundry.internal"
+        record = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "console.labfoundry.internal", DnsRecord.record_type == "A")
+        ).scalar_one()
+        assert record.address == "192.168.49.1"
+        assert "app-owned appliance FQDN" in (record.description or "")
+
+
+def test_settings_fqdn_rename_removes_only_old_app_owned_record(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord, DnsSettings
+
+    login(client)
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        db.add(
+            DnsRecord(
+                hostname="manual.labfoundry.internal",
+                record_type="A",
+                address="192.168.49.20",
+                description="User-owned record",
+            )
+        )
+        db.commit()
+
+    page = client.get("/settings")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    first = client.post(
+        "/settings",
+        data={
+            "fqdn": "old-appliance.labfoundry.internal",
+            "external_dns_servers": "1.1.1.1\n9.9.9.9",
+            "ntp_servers": "time1.google.com",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert first.status_code == 200
+    second = client.post(
+        "/settings",
+        data={
+            "fqdn": "new-appliance.labfoundry.internal",
+            "external_dns_servers": "1.1.1.1\n9.9.9.9",
+            "ntp_servers": "time1.google.com",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert second.status_code == 200
+    assert "removed-old" in (second.json()["dns_record_action"] or "")
+
+    with SessionLocal() as db:
+        old = db.execute(select(DnsRecord).where(DnsRecord.hostname == "old-appliance.labfoundry.internal")).scalars().all()
+        new = db.execute(select(DnsRecord).where(DnsRecord.hostname == "new-appliance.labfoundry.internal")).scalars().all()
+        manual = db.execute(select(DnsRecord).where(DnsRecord.hostname == "manual.labfoundry.internal")).scalar_one()
+        assert old == []
+        assert len(new) == 1
+        assert manual.address == "192.168.49.20"
+
+
+def test_settings_local_dns_disabled_requires_external_dns_without_dns_registration(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord, DnsSettings
+
+    login(client)
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = False
+        db.commit()
+
+    page = client.get("/settings")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/settings",
+        data={
+            "fqdn": "external-only.labfoundry.internal",
+            "external_dns_servers": "",
+            "ntp_servers": "time1.google.com",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["valid"] is False
+    assert "External DNS servers are required when local DNS is disabled." in payload["validation_errors"]
+    assert payload["dns_record_action"] is None
+    assert '"resolver_mode": "external"' in payload["config_preview"]
+    with SessionLocal() as db:
+        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "external-only.labfoundry.internal")).scalar_one_or_none()
+        assert record is None
+
+
+def test_appliance_settings_apply_task_records_dry_run_helper_commands(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job
+
+    login(client)
+    page = client.get("/settings")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    saved = client.post(
+        "/settings",
+        data={
+            "fqdn": "apply.labfoundry.internal",
+            "external_dns_servers": "1.1.1.1\n9.9.9.9",
+            "ntp_servers": "time1.google.com",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert saved.status_code == 200
+
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
+    assert apply_response.status_code == 200
+    assert "Appliance apply task succeeded" in apply_response.text
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
+        assert "appliance_settings" in (job.result or "")
+        assert "labfoundry-helper appliance-settings validate" in (job.result or "")
+        assert "labfoundry-helper appliance-settings apply" in (job.result or "")
+        assert "apply.labfoundry.internal" in (job.result or "")
+
+
 def test_routes_wan_policy_form_renders(client):
     login(client)
     response = client.get("/routes-wan")
@@ -1424,7 +1609,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "vlan-trunk-20260622-1" in page.text
+    assert "appliance-settings-20260622-3" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 

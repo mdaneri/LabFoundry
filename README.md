@@ -147,13 +147,13 @@ LabFoundry treats service pages as desired-state editors. Routine setting and gr
 
 Use `Appliance Apply` to review and submit appliance changes. The page:
 
-- lists changed apply units such as Network, DNS/DHCP, Firewall, KMS, VCF Backups, VCF Offline Depot, and VCF Private Registry;
+- lists changed apply units such as Appliance Settings, Network, DNS/DHCP, Firewall, KMS, VCF Backups, VCF Offline Depot, and VCF Private Registry;
 - checks changed valid units by default;
 - shows compact summaries and rendered config previews or diffs when a last-applied baseline exists;
 - lets operators unselect changed units that should stay pending;
 - creates one `appliance-apply` job that records selected units, skipped changed units, validation results, rendered previews/diffs, adapter command intent, dry-run state, and the audit event.
 
-DNS and DHCP share one `DNS/DHCP (dnsmasq)` apply unit because they render and reload the same dnsmasq config. In development, system adapters remain dry-run by default and record command intent instead of mutating host services directly.
+Appliance Settings owns the appliance FQDN, OS hostname, resolver mode, resolver servers, and appliance NTP client. DNS and DHCP share one `DNS/DHCP (dnsmasq)` apply unit because they render and reload the same dnsmasq config. In development, system adapters remain dry-run by default and record command intent instead of mutating host services directly.
 
 More detail lives in [`docs/appliance-apply.md`](docs/appliance-apply.md).
 
@@ -177,6 +177,7 @@ The MVP follows these boundaries:
 - System adapters default to dry-run mode.
 - Physical Interfaces can refresh read-only Linux NIC inventory from Photon/Hyper-V; observed host facts are separate from desired interface state.
 - Real network apply is Photon `systemd-networkd` backed: it stages LabFoundry's desired network state, installs LabFoundry-owned `.network`/`.netdev` files under `/etc/systemd/network/`, reloads networkd, reconfigures non-management links, and reconciles VLAN links. It keeps management on `eth0` explicit and avoids blindly reconfiguring the management link during the first pass.
+- Appliance Settings apply stages `/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json`, sets the OS hostname to the appliance FQDN, configures the management resolver for local or external DNS mode, and writes the Photon `systemd-timesyncd` drop-in for the appliance NTP client.
 - Privileged changes must use reviewed `labfoundry-helper` commands and sudo allowlists.
 - Subprocess calls must use argument arrays, not arbitrary shell strings.
 - The global `/appliance-apply` workflow is the only appliance enforcement path.

@@ -3533,6 +3533,81 @@ function initializeFirewallSettings() {
   });
 }
 
+function updateValidationList(list, items = []) {
+  if (!(list instanceof HTMLElement)) {
+    return;
+  }
+  list.innerHTML = "";
+  items.forEach((message) => {
+    const item = document.createElement("li");
+    item.textContent = message;
+    list.append(item);
+  });
+  list.classList.toggle("hidden", items.length === 0);
+}
+
+function updateApplianceSettingsValidation(payload = {}) {
+  const errors = Array.isArray(payload.validation_errors) ? payload.validation_errors : [];
+  const warnings = Array.isArray(payload.validation_warnings) ? payload.validation_warnings : [];
+  const valid = payload.valid !== undefined ? Boolean(payload.valid) : errors.length === 0;
+  const pill = document.querySelector("[data-appliance-settings-valid-pill]");
+  if (pill instanceof HTMLElement) {
+    pill.textContent = valid ? "valid" : "needs attention";
+    pill.classList.toggle("good", valid);
+    pill.classList.toggle("warn", !valid);
+  }
+  updateValidationList(document.querySelector("[data-appliance-settings-errors]"), errors);
+  updateValidationList(document.querySelector("[data-appliance-settings-warnings]"), warnings);
+
+  const configPath = document.querySelector("[data-appliance-settings-config-path]");
+  if (configPath instanceof HTMLElement && typeof payload.config_path === "string") {
+    configPath.textContent = payload.config_path;
+  }
+  const preview = document.querySelector("[data-appliance-settings-preview]");
+  if (preview instanceof HTMLElement && typeof payload.config_preview === "string") {
+    preview.textContent = payload.config_preview;
+  }
+  const management = document.querySelector("[data-appliance-settings-management]");
+  if (management instanceof HTMLElement && payload.management_interface) {
+    const name = payload.management_interface.name || "not found";
+    const ip = payload.management_interface.ip ? ` / ${payload.management_interface.ip}` : "";
+    management.textContent = `${name}${ip}`;
+  }
+  const dnsStatus = document.querySelector("[data-appliance-settings-dns-status]");
+  if (dnsStatus instanceof HTMLElement) {
+    const localDnsEnabled = Boolean(payload.local_dns_enabled);
+    dnsStatus.classList.toggle("success", localDnsEnabled);
+    dnsStatus.classList.toggle("warning", !localDnsEnabled);
+    const fqdn = typeof payload.fqdn === "string" ? payload.fqdn : "the appliance FQDN";
+    const actionMessages = {
+      created: "Created the app-owned appliance DNS record.",
+      updated: "Updated the app-owned appliance DNS record.",
+      unchanged: "The app-owned appliance DNS record already matched the management IP.",
+      "updated+removed-old": "Updated the appliance DNS record and removed the old app-owned record.",
+      "created+removed-old": "Created the appliance DNS record and removed the old app-owned record.",
+      conflict: "A user-owned DNS record already uses this appliance FQDN.",
+    };
+    if (payload.dns_record_action && actionMessages[payload.dns_record_action]) {
+      dnsStatus.textContent = actionMessages[payload.dns_record_action];
+    } else if (localDnsEnabled) {
+      dnsStatus.textContent = `Local DNS is enabled. Autosave manages the app-owned appliance DNS record for ${fqdn}.`;
+    } else {
+      dnsStatus.textContent = "Local DNS is disabled. External DNS servers are required for appliance resolver apply.";
+    }
+  }
+}
+
+function initializeApplianceSettings() {
+  document.querySelectorAll("[data-appliance-settings]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      updateApplianceSettingsValidation(event.detail || {});
+    });
+  });
+}
+
 function updateDnsValidation(payload = {}) {
   const validationPanel = document.querySelector("[data-dns-validation-panel]");
   if (!(validationPanel instanceof HTMLElement)) {
@@ -4906,6 +4981,7 @@ document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
 document.addEventListener("DOMContentLoaded", initializeSwitchFields);
 document.addEventListener("DOMContentLoaded", initializeAutosaveForms);
+document.addEventListener("DOMContentLoaded", initializeApplianceSettings);
 document.addEventListener("DOMContentLoaded", initializeFirewallSettings);
 document.addEventListener("DOMContentLoaded", initializeDnsSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);

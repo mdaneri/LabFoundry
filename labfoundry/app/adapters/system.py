@@ -73,6 +73,12 @@ class SystemAdapter:
     def validate_network_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("network", "validate", config_path, dry_run_message="dry-run: network validation command recorded")
 
+    def apply_appliance_settings_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("appliance-settings", "apply", config_path, dry_run_message="dry-run: appliance settings apply command recorded")
+
+    def validate_appliance_settings_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("appliance-settings", "validate", config_path, dry_run_message="dry-run: appliance settings validation command recorded")
+
     def apply_firewall_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("firewall", "apply", config_path, dry_run_message="dry-run: firewall apply command recorded")
 

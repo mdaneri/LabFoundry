@@ -1,6 +1,7 @@
 from datetime import datetime
 from ipaddress import ip_interface
 from pathlib import Path
+import socket
 from typing import Annotated
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from labfoundry.app.audit import record_audit
 from labfoundry.app.config import Settings, get_settings
 from labfoundry.app.database import get_db
 from labfoundry.app.models import (
+    ApplianceSettings,
     ApiToken,
     AuditEvent,
     CaSettings,
@@ -78,6 +80,7 @@ from labfoundry.app.schemas import (
     ServiceActionResponse,
     ServiceStateResponse,
     SettingsResponse,
+    SettingsUpdate,
     VcfBackupStatusResponse,
     VcfOfflineDepotStatusResponse,
     VcfPrivateRegistryStatusResponse,
@@ -111,6 +114,15 @@ from labfoundry.app.services.dnsmasq import (
     validate_dns_record,
     validate_dhcp_settings,
     validate_dns_settings,
+)
+from labfoundry.app.services.appliance_settings import (
+    APPLIANCE_SETTINGS_STAGED_CONFIG_PATH,
+    appliance_settings_to_dict,
+    management_interface_context,
+    normalize_fqdn,
+    normalize_multiline_values,
+    render_appliance_settings_config,
+    validate_appliance_settings,
 )
 from labfoundry.app.services.firewall import (
     FIREWALL_ACTIONS,
@@ -186,6 +198,51 @@ def get_firewall_settings(db: Session) -> FirewallSettings:
         db.commit()
         db.refresh(settings)
     return settings
+
+
+def get_appliance_settings(db: Session) -> ApplianceSettings:
+    settings = db.execute(select(ApplianceSettings)).scalar_one_or_none()
+    if settings is None:
+        settings = ApplianceSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
+def appliance_settings_response(db: Session, app_settings: Settings) -> SettingsResponse:
+    desired = get_appliance_settings(db)
+    dns_settings = db.execute(select(DnsSettings)).scalar_one_or_none()
+    local_dns_enabled = bool(dns_settings and dns_settings.enabled)
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    management = management_interface_context(interfaces)
+    validation_errors, validation_warnings = validate_appliance_settings(
+        desired,
+        local_dns_enabled=local_dns_enabled,
+        management_interface=management,
+    )
+    return SettingsResponse(
+        app_name=app_settings.app_name,
+        appliance_hostname=socket.gethostname(),
+        dry_run_system_adapters=app_settings.dry_run_system_adapters,
+        repository_path=str(app_settings.repository_path),
+        vcf_backup_path=str(app_settings.vcf_backup_path),
+        appliance_fqdn=desired.fqdn,
+        external_dns_servers=appliance_settings_to_dict(desired)["external_dns_servers"],
+        ntp_servers=appliance_settings_to_dict(desired)["ntp_servers"],
+        appliance_settings_config_path=desired.config_path,
+        local_dns_enabled=local_dns_enabled,
+        management_interface=management["name"],
+        management_ip=management["ip"],
+        valid=not validation_errors,
+        validation_errors=validation_errors,
+        validation_warnings=validation_warnings,
+        config_preview=render_appliance_settings_config(
+            desired,
+            local_dns_enabled=local_dns_enabled,
+            management_interface=management,
+        ),
+    )
 
 
 def assign_firewall_rule_values(rule: FirewallRule, values: dict) -> FirewallRule:
@@ -411,7 +468,7 @@ def get_dashboard(
     audit_events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(5)).scalars().all()
     return DashboardResponse(
         appliance={
-            "hostname": settings.appliance_hostname,
+            "hostname": socket.gethostname(),
             "management_ip": "127.0.0.1",
             "uptime": "development session",
             "cpu_usage_percent": 12,
@@ -1660,14 +1717,32 @@ def cancel_job(job_id: str, identity: Annotated[Identity, Depends(require_scope(
 
 
 @router.get("/settings", response_model=SettingsResponse, tags=["Settings"], operation_id="getSettings")
-def get_app_settings(identity: Annotated[Identity, Depends(require_scope("read:dashboard"))], settings: Settings = Depends(get_settings)) -> SettingsResponse:
-    return SettingsResponse(
-        app_name=settings.app_name,
-        appliance_hostname=settings.appliance_hostname,
-        dry_run_system_adapters=settings.dry_run_system_adapters,
-        repository_path=str(settings.repository_path),
-        vcf_backup_path=str(settings.vcf_backup_path),
-    )
+def get_app_settings(
+    identity: Annotated[Identity, Depends(require_scope("read:dashboard"))],
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> SettingsResponse:
+    return appliance_settings_response(db, settings)
+
+
+@router.patch("/settings", response_model=SettingsResponse, tags=["Settings"], operation_id="updateSettings")
+def update_app_settings(
+    payload: SettingsUpdate,
+    identity: Annotated[Identity, Depends(require_scope("admin:all"))],
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> SettingsResponse:
+    desired = get_appliance_settings(db)
+    desired.fqdn = normalize_fqdn(payload.appliance_fqdn)
+    desired.external_dns_servers = normalize_multiline_values("\n".join(payload.external_dns_servers))
+    desired.ntp_servers = normalize_multiline_values("\n".join(payload.ntp_servers))
+    desired.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
+    desired.updated_at = utcnow()
+    db.add(desired)
+    db.commit()
+    db.refresh(desired)
+    record_audit(db, actor=identity.username, action="update_appliance_settings", resource_type="settings", resource_id=str(desired.id))
+    return appliance_settings_response(db, settings)
 
 
 @router.get("/vcf-backups/status", response_model=VcfBackupStatusResponse, tags=["VCF Backups"], operation_id="getVcfBackupsStatus")

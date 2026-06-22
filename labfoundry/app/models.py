@@ -159,6 +159,17 @@ class ServiceState(Base):
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ApplianceSettings(Base):
+    __tablename__ = "appliance_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fqdn: Mapped[str] = mapped_column(String(180), default="labfoundry.labfoundry.internal")
+    external_dns_servers: Mapped[str] = mapped_column(Text, default="1.1.1.1\n9.9.9.9")
+    ntp_servers: Mapped[str] = mapped_column(Text, default="time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com")
+    config_path: Mapped[str] = mapped_column(String(240), default="/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class FirewallSettings(Base):
     __tablename__ = "firewall_settings"
 

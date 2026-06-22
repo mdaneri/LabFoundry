@@ -267,11 +267,12 @@ def test_dnsmasq_helper_apply_installs_config_dropin_and_enables_service(monkeyp
     assert ["/usr/sbin/dnsmasq", "--test", f"--conf-file={config_path}"] in commands
     assert ["systemctl", "daemon-reload"] in commands
     assert ["systemctl", "enable", "dnsmasq"] in commands
-    assert ["resolvectl", "dns", "eth0", "127.0.0.1"] in commands
-    assert ["resolvectl", "domain", "eth0", "~."] in commands
-    assert "DNS=1.1.1.1" not in mgmt_network.read_text(encoding="utf-8")
-    assert "DNS=127.0.0.1" in mgmt_network.read_text(encoding="utf-8")
-    assert "Domains=~." in mgmt_network.read_text(encoding="utf-8")
+    assert ["systemctl", "reload-or-restart", "dnsmasq"] in commands
+    assert ["resolvectl", "dns", "eth0", "127.0.0.1"] not in commands
+    assert ["resolvectl", "domain", "eth0", "~."] not in commands
+    assert "DNS=1.1.1.1" in mgmt_network.read_text(encoding="utf-8")
+    assert "DNS=127.0.0.1" not in mgmt_network.read_text(encoding="utf-8")
+    assert "Domains=~." not in mgmt_network.read_text(encoding="utf-8")
 
 
 def test_dnsmasq_helper_reload_restarts_service(monkeypatch):
@@ -289,6 +290,163 @@ def test_dnsmasq_helper_reload_restarts_service(monkeypatch):
     assert commands == [
         ["systemctl", "daemon-reload"],
         ["systemctl", "reload-or-restart", "dnsmasq"],
-        ["resolvectl", "dns", "eth0", "127.0.0.1"],
-        ["resolvectl", "domain", "eth0", "~."],
     ]
+
+
+def appliance_settings_json(
+    *,
+    resolver_mode: str = "local_dns",
+    resolver_servers: list[str] | None = None,
+    local_dns_enabled: bool = True,
+) -> str:
+    import json
+
+    return json.dumps(
+        {
+            "fqdn": "labfoundry.labfoundry.internal",
+            "resolver_mode": resolver_mode,
+            "resolver_servers": resolver_servers or ["127.0.0.1"],
+            "local_dns_enabled": local_dns_enabled,
+            "management_interface": "eth0",
+            "management_ip": "192.168.49.1",
+            "management_ip_cidr": "192.168.49.1/24",
+            "ntp_servers": ["time1.google.com", "time2.google.com"],
+        }
+    )
+
+
+def test_appliance_settings_helper_validates_staged_json(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "appliance-settings"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-settings.json"
+    config_path.write_text(appliance_settings_json(), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
+
+    assert helper._handle_appliance_settings("validate", [str(config_path)]) == 0
+
+
+def test_appliance_settings_helper_rejects_invalid_json(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-settings.json"
+    config_path.write_text('{"fqdn": "bad name"}', encoding="utf-8")
+
+    errors = helper._appliance_settings_config_errors(config_path)
+
+    assert "fqdn must be a valid fully qualified DNS name." in errors
+    assert "resolver_mode must be local_dns or external." in errors
+    assert "ntp_servers must include at least one server." in errors
+
+
+def test_appliance_settings_helper_applies_local_resolver_and_timesyncd(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "appliance-settings"
+    networkd_dir = tmp_path / "etc" / "systemd" / "network"
+    timesyncd_dir = tmp_path / "etc" / "systemd" / "timesyncd.conf.d"
+    apply_dir.mkdir(parents=True)
+    networkd_dir.mkdir(parents=True)
+    mgmt_network = networkd_dir / "00-labfoundry-mgmt.network"
+    mgmt_network.write_text(
+        "\n".join(
+            [
+                "[Match]",
+                "Name=eth0",
+                "",
+                "[Network]",
+                "Address=192.168.49.1/24",
+                "DNS=1.1.1.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_path = apply_dir / "labfoundry-settings.json"
+    config_path.write_text(appliance_settings_json(), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", mgmt_network)
+    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
+    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/hostnamectl" if command == "hostnamectl" else None)
+
+    assert helper._handle_appliance_settings("apply", [str(config_path)]) == 0
+
+    assert ["/usr/bin/hostnamectl", "set-hostname", "labfoundry.labfoundry.internal"] in commands
+    assert ["resolvectl", "dns", "eth0", "127.0.0.1"] in commands
+    assert ["resolvectl", "domain", "eth0", "~."] in commands
+    assert ["systemctl", "enable", "--now", "systemd-timesyncd"] in commands
+    assert ["systemctl", "restart", "systemd-timesyncd"] in commands
+    network_text = mgmt_network.read_text(encoding="utf-8")
+    assert "DNS=1.1.1.1" not in network_text
+    assert "DNS=127.0.0.1" in network_text
+    assert "Domains=~." in network_text
+    timesyncd = (timesyncd_dir / "labfoundry.conf").read_text(encoding="utf-8")
+    assert "NTP=time1.google.com time2.google.com" in timesyncd
+
+
+def test_appliance_settings_helper_applies_external_resolver_without_catchall(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "appliance-settings"
+    networkd_dir = tmp_path / "etc" / "systemd" / "network"
+    timesyncd_dir = tmp_path / "etc" / "systemd" / "timesyncd.conf.d"
+    apply_dir.mkdir(parents=True)
+    networkd_dir.mkdir(parents=True)
+    mgmt_network = networkd_dir / "00-labfoundry-mgmt.network"
+    mgmt_network.write_text(
+        "\n".join(["[Match]", "Name=eth0", "", "[Network]", "Address=192.168.49.1/24", "DNS=127.0.0.1", "Domains=~."]) + "\n",
+        encoding="utf-8",
+    )
+    config_path = apply_dir / "labfoundry-settings.json"
+    config_path.write_text(
+        appliance_settings_json(resolver_mode="external", resolver_servers=["1.1.1.1", "9.9.9.9"], local_dns_enabled=False),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", mgmt_network)
+    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
+    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/hostnamectl" if command == "hostnamectl" else None)
+
+    assert helper._handle_appliance_settings("apply", [str(config_path)]) == 0
+
+    assert ["/usr/bin/hostnamectl", "set-hostname", "labfoundry.labfoundry.internal"] in commands
+    assert ["resolvectl", "dns", "eth0", "1.1.1.1", "9.9.9.9"] in commands
+    assert ["resolvectl", "domain", "eth0", ""] in commands
+    network_text = mgmt_network.read_text(encoding="utf-8")
+    assert "DNS=127.0.0.1" not in network_text
+    assert "Domains=~." not in network_text
+    assert "DNS=1.1.1.1" in network_text
+    assert "DNS=9.9.9.9" in network_text
+
+
+def test_appliance_settings_hostname_fallback_writes_etc_hostname(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    hostname_path = tmp_path / "hostname"
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/hostname" if command == "hostname" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper, "Path", lambda value: hostname_path if value == "/etc/hostname" else Path(value))
+
+    assert helper._apply_hostname("fallback.labfoundry.internal") == 0
+
+    assert hostname_path.read_text(encoding="utf-8") == "fallback.labfoundry.internal\n"
+    assert commands == [["/usr/bin/hostname", "fallback.labfoundry.internal"]]

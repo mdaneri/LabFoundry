@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from labfoundry.app.config import get_settings
 from labfoundry.app.models import (
+    ApplianceSettings,
     CaCertificate,
     CaProfile,
     CaSettings,
@@ -204,6 +205,9 @@ def seed_initial_data(db: Session) -> None:
             existing_service.enabled = service_state["enabled"]
             existing_service.running = service_state["running"]
 
+    if db.execute(select(ApplianceSettings)).first() is None:
+        db.add(ApplianceSettings())
+
     if db.execute(select(DnsSettings)).first() is None:
         db.add(
             DnsSettings(
@@ -221,7 +225,7 @@ def seed_initial_data(db: Session) -> None:
                 hostname="labfoundry.labfoundry.internal",
                 record_type="A",
                 address="192.168.50.1",
-                description="Appliance console on the SiteA lab network.",
+                description="LabFoundry app-owned appliance FQDN record.",
             )
         )
 

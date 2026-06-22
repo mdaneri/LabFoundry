@@ -466,3 +466,22 @@ class SettingsResponse(BaseModel):
     dry_run_system_adapters: bool
     repository_path: str
     vcf_backup_path: str
+    appliance_fqdn: str
+    external_dns_servers: list[str]
+    ntp_servers: list[str]
+    appliance_settings_config_path: str
+    local_dns_enabled: bool
+    management_interface: str
+    management_ip: str
+    valid: bool
+    validation_errors: list[str] = Field(default_factory=list)
+    validation_warnings: list[str] = Field(default_factory=list)
+    config_preview: str
+
+
+class SettingsUpdate(BaseModel):
+    appliance_fqdn: str = Field(default="labfoundry.labfoundry.internal", min_length=1, max_length=180)
+    external_dns_servers: list[str] = Field(default_factory=lambda: ["1.1.1.1", "9.9.9.9"])
+    ntp_servers: list[str] = Field(
+        default_factory=lambda: ["time1.google.com", "time2.google.com", "time3.google.com", "time4.google.com"]
+    )
