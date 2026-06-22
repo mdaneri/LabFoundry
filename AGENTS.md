@@ -44,6 +44,20 @@
 - The global `/appliance-apply` workflow remains the only host-mutation workflow. Do not add service-specific apply routes, service-specific apply jobs, or direct helper calls from desired-state edit forms.
 - Packer is a Windows-host prerequisite for the Photon image path; Hyper-V and `qemu-img` may already be available locally but should still be checked in handoff notes.
 
+## Photon VM Debugging Notes
+
+- The Hyper-V management NAT appliance address used during the first Photon bring-up was `192.168.49.1`; verify the actual current address before assuming it with `scripts/windows/get-labfoundry-vm-ip.ps1`, Hyper-V Manager, or SSH.
+- When the appliance web UI is unreachable, separate network reachability from service reachability: use host-side `Test-Connection <ip>` for ICMP, `Test-NetConnection <ip> -Port 8000` for the web service, and in-guest `systemctl status labfoundry --no-pager` plus `journalctl -u labfoundry -n 120 --no-pager`.
+- ICMP can be intentionally blocked by nftables while SSH and TCP/8000 still work. Do not treat failed ping as proof that the VM is down; check TCP ports and Hyper-V console before changing networking.
+- For live appliance patching, build a local wheel with `python -m pip wheel . -w dist`, copy only the LabFoundry wheel to the VM, install it with `/opt/labfoundry/.venv/bin/python -m pip install --force-reinstall --no-deps`, then restore venv readability for the `labfoundry` service user with directory `0755`, file `0644`, and executable bits under `.venv/bin`.
+- After installing a live wheel, restart with `systemctl restart labfoundry` and verify both `systemctl is-active labfoundry` and `curl http://127.0.0.1:8000/openapi.json` from inside the guest or `Invoke-WebRequest http://<ip>:8000/openapi.json` from Windows.
+- If `labfoundry.service` fails with `status=203/EXEC`, check execute permissions on `/opt/labfoundry/.venv/bin/python` for the `labfoundry` user. If it fails importing static/templates, confirm package assets are included in the wheel and that `base.html` static query strings changed after JS/CSS edits.
+- Real firewall apply stages rendered nftables config under `/var/lib/labfoundry/apply/firewall/labfoundry.nft` as the `labfoundry` service user before invoking the root helper. Keep `/var/lib/labfoundry/apply` and its firewall child owned by `labfoundry:labfoundry`; root-owned staging files cause `/appliance-apply` to fail before a job is recorded.
+- Validate actual firewall state with `nft list ruleset`, not only the UI preview. The helper should run `nft -c -f <staged file>` before apply; syntax errors such as placing `tcp` before `ip saddr` must fail validation and be fixed in the renderer.
+- `labfoundry-firewall.service` is a oneshot persistence service. It should be installed with `systemctl enable --now labfoundry-firewall.service`; `enabled` plus `inactive` means it was not started after writing/enabling.
+- When testing real apply from the UI, select only the intended apply unit. The current page lists units without a last-applied baseline as changed; unselect unrelated units before submitting until baseline UX is improved.
+- Check the latest appliance apply job directly when behavior is unclear: query `Job` rows in the appliance SQLite database or inspect the rendered job JSON in the UI. A failed job can still leave host state unchanged if helper validation failed before apply.
+
 ## Network And Service Binding
 
 - Physical Interfaces are for untagged/access networks. VLAN Interfaces are only for tagged VLAN networks on physical parent interfaces marked as trunk.
