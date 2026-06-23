@@ -624,16 +624,33 @@ def appliance_dns_record_conflict(db: Session, fqdn: str) -> bool:
     return any(not is_app_owned_appliance_dns_record(record.description) for record in records)
 
 
+def appliance_domain_from_fqdn(fqdn: str) -> str:
+    normalized = normalize_fqdn(fqdn)
+    parts = normalized.split(".", 1)
+    return parts[1] if len(parts) == 2 else ""
+
+
+def ensure_dns_domain_for_appliance_settings(dns_settings: DnsSettings, fqdn: str) -> bool:
+    domain = appliance_domain_from_fqdn(fqdn)
+    if not domain:
+        return False
+    domains = split_domains(dns_settings.domain)
+    if domain in domains:
+        return False
+    dns_settings.domain = join_domains([domain, *domains])
+    dns_settings.updated_at = utcnow()
+    return True
+
+
 def ensure_dns_for_appliance_settings(
     db: Session,
     settings: ApplianceSettings,
     *,
     previous_fqdn: str,
-    actor: str,
+    actor: str | None,
 ) -> str | None:
     dns_settings = get_dns_settings_row(db)
-    if not dns_settings.enabled:
-        return None
+    ensure_dns_domain_for_appliance_settings(dns_settings, settings.fqdn)
     fqdn = normalize_fqdn(settings.fqdn)
     management = appliance_settings_management_context(db)
     if not fqdn or not management["ip"]:
@@ -662,14 +679,15 @@ def ensure_dns_for_appliance_settings(
             existing.enabled = True
             existing.description = APPLIANCE_DNS_RECORD_DESCRIPTION
             db.flush()
-            record_audit(
-                db,
-                actor=actor,
-                action="update_dns_record_from_appliance_settings",
-                resource_type="dns_record",
-                resource_id=str(existing.id),
-                detail=f"{fqdn} {record_type} -> {address}",
-            )
+            if actor:
+                record_audit(
+                    db,
+                    actor=actor,
+                    action="update_dns_record_from_appliance_settings",
+                    resource_type="dns_record",
+                    resource_id=str(existing.id),
+                    detail=f"{fqdn} {record_type} -> {address}",
+                )
             actions.append("updated")
         else:
             actions.append("unchanged")
@@ -683,14 +701,15 @@ def ensure_dns_for_appliance_settings(
         )
         db.add(record)
         db.flush()
-        record_audit(
-            db,
-            actor=actor,
-            action="create_dns_record_from_appliance_settings",
-            resource_type="dns_record",
-            resource_id=str(record.id),
-            detail=f"{fqdn} {record_type} -> {address}",
-        )
+        if actor:
+            record_audit(
+                db,
+                actor=actor,
+                action="create_dns_record_from_appliance_settings",
+                resource_type="dns_record",
+                resource_id=str(record.id),
+                detail=f"{fqdn} {record_type} -> {address}",
+            )
         actions.append("created")
 
     stale_records = db.execute(
@@ -706,14 +725,15 @@ def ensure_dns_for_appliance_settings(
             continue
         db.delete(record)
         removed_stale += 1
-        record_audit(
-            db,
-            actor=actor,
-            action="delete_dns_record_from_appliance_settings_ip_family_change",
-            resource_type="dns_record",
-            resource_id=str(record.id),
-            detail=f"{record.hostname} {record.record_type}",
-        )
+        if actor:
+            record_audit(
+                db,
+                actor=actor,
+                action="delete_dns_record_from_appliance_settings_ip_family_change",
+                resource_type="dns_record",
+                resource_id=str(record.id),
+                detail=f"{record.hostname} {record.record_type}",
+            )
     if removed_stale:
         db.flush()
         actions.append("removed-stale")
@@ -732,23 +752,28 @@ def ensure_dns_for_appliance_settings(
                 continue
             db.delete(record)
             removed += 1
-            record_audit(
-                db,
-                actor=actor,
-                action="delete_dns_record_from_appliance_settings_rename",
-                resource_type="dns_record",
-                resource_id=str(record.id),
-                detail=f"{record.hostname} {record.record_type}",
-            )
+            if actor:
+                record_audit(
+                    db,
+                    actor=actor,
+                    action="delete_dns_record_from_appliance_settings_rename",
+                    resource_type="dns_record",
+                    resource_id=str(record.id),
+                    detail=f"{record.hostname} {record.record_type}",
+                )
         if removed:
             db.flush()
             actions.append("removed-old")
     return "+".join(actions) if actions else None
 
 
-def appliance_settings_context(db: Session) -> dict[str, Any]:
+def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> dict[str, Any]:
     settings = get_appliance_settings_row(db)
     dns_settings = get_dns_settings_row(db)
+    if reconcile_dns and ensure_dns_for_appliance_settings(db, settings, previous_fqdn=settings.fqdn, actor=None):
+        db.commit()
+        db.refresh(settings)
+        db.refresh(dns_settings)
     local_dns_enabled = bool(dns_settings.enabled)
     management = appliance_settings_management_context(db)
     validation_errors, validation_warnings = validate_appliance_settings(
@@ -1213,6 +1238,10 @@ def routes_wan_context(db: Session) -> dict:
 
 def dnsmasq_context(db: Session) -> dict:
     dns_settings = get_dns_settings_row(db)
+    appliance_settings = get_appliance_settings_row(db)
+    if ensure_dns_for_appliance_settings(db, appliance_settings, previous_fqdn=appliance_settings.fqdn, actor=None):
+        db.commit()
+        db.refresh(dns_settings)
     conditional_forwarders = setting_value(db, DNS_CONDITIONAL_FORWARDERS_SETTING_KEY)
     dns_records = db.execute(select(DnsRecord).order_by(DnsRecord.hostname)).scalars().all()
     dhcp_settings = get_dhcp_settings_row(db)
@@ -5745,12 +5774,22 @@ def update_settings_from_ui(
     settings.ntp_servers = normalize_multiline_values(ntp_servers)
     settings.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
     settings.updated_at = utcnow()
-    dns_record_action = ensure_dns_for_appliance_settings(db, settings, previous_fqdn=previous_fqdn, actor=identity.username)
+    dns_settings = get_dns_settings_row(db)
+    management = appliance_settings_management_context(db)
+    validation_errors, _validation_warnings = validate_appliance_settings(
+        settings,
+        local_dns_enabled=bool(dns_settings.enabled),
+        management_interface=management,
+        dns_record_conflict=bool(dns_settings.enabled) and appliance_dns_record_conflict(db, settings.fqdn),
+    )
+    dns_record_action = None
+    if not validation_errors:
+        dns_record_action = ensure_dns_for_appliance_settings(db, settings, previous_fqdn=previous_fqdn, actor=identity.username)
     db.add(settings)
     db.commit()
     record_audit(db, actor=identity.username, action="update_appliance_settings", resource_type="settings", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave") == "1":
-        context = appliance_settings_context(db)
+        context = appliance_settings_context(db, reconcile_dns=not validation_errors)
         saved = context["appliance_settings"]
         return JSONResponse(
             {

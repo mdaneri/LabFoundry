@@ -130,6 +130,29 @@ def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
         assert "app-owned appliance FQDN" in (record.description or "")
 
 
+def test_dns_defaults_follow_appliance_fqdn_and_management_ip(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord, DnsSettings
+
+    login(client)
+    page = client.get("/dns")
+    assert page.status_code == 200
+    assert 'data-domain="labfoundry.internal"' in page.text
+    assert "labfoundry" in page.text
+    assert "192.168.49.1" in page.text
+
+    with SessionLocal() as db:
+        settings = db.execute(select(DnsSettings)).scalar_one()
+        assert settings.domain == "labfoundry.internal"
+        record = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "labfoundry.labfoundry.internal", DnsRecord.record_type == "A")
+        ).scalar_one()
+        assert record.address == "192.168.49.1"
+        assert "app-owned appliance FQDN" in (record.description or "")
+
+
 def test_settings_fqdn_rename_removes_only_old_app_owned_record(client):
     from sqlalchemy import select
 
@@ -465,7 +488,12 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
         assert db.execute(select(VlanInterface)).scalars().all() == []
         assert db.execute(select(WanPolicy)).scalars().all() == []
         assert db.execute(select(Route)).scalars().all() == []
-        assert db.execute(select(DnsRecord)).scalars().all() == []
+        dns_records = db.execute(select(DnsRecord)).scalars().all()
+        assert len(dns_records) == 1
+        assert dns_records[0].hostname == "labfoundry.labfoundry.internal"
+        assert dns_records[0].record_type == "A"
+        assert dns_records[0].address == "192.168.49.1"
+        assert "app-owned appliance FQDN" in (dns_records[0].description or "")
         assert db.execute(select(DhcpScope)).scalars().all() == []
         assert db.execute(select(DhcpReservation)).scalars().all() == []
         assert db.execute(select(FirewallRule)).scalars().all() == []
@@ -478,7 +506,9 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
         assert marker.value == "false"
         seed_initial_data(db)
         assert db.execute(select(VlanInterface)).scalars().all() == []
-        assert db.execute(select(DnsRecord)).scalars().all() == []
+        dns_records = db.execute(select(DnsRecord)).scalars().all()
+        assert len(dns_records) == 1
+        assert dns_records[0].hostname == "labfoundry.labfoundry.internal"
         assert db.execute(select(VcfDepotDownloadProfile)).scalars().all() == []
         services = db.execute(select(ServiceState)).scalars().all()
         assert services
@@ -598,6 +628,7 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "LDAP is an authentication provider" in users.text
     assert "users-table" in users.text
     assert "user-password-modal" in users.text
+    assert "data-password-toggle" in users.text
     assert "Password Reset" not in users.text
     assert "Reset password" in users.text
     assert "Remove" in users.text
@@ -625,6 +656,7 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "openUserPasswordModal" in app_js.text
     assert "deleteUserFromMenu" in app_js.text
     assert "Unlock OS account" in app_js.text
+    assert "validatePasswordMatch" in app_js.text
     assert 'field: "shell"' in app_js.text
     assert "Temp Password" not in app_js.text
 
@@ -822,7 +854,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "AAAA (IPv6)" in dns.text
     assert "CNAME (alias)" in dns.text
     assert "ptr-record=" not in dns.text
-    assert "1.50.168.192.in-addr.arpa" in dns.text
+    assert "1.49.168.192.in-addr.arpa" in dns.text
     assert 'name="listen_interfaces"' in dns.text
     assert 'name="listen_addresses"' in dns.text
     assert 'name="conditional_forwarders"' in dns.text
@@ -903,6 +935,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert ".appliance-apply-form" in app_css.text
     assert ".confirm-modal" in app_css.text
     assert ".confirm-modal::backdrop" in app_css.text
+    assert "backdrop-filter" not in app_css.text
     assert ".section-head" in app_css.text
 
     dhcp = client.get("/dhcp")
@@ -3234,7 +3267,7 @@ def test_hosts_file_editor_replaces_dns_records(client):
     assert "Import Hosts" in refreshed.text
     assert "bulk.labfoundry.internal" in refreshed.text
     assert "bulk-alias.labfoundry.internal" in refreshed.text
-    assert "labfoundry.labfoundry.internal" not in refreshed.text
+    assert "labfoundry.labfoundry.internal" in refreshed.text
 
 
 def test_zone_file_editor_import_replaces_domain_records(client):

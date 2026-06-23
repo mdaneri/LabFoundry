@@ -26,7 +26,7 @@ Current apply units are:
 
 DNS and DHCP are one unit because they share the rendered dnsmasq config and reload boundary.
 
-Appliance Settings owns appliance identity, OS hostname, resolver mode, resolver servers, and the appliance NTP client. It does not render DNS records; those remain part of the DNS/DHCP unit.
+Appliance Settings owns appliance identity, OS hostname, resolver mode, resolver servers, and the appliance NTP client. The app-owned appliance DNS record is derived from that identity, but DNS/DHCP still owns the rendered dnsmasq record and service reload boundary.
 
 ## Local Users Apply
 

@@ -1714,6 +1714,23 @@ function openUserPasswordModal(data) {
   }
   form.action = `/users/${data.id}/password`;
   form.reset();
+  form.querySelectorAll('input[type="text"][data-password-visible]').forEach((input) => {
+    if (input instanceof HTMLInputElement) {
+      input.type = "password";
+      input.removeAttribute("data-password-visible");
+    }
+  });
+  form.querySelectorAll("[data-password-toggle]").forEach((button) => {
+    if (button instanceof HTMLButtonElement) {
+      button.setAttribute("aria-pressed", "false");
+      button.setAttribute("aria-label", button.getAttribute("aria-label")?.replace("Hide", "Show") || "Show password");
+    }
+  });
+  form.querySelectorAll("input").forEach((input) => {
+    if (input instanceof HTMLInputElement) {
+      input.setCustomValidity("");
+    }
+  });
   if (title instanceof HTMLElement) {
     title.textContent = `Reset ${data.username} password`;
   }
@@ -1943,19 +1960,49 @@ function initializeUserPasswordForm() {
   if (!(form instanceof HTMLFormElement)) {
     return;
   }
-  form.addEventListener("submit", (event) => {
-    const password = form.querySelector('input[name="password"]');
-    const confirmation = form.querySelector('input[name="confirm_password"]');
+  const password = form.querySelector('input[name="password"]');
+  const confirmation = form.querySelector('input[name="confirm_password"]');
+  const validatePasswordMatch = (report = false) => {
     if (!(password instanceof HTMLInputElement) || !(confirmation instanceof HTMLInputElement)) {
-      return;
+      return true;
     }
-    if (password.value !== confirmation.value) {
-      event.preventDefault();
-      confirmation.setCustomValidity("Password confirmation does not match.");
+    if (!password.value || !confirmation.value || password.value === confirmation.value) {
+      confirmation.setCustomValidity("");
+      return true;
+    }
+    confirmation.setCustomValidity("Password confirmation does not match.");
+    if (report) {
       confirmation.reportValidity();
+    }
+    return false;
+  };
+  [password, confirmation].forEach((input) => {
+    if (!(input instanceof HTMLInputElement)) {
       return;
     }
-    confirmation.setCustomValidity("");
+    input.addEventListener("input", () => validatePasswordMatch(false));
+  });
+  form.querySelectorAll("[data-password-toggle]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    const input = button.closest(".password-input-wrap")?.querySelector("input");
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      const nextVisible = input.type === "password";
+      input.type = nextVisible ? "text" : "password";
+      input.toggleAttribute("data-password-visible", nextVisible);
+      button.setAttribute("aria-pressed", nextVisible ? "true" : "false");
+      button.setAttribute("aria-label", `${nextVisible ? "Hide" : "Show"} ${input.name === "confirm_password" ? "confirmation password" : "new password"}`);
+      input.focus();
+    });
+  });
+  form.addEventListener("submit", (event) => {
+    if (!validatePasswordMatch(true)) {
+      event.preventDefault();
+    }
   });
 }
 

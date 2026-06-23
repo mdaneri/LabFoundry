@@ -146,11 +146,27 @@
     </div>
     <label>
       <span class="field-label"><span>New password</span><button class="help-icon" type="button" data-help="Minimum length is 8 characters.">i</button></span>
-      <input type="password" name="password" autocomplete="new-password" minlength="{{ password_policy.min_length }}" required>
+      <span class="password-input-wrap">
+        <input type="password" name="password" autocomplete="new-password" minlength="{{ password_policy.min_length }}" required>
+        <button class="password-toggle" type="button" data-password-toggle aria-label="Show new password" aria-pressed="false">
+          <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+            <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+          </svg>
+        </button>
+      </span>
     </label>
     <label>
       <span class="field-label"><span>Confirm password</span><button class="help-icon" type="button" data-help="Must match the new password. LabFoundry validates the policy and holds the value only until the global Local Users apply sends it to Photon OS.">i</button></span>
-      <input type="password" name="confirm_password" autocomplete="new-password" minlength="{{ password_policy.min_length }}" required>
+      <span class="password-input-wrap">
+        <input type="password" name="confirm_password" autocomplete="new-password" minlength="{{ password_policy.min_length }}" required>
+        <button class="password-toggle" type="button" data-password-toggle aria-label="Show confirmation password" aria-pressed="false">
+          <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+            <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+          </svg>
+        </button>
+      </span>
     </label>
     <div class="confirm-modal-actions">
       <button class="button ghost" value="cancel" type="button" data-user-password-cancel>Cancel</button>

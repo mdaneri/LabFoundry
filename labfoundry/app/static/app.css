@@ -2189,8 +2189,7 @@ textarea {
 }
 
 .confirm-modal::backdrop {
-  background: rgba(15, 23, 42, 0.38);
-  backdrop-filter: blur(2px);
+  background: rgba(15, 23, 42, 0.32);
 }
 
 .confirm-modal-panel {
@@ -2222,6 +2221,47 @@ textarea {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.password-input-wrap {
+  position: relative;
+  display: block;
+}
+
+.password-input-wrap input {
+  padding-right: 42px;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 5px;
+  padding: 0;
+  color: #64748b;
+  background: transparent;
+  cursor: pointer;
+}
+
+.password-toggle:hover,
+.password-toggle:focus-visible {
+  color: var(--accent-dark);
+  background: #eff6ff;
+  outline: none;
+}
+
+.password-toggle svg {
+  width: 17px;
+  height: 17px;
+  stroke: currentColor;
+  stroke-width: 2;
+  fill: none;
 }
 
 .monospace-textarea {

@@ -1,3 +1,5 @@
+from ipaddress import ip_interface
+
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -29,7 +31,9 @@ from labfoundry.app.models import (
     VlanInterface,
     WanPolicy,
 )
+from labfoundry.app.services.appliance_settings import APPLIANCE_DNS_RECORD_DESCRIPTION, normalize_fqdn
 from labfoundry.app.services.local_users import stage_user_os_password
+from labfoundry.app.services.dnsmasq import join_domains, split_domains, validate_dns_record
 from labfoundry.app.services.networking import normalize_interface_mode
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
 
@@ -221,29 +225,30 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
             existing_service.enabled = service_state["enabled"]
             existing_service.running = service_state["running"]
 
-    if db.execute(select(ApplianceSettings)).first() is None:
-        db.add(ApplianceSettings())
+    appliance_settings = db.execute(select(ApplianceSettings)).scalar_one_or_none()
+    if appliance_settings is None:
+        appliance_settings = ApplianceSettings()
+        db.add(appliance_settings)
+        db.flush()
 
-    if db.execute(select(DnsSettings)).first() is None:
-        db.add(
-            DnsSettings(
-                enabled=False,
-                listen_interface="eth2" if include_examples else "",
-                listen_address="192.168.50.1" if include_examples else "",
-                domain="labfoundry.internal",
-                upstream_servers="1.1.1.1\n9.9.9.9",
-            )
+    appliance_dns_domain = _domain_from_fqdn(appliance_settings.fqdn) or "labfoundry.internal"
+    dns_settings = db.execute(select(DnsSettings)).scalar_one_or_none()
+    if dns_settings is None:
+        dns_settings = DnsSettings(
+            enabled=False,
+            listen_interface="eth2" if include_examples else "",
+            listen_address="192.168.50.1" if include_examples else "",
+            domain=appliance_dns_domain,
+            upstream_servers="1.1.1.1\n9.9.9.9",
         )
+        db.add(dns_settings)
+    else:
+        domains = split_domains(dns_settings.domain)
+        if appliance_dns_domain not in domains:
+            dns_settings.domain = join_domains([appliance_dns_domain, *domains])
+            db.add(dns_settings)
 
-    if include_examples and db.execute(select(DnsRecord)).first() is None:
-        db.add(
-            DnsRecord(
-                hostname="labfoundry.labfoundry.internal",
-                record_type="A",
-                address="192.168.50.1",
-                description="LabFoundry app-owned appliance FQDN record.",
-            )
-        )
+    _ensure_appliance_dns_record(db, appliance_settings)
 
     if db.execute(select(DhcpSettings)).first() is None:
         db.add(
@@ -450,3 +455,59 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
             ]
         )
     db.commit()
+
+
+def _domain_from_fqdn(fqdn: str) -> str:
+    normalized = normalize_fqdn(fqdn)
+    parts = normalized.split(".", 1)
+    return parts[1] if len(parts) == 2 else ""
+
+
+def _management_ip(db: Session) -> str:
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    candidates = [interface for interface in interfaces if interface.role == "management"] + [
+        interface for interface in interfaces if interface.name == "eth0"
+    ]
+    seen: set[str] = set()
+    for interface in candidates:
+        if interface.name in seen:
+            continue
+        seen.add(interface.name)
+        if not interface.ip_cidr:
+            continue
+        try:
+            return str(ip_interface(interface.ip_cidr).ip)
+        except ValueError:
+            continue
+    return ""
+
+
+def _ensure_appliance_dns_record(db: Session, appliance_settings: ApplianceSettings) -> None:
+    fqdn = normalize_fqdn(appliance_settings.fqdn)
+    address = _management_ip(db)
+    if not fqdn or not address:
+        return
+    record_type = "AAAA" if ":" in address else "A"
+    if validate_dns_record(fqdn, record_type, address):
+        return
+    existing = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == fqdn,
+            DnsRecord.record_type == record_type,
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        db.add(
+            DnsRecord(
+                hostname=fqdn,
+                record_type=record_type,
+                address=address,
+                description=APPLIANCE_DNS_RECORD_DESCRIPTION,
+                enabled=True,
+            )
+        )
+    elif APPLIANCE_DNS_RECORD_DESCRIPTION in (existing.description or ""):
+        existing.address = address
+        existing.enabled = True
+        existing.description = APPLIANCE_DNS_RECORD_DESCRIPTION
+        db.add(existing)
