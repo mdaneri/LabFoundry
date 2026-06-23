@@ -40,6 +40,12 @@ class SystemAdapter:
     def validate_dnsmasq_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("dnsmasq", "validate", config_path, dry_run_message="dry-run: dnsmasq validation command recorded")
 
+    def validate_local_users_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("local-users", "validate", config_path, dry_run_message="dry-run: local users validation command recorded")
+
+    def apply_local_users_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("local-users", "apply", config_path, dry_run_message="dry-run: local users apply command recorded")
+
     def apply_dnsmasq_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("dnsmasq", "apply", config_path, dry_run_message="dry-run: dnsmasq apply command recorded")
 

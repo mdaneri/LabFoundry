@@ -20,6 +20,7 @@ from pathlib import Path
 
 
 COMMANDS: dict[str, set[str]] = {
+    "local-users": {"validate", "apply"},
     "appliance-settings": {"validate", "apply"},
     "network": {"validate", "apply"},
     "firewall": {"validate", "apply"},
@@ -44,6 +45,8 @@ DNSMASQ_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/dnsmasq.service.d")
 DNSMASQ_SERVICE_DROPIN_PATH = DNSMASQ_SERVICE_DROPIN_DIR / "labfoundry.conf"
 NETWORK_APPLY_DIR = Path("/var/lib/labfoundry/apply/network")
 APPLIANCE_SETTINGS_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-settings")
+LOCAL_USERS_APPLY_DIR = Path("/var/lib/labfoundry/apply/local-users")
+LOCAL_USERS_HOME_BASE = Path("/var/lib/labfoundry/users")
 NETWORKD_CONFIG_DIR = Path("/etc/systemd/network")
 NETWORKD_MGMT_CONFIG_PATH = NETWORKD_CONFIG_DIR / "00-labfoundry-mgmt.network"
 NETWORKD_MANAGED_PREFIX = "10-labfoundry-"
@@ -60,10 +63,51 @@ VCF_BACKUPS_DEFAULT_REMOTE_DIRECTORY = "/backups"
 VCF_BACKUPS_DEFAULT_USERNAME = "vcf-backup"
 VCF_BACKUPS_USERNAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 VCF_BACKUPS_PATH_PATTERN = re.compile(r"^/[A-Za-z0-9._/+:-]+$")
+LOCAL_USERS_USERNAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+LOCAL_USERS_RESERVED_USERNAMES = {
+    "adm",
+    "bin",
+    "daemon",
+    "dbus",
+    "games",
+    "halt",
+    "labfoundry",
+    "lp",
+    "mail",
+    "nfsnobody",
+    "nobody",
+    "operator",
+    "root",
+    "shutdown",
+    "sshd",
+    "sync",
+    "systemd-network",
+    "systemd-resolve",
+}
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=False, capture_output=True, text=True)
+
+
+def _run_with_input(command: list[str], input_text: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, input=input_text, check=False, capture_output=True, text=True)
+
+
+def _run_account_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    if os.environ.get("LABFOUNDRY_HELPER_USE_SYSTEMD_RUN") == "1":
+        systemd_run = shutil.which("systemd-run")
+        if systemd_run is not None:
+            return _run([systemd_run, "--quiet", "--wait", "--pipe", "--collect", "--service-type=exec", *command])
+    return _run(command)
+
+
+def _run_account_command_with_input(command: list[str], input_text: str) -> subprocess.CompletedProcess[str]:
+    if os.environ.get("LABFOUNDRY_HELPER_USE_SYSTEMD_RUN") == "1":
+        systemd_run = shutil.which("systemd-run")
+        if systemd_run is not None:
+            return _run_with_input([systemd_run, "--quiet", "--wait", "--pipe", "--collect", "--service-type=exec", *command], input_text)
+    return _run_with_input(command, input_text)
 
 
 def _chown_path(path: Path, uid: int, gid: int) -> None:
@@ -434,6 +478,195 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                 "resolver_mode": resolver_mode,
                 "resolver_servers": resolver_servers,
                 "timesyncd_dropin": str(TIMESYNCD_DROPIN_PATH),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _validate_local_users_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".json":
+        raise ValueError("local users config path must end with .json")
+    if not path.is_relative_to(LOCAL_USERS_APPLY_DIR):
+        raise ValueError(f"local users config must be staged under {LOCAL_USERS_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"local users config does not exist: {path}")
+    return path
+
+
+def _load_local_users_config(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("local users config must be a JSON object")
+    return payload
+
+
+def _local_user_home(username: str) -> str:
+    return (LOCAL_USERS_HOME_BASE / username).as_posix()
+
+
+def _local_users_config_errors(path: Path) -> list[str]:
+    errors: list[str] = []
+    try:
+        payload = _load_local_users_config(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return [str(exc)]
+    if payload.get("managed_by") != "LabFoundry":
+        errors.append("local users config must be rendered by LabFoundry.")
+    if payload.get("version") != 1:
+        errors.append("local users config version must be 1.")
+    users = payload.get("users")
+    if not isinstance(users, list):
+        return [*errors, "local users config requires a users list."]
+    seen: set[str] = set()
+    for index, row in enumerate(users):
+        if not isinstance(row, dict):
+            errors.append(f"local user row {index} must be an object.")
+            continue
+        username = str(row.get("username") or "").strip().lower()
+        if username in seen:
+            errors.append(f"duplicate local user {username}.")
+        seen.add(username)
+        if not LOCAL_USERS_USERNAME_PATTERN.fullmatch(username):
+            errors.append(f"local user {username or index} is not a valid Photon OS username.")
+        if username in LOCAL_USERS_RESERVED_USERNAMES:
+            errors.append(f"local user {username} is reserved by Photon OS or LabFoundry.")
+        if row.get("home") != _local_user_home(username):
+            errors.append(f"local user {username} home must be {_local_user_home(username)}.")
+        if row.get("shell") != "/sbin/nologin":
+            errors.append(f"local user {username} shell must be /sbin/nologin.")
+        if not isinstance(row.get("enabled"), bool):
+            errors.append(f"local user {username} enabled must be true or false.")
+        password = row.get("password")
+        if password is not None and (not isinstance(password, str) or not password):
+            errors.append(f"local user {username} pending password must be a non-empty string when present.")
+    return errors
+
+
+def _local_users_payload(path: Path) -> dict:
+    return _load_local_users_config(path)
+
+
+def _command_path(command: str) -> str | None:
+    found = shutil.which(command)
+    if found:
+        return found
+    fallback = f"/usr/sbin/{command}"
+    if Path(fallback).exists():
+        return fallback
+    return None
+
+
+def _ensure_os_user(username: str, home: str, shell: str) -> int:
+    id_command = _command_path("id")
+    useradd = _command_path("useradd")
+    if id_command is None:
+        print("id command not found", file=sys.stderr)
+        return 127
+    if _run([id_command, username]).returncode == 0:
+        return 0
+    if useradd is None:
+        print("useradd command not found", file=sys.stderr)
+        return 127
+    LOCAL_USERS_HOME_BASE.mkdir(parents=True, exist_ok=True)
+    result = _run_account_command([useradd, "--home-dir", home, "--create-home", "--shell", shell, username])
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _set_os_user_password(username: str, password: str) -> int:
+    chpasswd = _command_path("chpasswd")
+    passwd = _command_path("passwd")
+    if chpasswd is None:
+        print("chpasswd command not found", file=sys.stderr)
+        return 127
+    result = _run_account_command_with_input([chpasswd], f"{username}:{password}\n")
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    if result.returncode != 0:
+        return result.returncode
+    if passwd is None:
+        print("passwd command not found", file=sys.stderr)
+        return 127
+    unlock = _run_account_command([passwd, "-u", username])
+    print(unlock.stdout, end="")
+    print(unlock.stderr, end="", file=sys.stderr)
+    return unlock.returncode
+
+
+def _lock_os_user(username: str) -> int:
+    passwd = _command_path("passwd")
+    if passwd is None:
+        print("passwd command not found", file=sys.stderr)
+        return 127
+    result = _run_account_command([passwd, "-l", username])
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _handle_local_users(action: str, args: list[str]) -> int:
+    if len(args) != 1:
+        print(f"local-users {action} requires exactly one staged JSON config path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _validate_local_users_config_path(args[0])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    errors = _local_users_config_errors(config_path)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    payload = _local_users_payload(config_path)
+    users = payload["users"]
+    if action == "validate":
+        print(
+            json.dumps(
+                {
+                    "local_users": "validation ok",
+                    "users": len(users),
+                    "passwords_pending": sum(1 for row in users if row.get("password")),
+                    "scope": "Photon OS local users",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    applied: list[str] = []
+    locked: list[str] = []
+    passwords_updated = 0
+    for row in users:
+        username = str(row["username"])
+        ensure = _ensure_os_user(username, str(row["home"]), str(row["shell"]))
+        if ensure != 0:
+            return ensure
+        if row.get("password"):
+            password_result = _set_os_user_password(username, str(row["password"]))
+            if password_result != 0:
+                return password_result
+            passwords_updated += 1
+        if row.get("enabled"):
+            applied.append(username)
+        else:
+            lock = _lock_os_user(username)
+            if lock != 0:
+                return lock
+            locked.append(username)
+    print(
+        json.dumps(
+            {
+                "local_users": "apply complete",
+                "users": len(users),
+                "enabled_users": applied,
+                "locked_users": locked,
+                "passwords_updated": passwords_updated,
             },
             sort_keys=True,
         )
@@ -984,7 +1217,7 @@ def _ensure_vcf_backups_user(username: str, storage_path: Path) -> int:
         return 127
     if _run(["id", username]).returncode == 0:
         return 0
-    print(f"VCF backups OS user {username} does not exist. Provision the selected backup user before apply.", file=sys.stderr)
+    print(f"VCF backups OS user {username} does not exist. Apply the Local Users unit before VCF Backups.", file=sys.stderr)
     return 2
 
 
@@ -1163,6 +1396,8 @@ def main(argv: list[str]) -> int:
         return _handle_dnsmasq(action, normalized_args)
     if group == "appliance-settings":
         return _handle_appliance_settings(action, normalized_args)
+    if group == "local-users":
+        return _handle_local_users(action, normalized_args)
     if group == "vcf-backups":
         return _handle_vcf_backups(action, normalized_args)
 

@@ -175,6 +175,16 @@ leases, and the helper exposes only that allowlisted lease readback path.
 DHCP scopes should bind to access physical interfaces with IP CIDR or enabled
 VLAN interfaces with IP CIDR, not trunk or addressless physical interfaces.
 
+Local Users desired state is Photon OS account-backed. Real `/appliance-apply`
+stages `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`, validates
+LabFoundry-owned local usernames, creates enabled users as non-interactive OS
+accounts under `/var/lib/labfoundry/users`, locks disabled users, and sends
+pending passwords to `chpasswd` over stdin. Password previews, job results, and
+logs should show only status and counts. `labfoundry.service` preserves
+`LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1` through sudo so account-mutating helper
+commands can run as transient systemd units outside the control-plane service
+sandbox while still using the constrained helper allowlist.
+
 VCF Backups desired state is OpenSSH-backed. Provisioning creates the default
 `vcf-backup` OS account. Real `/appliance-apply` stages the rendered drop-in
 under `/var/lib/labfoundry/apply/vcf-backups/`, validates that it is a
@@ -182,7 +192,8 @@ LabFoundry-rendered `Match User` config for an existing OS account, installs
 `/etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf`, prepares the fixed
 `/mnt/labfoundry-vcf-backups` chroot and `/backups` upload directory, and
 restarts `sshd` through `labfoundry-helper`. Firewall apply still owns the
-selected interface and port allow rule.
+selected interface and port allow rule. Apply Local Users first when the
+selected SFTP user is new or has a staged password.
 
 The firewall preview derives LabFoundry-managed service allow rules from
 enabled service listener desired state, including management, DNS, DHCP, KMS,

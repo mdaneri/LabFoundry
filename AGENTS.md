@@ -43,6 +43,7 @@
 - Photon Hyper-V images should mask `systemd-ssh-generator` because LabFoundry uses normal TCP SSH and does not rely on automatic SSH-over-AF_VSOCK sockets. This prevents noisy `Failed to query local AF_VSOCK CID` console messages on current systemd/Hyper-V combinations.
 - Keep `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` for first-boot appliance images. Promote real host mutation one apply unit at a time after validation, preview, job capture, and rollback behavior are reviewed.
 - Privileged appliance enforcement must go through `labfoundry-helper` and constrained sudoers entries. Do not give the control plane broad shell, root, or package-manager access.
+- Account-mutating helper actions such as Local Users run account tools through `systemd-run` from the helper. Keep `LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1` in `labfoundry.service` and preserve that single environment variable in the LabFoundry sudoers rule.
 - The global `/appliance-apply` workflow remains the only host-mutation workflow. Do not add service-specific apply routes, service-specific apply jobs, or direct helper calls from desired-state edit forms.
 - Packer is a Windows-host prerequisite for the Photon image path; Hyper-V and `qemu-img` may already be available locally but should still be checked in handoff notes.
 
@@ -97,12 +98,17 @@
 - Keep local Users separate from authentication provider settings. LDAP is an authentication source, not the local user list.
 - Users need roles because LabFoundry is expected to support OIDC. LDAP/OIDC integrations should support group-to-role mapping.
 - Default local users should be created by seed logic when needed. The VCF Backup SFTP service has a default local user named `vcf-backup`; keep it visible under Users and selectable by the VCF Backup service.
+- Local Users owns Photon OS account synchronization through the global `/appliance-apply` unit `local_users`. It stages `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`, creates enabled users as non-interactive OS accounts under `/var/lib/labfoundry/users`, locks disabled users, and does not delete OS users in the current version.
+- Local user password rules are configurable desired state on Users. Enforce them on create/reset before staging a Photon OS password.
+- LabFoundry stores local web passwords as hashes and keeps only encrypted pending OS passwords until a successful real Local Users apply. Dry-run apply must not clear pending passwords. Never render plaintext passwords, encrypted pending password values, or password hashes in previews, jobs, logs, widgets, docs, or final responses.
+- Existing users without a pending OS password cannot have their OS password recovered from the LabFoundry hash; show/reset them as `password not staged; reset to sync`.
 - Never expose secrets in final responses, logs, widgets, or rendered previews beyond intentionally generated one-time credentials already displayed by the app.
 
 ## VCF Backups
 
 - VCF Backups is an SFTP endpoint backed by local LabFoundry users. The selected SFTP user must come from Users.
 - The default VCF Backup user is `vcf-backup`. Development seed credentials may exist for bootstrapping, but production workflows should prompt/reset credentials before exposure.
+- Apply the Local Users unit before VCF Backups when the selected SFTP user is new, renamed, disabled/enabled, or has a pending staged password.
 - VCF Backup listen targets must include access physical interfaces with IPs and VLAN interfaces with IPs; exclude trunk physical interfaces.
 - The VCF-facing remote directory should be short and stable: `/backups`.
 - The appliance backup storage is a fixed appliance volume mount, currently `/mnt/labfoundry-vcf-backups`; do not make this a routine UI-configurable field.

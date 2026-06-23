@@ -1,5 +1,10 @@
 Defaults:labfoundry !requiretty
+Defaults:labfoundry env_keep += "LABFOUNDRY_HELPER_USE_SYSTEMD_RUN"
 labfoundry ALL=(root) NOPASSWD: \
+    /opt/labfoundry/bin/labfoundry-helper local-users validate *, \
+    /opt/labfoundry/bin/labfoundry-helper local-users validate --real *, \
+    /opt/labfoundry/bin/labfoundry-helper local-users apply *, \
+    /opt/labfoundry/bin/labfoundry-helper local-users apply --real *, \
     /opt/labfoundry/bin/labfoundry-helper appliance-settings validate *, \
     /opt/labfoundry/bin/labfoundry-helper appliance-settings validate --real *, \
     /opt/labfoundry/bin/labfoundry-helper appliance-settings apply *, \

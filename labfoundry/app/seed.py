@@ -29,6 +29,7 @@ from labfoundry.app.models import (
     WanPolicy,
 )
 from labfoundry.app.security import hash_password
+from labfoundry.app.services.local_users import stage_user_os_password
 from labfoundry.app.services.networking import normalize_interface_mode
 
 
@@ -88,6 +89,7 @@ def seed_initial_data(db: Session) -> None:
             password_hash=hash_password(settings.bootstrap_admin_password),
             role="admin",
         )
+        stage_user_os_password(bootstrap_user, settings.bootstrap_admin_password, settings)
         db.add(bootstrap_user)
         db.flush()
     vcf_backup_user = db.execute(select(User).where(User.username == VCF_BACKUP_USERNAME)).scalar_one_or_none()
@@ -98,6 +100,7 @@ def seed_initial_data(db: Session) -> None:
             role="viewer",
             enabled=True,
         )
+        stage_user_os_password(vcf_backup_user, VCF_BACKUP_INITIAL_PASSWORD, settings)
         db.add(vcf_backup_user)
         db.flush()
 

@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
 
@@ -344,6 +345,103 @@ def test_dnsmasq_helper_rejects_lease_paths_outside_allowlisted_state(monkeypatc
     assert "dnsmasq lease file must stay under" in captured.err
 
 
+def local_users_json(*, username: str = "sync-user", enabled: bool = True, password: str | None = "BridgeStrong1!") -> str:
+    row = {
+        "username": username,
+        "role": "viewer",
+        "enabled": enabled,
+        "home": f"/var/lib/labfoundry/users/{username}",
+        "shell": "/sbin/nologin",
+        "password_pending": bool(password),
+        "password_pending_since": "2026-06-23T12:00:00+00:00" if password else "",
+    }
+    if password:
+        row["password"] = password
+    return json.dumps({"managed_by": "LabFoundry", "version": 1, "scope": "Photon OS local users", "users": [row]})
+
+
+def test_local_users_helper_validates_staged_config(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    config_path.write_text(local_users_json(), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+
+    assert helper._handle_local_users("validate", [str(config_path)]) == 0
+    captured = capsys.readouterr()
+    assert '"local_users": "validation ok"' in captured.out
+    assert '"passwords_pending": 1' in captured.out
+    assert "BridgeStrong1!" not in captured.out
+
+
+def test_local_users_helper_rejects_reserved_username(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    config_path.write_text(local_users_json(username="root"), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+
+    assert helper._handle_local_users("validate", [str(config_path)]) == 2
+    captured = capsys.readouterr()
+    assert "local user root is reserved" in captured.err
+
+
+def test_local_users_helper_creates_locks_and_sets_password_without_leaking(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    home_base = tmp_path / "users"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    payload = json.loads(local_users_json())
+    payload["users"][0]["home"] = (home_base / "sync-user").as_posix()
+    payload["users"].append(
+        {
+            "username": "disabled-user",
+            "role": "viewer",
+            "enabled": False,
+            "home": (home_base / "disabled-user").as_posix(),
+            "shell": "/sbin/nologin",
+            "password_pending": False,
+            "password_pending_since": "",
+        }
+    )
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    commands: list[list[str]] = []
+    stdin_values: list[str] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command in (["id", "sync-user"], ["id", "disabled-user"]):
+            return subprocess.CompletedProcess(command, 1, "", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_run_with_input(command: list[str], input_text: str) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        stdin_values.append(input_text)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "LOCAL_USERS_HOME_BASE", home_base)
+    monkeypatch.setattr(helper, "_command_path", lambda command: command)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper, "_run_with_input", fake_run_with_input)
+
+    assert helper._handle_local_users("apply", [str(config_path)]) == 0
+    captured = capsys.readouterr()
+
+    assert ["useradd", "--home-dir", (home_base / "sync-user").as_posix(), "--create-home", "--shell", "/sbin/nologin", "sync-user"] in commands
+    assert ["passwd", "-u", "sync-user"] in commands
+    assert ["passwd", "-l", "disabled-user"] in commands
+    assert stdin_values == ["sync-user:BridgeStrong1!\n"]
+    assert all("BridgeStrong1!" not in arg for command in commands for arg in command)
+    assert "BridgeStrong1!" not in captured.out
+    assert "BridgeStrong1!" not in captured.err
+
+
 def vcf_backups_config_text(*, enabled: bool = True) -> str:
     if not enabled:
         return "\n".join(
@@ -474,7 +572,7 @@ def test_vcf_backups_helper_apply_requires_existing_os_user(monkeypatch, tmp_pat
 
     assert helper._handle_vcf_backups("apply", [str(config_path)]) == 2
     captured = capsys.readouterr()
-    assert "VCF backups OS user vcf-backup does not exist" in captured.err
+    assert "Apply the Local Users unit before VCF Backups" in captured.err
 
 
 def appliance_settings_json(

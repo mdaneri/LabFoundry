@@ -21,7 +21,7 @@
     ></div>
     <table id="users-fallback" class="data-table compact dns-fallback-table">
       <thead>
-        <tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th></tr>
+        <tr><th>Username</th><th>Role</th><th>Status</th><th>Photon OS</th><th>Created</th><th>Actions</th></tr>
       </thead>
       <tbody>
         {% for user in users %}
@@ -29,6 +29,10 @@
             <td>{{ user.username }}</td>
             <td>{{ user.role }}</td>
             <td><span class="status-pill {{ 'good' if user.enabled else 'muted' }}">{{ "enabled" if user.enabled else "disabled" }}</span></td>
+            <td>
+              {% set row = local_user_sync_rows | selectattr("username", "equalto", user.username) | first %}
+              <span class="status-pill {{ 'warn' if row.password_pending or row.sync_status.startswith('password not') else 'good' if row.sync_status == 'synced' else 'muted' }}">{{ row.sync_status }}</span>
+            </td>
             <td>{{ user.created_at.strftime("%Y-%m-%d") }}</td>
             <td class="button-row">
               <button class="button tiny secondary" type="button" data-reset-user-button data-user-id="{{ user.id }}" data-username="{{ user.username }}">Reset password</button>
@@ -51,6 +55,61 @@
   </div>
 
   <aside class="side-stack">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Pending Appliance Changes</h2>
+        <span class="status-pill {{ appliance_apply_status.pill }}">{{ appliance_apply_status.state }}</span>
+      </div>
+      <div class="settings-list compact-list">
+        <div><span>Apply unit</span><strong>Local Users</strong></div>
+        <div><span>Pending passwords</span><strong>{{ appliance_apply_status.context.local_user_pending_password_count }}</strong></div>
+      </div>
+      <a class="button secondary full-width" href="/appliance-apply">Review appliance changes</a>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Password Policy</h2>
+        <span class="status-pill good">strict</span>
+      </div>
+      <form class="form-stack" action="/users/password-policy" method="post" data-autosave-form data-autosave-status-id="users-password-policy-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label>
+          <span class="field-label"><span>Minimum length</span><button class="help-icon" type="button" data-help="Sets the minimum length for local LabFoundry passwords. The rule applies to new users and password resets before any Photon OS password is staged.">i</button></span>
+          <input type="number" name="min_length" min="8" max="128" value="{{ password_policy.min_length }}" required>
+        </label>
+        <label class="switch-field">
+          <span class="field-label"><span>Require uppercase</span><button class="help-icon" type="button" data-help="Requires at least one uppercase letter in local passwords before Photon OS sync staging is allowed.">i</button></span>
+          <input class="switch-input" type="checkbox" name="require_uppercase" {{ "checked" if password_policy.require_uppercase else "" }}>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <label class="switch-field">
+          <span class="field-label"><span>Require lowercase</span><button class="help-icon" type="button" data-help="Requires at least one lowercase letter in local passwords before Photon OS sync staging is allowed.">i</button></span>
+          <input class="switch-input" type="checkbox" name="require_lowercase" {{ "checked" if password_policy.require_lowercase else "" }}>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <label class="switch-field">
+          <span class="field-label"><span>Require number</span><button class="help-icon" type="button" data-help="Requires at least one number in local passwords before Photon OS sync staging is allowed.">i</button></span>
+          <input class="switch-input" type="checkbox" name="require_number" {{ "checked" if password_policy.require_number else "" }}>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <label class="switch-field">
+          <span class="field-label"><span>Require special</span><button class="help-icon" type="button" data-help="Requires at least one non-alphanumeric character in local passwords before Photon OS sync staging is allowed.">i</button></span>
+          <input class="switch-input" type="checkbox" name="require_special" {{ "checked" if password_policy.require_special else "" }}>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <label class="switch-field">
+          <span class="field-label"><span>Block username</span><button class="help-icon" type="button" data-help="Rejects passwords containing the username. This applies only to local LabFoundry user passwords staged for Photon OS.">i</button></span>
+          <input class="switch-input" type="checkbox" name="disallow_username" {{ "checked" if password_policy.disallow_username else "" }}>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <p id="users-password-policy-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
+      </form>
+      <div class="settings-list compact-list">
+        <div><span>Current rule</span><strong>{{ password_policy_summary }}</strong></div>
+      </div>
+    </div>
+
     <div class="panel">
       <div class="panel-head">
         <h2>Authentication Boundary</h2>
@@ -76,11 +135,11 @@
     </div>
     <label>
       <span class="field-label"><span>New password</span><button class="help-icon" type="button" data-help="Minimum length is 8 characters.">i</button></span>
-      <input type="password" name="password" autocomplete="new-password" minlength="8" required>
+      <input type="password" name="password" autocomplete="new-password" minlength="{{ password_policy.min_length }}" required>
     </label>
     <label>
-      <span>Confirm password</span>
-      <input type="password" name="confirm_password" autocomplete="new-password" minlength="8" required>
+      <span class="field-label"><span>Confirm password</span><button class="help-icon" type="button" data-help="Must match the new password. The password is hashed for LabFoundry and staged for Photon OS only after the configured policy passes.">i</button></span>
+      <input type="password" name="confirm_password" autocomplete="new-password" minlength="{{ password_policy.min_length }}" required>
     </label>
     <div class="confirm-modal-actions">
       <button class="button ghost" value="cancel" type="button" data-user-password-cancel>Cancel</button>

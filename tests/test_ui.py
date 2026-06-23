@@ -489,12 +489,15 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "Password Reset" not in users.text
     assert "Reset password" in users.text
     assert "Remove" in users.text
+    assert "Password Policy" in users.text
+    assert "Pending Appliance Changes" in users.text
+    assert "Photon OS" in users.text
     assert "admin" in users.text
     assert "vcf-backup" in users.text
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
-        data={"username": "operator", "role": "viewer", "password": "operator-pass", "enabled": "on", "csrf": csrf},
+        data={"username": "operator", "role": "viewer", "password": "Strong-local1!", "enabled": "on", "csrf": csrf},
         follow_redirects=True,
     )
     assert created.status_code == 200
@@ -517,7 +520,7 @@ def test_local_user_reset_modal_endpoint_and_remove(client):
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
-        data={"username": "remove-me", "role": "viewer", "password": "temporary-pass", "enabled": "on", "csrf": csrf},
+        data={"username": "remove-me", "role": "viewer", "password": "Temporary-pass1!", "enabled": "on", "csrf": csrf},
         follow_redirects=False,
     )
     assert created.status_code == 303
@@ -529,7 +532,7 @@ def test_local_user_reset_modal_endpoint_and_remove(client):
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     reset = client.post(
         f"/users/{user_id}/password",
-        data={"password": "new-temporary-pass", "confirm_password": "new-temporary-pass", "csrf": csrf},
+        data={"password": "New-temporary1!", "confirm_password": "New-temporary1!", "csrf": csrf},
         follow_redirects=False,
     )
     assert reset.status_code == 303
@@ -538,6 +541,123 @@ def test_local_user_reset_modal_endpoint_and_remove(client):
     assert deleted.status_code == 303
     refreshed = client.get("/users")
     assert "remove-me" not in refreshed.text
+
+
+def test_local_users_password_policy_staging_and_apply_redaction(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, User
+    from labfoundry.app.services.local_users import decrypt_os_password
+
+    login(client)
+    users = client.get("/users")
+    csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    policy = client.post(
+        "/users/password-policy",
+        data={
+            "csrf": csrf,
+            "min_length": "14",
+            "require_uppercase": "on",
+            "require_lowercase": "on",
+            "require_number": "on",
+            "require_special": "on",
+            "disallow_username": "on",
+        },
+    )
+    assert policy.status_code == 200
+    assert policy.json()["policy"]["min_length"] == 14
+
+    weak = client.post(
+        "/users",
+        data={"username": "sync-me", "role": "viewer", "password": "short", "enabled": "on", "csrf": csrf},
+    )
+    assert weak.status_code == 400
+    assert "Password must be at least 14 characters" in weak.text
+
+    plaintext = "BridgeStrong1!"
+    created = client.post(
+        "/users",
+        data={"username": "sync-me", "role": "viewer", "password": plaintext, "enabled": "on", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+
+    with SessionLocal() as db:
+        user = db.execute(select(User).where(User.username == "sync-me")).scalar_one()
+        assert user.pending_os_password_encrypted
+        assert decrypt_os_password(user.pending_os_password_encrypted) == plaintext
+
+    apply_page = client.get("/appliance-apply")
+    assert apply_page.status_code == 200
+    assert 'value="local_users"' in apply_page.text
+    assert "Local Users" in apply_page.text
+    assert "pending OS passwords" in apply_page.text
+    assert plaintext not in apply_page.text
+
+    csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    applied = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "local_users"})
+    assert applied.status_code == 200
+    assert plaintext not in applied.text
+
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply").order_by(Job.created_at.desc())).scalars().first()
+        assert job is not None
+        assert "local-users" in (job.result or "")
+        assert plaintext not in (job.result or "")
+        user = db.execute(select(User).where(User.username == "sync-me")).scalar_one()
+        assert user.pending_os_password_encrypted
+
+
+def test_real_local_users_apply_clears_pending_passwords_and_baselines_post_apply(client, monkeypatch, tmp_path):
+    from sqlalchemy import select
+
+    import labfoundry.app.ui as ui_module
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting, User
+
+    class SuccessfulLocalUsersAdapter:
+        dry_run = False
+
+        def read_dhcp_leases(self) -> AdapterResult:
+            return AdapterResult(command=["labfoundry-helper", "dnsmasq", "leases"], dry_run=True, stdout="")
+
+        def validate_local_users_config(self, config_path: str) -> AdapterResult:
+            return AdapterResult(command=["labfoundry-helper", "local-users", "validate", config_path], dry_run=False, stdout="validation ok")
+
+        def apply_local_users_config(self, config_path: str) -> AdapterResult:
+            return AdapterResult(command=["labfoundry-helper", "local-users", "apply", config_path], dry_run=False, stdout="apply complete")
+
+    staged_path = tmp_path / "apply" / "local-users" / "labfoundry-users.json"
+    monkeypatch.setattr(ui_module, "LOCAL_USERS_STAGED_CONFIG_PATH", str(staged_path))
+    monkeypatch.setattr(ui_module, "SystemAdapter", SuccessfulLocalUsersAdapter)
+
+    login(client)
+    users = client.get("/users")
+    csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    created = client.post(
+        "/users",
+        data={"username": "real-sync", "role": "viewer", "password": "BridgeStrong1!", "enabled": "on", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+
+    apply_page = client.get("/appliance-apply")
+    csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    applied = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "local_users"})
+    assert applied.status_code == 200
+    assert staged_path.is_file()
+    assert "BridgeStrong1!" not in applied.text
+
+    with SessionLocal() as db:
+        users = db.execute(select(User)).scalars().all()
+        assert all(user.pending_os_password_encrypted is None for user in users)
+        assert all(user.os_sync_status == "applied" for user in users)
+        baseline = db.execute(select(Setting).where(Setting.key == "appliance_apply.baselines.v1")).scalar_one()
+        assert "BridgeStrong1!" not in baseline.value
+        assert '"password_pending": true' not in baseline.value
 
 
 def test_audit_log_renders(client):
@@ -2036,7 +2156,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "firewall-validation-refresh-20260623-3" in page.text
+    assert "local-users-sync-20260623-1" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 

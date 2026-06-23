@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from labfoundry.app.config import get_settings
@@ -32,6 +32,28 @@ def init_db() -> None:
     from labfoundry.app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_sqlite_user_sync_columns()
+
+
+def _ensure_sqlite_user_sync_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "users" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("users")}
+    columns = {
+        "pending_os_password_encrypted": "TEXT",
+        "os_password_pending_at": "DATETIME",
+        "os_password_applied_at": "DATETIME",
+        "os_sync_applied_at": "DATETIME",
+        "os_sync_status": "VARCHAR(80) DEFAULT 'password_not_staged'",
+        "os_sync_error": "TEXT",
+    }
+    with engine.begin() as connection:
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE users ADD COLUMN {name} {definition}"))
 
 
 def get_db() -> Generator[Session, None, None]:

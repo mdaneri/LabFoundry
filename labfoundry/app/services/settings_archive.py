@@ -40,12 +40,14 @@ from labfoundry.app.models import (
 from labfoundry.app.seed import seed_initial_data
 from labfoundry.app.services.dnsmasq import DNS_CONDITIONAL_FORWARDERS_SETTING_KEY
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY
+from labfoundry.app.services.local_users import LOCAL_USERS_PASSWORD_POLICY_KEY
 
 ARCHIVE_SCHEMA_VERSION = 1
 ARCHIVE_KIND = "labfoundry-settings-archive"
 SAFE_SETTING_KEYS = {
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
     FIREWALL_SOURCE_GROUPS_SETTING_KEY,
+    LOCAL_USERS_PASSWORD_POLICY_KEY,
 }
 
 SCALAR_TABLES = {

@@ -142,6 +142,22 @@ from labfoundry.app.services.settings_archive import (
     factory_reset_desired_state,
     restore_settings_archive,
 )
+from labfoundry.app.services.local_users import (
+    LOCAL_USERS_PASSWORD_POLICY_KEY,
+    LOCAL_USERS_STAGED_CONFIG_PATH,
+    DEFAULT_PASSWORD_POLICY,
+    local_user_sync_rows,
+    mark_local_users_applied,
+    mark_local_users_failed,
+    password_policy_from_json,
+    password_policy_summary,
+    password_policy_to_json,
+    render_local_users_apply_config,
+    render_local_users_preview,
+    stage_user_os_password,
+    validate_local_usernames,
+    validate_password,
+)
 from labfoundry.app.services.firewall import (
     FIREWALL_ACTIONS,
     FIREWALL_DIRECTIONS,
@@ -282,17 +298,27 @@ def user_to_dict(user: User, current_user_id: int | None = None) -> dict:
         "role": user.role,
         "enabled": user.enabled,
         "created_at": user.created_at.strftime("%Y-%m-%d"),
+        "os_sync_status": local_user_sync_rows([user])[0]["sync_status"],
+        "os_password_pending": bool(user.pending_os_password_encrypted),
         "is_current": user.id == current_user_id,
         "is_new": False,
     }
 
 
+def local_users_password_policy(db: Session) -> dict[str, bool | int]:
+    return password_policy_from_json(setting_value(db, LOCAL_USERS_PASSWORD_POLICY_KEY))
+
+
 def users_context(db: Session, identity: Identity) -> dict:
     users = db.execute(select(User).order_by(User.username)).scalars().all()
+    policy = local_users_password_policy(db)
     return {
         "users": users,
         "users_json": [user_to_dict(user, identity.user_id) for user in users],
         "roles": [role.value for role in Role],
+        "password_policy": policy,
+        "password_policy_summary": password_policy_summary(policy),
+        "local_user_sync_rows": local_user_sync_rows(users),
     }
 
 
@@ -1549,6 +1575,7 @@ def records_for_domain(db: Session, domain: str) -> list[DnsRecord]:
 
 APPLIANCE_APPLY_BASELINES_KEY = "appliance_apply.baselines.v1"
 APPLIANCE_APPLY_UNIT_IDS = {
+    "local_users",
     "appliance_settings",
     "network",
     "wan",
@@ -1762,8 +1789,27 @@ def make_appliance_apply_unit(
     }
 
 
+def local_users_apply_context(db: Session) -> dict[str, Any]:
+    users = db.execute(select(User).order_by(User.username)).scalars().all()
+    validation_errors = validate_local_usernames(users)
+    config_preview = render_local_users_preview(users)
+    try:
+        config_preview = render_local_users_apply_config(users)
+    except ValueError as exc:
+        validation_errors.append(str(exc))
+    return {
+        "local_users": users,
+        "local_user_sync_rows": local_user_sync_rows(users),
+        "local_user_validation_errors": validation_errors,
+        "local_user_config_preview": config_preview,
+        "local_user_display_preview": render_local_users_preview(users),
+        "local_user_pending_password_count": sum(1 for user in users if user.pending_os_password_encrypted),
+    }
+
+
 def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     baselines = load_appliance_apply_baselines(db)
+    local_users = local_users_apply_context(db)
     appliance_settings = appliance_settings_context(db)
     network = network_context(db)
     wan = routes_wan_context(db)
@@ -1797,6 +1843,20 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     network_unit["removed_vlan_interfaces"] = network_removed_vlans
 
     return [
+        make_appliance_apply_unit(
+            unit_id="local_users",
+            label="Local Users",
+            page_url="/users",
+            context=local_users,
+            summary=[
+                f"{len(local_users['local_users'])} local users",
+                f"{local_users['local_user_pending_password_count']} pending OS passwords",
+            ],
+            validation_errors=local_users["local_user_validation_errors"],
+            config_path=LOCAL_USERS_STAGED_CONFIG_PATH,
+            config_preview=local_users["local_user_config_preview"],
+            baseline=baselines.get("local_users"),
+        ),
         make_appliance_apply_unit(
             unit_id="appliance_settings",
             label="Appliance Settings",
@@ -1977,7 +2037,12 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
     context = unit["context"]
     adapter = SystemAdapter()
     unit_id = unit["id"]
-    if unit_id == "appliance_settings":
+    if unit_id == "local_users":
+        config_path = LOCAL_USERS_STAGED_CONFIG_PATH
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(LOCAL_USERS_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+        results = [adapter.validate_local_users_config(config_path), adapter.apply_local_users_config(config_path)]
+    elif unit_id == "appliance_settings":
         settings = context["appliance_settings"]
         config_path = settings.config_path
         if not adapter.dry_run:
@@ -2032,6 +2097,13 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Unknown apply unit {unit_id}.")
 
     succeeded = all(result.returncode == 0 for result in results)
+    if unit_id == "local_users" and not any(result.dry_run for result in results):
+        users = list(context["local_users"])
+        if succeeded:
+            mark_local_users_applied(users)
+        else:
+            error = "\n".join(result.stderr for result in results if result.stderr).strip() or "Local user OS sync failed."
+            mark_local_users_failed(users, error)
     return {
         "unit_id": unit_id,
         "label": unit["label"],
@@ -2206,7 +2278,7 @@ def submit_appliance_apply(
     )
     db.add(job)
     if succeeded:
-        update_appliance_apply_baselines(db, units, selected_ids)
+        update_appliance_apply_baselines(db, appliance_apply_units(db), selected_ids)
     db.commit()
     detail = " ; ".join(
         " ".join(command["command"])
@@ -5021,7 +5093,50 @@ def users_page(
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     require_admin_identity(identity)
-    return render(request, "users.html", {"identity": identity, **users_context(db, identity)})
+    return render(
+        request,
+        "users.html",
+        {"identity": identity, **users_context(db, identity), "appliance_apply_status": appliance_apply_status(db, "local_users")},
+    )
+
+
+@router.post("/users/password-policy", response_model=None)
+def update_users_password_policy(
+    request: Request,
+    min_length: str = Form(str(DEFAULT_PASSWORD_POLICY["min_length"])),
+    require_uppercase: str | None = Form(None),
+    require_lowercase: str | None = Form(None),
+    require_number: str | None = Form(None),
+    require_special: str | None = Form(None),
+    disallow_username: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    require_admin_identity(identity)
+    verify_csrf(request, csrf)
+    try:
+        parsed_min_length = int(min_length)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Minimum length must be a number.") from exc
+    if parsed_min_length < 8 or parsed_min_length > 128:
+        raise HTTPException(status_code=422, detail="Minimum length must be between 8 and 128.")
+    policy = password_policy_from_json(
+        json.dumps(
+            {
+                "min_length": parsed_min_length,
+                "require_uppercase": require_uppercase == "on",
+                "require_lowercase": require_lowercase == "on",
+                "require_number": require_number == "on",
+                "require_special": require_special == "on",
+                "disallow_username": disallow_username == "on",
+            }
+        )
+    )
+    setting = set_setting_value(db, LOCAL_USERS_PASSWORD_POLICY_KEY, password_policy_to_json(policy))
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_local_user_password_policy", resource_type="user_policy")
+    return JSONResponse({"updated_at": setting.updated_at.isoformat(), "policy": policy, "summary": password_policy_summary(policy)})
 
 
 @router.post("/users", response_model=None)
@@ -5042,11 +5157,13 @@ def create_user_from_ui(
         raise HTTPException(status_code=400, detail="Username is required.")
     if role not in {item.value for item in Role}:
         raise HTTPException(status_code=400, detail="Unknown role.")
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Temporary password must be at least 8 characters.")
+    policy_errors = validate_password(password, username, local_users_password_policy(db))
+    if policy_errors:
+        raise HTTPException(status_code=400, detail=" ".join(policy_errors))
     if db.execute(select(User).where(User.username == username)).scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"User {username} already exists.")
     user = User(username=username, role=role, password_hash=hash_password(password), enabled=enabled == "on")
+    stage_user_os_password(user, password)
     db.add(user)
     db.commit()
     record_audit(db, actor=identity.username, action="create_local_user", resource_type="user", resource_id=str(user.id))
@@ -5139,11 +5256,13 @@ def reset_user_password_from_ui(
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
     if password != confirm_password:
         raise HTTPException(status_code=400, detail="Password confirmation does not match.")
+    policy_errors = validate_password(password, user.username, local_users_password_policy(db))
+    if policy_errors:
+        raise HTTPException(status_code=400, detail=" ".join(policy_errors))
     user.password_hash = hash_password(password)
+    stage_user_os_password(user, password)
     db.add(user)
     revoke_user_tokens(db, user, identity.username)
     db.commit()

@@ -34,6 +34,12 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(512))
     role: Mapped[str] = mapped_column(String(50), default=Role.ADMIN.value)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    pending_os_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    os_password_pending_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    os_password_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    os_sync_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    os_sync_status: Mapped[str] = mapped_column(String(80), default="password_not_staged")
+    os_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     tokens: Mapped[list["ApiToken"]] = relationship(back_populates="owner")

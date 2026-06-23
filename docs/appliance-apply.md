@@ -10,6 +10,7 @@ Service pages edit desired state. They autosave routine settings and grids, show
 
 Current apply units are:
 
+- Local Users
 - Network
 - Appliance Settings
 - Routes & WAN Simulation
@@ -24,6 +25,12 @@ Current apply units are:
 DNS and DHCP are one unit because they share the rendered dnsmasq config and reload boundary.
 
 Appliance Settings owns appliance identity, OS hostname, resolver mode, resolver servers, and the appliance NTP client. It does not render DNS records; those remain part of the DNS/DHCP unit.
+
+## Local Users Apply
+
+The real Local Users apply path stages JSON at `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`. The `local_users` unit synchronizes LabFoundry local users to Photon OS users through `labfoundry-helper local-users validate|apply`. Enabled LabFoundry users are created as non-interactive OS accounts under `/var/lib/labfoundry/users/<username>` with `/sbin/nologin`; disabled users are locked. Deleted LabFoundry users are not removed from Photon OS in this version.
+
+Passwords are available for OS sync only when an administrator creates or resets a local LabFoundry password. LabFoundry stores the web password as an Argon2 hash and separately stages an encrypted pending OS password for the next global apply. A successful real apply sends the password to `chpasswd` over stdin and then clears the pending encrypted value. Dry-run apply records command intent but keeps the pending password staged. Rendered previews, diffs, job results, logs, and audit details must show only counts and status such as `password staged` or `password not staged; reset to sync`.
 
 ## Physical Interface Inventory
 
@@ -43,7 +50,7 @@ The Firewall apply unit derives LabFoundry-managed service allow rules from enab
 
 ## VCF Backups Apply
 
-The real VCF Backups apply path is OpenSSH-backed. The `vcf_backups` unit stages LabFoundry's rendered `Match User` drop-in at `/var/lib/labfoundry/apply/vcf-backups/labfoundry-vcf-backups-sshd.conf`, validates that it is LabFoundry-rendered and scoped to the selected backup user, verifies the selected OS account exists, installs `/etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf`, prepares the fixed chroot storage mount and `/backups` upload directory, validates `sshd`, and restarts `sshd` through `labfoundry-helper`. Provisioning creates the default `vcf-backup` OS account; the helper owns only the OpenSSH/user/storage enforcement for the SFTP account. Firewall apply owns the selected interface and port allow rule.
+The real VCF Backups apply path is OpenSSH-backed. The `vcf_backups` unit stages LabFoundry's rendered `Match User` drop-in at `/var/lib/labfoundry/apply/vcf-backups/labfoundry-vcf-backups-sshd.conf`, validates that it is LabFoundry-rendered and scoped to the selected backup user, verifies the selected OS account exists, installs `/etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf`, prepares the fixed chroot storage mount and `/backups` upload directory, validates `sshd`, and restarts `sshd` through `labfoundry-helper`. The selected backup user should be synchronized through the Local Users apply unit before VCF Backups is applied. Firewall apply owns the selected interface and port allow rule.
 
 ## Appliance Settings Apply
 

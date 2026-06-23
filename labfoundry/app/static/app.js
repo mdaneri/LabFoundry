@@ -1676,7 +1676,7 @@ async function postUserAction(url, data, csrf, options = {}) {
   const body = new FormData();
   body.set("csrf", csrf);
   for (const [key, value] of Object.entries(data)) {
-    if (["id", "is_new", "is_current", "created_at"].includes(key)) {
+    if (["id", "is_new", "is_current", "created_at", "os_sync_status", "os_password_pending"].includes(key)) {
       continue;
     }
     if (key === "temp_password") {
@@ -1759,6 +1759,8 @@ function newUserRow() {
     role: "viewer",
     enabled: true,
     created_at: "",
+    os_sync_status: "password staged after creation",
+    os_password_pending: false,
     temp_password: "",
     is_current: false,
     is_new: true,
@@ -1873,6 +1875,16 @@ function initializeUsersTable() {
           editable: (cell) => cell.getRow().getData().is_new,
           formatter: userPasswordFormatter,
           cellEdited: (cell) => autoSaveUser(cell, csrf),
+        },
+        {
+          title: "Photon OS",
+          field: "os_sync_status",
+          formatter: (cell) => {
+            const value = String(cell.getValue() || "");
+            const pill = value === "synced" ? "good" : value.includes("staged") || value.includes("not staged") ? "warn" : "muted";
+            return `<span class="status-pill ${pill}">${escapeHtml(value)}</span>`;
+          },
+          minWidth: 190,
         },
         { title: "Created", field: "created_at", width: 120 },
         {
