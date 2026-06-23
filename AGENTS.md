@@ -123,6 +123,7 @@
 
 - This project is still in MVP scaffold mode. When model/schema changes make the development SQLite database stale, prefer deleting/reseeding `data/labfoundry.db` over adding migrations, unless the user explicitly asks for migrations.
 - Do not delete the DB for data-only seed/default updates if a focused in-place update is safer and the schema did not change.
+- Backup / Restore owns desired-state settings archives only. Do not include audit events, jobs, API tokens, password hashes, uploaded secret bodies, or runtime history. Restore and factory reset must leave service status rows stopped, disabled, and `unconfigured`; host mutation still belongs only to the global `/appliance-apply` workflow.
 - Any major product, architecture, workflow, safety-boundary, or operator-experience change must include a same-change documentation sweep for `README.md` and `AGENTS.md`.
 - Before finalizing UI/backend changes, run focused tests for the touched area when available, then `pytest -q` for broader confidence. Also run `python -m compileall labfoundry` after broad Python/template-adjacent changes.
 - Before finalizing appliance deployment changes, also run `python scripts/check_photon_compatibility.py`. If image build files changed and Packer is available, run `packer fmt` and `packer validate` from `image/hyperv/`.

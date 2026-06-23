@@ -253,6 +253,128 @@ def test_appliance_settings_apply_task_records_dry_run_helper_commands(client):
         assert "apply.labfoundry.internal" in (job.result or "")
 
 
+def test_backup_restore_page_exports_settings_archive(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import AuditEvent
+
+    login(client)
+    page = client.get("/backup-restore")
+    assert page.status_code == 200
+    assert "Download settings backup" in page.text
+    assert "Restore settings backup" in page.text
+    assert "Factory reset settings" in page.text
+    assert "Audit events, jobs, API tokens, password hashes, uploaded secret bodies" in page.text
+    assert "data-confirm-modal" in page.text
+
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    exported = client.post("/backup-restore/export", data={"csrf": csrf})
+
+    assert exported.status_code == 200
+    assert exported.headers["content-type"].startswith("application/json")
+    assert "labfoundry-settings-" in exported.headers["content-disposition"]
+    payload = json.loads(exported.content)
+    assert payload["kind"] == "labfoundry-settings-archive"
+    assert payload["schema_version"] == 1
+    assert "appliance_settings" in payload["data"]
+    assert "dns_records" in payload["data"]
+    assert "users" not in payload["data"]
+    assert "api_tokens" not in payload["data"]
+    assert "audit_events" not in payload["data"]
+    assert "jobs" not in payload["data"]
+
+    with SessionLocal() as db:
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "export_settings_backup")).scalar_one()
+        assert event.resource_type == "settings_backup"
+
+
+def test_backup_restore_restore_replaces_settings_and_stops_services(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, AuditEvent, ServiceState
+
+    login(client)
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        settings.fqdn = "restore-target.labfoundry.internal"
+        service = db.execute(select(ServiceState).where(ServiceState.service == "dns")).scalar_one()
+        service.running = True
+        service.enabled = True
+        service.health = "healthy"
+        db.commit()
+
+    page = client.get("/backup-restore")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    exported = client.post("/backup-restore/export", data={"csrf": csrf})
+    archive_bytes = exported.content
+
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        settings.fqdn = "temporary-change.labfoundry.internal"
+        db.commit()
+
+    restored = client.post(
+        "/backup-restore/restore",
+        data={"csrf": csrf},
+        files={"archive_file": ("labfoundry-settings.json", archive_bytes, "application/json")},
+    )
+
+    assert restored.status_code == 200
+    assert "Settings restored" in restored.text
+    assert "Services are stopped and unconfigured" in restored.text
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        assert settings.fqdn == "restore-target.labfoundry.internal"
+        services = db.execute(select(ServiceState)).scalars().all()
+        assert services
+        assert all(not service.running and not service.enabled and service.health == "unconfigured" for service in services)
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "restore_settings_backup")).scalar_one()
+        assert "services forced stopped/unconfigured" in (event.detail or "")
+    payload = json.loads(archive_bytes)
+    assert payload["data"]["service_states"]
+
+
+def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, AuditEvent, DnsRecord, ServiceState
+
+    login(client)
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        settings.fqdn = "custom.labfoundry.internal"
+        db.add(DnsRecord(hostname="remove-me.labfoundry.internal", record_type="A", address="192.168.50.250"))
+        service = db.execute(select(ServiceState).where(ServiceState.service == "vcf-backups")).scalar_one()
+        service.running = True
+        service.enabled = True
+        service.health = "healthy"
+        db.commit()
+
+    page = client.get("/backup-restore")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    reset = client.post("/backup-restore/factory-reset", data={"csrf": csrf})
+
+    assert reset.status_code == 200
+    assert "Factory reset complete" in reset.text
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        assert settings.fqdn == "labfoundry.labfoundry.internal"
+        removed = db.execute(select(DnsRecord).where(DnsRecord.hostname == "remove-me.labfoundry.internal")).scalar_one_or_none()
+        assert removed is None
+        services = db.execute(select(ServiceState)).scalars().all()
+        assert services
+        assert all(not service.running and not service.enabled and service.health == "unconfigured" for service in services)
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "factory_reset_settings")).scalar_one()
+        assert "services forced stopped/unconfigured" in (event.detail or "")
+
+
 def test_routes_wan_policy_form_renders(client):
     login(client)
     response = client.get("/routes-wan")

@@ -159,6 +159,12 @@ Appliance Settings owns the appliance FQDN, OS hostname, resolver mode, resolver
 
 More detail lives in [`docs/appliance-apply.md`](docs/appliance-apply.md).
 
+## Backup, Restore, And Factory Reset
+
+`Backup / Restore` exports LabFoundry desired-state settings as a JSON archive. The archive includes appliance, network, DNS/DHCP, firewall, CA, KMS, VCF service, and safe generic desired-state settings. It does not include audit events, jobs, API tokens, password hashes, uploaded secret bodies, or other runtime history.
+
+Restoring a settings archive replaces desired-state configuration in the control-plane database only. Factory reset removes current desired-state configuration and reseeds LabFoundry defaults. Both restore and factory reset force service status rows to stopped, disabled, and `unconfigured`; host services are not mutated until the operator reviews and submits selected units through the global `Appliance Apply` workflow.
+
 ## Brand Assets
 
 Reusable SVG assets live in `labfoundry/app/static/brand/` and are documented in `docs/branding.md`.

@@ -135,6 +135,13 @@ from labfoundry.app.services.routes_wan import (
     validate_wan_state,
     wan_policy_to_dict,
 )
+from labfoundry.app.services.settings_archive import (
+    archive_summary,
+    desired_state_counts,
+    export_settings_archive,
+    factory_reset_desired_state,
+    restore_settings_archive,
+)
 from labfoundry.app.services.firewall import (
     FIREWALL_ACTIONS,
     FIREWALL_DIRECTIONS,
@@ -5169,6 +5176,16 @@ def services_template_context(db: Session) -> dict[str, object]:
     }
 
 
+def backup_restore_context(db: Session, result: dict[str, Any] | None = None, error: str | None = None) -> dict[str, Any]:
+    counts = desired_state_counts(db)
+    return {
+        "settings_backup_counts": counts,
+        "settings_backup_total_rows": sum(counts.values()),
+        "backup_restore_result": result,
+        "backup_restore_error": error,
+    }
+
+
 @router.post("/services/{service}/{action}", response_model=None)
 def service_action_from_ui(
     service: str,
@@ -5261,6 +5278,132 @@ def audit_log(
     return render(request, "audit.html", {"identity": identity, "events": events})
 
 
+@router.get("/backup-restore", response_class=HTMLResponse, response_model=None)
+def backup_restore_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    require_admin_identity(identity)
+    return render(request, "backup_restore.html", {"identity": identity, **backup_restore_context(db)})
+
+
+@router.post("/backup-restore/export", response_model=None)
+def export_backup_restore_archive(
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    require_admin_identity(identity)
+    verify_csrf(request, csrf)
+    archive = export_settings_archive(db, actor=identity.username)
+    exported_at = utcnow().strftime("%Y%m%d-%H%M%SZ")
+    record_audit(
+        db,
+        actor=identity.username,
+        action="export_settings_backup",
+        resource_type="settings_backup",
+        detail=f"{sum(len(value) for value in archive['data'].values() if isinstance(value, list))} desired-state rows",
+        request_id=request.state.request_id,
+    )
+    return Response(
+        json.dumps(archive, indent=2, sort_keys=True),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="labfoundry-settings-{exported_at}.json"'},
+    )
+
+
+@router.post("/backup-restore/restore", response_class=HTMLResponse, response_model=None)
+async def restore_backup_restore_archive(
+    request: Request,
+    archive_file: UploadFile = File(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    require_admin_identity(identity)
+    verify_csrf(request, csrf)
+    raw_archive = await archive_file.read()
+    if len(raw_archive) > 3_000_000:
+        return render(
+            request,
+            "backup_restore.html",
+            {"identity": identity, **backup_restore_context(db, error="The settings archive is too large.")},
+            status_code=413,
+        )
+    try:
+        archive = json.loads(raw_archive.decode("utf-8"))
+        summary = archive_summary(archive)
+        counts = restore_settings_archive(db, archive)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return render(
+            request,
+            "backup_restore.html",
+            {"identity": identity, **backup_restore_context(db, error=str(exc))},
+            status_code=400,
+        )
+    record_audit(
+        db,
+        actor=identity.username,
+        action="restore_settings_backup",
+        resource_type="settings_backup",
+        detail=f"Restored {sum(counts.values())} desired-state rows from {archive_file.filename or 'uploaded archive'}; services forced stopped/unconfigured.",
+        request_id=request.state.request_id,
+    )
+    return render(
+        request,
+        "backup_restore.html",
+        {
+            "identity": identity,
+            **backup_restore_context(
+                db,
+                result={
+                    "title": "Settings restored",
+                    "message": "Desired-state settings were restored. Services are stopped and unconfigured until reviewed and applied through the global appliance workflow.",
+                    "summary": summary,
+                    "counts": counts,
+                },
+            ),
+        },
+    )
+
+
+@router.post("/backup-restore/factory-reset", response_class=HTMLResponse, response_model=None)
+def factory_reset_backup_restore(
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    require_admin_identity(identity)
+    verify_csrf(request, csrf)
+    counts = factory_reset_desired_state(db)
+    record_audit(
+        db,
+        actor=identity.username,
+        action="factory_reset_settings",
+        resource_type="settings_backup",
+        detail="Desired-state settings reset to factory defaults; services forced stopped/unconfigured.",
+        request_id=request.state.request_id,
+    )
+    return render(
+        request,
+        "backup_restore.html",
+        {
+            "identity": identity,
+            **backup_restore_context(
+                db,
+                result={
+                    "title": "Factory reset complete",
+                    "message": "Desired-state settings were reset to LabFoundry defaults. Services are stopped and unconfigured until reviewed and applied through the global appliance workflow.",
+                    "counts": counts,
+                },
+            ),
+        },
+    )
+
+
 @router.get("/settings", response_class=HTMLResponse, response_model=None)
 def settings_page(
     request: Request,
@@ -5328,7 +5471,6 @@ def placeholder_page(page: str, request: Request, identity: Identity = Depends(r
         "vcf-offline-depot": "VCF Offline Depot",
         "vcf-backups": "VCF Backups",
         "logs": "Logs",
-        "backup-restore": "Backup / Restore",
     }
     if page not in known:
         raise HTTPException(status_code=404, detail="Page not found")
