@@ -147,6 +147,9 @@ it to Packer.
 - `/etc/labfoundry/labfoundry.env` production environment file.
 - `/etc/labfoundry/build-info` recording build time, Photon release, kernel,
   Python, and the package update marker.
+- A masked `systemd-ssh-generator` so Photon does not try to advertise or bind
+  automatic SSH-over-AF_VSOCK sockets on Hyper-V. Normal TCP SSH remains
+  provided by `sshd`.
 - `/var/lib/labfoundry` durable SQLite state.
 - `/var/log/labfoundry` local service logs.
 - Fixed appliance mounts under `/mnt/labfoundry-vcf-*`.
@@ -167,6 +170,15 @@ DNS/DHCP desired state is dnsmasq-backed. Real `/appliance-apply` stages the
 rendered config under `/var/lib/labfoundry/apply/dnsmasq/`, validates it with
 `dnsmasq --test`, installs `/etc/labfoundry/dnsmasq.d/labfoundry.conf`, and
 reloads or restarts `dnsmasq` through `labfoundry-helper`.
+The rendered config uses `/var/lib/labfoundry/dnsmasq/dhcp.leases` for DHCP
+leases, and the helper exposes only that allowlisted lease readback path.
+DHCP scopes should bind to access physical interfaces with IP CIDR or enabled
+VLAN interfaces with IP CIDR, not trunk or addressless physical interfaces.
+The firewall preview derives LabFoundry-managed service allow rules from
+enabled service listener desired state, including management, DNS, DHCP, KMS,
+VCF Backup, VCF Offline Depot, and VCF Private Registry listeners. DHCP VLAN
+moves or service listener moves should be applied with the changed Firewall
+unit when `/appliance-apply` shows it pending.
 
 Before shutdown, provisioning resets the exported appliance image from the
 temporary Packer builder network to the LabFoundry management network:
@@ -234,3 +246,17 @@ curl -fsS http://127.0.0.1:8000/api/v1/dashboard >/dev/null || true
 From the host, verify the management URL, login, reboot persistence, and that
 `/appliance-apply` still records dry-run command intent before any real adapter
 execution is enabled.
+
+If the VM console prints
+`systemd-ssh-generator: Failed to query local AF_VSOCK CID: Cannot assign requested address`,
+the appliance is hitting systemd's automatic SSH-over-vsock discovery path.
+LabFoundry does not use SSH-over-vsock, and current image provisioning masks
+that generator while keeping regular TCP SSH available. On an already-built VM,
+apply the same cleanup as root and reboot:
+
+```bash
+install -d -o root -g root -m 0755 /etc/systemd/system-generators
+ln -sfn /dev/null /etc/systemd/system-generators/systemd-ssh-generator
+systemctl daemon-reload
+reboot
+```

@@ -468,7 +468,7 @@ async function postDhcpOptionAction(url, data, csrf, options = {}) {
   }
 }
 
-function newDhcpScopeRow(defaultInterface = "eth1") {
+function newDhcpScopeRow(defaultInterface = "eth2") {
   return {
     id: "__new__",
     name: "",
@@ -1406,6 +1406,61 @@ function initializeFirewallRulesTable() {
     }
   } catch (error) {
     showCaMessage("firewall-rule-error", error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
+  }
+}
+
+function managedFirewallStatusFormatter(cell) {
+  const value = String(cell.getValue() || "managed");
+  const style = value === "generated" ? "good" : value === "replaced" ? "warn" : "muted";
+  return `<span class="status-pill ${style}">${escapeHtml(value)}</span>`;
+}
+
+function initializeManagedFirewallRulesTable() {
+  const tableElement = document.getElementById("managed-firewall-rules-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  if (typeof Tabulator === "undefined") {
+    return;
+  }
+  const rows = JSON.parse(tableElement.dataset.rules || "[]");
+  try {
+    new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "300px",
+      rowHeight: 42,
+      placeholder: "No managed service rules.",
+      reactiveData: false,
+      columns: [
+        { title: "Status", field: "managed_status", formatter: managedFirewallStatusFormatter, width: 120 },
+        { title: "Name", field: "name" },
+        { title: "Direction", field: "direction", width: 120 },
+        { title: "Action", field: "action", width: 105 },
+        { title: "Protocol", field: "protocol", width: 110 },
+        { title: "Source", field: "source" },
+        { title: "Destination", field: "destination" },
+        { title: "Ports", field: "destination_port", width: 120 },
+        { title: "Interface", field: "interface_name", width: 120 },
+        { title: "Priority", field: "priority", width: 100 },
+        { title: "Enabled", field: "enabled", formatter: "tickCross", hozAlign: "center", width: 95 },
+        { title: "Description", field: "description" },
+      ],
+      rowFormatter: (row) => {
+        const data = row.getData();
+        row.getElement().classList.toggle("managed-rule-generated", data.managed_state === "generated");
+        row.getElement().classList.toggle("managed-rule-replaced", data.managed_state === "replaced");
+      },
+    });
+    if (fallback) {
+      fallback.classList.add("hidden");
+    }
+  } catch (_error) {
+    if (fallback) {
+      fallback.classList.remove("hidden");
+    }
   }
 }
 
@@ -4969,6 +5024,7 @@ document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);
+document.addEventListener("DOMContentLoaded", initializeManagedFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeServicesTable);
 document.addEventListener("DOMContentLoaded", initializeUsersTable);
 document.addEventListener("DOMContentLoaded", initializeUserPasswordForm);

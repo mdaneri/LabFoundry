@@ -170,6 +170,9 @@
           <span class="status-pill {{ 'warn' if dhcp_lease_dry_run else 'good' }}">{{ "dry-run" if dhcp_lease_dry_run else "live" }}</span>
         </div>
         <p class="muted">Source command: <code>{{ dhcp_lease_command }}</code></p>
+        {% if dhcp_lease_error %}
+          <div class="alert error">{{ dhcp_lease_error }}</div>
+        {% endif %}
         <table class="data-table compact">
           <thead>
             <tr><th>Status</th><th>DNS name / FQDN</th><th>IP</th><th>MAC</th><th>Expires</th><th>Client ID</th></tr>

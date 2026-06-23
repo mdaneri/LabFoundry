@@ -1,5 +1,7 @@
-from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings
+from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
 from labfoundry.app.services.dnsmasq import (
+    DNSMASQ_LEASE_FILE_PATH,
+    dhcp_bind_target_names,
     dns_domain_warnings,
     dns_reverse_records,
     join_conditional_forwarders,
@@ -8,6 +10,7 @@ from labfoundry.app.services.dnsmasq import (
     render_dnsmasq_config,
     split_conditional_forwarders,
     validate_dns_record,
+    validate_dhcp_bind_targets,
     validate_dns_listen_targets,
     validate_dhcp_settings,
     validate_dns_settings,
@@ -62,6 +65,8 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
     assert "listen-address=192.168.60.1" in config
     assert "domain=labfoundry.internal" in config
     assert "domain=corp.lab" in config
+    assert "local=/labfoundry.internal/" in config
+    assert "local=/corp.lab/" in config
     assert "dhcp-range=set:sitea,192.168.50.100,192.168.50.200,12h" in config
     assert "dhcp-option=tag:sitea,option:router,192.168.50.1" in config
     assert "dhcp-option=option:ntp-server,192.168.50.1" in config
@@ -71,6 +76,7 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
     assert "server=/sddc.internal/192.168.10.10" in config
     assert "server=/corp.example/192.168.20.10#5353" in config
     assert "ptr-record=" not in config
+    assert f"dhcp-leasefile={DNSMASQ_LEASE_FILE_PATH}" in config
     assert "dhcp-host=02:15:5d:00:20:20,client1,192.168.50.120" in config
 
 
@@ -108,6 +114,7 @@ def test_dnsmasq_renderer_only_marks_dhcp_authoritative_when_dhcp_enabled():
     )
 
     assert "dhcp-authoritative" not in config
+    assert "dhcp-range=" not in config
 
 
 def test_dnsmasq_lease_parser_tracks_active_and_expired_leases():
@@ -217,6 +224,48 @@ def test_dns_listen_target_validation_rejects_trunks_and_unknown_targets():
     assert "DNS listen interface eth1" not in "\n".join(errors)
     assert any("DNS listen interface eth2 is not a valid bind target" in error for error in errors)
     assert any("DNS listen interface missing is not a valid bind target" in error for error in errors)
+
+
+def test_dhcp_bind_target_validation_accepts_access_physical_and_vlans():
+    physical = [
+        PhysicalInterface(name="eth0", mode="access", ip_cidr="192.168.49.1/24", mac_address="00:00:00:00:00:01"),
+        PhysicalInterface(name="eth1", mode="trunk", ip_cidr="192.168.60.1/24", mac_address="00:00:00:00:00:02"),
+        PhysicalInterface(name="eth2", mode="access", ip_cidr="192.168.50.1/24", mac_address="00:00:00:00:00:03"),
+        PhysicalInterface(name="eth3", mode="access", ip_cidr="", mac_address="00:00:00:00:00:04"),
+    ]
+    vlans = [
+        VlanInterface(name="eth1.20", parent_interface="eth1", vlan_id=20, ip_cidr="192.168.20.1/24", enabled=True),
+        VlanInterface(name="eth1.30", parent_interface="eth1", vlan_id=30, ip_cidr="", enabled=True),
+        VlanInterface(name="eth1.40", parent_interface="eth1", vlan_id=40, ip_cidr="192.168.40.1/24", enabled=False),
+    ]
+
+    targets = dhcp_bind_target_names(physical, vlans)
+
+    assert targets == {"eth0", "eth2", "eth1.20"}
+    assert validate_dhcp_bind_targets(
+        DhcpSettings(enabled=True),
+        [
+            DhcpScope(name="SiteA", interface_name="eth2"),
+            DhcpScope(name="SiteB", interface_name="eth1.20"),
+        ],
+        targets,
+    ) == []
+
+
+def test_dhcp_bind_target_validation_rejects_trunks_missing_ip_and_unknown_targets():
+    errors = validate_dhcp_bind_targets(
+        DhcpSettings(enabled=True),
+        [
+            DhcpScope(name="Trunk", interface_name="eth1"),
+            DhcpScope(name="MissingIp", interface_name="eth3"),
+            DhcpScope(name="Unknown", interface_name="missing"),
+        ],
+        {"eth2"},
+    )
+
+    assert any("DHCP IP zone Trunk interface eth1 is not a valid bind target" in error for error in errors)
+    assert any("DHCP IP zone MissingIp interface eth3 is not a valid bind target" in error for error in errors)
+    assert any("DHCP IP zone Unknown interface missing is not a valid bind target" in error for error in errors)
 
 
 def test_dns_domain_warnings_flag_local_domains_for_vcf():
@@ -401,7 +450,7 @@ def test_dhcp_api_scope_and_reservations(client):
     dhcp_token = create_token(client, ["read:dhcp", "write:dhcp", "read:dns"])
     status = client.get("/api/v1/dhcp/status", headers={"Authorization": f"Bearer {dhcp_token}"})
     assert status.status_code == 200
-    assert status.json()["interface_name"] == "eth1"
+    assert status.json()["interface_name"] == "eth2"
 
     reservation = client.post(
         "/api/v1/dhcp/reservations",
@@ -459,3 +508,31 @@ def test_dhcp_api_scope_and_reservations(client):
     assert leases.json()[0]["hostname"] == "api-client.labfoundry.internal"
     scopes = client.get("/api/v1/dhcp/scopes", headers={"Authorization": f"Bearer {dhcp_token}"})
     assert {scope["name"] for scope in scopes.json()} == {"SiteA", "SiteB"}
+
+
+def test_dhcp_api_leases_reflect_helper_output(client, monkeypatch):
+    from labfoundry.app.adapters.system import AdapterResult
+
+    def fake_read_dhcp_leases(self):
+        return AdapterResult(
+            command=["sudo", "-n", "/opt/labfoundry/bin/labfoundry-helper", "dnsmasq", "leases", "--real"],
+            dry_run=False,
+            stdout="1893456000 02:15:5d:00:20:40 192.168.50.140 live-client.labfoundry.internal *\n",
+        )
+
+    monkeypatch.setattr("labfoundry.app.api.v1.SystemAdapter.read_dhcp_leases", fake_read_dhcp_leases)
+    dhcp_token = create_token(client, ["read:dhcp"])
+
+    leases = client.get("/api/v1/dhcp/leases", headers={"Authorization": f"Bearer {dhcp_token}"})
+
+    assert leases.status_code == 200
+    assert leases.json() == [
+        {
+            "expires_at": "2030-01-01T00:00:00Z",
+            "mac_address": "02:15:5d:00:20:40",
+            "ip_address": "192.168.50.140",
+            "hostname": "live-client.labfoundry.internal",
+            "client_id": "",
+            "status": "active",
+        }
+    ]

@@ -47,13 +47,30 @@ class SystemAdapter:
         return self._helper_result("dnsmasq", "reload", dry_run_message="dry-run: dnsmasq reload command recorded")
 
     def read_dhcp_leases(self) -> AdapterResult:
-        return self._record_only_result(
-            ["labfoundry-helper", "dnsmasq", "leases"],
-            (
-                "1893456000 02:15:5d:00:20:30 192.168.50.130 api-client.labfoundry.internal 01:02:15:5d:00:20:30\n"
-                "1893459600 02:15:5d:00:20:31 192.168.50.131 vcsa.labfoundry.internal 01:02:15:5d:00:20:31"
-            ),
-        )
+        if self.dry_run:
+            return self._record_only_result(
+                ["labfoundry-helper", "dnsmasq", "leases"],
+                (
+                    "1893456000 02:15:5d:00:20:30 192.168.50.130 api-client.labfoundry.internal 01:02:15:5d:00:20:30\n"
+                    "1893459600 02:15:5d:00:20:31 192.168.50.131 vcsa.labfoundry.internal 01:02:15:5d:00:20:31"
+                ),
+            )
+        helper_result = self._helper_result("dnsmasq", "leases", dry_run_message="dry-run: dnsmasq lease read command recorded", use_sudo=False)
+        if helper_result.returncode == 0:
+            return helper_result
+        helper_result = self._helper_result("dnsmasq", "leases", dry_run_message="dry-run: dnsmasq lease read command recorded")
+        if "sudo:" in helper_result.stderr and "password is required" in helper_result.stderr:
+            return AdapterResult(
+                command=helper_result.command,
+                dry_run=False,
+                stdout=helper_result.stdout,
+                stderr=(
+                    "DHCP lease readback needs the updated LabFoundry sudoers helper rule. "
+                    "Reinstall the appliance helper/sudoers configuration, then restart labfoundry.service."
+                ),
+                returncode=helper_result.returncode,
+            )
+        return helper_result
 
     def apply_ca_config(self, config_path: str) -> AdapterResult:
         return self._record_only_result(["labfoundry-helper", "ca", "apply", config_path], "dry-run: CA apply command recorded")
@@ -86,10 +103,10 @@ class SystemAdapter:
         return self._helper_result("firewall", "validate", config_path, dry_run_message="dry-run: firewall validation command recorded")
 
     def apply_vcf_backup_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "vcf-backups", "apply", config_path], "dry-run: VCF backup SFTP apply command recorded")
+        return self._helper_result("vcf-backups", "apply", config_path, dry_run_message="dry-run: VCF backup SFTP apply command recorded")
 
     def validate_vcf_backup_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "vcf-backups", "validate", config_path], "dry-run: VCF backup SFTP validation command recorded")
+        return self._helper_result("vcf-backups", "validate", config_path, dry_run_message="dry-run: VCF backup SFTP validation command recorded")
 
     def validate_vcf_private_registry_config(self, config_path: str) -> AdapterResult:
         return self._record_only_result(["labfoundry-helper", "vcf-private-registry", "validate", config_path], "dry-run: VCF private registry validation command recorded")
@@ -115,18 +132,28 @@ class SystemAdapter:
     def _record_only_result(self, command: list[str], stdout: str) -> AdapterResult:
         return AdapterResult(command=command, dry_run=True, stdout=stdout)
 
-    def _helper_result(self, group: str, action: str, *args: str, dry_run_message: str) -> AdapterResult:
+    def _helper_result(self, group: str, action: str, *args: str, dry_run_message: str, use_sudo: bool = True) -> AdapterResult:
         display_command = ["labfoundry-helper", group, action, *args]
         if self.dry_run:
             return AdapterResult(command=display_command, dry_run=True, stdout=dry_run_message)
 
-        command = ["sudo", "-n", self.HELPER_PATH, group, action, "--real", *args]
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        command = [self.HELPER_PATH, group, action, "--real", *args]
+        if use_sudo:
+            command = ["sudo", "-n", *command]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            return AdapterResult(
+                command=command,
+                dry_run=False,
+                stderr=f"Unable to execute {' '.join(command)}: {exc}",
+                returncode=127,
+            )
         return AdapterResult(
             command=command,
             dry_run=False,

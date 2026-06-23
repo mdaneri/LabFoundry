@@ -329,6 +329,32 @@ body {
   margin-bottom: 12px;
 }
 
+.panel-head.compact {
+  margin-bottom: 8px;
+}
+
+.subsection {
+  margin-top: 16px;
+}
+
+.readonly-tabulator-shell .tabulator-cell {
+  cursor: default;
+}
+
+.managed-rule-generated {
+  background: #f0fdf4;
+}
+
+.managed-rule-replaced {
+  background: #fff7ed;
+  color: #64748b;
+  text-decoration: line-through;
+}
+
+.managed-rule-replaced .status-pill {
+  text-decoration: none;
+}
+
 .section-head {
   display: flex;
   justify-content: space-between;

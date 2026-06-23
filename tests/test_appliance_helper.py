@@ -293,6 +293,52 @@ def test_dnsmasq_helper_reload_restarts_service(monkeypatch):
     ]
 
 
+def test_dnsmasq_helper_reads_allowlisted_lease_file(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    state_dir = tmp_path / "var" / "lib" / "labfoundry" / "dnsmasq"
+    state_dir.mkdir(parents=True)
+    lease_file = state_dir / "dhcp.leases"
+    lease_file.write_text("1893456000 02:15:5d:00:20:30 192.168.50.130 api-client *\n", encoding="utf-8")
+
+    monkeypatch.setattr(helper, "DNSMASQ_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_LEASE_FILE_PATH", lease_file)
+
+    assert helper._handle_dnsmasq("leases", []) == 0
+    captured = capsys.readouterr()
+    assert "api-client" in captured.out
+    assert captured.err == ""
+
+
+def test_dnsmasq_helper_missing_lease_file_is_empty_success(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    state_dir = tmp_path / "var" / "lib" / "labfoundry" / "dnsmasq"
+    state_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(helper, "DNSMASQ_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_LEASE_FILE_PATH", state_dir / "dhcp.leases")
+
+    assert helper._handle_dnsmasq("leases", []) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_dnsmasq_helper_rejects_lease_paths_outside_allowlisted_state(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    state_dir = tmp_path / "var" / "lib" / "labfoundry" / "dnsmasq"
+    outside_file = tmp_path / "elsewhere" / "dhcp.leases"
+    state_dir.mkdir(parents=True)
+    outside_file.parent.mkdir(parents=True)
+    outside_file.write_text("1893456000 02:15:5d:00:20:30 192.168.50.130 api-client *\n", encoding="utf-8")
+
+    monkeypatch.setattr(helper, "DNSMASQ_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_LEASE_FILE_PATH", outside_file)
+
+    assert helper._handle_dnsmasq("leases", []) == 2
+    captured = capsys.readouterr()
+    assert "dnsmasq lease file must stay under" in captured.err
+
+
 def appliance_settings_json(
     *,
     resolver_mode: str = "local_dns",

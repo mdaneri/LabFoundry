@@ -240,7 +240,7 @@ class DhcpSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    interface_name: Mapped[str] = mapped_column(String(80), default="eth1")
+    interface_name: Mapped[str] = mapped_column(String(80), default="eth2")
     site_address: Mapped[str] = mapped_column(String(64), default="192.168.50.1")
     prefix_length: Mapped[int] = mapped_column(Integer, default=24)
     range_start: Mapped[str] = mapped_column(String(64), default="192.168.50.100")
@@ -258,7 +258,7 @@ class DhcpScope(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
-    interface_name: Mapped[str] = mapped_column(String(80), default="eth1")
+    interface_name: Mapped[str] = mapped_column(String(80), default="eth2")
     site_address: Mapped[str] = mapped_column(String(64), default="192.168.50.1")
     prefix_length: Mapped[int] = mapped_column(Integer, default=24)
     range_start: Mapped[str] = mapped_column(String(64), default="192.168.50.100")
@@ -430,7 +430,7 @@ class VcfBackupSettings(Base):
     allow_password_auth: Mapped[bool] = mapped_column(Boolean, default=True)
     allow_public_key_auth: Mapped[bool] = mapped_column(Boolean, default=True)
     max_sessions: Mapped[int] = mapped_column(Integer, default=4)
-    config_path: Mapped[str] = mapped_column(String(240), default="/etc/labfoundry/ssh/sshd_config.d/labfoundry-vcf-backups.conf")
+    config_path: Mapped[str] = mapped_column(String(240), default="/etc/labfoundry/ssh/labfoundry-vcf-backups-sshd.conf")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     sftp_user: Mapped[User | None] = relationship()

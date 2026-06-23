@@ -233,7 +233,7 @@ def seed_initial_data(db: Session) -> None:
         db.add(
             DhcpSettings(
                 enabled=False,
-                interface_name="eth1",
+                interface_name="eth2",
                 site_address="192.168.50.1",
                 prefix_length=24,
                 range_start="192.168.50.100",
@@ -248,7 +248,7 @@ def seed_initial_data(db: Session) -> None:
         db.add(
             DhcpScope(
                 name="SiteA",
-                interface_name="eth1",
+                interface_name="eth2",
                 site_address="192.168.50.1",
                 prefix_length=24,
                 range_start="192.168.50.100",
@@ -299,7 +299,7 @@ def seed_initial_data(db: Session) -> None:
                     source="192.168.50.0/24",
                     destination="any",
                     destination_port="53,67",
-                    interface_name="eth1",
+                    interface_name="eth2",
                     priority=20,
                     description="Allow SiteA clients to reach LabFoundry DNS and DHCP.",
                 ),

@@ -250,7 +250,7 @@ class DnsConditionalForwarder(BaseModel):
 
 class DnsSettingsUpdate(BaseModel):
     enabled: bool = False
-    listen_interface: str = Field(default="eth1", min_length=1, max_length=80)
+    listen_interface: str = Field(default="eth2", min_length=1, max_length=80)
     listen_address: str | None = Field(default=None, max_length=240)
     domain: str = Field(default="labfoundry.internal", min_length=1, max_length=500)
     upstream_servers: list[str] = Field(default_factory=lambda: ["1.1.1.1", "9.9.9.9"])
@@ -297,7 +297,7 @@ class DnsHostsImportResponse(BaseModel):
 
 class DhcpSettingsUpdate(BaseModel):
     enabled: bool = False
-    interface_name: str = Field(default="eth1", min_length=1, max_length=80)
+    interface_name: str = Field(default="eth2", min_length=1, max_length=80)
     site_address: str = Field(default="192.168.50.1", min_length=1, max_length=64)
     prefix_length: int = Field(default=24, ge=1, le=32)
     range_start: str = Field(default="192.168.50.100", min_length=1, max_length=64)

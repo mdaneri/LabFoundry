@@ -5,6 +5,8 @@ from labfoundry.app.models import User, VcfBackupSettings
 
 VCF_BACKUP_DEFAULT_VOLUME_MOUNT = "/mnt/labfoundry-vcf-backups"
 VCF_BACKUP_REMOTE_DIRECTORY = "/backups"
+VCF_BACKUP_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/vcf-backups/labfoundry-vcf-backups-sshd.conf"
+VCF_BACKUP_EFFECTIVE_CONFIG_PATH = "/etc/labfoundry/ssh/labfoundry-vcf-backups-sshd.conf"
 
 
 def vcf_backup_remote_directory(settings: VcfBackupSettings) -> str:
@@ -66,14 +68,30 @@ def validate_vcf_backup_state(settings: VcfBackupSettings, users: list[User], in
 def render_vcf_backup_config(settings: VcfBackupSettings) -> str:
     username = settings.sftp_user.username if settings.sftp_user else "select-a-labfoundry-user"
     remote_directory = vcf_backup_remote_directory(settings)
-    lines = [
+    common_header = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
-        "# Dry-run preview of desired OpenSSH SFTP backup endpoint.",
+        f"# LabFoundry VCF Backups enabled: {'true' if settings.enabled else 'false'}",
+        f"# LabFoundry VCF Backups user: {username}",
         f"# Backup volume mount: {settings.storage_path}",
         f"# VCF remote directory: {remote_directory}",
+        "# This file is used by the standalone labfoundry-vcf-backups.service OpenSSH instance.",
         "",
+    ]
+    if not settings.enabled:
+        return "\n".join([*common_header, "# VCF Backup SFTP desired state is disabled.", ""]).strip() + "\n"
+
+    lines = [
+        *common_header,
         f"Port {settings.port}",
         f"ListenAddress {settings.listen_address}",
+        "PidFile /run/labfoundry-vcf-backups/sshd.pid",
+        "AuthorizedKeysFile /etc/labfoundry/ssh/authorized_keys/%u",
+        f"AllowUsers {username}",
+        "PermitTTY no",
+        "PermitTunnel no",
+        "AllowAgentForwarding no",
+        "AllowTcpForwarding no",
+        "X11Forwarding no",
         "Subsystem sftp internal-sftp",
         "",
         f"Match User {username}",
@@ -87,13 +105,17 @@ def render_vcf_backup_config(settings: VcfBackupSettings) -> str:
     ]
     if not settings.chroot_enabled:
         lines = [
-            "# Managed by LabFoundry. Local changes may be overwritten.",
-            "# Dry-run preview of desired OpenSSH SFTP backup endpoint.",
-            f"# Backup volume mount: {settings.storage_path}",
-            f"# VCF remote directory: {remote_directory}",
-            "",
+            *common_header,
             f"Port {settings.port}",
             f"ListenAddress {settings.listen_address}",
+            "PidFile /run/labfoundry-vcf-backups/sshd.pid",
+            "AuthorizedKeysFile /etc/labfoundry/ssh/authorized_keys/%u",
+            f"AllowUsers {username}",
+            "PermitTTY no",
+            "PermitTunnel no",
+            "AllowAgentForwarding no",
+            "AllowTcpForwarding no",
+            "X11Forwarding no",
             "Subsystem sftp internal-sftp",
             "",
             f"Match User {username}",

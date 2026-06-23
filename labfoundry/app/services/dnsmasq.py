@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
-from ipaddress import ip_address, ip_network
+from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import PurePosixPath
 
-from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings
+from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
 
 DNS_CONDITIONAL_FORWARDERS_SETTING_KEY = "dns.conditional_forwarders"
+DNSMASQ_LEASE_FILE_PATH = "/var/lib/labfoundry/dnsmasq/dhcp.leases"
 
 
 def split_servers(raw: str | None) -> list[str]:
@@ -373,6 +374,38 @@ def validate_dns_listen_targets(settings: DnsSettings, available_interface_names
     return errors
 
 
+def dhcp_bind_target_names(physical_interfaces: list[PhysicalInterface], vlan_interfaces: list[VlanInterface]) -> set[str]:
+    names: set[str] = set()
+    for interface in physical_interfaces:
+        mode = (interface.mode or "").strip().lower()
+        if mode == "trunk" or not _valid_cidr(interface.ip_cidr):
+            continue
+        names.add(interface.name)
+    for vlan in vlan_interfaces:
+        if vlan.enabled is False or not _valid_cidr(vlan.ip_cidr):
+            continue
+        names.add(vlan.name)
+    return names
+
+
+def validate_dhcp_bind_targets(settings: DhcpSettings, scopes: list[DhcpScope], available_interface_names: set[str]) -> list[str]:
+    errors: list[str] = []
+    if not settings.enabled:
+        return errors
+    scope_rows = scopes if scopes else [_legacy_scope(settings)]
+    enabled_scopes = [scope for scope in scope_rows if scope.enabled is not False]
+    if enabled_scopes and not available_interface_names:
+        return ["DHCP has no valid bind targets. Configure an access physical interface or enabled VLAN with an IP CIDR."]
+    for scope in enabled_scopes:
+        interface_name = scope.interface_name.strip()
+        if interface_name not in available_interface_names:
+            errors.append(
+                f"DHCP IP zone {scope.name} interface {interface_name or '<missing>'} is not a valid bind target. "
+                "Use an access physical interface with an IP CIDR or an enabled VLAN interface with an IP CIDR."
+            )
+    return errors
+
+
 def dns_domain_warnings(domains: list[str]) -> list[str]:
     warnings: list[str] = []
     for domain in split_domains("\n".join(domains)):
@@ -494,15 +527,17 @@ def render_dnsmasq_config(
         "bogus-priv",
         "no-resolv",
         "bind-interfaces",
+        f"dhcp-leasefile={DNSMASQ_LEASE_FILE_PATH}",
         f"cache-size={dns_settings.cache_size if dns_settings.cache_size is not None else 1000}",
     ]
     for domain in domains:
         lines.append(f"domain={domain}")
+        lines.append(f"local=/{domain}/")
     if dns_settings.expand_hosts:
         lines.append("expand-hosts")
     if dhcp_settings.enabled and dhcp_settings.authoritative:
         lines.append("dhcp-authoritative")
-    dhcp_interfaces = [scope.interface_name for scope in scopes if scope.enabled is not False]
+    dhcp_interfaces = [scope.interface_name for scope in scopes if dhcp_settings.enabled and scope.enabled is not False]
     for interface_name in _ordered_unique([*split_interfaces(dns_settings.listen_interface), *dhcp_interfaces]):
         lines.append(f"interface={interface_name}")
     for listen_address in split_addresses(dns_settings.listen_address):
@@ -578,6 +613,16 @@ def _validate_ip(value: str, label: str, errors: list[str]):
     except ValueError:
         errors.append(f"{label} is not a valid IP address.")
         return None
+
+
+def _valid_cidr(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        ip_interface(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _is_ip_address(value: str) -> bool:

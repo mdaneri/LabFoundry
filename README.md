@@ -18,6 +18,8 @@ builder lives in [`image/hyperv/`](image/hyperv/) and provisions:
 - `/opt/labfoundry` for the installed application;
 - `/etc/labfoundry/labfoundry.env` for appliance environment settings;
 - `/etc/labfoundry/build-info` for build/update provenance;
+- masked `systemd-ssh-generator` so Photon does not attempt automatic
+  SSH-over-AF_VSOCK sockets on Hyper-V while normal TCP SSH remains available;
 - `/var/lib/labfoundry` for durable state;
 - `/var/log/labfoundry` for local logs;
 - fixed appliance mount points under `/mnt/labfoundry-vcf-*`;
@@ -153,7 +155,7 @@ Use `Appliance Apply` to review and submit appliance changes. The page:
 - lets operators unselect changed units that should stay pending;
 - creates one `appliance-apply` job that records selected units, skipped changed units, validation results, rendered previews/diffs, adapter command intent, dry-run state, and the audit event.
 
-Appliance Settings owns the appliance FQDN, OS hostname, resolver mode, resolver servers, and appliance NTP client. DNS and DHCP share one `DNS/DHCP (dnsmasq)` apply unit because they render and reload the same dnsmasq config. In development, system adapters remain dry-run by default and record command intent instead of mutating host services directly.
+Appliance Settings owns the appliance FQDN, OS hostname, resolver mode, resolver servers, and appliance NTP client. DNS and DHCP share one `DNS/DHCP (dnsmasq)` apply unit because they render and reload the same dnsmasq config. DHCP scopes bind only to access physical interfaces with IP CIDR or enabled VLAN interfaces with IP CIDR, and live lease readback uses the LabFoundry-owned dnsmasq lease file under `/var/lib/labfoundry/dnsmasq/`. The firewall preview derives LabFoundry-managed service allow rules from service desired state, including management, DNS, DHCP, KMS, VCF Backup, VCF Offline Depot, and VCF Private Registry listeners. Moving a DHCP scope or service listener to a VLAN such as `eth2.50` also changes the Firewall apply unit. In development, system adapters remain dry-run by default and record command intent instead of mutating host services directly.
 
 More detail lives in [`docs/appliance-apply.md`](docs/appliance-apply.md).
 

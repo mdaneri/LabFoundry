@@ -77,6 +77,7 @@ from labfoundry.app.security import (
 )
 from labfoundry.app.services.dnsmasq import (
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+    dhcp_bind_target_names,
     dns_domain_warnings,
     dns_reverse_records,
     dhcp_option_to_dict,
@@ -100,6 +101,7 @@ from labfoundry.app.services.dnsmasq import (
     split_interfaces,
     split_servers,
     validate_dns_record,
+    validate_dhcp_bind_targets,
     validate_dhcp_settings,
     validate_dns_listen_targets,
     validate_dns_settings,
@@ -139,8 +141,11 @@ from labfoundry.app.services.firewall import (
     FIREWALL_POLICIES,
     FIREWALL_PROTOCOLS,
     FIREWALL_STAGED_CONFIG_PATH,
+    firewall_interface_networks,
     firewall_rule_to_dict,
     firewall_settings_to_dict,
+    is_labfoundry_managed_firewall_rule,
+    managed_service_firewall_rules,
     render_nftables_config,
     validate_firewall_rule,
     validate_firewall_state,
@@ -161,6 +166,8 @@ from labfoundry.app.services.kms import (
 )
 from labfoundry.app.services.vcf_backups import (
     VCF_BACKUP_DEFAULT_VOLUME_MOUNT,
+    VCF_BACKUP_EFFECTIVE_CONFIG_PATH,
+    VCF_BACKUP_STAGED_CONFIG_PATH,
     render_vcf_backup_config,
     validate_vcf_backup_state,
     vcf_backup_remote_directory,
@@ -860,20 +867,65 @@ def vcf_offline_depot_context(db: Session) -> dict:
 def firewall_context(db: Session) -> dict:
     settings = get_firewall_settings_row(db)
     rules = db.execute(select(FirewallRule).order_by(FirewallRule.priority, FirewallRule.name)).scalars().all()
-    config_preview = render_nftables_config(settings, rules)
-    validation_errors = validate_firewall_state(settings, rules)
+    dns_settings = get_dns_settings_row(db)
+    dhcp_settings = get_dhcp_settings_row(db)
+    dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    generated_rules = managed_service_firewall_rules(
+        dns_settings=dns_settings,
+        dhcp_settings=dhcp_settings,
+        dhcp_scopes=dhcp_scopes,
+        kms_settings=get_kms_settings_row(db),
+        vcf_backup_settings=get_vcf_backup_settings_row(db),
+        vcf_depot_settings=get_vcf_offline_depot_settings_row(db),
+        vcf_registry_settings=get_vcf_private_registry_settings_row(db),
+        interface_networks=firewall_interface_networks(physical_interfaces, vlan_interfaces),
+    )
+    config_preview = render_nftables_config(settings, rules, generated_rules, replace_labfoundry_service_rules=True)
+    validation_errors = validate_firewall_state(settings, rules, generated_rules, replace_labfoundry_service_rules=True)
+    editable_rules = [rule for rule in rules if not is_labfoundry_managed_firewall_rule(rule)]
+    replaced_rules = [rule for rule in rules if is_labfoundry_managed_firewall_rule(rule)]
+    available_interfaces = service_bind_options(db)
     return {
         "firewall_settings": settings,
-        "firewall_rules": rules,
-        "firewall_rules_json": [firewall_rule_to_dict(rule) for rule in rules],
+        "firewall_rules": editable_rules,
+        "firewall_rules_json": [firewall_rule_to_dict(rule) for rule in editable_rules],
+        "firewall_generated_rules": generated_rules,
+        "firewall_generated_rules_json": [firewall_rule_to_dict(rule) for rule in generated_rules],
+        "firewall_managed_rule_rows": managed_firewall_rule_rows(generated_rules, replaced_rules),
         "firewall_config_preview": config_preview,
         "firewall_validation_errors": validation_errors,
         "firewall_directions": FIREWALL_DIRECTIONS,
         "firewall_actions": FIREWALL_ACTIONS,
         "firewall_protocols": FIREWALL_PROTOCOLS,
         "firewall_policies": FIREWALL_POLICIES,
-        "physical_interfaces": db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all(),
+        "firewall_interface_options": available_interfaces,
     }
+
+
+def managed_firewall_rule_rows(generated_rules: list[FirewallRule], replaced_rules: list[FirewallRule]) -> list[dict]:
+    rows: list[dict] = []
+    for rule in generated_rules:
+        rows.append(
+            {
+                **firewall_rule_to_dict(rule),
+                "id": f"generated:{rule.name}",
+                "managed_state": "generated",
+                "managed_status": "generated",
+            }
+        )
+    for rule in replaced_rules:
+        rows.append(
+            {
+                **firewall_rule_to_dict(rule),
+                "id": f"replaced:{rule.id or rule.name}",
+                "managed_state": "replaced",
+                "managed_status": "replaced",
+                "enabled": False,
+            }
+        )
+    return rows
 
 
 def ca_context(db: Session) -> dict:
@@ -1021,6 +1073,14 @@ def dnsmasq_context(db: Session) -> dict:
     validation_errors = (
         validate_dns_settings(dns_settings, dns_records, conditional_forwarders)
         + validate_dns_listen_targets(dns_settings, {interface["name"] for interface in available_interfaces})
+        + validate_dhcp_bind_targets(
+            dhcp_settings,
+            dhcp_scopes,
+            dhcp_bind_target_names(
+                db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all(),
+                vlan_interfaces,
+            ),
+        )
         + validate_dhcp_settings(
             dhcp_settings,
             dhcp_reservations,
@@ -1033,7 +1093,8 @@ def dnsmasq_context(db: Session) -> dict:
     dns_record_groups = dns_records_by_domain(dns_records, dns_domains)
     reverse_zone_groups = reverse_records_by_zone(dns_reverse_records(dns_records))
     lease_result = SystemAdapter().read_dhcp_leases()
-    dhcp_leases = parse_dnsmasq_leases(lease_result.stdout)
+    dhcp_lease_error = lease_result.stderr.strip() if lease_result.returncode != 0 else ""
+    dhcp_leases = [] if dhcp_lease_error else parse_dnsmasq_leases(lease_result.stdout)
     return {
         "dns_settings": dns_settings,
         "dns_records": dns_records,
@@ -1050,6 +1111,7 @@ def dnsmasq_context(db: Session) -> dict:
         "dhcp_leases": dhcp_leases,
         "dhcp_lease_dry_run": lease_result.dry_run,
         "dhcp_lease_command": " ".join(lease_result.command),
+        "dhcp_lease_error": dhcp_lease_error,
         "available_interfaces": available_interfaces,
         "available_dns_addresses": available_dns_listen_addresses(dns_settings, dhcp_settings, available_interfaces, vlan_interfaces),
         "selected_dns_interfaces": split_interfaces(dns_settings.listen_interface),
@@ -1703,7 +1765,11 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             label="Firewall",
             page_url="/firewall",
             context=firewall,
-            summary=["service enabled" if firewall["firewall_settings"].enabled else "service disabled", f"{len(firewall['firewall_rules'])} rules"],
+            summary=[
+                "service enabled" if firewall["firewall_settings"].enabled else "service disabled",
+                f"{len(firewall['firewall_rules'])} editable rules",
+                f"{len(firewall['firewall_generated_rules'])} managed service rules",
+            ],
             validation_errors=firewall["firewall_validation_errors"],
             config_path=firewall["firewall_settings"].config_path,
             config_preview=firewall["firewall_config_preview"],
@@ -1878,7 +1944,10 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         results = [adapter.validate_kms_config(context["kms_settings"].config_path), adapter.apply_kms_config(context["kms_settings"].config_path)]
     elif unit_id == "vcf_backups":
         settings = context["vcf_backup_settings"]
-        results = [adapter.validate_vcf_backup_config(settings.config_path), adapter.apply_vcf_backup_config(settings.config_path)]
+        config_path = settings.config_path
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(VCF_BACKUP_STAGED_CONFIG_PATH, unit["config_preview"])
+        results = [adapter.validate_vcf_backup_config(config_path), adapter.apply_vcf_backup_config(config_path)]
     elif unit_id == "vcf_offline_depot":
         settings = context["vcf_depot_settings"]
         results = [
@@ -4582,7 +4651,7 @@ def update_vcf_backup_settings_from_ui(
     settings.allow_password_auth = allow_password_auth == "on"
     settings.allow_public_key_auth = allow_public_key_auth == "on"
     settings.max_sessions = max_sessions
-    settings.config_path = "/etc/labfoundry/ssh/sshd_config.d/labfoundry-vcf-backups.conf"
+    settings.config_path = VCF_BACKUP_EFFECTIVE_CONFIG_PATH
     settings.updated_at = utcnow()
     db.commit()
     record_audit(db, actor=identity.username, action="update_vcf_backup_settings", resource_type="vcf_backups", resource_id=str(settings.id))

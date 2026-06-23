@@ -18,7 +18,7 @@
       data-directions='{{ firewall_directions | tojson }}'
       data-actions='{{ firewall_actions | tojson }}'
       data-protocols='{{ firewall_protocols | tojson }}'
-      data-interfaces='{{ physical_interfaces | map(attribute="name") | list | tojson }}'
+      data-interfaces='{{ firewall_interface_options | map(attribute="name") | list | tojson }}'
       data-csrf="{{ csrf_token }}"
       data-fallback-id="firewall-rules-fallback"
     ></div>
@@ -43,6 +43,43 @@
         {% endfor %}
       </tbody>
     </table>
+    {% if firewall_managed_rule_rows %}
+      <div class="subsection">
+        <div class="panel-head compact">
+          <h3>Managed Service Rules</h3>
+          <span class="status-pill muted">{{ firewall_managed_rule_rows|length }} managed</span>
+        </div>
+        <div
+          id="managed-firewall-rules-table"
+          class="tabulator-shell readonly-tabulator-shell"
+          data-rules='{{ firewall_managed_rule_rows | tojson }}'
+          data-fallback-id="managed-firewall-rules-fallback"
+        ></div>
+        <table id="managed-firewall-rules-fallback" class="data-table compact dns-fallback-table">
+          <thead>
+            <tr><th>Status</th><th>Name</th><th>Direction</th><th>Action</th><th>Protocol</th><th>Source</th><th>Destination</th><th>Ports</th><th>Interface</th><th>Priority</th><th>Enabled</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            {% for rule in firewall_managed_rule_rows %}
+              <tr class="{{ 'managed-rule-replaced' if rule.managed_state == 'replaced' else 'managed-rule-generated' }}">
+                <td>{{ rule.managed_status }}</td>
+                <td>{{ rule.name }}</td>
+                <td>{{ rule.direction }}</td>
+                <td>{{ rule.action }}</td>
+                <td>{{ rule.protocol }}</td>
+                <td>{{ rule.source }}</td>
+                <td>{{ rule.destination }}</td>
+                <td>{{ rule.destination_port }}</td>
+                <td>{{ rule.interface_name }}</td>
+                <td>{{ rule.priority }}</td>
+                <td><span class="status-pill {{ 'good' if rule.enabled else 'muted' }}">{{ "enabled" if rule.enabled else "disabled" }}</span></td>
+                <td>{{ rule.description }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
   </div>
 
   <aside class="side-stack">

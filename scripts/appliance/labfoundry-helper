@@ -36,6 +36,8 @@ FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
 FIREWALL_CONFIG_PATH = FIREWALL_CONFIG_DIR / "labfoundry.nft"
 FIREWALL_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-firewall.service")
 DNSMASQ_APPLY_DIR = Path("/var/lib/labfoundry/apply/dnsmasq")
+DNSMASQ_STATE_DIR = Path("/var/lib/labfoundry/dnsmasq")
+DNSMASQ_LEASE_FILE_PATH = DNSMASQ_STATE_DIR / "dhcp.leases"
 DNSMASQ_CONFIG_DIR = Path("/etc/labfoundry/dnsmasq.d")
 DNSMASQ_CONFIG_PATH = DNSMASQ_CONFIG_DIR / "labfoundry.conf"
 DNSMASQ_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/dnsmasq.service.d")
@@ -120,6 +122,20 @@ def _install_dnsmasq_service_dropin() -> None:
     )
 
 
+def _read_dnsmasq_leases() -> int:
+    lease_path = DNSMASQ_LEASE_FILE_PATH.resolve()
+    if not lease_path.is_relative_to(DNSMASQ_STATE_DIR.resolve()):
+        print(f"dnsmasq lease file must stay under {DNSMASQ_STATE_DIR}", file=sys.stderr)
+        return 2
+    if not lease_path.exists():
+        return 0
+    if not lease_path.is_file():
+        print(f"dnsmasq lease path is not a regular file: {lease_path}", file=sys.stderr)
+        return 2
+    print(lease_path.read_text(encoding="utf-8"), end="")
+    return 0
+
+
 def _write_management_resolver(servers: list[str], domains: list[str]) -> None:
     if NETWORKD_MGMT_CONFIG_PATH.is_file():
         lines = NETWORKD_MGMT_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
@@ -167,6 +183,12 @@ def _configure_local_resolver() -> subprocess.CompletedProcess[str]:
 
 
 def _handle_dnsmasq(action: str, args: list[str]) -> int:
+    if action == "leases":
+        if args:
+            print("dnsmasq leases does not accept a path", file=sys.stderr)
+            return 2
+        return _read_dnsmasq_leases()
+
     if action in {"validate", "apply"}:
         try:
             config_path = _validate_dnsmasq_config_path(args[0])
@@ -181,6 +203,7 @@ def _handle_dnsmasq(action: str, args: list[str]) -> int:
             return validation.returncode
 
         DNSMASQ_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        DNSMASQ_STATE_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copy2(config_path, DNSMASQ_CONFIG_PATH)
         _install_dnsmasq_service_dropin()
         daemon_reload = _run(["systemctl", "daemon-reload"])

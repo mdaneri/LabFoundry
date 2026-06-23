@@ -28,6 +28,7 @@ from labfoundry.app.models import (
     FirewallRule,
     FirewallSettings,
     Job,
+    KmsSettings,
     PhysicalInterface,
     Route,
     ServiceState,
@@ -100,6 +101,7 @@ from labfoundry.app.security import (
 )
 from labfoundry.app.services.dnsmasq import (
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+    dhcp_bind_target_names,
     dns_domain_warnings,
     dns_settings_to_dict,
     dnsmasq_test_command,
@@ -112,7 +114,9 @@ from labfoundry.app.services.dnsmasq import (
     reservation_dns_record,
     split_domains,
     validate_dns_record,
+    validate_dhcp_bind_targets,
     validate_dhcp_settings,
+    validate_dns_listen_targets,
     validate_dns_settings,
 )
 from labfoundry.app.services.appliance_settings import (
@@ -130,6 +134,8 @@ from labfoundry.app.services.firewall import (
     FIREWALL_POLICIES,
     FIREWALL_PROTOCOLS,
     FIREWALL_STAGED_CONFIG_PATH,
+    firewall_interface_networks,
+    managed_service_firewall_rules,
     render_nftables_config,
     validate_firewall_rule,
     validate_firewall_state,
@@ -154,6 +160,7 @@ from labfoundry.app.services.vcf_offline_depot import (
 from labfoundry.app.token_service import create_token_for_user, token_to_response
 
 router = APIRouter(prefix="/api/v1")
+DNSMASQ_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf"
 
 APPROVED_SERVICES = {
     "routing",
@@ -194,6 +201,26 @@ def get_firewall_settings(db: Session) -> FirewallSettings:
     settings = db.execute(select(FirewallSettings)).scalar_one_or_none()
     if settings is None:
         settings = FirewallSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
+def get_dhcp_settings_row(db: Session) -> DhcpSettings:
+    settings = db.execute(select(DhcpSettings)).scalar_one_or_none()
+    if settings is None:
+        settings = DhcpSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
+def get_kms_settings_row(db: Session) -> KmsSettings:
+    settings = db.execute(select(KmsSettings)).scalar_one_or_none()
+    if settings is None:
+        settings = KmsSettings()
         db.add(settings)
         db.commit()
         db.refresh(settings)
@@ -322,11 +349,38 @@ def vcf_depot_secret_status(db: Session) -> tuple[bool, bool]:
 def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[FirewallRule], str, list[str]]:
     settings = get_firewall_settings(db)
     rules = db.execute(select(FirewallRule).order_by(FirewallRule.priority, FirewallRule.name)).scalars().all()
-    return settings, rules, render_nftables_config(settings, rules), validate_firewall_state(settings, rules)
+    dns_settings = get_dns_settings_row(db)
+    dhcp_settings = get_dhcp_settings_row(db)
+    dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    generated_rules = managed_service_firewall_rules(
+        dns_settings=dns_settings,
+        dhcp_settings=dhcp_settings,
+        dhcp_scopes=dhcp_scopes,
+        kms_settings=get_kms_settings_row(db),
+        vcf_backup_settings=get_vcf_backup_settings(db),
+        vcf_depot_settings=get_vcf_offline_depot_settings(db),
+        vcf_registry_settings=get_vcf_private_registry_settings(db),
+        interface_networks=firewall_interface_networks(physical_interfaces, vlan_interfaces),
+    )
+    return (
+        settings,
+        rules,
+        render_nftables_config(settings, rules, generated_rules, replace_labfoundry_service_rules=True),
+        validate_firewall_state(settings, rules, generated_rules, replace_labfoundry_service_rules=True),
+    )
 
 
 def stage_api_firewall_config(config_preview: str) -> str:
     path = Path(FIREWALL_STAGED_CONFIG_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(config_preview, encoding="utf-8")
+    return str(path)
+
+
+def stage_api_dnsmasq_config(config_preview: str) -> str:
+    path = Path(DNSMASQ_STAGED_CONFIG_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(config_preview, encoding="utf-8")
     return str(path)
@@ -1158,19 +1212,31 @@ def delete_dns_record(
 def dnsmasq_validation_response(db: Session) -> ConfigValidationResponse:
     dns_settings, dns_records, dhcp_settings, dhcp_scopes, dhcp_options, dhcp_reservations, config_preview = get_dnsmasq_state(db)
     conditional_forwarders = setting_value(db, DNS_CONDITIONAL_FORWARDERS_SETTING_KEY)
-    errors = validate_dns_settings(dns_settings, dns_records, conditional_forwarders) + validate_dhcp_settings(
-        dhcp_settings,
-        dhcp_reservations,
-        dhcp_scopes,
-        dhcp_options,
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
+    bind_targets = dhcp_bind_target_names(physical_interfaces, vlan_interfaces)
+    errors = (
+        validate_dns_settings(dns_settings, dns_records, conditional_forwarders)
+        + validate_dns_listen_targets(dns_settings, bind_targets)
+        + validate_dhcp_bind_targets(dhcp_settings, dhcp_scopes, bind_targets)
+        + validate_dhcp_settings(
+            dhcp_settings,
+            dhcp_reservations,
+            dhcp_scopes,
+            dhcp_options,
+        )
     )
     warnings = dns_domain_warnings(split_domains(dns_settings.domain))
-    result = SystemAdapter().validate_dnsmasq_config(dns_settings.config_path)
+    adapter = SystemAdapter()
+    config_path = dns_settings.config_path
+    if not adapter.dry_run:
+        config_path = stage_api_dnsmasq_config(config_preview)
+    result = adapter.validate_dnsmasq_config(config_path)
     return ConfigValidationResponse(
         valid=not errors,
         dry_run=result.dry_run,
-        command=dnsmasq_test_command(dns_settings.config_path),
-        config_path=dns_settings.config_path,
+        command=result.command if result.command else dnsmasq_test_command(config_path),
+        config_path=config_path,
         config_preview=config_preview,
         errors=errors,
         warnings=warnings,
@@ -1373,6 +1439,8 @@ def list_dhcp_reservations(identity: Annotated[Identity, Depends(require_scope("
 @router.get("/dhcp/leases", response_model=list[DhcpLeaseResponse], tags=["DHCP"], operation_id="listDhcpLeases")
 def list_dhcp_leases(identity: Annotated[Identity, Depends(require_scope("read:dhcp"))]) -> list[DhcpLeaseResponse]:
     result = SystemAdapter().read_dhcp_leases()
+    if result.returncode != 0:
+        raise HTTPException(status_code=502, detail=result.stderr.strip() or "Unable to read dnsmasq DHCP leases.")
     return [DhcpLeaseResponse(**lease) for lease in parse_dnsmasq_leases(result.stdout)]
 
 

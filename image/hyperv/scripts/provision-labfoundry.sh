@@ -32,6 +32,10 @@ tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openss
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
 
+log_step "disabling systemd SSH-over-vsock auto generator"
+install -d -o root -g root -m 0755 /etc/systemd/system-generators
+ln -sfn /dev/null /etc/systemd/system-generators/systemd-ssh-generator
+
 if ! getent group labfoundry >/dev/null 2>&1; then
   groupadd --system labfoundry
 fi
@@ -44,6 +48,7 @@ install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/firewall"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/dnsmasq"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/dnsmasq"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG"
 install -d -o root -g root -m 0755 /etc/labfoundry
 install -d -o root -g root -m 0755 /etc/labfoundry/dnsmasq.d

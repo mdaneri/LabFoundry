@@ -33,19 +33,54 @@ def test_login_and_dashboard_render(client):
     assert favicon.headers["content-type"].startswith("image/svg+xml")
 
 
-def test_settings_page_renders_autosave_validation_and_preview(client):
+def test_settings_page_renders_autosave_validation_and_preview(client, monkeypatch):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsSettings
+
+    monkeypatch.setattr("labfoundry.app.ui.socket.gethostname", lambda: "runtime.labfoundry.internal")
+
     login(client)
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        db.commit()
+
     response = client.get("/settings")
 
     assert response.status_code == 200
     assert 'action="/settings"' in response.text
     assert 'data-autosave-status-id="appliance-settings-autosave-status"' in response.text
-    assert response.text.count('class="help-icon"') >= 3
+    assert response.text.count('class="help-icon"') >= 2
+    assert 'textarea name="external_dns_servers"' not in response.text
+    assert 'input type="hidden" name="external_dns_servers"' in response.text
     assert "Pending Appliance Changes" in response.text
     assert "Validation" in response.text
+    assert "runtime.labfoundry.internal" in response.text
     assert "labfoundry.labfoundry.internal" in response.text
     assert "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json" in response.text
     assert "resolver_mode" in response.text
+
+
+def test_settings_page_shows_external_dns_editor_when_local_dns_is_disabled(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsSettings
+
+    login(client)
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = False
+        db.commit()
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert "External DNS servers" in response.text
+    assert 'textarea name="external_dns_servers"' in response.text
+    assert "Local DNS is disabled. External DNS servers are required" in response.text
 
 
 def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
@@ -537,6 +572,89 @@ def test_dns_settings_badge_reflects_live_adapter_mode(client, monkeypatch):
     assert page.status_code == 200
     assert '<span class="status-pill good">live</span>' in page.text
     assert '<span class="status-pill warn">dry-run</span>' not in page.text
+
+
+def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
+    from labfoundry.app.adapters.system import AdapterResult
+
+    def fake_read_dhcp_leases(self):
+        return AdapterResult(
+            command=["sudo", "-n", "/opt/labfoundry/bin/labfoundry-helper", "dnsmasq", "leases", "--real"],
+            dry_run=False,
+            stdout="1893456000 02:15:5d:00:20:40 192.168.50.140 live-client.labfoundry.internal *\n",
+        )
+
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.read_dhcp_leases", fake_read_dhcp_leases)
+
+    login(client)
+    page = client.get("/dhcp")
+
+    assert page.status_code == 200
+    assert '<span class="status-pill good">live</span>' in page.text
+    assert "sudo -n /opt/labfoundry/bin/labfoundry-helper dnsmasq leases --real" in page.text
+    assert "live-client.labfoundry.internal" in page.text
+    assert '<span class="status-pill warn">dry-run</span>' not in page.text
+
+
+def test_firewall_preview_derives_dns_dhcp_rule_from_dhcp_scope_vlan(client):
+    import html
+    import json
+    import re
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope, DhcpSettings, FirewallRule, VlanInterface
+
+    with SessionLocal() as db:
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp_settings.enabled = True
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        scope.interface_name = "eth2.50"
+        scope.site_address = "192.168.50.1"
+        scope.prefix_length = 24
+        scope.enabled = True
+        legacy_rule = db.execute(select(FirewallRule).where(FirewallRule.name == "sitea-dns-dhcp")).scalar_one()
+        legacy_rule.interface_name = "eth1"
+        if db.execute(select(VlanInterface).where(VlanInterface.name == "eth2.50")).scalar_one_or_none() is None:
+            db.add(
+                VlanInterface(
+                    name="eth2.50",
+                    parent_interface="eth2",
+                    vlan_id=50,
+                    ip_cidr="192.168.50.1/24",
+                    role="services",
+                    enabled=True,
+                )
+            )
+        db.commit()
+
+    login(client)
+    firewall = client.get("/firewall")
+
+    assert firewall.status_code == 200
+    assert "Managed Service Rules" in firewall.text
+    assert "eth2.50" in firewall.text
+    assert "data-interfaces=" in firewall.text
+    assert "&#34;eth2.50&#34;" in firewall.text
+    editable_payload = re.search(r'id="firewall-rules-table"[^>]+data-rules=\'([^\']*)\'', firewall.text, re.S)
+    managed_payload = re.search(r'id="managed-firewall-rules-table"[^>]+data-rules=\'([^\']*)\'', firewall.text, re.S)
+    assert editable_payload is not None
+    assert managed_payload is not None
+    editable_rows = json.loads(html.unescape(editable_payload.group(1)))
+    managed_rows = json.loads(html.unescape(managed_payload.group(1)))
+    assert not any(row["name"] == "sitea-dns-dhcp" and row["interface_name"] == "eth1" for row in editable_rows)
+    assert any(row["name"] == "sitea-dns-dhcp" and row["interface_name"] == "eth1" and row["managed_state"] == "replaced" for row in managed_rows)
+    assert any(row["name"] == "sitea-dns-dhcp" and row["interface_name"] == "eth2.50" and row["managed_state"] == "generated" for row in managed_rows)
+    assert any(row["name"] == "mgmt-console" and row["managed_state"] == "generated" for row in managed_rows)
+    assert 'iifname &#34;eth2.50&#34; ip saddr 192.168.50.0/24 udp dport { 53, 67 } accept comment &#34;sitea-dns-dhcp&#34;' in firewall.text
+    assert 'iifname &#34;eth1&#34; ip saddr 192.168.50.0/24 udp dport { 53, 67 } accept comment &#34;sitea-dns-dhcp&#34;' not in firewall.text
+
+    apply_page = client.get("/appliance-apply")
+    assert apply_page.status_code == 200
+    assert "DNS/DHCP (dnsmasq)" in apply_page.text
+    assert "Firewall" in apply_page.text
+    assert "eth2.50" in apply_page.text
 
 
 def test_dns_listen_options_include_access_and_vlans_not_trunks(client):
@@ -1598,7 +1716,7 @@ def test_firewall_page_create_rule_and_apply_task(client):
             "source": "192.168.50.0/24",
             "destination": "any",
             "destination_port": "443",
-            "interface_name": "eth1",
+            "interface_name": "eth2",
             "priority": "30",
             "enabled": "on",
             "description": "VCF management access",
@@ -1623,7 +1741,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "appliance-settings-20260622-3" in page.text
+    assert "managed-firewall-20260622-1" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
@@ -1702,7 +1820,7 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
             "source": "192.168.50.0/24",
             "destination": "any",
             "destination_port": "8443",
-            "interface_name": "eth1",
+            "interface_name": "eth2",
             "priority": "35",
             "enabled": "on",
             "description": "global apply diff",
@@ -2127,7 +2245,7 @@ def test_dhcp_settings_autosave_returns_json(client):
         "/dhcp/settings",
         data={
             "enabled": "on",
-            "interface_name": "eth1",
+            "interface_name": "eth2",
             "site_address": "192.168.50.1",
             "prefix_length": "24",
             "range_start": "192.168.50.120",
@@ -2159,7 +2277,7 @@ def test_dhcp_scope_edit_form_updates_ip_zone(client):
         f"/dhcp/scopes/{scope_id}/edit",
         data={
             "name": "SiteA-Lab",
-            "interface_name": "eth1",
+            "interface_name": "eth2",
             "site_address": "192.168.50.1",
             "prefix_length": "24",
             "range_start": "192.168.50.110",
