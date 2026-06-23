@@ -73,3 +73,30 @@ def test_real_dhcp_leases_sudo_password_error_becomes_operator_guidance(monkeypa
     assert result.command == ["sudo", "-n", SystemAdapter.HELPER_PATH, "dnsmasq", "leases", "--real"]
     assert "updated LabFoundry sudoers helper rule" in result.stderr
     assert "sudo: a password is required" not in result.stderr
+
+
+def test_real_vcf_backup_apply_uses_sudo_helper(monkeypatch):
+    import labfoundry.app.adapters.system as system_adapter
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, check, capture_output, text):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, '{"vcf_backups": "apply complete"}\n', "")
+
+    monkeypatch.setattr(system_adapter.subprocess, "run", fake_run)
+
+    result = SystemAdapter(dry_run=False).apply_vcf_backup_config("/var/lib/labfoundry/apply/vcf-backups/labfoundry-vcf-backups-sshd.conf")
+
+    assert result.returncode == 0
+    assert result.dry_run is False
+    assert result.command == [
+        "sudo",
+        "-n",
+        SystemAdapter.HELPER_PATH,
+        "vcf-backups",
+        "apply",
+        "--real",
+        "/var/lib/labfoundry/apply/vcf-backups/labfoundry-vcf-backups-sshd.conf",
+    ]
+    assert commands == [result.command]

@@ -140,13 +140,19 @@ from labfoundry.app.services.firewall import (
     FIREWALL_DIRECTIONS,
     FIREWALL_POLICIES,
     FIREWALL_PROTOCOLS,
+    FIREWALL_ANY_SOURCE_GROUP_ID,
+    FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX,
+    FIREWALL_SOURCE_GROUPS_SETTING_KEY,
     FIREWALL_STAGED_CONFIG_PATH,
+    LABFOUNDRY_DHCP_FIREWALL_RULE_MARKER,
     firewall_interface_networks,
     firewall_rule_to_dict,
     firewall_settings_to_dict,
+    firewall_source_group_state,
     is_labfoundry_managed_firewall_rule,
     managed_service_firewall_rules,
     render_nftables_config,
+    validate_firewall_source_groups,
     validate_firewall_rule,
     validate_firewall_state,
 )
@@ -466,6 +472,7 @@ def vcf_backup_context(db: Session) -> dict:
         "vcf_backup_remote_directory": vcf_backup_remote_directory(settings),
         "vcf_backup_config_preview": config_preview,
         "vcf_backup_validation_errors": validation_errors,
+        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
     }
 
 
@@ -872,6 +879,8 @@ def firewall_context(db: Session) -> dict:
     dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
     physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    interface_networks = firewall_interface_networks(physical_interfaces, vlan_interfaces)
+    source_group_state = firewall_source_group_state(setting_value(db, FIREWALL_SOURCE_GROUPS_SETTING_KEY), interface_networks)
     generated_rules = managed_service_firewall_rules(
         dns_settings=dns_settings,
         dhcp_settings=dhcp_settings,
@@ -880,10 +889,27 @@ def firewall_context(db: Session) -> dict:
         vcf_backup_settings=get_vcf_backup_settings_row(db),
         vcf_depot_settings=get_vcf_offline_depot_settings_row(db),
         vcf_registry_settings=get_vcf_private_registry_settings_row(db),
-        interface_networks=firewall_interface_networks(physical_interfaces, vlan_interfaces),
+        interface_networks=interface_networks,
+        source_groups=source_group_state["groups"],
+        source_group_assignments=source_group_state["assignments"],
     )
-    config_preview = render_nftables_config(settings, rules, generated_rules, replace_labfoundry_service_rules=True)
-    validation_errors = validate_firewall_state(settings, rules, generated_rules, replace_labfoundry_service_rules=True)
+    config_preview = render_nftables_config(
+        settings,
+        rules,
+        generated_rules,
+        source_groups=source_group_state["groups"],
+        replace_labfoundry_service_rules=True,
+    )
+    validation_errors = [
+        *validate_firewall_source_groups(source_group_state["groups"]),
+        *validate_firewall_state(
+            settings,
+            rules,
+            generated_rules,
+            source_groups=source_group_state["groups"],
+            replace_labfoundry_service_rules=True,
+        ),
+    ]
     editable_rules = [rule for rule in rules if not is_labfoundry_managed_firewall_rule(rule)]
     replaced_rules = [rule for rule in rules if is_labfoundry_managed_firewall_rule(rule)]
     available_interfaces = service_bind_options(db)
@@ -893,7 +919,9 @@ def firewall_context(db: Session) -> dict:
         "firewall_rules_json": [firewall_rule_to_dict(rule) for rule in editable_rules],
         "firewall_generated_rules": generated_rules,
         "firewall_generated_rules_json": [firewall_rule_to_dict(rule) for rule in generated_rules],
-        "firewall_managed_rule_rows": managed_firewall_rule_rows(generated_rules, replaced_rules),
+        "firewall_managed_rule_rows": managed_firewall_rule_rows(generated_rules, replaced_rules, source_group_state["groups"], source_group_state["assignments"]),
+        "firewall_source_groups": source_group_state["groups"],
+        "firewall_source_group_assignments": source_group_state["assignments"],
         "firewall_config_preview": config_preview,
         "firewall_validation_errors": validation_errors,
         "firewall_directions": FIREWALL_DIRECTIONS,
@@ -904,28 +932,57 @@ def firewall_context(db: Session) -> dict:
     }
 
 
-def managed_firewall_rule_rows(generated_rules: list[FirewallRule], replaced_rules: list[FirewallRule]) -> list[dict]:
+def managed_firewall_rule_rows(
+    generated_rules: list[FirewallRule],
+    replaced_rules: list[FirewallRule],
+    source_groups: list[dict] | None = None,
+    assignments: dict[str, str] | None = None,
+) -> list[dict]:
     rows: list[dict] = []
+    replaced_by_name: dict[str, list[FirewallRule]] = {}
+    source_groups_by_id = {str(group["id"]): group for group in source_groups or []}
+    assignments = assignments or {}
+    for rule in replaced_rules:
+        replaced_by_name.setdefault(rule.name.strip().lower(), []).append(rule)
     for rule in generated_rules:
+        if LABFOUNDRY_DHCP_FIREWALL_RULE_MARKER in (rule.description or ""):
+            source_group_id = ""
+            source_group = {"name": "DHCP bootstrap", "entries": ["interface-bound"]}
+        else:
+            source_group_id = assignments.get(rule.name, "any")
+            if source_group_id not in source_groups_by_id:
+                source_group_id = "any"
+            source_group = source_groups_by_id.get(source_group_id, {})
         rows.append(
             {
                 **firewall_rule_to_dict(rule),
                 "id": f"generated:{rule.name}",
                 "managed_state": "generated",
                 "managed_status": "generated",
+                "source_group_id": source_group_id,
+                "source_group_name": source_group.get("name", source_group_id),
+                "source_group_sources": ", ".join(source_group.get("entries") or source_group.get("sources") or []),
             }
         )
-    for rule in replaced_rules:
-        rows.append(
-            {
-                **firewall_rule_to_dict(rule),
-                "id": f"replaced:{rule.id or rule.name}",
-                "managed_state": "replaced",
-                "managed_status": "replaced",
-                "enabled": False,
-            }
-        )
+        for replaced_rule in replaced_by_name.pop(rule.name.strip().lower(), []):
+            rows.append(managed_replaced_firewall_rule_row(replaced_rule))
+    for matching_replaced_rules in replaced_by_name.values():
+        for rule in matching_replaced_rules:
+            rows.append(managed_replaced_firewall_rule_row(rule))
     return rows
+
+
+def managed_replaced_firewall_rule_row(rule: FirewallRule) -> dict:
+    return {
+        **firewall_rule_to_dict(rule),
+        "id": f"replaced:{rule.id or rule.name}",
+        "managed_state": "replaced",
+        "managed_status": "replaced",
+        "source_group_id": "",
+        "source_group_name": "",
+        "source_group_sources": "",
+        "enabled": False,
+    }
 
 
 def ca_context(db: Session) -> dict:
@@ -1688,6 +1745,7 @@ def make_appliance_apply_unit(
         "validation_warnings": validation_warnings or [],
         "valid": not validation_errors,
         "config_path": config_path,
+        "raw_config_preview": config_preview,
         "config_preview": redacted_preview,
         "snapshot_hash": current_hash,
         "changed": current_hash != baseline_hash,
@@ -1916,12 +1974,12 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         settings = context["appliance_settings"]
         config_path = settings.config_path
         if not adapter.dry_run:
-            config_path = stage_appliance_apply_config(APPLIANCE_SETTINGS_STAGED_CONFIG_PATH, unit["config_preview"])
+            config_path = stage_appliance_apply_config(APPLIANCE_SETTINGS_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = [adapter.validate_appliance_settings_config(config_path), adapter.apply_appliance_settings_config(config_path)]
     elif unit_id == "network":
         config_path = context["network_config_path"]
         if not adapter.dry_run:
-            config_preview = network_config_with_removed_vlans(unit["config_preview"], unit.get("removed_vlan_interfaces", []))
+            config_preview = network_config_with_removed_vlans(unit["raw_config_preview"], unit.get("removed_vlan_interfaces", []))
             config_path = stage_appliance_apply_config(NETWORK_STAGED_CONFIG_PATH, config_preview)
         results = [adapter.validate_network_config(config_path), adapter.apply_network_config(config_path)]
     elif unit_id == "wan":
@@ -1930,12 +1988,12 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         settings = context["firewall_settings"]
         config_path = settings.config_path
         if not adapter.dry_run:
-            config_path = stage_appliance_apply_config(FIREWALL_STAGED_CONFIG_PATH, unit["config_preview"])
+            config_path = stage_appliance_apply_config(FIREWALL_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = [adapter.validate_firewall_config(config_path), adapter.apply_firewall_config(config_path)]
     elif unit_id == "dnsmasq":
         config_path = context["dns_settings"].config_path
         if not adapter.dry_run:
-            config_path = stage_appliance_apply_config(DNSMASQ_STAGED_CONFIG_PATH, unit["config_preview"])
+            config_path = stage_appliance_apply_config(DNSMASQ_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = [adapter.validate_dnsmasq_config(config_path), adapter.apply_dnsmasq_config(config_path), adapter.reload_dnsmasq()]
     elif unit_id == "ca":
         config_path = f"{context['ca_settings'].storage_path}/labfoundry-ca.conf"
@@ -1946,7 +2004,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         settings = context["vcf_backup_settings"]
         config_path = settings.config_path
         if not adapter.dry_run:
-            config_path = stage_appliance_apply_config(VCF_BACKUP_STAGED_CONFIG_PATH, unit["config_preview"])
+            config_path = stage_appliance_apply_config(VCF_BACKUP_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = [adapter.validate_vcf_backup_config(config_path), adapter.apply_vcf_backup_config(config_path)]
     elif unit_id == "vcf_offline_depot":
         settings = context["vcf_depot_settings"]
@@ -2537,20 +2595,217 @@ def update_firewall_settings(
     db.refresh(settings)
     record_audit(db, actor=identity.username, action="update_firewall_settings", resource_type="firewall", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave"):
-        rules = db.execute(select(FirewallRule).order_by(FirewallRule.priority, FirewallRule.name)).scalars().all()
-        validation_errors = validate_firewall_state(settings, rules)
+        context = firewall_context(db)
         return JSONResponse(
             {
                 "updated_at": settings.updated_at.isoformat(),
                 "settings": firewall_settings_to_dict(settings),
                 "enabled": settings.enabled,
-                "valid": not validation_errors,
-                "validation_errors": validation_errors,
+                "valid": not context["firewall_validation_errors"],
+                "validation_errors": context["firewall_validation_errors"],
                 "config_path": settings.config_path,
-                "config_preview": render_nftables_config(settings, rules),
+                "config_preview": context["firewall_config_preview"],
             }
         )
     return RedirectResponse("/firewall", status_code=303)
+
+
+def firewall_source_group_state_for_db(db: Session) -> dict:
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    interface_networks = firewall_interface_networks(physical_interfaces, vlan_interfaces)
+    return firewall_source_group_state(setting_value(db, FIREWALL_SOURCE_GROUPS_SETTING_KEY), interface_networks)
+
+
+def persist_firewall_source_group_state(db: Session, state: dict) -> None:
+    set_setting_value(db, FIREWALL_SOURCE_GROUPS_SETTING_KEY, json.dumps(state, indent=2, sort_keys=True))
+
+
+def _source_group_entries_from_form(form) -> list[str]:
+    values = [str(item).strip() for item in form.getlist("group_entries") if str(item).strip()]
+    return values or ["any"]
+
+
+def _firewall_source_group_id(name: str, groups: list[dict]) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-") or "group"
+    existing = {str(group.get("id", "")) for group in groups}
+    candidate = f"custom:{base}"
+    index = 2
+    while candidate in existing:
+        candidate = f"custom:{base}-{index}"
+        index += 1
+    return candidate
+
+
+def _normalized_firewall_source_group(group: dict) -> dict:
+    entries = [str(item).strip() for item in (group.get("entries") or group.get("sources") or []) if str(item).strip()] or ["any"]
+    normalized_entries = []
+    for entry in entries:
+        if entry.lower() == "any":
+            normalized_entries.append("any")
+        elif entry.lower().startswith(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):
+            normalized_entries.append(f"{FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX}{entry[len(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):]}")
+        else:
+            normalized_entries.append(entry)
+    return {
+        "id": str(group.get("id", "")),
+        "name": str(group.get("name", "")).strip() or str(group.get("id", "")),
+        "entries": normalized_entries,
+        "sources": normalized_entries,
+        "description": str(group.get("description") or "Custom firewall group."),
+        "builtin": bool(group.get("builtin")),
+    }
+
+
+def _strip_deleted_source_group_references(groups: list[dict], deleted_group_id: str, deleted_group_name: str) -> list[dict]:
+    stripped: list[dict] = []
+    deleted_ref = f"{FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX}{deleted_group_id}"
+    deleted_name_ref = f"@{deleted_group_name}".strip().lower()
+    for group in groups:
+        entries = []
+        for entry in group.get("entries") or group.get("sources") or []:
+            normalized_entry = str(entry).strip()
+            if normalized_entry == deleted_ref or normalized_entry.lower() == deleted_name_ref:
+                continue
+            entries.append(normalized_entry)
+        stripped.append(_normalized_firewall_source_group({**group, "entries": entries or ["any"]}))
+    return stripped
+
+
+def _firewall_source_group_response(db: Session, updated_at: str) -> JSONResponse:
+    context = firewall_context(db)
+    return JSONResponse(
+        {
+            "status": "saved",
+            "updated_at": updated_at,
+            "valid": not context["firewall_validation_errors"],
+            "validation_errors": context["firewall_validation_errors"],
+            "config_path": context["firewall_settings"].config_path,
+            "config_preview": context["firewall_config_preview"],
+        }
+    )
+
+
+@router.post("/firewall/source-groups", response_model=None)
+async def update_firewall_source_groups(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    form = await request.form()
+    verify_csrf(request, str(form.get("csrf", "")))
+    state = firewall_source_group_state_for_db(db)
+    groups = [_normalized_firewall_source_group(group) for group in state["groups"]]
+    assignments = dict(state["assignments"])
+    action = str(form.get("action") or "update")
+    group_id = str(form.get("group_id") or "")
+
+    if action == "create":
+        name = str(form.get("group_name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Firewall group name is required.")
+        groups.append(
+            _normalized_firewall_source_group(
+                {
+                    "id": _firewall_source_group_id(name, groups),
+                    "name": name,
+                    "entries": _source_group_entries_from_form(form),
+                    "description": "Custom firewall group.",
+                }
+            )
+        )
+    elif action == "rename":
+        name = str(form.get("group_name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Firewall group name is required.")
+        updated = False
+        for index, group in enumerate(groups):
+            if group["id"] != group_id:
+                continue
+            if group["id"] == FIREWALL_ANY_SOURCE_GROUP_ID:
+                raise HTTPException(status_code=422, detail="Any cannot be renamed.")
+            groups[index] = _normalized_firewall_source_group({**group, "name": name})
+            updated = True
+            break
+        if not updated:
+            raise HTTPException(status_code=404, detail="Firewall group not found.")
+    elif action == "delete":
+        if group_id == FIREWALL_ANY_SOURCE_GROUP_ID:
+            raise HTTPException(status_code=422, detail="Any cannot be removed.")
+        deleted_group = next((group for group in groups if group["id"] == group_id), None)
+        if not deleted_group:
+            raise HTTPException(status_code=404, detail="Firewall group not found.")
+        groups = [group for group in groups if group["id"] != group_id]
+        assignments = {
+            rule_name: (FIREWALL_ANY_SOURCE_GROUP_ID if assigned_group == group_id else assigned_group)
+            for rule_name, assigned_group in assignments.items()
+        }
+        groups = _strip_deleted_source_group_references(groups, group_id, str(deleted_group.get("name") or group_id))
+    else:
+        updated = False
+        for index, group in enumerate(groups):
+            if group["id"] != group_id:
+                continue
+            if group["id"] == FIREWALL_ANY_SOURCE_GROUP_ID:
+                groups[index] = _normalized_firewall_source_group({**group, "name": "Any", "entries": ["any"], "builtin": True})
+            else:
+                groups[index] = _normalized_firewall_source_group(
+                    {
+                        **group,
+                        "name": str(form.get("group_name") or group["name"]).strip(),
+                        "entries": _source_group_entries_from_form(form),
+                    }
+                )
+            updated = True
+            break
+        if not updated:
+            raise HTTPException(status_code=404, detail="Firewall group not found.")
+    errors = validate_firewall_source_groups(groups)
+    if errors:
+        return JSONResponse({"status": "error", "errors": errors}, status_code=422)
+    updated_state = {"groups": groups, "assignments": assignments}
+    persist_firewall_source_group_state(db, updated_state)
+    db.commit()
+    updated_at = utcnow().isoformat()
+    record_audit(
+        db,
+        actor=identity.username,
+        action=f"{action}_firewall_source_group",
+        resource_type="firewall",
+        resource_id=group_id or "managed-source-groups",
+    )
+    if request.headers.get("X-LabFoundry-Autosave"):
+        return _firewall_source_group_response(db, updated_at)
+    return RedirectResponse("/firewall", status_code=303)
+
+
+@router.post("/firewall/managed-rules/source-group", response_model=None)
+def update_managed_firewall_rule_source_group(
+    request: Request,
+    rule_name: str = Form(...),
+    source_group_id: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    verify_csrf(request, csrf)
+    context = firewall_context(db)
+    valid_rule_names = {
+        row["name"]
+        for row in context["firewall_managed_rule_rows"]
+        if row["managed_state"] == "generated" and row["source_group_id"]
+    }
+    valid_group_ids = {group["id"] for group in context["firewall_source_groups"]}
+    if rule_name not in valid_rule_names:
+        raise HTTPException(status_code=404, detail="Managed firewall rule not found.")
+    if source_group_id not in valid_group_ids:
+        raise HTTPException(status_code=422, detail="Firewall group does not exist.")
+    state = firewall_source_group_state_for_db(db)
+    state["assignments"][rule_name] = source_group_id
+    persist_firewall_source_group_state(db, state)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_managed_firewall_source_group", resource_type="firewall_rule", resource_id=rule_name)
+    return JSONResponse({"status": "saved", "updated_at": utcnow().isoformat()})
 
 
 def _assign_firewall_rule(
@@ -2616,7 +2871,8 @@ def create_firewall_rule(
         enabled=enabled == "on",
         description=description,
     )
-    errors = validate_firewall_rule(rule)
+    state = firewall_source_group_state_for_db(db)
+    errors = validate_firewall_rule(rule, state["groups"], require_group_addresses=True)
     if errors:
         raise HTTPException(status_code=422, detail=" ".join(errors))
     db.add(rule)
@@ -2666,7 +2922,8 @@ def update_firewall_rule(
         enabled=enabled == "on",
         description=description,
     )
-    errors = validate_firewall_rule(rule)
+    state = firewall_source_group_state_for_db(db)
+    errors = validate_firewall_rule(rule, state["groups"], require_group_addresses=True)
     if errors:
         raise HTTPException(status_code=422, detail=" ".join(errors))
     db.add(rule)

@@ -17,7 +17,7 @@ NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/etc/hostname /etc/labfoundry /etc/systemd/system /etc/systemd/network /etc/systemd/scripts /etc/systemd/timesyncd.conf.d /var/lib/labfoundry /var/log/labfoundry /mnt/labfoundry-vcf-backups /mnt/labfoundry-vcf-registry /mnt/labfoundry-vcf-offline-depot
+ReadWritePaths=/etc/hostname /etc/ssh /etc/labfoundry /etc/systemd/system /etc/systemd/network /etc/systemd/scripts /etc/systemd/timesyncd.conf.d /var/lib/labfoundry /var/log/labfoundry /mnt/labfoundry-vcf-backups /mnt/labfoundry-vcf-registry /mnt/labfoundry-vcf-offline-depot
 
 [Install]
 WantedBy=multi-user.target

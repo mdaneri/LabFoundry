@@ -52,7 +52,7 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>SFTP Settings</h2>
-        <span class="status-pill warn">dry-run</span>
+        <span class="status-pill {{ 'warn' if system_adapter_dry_run else 'good' }}">{{ "dry-run" if system_adapter_dry_run else "live" }}</span>
       </div>
       <form class="form-stack" action="/vcf-backups/settings" method="post" data-autosave-form data-vcf-backup-settings data-autosave-status-id="vcf-backup-settings-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -84,11 +84,11 @@
             <strong data-vcf-derived-address>{{ vcf_backup_settings.listen_address }}</strong>
           </div>
         </div>
-        <div class="derived-field">
+        <div class="derived-field fixed-value-field">
           <span class="field-label"><span>Backup volume mount</span><button class="help-icon" type="button" data-help="Fixed appliance volume mount used to store VCF backup files. Create or attach this volume during appliance provisioning; VCF clients only see the remote directory.">i</button></span>
           <strong data-vcf-storage-path>{{ vcf_backup_settings.storage_path }}</strong>
         </div>
-        <div class="derived-field">
+        <div class="derived-field fixed-value-field">
           <span class="field-label"><span>Remote directory</span><button class="help-icon" type="button" data-help="Directory configured in VCF. With chroot enabled this is short and stable even though files land on the appliance backup volume.">i</button></span>
           <strong data-vcf-remote-directory>{{ vcf_backup_remote_directory }}</strong>
         </div>

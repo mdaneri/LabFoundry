@@ -40,7 +40,7 @@ def test_dhcp_firewall_rules_follow_scope_interface_and_replace_legacy_rule():
 
     config = render_nftables_config(settings, [legacy_rule], generated_rules, replace_labfoundry_dhcp_rules=True)
 
-    assert 'iifname "eth2.50" ip saddr 192.168.50.0/24 udp dport { 53, 67 } accept comment "sitea-dns-dhcp"' in config
+    assert 'iifname "eth2.50" udp dport 67 accept comment "sitea-dns-dhcp"' in config
     assert 'iifname "eth1" ip saddr 192.168.50.0/24 udp dport { 53, 67 } accept comment "sitea-dns-dhcp"' not in config
 
 
@@ -93,7 +93,59 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     assert by_name["eth2-50-dns-tcp"].destination_port == "53"
     assert by_name["eth2-50-dns-udp"].destination_port == "53"
     assert by_name["sitea-dns-dhcp"].interface_name == "eth2.50"
+    assert by_name["sitea-dns-dhcp"].source == "any"
+    assert by_name["sitea-dns-dhcp"].destination_port == "67"
+    assert by_name["mgmt-console"].source == "any"
+    assert by_name["vcf-backups-sftp"].source == "any"
     assert by_name["kms-kmip"].destination_port == "5696"
     assert by_name["vcf-backups-sftp"].destination_port == "22"
     assert by_name["vcf-offline-depot"].destination_port == "8443"
     assert by_name["vcf-private-registry"].destination_port == "9443"
+
+
+def test_managed_service_firewall_rules_use_assigned_source_group():
+    rules = managed_service_firewall_rules(
+        dns_settings=DnsSettings(enabled=False),
+        dhcp_settings=DhcpSettings(enabled=False),
+        dhcp_scopes=[],
+        kms_settings=KmsSettings(enabled=False),
+        vcf_backup_settings=VcfBackupSettings(enabled=True, listen_interface="eth2.50", port=22),
+        vcf_depot_settings=VcfOfflineDepotSettings(enabled=False),
+        vcf_registry_settings=VcfPrivateRegistrySettings(enabled=False),
+        interface_networks={"eth0": "192.168.49.0/24", "eth2.50": "192.168.50.0/24"},
+        source_groups=[
+            {"id": "any", "name": "Any", "entries": ["any"]},
+            {"id": "custom:site-a", "name": "Site A clients", "entries": ["10.10.0.0/16"]},
+            {"id": "custom:managed-clients", "name": "Managed clients", "entries": ["group:custom:site-a", "10.20.0.0/16"]},
+        ],
+        source_group_assignments={"vcf-backups-sftp": "custom:managed-clients"},
+    )
+    settings = FirewallSettings(enabled=True, default_input_policy="drop")
+    config = render_nftables_config(settings, [], rules, replace_labfoundry_service_rules=True)
+
+    assert 'iifname "eth2.50" ip saddr { 10.10.0.0/16, 10.20.0.0/16 } tcp dport 22 accept comment "vcf-backups-sftp"' in config
+
+
+def test_custom_firewall_rules_resolve_source_and_destination_groups():
+    settings = FirewallSettings(enabled=True, default_input_policy="drop")
+    rule = FirewallRule(
+        name="custom-grouped",
+        direction="input",
+        action="accept",
+        protocol="tcp",
+        source="group:custom:clients",
+        destination="group:custom:targets",
+        destination_port="443",
+        interface_name="eth2.50",
+        priority=100,
+        enabled=True,
+    )
+    groups = [
+        {"id": "any", "name": "Any", "entries": ["any"]},
+        {"id": "custom:clients", "name": "Clients", "entries": ["10.10.0.0/16"]},
+        {"id": "custom:targets", "name": "Targets", "entries": ["172.20.0.10/32", "172.20.0.20/32"]},
+    ]
+
+    config = render_nftables_config(settings, [rule], source_groups=groups)
+
+    assert 'iifname "eth2.50" ip saddr 10.10.0.0/16 ip daddr { 172.20.0.10/32, 172.20.0.20/32 } tcp dport 443 accept comment "custom-grouped"' in config

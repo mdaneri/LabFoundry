@@ -9,6 +9,7 @@ LABFOUNDRY_MGMT_ADDRESS="${LABFOUNDRY_MGMT_ADDRESS:-192.168.49.1/24}"
 LABFOUNDRY_MGMT_GATEWAY="${LABFOUNDRY_MGMT_GATEWAY:-192.168.49.254}"
 LABFOUNDRY_MGMT_DNS="${LABFOUNDRY_MGMT_DNS:-1.1.1.1 9.9.9.9}"
 BOOTSTRAP_PASSWORD="${LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD:-}"
+VCF_BACKUP_INITIAL_PASSWORD="${LABFOUNDRY_VCF_BACKUP_INITIAL_PASSWORD:-labfoundry-vcf-backup}"
 
 log_step() {
   printf '\n==> LabFoundry appliance: %s\n' "$1"
@@ -48,15 +49,23 @@ install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/firewall"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/dnsmasq"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-backups"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/dnsmasq"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG"
 install -d -o root -g root -m 0755 /etc/labfoundry
 install -d -o root -g root -m 0755 /etc/labfoundry/dnsmasq.d
+install -d -o root -g root -m 0755 /etc/labfoundry/ssh/authorized_keys
+install -d -o root -g root -m 0755 /etc/ssh/sshd_config.d
 install -d -o root -g root -m 0755 /etc/systemd/network
 install -d -o root -g root -m 0755 /usr/local/lib/labfoundry
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-backups
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-registry
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-offline-depot
+
+if ! id vcf-backup >/dev/null 2>&1; then
+  useradd --home-dir /mnt/labfoundry-vcf-backups --shell /sbin/nologin vcf-backup
+fi
+printf 'vcf-backup:%s\n' "$VCF_BACKUP_INITIAL_PASSWORD" | chpasswd
 
 cat >/etc/labfoundry/build-info <<EOF
 build_time_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")

@@ -105,9 +105,14 @@ def test_network_helper_installs_networkd_files_and_reconfigures_non_management(
     old_managed = networkd_dir / "10-labfoundry-old.network"
     old_managed.write_text("old", encoding="utf-8")
     commands: list[list[str]] = []
+    stdin_commands: list[tuple[list[str], str]] = []
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
         commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_run_with_input(command: list[str], stdin_text: str) -> subprocess.CompletedProcess[str]:
+        stdin_commands.append((command, stdin_text))
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(helper, "NETWORKD_CONFIG_DIR", networkd_dir)
@@ -337,6 +342,139 @@ def test_dnsmasq_helper_rejects_lease_paths_outside_allowlisted_state(monkeypatc
     assert helper._handle_dnsmasq("leases", []) == 2
     captured = capsys.readouterr()
     assert "dnsmasq lease file must stay under" in captured.err
+
+
+def vcf_backups_config_text(*, enabled: bool = True) -> str:
+    if not enabled:
+        return "\n".join(
+            [
+                "# Managed by LabFoundry. Local changes may be overwritten.",
+                "# LabFoundry VCF Backups enabled: false",
+                "# LabFoundry VCF Backups user: vcf-backup",
+                "# Backup volume mount: /mnt/labfoundry-vcf-backups",
+                "# VCF remote directory: /backups",
+                "# VCF Backup SFTP desired state is disabled.",
+                "",
+            ]
+        )
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "# LabFoundry VCF Backups enabled: true",
+            "# LabFoundry VCF Backups user: vcf-backup",
+            "# Backup volume mount: /mnt/labfoundry-vcf-backups",
+            "# VCF remote directory: /backups",
+            "# The selected listen target is enforced by the LabFoundry firewall apply unit.",
+            "",
+            "# Service listener target: 192.168.50.1:22",
+            "Match User vcf-backup",
+            "  AuthorizedKeysFile /etc/labfoundry/ssh/authorized_keys/%u",
+            "  ChrootDirectory /mnt/labfoundry-vcf-backups",
+            "  ForceCommand internal-sftp -d /backups",
+            "  PasswordAuthentication yes",
+            "  PubkeyAuthentication yes",
+            "  MaxSessions 4",
+            "  PermitTTY no",
+            "  PermitTunnel no",
+            "  AllowAgentForwarding no",
+            "  AllowTcpForwarding no",
+            "  X11Forwarding no",
+            "",
+        ]
+    )
+
+
+def test_vcf_backups_helper_validates_staged_config(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "vcf-backups"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-vcf-backups-sshd.conf"
+    config_path.write_text(vcf_backups_config_text(), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "VCF_BACKUPS_APPLY_DIR", apply_dir)
+
+    assert helper._handle_vcf_backups("validate", [str(config_path)]) == 0
+    captured = capsys.readouterr()
+    assert '"vcf_backups": "validation ok"' in captured.out
+    assert '"username": "vcf-backup"' in captured.out
+
+
+def test_vcf_backups_helper_rejects_unmanaged_config(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-vcf-backups-sshd.conf"
+    config_path.write_text("Match User root\n", encoding="utf-8")
+
+    errors = helper._vcf_backups_config_errors(config_path)
+
+    assert "VCF backups config must be rendered by LabFoundry." in errors
+
+
+def test_vcf_backups_helper_apply_installs_sshd_dropin_and_storage(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "vcf-backups"
+    config_dir = tmp_path / "etc" / "ssh" / "sshd_config.d"
+    labfoundry_ssh_dir = tmp_path / "etc" / "labfoundry" / "ssh" / "authorized_keys"
+    storage_path = tmp_path / "mnt" / "labfoundry-vcf-backups"
+    sshd_config = tmp_path / "etc" / "ssh" / "sshd_config"
+    apply_dir.mkdir(parents=True)
+    sshd_config.parent.mkdir(parents=True)
+    sshd_config.write_text("Subsystem sftp internal-sftp\n", encoding="utf-8")
+    config_path = apply_dir / "labfoundry-vcf-backups-sshd.conf"
+    config_path.write_text(vcf_backups_config_text(), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "VCF_BACKUPS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "VCF_BACKUPS_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(helper, "VCF_BACKUPS_CONFIG_PATH", config_dir / "labfoundry-vcf-backups.conf")
+    monkeypatch.setattr(helper, "VCF_BACKUPS_AUTHORIZED_KEYS_DIR", labfoundry_ssh_dir)
+    def fake_path(value):
+        if value == "/etc/ssh/sshd_config":
+            return sshd_config
+        if value == "/mnt/labfoundry-vcf-backups":
+            return storage_path
+        return Path(value)
+
+    monkeypatch.setattr(helper, "Path", fake_path)
+    monkeypatch.setattr(helper, "_chown_path", lambda path, uid, gid: None)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: {"id": "id", "sshd": "sshd"}.get(command))
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_vcf_backups("apply", [str(config_path)]) == 0
+
+    assert (config_dir / "labfoundry-vcf-backups.conf").is_file()
+    assert "Match User vcf-backup" in (config_dir / "labfoundry-vcf-backups.conf").read_text(encoding="utf-8")
+    assert (storage_path / "backups").is_dir()
+    assert (labfoundry_ssh_dir / "vcf-backup").is_file()
+    assert sshd_config.read_text(encoding="utf-8").startswith("Include /etc/ssh/sshd_config.d/*.conf\n")
+    assert ["id", "vcf-backup"] in commands
+    assert all(arg != "labfoundry-vcf-backup" for command in commands for arg in command)
+    assert ["sshd", "-t"] in commands
+    assert ["systemctl", "restart", "sshd"] in commands
+
+
+def test_vcf_backups_helper_apply_requires_existing_os_user(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "vcf-backups"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-vcf-backups-sshd.conf"
+    config_path.write_text(vcf_backups_config_text(), encoding="utf-8")
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command == ["id", "vcf-backup"]:
+            return subprocess.CompletedProcess(command, 1, "", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "VCF_BACKUPS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "id" if command == "id" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_vcf_backups("apply", [str(config_path)]) == 2
+    captured = capsys.readouterr()
+    assert "VCF backups OS user vcf-backup does not exist" in captured.err
 
 
 def appliance_settings_json(

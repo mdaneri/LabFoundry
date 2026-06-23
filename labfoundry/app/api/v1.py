@@ -133,10 +133,13 @@ from labfoundry.app.services.firewall import (
     FIREWALL_DIRECTIONS,
     FIREWALL_POLICIES,
     FIREWALL_PROTOCOLS,
+    FIREWALL_SOURCE_GROUPS_SETTING_KEY,
     FIREWALL_STAGED_CONFIG_PATH,
     firewall_interface_networks,
+    firewall_source_group_state,
     managed_service_firewall_rules,
     render_nftables_config,
+    validate_firewall_source_groups,
     validate_firewall_rule,
     validate_firewall_state,
 )
@@ -354,6 +357,8 @@ def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[Fir
     dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
     physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    interface_networks = firewall_interface_networks(physical_interfaces, vlan_interfaces)
+    source_group_state = firewall_source_group_state(setting_value(db, FIREWALL_SOURCE_GROUPS_SETTING_KEY), interface_networks)
     generated_rules = managed_service_firewall_rules(
         dns_settings=dns_settings,
         dhcp_settings=dhcp_settings,
@@ -362,13 +367,30 @@ def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[Fir
         vcf_backup_settings=get_vcf_backup_settings(db),
         vcf_depot_settings=get_vcf_offline_depot_settings(db),
         vcf_registry_settings=get_vcf_private_registry_settings(db),
-        interface_networks=firewall_interface_networks(physical_interfaces, vlan_interfaces),
+        interface_networks=interface_networks,
+        source_groups=source_group_state["groups"],
+        source_group_assignments=source_group_state["assignments"],
     )
     return (
         settings,
         rules,
-        render_nftables_config(settings, rules, generated_rules, replace_labfoundry_service_rules=True),
-        validate_firewall_state(settings, rules, generated_rules, replace_labfoundry_service_rules=True),
+        render_nftables_config(
+            settings,
+            rules,
+            generated_rules,
+            source_groups=source_group_state["groups"],
+            replace_labfoundry_service_rules=True,
+        ),
+        [
+            *validate_firewall_source_groups(source_group_state["groups"]),
+            *validate_firewall_state(
+                settings,
+                rules,
+                generated_rules,
+                source_groups=source_group_state["groups"],
+                replace_labfoundry_service_rules=True,
+            ),
+        ],
     )
 
 
@@ -1548,6 +1570,13 @@ def list_firewall_rules(identity: Annotated[Identity, Depends(require_scope("rea
     return [FirewallRuleResponse.model_validate(row) for row in db.execute(select(FirewallRule).order_by(FirewallRule.priority, FirewallRule.name)).scalars().all()]
 
 
+def firewall_groups_for_api_validation(db: Session) -> list[dict]:
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    interface_networks = firewall_interface_networks(physical_interfaces, vlan_interfaces)
+    return firewall_source_group_state(setting_value(db, FIREWALL_SOURCE_GROUPS_SETTING_KEY), interface_networks)["groups"]
+
+
 @router.post("/firewall/rules", response_model=FirewallRuleResponse, tags=["Firewall"], operation_id="createFirewallRule")
 def create_firewall_rule_api(
     payload: FirewallRuleCreate,
@@ -1555,7 +1584,7 @@ def create_firewall_rule_api(
     db: Session = Depends(get_db),
 ) -> FirewallRuleResponse:
     rule = assign_firewall_rule_values(FirewallRule(), payload.model_dump())
-    errors = validate_firewall_rule(rule)
+    errors = validate_firewall_rule(rule, firewall_groups_for_api_validation(db), require_group_addresses=True)
     if errors:
         raise HTTPException(status_code=422, detail=" ".join(errors))
     db.add(rule)
@@ -1580,7 +1609,7 @@ def update_firewall_rule_api(
     if not rule:
         raise HTTPException(status_code=404, detail="Firewall rule not found")
     assign_firewall_rule_values(rule, payload.model_dump())
-    errors = validate_firewall_rule(rule)
+    errors = validate_firewall_rule(rule, firewall_groups_for_api_validation(db), require_group_addresses=True)
     if errors:
         raise HTTPException(status_code=422, detail=" ".join(errors))
     db.add(rule)

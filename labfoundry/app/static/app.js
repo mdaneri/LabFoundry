@@ -1252,6 +1252,24 @@ function newFirewallRuleRow(defaultInterface = "") {
   };
 }
 
+function firewallGroupOptions(groups = []) {
+  const options = { any: "Any" };
+  groups.forEach((group) => {
+    if (!group || !group.id || group.id === "any") {
+      return;
+    }
+    options[`group:${group.id}`] = group.name || group.id;
+  });
+  return options;
+}
+
+function firewallGroupFormatter(groupOptions) {
+  return (cell) => {
+    const value = String(cell.getValue() || "any");
+    return escapeHtml(groupOptions[value] || value);
+  };
+}
+
 function hasRequiredFirewallRuleFields(data) {
   return Boolean((data.name || "").trim());
 }
@@ -1324,14 +1342,18 @@ function initializeFirewallRulesTable() {
   const actions = roleValues(JSON.parse(tableElement.dataset.actions || "[]"));
   const protocols = roleValues(JSON.parse(tableElement.dataset.protocols || "[]"));
   const interfaces = JSON.parse(tableElement.dataset.interfaces || "[]");
+  const groups = JSON.parse(tableElement.dataset.groups || "[]");
   const interfaceOptions = Object.fromEntries(["", ...interfaces].map((item) => [item, item || "any"]));
+  const groupOptions = firewallGroupOptions(groups);
+  const groupValueFormatter = firewallGroupFormatter(groupOptions);
   const rows = [...JSON.parse(tableElement.dataset.rules || "[]"), newFirewallRuleRow(interfaces[0] || "")];
+  const tableHeight = `${Math.min(Math.max(rows.length * 42 + 42, 90), 240)}px`;
   try {
     new Tabulator(tableElement, {
       data: rows,
       index: "id",
       layout: "fitColumns",
-      height: "520px",
+      height: tableHeight,
       rowHeight: 42,
       placeholder: "No firewall rules configured.",
       reactiveData: false,
@@ -1374,8 +1396,22 @@ function initializeFirewallRulesTable() {
           width: 110,
           cellEdited: (cell) => autoSaveFirewallRule(cell, csrf),
         },
-        { title: "Source", field: "source", editor: "input", cellEdited: (cell) => autoSaveFirewallRule(cell, csrf) },
-        { title: "Destination", field: "destination", editor: "input", cellEdited: (cell) => autoSaveFirewallRule(cell, csrf) },
+        {
+          title: "Source",
+          field: "source",
+          editor: "list",
+          editorParams: { values: groupOptions },
+          formatter: groupValueFormatter,
+          cellEdited: (cell) => autoSaveFirewallRule(cell, csrf),
+        },
+        {
+          title: "Destination",
+          field: "destination",
+          editor: "list",
+          editorParams: { values: groupOptions },
+          formatter: groupValueFormatter,
+          cellEdited: (cell) => autoSaveFirewallRule(cell, csrf),
+        },
         { title: "Ports", field: "destination_port", editor: "input", width: 120, cellEdited: (cell) => autoSaveFirewallRule(cell, csrf) },
         {
           title: "Interface",
@@ -1415,6 +1451,35 @@ function managedFirewallStatusFormatter(cell) {
   return `<span class="status-pill ${style}">${escapeHtml(value)}</span>`;
 }
 
+async function updateManagedFirewallSourceGroup(cell, csrf) {
+  const data = cell.getRow().getData();
+  if (data.managed_state !== "generated") {
+    if (typeof cell.restoreOldValue === "function") {
+      cell.restoreOldValue();
+    }
+    return;
+  }
+  const body = new FormData();
+  body.set("csrf", csrf);
+  body.set("rule_name", data.name || "");
+  body.set("source_group_id", data.source_group_id || "");
+  const response = await fetch("/firewall/managed-rules/source-group", {
+    method: "POST",
+    body,
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    if (typeof cell.restoreOldValue === "function") {
+      cell.restoreOldValue();
+    }
+    const text = await response.text();
+    showCaMessage("firewall-rule-error", text.trim().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ") || "The managed firewall group could not be saved.");
+    return;
+  }
+  showTransientGridStatus("Saved");
+  window.location.reload();
+}
+
 function initializeManagedFirewallRulesTable() {
   const tableElement = document.getElementById("managed-firewall-rules-table");
   if (!(tableElement instanceof HTMLElement)) {
@@ -1425,23 +1490,34 @@ function initializeManagedFirewallRulesTable() {
     return;
   }
   const rows = JSON.parse(tableElement.dataset.rules || "[]");
+  const csrf = tableElement.dataset.csrf || "";
+  const sourceGroups = JSON.parse(tableElement.dataset.sourceGroups || "[]");
+  const sourceGroupOptions = Object.fromEntries(sourceGroups.map((group) => [group.id, group.name]));
   try {
     new Tabulator(tableElement, {
       data: rows,
       index: "id",
       layout: "fitColumns",
-      height: "300px",
+      height: "100%",
       rowHeight: 42,
       placeholder: "No managed service rules.",
       reactiveData: false,
       columns: [
         { title: "Status", field: "managed_status", formatter: managedFirewallStatusFormatter, width: 120 },
         { title: "Name", field: "name" },
+        {
+          title: "Source",
+          field: "source_group_id",
+          editor: "list",
+          editorParams: { values: sourceGroupOptions },
+          formatter: (cell) => escapeHtml(cell.getRow().getData().source_group_name || cell.getValue() || ""),
+          width: 170,
+          cellEdited: (cell) => updateManagedFirewallSourceGroup(cell, csrf),
+          editable: (cell) => cell.getRow().getData().managed_state === "generated" && Boolean(cell.getRow().getData().source_group_id),
+        },
         { title: "Direction", field: "direction", width: 120 },
         { title: "Action", field: "action", width: 105 },
         { title: "Protocol", field: "protocol", width: 110 },
-        { title: "Source", field: "source" },
-        { title: "Destination", field: "destination" },
         { title: "Ports", field: "destination_port", width: 120 },
         { title: "Interface", field: "interface_name", width: 120 },
         { title: "Priority", field: "priority", width: 100 },
@@ -3430,6 +3506,7 @@ function initializeAutosaveForms() {
       return;
     }
     const statusElement = document.getElementById(form.dataset.autosaveStatusId || "");
+    const inputAutosave = form.dataset.autosaveTrigger !== "change";
     let timer = 0;
     let inFlightController = null;
 
@@ -3441,7 +3518,8 @@ function initializeAutosaveForms() {
       inFlightController = new AbortController();
       setAutosaveStatus(statusElement, "Saving changes...", "saving");
       try {
-        const response = await fetch(form.action, {
+        const actionUrl = form.getAttribute("action") || window.location.href;
+        const response = await fetch(new URL(actionUrl, window.location.href), {
           method: form.method || "POST",
           body: new FormData(form),
           credentials: "same-origin",
@@ -3474,6 +3552,9 @@ function initializeAutosaveForms() {
     };
 
     form.addEventListener("input", (event) => {
+      if (!inputAutosave) {
+        return;
+      }
       if (event.target instanceof HTMLInputElement && event.target.type === "file") {
         return;
       }
@@ -3575,10 +3656,220 @@ function updateFirewallDesiredState(payload = {}) {
   if (configPreview instanceof HTMLElement && typeof payload.config_preview === "string") {
     configPreview.textContent = payload.config_preview;
   }
+  const refreshStatus = validationPanel.querySelector("[data-firewall-validation-refresh]");
+  if (refreshStatus instanceof HTMLElement) {
+    const updatedAt = typeof payload.updated_at === "string" ? new Date(payload.updated_at) : new Date();
+    const timestamp = Number.isNaN(updatedAt.getTime()) ? new Date() : updatedAt;
+    refreshStatus.textContent = `Preview refreshed ${timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}.`;
+    refreshStatus.dataset.state = "saved";
+  }
+  validationPanel.classList.remove("validation-panel-refreshed");
+  void validationPanel.offsetWidth;
+  validationPanel.classList.add("validation-panel-refreshed");
+}
+
+const FIREWALL_SOURCE_GROUP_SELECTION_KEY = "labfoundry:firewall:active-source-group";
+
+function rememberFirewallSourceGroup(groupId) {
+  try {
+    window.localStorage.setItem(FIREWALL_SOURCE_GROUP_SELECTION_KEY, groupId || "");
+  } catch {
+    // Remembering the selected editor is only a convenience.
+  }
+}
+
+function storedFirewallSourceGroup() {
+  try {
+    return window.localStorage.getItem(FIREWALL_SOURCE_GROUP_SELECTION_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function showFirewallSourceGroupEditor(manager, groupId) {
+  manager.querySelectorAll("[data-source-group-editor]").forEach((editor) => {
+    if (!(editor instanceof HTMLElement)) {
+      return;
+    }
+    const active = editor.dataset.sourceGroupId === groupId;
+    editor.classList.toggle("active", active);
+    if (active) {
+      editor.removeAttribute("hidden");
+    } else {
+      editor.setAttribute("hidden", "");
+    }
+  });
+}
+
+function triggerSourceGroupAutosave(form) {
+  if (form instanceof HTMLFormElement) {
+    form.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+}
+
+function addSourceGroupEntry(form, value) {
+  const list = form.querySelector("[data-source-group-entry-list]");
+  const entry = String(value || "").trim();
+  if (!(list instanceof HTMLElement) || !entry) {
+    return;
+  }
+  const existingRows = Array.from(list.querySelectorAll(".source-group-entry-row"));
+  if (entry.toLowerCase() === "any") {
+    existingRows.forEach((row) => row.remove());
+  } else {
+    existingRows.forEach((row) => {
+      const input = row.querySelector('input[name="group_entries"]');
+      if (input instanceof HTMLInputElement && input.value.trim().toLowerCase() === "any") {
+        row.remove();
+      }
+    });
+  }
+  const duplicate = Array.from(list.querySelectorAll('input[name="group_entries"]')).some((input) => input instanceof HTMLInputElement && input.value.trim().toLowerCase() === entry.toLowerCase());
+  if (duplicate) {
+    triggerSourceGroupAutosave(form);
+    return;
+  }
+  const row = document.createElement("div");
+  row.className = "source-group-entry-row";
+  const input = document.createElement("input");
+  input.type = "hidden";
+  input.name = "group_entries";
+  input.value = entry;
+  const label = document.createElement("span");
+  label.className = "source-group-entry-label";
+  label.textContent = entry;
+  const remove = document.createElement("button");
+  remove.className = "icon-button source-group-entry-remove";
+  remove.type = "button";
+  remove.dataset.sourceGroupRemoveEntry = "";
+  remove.setAttribute("aria-label", "Remove entry");
+  remove.textContent = "x";
+  row.append(input, label, remove);
+  list.append(row);
+  triggerSourceGroupAutosave(form);
+}
+
+function ensureSourceGroupHasEntry(form) {
+  const list = form.querySelector("[data-source-group-entry-list]");
+  if (!(list instanceof HTMLElement) || list.querySelector("[name='group_entries']")) {
+    return;
+  }
+  addSourceGroupEntry(form, "any");
+}
+
+function initializeFirewallSourceGroupManager() {
+  const renameModal = document.getElementById("firewall-rename-group-modal");
+  const renameForm = renameModal instanceof HTMLDialogElement ? renameModal.querySelector("form") : null;
+  const renameGroupId = renameForm instanceof HTMLFormElement ? renameForm.querySelector('input[name="group_id"]') : null;
+  const renameGroupName = renameForm instanceof HTMLFormElement ? renameForm.querySelector('input[name="group_name"]') : null;
+  if (renameModal instanceof HTMLDialogElement) {
+    renameModal.querySelectorAll("[data-firewall-rename-group-cancel]").forEach((button) => {
+      button.addEventListener("click", () => renameModal.close());
+    });
+  }
+
+  document.querySelectorAll("[data-source-group-manager]").forEach((manager) => {
+    if (!(manager instanceof HTMLElement)) {
+      return;
+    }
+    const select = manager.querySelector("[data-source-group-select]");
+    if (!(select instanceof HTMLSelectElement)) {
+      return;
+    }
+    const storedGroup = storedFirewallSourceGroup();
+    if (storedGroup && Array.from(select.options).some((option) => option.value === storedGroup)) {
+      select.value = storedGroup;
+    }
+    showFirewallSourceGroupEditor(manager, select.value);
+    select.addEventListener("change", () => {
+      rememberFirewallSourceGroup(select.value);
+      showFirewallSourceGroupEditor(manager, select.value);
+    });
+  });
+
+  document.querySelectorAll("[data-source-group-editor]").forEach((editor) => {
+    if (!(editor instanceof HTMLElement)) {
+      return;
+    }
+    const form = editor.querySelector('form[data-firewall-source-groups]');
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    form.addEventListener("input", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement) || target.name !== "group_name") {
+        return;
+      }
+      const manager = editor.closest("[data-source-group-manager]");
+      const select = manager?.querySelector("[data-source-group-select]");
+      const groupId = editor.dataset.sourceGroupId || "";
+      const option = select instanceof HTMLSelectElement ? Array.from(select.options).find((item) => item.value === groupId) : null;
+      if (option) {
+        option.textContent = target.value.trim() || groupId;
+      }
+    });
+    form.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+      if (target.matches("[data-source-group-remove-entry]")) {
+        event.preventDefault();
+        target.closest(".source-group-entry-row")?.remove();
+        ensureSourceGroupHasEntry(form);
+        triggerSourceGroupAutosave(form);
+        return;
+      }
+      if (target.matches("[data-source-group-add-any]")) {
+        event.preventDefault();
+        addSourceGroupEntry(form, "any");
+        return;
+      }
+      if (target.matches("[data-source-group-add-cidr]")) {
+        event.preventDefault();
+        const input = form.querySelector("[data-source-group-cidr-input]");
+        if (input instanceof HTMLInputElement) {
+          addSourceGroupEntry(form, input.value);
+          input.value = "";
+          input.focus();
+        }
+        return;
+      }
+      if (target.matches("[data-source-group-add-ref]")) {
+        event.preventDefault();
+        const select = form.querySelector("[data-source-group-ref-select]");
+        if (select instanceof HTMLSelectElement && select.value) {
+          addSourceGroupEntry(form, select.value);
+          select.value = "";
+        }
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-source-group-rename]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!(renameModal instanceof HTMLDialogElement) || !(renameGroupId instanceof HTMLInputElement) || !(renameGroupName instanceof HTMLInputElement)) {
+        return;
+      }
+      renameGroupId.value = button instanceof HTMLElement ? button.dataset.groupId || "" : "";
+      renameGroupName.value = button instanceof HTMLElement ? button.dataset.groupName || "" : "";
+      renameModal.showModal();
+      renameGroupName.focus();
+      renameGroupName.select();
+    });
+  });
 }
 
 function initializeFirewallSettings() {
   document.querySelectorAll('form[action="/firewall/settings"]').forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      updateFirewallDesiredState(event.detail || {});
+    });
+  });
+  document.querySelectorAll("[data-firewall-source-groups]").forEach((form) => {
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
@@ -5025,6 +5316,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable)
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeManagedFirewallRulesTable);
+document.addEventListener("DOMContentLoaded", initializeFirewallSourceGroupManager);
 document.addEventListener("DOMContentLoaded", initializeServicesTable);
 document.addEventListener("DOMContentLoaded", initializeUsersTable);
 document.addEventListener("DOMContentLoaded", initializeUserPasswordForm);

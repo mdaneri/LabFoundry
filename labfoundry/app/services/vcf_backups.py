@@ -6,7 +6,7 @@ from labfoundry.app.models import User, VcfBackupSettings
 VCF_BACKUP_DEFAULT_VOLUME_MOUNT = "/mnt/labfoundry-vcf-backups"
 VCF_BACKUP_REMOTE_DIRECTORY = "/backups"
 VCF_BACKUP_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/vcf-backups/labfoundry-vcf-backups-sshd.conf"
-VCF_BACKUP_EFFECTIVE_CONFIG_PATH = "/etc/labfoundry/ssh/labfoundry-vcf-backups-sshd.conf"
+VCF_BACKUP_EFFECTIVE_CONFIG_PATH = "/etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf"
 
 
 def vcf_backup_remote_directory(settings: VcfBackupSettings) -> str:
@@ -74,7 +74,7 @@ def render_vcf_backup_config(settings: VcfBackupSettings) -> str:
         f"# LabFoundry VCF Backups user: {username}",
         f"# Backup volume mount: {settings.storage_path}",
         f"# VCF remote directory: {remote_directory}",
-        "# This file is used by the standalone labfoundry-vcf-backups.service OpenSSH instance.",
+        "# The selected listen target is enforced by the LabFoundry firewall apply unit.",
         "",
     ]
     if not settings.enabled:
@@ -82,47 +82,33 @@ def render_vcf_backup_config(settings: VcfBackupSettings) -> str:
 
     lines = [
         *common_header,
-        f"Port {settings.port}",
-        f"ListenAddress {settings.listen_address}",
-        "PidFile /run/labfoundry-vcf-backups/sshd.pid",
-        "AuthorizedKeysFile /etc/labfoundry/ssh/authorized_keys/%u",
-        f"AllowUsers {username}",
-        "PermitTTY no",
-        "PermitTunnel no",
-        "AllowAgentForwarding no",
-        "AllowTcpForwarding no",
-        "X11Forwarding no",
-        "Subsystem sftp internal-sftp",
-        "",
+        f"# Service listener target: {settings.listen_address}:{settings.port}",
         f"Match User {username}",
+        "  AuthorizedKeysFile /etc/labfoundry/ssh/authorized_keys/%u",
         f"  ChrootDirectory {settings.storage_path}",
         f"  ForceCommand internal-sftp -d {remote_directory}",
         f"  PasswordAuthentication {'yes' if settings.allow_password_auth else 'no'}",
         f"  PubkeyAuthentication {'yes' if settings.allow_public_key_auth else 'no'}",
         f"  MaxSessions {settings.max_sessions}",
+        "  PermitTTY no",
+        "  PermitTunnel no",
+        "  AllowAgentForwarding no",
         "  AllowTcpForwarding no",
         "  X11Forwarding no",
     ]
     if not settings.chroot_enabled:
         lines = [
             *common_header,
-            f"Port {settings.port}",
-            f"ListenAddress {settings.listen_address}",
-            "PidFile /run/labfoundry-vcf-backups/sshd.pid",
-            "AuthorizedKeysFile /etc/labfoundry/ssh/authorized_keys/%u",
-            f"AllowUsers {username}",
-            "PermitTTY no",
-            "PermitTunnel no",
-            "AllowAgentForwarding no",
-            "AllowTcpForwarding no",
-            "X11Forwarding no",
-            "Subsystem sftp internal-sftp",
-            "",
+            f"# Service listener target: {settings.listen_address}:{settings.port}",
             f"Match User {username}",
+            "  AuthorizedKeysFile /etc/labfoundry/ssh/authorized_keys/%u",
             f"  ForceCommand internal-sftp -d {remote_directory}",
             f"  PasswordAuthentication {'yes' if settings.allow_password_auth else 'no'}",
             f"  PubkeyAuthentication {'yes' if settings.allow_public_key_auth else 'no'}",
             f"  MaxSessions {settings.max_sessions}",
+            "  PermitTTY no",
+            "  PermitTunnel no",
+            "  AllowAgentForwarding no",
             "  AllowTcpForwarding no",
             "  X11Forwarding no",
         ]

@@ -634,9 +634,17 @@ def test_firewall_preview_derives_dns_dhcp_rule_from_dhcp_scope_vlan(client):
 
     assert firewall.status_code == 200
     assert "Managed Service Rules" in firewall.text
+    assert "Groups" in firewall.text
+    assert "data-firewall-validation-refresh" in firewall.text
+    assert "Add group" in firewall.text
+    assert "No custom groups yet." in firewall.text
+    assert 'data-source-group-select' not in firewall.text
+    assert firewall.text.index('class="form-stack source-group-create-form"') < firewall.text.index('class="source-group-manager"')
     assert "eth2.50" in firewall.text
     assert "data-interfaces=" in firewall.text
     assert "&#34;eth2.50&#34;" in firewall.text
+    assert "data-source-groups=" in firewall.text
+    assert "data-groups=" in firewall.text
     editable_payload = re.search(r'id="firewall-rules-table"[^>]+data-rules=\'([^\']*)\'', firewall.text, re.S)
     managed_payload = re.search(r'id="managed-firewall-rules-table"[^>]+data-rules=\'([^\']*)\'', firewall.text, re.S)
     assert editable_payload is not None
@@ -646,9 +654,87 @@ def test_firewall_preview_derives_dns_dhcp_rule_from_dhcp_scope_vlan(client):
     assert not any(row["name"] == "sitea-dns-dhcp" and row["interface_name"] == "eth1" for row in editable_rows)
     assert any(row["name"] == "sitea-dns-dhcp" and row["interface_name"] == "eth1" and row["managed_state"] == "replaced" for row in managed_rows)
     assert any(row["name"] == "sitea-dns-dhcp" and row["interface_name"] == "eth2.50" and row["managed_state"] == "generated" for row in managed_rows)
-    assert any(row["name"] == "mgmt-console" and row["managed_state"] == "generated" for row in managed_rows)
-    assert 'iifname &#34;eth2.50&#34; ip saddr 192.168.50.0/24 udp dport { 53, 67 } accept comment &#34;sitea-dns-dhcp&#34;' in firewall.text
+    assert any(row["name"] == "mgmt-console" and row["managed_state"] == "generated" and row["source_group_id"] == "any" and row["source_group_name"] == "Any" for row in managed_rows)
+    generated_index = next(i for i, row in enumerate(managed_rows) if row["name"] == "sitea-dns-dhcp" and row["managed_state"] == "generated")
+    replaced_index = next(i for i, row in enumerate(managed_rows) if row["name"] == "sitea-dns-dhcp" and row["managed_state"] == "replaced")
+    assert replaced_index == generated_index + 1
+    assert 'iifname &#34;eth2.50&#34; udp dport 67 accept comment &#34;sitea-dns-dhcp&#34;' in firewall.text
     assert 'iifname &#34;eth1&#34; ip saddr 192.168.50.0/24 udp dport { 53, 67 } accept comment &#34;sitea-dns-dhcp&#34;' not in firewall.text
+
+    csrf = firewall.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    group_response = client.post(
+        "/firewall/source-groups",
+        data={
+            "csrf": csrf,
+            "action": "create",
+            "group_name": "Managed clients",
+            "group_entries": "any",
+        },
+    )
+    assert group_response.status_code == 200
+
+    group_response = client.post(
+        "/firewall/source-groups",
+        data={
+            "csrf": csrf,
+            "action": "update",
+            "group_id": "custom:managed-clients",
+            "group_name": "Managed clients",
+            "group_entries": "10.77.0.0/16",
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert group_response.status_code == 200
+    assert group_response.json()["status"] == "saved"
+    assert group_response.json()["updated_at"]
+    assert "config_preview" in group_response.json()
+
+    rename_response = client.post(
+        "/firewall/source-groups",
+        data={
+            "csrf": csrf,
+            "action": "rename",
+            "group_id": "custom:managed-clients",
+            "group_name": "Managed client sources",
+        },
+    )
+    assert rename_response.status_code == 200
+
+    assignment_response = client.post(
+        "/firewall/managed-rules/source-group",
+        data={"csrf": csrf, "rule_name": "mgmt-console", "source_group_id": "custom:managed-clients"},
+    )
+    assert assignment_response.status_code == 200
+
+    rule_response = client.post(
+        "/firewall/rules",
+        data={
+            "csrf": csrf,
+            "name": "grouped-custom",
+            "direction": "input",
+            "action": "accept",
+            "protocol": "tcp",
+            "source": "group:custom:managed-clients",
+            "destination": "group:custom:managed-clients",
+            "destination_port": "443",
+            "interface_name": "eth2.50",
+            "priority": "101",
+            "enabled": "on",
+        },
+    )
+    assert rule_response.status_code == 200
+
+    updated_firewall = client.get("/firewall")
+    assert "10.77.0.0/16" in updated_firewall.text
+    assert "Managed client sources" in updated_firewall.text
+    assert "data-source-group-rename" in updated_firewall.text
+    source_group_manager = re.search(r'<div class="source-group-manager" data-source-group-manager>(.*?)</div>\s*<dialog id="firewall-rename-group-modal"', updated_firewall.text, re.S)
+    assert source_group_manager is not None
+    assert 'data-source-group-select' in source_group_manager.group(1)
+    assert '<option value="any">' not in source_group_manager.group(1)
+    assert 'iifname &#34;eth0&#34; ip saddr 10.77.0.0/16 tcp dport { 22, 443, 8000 } accept comment &#34;mgmt-console&#34;' in updated_firewall.text
+    assert 'iifname &#34;eth2.50&#34; ip saddr 10.77.0.0/16 ip daddr 10.77.0.0/16 tcp dport 443 accept comment &#34;grouped-custom&#34;' in updated_firewall.text
+    assert 'iifname &#34;eth2.50&#34; udp dport 67 accept comment &#34;sitea-dns-dhcp&#34;' in updated_firewall.text
 
     apply_page = client.get("/appliance-apply")
     assert apply_page.status_code == 200
@@ -832,8 +918,9 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert 'data-autosave-status-id="vcf-backup-settings-status"' in page.text
     assert 'href="/appliance-apply"' in page.text
     assert "Review appliance changes" in page.text
-    assert "internal-sftp" in page.text
+    assert "VCF Backup SFTP desired state is disabled" in page.text
     assert "Derived address" in page.text
+    assert page.text.count("fixed-value-field") >= 2
     assert "<span>Config path</span>" not in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
@@ -844,6 +931,20 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert "initializeVcfBackupSettings" in app_js.text
     assert "updateVcfBackupDerivedAddress" in app_js.text
     assert "updateVcfBackupValidation" in app_js.text
+
+
+def test_vcf_backups_settings_badge_reflects_live_adapter_mode(client, monkeypatch):
+    from labfoundry.app.config import get_settings
+
+    login(client)
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+
+    page = client.get("/vcf-backups")
+
+    assert page.status_code == 200
+    assert '<span class="status-pill good">live</span>' in page.text
+    assert '<span class="status-pill warn">dry-run</span>' not in page.text
 
 
 def test_vcf_private_registry_page_models_harbor_and_bundle_relocation(client):
@@ -1323,7 +1424,7 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
     assert response.json()["storage_path"] == "/mnt/labfoundry-vcf-backups"
     assert response.json()["remote_directory"] == "/backups"
     assert response.json()["valid"] is True
-    assert "ListenAddress 192.168.50.1" in response.json()["config_preview"]
+    assert "# Service listener target: 192.168.50.1:22" in response.json()["config_preview"]
     assert "Match User vcf-backup" in response.json()["config_preview"]
     assert "ForceCommand internal-sftp -d /backups" in response.json()["config_preview"]
     assert "enabled" in client.get("/vcf-backups").text
@@ -1348,12 +1449,32 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
 
 
 def test_vcf_backups_apply_task_captures_sftp_config(client):
+    import re
+
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import Job
 
     login(client)
+    page = client.get("/vcf-backups")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    user_id = re.search(r'<option value="(\d+)" selected>vcf-backup</option>', page.text).group(1)
+    settings_response = client.post(
+        "/vcf-backups/settings",
+        data={
+            "enabled": "on",
+            "listen_interface": "eth2",
+            "port": "22",
+            "sftp_user_id": user_id,
+            "chroot_enabled": "on",
+            "allow_password_auth": "on",
+            "allow_public_key_auth": "on",
+            "max_sessions": "4",
+            "csrf": csrf,
+        },
+    )
+    assert settings_response.status_code == 200
     page = client.get("/vcf-backups")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "vcf_backups"})
@@ -1366,6 +1487,26 @@ def test_vcf_backups_apply_task_captures_sftp_config(client):
         assert "labfoundry-helper" in (job.result or "")
         assert "vcf-backups" in (job.result or "")
         assert "internal-sftp" in (job.result or "")
+
+
+def test_appliance_apply_unit_keeps_raw_config_for_helper_staging():
+    from labfoundry.app.ui import make_appliance_apply_unit
+
+    unit = make_appliance_apply_unit(
+        unit_id="vcf_backups",
+        label="VCF Backups",
+        page_url="/vcf-backups",
+        context={},
+        summary=["service enabled"],
+        validation_errors=[],
+        config_path="/etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf",
+        config_preview="Match User vcf-backup\n  PasswordAuthentication yes\n  ForceCommand internal-sftp -d /backups\n",
+        baseline=None,
+    )
+
+    assert "PasswordAuthentication yes" in unit["raw_config_preview"]
+    assert "[redacted sensitive line]" in unit["config_preview"]
+    assert "PasswordAuthentication yes" not in unit["config_preview"]
 
 
 def test_physical_and_vlan_pages_render(client):
@@ -1706,6 +1847,38 @@ def test_firewall_page_create_rule_and_apply_task(client):
     assert "nftables" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
+    rejected = client.post(
+        "/firewall/rules",
+        data={
+            "name": "raw-source-rejected",
+            "direction": "input",
+            "action": "accept",
+            "protocol": "tcp",
+            "source": "192.168.50.0/24",
+            "destination": "any",
+            "destination_port": "443",
+            "interface_name": "eth2",
+            "priority": "29",
+            "enabled": "on",
+            "description": "raw source should not save",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 422
+    assert "Source must use Any or a firewall group." in rejected.text
+
+    group_response = client.post(
+        "/firewall/source-groups",
+        data={
+            "csrf": csrf,
+            "action": "create",
+            "group_name": "VCenter clients",
+            "group_entries": "192.168.50.0/24",
+        },
+    )
+    assert group_response.status_code == 200
+
     created = client.post(
         "/firewall/rules",
         data={
@@ -1713,7 +1886,7 @@ def test_firewall_page_create_rule_and_apply_task(client):
             "direction": "input",
             "action": "accept",
             "protocol": "tcp",
-            "source": "192.168.50.0/24",
+            "source": "group:custom:vcenter-clients",
             "destination": "any",
             "destination_port": "443",
             "interface_name": "eth2",
@@ -1741,7 +1914,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "managed-firewall-20260622-1" in page.text
+    assert "firewall-validation-refresh-20260623-3" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
@@ -1784,9 +1957,9 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     assert enabled_payload["enabled"] is True
     assert enabled_payload["settings"]["enabled"] is True
     assert "table inet labfoundry" in enabled_payload["config_preview"]
-    assert "LabFoundry management access" in enabled_payload["config_preview"]
+    assert 'comment "mgmt-console"' in enabled_payload["config_preview"]
     assert 'tcp ip saddr' not in enabled_payload["config_preview"]
-    assert 'ip saddr 192.168.49.0/24 tcp dport { 22, 443, 8000 }' in enabled_payload["config_preview"]
+    assert 'tcp dport { 22, 443, 8000 } accept comment "mgmt-console"' in enabled_payload["config_preview"]
 
 
 def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
@@ -1810,6 +1983,19 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
         baseline = db.execute(select(Setting).where(Setting.key == "appliance_apply.baselines.v1")).scalar_one()
         assert '"firewall"' in baseline.value
 
+    firewall_page = client.get("/firewall")
+    csrf = firewall_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    group_response = client.post(
+        "/firewall/source-groups",
+        data={
+            "csrf": csrf,
+            "action": "create",
+            "group_name": "Global apply clients",
+            "group_entries": "192.168.50.0/24",
+        },
+    )
+    assert group_response.status_code == 200
+
     created = client.post(
         "/firewall/rules",
         data={
@@ -1817,7 +2003,7 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
             "direction": "input",
             "action": "accept",
             "protocol": "tcp",
-            "source": "192.168.50.0/24",
+            "source": "group:custom:global-apply-clients",
             "destination": "any",
             "destination_port": "8443",
             "interface_name": "eth2",

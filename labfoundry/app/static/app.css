@@ -10,6 +10,7 @@
   --good: #15803d;
   --warn: #b45309;
   --bad: #b91c1c;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 * {
@@ -18,7 +19,7 @@
 
 body {
   min-height: 100vh;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   letter-spacing: 0;
 }
 
@@ -235,6 +236,34 @@ body {
   font-size: 12px;
 }
 
+.compact-button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: white;
+  color: #475569;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.icon-button:hover,
+.icon-button:focus-visible {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: var(--accent-dark);
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -337,8 +366,49 @@ body {
   margin-top: 16px;
 }
 
+.firewall-workspace {
+  align-items: stretch;
+  min-height: calc(100vh - 104px);
+}
+
+.firewall-main-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 104px);
+  overflow: hidden;
+}
+
+.firewall-managed-section {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 280px;
+}
+
+.firewall-managed-section .readonly-tabulator-shell {
+  flex: 1 1 auto;
+  min-height: 280px;
+}
+
 .readonly-tabulator-shell .tabulator-cell {
   cursor: default;
+}
+
+.validation-refresh-status {
+  margin: 8px 0 10px;
+}
+
+.validation-panel-refreshed {
+  animation: validation-panel-refreshed 900ms ease-out;
+}
+
+@keyframes validation-panel-refreshed {
+  0% {
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+  }
+  100% {
+    box-shadow: none;
+  }
 }
 
 .managed-rule-generated {
@@ -353,6 +423,112 @@ body {
 
 .managed-rule-replaced .status-pill {
   text-decoration: none;
+}
+
+.source-group-manager {
+  display: grid;
+  gap: 12px;
+}
+
+.source-group-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.source-group-editor[hidden] {
+  display: none;
+}
+
+.label-value {
+  display: grid;
+  gap: 6px;
+}
+
+.readonly-value strong {
+  display: block;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.source-group-entry-list {
+  display: grid;
+  gap: 7px;
+}
+
+.source-group-entry-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  border: 1px solid #dbeafe;
+  border-radius: 7px;
+  padding: 4px 5px 4px 9px;
+  background: #f8fbff;
+}
+
+.source-group-entry-label {
+  min-width: 0;
+  overflow: hidden;
+  color: #0f172a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-group-add-controls {
+  display: grid;
+  gap: 8px;
+}
+
+.inline-add-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.source-group-add-ref-control {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+}
+
+.source-group-inline-actions,
+.source-group-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.source-group-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.source-group-actions form {
+  margin: 0;
+}
+
+.source-group-actions .button,
+.source-group-inline-actions .button {
+  width: 100%;
+}
+
+.source-group-create-form {
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.source-group-editor input,
+.source-group-editor select,
+.source-group-create-form input {
+  font-family: var(--font-sans);
 }
 
 .section-head {
@@ -886,6 +1062,14 @@ body {
   padding: 3px 6px;
 }
 
+.tabulator .tabulator-cell input,
+.tabulator .tabulator-cell select,
+.tabulator-popup-container,
+.tabulator-edit-list,
+.tabulator-edit-list .tabulator-edit-list-item {
+  font-family: inherit;
+}
+
 .tabulator .button + .button {
   margin-left: 6px;
 }
@@ -893,6 +1077,7 @@ body {
 .tabulator-menu {
   border: 1px solid var(--border);
   border-radius: 7px;
+  font-family: inherit;
   box-shadow: 0 12px 24px rgba(15, 23, 42, 0.14);
   overflow: hidden;
 }
@@ -989,6 +1174,23 @@ body {
   font-weight: 650;
 }
 
+.fixed-value-field strong {
+  min-height: auto;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  color: #111827;
+  background: transparent;
+  box-shadow: none;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.fixed-value-field {
+  border-top: 1px solid #e5edf7;
+  padding-top: 8px;
+}
+
 label > span,
 .field-label > span:first-child {
   display: block;
@@ -1062,7 +1264,7 @@ textarea {
   border-radius: 6px;
   padding: 7px 10px;
   color: #111827;
-  font-family: inherit;
+  font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 400;
   line-height: 1.45;
@@ -1073,9 +1275,18 @@ textarea {
   transition: border-color 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
 }
 
+select,
+option,
+optgroup {
+  font-family: var(--font-sans);
+}
+
 .detail-panel input:not(.switch-input),
 .detail-panel select,
 .detail-panel textarea,
+.source-group-manager input:not(.switch-input),
+.source-group-manager select,
+.source-group-create-form input:not(.switch-input),
 [data-appliance-settings] input:not(.switch-input),
 [data-appliance-settings] select,
 [data-appliance-settings] textarea,
@@ -1085,7 +1296,7 @@ textarea {
   min-height: 36px;
   border-color: #d5dde8;
   color: #1f2937;
-  font-family: "Aptos", "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 400;
   background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
@@ -1099,6 +1310,9 @@ textarea {
 .detail-panel input:not(.switch-input):hover,
 .detail-panel select:hover,
 .detail-panel textarea:hover,
+.source-group-manager input:not(.switch-input):hover,
+.source-group-manager select:hover,
+.source-group-create-form input:not(.switch-input):hover,
 [data-appliance-settings] input:not(.switch-input):hover,
 [data-appliance-settings] select:hover,
 [data-appliance-settings] textarea:hover,
@@ -1112,6 +1326,9 @@ textarea {
 .detail-panel input:not(.switch-input):focus,
 .detail-panel select:focus,
 .detail-panel textarea:focus,
+.source-group-manager input:not(.switch-input):focus,
+.source-group-manager select:focus,
+.source-group-create-form input:not(.switch-input):focus,
 [data-appliance-settings] input:not(.switch-input):focus,
 [data-appliance-settings] select:focus,
 [data-appliance-settings] textarea:focus,
@@ -2138,6 +2355,16 @@ textarea {
 
   .detail-panel {
     position: static;
+  }
+
+  .firewall-workspace,
+  .firewall-main-panel {
+    min-height: auto;
+  }
+
+  .firewall-managed-section,
+  .firewall-managed-section .readonly-tabulator-shell {
+    min-height: 320px;
   }
 
   .service-control-row {

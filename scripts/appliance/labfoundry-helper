@@ -51,10 +51,25 @@ NETWORK_INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 TIMESYNCD_DROPIN_DIR = Path("/etc/systemd/timesyncd.conf.d")
 TIMESYNCD_DROPIN_PATH = TIMESYNCD_DROPIN_DIR / "labfoundry.conf"
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+VCF_BACKUPS_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-backups")
+VCF_BACKUPS_CONFIG_DIR = Path("/etc/ssh/sshd_config.d")
+VCF_BACKUPS_CONFIG_PATH = VCF_BACKUPS_CONFIG_DIR / "labfoundry-vcf-backups.conf"
+VCF_BACKUPS_AUTHORIZED_KEYS_DIR = Path("/etc/labfoundry/ssh/authorized_keys")
+VCF_BACKUPS_DEFAULT_STORAGE_PATH = Path("/mnt/labfoundry-vcf-backups")
+VCF_BACKUPS_DEFAULT_REMOTE_DIRECTORY = "/backups"
+VCF_BACKUPS_DEFAULT_USERNAME = "vcf-backup"
+VCF_BACKUPS_USERNAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+VCF_BACKUPS_PATH_PATTERN = re.compile(r"^/[A-Za-z0-9._/+:-]+$")
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=False, capture_output=True, text=True)
+
+
+def _chown_path(path: Path, uid: int, gid: int) -> None:
+    chown = getattr(os, "chown", None)
+    if chown is not None:
+        chown(path, uid, gid)
 
 
 def _usage() -> int:
@@ -886,6 +901,221 @@ def _handle_firewall(action: str, args: list[str]) -> int:
     return 0
 
 
+def _validate_vcf_backups_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".conf":
+        raise ValueError("VCF backups config path must end with .conf")
+    if not path.is_relative_to(VCF_BACKUPS_APPLY_DIR):
+        raise ValueError(f"VCF backups config must be staged under {VCF_BACKUPS_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"VCF backups config does not exist: {path}")
+    return path
+
+
+def _vcf_backups_config_values(path: Path) -> dict[str, str | bool]:
+    values: dict[str, str | bool] = {
+        "enabled": False,
+        "username": "",
+        "storage_path": str(VCF_BACKUPS_DEFAULT_STORAGE_PATH),
+        "remote_directory": VCF_BACKUPS_DEFAULT_REMOTE_DIRECTORY,
+        "chroot_enabled": False,
+    }
+    in_match = False
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("# LabFoundry VCF Backups enabled:"):
+            values["enabled"] = stripped.rsplit(":", 1)[1].strip().lower() == "true"
+        elif stripped.startswith("# LabFoundry VCF Backups user:"):
+            values["username"] = stripped.rsplit(":", 1)[1].strip()
+        elif stripped.startswith("# Backup volume mount:"):
+            values["storage_path"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("# VCF remote directory:"):
+            values["remote_directory"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Match User "):
+            in_match = True
+            values["username"] = stripped.split(None, 2)[2].strip()
+        elif in_match and stripped.startswith("ChrootDirectory "):
+            values["chroot_enabled"] = True
+            values["storage_path"] = stripped.split(None, 1)[1].strip()
+        elif in_match and stripped.startswith("ForceCommand internal-sftp -d "):
+            values["remote_directory"] = stripped.rsplit(" ", 1)[1].strip()
+    return values
+
+
+def _vcf_backups_config_errors(path: Path) -> list[str]:
+    errors: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [str(exc)]
+    values = _vcf_backups_config_values(path)
+    username = str(values["username"])
+    storage_path = str(values["storage_path"])
+    remote_directory = str(values["remote_directory"])
+    if not text.startswith("# Managed by LabFoundry."):
+        errors.append("VCF backups config must be rendered by LabFoundry.")
+    if values["enabled"]:
+        if not VCF_BACKUPS_USERNAME_PATTERN.fullmatch(username):
+            errors.append("VCF backups user must be a local Unix username.")
+        if not VCF_BACKUPS_PATH_PATTERN.fullmatch(storage_path):
+            errors.append("Backup volume mount must be an absolute Linux path with safe characters.")
+        if not VCF_BACKUPS_PATH_PATTERN.fullmatch(remote_directory):
+            errors.append("VCF remote directory must be an absolute Linux path with safe characters.")
+        if remote_directory != VCF_BACKUPS_DEFAULT_REMOTE_DIRECTORY and bool(values["chroot_enabled"]):
+            errors.append(f"Chrooted VCF backups must use remote directory {VCF_BACKUPS_DEFAULT_REMOTE_DIRECTORY}.")
+        required = [
+            f"Match User {username}",
+            "ForceCommand internal-sftp",
+            "AllowTcpForwarding no",
+            "X11Forwarding no",
+            "PermitTTY no",
+        ]
+        for expected in required:
+            if expected not in text:
+                errors.append(f"VCF backups config is missing {expected}.")
+    return errors
+
+
+def _ensure_vcf_backups_user(username: str, storage_path: Path) -> int:
+    if shutil.which("id") is None:
+        print("id command not found", file=sys.stderr)
+        return 127
+    if _run(["id", username]).returncode == 0:
+        return 0
+    print(f"VCF backups OS user {username} does not exist. Provision the selected backup user before apply.", file=sys.stderr)
+    return 2
+
+
+def _prepare_vcf_backups_storage(username: str, storage_path: Path, remote_directory: str, chroot_enabled: bool) -> int:
+    storage_path.mkdir(parents=True, exist_ok=True)
+    _chown_path(storage_path, 0, 0)
+    os.chmod(storage_path, 0o755)
+    writable_path = storage_path / remote_directory.strip("/")
+    writable_path.mkdir(parents=True, exist_ok=True)
+    chown = _run(["chown", username, str(writable_path)])
+    print(chown.stdout, end="")
+    print(chown.stderr, end="", file=sys.stderr)
+    if chown.returncode != 0:
+        return chown.returncode
+    os.chmod(writable_path, 0o750 if chroot_enabled else 0o755)
+    VCF_BACKUPS_AUTHORIZED_KEYS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(VCF_BACKUPS_AUTHORIZED_KEYS_DIR, 0o755)
+    authorized_keys = VCF_BACKUPS_AUTHORIZED_KEYS_DIR / username
+    if not authorized_keys.exists():
+        authorized_keys.write_text("", encoding="utf-8")
+    _chown_path(authorized_keys, 0, 0)
+    os.chmod(authorized_keys, 0o644)
+    return 0
+
+
+def _install_vcf_backups_sshd_include() -> int:
+    config_path = Path("/etc/ssh/sshd_config")
+    include_line = "Include /etc/ssh/sshd_config.d/*.conf"
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if include_line not in text:
+        config_path.write_text(f"{include_line}\n{text}", encoding="utf-8")
+        os.chmod(config_path, 0o644)
+    return 0
+
+
+def _validate_sshd_config() -> subprocess.CompletedProcess[str]:
+    sshd = shutil.which("sshd")
+    if sshd is not None:
+        return _run([sshd, "-t"])
+    else:
+        sshd = "/usr/sbin/sshd"
+        if not Path(sshd).exists():
+            return subprocess.CompletedProcess([sshd, "-t"], 127, "", "sshd command not found\n")
+    return _run([sshd, "-t"])
+
+
+def _handle_vcf_backups(action: str, args: list[str]) -> int:
+    if len(args) != 1:
+        print(f"vcf-backups {action} requires exactly one staged config path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _validate_vcf_backups_config_path(args[0])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    errors = _vcf_backups_config_errors(config_path)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    values = _vcf_backups_config_values(config_path)
+    if action == "validate":
+        print(
+            json.dumps(
+                {
+                    "vcf_backups": "validation ok",
+                    "enabled": values["enabled"],
+                    "username": values["username"],
+                    "storage_path": values["storage_path"],
+                    "remote_directory": values["remote_directory"],
+                    "scope": "OpenSSH SFTP Match User drop-in",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    VCF_BACKUPS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not values["enabled"]:
+        if VCF_BACKUPS_CONFIG_PATH.exists():
+            VCF_BACKUPS_CONFIG_PATH.unlink()
+        restart = _run(["systemctl", "restart", "sshd"])
+        print(restart.stdout, end="")
+        print(restart.stderr, end="", file=sys.stderr)
+        return restart.returncode
+
+    username = str(values["username"])
+    storage_path = Path(str(values["storage_path"]))
+    remote_directory = str(values["remote_directory"])
+    chroot_enabled = bool(values["chroot_enabled"])
+    user_result = _ensure_vcf_backups_user(username, storage_path)
+    if user_result != 0:
+        return user_result
+    storage_result = _prepare_vcf_backups_storage(username, storage_path, remote_directory, chroot_enabled)
+    if storage_result != 0:
+        return storage_result
+    include_result = _install_vcf_backups_sshd_include()
+    if include_result != 0:
+        return include_result
+    shutil.copy2(config_path, VCF_BACKUPS_CONFIG_PATH)
+    os.chmod(VCF_BACKUPS_CONFIG_PATH, 0o644)
+    validation = _validate_sshd_config()
+    print(validation.stdout, end="")
+    print(validation.stderr, end="", file=sys.stderr)
+    if validation.returncode != 0:
+        VCF_BACKUPS_CONFIG_PATH.unlink(missing_ok=True)
+        return validation.returncode
+    restart = _run(["systemctl", "restart", "sshd"])
+    print(restart.stdout, end="")
+    print(restart.stderr, end="", file=sys.stderr)
+    if restart.returncode != 0:
+        return restart.returncode
+    print(
+        json.dumps(
+            {
+                "vcf_backups": "apply complete",
+                "config_path": str(VCF_BACKUPS_CONFIG_PATH),
+                "storage_path": str(storage_path),
+                "remote_directory": remote_directory,
+                "username": username,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         return _usage()
@@ -933,6 +1163,8 @@ def main(argv: list[str]) -> int:
         return _handle_dnsmasq(action, normalized_args)
     if group == "appliance-settings":
         return _handle_appliance_settings(action, normalized_args)
+    if group == "vcf-backups":
+        return _handle_vcf_backups(action, normalized_args)
 
     print("real helper execution is not implemented for this apply unit", file=sys.stderr)
     return 78

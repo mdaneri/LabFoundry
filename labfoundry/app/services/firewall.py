@@ -1,4 +1,5 @@
 from ipaddress import ip_network
+import json
 import re
 
 from labfoundry.app.models import (
@@ -21,6 +22,9 @@ FIREWALL_ACTIONS = ["accept", "drop", "reject"]
 FIREWALL_PROTOCOLS = ["any", "tcp", "udp", "icmp"]
 FIREWALL_POLICIES = ["accept", "drop"]
 FIREWALL_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/firewall/labfoundry.nft"
+FIREWALL_SOURCE_GROUPS_SETTING_KEY = "firewall.managed_source_groups"
+FIREWALL_ANY_SOURCE_GROUP_ID = "any"
+FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX = "group:"
 LABFOUNDRY_DHCP_FIREWALL_RULE_MARKER = "LabFoundry-managed DNS/DHCP access"
 LABFOUNDRY_DNS_FIREWALL_RULE_MARKER = "LabFoundry-managed DNS access"
 LABFOUNDRY_SERVICE_FIREWALL_RULE_MARKER = "LabFoundry-managed service access"
@@ -76,7 +80,7 @@ def validate_firewall_settings(settings: FirewallSettings) -> list[str]:
     return errors
 
 
-def validate_firewall_rule(rule: FirewallRule) -> list[str]:
+def validate_firewall_rule(rule: FirewallRule, source_groups: list[dict] | None = None, *, require_group_addresses: bool = False) -> list[str]:
     errors: list[str] = []
     if not rule.name.strip():
         errors.append("Rule name is required.")
@@ -88,64 +92,44 @@ def validate_firewall_rule(rule: FirewallRule) -> list[str]:
         errors.append("Protocol must be any, tcp, udp, or icmp.")
     if rule.protocol in {"any", "icmp"} and rule.destination_port.strip():
         errors.append("Destination port is only valid for TCP or UDP rules.")
+    groups_by_id = {str(group.get("id", "")): group for group in source_groups or []}
+    names = _source_group_name_index(groups_by_id)
     for label, value in [("Source", rule.source), ("Destination", rule.destination)]:
-        normalized = value.strip().lower()
-        if normalized in {"", "any"}:
-            continue
-        try:
-            ip_network(normalized, strict=False)
-        except ValueError:
-            errors.append(f"{label} must be 'any' or a valid IPv4/IPv6 address or CIDR.")
+        if require_group_addresses:
+            group_error = _validate_rule_group_reference(label, value, groups_by_id)
+            if group_error:
+                errors.append(group_error)
+                continue
+        errors.extend(_validate_rule_address_value(label, value, groups_by_id, names))
     if rule.destination_port.strip():
         errors.extend(_validate_ports(rule.destination_port))
     return errors
 
 
-def dhcp_firewall_rules(dhcp_settings: DhcpSettings, scopes: list[DhcpScope]) -> list[FirewallRule]:
+def dhcp_firewall_rules(
+    dhcp_settings: DhcpSettings,
+    scopes: list[DhcpScope],
+) -> list[FirewallRule]:
     if not dhcp_settings.enabled:
         return []
     generated_rules: list[FirewallRule] = []
     for index, scope in enumerate([item for item in scopes if item.enabled], start=1):
+        rule_name = f"{_slug(scope.name)}-dns-dhcp"
         generated_rules.append(
             FirewallRule(
-                name=f"{_slug(scope.name)}-dns-dhcp",
+                name=rule_name,
                 direction="input",
                 action="accept",
                 protocol="udp",
-                source=_scope_network(scope),
+                source="any",
                 destination="any",
-                destination_port="53,67",
+                destination_port="67",
                 interface_name=scope.interface_name.strip(),
                 priority=20 + index,
                 enabled=True,
-                description=f"{LABFOUNDRY_DHCP_FIREWALL_RULE_MARKER} for DHCP IP zone {scope.name}.",
+                description=f"{LABFOUNDRY_DHCP_FIREWALL_RULE_MARKER} for DHCP IP zone {scope.name}. DHCP bootstrap traffic is interface-bound and not group-restricted.",
             )
         )
-    return generated_rules
-
-
-def dns_firewall_rules(dns_settings: DnsSettings, interface_networks: dict[str, str]) -> list[FirewallRule]:
-    if not dns_settings.enabled:
-        return []
-    generated_rules: list[FirewallRule] = []
-    listen_interfaces = [item.strip() for item in dns_settings.listen_interface.replace(",", "\n").splitlines() if item.strip()]
-    for index, interface_name in enumerate(listen_interfaces, start=1):
-        for protocol_offset, protocol in enumerate(["tcp", "udp"]):
-            generated_rules.append(
-                FirewallRule(
-                    name=f"{_slug(interface_name)}-dns-{protocol}",
-                    direction="input",
-                    action="accept",
-                    protocol=protocol,
-                    source=interface_networks.get(interface_name, "any"),
-                    destination="any",
-                    destination_port="53",
-                    interface_name=interface_name,
-                    priority=40 + (index * 2) + protocol_offset,
-                    enabled=True,
-                    description=f"{LABFOUNDRY_DNS_FIREWALL_RULE_MARKER} for DNS listener {interface_name}.",
-                )
-            )
     return generated_rules
 
 
@@ -159,19 +143,23 @@ def managed_service_firewall_rules(
     vcf_depot_settings: VcfOfflineDepotSettings,
     vcf_registry_settings: VcfPrivateRegistrySettings,
     interface_networks: dict[str, str],
+    source_groups: list[dict] | None = None,
+    source_group_assignments: dict[str, str] | None = None,
 ) -> list[FirewallRule]:
+    source_groups_by_id = {str(group.get("id", "")): group for group in source_groups or []}
+    source_group_assignments = source_group_assignments or {}
     rules = [
         _service_firewall_rule(
             name="mgmt-console",
             service="Management console",
             interface_name="eth0",
-            source=interface_networks.get("eth0", "192.168.49.0/24"),
+            source=_managed_rule_source("mgmt-console", "eth0", interface_networks, source_groups_by_id, source_group_assignments),
             protocol="tcp",
             ports="22,443,8000",
             priority=10,
         )
     ]
-    rules.extend(dns_firewall_rules(dns_settings, interface_networks))
+    rules.extend(dns_firewall_rules(dns_settings, interface_networks, source_groups_by_id, source_group_assignments))
     rules.extend(dhcp_firewall_rules(dhcp_settings, dhcp_scopes))
     if kms_settings.enabled:
         rules.append(
@@ -179,7 +167,7 @@ def managed_service_firewall_rules(
                 name="kms-kmip",
                 service="KMS / KMIP",
                 interface_name=kms_settings.listen_interface,
-                source=interface_networks.get(kms_settings.listen_interface, "any"),
+                source=_managed_rule_source("kms-kmip", kms_settings.listen_interface, interface_networks, source_groups_by_id, source_group_assignments),
                 protocol="tcp",
                 ports=str(kms_settings.port),
                 priority=60,
@@ -191,7 +179,7 @@ def managed_service_firewall_rules(
                 name="vcf-backups-sftp",
                 service="VCF Backups SFTP",
                 interface_name=vcf_backup_settings.listen_interface,
-                source=interface_networks.get(vcf_backup_settings.listen_interface, "any"),
+                source=_managed_rule_source("vcf-backups-sftp", vcf_backup_settings.listen_interface, interface_networks, source_groups_by_id, source_group_assignments),
                 protocol="tcp",
                 ports=str(vcf_backup_settings.port),
                 priority=70,
@@ -203,7 +191,7 @@ def managed_service_firewall_rules(
                 name="vcf-offline-depot",
                 service="VCF Offline Depot",
                 interface_name=vcf_depot_settings.listen_interface,
-                source=interface_networks.get(vcf_depot_settings.listen_interface, "any"),
+                source=_managed_rule_source("vcf-offline-depot", vcf_depot_settings.listen_interface, interface_networks, source_groups_by_id, source_group_assignments),
                 protocol="tcp",
                 ports=str(vcf_depot_settings.port),
                 priority=80,
@@ -215,13 +203,87 @@ def managed_service_firewall_rules(
                 name="vcf-private-registry",
                 service="VCF Private Registry",
                 interface_name=vcf_registry_settings.listen_interface,
-                source=interface_networks.get(vcf_registry_settings.listen_interface, "any"),
+                source=_managed_rule_source("vcf-private-registry", vcf_registry_settings.listen_interface, interface_networks, source_groups_by_id, source_group_assignments),
                 protocol="tcp",
                 ports=str(vcf_registry_settings.port),
                 priority=90,
             )
         )
     return rules
+
+
+def firewall_source_group_state(raw_json: str, interface_networks: dict[str, str]) -> dict:
+    saved: dict = {}
+    if raw_json.strip():
+        try:
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, dict):
+                saved = parsed
+        except ValueError:
+            saved = {}
+    saved_groups = {str(group.get("id", "")): group for group in saved.get("groups", []) if isinstance(group, dict)}
+    groups: list[dict] = [_source_group("any", "Any", ["any"], "Allow traffic from any source or destination address.", builtin=True)]
+    for group_id, saved_group in saved_groups.items():
+        if group_id == "any":
+            continue
+        default_entries = [interface_networks[group_id.removeprefix("interface:")]] if group_id.startswith("interface:") and group_id.removeprefix("interface:") in interface_networks else ["any"]
+        groups.append(
+            _source_group(
+                group_id,
+                str(saved_group.get("name") or group_id),
+                _source_group_entries(saved_group, default_entries),
+                str(saved_group.get("description") or "Custom firewall group."),
+            )
+        )
+    assignments = saved.get("assignments", {})
+    if not isinstance(assignments, dict):
+        assignments = {}
+    valid_group_ids = {group["id"] for group in groups}
+    return {
+        "groups": groups,
+        "assignments": {str(rule_name): str(group_id) for rule_name, group_id in assignments.items() if str(group_id) in valid_group_ids},
+    }
+
+
+def validate_firewall_source_groups(groups: list[dict]) -> list[str]:
+    errors: list[str] = []
+    groups_by_id = {str(group.get("id", "")): group for group in groups}
+    names: dict[str, str] = {}
+    for group in groups:
+        group_id = str(group.get("id", ""))
+        label = str(group.get("name") or group_id or "Firewall group")
+        normalized_name = label.strip().lower()
+        if not label.strip():
+            errors.append("Firewall group name is required.")
+        elif normalized_name in names and names[normalized_name] != group_id:
+            errors.append(f"Firewall group name '{label}' is already used.")
+        names[normalized_name] = group_id
+    for group in groups:
+        group_id = str(group.get("id", ""))
+        label = str(group.get("name") or group_id or "Firewall group")
+        entries = _source_group_entries(group, ["any"])
+        if group_id == FIREWALL_ANY_SOURCE_GROUP_ID and entries != ["any"]:
+            errors.append("Any is built in and must contain only 'any'.")
+            continue
+        address_entries = [entry for entry in entries if not _source_group_reference_target(entry, groups_by_id, names)]
+        for entry in entries:
+            if entry.strip().lower() == "any":
+                continue
+            if _source_group_reference_target(entry, groups_by_id, names):
+                continue
+            if _looks_like_source_group_reference(entry):
+                errors.append(f"{label} references a firewall group that does not exist: {entry}.")
+        for error in _validate_address_value(label, "\n".join(address_entries)):
+            errors.append(error)
+        if "any" in [entry.strip().lower() for entry in entries] and len(entries) > 1:
+            errors.append(f"{label} can use 'any' only by itself.")
+    errors.extend(_validate_source_group_cycles(groups, groups_by_id, names))
+    return errors
+
+
+def source_group_to_rule_source(group: dict | None, source_groups_by_id: dict[str, dict] | None = None) -> str:
+    sources = _expand_source_group_entries(group, source_groups_by_id or {})
+    return "\n".join(sources or ["any"])
 
 
 def firewall_interface_networks(interfaces: list[PhysicalInterface], vlans: list[VlanInterface]) -> dict[str, str]:
@@ -297,6 +359,7 @@ def validate_firewall_state(
     settings: FirewallSettings,
     rules: list[FirewallRule],
     generated_rules: list[FirewallRule] | None = None,
+    source_groups: list[dict] | None = None,
     replace_labfoundry_dhcp_rules: bool = False,
     replace_labfoundry_dns_rules: bool = False,
     replace_labfoundry_service_rules: bool = False,
@@ -314,7 +377,7 @@ def validate_firewall_state(
         if normalized_name in seen_names:
             errors.append(f"Firewall rule {rule.name} is duplicated.")
         seen_names.add(normalized_name)
-        errors.extend(validate_firewall_rule(rule))
+        errors.extend(validate_firewall_rule(rule, source_groups))
     return errors
 
 
@@ -322,6 +385,7 @@ def render_nftables_config(
     settings: FirewallSettings,
     rules: list[FirewallRule],
     generated_rules: list[FirewallRule] | None = None,
+    source_groups: list[dict] | None = None,
     replace_labfoundry_dhcp_rules: bool = False,
     replace_labfoundry_dns_rules: bool = False,
     replace_labfoundry_service_rules: bool = False,
@@ -339,6 +403,7 @@ def render_nftables_config(
             ]
         )
         return "\n".join(lines) + "\n"
+    source_groups_by_id = {str(group.get("id", "")): group for group in source_groups or []}
     lines.append("table inet labfoundry {")
     for chain_name, policy in [
         ("input", settings.default_input_policy),
@@ -371,7 +436,7 @@ def render_nftables_config(
             ],
             key=lambda item: item.priority,
         ):
-            lines.append(f"    {_render_rule(rule)}")
+            lines.append(f"    {_render_rule(rule, source_groups_by_id)}")
         if settings.log_dropped and policy == "drop":
             lines.append(f'    log prefix "labfoundry {chain_name} drop: " flags all counter')
         lines.append("  }")
@@ -379,7 +444,8 @@ def render_nftables_config(
     return "\n".join(lines) + "\n"
 
 
-def _render_rule(rule: FirewallRule) -> str:
+def _render_rule(rule: FirewallRule, source_groups_by_id: dict[str, dict] | None = None) -> str:
+    source_groups_by_id = source_groups_by_id or {}
     parts: list[str] = []
     if rule.interface_name.strip():
         interface_key = "oifname" if rule.direction == "output" else "iifname"
@@ -387,10 +453,10 @@ def _render_rule(rule: FirewallRule) -> str:
     protocol = rule.protocol.strip().lower()
     if protocol == "icmp":
         parts.append("meta l4proto icmp")
-    source = rule.source.strip().lower()
+    source = _rule_address_value(rule.source, source_groups_by_id)
     if source and source != "any":
         parts.append(_address_expr("saddr", source))
-    destination = rule.destination.strip().lower()
+    destination = _rule_address_value(rule.destination, source_groups_by_id)
     if destination and destination != "any":
         parts.append(_address_expr("daddr", destination))
     if protocol in {"tcp", "udp"} and rule.destination_port.strip():
@@ -423,8 +489,11 @@ def _valid_port(value: str) -> bool:
 
 
 def _address_expr(direction: str, value: str) -> str:
-    family = "ip6" if ip_network(value, strict=False).version == 6 else "ip"
-    return f"{family} {direction} {value}"
+    values = _split_address_values(value)
+    family = "ip6" if ip_network(values[0], strict=False).version == 6 else "ip"
+    if len(values) == 1:
+        return f"{family} {direction} {values[0]}"
+    return f"{family} {direction} {{ {', '.join(values)} }}"
 
 
 def _render_ports(raw_ports: str) -> str:
@@ -465,6 +534,53 @@ def _service_firewall_rule(
     )
 
 
+def _managed_rule_source(
+    rule_name: str,
+    interface_name: str,
+    interface_networks: dict[str, str],
+    source_groups_by_id: dict[str, dict],
+    assignments: dict[str, str],
+) -> str:
+    group_id = assignments.get(rule_name, FIREWALL_ANY_SOURCE_GROUP_ID)
+    group = source_groups_by_id.get(group_id) or source_groups_by_id.get(FIREWALL_ANY_SOURCE_GROUP_ID)
+    if group:
+        return source_group_to_rule_source(group, source_groups_by_id)
+    return "any"
+
+
+def dns_firewall_rules(
+    dns_settings: DnsSettings,
+    interface_networks: dict[str, str],
+    source_groups_by_id: dict[str, dict] | None = None,
+    assignments: dict[str, str] | None = None,
+) -> list[FirewallRule]:
+    if not dns_settings.enabled:
+        return []
+    source_groups_by_id = source_groups_by_id or {}
+    assignments = assignments or {}
+    generated_rules: list[FirewallRule] = []
+    listen_interfaces = [item.strip() for item in dns_settings.listen_interface.replace(",", "\n").splitlines() if item.strip()]
+    for index, interface_name in enumerate(listen_interfaces, start=1):
+        for protocol_offset, protocol in enumerate(["tcp", "udp"]):
+            rule_name = f"{_slug(interface_name)}-dns-{protocol}"
+            generated_rules.append(
+                FirewallRule(
+                    name=rule_name,
+                    direction="input",
+                    action="accept",
+                    protocol=protocol,
+                    source=_managed_rule_source(rule_name, interface_name, interface_networks, source_groups_by_id, assignments),
+                    destination="any",
+                    destination_port="53",
+                    interface_name=interface_name,
+                    priority=40 + (index * 2) + protocol_offset,
+                    enabled=True,
+                    description=f"{LABFOUNDRY_DNS_FIREWALL_RULE_MARKER} for DNS listener {interface_name}.",
+                )
+            )
+    return generated_rules
+
+
 def _scope_network(scope: DhcpScope) -> str:
     try:
         return str(ip_network(f"{scope.site_address.strip()}/{scope.prefix_length}", strict=False))
@@ -484,3 +600,167 @@ def _network_from_cidr(value: str | None) -> str:
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "dhcp-scope"
+
+
+def _source_group(group_id: str, name: str, entries: list[str], description: str, *, builtin: bool = False) -> dict:
+    normalized_entries = _source_group_entries({"entries": entries}, ["any"])
+    return {
+        "id": group_id,
+        "name": name,
+        "entries": normalized_entries,
+        "sources": normalized_entries,
+        "description": description,
+        "builtin": builtin,
+    }
+
+
+def _source_group_entries(group: dict | None, default_entries: list[str]) -> list[str]:
+    group = group or {}
+    raw_entries = group.get("entries")
+    if raw_entries is None:
+        raw_entries = group.get("sources")
+    if isinstance(raw_entries, str):
+        values = _split_source_group_entry_values(raw_entries)
+    elif isinstance(raw_entries, list):
+        values = [str(item).strip() for item in raw_entries if str(item).strip()]
+    else:
+        values = []
+    normalized: list[str] = []
+    for value in values or default_entries:
+        item = str(value).strip()
+        if item.lower() == "any":
+            item = "any"
+        elif item.lower().startswith(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):
+            item = f"{FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX}{item[len(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):]}"
+        normalized.append(item)
+    return normalized
+
+
+def _split_source_group_entry_values(value: str) -> list[str]:
+    return [item.strip() for item in re.split(r"[\n,]+", value) if item.strip()]
+
+
+def _looks_like_source_group_reference(value: str) -> bool:
+    return value.strip().startswith("@") or value.strip().lower().startswith(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX)
+
+
+def _source_group_name_index(groups: dict[str, dict]) -> dict[str, str]:
+    return {str(group.get("name", "")).strip().lower(): group_id for group_id, group in groups.items() if str(group.get("name", "")).strip()}
+
+
+def _source_group_reference_target(value: str, groups_by_id: dict[str, dict], names: dict[str, str] | None = None) -> str:
+    item = value.strip()
+    if item.lower().startswith(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):
+        group_id = item[len(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):]
+        return group_id if group_id in groups_by_id else ""
+    if item.startswith("@"):
+        name_index = names or _source_group_name_index(groups_by_id)
+        return name_index.get(item[1:].strip().lower(), "")
+    return ""
+
+
+def _expand_source_group_entries(group: dict | None, groups_by_id: dict[str, dict], stack: tuple[str, ...] = ()) -> list[str]:
+    entries = _source_group_entries(group, ["any"])
+    expanded: list[str] = []
+    seen: set[str] = set()
+    name_index = _source_group_name_index(groups_by_id)
+    for entry in entries:
+        normalized = entry.strip()
+        if normalized.lower() == "any":
+            return ["any"]
+        target_id = _source_group_reference_target(normalized, groups_by_id, name_index)
+        if target_id:
+            if target_id in stack:
+                continue
+            nested_sources = _expand_source_group_entries(groups_by_id.get(target_id), groups_by_id, (*stack, target_id))
+            if nested_sources == ["any"]:
+                return ["any"]
+            for source in nested_sources:
+                if source not in seen:
+                    seen.add(source)
+                    expanded.append(source)
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            expanded.append(normalized)
+    return expanded or ["any"]
+
+
+def _validate_source_group_cycles(groups: list[dict], groups_by_id: dict[str, dict], names: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+
+    def visit(group_id: str, path: list[str]) -> None:
+        if group_id in path:
+            cycle_ids = [*path[path.index(group_id):], group_id]
+            cycle_names = [str(groups_by_id[item].get("name") or item) for item in cycle_ids if item in groups_by_id]
+            errors.append(f"Firewall groups cannot reference each other in a cycle: {' -> '.join(cycle_names)}.")
+            return
+        group = groups_by_id.get(group_id)
+        if not group:
+            return
+        for entry in _source_group_entries(group, ["any"]):
+            target_id = _source_group_reference_target(entry, groups_by_id, names)
+            if target_id:
+                visit(target_id, [*path, group_id])
+
+    for group in groups:
+        group_id = str(group.get("id", ""))
+        if group_id:
+            visit(group_id, [])
+    return errors
+
+
+def _rule_address_value(value: str, source_groups_by_id: dict[str, dict]) -> str:
+    raw_value = value.strip()
+    if not raw_value:
+        return "any"
+    target_id = _source_group_reference_target(raw_value, source_groups_by_id)
+    if target_id:
+        return "\n".join(_expand_source_group_entries(source_groups_by_id.get(target_id), source_groups_by_id))
+    return raw_value.lower()
+
+
+def _validate_rule_address_value(label: str, value: str, source_groups_by_id: dict[str, dict], names: dict[str, str]) -> list[str]:
+    raw_value = value.strip()
+    if not raw_value:
+        return []
+    target_id = _source_group_reference_target(raw_value, source_groups_by_id, names)
+    if target_id:
+        group = source_groups_by_id.get(target_id)
+        return _validate_address_value(label, "\n".join(_expand_source_group_entries(group, source_groups_by_id)))
+    if _looks_like_source_group_reference(raw_value):
+        return [f"{label} references a firewall group that does not exist: {raw_value}."]
+    return _validate_address_value(label, raw_value)
+
+
+def _validate_rule_group_reference(label: str, value: str, source_groups_by_id: dict[str, dict]) -> str:
+    raw_value = value.strip()
+    if raw_value.lower() == "any":
+        return ""
+    if raw_value.lower().startswith(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):
+        if _source_group_reference_target(raw_value, source_groups_by_id):
+            return ""
+        return f"{label} references a firewall group that does not exist: {raw_value}."
+    return f"{label} must use Any or a firewall group."
+
+
+def _split_address_values(value: str) -> list[str]:
+    return [item.strip().lower() for item in re.split(r"[\n,]+", value) if item.strip()]
+
+
+def _validate_address_value(label: str, value: str) -> list[str]:
+    normalized_values = _split_address_values(value)
+    if not normalized_values:
+        return []
+    if "any" in normalized_values:
+        return [] if normalized_values == ["any"] else [f"{label} can use 'any' only by itself."]
+    families: set[int] = set()
+    errors: list[str] = []
+    for item in normalized_values:
+        try:
+            families.add(ip_network(item, strict=False).version)
+        except ValueError:
+            errors.append(f"{label} must be 'any' or valid IPv4/IPv6 addresses or CIDRs.")
+    if len(families) > 1:
+        errors.append(f"{label} cannot mix IPv4 and IPv6 addresses in one rule.")
+    return errors
