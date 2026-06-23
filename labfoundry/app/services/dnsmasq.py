@@ -333,7 +333,7 @@ def parse_dnsmasq_leases(raw_text: str, now: datetime | None = None) -> list[dic
 
 def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord], conditional_forwarders: str | None = None) -> list[str]:
     errors: list[str] = []
-    if not split_interfaces(settings.listen_interface):
+    if settings.enabled and not split_interfaces(settings.listen_interface):
         errors.append("DNS must listen on at least one interface.")
     if not split_domains(settings.domain):
         errors.append("DNS must manage at least one domain.")
@@ -362,6 +362,8 @@ def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord], condi
 
 def validate_dns_listen_targets(settings: DnsSettings, available_interface_names: set[str]) -> list[str]:
     errors: list[str] = []
+    if not settings.enabled:
+        return errors
     if not available_interface_names:
         errors.append("DNS has no valid listen interfaces. Configure an access physical interface or enabled VLAN with an IP CIDR.")
         return errors
@@ -451,6 +453,8 @@ def validate_dhcp_settings(
     options: list[DhcpOption] | None = None,
 ) -> list[str]:
     errors: list[str] = []
+    if not settings.enabled:
+        return errors
     scope_rows = scopes if scopes else [_legacy_scope(settings)]
     enabled_scopes = [scope for scope in scope_rows if scope.enabled is not False]
     if settings.enabled and not enabled_scopes:

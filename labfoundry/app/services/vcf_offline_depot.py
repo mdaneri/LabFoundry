@@ -284,15 +284,16 @@ def validate_vcf_depot_state(
         errors.append("Depot hostname must be a fully qualified DNS name.")
     if hostname.endswith(".local"):
         warnings.append("Avoid .local for VCF labs; use labfoundry.internal or another non-.local internal domain.")
-    if not settings.listen_interface.strip():
-        errors.append("Listen interface is required.")
-    elif interface_names is not None and settings.listen_interface not in interface_names:
-        errors.append(f"Listen interface {settings.listen_interface} is not configured as an access physical or VLAN interface with an IP address.")
-    if settings.listen_address.strip():
-        try:
-            ip_address(settings.listen_address.strip())
-        except ValueError:
-            errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
+    if settings.enabled:
+        if not settings.listen_interface.strip():
+            errors.append("Listen interface is required.")
+        elif interface_names is not None and settings.listen_interface not in interface_names:
+            errors.append(f"Listen interface {settings.listen_interface} is not configured as an access physical or VLAN interface with an IP address.")
+        if settings.listen_address.strip():
+            try:
+                ip_address(settings.listen_address.strip())
+            except ValueError:
+                errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
     if settings.port < 1 or settings.port > 65535:
         errors.append("Depot HTTPS port must be between 1 and 65535.")
     for path_label, path_value in [
@@ -305,7 +306,7 @@ def validate_vcf_depot_state(
         errors.append("Server certificate name is required.")
     if settings.telemetry_choice not in VCF_DEPOT_TELEMETRY_CHOICES:
         errors.append("Telemetry choice must be ENABLE, DISABLE, or NOT_PROVIDED.")
-    if not settings.tool_archive_path.strip():
+    if settings.enabled and not settings.tool_archive_path.strip():
         errors.append("Upload the VCF Download Tool before submitting VCF Offline Depot through global appliance apply.")
     elif not Path(settings.tool_archive_path).exists():
         errors.append("The configured VCF Download Tool file is not present on disk.")

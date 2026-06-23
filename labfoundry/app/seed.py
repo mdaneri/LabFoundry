@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from labfoundry.app.config import get_settings
@@ -20,6 +20,7 @@ from labfoundry.app.models import (
     PhysicalInterface,
     Route,
     ServiceState,
+    Setting,
     User,
     VcfBackupSettings,
     VcfDepotDownloadProfile,
@@ -28,13 +29,13 @@ from labfoundry.app.models import (
     VlanInterface,
     WanPolicy,
 )
-from labfoundry.app.security import hash_password
 from labfoundry.app.services.local_users import stage_user_os_password
 from labfoundry.app.services.networking import normalize_interface_mode
+from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
 
 
-VCF_BACKUP_USERNAME = "vcf-backup"
-VCF_BACKUP_INITIAL_PASSWORD = "labfoundry-vcf-backup"
+VCF_BACKUP_USERNAME = VCF_BACKUP_DEFAULT_USERNAME
+SEED_EXAMPLES_SETTING_KEY = "seed.include_examples"
 
 
 SERVICE_STATE_DEFAULTS = [
@@ -80,27 +81,37 @@ SERVICE_STATE_DEFAULTS = [
 ]
 
 
-def seed_initial_data(db: Session) -> None:
+def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
+    if include_examples:
+        seed_examples_setting = db.execute(select(Setting).where(Setting.key == SEED_EXAMPLES_SETTING_KEY)).scalar_one_or_none()
+        if seed_examples_setting is not None and seed_examples_setting.value.strip().lower() in {"0", "false", "no"}:
+            include_examples = False
     settings = get_settings()
+    if db.bind is not None and db.bind.dialect.name == "sqlite":
+        columns = {row[1] for row in db.execute(text("PRAGMA table_info(users)")).all()}
+        if {"pending_os_password_encrypted", "os_password_pending_at"}.issubset(columns):
+            db.execute(
+                text(
+                    "UPDATE users SET pending_os_password_encrypted = NULL, os_password_pending_at = NULL "
+                    "WHERE pending_os_password_encrypted IS NOT NULL"
+                )
+            )
     bootstrap_user = db.execute(select(User).where(User.username == settings.bootstrap_admin_username)).scalar_one_or_none()
     if db.execute(select(User)).first() is None:
         bootstrap_user = User(
             username=settings.bootstrap_admin_username,
-            password_hash=hash_password(settings.bootstrap_admin_password),
             role="admin",
         )
-        stage_user_os_password(bootstrap_user, settings.bootstrap_admin_password, settings)
+        stage_user_os_password(bootstrap_user, settings.bootstrap_admin_password)
         db.add(bootstrap_user)
         db.flush()
     vcf_backup_user = db.execute(select(User).where(User.username == VCF_BACKUP_USERNAME)).scalar_one_or_none()
     if vcf_backup_user is None:
         vcf_backup_user = User(
             username=VCF_BACKUP_USERNAME,
-            password_hash=hash_password(VCF_BACKUP_INITIAL_PASSWORD),
             role="viewer",
-            enabled=True,
+            enabled=False,
         )
-        stage_user_os_password(vcf_backup_user, VCF_BACKUP_INITIAL_PASSWORD, settings)
         db.add(vcf_backup_user)
         db.flush()
 
@@ -128,10 +139,11 @@ def seed_initial_data(db: Session) -> None:
                     driver="hv_netvsc",
                     speed="10 Gbps",
                     host_mtu=1500,
-                    host_admin_state="up",
+                    host_admin_state="up" if include_examples else "down",
                     mtu=1500,
+                    admin_state="up" if include_examples else "down",
                     role="access",
-                    mode="trunk",
+                    mode="trunk" if include_examples else "access",
                     inventory_source="seed",
                     desired_state_source="seed",
                 ),
@@ -140,11 +152,12 @@ def seed_initial_data(db: Session) -> None:
                     mac_address="02:15:5d:00:10:03",
                     driver="hv_netvsc",
                     speed="10 Gbps",
-                    host_ip_cidr="192.168.50.1/24",
+                    host_ip_cidr="192.168.50.1/24" if include_examples else None,
                     host_mtu=1500,
-                    host_admin_state="up",
-                    ip_cidr="192.168.50.1/24",
+                    host_admin_state="up" if include_examples else "down",
+                    ip_cidr="192.168.50.1/24" if include_examples else None,
                     mtu=1500,
+                    admin_state="up" if include_examples else "down",
                     role="access",
                     mode="access",
                     inventory_source="seed",
@@ -155,7 +168,7 @@ def seed_initial_data(db: Session) -> None:
         db.flush()
 
     eth1_parent = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth1")).scalar_one_or_none()
-    seed_sample_vlan = eth1_parent is not None and normalize_interface_mode(eth1_parent.mode) == "trunk"
+    seed_sample_vlan = include_examples and eth1_parent is not None and normalize_interface_mode(eth1_parent.mode) == "trunk"
     if seed_sample_vlan and db.execute(select(VlanInterface).where(VlanInterface.name == "eth1.20")).scalar_one_or_none() is None:
         db.add(
             VlanInterface(
@@ -170,7 +183,7 @@ def seed_initial_data(db: Session) -> None:
         )
         db.flush()
 
-    if db.execute(select(WanPolicy)).first() is None:
+    if include_examples and db.execute(select(WanPolicy)).first() is None:
         policy = WanPolicy(
             name="Europe WAN",
             description="Training-lab WAN profile for transatlantic latency.",
@@ -215,14 +228,14 @@ def seed_initial_data(db: Session) -> None:
         db.add(
             DnsSettings(
                 enabled=False,
-                listen_interface="eth2",
-                listen_address="192.168.50.1",
+                listen_interface="eth2" if include_examples else "",
+                listen_address="192.168.50.1" if include_examples else "",
                 domain="labfoundry.internal",
                 upstream_servers="1.1.1.1\n9.9.9.9",
             )
         )
 
-    if db.execute(select(DnsRecord)).first() is None:
+    if include_examples and db.execute(select(DnsRecord)).first() is None:
         db.add(
             DnsRecord(
                 hostname="labfoundry.labfoundry.internal",
@@ -236,18 +249,18 @@ def seed_initial_data(db: Session) -> None:
         db.add(
             DhcpSettings(
                 enabled=False,
-                interface_name="eth2",
-                site_address="192.168.50.1",
+                interface_name="eth2" if include_examples else "",
+                site_address="192.168.50.1" if include_examples else "",
                 prefix_length=24,
-                range_start="192.168.50.100",
-                range_end="192.168.50.200",
+                range_start="192.168.50.100" if include_examples else "",
+                range_end="192.168.50.200" if include_examples else "",
                 lease_time="12h",
                 domain_name="labfoundry.internal",
-                dns_server="192.168.50.1",
+                dns_server="192.168.50.1" if include_examples else "",
             )
         )
 
-    if db.execute(select(DhcpScope)).first() is None:
+    if include_examples and db.execute(select(DhcpScope)).first() is None:
         db.add(
             DhcpScope(
                 name="SiteA",
@@ -265,7 +278,7 @@ def seed_initial_data(db: Session) -> None:
             )
         )
 
-    if db.execute(select(DhcpReservation)).first() is None:
+    if include_examples and db.execute(select(DhcpReservation)).first() is None:
         db.add(
             DhcpReservation(
                 hostname="test-client",
@@ -279,7 +292,7 @@ def seed_initial_data(db: Session) -> None:
     if db.execute(select(FirewallSettings)).first() is None:
         db.add(FirewallSettings(enabled=True, default_input_policy="drop", default_forward_policy="drop", default_output_policy="accept"))
 
-    if db.execute(select(FirewallRule)).first() is None:
+    if include_examples and db.execute(select(FirewallRule)).first() is None:
         db.add_all(
             [
                 FirewallRule(
@@ -321,7 +334,7 @@ def seed_initial_data(db: Session) -> None:
             )
         )
 
-    if db.execute(select(CaProfile)).first() is None:
+    if include_examples and db.execute(select(CaProfile)).first() is None:
         server_profile = CaProfile(
             name="VCF service TLS",
             certificate_type="server",
@@ -351,8 +364,8 @@ def seed_initial_data(db: Session) -> None:
             KmsSettings(
                 enabled=False,
                 backend="pykmip",
-                listen_interface="eth1",
-                listen_address="192.168.50.1",
+                listen_interface="eth1" if include_examples else "",
+                listen_address="192.168.50.1" if include_examples else "",
                 port=5696,
                 hostname="kms.labfoundry.internal",
                 server_certificate="kms.labfoundry.internal",
@@ -365,7 +378,7 @@ def seed_initial_data(db: Session) -> None:
             )
         )
 
-    if db.execute(select(KmsClient)).first() is None:
+    if include_examples and db.execute(select(KmsClient)).first() is None:
         client = KmsClient(
             name="vcf-management",
             certificate_subject="CN=vcf-management.labfoundry.internal,O=LabFoundry",
@@ -393,8 +406,8 @@ def seed_initial_data(db: Session) -> None:
         db.add(
             VcfBackupSettings(
                 enabled=False,
-                listen_interface="eth2",
-                listen_address="192.168.50.1",
+                listen_interface="eth2" if include_examples else "",
+                listen_address="192.168.50.1" if include_examples else "",
                 port=22,
                 sftp_user_id=vcf_backup_user.id if vcf_backup_user else None,
                 storage_path="/mnt/labfoundry-vcf-backups",
@@ -408,7 +421,7 @@ def seed_initial_data(db: Session) -> None:
         db.add(VcfPrivateRegistrySettings())
     if db.execute(select(VcfOfflineDepotSettings)).first() is None:
         db.add(VcfOfflineDepotSettings())
-    if db.execute(select(VcfDepotDownloadProfile)).first() is None:
+    if include_examples and db.execute(select(VcfDepotDownloadProfile)).first() is None:
         db.add_all(
             [
                 VcfDepotDownloadProfile(

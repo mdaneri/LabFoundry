@@ -43,12 +43,12 @@ def _ensure_sqlite_user_sync_columns() -> None:
         return
     existing = {column["name"] for column in inspector.get_columns("users")}
     columns = {
-        "pending_os_password_encrypted": "TEXT",
-        "os_password_pending_at": "DATETIME",
+        "shell": "VARCHAR(80) DEFAULT '/sbin/nologin'",
         "os_password_applied_at": "DATETIME",
         "os_sync_applied_at": "DATETIME",
         "os_sync_status": "VARCHAR(80) DEFAULT 'password_not_staged'",
         "os_sync_error": "TEXT",
+        "os_unlock_requested_at": "DATETIME",
     }
     with engine.begin() as connection:
         for name, definition in columns.items():

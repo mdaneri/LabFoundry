@@ -17,7 +17,13 @@ def load_helper_module():
     return module
 
 
-def network_config_text(*, eth2_mode: str = "trunk", include_vlan: bool = True, include_removed_vlan: bool = False) -> str:
+def network_config_text(
+    *,
+    eth2_mode: str = "trunk",
+    eth2_admin_state: str = "up",
+    include_vlan: bool = True,
+    include_removed_vlan: bool = False,
+) -> str:
     lines = [
         "[physical_interfaces]",
         "interface=eth0",
@@ -30,7 +36,7 @@ def network_config_text(*, eth2_mode: str = "trunk", include_vlan: bool = True, 
         "  role=access",
         f"  mode={eth2_mode}",
         "  ip_cidr=",
-        "  admin_state=up",
+        f"  admin_state={eth2_admin_state}",
         "  mtu=1500",
         "",
         "[vlan_interfaces]",
@@ -77,12 +83,48 @@ def test_network_helper_accepts_valid_vlan_config(tmp_path):
     assert helper._network_config_errors(config_path) == []
 
 
+def test_real_mutating_helper_action_escapes_service_mount_namespace(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry.conf"
+    config_path.write_text("# staged dnsmasq config\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_which(command: str) -> str | None:
+        return "/usr/bin/systemd-run" if command == "systemd-run" else None
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "child helper output\n", "")
+
+    monkeypatch.setenv("LABFOUNDRY_HELPER_USE_SYSTEMD_RUN", "1")
+    monkeypatch.delenv(helper.SYSTEMD_RUN_CHILD_ENV, raising=False)
+    monkeypatch.setattr(helper.shutil, "which", fake_which)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper, "_handle_dnsmasq", lambda action, args: (_ for _ in ()).throw(AssertionError("handler should run in child")))
+
+    assert helper.main(["labfoundry-helper", "dnsmasq", "apply", "--real", str(config_path)]) == 0
+
+    out = capsys.readouterr().out
+    assert out == "child helper output\n"
+    assert len(commands) == 1
+    assert commands[0][:7] == [
+        "/usr/bin/systemd-run",
+        "--quiet",
+        "--wait",
+        "--pipe",
+        "--collect",
+        "--service-type=exec",
+        f"--setenv={helper.SYSTEMD_RUN_CHILD_ENV}=1",
+    ]
+    assert commands[0][-4:] == ["dnsmasq", "apply", "--real", str(config_path)]
+
+
 def test_network_helper_renders_systemd_networkd_files(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-network.conf"
     config_path.write_text(network_config_text(), encoding="utf-8")
 
-    files, links = helper._systemd_networkd_files(config_path)
+    files, links, admin_down_links = helper._systemd_networkd_files(config_path)
 
     assert "00-labfoundry-mgmt.network" in files
     assert "Name=eth0" in files["00-labfoundry-mgmt.network"]
@@ -95,6 +137,20 @@ def test_network_helper_renders_systemd_networkd_files(tmp_path):
     assert "10-labfoundry-eth2.20.network" in files
     assert "Address=192.168.20.1/24" in files["10-labfoundry-eth2.20.network"]
     assert links == ["eth2", "eth2.20"]
+    assert admin_down_links == []
+
+
+def test_network_helper_keeps_admin_down_physical_links_unmanaged(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(network_config_text(eth2_mode="access", eth2_admin_state="down", include_vlan=False), encoding="utf-8")
+
+    files, links, admin_down_links = helper._systemd_networkd_files(config_path)
+
+    assert "00-labfoundry-mgmt.network" in files
+    assert "10-labfoundry-eth2.network" not in files
+    assert links == []
+    assert admin_down_links == ["eth2"]
 
 
 def test_network_helper_installs_networkd_files_and_reconfigures_non_management(monkeypatch, tmp_path):
@@ -105,6 +161,8 @@ def test_network_helper_installs_networkd_files_and_reconfigures_non_management(
     networkd_dir.mkdir()
     old_managed = networkd_dir / "10-labfoundry-old.network"
     old_managed.write_text("old", encoding="utf-8")
+    old_default = networkd_dir / "99-dhcp-en.network"
+    old_default.write_text("old default", encoding="utf-8")
     commands: list[list[str]] = []
     stdin_commands: list[tuple[list[str], str]] = []
 
@@ -122,10 +180,11 @@ def test_network_helper_installs_networkd_files_and_reconfigures_non_management(
     monkeypatch.setattr(helper, "_run", fake_run)
     monkeypatch.setattr(helper, "_link_exists", lambda name: True)
 
-    returncode, installed, links = helper._install_systemd_networkd_files(config_path)
+    returncode, installed, links, admin_down_links = helper._install_systemd_networkd_files(config_path)
 
     assert returncode == 0
     assert not old_managed.exists()
+    assert not old_default.exists()
     assert (networkd_dir / "00-labfoundry-mgmt.network").is_file()
     assert (networkd_dir / "10-labfoundry-eth2.network").is_file()
     assert (networkd_dir / "10-labfoundry-eth2.20.netdev").is_file()
@@ -135,6 +194,36 @@ def test_network_helper_installs_networkd_files_and_reconfigures_non_management(
     assert ["networkctl", "reconfigure", "eth0"] not in commands
     assert any(path.endswith("00-labfoundry-mgmt.network") for path in installed)
     assert links == ["eth2", "eth2.20"]
+    assert admin_down_links == []
+
+
+def test_network_helper_sets_admin_down_links_down_after_reload(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(network_config_text(eth2_mode="access", eth2_admin_state="down", include_vlan=False), encoding="utf-8")
+    networkd_dir = tmp_path / "systemd-network"
+    networkd_dir.mkdir()
+    commands: list[list[str]] = []
+
+    def fake_which(command: str) -> str | None:
+        return f"/usr/bin/{command}" if command in {"networkctl", "ip"} else None
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "NETWORKD_CONFIG_DIR", networkd_dir)
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", networkd_dir / "00-labfoundry-mgmt.network")
+    monkeypatch.setattr(helper.shutil, "which", fake_which)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper, "_link_exists", lambda name: True)
+
+    returncode, _installed, links, admin_down_links = helper._install_systemd_networkd_files(config_path)
+
+    assert returncode == 0
+    assert links == []
+    assert admin_down_links == ["eth2"]
+    assert ["ip", "link", "set", "dev", "eth2", "down"] in commands
 
 
 def test_network_helper_sets_vlan_ip_after_link_up_and_flush(monkeypatch, tmp_path):
@@ -390,10 +479,14 @@ def test_local_users_helper_rejects_reserved_username(monkeypatch, tmp_path, cap
     assert "local user root is reserved" in captured.err
 
 
-def test_local_users_helper_creates_locks_and_sets_password_without_leaking(monkeypatch, tmp_path, capsys):
+def test_local_users_helper_creates_deletes_and_sets_password_without_leaking(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "local-users"
     home_base = tmp_path / "users"
+    pwquality_path = tmp_path / "etc" / "security" / "pwquality.conf"
+    pam_path = tmp_path / "etc" / "pam.d" / "system-password"
+    pam_path.parent.mkdir(parents=True)
+    pam_path.write_text("password  required    pam_unix.so       sha512 shadow use_authtok\n", encoding="utf-8")
     apply_dir.mkdir(parents=True)
     config_path = apply_dir / "labfoundry-users.json"
     payload = json.loads(local_users_json())
@@ -415,7 +508,7 @@ def test_local_users_helper_creates_locks_and_sets_password_without_leaking(monk
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
         commands.append(command)
-        if command in (["id", "sync-user"], ["id", "disabled-user"]):
+        if command == ["id", "sync-user"]:
             return subprocess.CompletedProcess(command, 1, "", "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -426,6 +519,8 @@ def test_local_users_helper_creates_locks_and_sets_password_without_leaking(monk
 
     monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "LOCAL_USERS_HOME_BASE", home_base)
+    monkeypatch.setattr(helper, "LOCAL_USERS_PWQUALITY_PATH", pwquality_path)
+    monkeypatch.setattr(helper, "LOCAL_USERS_SYSTEM_PASSWORD_PAM_PATH", pam_path)
     monkeypatch.setattr(helper, "_command_path", lambda command: command)
     monkeypatch.setattr(helper, "_run", fake_run)
     monkeypatch.setattr(helper, "_run_with_input", fake_run_with_input)
@@ -434,12 +529,133 @@ def test_local_users_helper_creates_locks_and_sets_password_without_leaking(monk
     captured = capsys.readouterr()
 
     assert ["useradd", "--home-dir", (home_base / "sync-user").as_posix(), "--create-home", "--shell", "/sbin/nologin", "sync-user"] in commands
+    assert ["usermod", "--shell", "/sbin/nologin", "sync-user"] in commands
     assert ["passwd", "-u", "sync-user"] in commands
-    assert ["passwd", "-l", "disabled-user"] in commands
+    assert ["userdel", "-r", "disabled-user"] in commands
+    assert ["passwd", "-l", "disabled-user"] not in commands
     assert stdin_values == ["sync-user:BridgeStrong1!\n"]
     assert all("BridgeStrong1!" not in arg for command in commands for arg in command)
     assert "BridgeStrong1!" not in captured.out
     assert "BridgeStrong1!" not in captured.err
+    assert "pam_pwquality.so" in pam_path.read_text(encoding="utf-8")
+    assert "minlen = 12" in pwquality_path.read_text(encoding="utf-8")
+
+
+def test_local_users_helper_applies_per_user_shell(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    home_base = tmp_path / "users"
+    pwquality_path = tmp_path / "etc" / "security" / "pwquality.conf"
+    pam_path = tmp_path / "etc" / "pam.d" / "system-password"
+    pam_path.parent.mkdir(parents=True)
+    pam_path.write_text("password  required    pam_pwquality.so  retry=3\npassword  required    pam_unix.so\n", encoding="utf-8")
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    payload = json.loads(local_users_json(password=None))
+    payload["users"][0]["home"] = (home_base / "sync-user").as_posix()
+    payload["users"][0]["shell"] = "/bin/bash"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "LOCAL_USERS_HOME_BASE", home_base)
+    monkeypatch.setattr(helper, "LOCAL_USERS_PWQUALITY_PATH", pwquality_path)
+    monkeypatch.setattr(helper, "LOCAL_USERS_SYSTEM_PASSWORD_PAM_PATH", pam_path)
+    monkeypatch.setattr(helper, "_command_path", lambda command: command)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_local_users("apply", [str(config_path)]) == 0
+    assert ["usermod", "--shell", "/bin/bash", "sync-user"] in commands
+
+
+def test_local_users_helper_unlock_request_resets_passwd_and_faillock(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    home_base = tmp_path / "users"
+    pwquality_path = tmp_path / "etc" / "security" / "pwquality.conf"
+    pam_path = tmp_path / "etc" / "pam.d" / "system-password"
+    pam_path.parent.mkdir(parents=True)
+    pam_path.write_text("password  required    pam_pwquality.so  retry=3\npassword  required    pam_unix.so\n", encoding="utf-8")
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    payload = json.loads(local_users_json(password=None))
+    payload["users"][0]["home"] = (home_base / "sync-user").as_posix()
+    payload["users"][0]["unlock_requested"] = True
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "LOCAL_USERS_HOME_BASE", home_base)
+    monkeypatch.setattr(helper, "LOCAL_USERS_PWQUALITY_PATH", pwquality_path)
+    monkeypatch.setattr(helper, "LOCAL_USERS_SYSTEM_PASSWORD_PAM_PATH", pam_path)
+    monkeypatch.setattr(helper, "_command_path", lambda command: command)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_local_users("apply", [str(config_path)]) == 0
+    assert ["passwd", "-u", "sync-user"] in commands
+    assert ["faillock", "--user", "sync-user", "--reset"] in commands
+    assert ["chpasswd"] not in commands
+
+
+def test_local_users_helper_status_reports_faillock_blocked(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    config_path.write_text(local_users_json(password=None), encoding="utf-8")
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command == ["id", "sync-user"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command == ["passwd", "-S", "sync-user"]:
+            return subprocess.CompletedProcess(command, 0, "sync-user L 2026-06-23 0 99999 7 -1\n", "")
+        if command == ["faillock", "--user", "sync-user"]:
+            return subprocess.CompletedProcess(command, 0, "sync-user:\nWhen                Type  Source                                           Valid\n2026-06-23 10:00   TTY   ssh                                              V\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "_command_path", lambda command: command)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_local_users("status", [str(config_path)]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["users"][0]["username"] == "sync-user"
+    assert payload["users"][0]["state"] == "faillock blocked"
+
+
+def test_local_users_helper_status_does_not_block_on_zero_faillock_failures(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    config_path.write_text(local_users_json(password=None), encoding="utf-8")
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command == ["id", "sync-user"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command == ["passwd", "-S", "sync-user"]:
+            return subprocess.CompletedProcess(command, 0, "sync-user P 2026-06-23 0 99999 7 -1\n", "")
+        if command == ["faillock", "--user", "sync-user"]:
+            return subprocess.CompletedProcess(command, 0, "Login           Failures    Latest failure         From\nsync-user           0\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "_command_path", lambda command: command)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_local_users("status", [str(config_path)]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["users"][0]["state"] == "present"
 
 
 def vcf_backups_config_text(*, enabled: bool = True) -> str:

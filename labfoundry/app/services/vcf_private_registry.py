@@ -139,17 +139,18 @@ def validate_vcf_registry_state(
         errors.append("Registry hostname must be a fully qualified DNS name.")
     if hostname.endswith(".local"):
         warnings.append("Avoid .local for VCF labs; use labfoundry.internal or another non-.local internal domain.")
-    if managed_dns_names is not None and hostname.lower() not in managed_dns_names:
+    if settings.enabled and managed_dns_names is not None and hostname.lower() not in managed_dns_names:
         warnings.append(f"Registry hostname {hostname} is not present in managed DNS records.")
-    if not settings.listen_interface.strip():
-        errors.append("Listen interface is required.")
-    elif interface_names is not None and settings.listen_interface not in interface_names:
-        errors.append(f"Listen interface {settings.listen_interface} is not configured as an access physical or VLAN interface with an IP address.")
-    if settings.listen_address.strip():
-        try:
-            ip_address(settings.listen_address.strip())
-        except ValueError:
-            errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
+    if settings.enabled:
+        if not settings.listen_interface.strip():
+            errors.append("Listen interface is required.")
+        elif interface_names is not None and settings.listen_interface not in interface_names:
+            errors.append(f"Listen interface {settings.listen_interface} is not configured as an access physical or VLAN interface with an IP address.")
+        if settings.listen_address.strip():
+            try:
+                ip_address(settings.listen_address.strip())
+            except ValueError:
+                errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
     port = settings.port or 443
     if port < 1 or port > 65535:
         errors.append("Registry HTTPS port must be between 1 and 65535.")
@@ -166,7 +167,7 @@ def validate_vcf_registry_state(
         errors.append("Server certificate name is required.")
     if not settings.robot_account.strip():
         errors.append("Robot account name is required.")
-    if ca_bundle_source == "uploaded" and not ca_bundle_available:
+    if settings.enabled and ca_bundle_source == "uploaded" and not ca_bundle_available:
         errors.append("Upload a CA bundle or enable the local CA before submitting VCF Private Registry through global appliance apply.")
 
     seen_names: set[str] = set()

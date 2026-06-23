@@ -8,8 +8,9 @@ LABFOUNDRY_LOG="${LABFOUNDRY_LOG:-/var/log/labfoundry}"
 LABFOUNDRY_MGMT_ADDRESS="${LABFOUNDRY_MGMT_ADDRESS:-192.168.49.1/24}"
 LABFOUNDRY_MGMT_GATEWAY="${LABFOUNDRY_MGMT_GATEWAY:-192.168.49.254}"
 LABFOUNDRY_MGMT_DNS="${LABFOUNDRY_MGMT_DNS:-1.1.1.1 9.9.9.9}"
+LABFOUNDRY_MGMT_INTERFACE="${LABFOUNDRY_MGMT_INTERFACE:-eth0}"
+BOOTSTRAP_USERNAME="${LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME:-admin}"
 BOOTSTRAP_PASSWORD="${LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD:-}"
-VCF_BACKUP_INITIAL_PASSWORD="${LABFOUNDRY_VCF_BACKUP_INITIAL_PASSWORD:-labfoundry-vcf-backup}"
 
 log_step() {
   printf '\n==> LabFoundry appliance: %s\n' "$1"
@@ -64,10 +65,10 @@ install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-backups
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-registry
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-offline-depot
 
-if ! id vcf-backup >/dev/null 2>&1; then
-  useradd --home-dir /mnt/labfoundry-vcf-backups --shell /sbin/nologin vcf-backup
+if ! id "$BOOTSTRAP_USERNAME" >/dev/null 2>&1; then
+  useradd --home-dir "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME" --create-home --shell /sbin/nologin "$BOOTSTRAP_USERNAME"
 fi
-printf 'vcf-backup:%s\n' "$VCF_BACKUP_INITIAL_PASSWORD" | chpasswd
+printf '%s:%s\n' "$BOOTSTRAP_USERNAME" "$BOOTSTRAP_PASSWORD" | chpasswd
 
 cat >/etc/labfoundry/build-info <<EOF
 build_time_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -77,6 +78,7 @@ python=$(python3 --version 2>&1)
 package_update=tdnf -y update completed during image provisioning
 final_mgmt_address=$LABFOUNDRY_MGMT_ADDRESS
 final_mgmt_gateway=$LABFOUNDRY_MGMT_GATEWAY
+final_mgmt_interface=$LABFOUNDRY_MGMT_INTERFACE
 EOF
 chmod 0644 /etc/labfoundry/build-info
 
@@ -103,6 +105,7 @@ cat >/etc/labfoundry/labfoundry.env <<EOF
 LABFOUNDRY_ENVIRONMENT=appliance
 LABFOUNDRY_DATABASE_URL=sqlite:////var/lib/labfoundry/labfoundry.db
 LABFOUNDRY_SECRET_KEY=$SECRET_KEY
+LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME=$BOOTSTRAP_USERNAME
 LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD=$BOOTSTRAP_PASSWORD
 LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true
 LABFOUNDRY_REPOSITORY_PATH=/mnt/labfoundry-vcf-offline-depot
@@ -129,7 +132,7 @@ chown -R labfoundry:labfoundry "$LABFOUNDRY_STATE" "$LABFOUNDRY_LOG"
 log_step "configuring final appliance management network"
 {
   printf '[Match]\n'
-  printf 'Name=eth* en*\n\n'
+  printf 'Name=%s\n\n' "$LABFOUNDRY_MGMT_INTERFACE"
   printf '[Network]\n'
   printf 'Address=%s\n' "$LABFOUNDRY_MGMT_ADDRESS"
   printf 'Gateway=%s\n' "$LABFOUNDRY_MGMT_GATEWAY"
@@ -138,6 +141,7 @@ log_step "configuring final appliance management network"
   done
 } >/etc/systemd/network/00-labfoundry-mgmt.network
 chmod 0644 /etc/systemd/network/00-labfoundry-mgmt.network
+rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.network
 
 {
   for dns_server in $LABFOUNDRY_MGMT_DNS; do

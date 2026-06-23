@@ -46,6 +46,11 @@ class SystemAdapter:
     def apply_local_users_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("local-users", "apply", config_path, dry_run_message="dry-run: local users apply command recorded")
 
+    def local_users_status(self, config_path: str) -> AdapterResult:
+        if self.dry_run:
+            return AdapterResult(command=["labfoundry-helper", "local-users", "status", config_path], dry_run=True, stdout='{"users":[],"status":"dry-run"}')
+        return self._helper_result("local-users", "status", config_path, dry_run_message="dry-run: local users status command recorded")
+
     def apply_dnsmasq_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("dnsmasq", "apply", config_path, dry_run_message="dry-run: dnsmasq apply command recorded")
 

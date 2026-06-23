@@ -16,32 +16,41 @@
       class="tabulator-shell"
       data-users='{{ users_json | tojson }}'
       data-roles='{{ roles | tojson }}'
+      data-shells='{{ shells | tojson }}'
       data-csrf="{{ csrf_token }}"
       data-fallback-id="users-fallback"
     ></div>
     <table id="users-fallback" class="data-table compact dns-fallback-table">
       <thead>
-        <tr><th>Username</th><th>Role</th><th>Status</th><th>Photon OS</th><th>Created</th><th>Actions</th></tr>
+        <tr><th>Username</th><th>Role</th><th>Shell</th><th>Enabled</th><th>OS account</th><th>Created</th><th>Actions</th></tr>
       </thead>
       <tbody>
         {% for user in users %}
           <tr>
             <td>{{ user.username }}</td>
             <td>{{ user.role }}</td>
+            <td>{{ user.shell }}</td>
             <td><span class="status-pill {{ 'good' if user.enabled else 'muted' }}">{{ "enabled" if user.enabled else "disabled" }}</span></td>
             <td>
-              {% set row = local_user_sync_rows | selectattr("username", "equalto", user.username) | first %}
-              <span class="status-pill {{ 'warn' if row.password_pending or row.sync_status.startswith('password not') else 'good' if row.sync_status == 'synced' else 'muted' }}">{{ row.sync_status }}</span>
+              {% set os_row = local_user_os_statuses.get(user.username) %}
+              {% set os_state = os_row.state if os_row else "status unavailable" %}
+              <span class="status-pill {{ 'good' if os_state == 'present' else 'warn' if os_state in ['locked', 'faillock blocked', 'password not set'] else 'muted' }}">{{ os_state }}</span>
             </td>
             <td>{{ user.created_at.strftime("%Y-%m-%d") }}</td>
             <td class="button-row">
               <button class="button tiny secondary" type="button" data-reset-user-button data-user-id="{{ user.id }}" data-username="{{ user.username }}">Reset password</button>
+              {% if os_state in ["locked", "faillock blocked"] and user.enabled %}
+                <form action="/users/{{ user.id }}/unlock" method="post">
+                  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                  <button class="button tiny secondary" type="submit">Unlock OS account</button>
+                </form>
+              {% endif %}
               <form
                 action="/users/{{ user.id }}/delete"
                 method="post"
                 data-confirm-modal
                 data-confirm-title="Remove {{ user.username }}?"
-                data-confirm-message="This removes the local LabFoundry account and revokes its API tokens. Authentication provider users are not affected."
+                data-confirm-message="This removes the local LabFoundry account, revokes its API tokens, and removes the managed Photon OS account on the next global appliance apply."
                 data-confirm-label="Remove user"
               >
                 <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -63,6 +72,8 @@
       <div class="settings-list compact-list">
         <div><span>Apply unit</span><strong>Local Users</strong></div>
         <div><span>Pending passwords</span><strong>{{ appliance_apply_status.context.local_user_pending_password_count }}</strong></div>
+        <div><span>Unlock requests</span><strong>{{ appliance_apply_status.context.local_user_unlock_request_count }}</strong></div>
+        <div><span>Removed OS accounts</span><strong>{{ appliance_apply_status.context.local_user_removed_users|length }}</strong></div>
       </div>
       <a class="button secondary full-width" href="/appliance-apply">Review appliance changes</a>
     </div>
@@ -75,31 +86,31 @@
       <form class="form-stack" action="/users/password-policy" method="post" data-autosave-form data-autosave-status-id="users-password-policy-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <label>
-          <span class="field-label"><span>Minimum length</span><button class="help-icon" type="button" data-help="Sets the minimum length for local LabFoundry passwords. The rule applies to new users and password resets before any Photon OS password is staged.">i</button></span>
+          <span class="field-label"><span>Minimum length</span><button class="help-icon" type="button" data-help="Sets the desired local password minimum length. LabFoundry enforces it before staging a password, and Local Users apply writes it to Photon PAM/pwquality.">i</button></span>
           <input type="number" name="min_length" min="8" max="128" value="{{ password_policy.min_length }}" required>
         </label>
         <label class="switch-field">
-          <span class="field-label"><span>Require uppercase</span><button class="help-icon" type="button" data-help="Requires at least one uppercase letter in local passwords before Photon OS sync staging is allowed.">i</button></span>
+          <span class="field-label"><span>Require uppercase</span><button class="help-icon" type="button" data-help="Requires uppercase locally before staging and maps to Photon pwquality during global Local Users apply.">i</button></span>
           <input class="switch-input" type="checkbox" name="require_uppercase" {{ "checked" if password_policy.require_uppercase else "" }}>
           <span class="switch-track" aria-hidden="true"></span>
         </label>
         <label class="switch-field">
-          <span class="field-label"><span>Require lowercase</span><button class="help-icon" type="button" data-help="Requires at least one lowercase letter in local passwords before Photon OS sync staging is allowed.">i</button></span>
+          <span class="field-label"><span>Require lowercase</span><button class="help-icon" type="button" data-help="Requires lowercase locally before staging and maps to Photon pwquality during global Local Users apply.">i</button></span>
           <input class="switch-input" type="checkbox" name="require_lowercase" {{ "checked" if password_policy.require_lowercase else "" }}>
           <span class="switch-track" aria-hidden="true"></span>
         </label>
         <label class="switch-field">
-          <span class="field-label"><span>Require number</span><button class="help-icon" type="button" data-help="Requires at least one number in local passwords before Photon OS sync staging is allowed.">i</button></span>
+          <span class="field-label"><span>Require number</span><button class="help-icon" type="button" data-help="Requires a number locally before staging and maps to Photon pwquality during global Local Users apply.">i</button></span>
           <input class="switch-input" type="checkbox" name="require_number" {{ "checked" if password_policy.require_number else "" }}>
           <span class="switch-track" aria-hidden="true"></span>
         </label>
         <label class="switch-field">
-          <span class="field-label"><span>Require special</span><button class="help-icon" type="button" data-help="Requires at least one non-alphanumeric character in local passwords before Photon OS sync staging is allowed.">i</button></span>
+          <span class="field-label"><span>Require special</span><button class="help-icon" type="button" data-help="Requires a non-alphanumeric character locally before staging and maps to Photon pwquality during global Local Users apply.">i</button></span>
           <input class="switch-input" type="checkbox" name="require_special" {{ "checked" if password_policy.require_special else "" }}>
           <span class="switch-track" aria-hidden="true"></span>
         </label>
         <label class="switch-field">
-          <span class="field-label"><span>Block username</span><button class="help-icon" type="button" data-help="Rejects passwords containing the username. This applies only to local LabFoundry user passwords staged for Photon OS.">i</button></span>
+          <span class="field-label"><span>Block username</span><button class="help-icon" type="button" data-help="Rejects passwords containing the username and maps to Photon pwquality user checks during global Local Users apply.">i</button></span>
           <input class="switch-input" type="checkbox" name="disallow_username" {{ "checked" if password_policy.disallow_username else "" }}>
           <span class="switch-track" aria-hidden="true"></span>
         </label>
@@ -131,19 +142,19 @@
     <div class="confirm-modal-body">
       <p class="kicker">Local account</p>
       <h2 id="user-password-modal-title">Reset password</h2>
-      <p id="user-password-modal-message" class="muted">Set a temporary local password. API tokens for this user are revoked after reset.</p>
+      <p id="user-password-modal-message" class="muted">Set/reset the Photon OS password. The password is held only until global Local Users apply.</p>
     </div>
     <label>
       <span class="field-label"><span>New password</span><button class="help-icon" type="button" data-help="Minimum length is 8 characters.">i</button></span>
       <input type="password" name="password" autocomplete="new-password" minlength="{{ password_policy.min_length }}" required>
     </label>
     <label>
-      <span class="field-label"><span>Confirm password</span><button class="help-icon" type="button" data-help="Must match the new password. The password is hashed for LabFoundry and staged for Photon OS only after the configured policy passes.">i</button></span>
+      <span class="field-label"><span>Confirm password</span><button class="help-icon" type="button" data-help="Must match the new password. LabFoundry validates the policy and holds the value only until the global Local Users apply sends it to Photon OS.">i</button></span>
       <input type="password" name="confirm_password" autocomplete="new-password" minlength="{{ password_policy.min_length }}" required>
     </label>
     <div class="confirm-modal-actions">
       <button class="button ghost" value="cancel" type="button" data-user-password-cancel>Cancel</button>
-      <button class="button primary" type="submit">Reset password</button>
+      <button class="button primary" type="submit">Set/reset password</button>
     </div>
   </form>
 </dialog>

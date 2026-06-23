@@ -72,7 +72,6 @@ from labfoundry.app.security import (
     Identity,
     authenticate_user,
     get_session_identity,
-    hash_password,
     require_session_identity,
 )
 from labfoundry.app.services.dnsmasq import (
@@ -146,12 +145,19 @@ from labfoundry.app.services.local_users import (
     LOCAL_USERS_PASSWORD_POLICY_KEY,
     LOCAL_USERS_STAGED_CONFIG_PATH,
     DEFAULT_PASSWORD_POLICY,
+    DEFAULT_LOCAL_USER_SHELL,
+    LOCAL_USER_SHELLS,
+    has_pending_os_password,
+    is_valid_user_shell,
     local_user_sync_rows,
     mark_local_users_applied,
     mark_local_users_failed,
+    normalize_user_shell,
     password_policy_from_json,
+    pending_os_password_count,
     password_policy_summary,
     password_policy_to_json,
+    rename_pending_os_password,
     render_local_users_apply_config,
     render_local_users_preview,
     stage_user_os_password,
@@ -195,6 +201,7 @@ from labfoundry.app.services.kms import (
 )
 from labfoundry.app.services.vcf_backups import (
     VCF_BACKUP_DEFAULT_VOLUME_MOUNT,
+    VCF_BACKUP_DEFAULT_USERNAME,
     VCF_BACKUP_EFFECTIVE_CONFIG_PATH,
     VCF_BACKUP_STAGED_CONFIG_PATH,
     render_vcf_backup_config,
@@ -291,15 +298,57 @@ def require_admin_identity(identity: Identity) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator role required")
 
 
-def user_to_dict(user: User, current_user_id: int | None = None) -> dict:
+def local_user_os_statuses(users: list[User], policy: dict[str, bool | int]) -> dict[str, dict[str, Any]]:
+    statuses: dict[str, dict[str, Any]] = {}
+    adapter = SystemAdapter()
+    if adapter.dry_run or not hasattr(adapter, "local_users_status"):
+        return statuses
+    try:
+        config_path = stage_appliance_apply_config(LOCAL_USERS_STAGED_CONFIG_PATH, render_local_users_preview(users, password_policy=policy))
+        result = adapter.local_users_status(config_path)
+    except OSError:
+        result = None
+    if result is None or result.returncode != 0:
+        return statuses
+    payload: dict[str, Any] | None = None
+    for raw_line in reversed((result.stdout or "").splitlines()):
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("users"), list):
+            payload = parsed
+            break
+    if payload is None:
+        return statuses
+    for row in payload.get("users", []):
+        if not isinstance(row, dict):
+            continue
+        username = str(row.get("username") or "").strip().lower()
+        if username:
+            statuses[username] = row
+    return statuses
+
+
+def user_to_dict(user: User, current_user_id: int | None = None, os_status: dict[str, Any] | None = None) -> dict:
+    os_state = str((os_status or {}).get("state") or "status unavailable")
+    os_detail = str((os_status or {}).get("detail") or "")
     return {
         "id": user.id,
         "username": user.username,
         "role": user.role,
+        "shell": normalize_user_shell(user.shell),
         "enabled": user.enabled,
         "created_at": user.created_at.strftime("%Y-%m-%d"),
         "os_sync_status": local_user_sync_rows([user])[0]["sync_status"],
-        "os_password_pending": bool(user.pending_os_password_encrypted),
+        "os_password_pending": has_pending_os_password(user),
+        "os_account_state": os_state,
+        "os_account_detail": os_detail,
+        "os_unlock_available": os_state in {"locked", "faillock blocked"},
+        "unlock_requested": bool(user.os_unlock_requested_at),
         "is_current": user.id == current_user_id,
         "is_new": False,
     }
@@ -312,13 +361,16 @@ def local_users_password_policy(db: Session) -> dict[str, bool | int]:
 def users_context(db: Session, identity: Identity) -> dict:
     users = db.execute(select(User).order_by(User.username)).scalars().all()
     policy = local_users_password_policy(db)
+    os_statuses = local_user_os_statuses(users, policy)
     return {
         "users": users,
-        "users_json": [user_to_dict(user, identity.user_id) for user in users],
+        "users_json": [user_to_dict(user, identity.user_id, os_statuses.get(user.username.strip().lower())) for user in users],
         "roles": [role.value for role in Role],
+        "shells": LOCAL_USER_SHELLS,
         "password_policy": policy,
         "password_policy_summary": password_policy_summary(policy),
         "local_user_sync_rows": local_user_sync_rows(users),
+        "local_user_os_statuses": os_statuses,
     }
 
 
@@ -344,6 +396,21 @@ def revoke_user_tokens(db: Session, user: User, actor: str) -> None:
         token.revoked_at = utcnow()
         token.revoked_by = actor
         db.add(token)
+
+
+def disable_default_vcf_backup_user_when_service_off(db: Session, settings: VcfBackupSettings, *, actor: str | None = None) -> bool:
+    if settings.enabled or not settings.sftp_user_id:
+        return False
+    user = db.get(User, settings.sftp_user_id)
+    if user is None or user.username != VCF_BACKUP_DEFAULT_USERNAME or not user.enabled:
+        return False
+    user.enabled = False
+    user.os_sync_status = "pending"
+    user.os_unlock_requested_at = None
+    if actor:
+        revoke_user_tokens(db, user, actor)
+    db.add(user)
+    return True
 
 
 def get_dns_settings_row(db: Session) -> DnsSettings:
@@ -406,12 +473,15 @@ def get_firewall_settings_row(db: Session) -> FirewallSettings:
     return settings
 
 
-def get_vcf_backup_settings_row(db: Session) -> VcfBackupSettings:
+def get_vcf_backup_settings_row(db: Session, *, reconcile_default_user: bool = True) -> VcfBackupSettings:
     settings = db.execute(select(VcfBackupSettings).options(selectinload(VcfBackupSettings.sftp_user))).scalar_one_or_none()
     if settings is None:
         first_admin = db.execute(select(User).where(User.role == Role.ADMIN.value, User.enabled.is_(True)).order_by(User.username)).scalar_one_or_none()
         settings = VcfBackupSettings(sftp_user_id=first_admin.id if first_admin else None)
         db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    if reconcile_default_user and disable_default_vcf_backup_user_when_service_off(db, settings):
         db.commit()
         db.refresh(settings)
     return settings
@@ -1732,6 +1802,29 @@ def removed_network_vlan_entries(current_preview: str, applied_entries: list[dic
     return removed
 
 
+def local_usernames_from_config(config_preview: str) -> list[str]:
+    try:
+        payload = json.loads(config_preview or "")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    usernames: list[str] = []
+    for row in payload.get("users", []):
+        if not isinstance(row, dict):
+            continue
+        username = str(row.get("username") or "").strip().lower()
+        if username and username not in usernames:
+            usernames.append(username)
+    return usernames
+
+
+def removed_local_usernames(users: list[User], baseline: dict[str, Any] | None) -> list[str]:
+    current = {user.username.strip().lower() for user in users}
+    previous = local_usernames_from_config(str((baseline or {}).get("config_preview") or ""))
+    return [username for username in previous if username not in current]
+
+
 def network_config_with_removed_vlans(config_preview: str, removed_vlans: list[dict[str, str]]) -> str:
     if not removed_vlans:
         return config_preview
@@ -1789,12 +1882,14 @@ def make_appliance_apply_unit(
     }
 
 
-def local_users_apply_context(db: Session) -> dict[str, Any]:
+def local_users_apply_context(db: Session, baseline: dict[str, Any] | None = None) -> dict[str, Any]:
     users = db.execute(select(User).order_by(User.username)).scalars().all()
     validation_errors = validate_local_usernames(users)
-    config_preview = render_local_users_preview(users)
+    policy = local_users_password_policy(db)
+    removed_users = removed_local_usernames(users, baseline)
+    config_preview = render_local_users_preview(users, password_policy=policy, removed_users=removed_users)
     try:
-        config_preview = render_local_users_apply_config(users)
+        config_preview = render_local_users_apply_config(users, password_policy=policy, removed_users=removed_users)
     except ValueError as exc:
         validation_errors.append(str(exc))
     return {
@@ -1802,14 +1897,16 @@ def local_users_apply_context(db: Session) -> dict[str, Any]:
         "local_user_sync_rows": local_user_sync_rows(users),
         "local_user_validation_errors": validation_errors,
         "local_user_config_preview": config_preview,
-        "local_user_display_preview": render_local_users_preview(users),
-        "local_user_pending_password_count": sum(1 for user in users if user.pending_os_password_encrypted),
+        "local_user_display_preview": render_local_users_preview(users, password_policy=policy, removed_users=removed_users),
+        "local_user_pending_password_count": pending_os_password_count(users),
+        "local_user_unlock_request_count": sum(1 for user in users if user.os_unlock_requested_at),
+        "local_user_removed_users": removed_users,
     }
 
 
 def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     baselines = load_appliance_apply_baselines(db)
-    local_users = local_users_apply_context(db)
+    local_users = local_users_apply_context(db, baselines.get("local_users"))
     appliance_settings = appliance_settings_context(db)
     network = network_context(db)
     wan = routes_wan_context(db)
@@ -1851,6 +1948,8 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             summary=[
                 f"{len(local_users['local_users'])} local users",
                 f"{local_users['local_user_pending_password_count']} pending OS passwords",
+                f"{local_users['local_user_unlock_request_count']} unlock requests",
+                f"{len(local_users['local_user_removed_users'])} removed OS accounts",
             ],
             validation_errors=local_users["local_user_validation_errors"],
             config_path=LOCAL_USERS_STAGED_CONFIG_PATH,
@@ -2024,6 +2123,39 @@ def adapter_result_to_payload(result: Any) -> dict[str, Any]:
         "stderr": result.stderr,
         "returncode": result.returncode,
     }
+
+
+def apply_output_excerpt(value: str, *, limit: int = 2400) -> str:
+    redacted = redact_config_preview(value or "").strip()
+    if len(redacted) <= limit:
+        return redacted
+    return f"{redacted[:limit].rstrip()}\n... output truncated ..."
+
+
+def appliance_apply_failure_summaries(unit_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for unit in unit_results:
+        failed_commands = []
+        for command in unit.get("commands", []):
+            if int(command.get("returncode") or 0) == 0:
+                continue
+            failed_commands.append(
+                {
+                    "command_line": apply_output_excerpt(str(command.get("command_line") or ""), limit=800),
+                    "returncode": command.get("returncode"),
+                    "stdout": apply_output_excerpt(str(command.get("stdout") or "")),
+                    "stderr": apply_output_excerpt(str(command.get("stderr") or "")),
+                }
+            )
+        if failed_commands:
+            summaries.append(
+                {
+                    "unit_id": unit.get("unit_id"),
+                    "label": unit.get("label") or unit.get("unit_id"),
+                    "commands": failed_commands,
+                }
+            )
+    return summaries
 
 
 def stage_appliance_apply_config(config_path: str, config_preview: str) -> str:
@@ -2303,6 +2435,7 @@ def submit_appliance_apply(
             "apply_task": job,
             "apply_task_dry_run": job_result["dry_run"],
             "applied_unit_results": unit_results,
+            "apply_failure_summaries": appliance_apply_failure_summaries(unit_results),
         },
     )
 
@@ -4969,7 +5102,7 @@ def update_vcf_backup_settings_from_ui(
     db: Session = Depends(get_db),
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
-    settings = get_vcf_backup_settings_row(db)
+    settings = get_vcf_backup_settings_row(db, reconcile_default_user=False)
     user_id = int(sftp_user_id) if str(sftp_user_id).strip() else None
     if user_id and not db.get(User, user_id):
         raise HTTPException(status_code=400, detail="Selected SFTP user does not exist.")
@@ -4989,8 +5122,17 @@ def update_vcf_backup_settings_from_ui(
     settings.max_sessions = max_sessions
     settings.config_path = VCF_BACKUP_EFFECTIVE_CONFIG_PATH
     settings.updated_at = utcnow()
+    disabled_default_user = disable_default_vcf_backup_user_when_service_off(db, settings, actor=identity.username)
     db.commit()
     record_audit(db, actor=identity.username, action="update_vcf_backup_settings", resource_type="vcf_backups", resource_id=str(settings.id))
+    if disabled_default_user:
+        record_audit(
+            db,
+            actor=identity.username,
+            action="disable_vcf_backup_default_user",
+            resource_type="user",
+            resource_id=str(user_id or ""),
+        )
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         context = vcf_backup_context(db)
         saved_settings = context["vcf_backup_settings"]
@@ -5144,7 +5286,8 @@ def create_user_from_ui(
     request: Request,
     username: str = Form(...),
     role: str = Form(Role.VIEWER.value),
-    password: str = Form(...),
+    shell: str = Form(DEFAULT_LOCAL_USER_SHELL),
+    password: str = Form(""),
     enabled: str | None = Form(None),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -5157,13 +5300,22 @@ def create_user_from_ui(
         raise HTTPException(status_code=400, detail="Username is required.")
     if role not in {item.value for item in Role}:
         raise HTTPException(status_code=400, detail="Unknown role.")
-    policy_errors = validate_password(password, username, local_users_password_policy(db))
-    if policy_errors:
-        raise HTTPException(status_code=400, detail=" ".join(policy_errors))
+    if not is_valid_user_shell(shell):
+        raise HTTPException(status_code=400, detail=f"Shell must be one of {', '.join(LOCAL_USER_SHELLS)}.")
+    shell = normalize_user_shell(shell)
+    next_enabled = enabled == "on"
+    password = password.strip()
+    if next_enabled and not password:
+        raise HTTPException(status_code=400, detail="Set/reset a Photon OS password before enabling this local user.")
+    if password:
+        policy_errors = validate_password(password, username, local_users_password_policy(db))
+        if policy_errors:
+            raise HTTPException(status_code=400, detail=" ".join(policy_errors))
     if db.execute(select(User).where(User.username == username)).scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"User {username} already exists.")
-    user = User(username=username, role=role, password_hash=hash_password(password), enabled=enabled == "on")
-    stage_user_os_password(user, password)
+    user = User(username=username, role=role, shell=shell, enabled=next_enabled)
+    if password:
+        stage_user_os_password(user, password)
     db.add(user)
     db.commit()
     record_audit(db, actor=identity.username, action="create_local_user", resource_type="user", resource_id=str(user.id))
@@ -5176,6 +5328,7 @@ def update_user_from_ui(
     request: Request,
     username: str = Form(...),
     role: str = Form(Role.VIEWER.value),
+    shell: str = Form(DEFAULT_LOCAL_USER_SHELL),
     enabled: str | None = Form(None),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -5191,6 +5344,9 @@ def update_user_from_ui(
         raise HTTPException(status_code=400, detail="Username is required.")
     if role not in {item.value for item in Role}:
         raise HTTPException(status_code=400, detail="Unknown role.")
+    if not is_valid_user_shell(shell):
+        raise HTTPException(status_code=400, detail=f"Shell must be one of {', '.join(LOCAL_USER_SHELLS)}.")
+    shell = normalize_user_shell(shell)
     next_enabled = enabled == "on"
     if user.id == identity.user_id and not next_enabled:
         raise HTTPException(status_code=400, detail="You cannot disable your own active session account.")
@@ -5199,19 +5355,55 @@ def update_user_from_ui(
     if existing:
         raise HTTPException(status_code=409, detail=f"User {username} already exists.")
     old_username = user.username
+    has_photon_password = bool(has_pending_os_password(user) or (old_username == username and user.os_password_applied_at))
+    if next_enabled and not has_photon_password:
+        raise HTTPException(status_code=400, detail="Set/reset a Photon OS password before enabling this local user.")
     user.username = username
     user.role = role
+    shell_changed = user.shell != shell
+    user.shell = shell
     user.enabled = next_enabled
+    if old_username != username:
+        rename_pending_os_password(old_username, username)
+        user.os_password_applied_at = None
+        user.os_sync_status = "pending" if has_pending_os_password(user) else "password_not_staged"
+    elif shell_changed and next_enabled:
+        user.os_sync_status = "pending"
     if old_username != username:
         tokens = db.execute(select(ApiToken).where(ApiToken.owner_user_id == user.id)).scalars().all()
         for token in tokens:
             token.owner_username = username
             db.add(token)
     if not next_enabled:
+        user.os_sync_status = "pending"
         revoke_user_tokens(db, user, identity.username)
     db.add(user)
     db.commit()
     record_audit(db, actor=identity.username, action="update_local_user", resource_type="user", resource_id=str(user.id))
+    db.refresh(user)
+    return JSONResponse({"user": user_to_dict(user, identity.user_id)})
+
+
+@router.post("/users/{user_id}/unlock", response_model=None)
+def request_user_os_unlock_from_ui(
+    user_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    require_admin_identity(identity)
+    verify_csrf(request, csrf)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not user.enabled:
+        raise HTTPException(status_code=400, detail="Disabled local users are removed from Photon OS during appliance apply.")
+    user.os_unlock_requested_at = utcnow()
+    user.os_sync_status = "pending"
+    db.add(user)
+    db.commit()
+    record_audit(db, actor=identity.username, action="request_local_user_os_unlock", resource_type="user", resource_id=str(user.id))
     db.refresh(user)
     return JSONResponse({"user": user_to_dict(user, identity.user_id)})
 
@@ -5261,7 +5453,6 @@ def reset_user_password_from_ui(
     policy_errors = validate_password(password, user.username, local_users_password_policy(db))
     if policy_errors:
         raise HTTPException(status_code=400, detail=" ".join(policy_errors))
-    user.password_hash = hash_password(password)
     stage_user_os_password(user, password)
     db.add(user)
     revoke_user_tokens(db, user, identity.username)
@@ -5503,7 +5694,7 @@ def factory_reset_backup_restore(
         actor=identity.username,
         action="factory_reset_settings",
         resource_type="settings_backup",
-        detail="Desired-state settings reset to factory defaults; services forced stopped/unconfigured.",
+        detail="Desired-state settings reset to core factory defaults without demo resources or service listener bindings; services forced stopped/unconfigured.",
         request_id=request.state.request_id,
     )
     return render(
@@ -5515,7 +5706,7 @@ def factory_reset_backup_restore(
                 db,
                 result={
                     "title": "Factory reset complete",
-                    "message": "Desired-state settings were reset to LabFoundry defaults. Services are stopped and unconfigured until reviewed and applied through the global appliance workflow.",
+                    "message": "Desired-state settings were reset to core LabFoundry defaults without demo resources or service listener bindings. Non-management NICs are desired admin down, and services are stopped and unconfigured until reviewed and applied through the global appliance workflow.",
                     "counts": counts,
                 },
             ),

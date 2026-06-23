@@ -177,23 +177,34 @@ VLAN interfaces with IP CIDR, not trunk or addressless physical interfaces.
 
 Local Users desired state is Photon OS account-backed. Real `/appliance-apply`
 stages `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`, validates
-LabFoundry-owned local usernames, creates enabled users as non-interactive OS
-accounts under `/var/lib/labfoundry/users`, locks disabled users, and sends
-pending passwords to `chpasswd` over stdin. Password previews, job results, and
-logs should show only status and counts. `labfoundry.service` preserves
+LabFoundry-owned local usernames, creates or updates enabled users under
+`/var/lib/labfoundry/users` with the per-user desired shell, removes disabled or
+removed managed users with `userdel -r`, applies staged unlock requests with
+`passwd -u` and `faillock --reset`, writes the desired PAM/pwquality password
+policy, and sends in-memory pending passwords to `chpasswd` over stdin. Password
+previews, job results, and logs should show only status and counts.
+`labfoundry.service` preserves
 `LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1` through sudo so account-mutating helper
 commands can run as transient systemd units outside the control-plane service
 sandbox while still using the constrained helper allowlist.
 
-VCF Backups desired state is OpenSSH-backed. Provisioning creates the default
-`vcf-backup` OS account. Real `/appliance-apply` stages the rendered drop-in
-under `/var/lib/labfoundry/apply/vcf-backups/`, validates that it is a
+Provisioning creates the bootstrap admin OS account under
+`/var/lib/labfoundry/users/<admin>` with `/sbin/nologin` and sets the same
+bootstrap password used for the initial web login, so the admin account exists
+on Photon before first appliance apply.
+
+VCF Backups desired state is OpenSSH-backed. Provisioning leaves the default
+`vcf-backup` account absent from Photon OS until Local Users apply creates it.
+When VCF Backup desired state is off, LabFoundry keeps the default `vcf-backup`
+user disabled so the next Local Users apply removes the Photon OS account.
+Real `/appliance-apply` stages the rendered drop-in under
+`/var/lib/labfoundry/apply/vcf-backups/`, validates that it is a
 LabFoundry-rendered `Match User` config for an existing OS account, installs
 `/etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf`, prepares the fixed
 `/mnt/labfoundry-vcf-backups` chroot and `/backups` upload directory, and
 restarts `sshd` through `labfoundry-helper`. Firewall apply still owns the
 selected interface and port allow rule. Apply Local Users first when the
-selected SFTP user is new or has a staged password.
+selected SFTP user is new, disabled/enabled, has a pending password, changes shell, or has an unlock request.
 
 The firewall preview derives LabFoundry-managed service allow rules from
 enabled service listener desired state, including management, DNS, DHCP, KMS,
@@ -208,6 +219,11 @@ temporary Packer builder network to the LabFoundry management network:
 - appliance interface: `eth0`;
 - host-side `LabFoundry-Mgmt` address: `192.168.49.254/24`;
 - default gateway: `192.168.49.254`.
+
+The generated `00-labfoundry-mgmt.network` matches only `eth0`. Provisioning
+removes the Photon installer's broad `50-static-en.network` and
+`99-dhcp-en.network` defaults so non-management NICs remain opt-in through
+LabFoundry desired state and global appliance apply.
 
 The Hyper-V switch script configures the host-side management address and NAT so
 the final appliance can reach Photon repositories when the Windows host has

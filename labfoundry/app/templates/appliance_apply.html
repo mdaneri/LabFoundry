@@ -20,6 +20,34 @@
         {% if apply_task_dry_run %}
           <p>Dry-run mode recorded the commands without changing the host.</p>
         {% endif %}
+        {% if apply_task.status != 'succeeded' and apply_failure_summaries %}
+          <div class="apply-failure-list">
+            {% for failure in apply_failure_summaries %}
+              <div class="apply-failure-item">
+                <strong>{{ failure.label }} failed</strong>
+                {% for command in failure.commands %}
+                  <details class="apply-failure-command">
+                    <summary>{{ command.command_line }} exited {{ command.returncode }}</summary>
+                    {% if command.stderr %}
+                      <div class="apply-failure-output">
+                        <span>stderr</span>
+                        <code>{{ command.stderr }}</code>
+                      </div>
+                    {% endif %}
+                    {% if command.stdout %}
+                      <div class="apply-failure-output">
+                        <span>stdout</span>
+                        <code>{{ command.stdout }}</code>
+                      </div>
+                    {% endif %}
+                  </details>
+                {% endfor %}
+              </div>
+            {% endfor %}
+          </div>
+        {% elif apply_task.status != 'succeeded' and apply_task.error %}
+          <p>{{ apply_task.error }}</p>
+        {% endif %}
       </div>
     {% endif %}
   </div>

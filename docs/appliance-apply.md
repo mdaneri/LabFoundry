@@ -6,6 +6,8 @@ Service pages edit desired state. They autosave routine settings and grids, show
 
 `Appliance Apply` is the global review and submit surface. It lists changed apply units, checks valid changed units by default, and lets an operator unselect any unit that should remain pending.
 
+On Photon appliances, real mutating helper actions run through `labfoundry-helper` and then re-enter via a transient `systemd-run` service when `LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1` is set. The web control plane remains inside the `labfoundry.service` sandbox, while the reviewed root helper writes approved `/etc` files from outside that service's read-only mount namespace.
+
 ## Apply Units
 
 Current apply units are:
@@ -28,9 +30,9 @@ Appliance Settings owns appliance identity, OS hostname, resolver mode, resolver
 
 ## Local Users Apply
 
-The real Local Users apply path stages JSON at `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`. The `local_users` unit synchronizes LabFoundry local users to Photon OS users through `labfoundry-helper local-users validate|apply`. Enabled LabFoundry users are created as non-interactive OS accounts under `/var/lib/labfoundry/users/<username>` with `/sbin/nologin`; disabled users are locked. Deleted LabFoundry users are not removed from Photon OS in this version.
+The real Local Users apply path stages JSON at `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`. The `local_users` unit synchronizes LabFoundry local users to Photon OS users through `labfoundry-helper local-users validate|apply`. Enabled LabFoundry users are created under `/var/lib/labfoundry/users/<username>` with the per-user desired shell, defaulting to `/sbin/nologin`; disabled and removed managed users are removed from Photon OS with `userdel -r`. Photon image provisioning creates the bootstrap admin OS account before first apply. When VCF Backup desired state is off, LabFoundry keeps the default `vcf-backup` user disabled so Local Users apply removes that OS account.
 
-Passwords are available for OS sync only when an administrator creates or resets a local LabFoundry password. LabFoundry stores the web password as an Argon2 hash and separately stages an encrypted pending OS password for the next global apply. A successful real apply sends the password to `chpasswd` over stdin and then clears the pending encrypted value. Dry-run apply records command intent but keeps the pending password staged. Rendered previews, diffs, job results, logs, and audit details must show only counts and status such as `password staged` or `password not staged; reset to sync`.
+Passwords are available for OS sync only when an administrator creates or resets a local user password. LabFoundry does not store local user password hashes or encrypted pending OS passwords in the database; the pending value is held only in process memory until a real global apply sends it to `chpasswd` over stdin and then clears it. If the service restarts before apply, the operator must set/reset the password again. Dry-run apply records command intent but keeps the in-memory pending password staged. Unlock requests are staged as desired state and applied later with `passwd -u` plus `faillock --user <name> --reset`. Password policy edits are also desired state; Local Users apply writes a LabFoundry-managed block in `/etc/security/pwquality.conf` and ensures `/etc/pam.d/system-password` runs `pam_pwquality.so` before `pam_unix.so`. Rendered previews, diffs, job results, logs, and audit details must show only counts and status such as `password staged` or `password not staged; reset to sync`.
 
 ## Physical Interface Inventory
 

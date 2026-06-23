@@ -46,6 +46,7 @@ def test_vcf_private_registry_relocation_preview_uses_imgpkg():
 
 def test_vcf_private_registry_validation_errors_and_warnings():
     settings = VcfPrivateRegistrySettings(
+        enabled=True,
         hostname="registry.labfoundry.local",
         listen_interface="eth9",
         listen_address="not-an-ip",

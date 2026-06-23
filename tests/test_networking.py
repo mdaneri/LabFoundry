@@ -103,6 +103,30 @@ def test_reconcile_host_inventory_replaces_seed_but_preserves_user_desired_state
     assert by_name["eth1"].host_mtu == 1500
 
 
+def test_reconcile_host_inventory_keeps_seed_non_management_down():
+    reconciled = reconcile_host_physical_interfaces(
+        [],
+        [
+            HostPhysicalInterface(
+                name="eth1",
+                mac_address="00:15:5d:aa:bb:02",
+                driver="hv_netvsc",
+                speed="10000 Mbps",
+                host_ip_cidr="192.168.50.22/24",
+                host_mtu=1500,
+                host_admin_state="up",
+                oper_state="up",
+            )
+        ],
+    )
+
+    assert len(reconciled) == 1
+    assert reconciled[0].name == "eth1"
+    assert reconciled[0].host_ip_cidr == "192.168.50.22/24"
+    assert reconciled[0].ip_cidr is None
+    assert reconciled[0].admin_state == "down"
+
+
 def test_render_network_config_includes_physical_roles_for_networkd_apply():
     config = render_network_config(
         interfaces=[

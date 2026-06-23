@@ -4,8 +4,6 @@ from secrets import token_urlsafe
 from typing import Annotated
 
 import jwt
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
@@ -108,7 +106,6 @@ ROLE_SCOPES = {
     },
 }
 
-password_hasher = PasswordHasher()
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -133,17 +130,6 @@ class Identity:
 
     def can(self, scope: str) -> bool:
         return "admin:all" in self.scopes or scope in self.scopes
-
-
-def hash_password(password: str) -> str:
-    return password_hasher.hash(password)
-
-
-def verify_password(password: str, password_hash: str) -> bool:
-    try:
-        return password_hasher.verify(password_hash, password)
-    except VerifyMismatchError:
-        return False
 
 
 def hash_token(raw_token: str) -> str:
@@ -270,7 +256,8 @@ def get_current_api_identity(
 
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
     user = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
-    if user and user.enabled and verify_password(password, user.password_hash):
+    settings = get_settings()
+    if user and user.enabled and user.username == settings.bootstrap_admin_username and password == settings.bootstrap_admin_password:
         return user
     return None
 

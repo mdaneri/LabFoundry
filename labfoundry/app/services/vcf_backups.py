@@ -7,6 +7,7 @@ VCF_BACKUP_DEFAULT_VOLUME_MOUNT = "/mnt/labfoundry-vcf-backups"
 VCF_BACKUP_REMOTE_DIRECTORY = "/backups"
 VCF_BACKUP_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/vcf-backups/labfoundry-vcf-backups-sshd.conf"
 VCF_BACKUP_EFFECTIVE_CONFIG_PATH = "/etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf"
+VCF_BACKUP_DEFAULT_USERNAME = "vcf-backup"
 
 
 def vcf_backup_remote_directory(settings: VcfBackupSettings) -> str:
@@ -41,17 +42,18 @@ def validate_vcf_backup_state(settings: VcfBackupSettings, users: list[User], in
     selected_user = user_by_id.get(settings.sftp_user_id or -1)
     if settings.enabled and selected_user is None:
         errors.append("Select a local LabFoundry user for SFTP authentication before enabling VCF backups.")
-    if selected_user is not None and not selected_user.enabled:
+    if settings.enabled and selected_user is not None and not selected_user.enabled:
         errors.append(f"SFTP user {selected_user.username} is disabled.")
-    if not settings.listen_interface.strip():
-        errors.append("Listen interface is required.")
-    elif interface_names is not None and settings.listen_interface not in interface_names:
-        errors.append(f"Listen interface {settings.listen_interface} is not configured as a physical or VLAN interface.")
-    if settings.listen_address.strip():
-        try:
-            ip_address(settings.listen_address.strip())
-        except ValueError:
-            errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
+    if settings.enabled:
+        if not settings.listen_interface.strip():
+            errors.append("Listen interface is required.")
+        elif interface_names is not None and settings.listen_interface not in interface_names:
+            errors.append(f"Listen interface {settings.listen_interface} is not configured as a physical or VLAN interface.")
+        if settings.listen_address.strip():
+            try:
+                ip_address(settings.listen_address.strip())
+            except ValueError:
+                errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
     if settings.port < 1 or settings.port > 65535:
         errors.append("SFTP port must be between 1 and 65535.")
     if not settings.storage_path.startswith("/"):

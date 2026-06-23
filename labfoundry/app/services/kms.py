@@ -125,12 +125,13 @@ def validate_kms_state(
     errors: list[str] = []
     if settings.backend not in KMS_BACKENDS:
         errors.append("KMS backend must be pykmip for the MVP scaffold.")
-    if not settings.listen_interface.strip():
-        errors.append("KMS listen interface is required.")
-    try:
-        ip_address(settings.listen_address)
-    except ValueError:
-        errors.append("KMS listen address must be a valid IPv4 or IPv6 address.")
+    if settings.enabled:
+        if not settings.listen_interface.strip():
+            errors.append("KMS listen interface is required.")
+        try:
+            ip_address(settings.listen_address)
+        except ValueError:
+            errors.append("KMS listen address must be a valid IPv4 or IPv6 address.")
     if settings.port < 1 or settings.port > 65535:
         errors.append("KMS port must be between 1 and 65535.")
     if not settings.hostname.strip():

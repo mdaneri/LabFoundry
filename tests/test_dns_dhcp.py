@@ -129,6 +129,24 @@ def test_dnsmasq_lease_parser_tracks_active_and_expired_leases():
     assert leases[1]["client_id"] == ""
 
 
+def test_disabled_dhcp_allows_blank_reset_defaults():
+    errors = validate_dhcp_settings(
+        DhcpSettings(
+            enabled=False,
+            interface_name="",
+            site_address="",
+            range_start="",
+            range_end="",
+            dns_server="",
+        ),
+        [],
+        [],
+        [],
+    )
+
+    assert errors == []
+
+
 def test_dnsmasq_renderer_supports_multiple_dhcp_ip_zones():
     dns_settings = DnsSettings(listen_interface="eth1", domain="labfoundry.internal")
     dhcp_settings = DhcpSettings(enabled=True, authoritative=True)
@@ -198,6 +216,7 @@ def test_dns_dhcp_validation_reports_bad_addresses():
         upstream_servers="not-an-ip",
     )
     dhcp_settings = DhcpSettings(
+        enabled=True,
         interface_name="eth1",
         site_address="192.168.50.1",
         prefix_length=24,
@@ -217,7 +236,7 @@ def test_dns_dhcp_validation_reports_bad_addresses():
 
 
 def test_dns_listen_target_validation_rejects_trunks_and_unknown_targets():
-    settings = DnsSettings(listen_interface="eth1\neth2\nmissing", domain="labfoundry.internal")
+    settings = DnsSettings(enabled=True, listen_interface="eth1\neth2\nmissing", domain="labfoundry.internal")
 
     errors = validate_dns_listen_targets(settings, {"eth1"})
 

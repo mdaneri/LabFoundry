@@ -23,6 +23,13 @@ body {
   letter-spacing: 0;
 }
 
+button,
+input,
+select,
+textarea {
+  font-family: var(--font-sans);
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
@@ -1275,6 +1282,28 @@ textarea {
   transition: border-color 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
 }
 
+input:not(.switch-input),
+input[type="number"],
+input[type="password"],
+input[type="search"],
+input[type="email"],
+input[type="url"],
+input[type="tel"],
+select,
+textarea {
+  font-family: var(--font-sans);
+}
+
+html body input:not(.switch-input):not([type="checkbox"]):not([type="radio"]),
+html body select,
+html body textarea {
+  font-family: var(--font-sans) !important;
+  font-size: 13px !important;
+  font-weight: 400;
+  line-height: 1.45 !important;
+  letter-spacing: 0;
+}
+
 select,
 option,
 optgroup {
@@ -2038,6 +2067,49 @@ textarea {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.55;
+  white-space: pre;
+}
+
+.apply-failure-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.apply-failure-item {
+  display: grid;
+  gap: 8px;
+}
+
+.apply-failure-command summary {
+  cursor: pointer;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.apply-failure-output {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.apply-failure-output span {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.apply-failure-output code {
+  display: block;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 6px;
+  padding: 10px;
+  background: #7f1d1d;
+  color: #fee2e2;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
   white-space: pre;
 }
 

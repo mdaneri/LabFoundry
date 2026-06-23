@@ -11,6 +11,7 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
     archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     archive.write_bytes(b"not-a-real-archive")
     settings = VcfOfflineDepotSettings(
+        enabled=True,
         hostname="depot.labfoundry.internal",
         listen_interface="eth2",
         listen_address="192.168.50.1",
@@ -48,6 +49,7 @@ def test_vcf_depot_validation_uses_documented_component_catalog(tmp_path):
     archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     archive.write_bytes(b"not-a-real-archive")
     settings = VcfOfflineDepotSettings(
+        enabled=True,
         hostname="depot.labfoundry.internal",
         listen_interface="eth2",
         listen_address="192.168.50.1",
@@ -87,6 +89,7 @@ def test_vcf_depot_validation_uses_esx_disabled_platform_catalog(tmp_path):
     archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     archive.write_bytes(b"not-a-real-archive")
     settings = VcfOfflineDepotSettings(
+        enabled=True,
         hostname="depot.labfoundry.internal",
         listen_interface="eth2",
         listen_address="192.168.50.1",

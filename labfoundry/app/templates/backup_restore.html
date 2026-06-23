@@ -66,7 +66,7 @@
       <div class="panel-head">
         <div>
           <h2>Factory Reset</h2>
-          <p class="muted">Resets desired-state configuration to LabFoundry defaults.</p>
+          <p class="muted">Resets desired-state configuration to core LabFoundry defaults without recreating demo resources.</p>
         </div>
         <span class="status-pill warn">admin action</span>
       </div>
@@ -75,7 +75,7 @@
         method="post"
         data-confirm-modal
         data-confirm-title="Factory reset LabFoundry settings?"
-        data-confirm-message="This removes current desired-state settings and restores LabFoundry defaults. Existing host services are not mutated immediately; all service status rows are set to stopped and unconfigured until global appliance apply runs."
+        data-confirm-message="This removes current desired-state settings and restores core LabFoundry defaults. Demo VLANs, routes, WAN policies, DNS/DHCP records, firewall rules, CA requests, KMS objects, depot profiles, and service listener bindings are not recreated; non-management NICs return desired admin down. Existing host services are not mutated immediately; all service status rows are set to stopped and unconfigured until global appliance apply runs."
         data-confirm-label="Factory reset settings"
       >
         <input type="hidden" name="csrf" value="{{ csrf_token }}">

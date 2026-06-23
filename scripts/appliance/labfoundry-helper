@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 COMMANDS: dict[str, set[str]] = {
-    "local-users": {"validate", "apply"},
+    "local-users": {"validate", "apply", "status"},
     "appliance-settings": {"validate", "apply"},
     "network": {"validate", "apply"},
     "firewall": {"validate", "apply"},
@@ -32,6 +32,8 @@ COMMANDS: dict[str, set[str]] = {
     "vcf-offline-depot": {"validate", "stage-tool", "sync", "apply-https"},
     "wan": {"validate", "apply"},
 }
+SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "sync", "apply-https", "relocate-bundles"}
+SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
 FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
 FIREWALL_CONFIG_PATH = FIREWALL_CONFIG_DIR / "labfoundry.nft"
@@ -47,9 +49,18 @@ NETWORK_APPLY_DIR = Path("/var/lib/labfoundry/apply/network")
 APPLIANCE_SETTINGS_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-settings")
 LOCAL_USERS_APPLY_DIR = Path("/var/lib/labfoundry/apply/local-users")
 LOCAL_USERS_HOME_BASE = Path("/var/lib/labfoundry/users")
+LOCAL_USERS_PWQUALITY_PATH = Path("/etc/security/pwquality.conf")
+LOCAL_USERS_SYSTEM_PASSWORD_PAM_PATH = Path("/etc/pam.d/system-password")
+LOCAL_USERS_PWQUALITY_BEGIN = "# BEGIN LabFoundry managed local user password policy"
+LOCAL_USERS_PWQUALITY_END = "# END LabFoundry managed local user password policy"
+LOCAL_USERS_ALLOWED_SHELLS = {"/sbin/nologin", "/bin/bash", "/bin/sh"}
 NETWORKD_CONFIG_DIR = Path("/etc/systemd/network")
 NETWORKD_MGMT_CONFIG_PATH = NETWORKD_CONFIG_DIR / "00-labfoundry-mgmt.network"
 NETWORKD_MANAGED_PREFIX = "10-labfoundry-"
+NETWORKD_DEFAULT_APPLIANCE_FILES = {
+    "50-static-en.network",
+    "99-dhcp-en.network",
+}
 NETWORK_INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 TIMESYNCD_DROPIN_DIR = Path("/etc/systemd/timesyncd.conf.d")
 TIMESYNCD_DROPIN_PATH = TIMESYNCD_DROPIN_DIR / "labfoundry.conf"
@@ -108,6 +119,37 @@ def _run_account_command_with_input(command: list[str], input_text: str) -> subp
         if systemd_run is not None:
             return _run_with_input([systemd_run, "--quiet", "--wait", "--pipe", "--collect", "--service-type=exec", *command], input_text)
     return _run_with_input(command, input_text)
+
+
+def _should_run_real_action_with_systemd(action: str) -> bool:
+    return (
+        action in SYSTEMD_RUN_REAL_ACTIONS
+        and os.environ.get("LABFOUNDRY_HELPER_USE_SYSTEMD_RUN") == "1"
+        and os.environ.get(SYSTEMD_RUN_CHILD_ENV) != "1"
+        and shutil.which("systemd-run") is not None
+    )
+
+
+def _run_real_action_with_systemd(group: str, action: str, args: list[str]) -> int:
+    helper_path = str(Path(__file__).resolve())
+    command = [
+        shutil.which("systemd-run") or "systemd-run",
+        "--quiet",
+        "--wait",
+        "--pipe",
+        "--collect",
+        "--service-type=exec",
+        f"--setenv={SYSTEMD_RUN_CHILD_ENV}=1",
+        helper_path,
+        group,
+        action,
+        "--real",
+        *args,
+    ]
+    result = _run(command)
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
 
 
 def _chown_path(path: Path, uid: int, gid: int) -> None:
@@ -508,6 +550,28 @@ def _local_user_home(username: str) -> str:
     return (LOCAL_USERS_HOME_BASE / username).as_posix()
 
 
+def _local_user_password_policy_errors(password: str, username: str, policy: dict) -> list[str]:
+    errors: list[str] = []
+    try:
+        min_length = int(policy.get("min_length", 12))
+    except (TypeError, ValueError):
+        min_length = 12
+    if len(password) < min_length:
+        errors.append(f"local user {username} password must be at least {min_length} characters.")
+    if policy.get("require_uppercase", True) and not any(character.isupper() for character in password):
+        errors.append(f"local user {username} password must include an uppercase letter.")
+    if policy.get("require_lowercase", True) and not any(character.islower() for character in password):
+        errors.append(f"local user {username} password must include a lowercase letter.")
+    if policy.get("require_number", True) and not any(character.isdigit() for character in password):
+        errors.append(f"local user {username} password must include a number.")
+    if policy.get("require_special", True) and not any(not character.isalnum() for character in password):
+        errors.append(f"local user {username} password must include a special character.")
+    normalized_username = username.strip().lower()
+    if policy.get("disallow_username", True) and normalized_username and normalized_username in password.lower():
+        errors.append(f"local user {username} password must not contain the username.")
+    return errors
+
+
 def _local_users_config_errors(path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -518,6 +582,31 @@ def _local_users_config_errors(path: Path) -> list[str]:
         errors.append("local users config must be rendered by LabFoundry.")
     if payload.get("version") != 1:
         errors.append("local users config version must be 1.")
+    policy = payload.get("password_policy", {})
+    if policy and not isinstance(policy, dict):
+        errors.append("local users password_policy must be an object.")
+        policy = {}
+    if isinstance(policy, dict):
+        try:
+            min_length = int(policy.get("min_length", 12))
+        except (TypeError, ValueError):
+            errors.append("local users password_policy min_length must be a number.")
+        else:
+            if min_length < 8 or min_length > 128:
+                errors.append("local users password_policy min_length must be between 8 and 128.")
+        for key in ("require_uppercase", "require_lowercase", "require_number", "require_special", "disallow_username"):
+            if key in policy and not isinstance(policy.get(key), bool):
+                errors.append(f"local users password_policy {key} must be true or false.")
+    removed_users = payload.get("removed_users", [])
+    if not isinstance(removed_users, list):
+        errors.append("local users removed_users must be a list.")
+    else:
+        for index, removed_username in enumerate(removed_users):
+            username = str(removed_username or "").strip().lower()
+            if not LOCAL_USERS_USERNAME_PATTERN.fullmatch(username):
+                errors.append(f"removed local user {username or index} is not a valid Photon OS username.")
+            if username in LOCAL_USERS_RESERVED_USERNAMES:
+                errors.append(f"removed local user {username} is reserved by Photon OS or LabFoundry.")
     users = payload.get("users")
     if not isinstance(users, list):
         return [*errors, "local users config requires a users list."]
@@ -536,13 +625,18 @@ def _local_users_config_errors(path: Path) -> list[str]:
             errors.append(f"local user {username} is reserved by Photon OS or LabFoundry.")
         if row.get("home") != _local_user_home(username):
             errors.append(f"local user {username} home must be {_local_user_home(username)}.")
-        if row.get("shell") != "/sbin/nologin":
-            errors.append(f"local user {username} shell must be /sbin/nologin.")
+        shell = str(row.get("shell") or "").strip()
+        if shell not in LOCAL_USERS_ALLOWED_SHELLS:
+            errors.append(f"local user {username} shell must be one of {', '.join(sorted(LOCAL_USERS_ALLOWED_SHELLS))}.")
         if not isinstance(row.get("enabled"), bool):
             errors.append(f"local user {username} enabled must be true or false.")
         password = row.get("password")
         if password is not None and (not isinstance(password, str) or not password):
             errors.append(f"local user {username} pending password must be a non-empty string when present.")
+        elif isinstance(password, str):
+            errors.extend(_local_user_password_policy_errors(password, username, policy))
+        if "unlock_requested" in row and not isinstance(row.get("unlock_requested"), bool):
+            errors.append(f"local user {username} unlock_requested must be true or false.")
     return errors
 
 
@@ -560,27 +654,68 @@ def _command_path(command: str) -> str | None:
     return None
 
 
+def _os_user_exists(username: str) -> bool:
+    id_command = _command_path("id")
+    return id_command is not None and _run([id_command, username]).returncode == 0
+
+
+def _run_and_forward(command: list[str], *, account_command: bool = True) -> int:
+    result = _run_account_command(command) if account_command else _run(command)
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
 def _ensure_os_user(username: str, home: str, shell: str) -> int:
     id_command = _command_path("id")
     useradd = _command_path("useradd")
     if id_command is None:
         print("id command not found", file=sys.stderr)
         return 127
-    if _run([id_command, username]).returncode == 0:
+    if _os_user_exists(username):
         return 0
     if useradd is None:
         print("useradd command not found", file=sys.stderr)
         return 127
     LOCAL_USERS_HOME_BASE.mkdir(parents=True, exist_ok=True)
-    result = _run_account_command([useradd, "--home-dir", home, "--create-home", "--shell", shell, username])
-    print(result.stdout, end="")
-    print(result.stderr, end="", file=sys.stderr)
-    return result.returncode
+    return _run_and_forward([useradd, "--home-dir", home, "--create-home", "--shell", shell, username])
+
+
+def _set_os_user_shell(username: str, shell: str) -> int:
+    usermod = _command_path("usermod")
+    if usermod is None:
+        print("usermod command not found", file=sys.stderr)
+        return 127
+    return _run_and_forward([usermod, "--shell", shell, username])
+
+
+def _unlock_os_user(username: str) -> int:
+    passwd = _command_path("passwd")
+    if passwd is None:
+        print("passwd command not found", file=sys.stderr)
+        return 127
+    return _run_and_forward([passwd, "-u", username])
+
+
+def _reset_user_faillock(username: str) -> int:
+    faillock = _command_path("faillock")
+    if faillock is None:
+        return 0
+    return _run_and_forward([faillock, "--user", username, "--reset"])
+
+
+def _delete_os_user(username: str) -> int:
+    if not _os_user_exists(username):
+        return 0
+    userdel = _command_path("userdel")
+    if userdel is None:
+        print("userdel command not found", file=sys.stderr)
+        return 127
+    return _run_and_forward([userdel, "-r", username])
 
 
 def _set_os_user_password(username: str, password: str) -> int:
     chpasswd = _command_path("chpasswd")
-    passwd = _command_path("passwd")
     if chpasswd is None:
         print("chpasswd command not found", file=sys.stderr)
         return 127
@@ -589,24 +724,137 @@ def _set_os_user_password(username: str, password: str) -> int:
     print(result.stderr, end="", file=sys.stderr)
     if result.returncode != 0:
         return result.returncode
-    if passwd is None:
-        print("passwd command not found", file=sys.stderr)
-        return 127
-    unlock = _run_account_command([passwd, "-u", username])
-    print(unlock.stdout, end="")
-    print(unlock.stderr, end="", file=sys.stderr)
-    return unlock.returncode
+    unlock = _unlock_os_user(username)
+    if unlock != 0:
+        return unlock
+    return _reset_user_faillock(username)
 
 
-def _lock_os_user(username: str) -> int:
+def _pwquality_policy_lines(policy: dict) -> list[str]:
+    def bool_policy(name: str, default: bool = True) -> bool:
+        value = policy.get(name, default)
+        return bool(value)
+
+    disallow_username = bool_policy("disallow_username")
+    return [
+        LOCAL_USERS_PWQUALITY_BEGIN,
+        f"minlen = {int(policy.get('min_length', 12) or 12)}",
+        f"ucredit = {-1 if bool_policy('require_uppercase') else 0}",
+        f"lcredit = {-1 if bool_policy('require_lowercase') else 0}",
+        f"dcredit = {-1 if bool_policy('require_number') else 0}",
+        f"ocredit = {-1 if bool_policy('require_special') else 0}",
+        f"usercheck = {1 if disallow_username else 0}",
+        f"usersubstr = {3 if disallow_username else 0}",
+        "enforcing = 1",
+        "enforce_for_root",
+        LOCAL_USERS_PWQUALITY_END,
+    ]
+
+
+def _apply_pwquality_conf(policy: dict) -> None:
+    current = LOCAL_USERS_PWQUALITY_PATH.read_text(encoding="utf-8") if LOCAL_USERS_PWQUALITY_PATH.exists() else ""
+    lines = current.splitlines()
+    output: list[str] = []
+    in_managed_block = False
+    for line in lines:
+        if line.strip() == LOCAL_USERS_PWQUALITY_BEGIN:
+            in_managed_block = True
+            continue
+        if line.strip() == LOCAL_USERS_PWQUALITY_END:
+            in_managed_block = False
+            continue
+        if not in_managed_block:
+            output.append(line)
+    while output and not output[-1].strip():
+        output.pop()
+    output.extend(["", *_pwquality_policy_lines(policy)])
+    LOCAL_USERS_PWQUALITY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOCAL_USERS_PWQUALITY_PATH.write_text("\n".join(output).strip() + "\n", encoding="utf-8")
+    os.chmod(LOCAL_USERS_PWQUALITY_PATH, 0o644)
+
+
+def _ensure_pam_pwquality() -> None:
+    path = LOCAL_USERS_SYSTEM_PASSWORD_PAM_PATH
+    if not path.exists():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if any("pam_pwquality.so" in line for line in lines):
+        return
+    insert_at = next((index for index, line in enumerate(lines) if line.strip().startswith("password") and "pam_unix.so" in line), len(lines))
+    lines.insert(insert_at, "password  required    pam_pwquality.so  retry=3")
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    os.chmod(path, 0o644)
+
+
+def _apply_local_users_password_policy(policy: dict) -> None:
+    _apply_pwquality_conf(policy)
+    _ensure_pam_pwquality()
+
+
+def _passwd_status(username: str) -> tuple[str, str]:
     passwd = _command_path("passwd")
     if passwd is None:
-        print("passwd command not found", file=sys.stderr)
-        return 127
-    result = _run_account_command([passwd, "-l", username])
-    print(result.stdout, end="")
-    print(result.stderr, end="", file=sys.stderr)
-    return result.returncode
+        return "status unavailable", "passwd command not found"
+    result = _run([passwd, "-S", username])
+    if result.returncode != 0:
+        return "status unavailable", (result.stderr or result.stdout).strip()
+    parts = result.stdout.strip().split()
+    code = parts[1] if len(parts) > 1 else ""
+    if code in {"L", "LK"}:
+        return "locked", result.stdout.strip()
+    if code == "NP":
+        return "password not set", result.stdout.strip()
+    if code == "P":
+        return "present", result.stdout.strip()
+    return "present", result.stdout.strip()
+
+
+def _faillock_blocked(username: str) -> tuple[bool, str]:
+    faillock = _command_path("faillock")
+    if faillock is None:
+        return False, ""
+    result = _run([faillock, "--user", username])
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout).strip()
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if any("Failures" in line for line in lines):
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == username:
+                try:
+                    return int(parts[1]) > 0, result.stdout.strip()
+                except ValueError:
+                    return False, result.stdout.strip()
+        return False, result.stdout.strip()
+    data_lines = [line for line in lines if not line.endswith(":") and not line.lower().startswith("when ")]
+    return bool(data_lines), result.stdout.strip()
+
+
+def _local_user_status_rows(users: list[dict]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in users:
+        username = str(row.get("username") or "").strip().lower()
+        if not username:
+            continue
+        if not _os_user_exists(username):
+            rows.append({"username": username, "state": "absent", "exists": False, "detail": "OS account absent"})
+            continue
+        state, detail = _passwd_status(username)
+        blocked, faillock_detail = _faillock_blocked(username)
+        if blocked:
+            state = "faillock blocked"
+        rows.append(
+            {
+                "username": username,
+                "state": state,
+                "exists": True,
+                "passwd_status": detail,
+                "faillock_blocked": blocked,
+                "faillock_status": faillock_detail,
+                "detail": faillock_detail if blocked else detail,
+            }
+        )
+    return rows
 
 
 def _handle_local_users(action: str, args: list[str]) -> int:
@@ -625,6 +873,11 @@ def _handle_local_users(action: str, args: list[str]) -> int:
         return 2
     payload = _local_users_payload(config_path)
     users = payload["users"]
+    policy = payload.get("password_policy") if isinstance(payload.get("password_policy"), dict) else {}
+    removed_users = [str(username).strip().lower() for username in payload.get("removed_users", []) if str(username or "").strip()]
+    if action == "status":
+        print(json.dumps({"local_users": "status ok", "users": _local_user_status_rows(users)}, sort_keys=True))
+        return 0
     if action == "validate":
         print(
             json.dumps(
@@ -632,6 +885,8 @@ def _handle_local_users(action: str, args: list[str]) -> int:
                     "local_users": "validation ok",
                     "users": len(users),
                     "passwords_pending": sum(1 for row in users if row.get("password")),
+                    "removed_users": len(removed_users),
+                    "unlock_requests": sum(1 for row in users if row.get("unlock_requested")),
                     "scope": "Photon OS local users",
                 },
                 sort_keys=True,
@@ -640,33 +895,56 @@ def _handle_local_users(action: str, args: list[str]) -> int:
         return 0
 
     applied: list[str] = []
-    locked: list[str] = []
+    deleted: list[str] = []
+    unlocked: list[str] = []
     passwords_updated = 0
+    _apply_local_users_password_policy(policy)
+    for username in removed_users:
+        delete_result = _delete_os_user(username)
+        if delete_result != 0:
+            return delete_result
+        deleted.append(username)
     for row in users:
         username = str(row["username"])
+        if not row.get("enabled"):
+            delete_result = _delete_os_user(username)
+            if delete_result != 0:
+                return delete_result
+            deleted.append(username)
+            continue
+        if not _os_user_exists(username) and not row.get("password"):
+            print(f"local user {username} is enabled but missing on Photon OS and has no staged password.", file=sys.stderr)
+            return 2
         ensure = _ensure_os_user(username, str(row["home"]), str(row["shell"]))
         if ensure != 0:
             return ensure
+        shell_result = _set_os_user_shell(username, str(row["shell"]))
+        if shell_result != 0:
+            return shell_result
         if row.get("password"):
             password_result = _set_os_user_password(username, str(row["password"]))
             if password_result != 0:
                 return password_result
             passwords_updated += 1
-        if row.get("enabled"):
-            applied.append(username)
-        else:
-            lock = _lock_os_user(username)
-            if lock != 0:
-                return lock
-            locked.append(username)
+        if row.get("unlock_requested"):
+            unlock_result = _unlock_os_user(username)
+            if unlock_result != 0:
+                return unlock_result
+            faillock_result = _reset_user_faillock(username)
+            if faillock_result != 0:
+                return faillock_result
+            unlocked.append(username)
+        applied.append(username)
     print(
         json.dumps(
             {
                 "local_users": "apply complete",
                 "users": len(users),
                 "enabled_users": applied,
-                "locked_users": locked,
+                "deleted_users": sorted(set(deleted)),
+                "unlocked_users": unlocked,
                 "passwords_updated": passwords_updated,
+                "password_policy_applied": True,
             },
             sort_keys=True,
         )
@@ -752,7 +1030,7 @@ def _read_existing_management_network_values() -> dict[str, list[str]]:
     return values
 
 
-def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str]]:
+def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list[str]]:
     physical_interfaces, vlan_interfaces, _removed_vlan_interfaces = _parse_network_config(path)
     vlans_by_parent: dict[str, list[dict[str, str]]] = {}
     for vlan in vlan_interfaces:
@@ -765,11 +1043,15 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str]]:
     preserved_management = _read_existing_management_network_values()
     files: dict[str, str] = {}
     reconfigure_links: list[str] = []
+    admin_down_links: list[str] = []
 
     for interface in physical_interfaces:
         name = interface.get("name", "")
         if not _valid_network_interface_name(name):
             raise ValueError(f"invalid physical interface name: {name}")
+        if name != management_name and interface.get("admin_state") == "down":
+            admin_down_links.append(name)
+            continue
         mode = interface.get("mode", "unused")
         lines = [
             "# Managed by LabFoundry. Local changes may be overwritten.",
@@ -826,7 +1108,7 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str]]:
         files[_networkd_managed_filename(name, "network")] = "\n".join(network_lines).strip() + "\n"
         reconfigure_links.append(name)
 
-    return files, reconfigure_links
+    return files, reconfigure_links, admin_down_links
 
 
 def _network_config_errors(path: Path) -> list[str]:
@@ -986,19 +1268,23 @@ def _apply_vlan_interfaces(path: Path) -> int:
     return 0
 
 
-def _install_systemd_networkd_files(path: Path) -> tuple[int, list[str], list[str]]:
+def _install_systemd_networkd_files(path: Path) -> tuple[int, list[str], list[str], list[str]]:
     try:
-        files, reconfigure_links = _systemd_networkd_files(path)
+        files, reconfigure_links, admin_down_links = _systemd_networkd_files(path)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
-        return 2, [], []
+        return 2, [], [], []
     if shutil.which("networkctl") is None:
         print("networkctl command not found", file=sys.stderr)
-        return 127, [], []
+        return 127, [], [], []
     NETWORKD_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     for old_path in NETWORKD_CONFIG_DIR.glob(f"{NETWORKD_MANAGED_PREFIX}*"):
         if old_path.is_file() and old_path.suffix in {".network", ".netdev"}:
             old_path.unlink()
+    for default_name in NETWORKD_DEFAULT_APPLIANCE_FILES:
+        default_path = NETWORKD_CONFIG_DIR / default_name
+        if default_path.is_file():
+            default_path.unlink()
     installed: list[str] = []
     for filename, content in sorted(files.items()):
         target = NETWORKD_CONFIG_DIR / filename
@@ -1012,7 +1298,7 @@ def _install_systemd_networkd_files(path: Path) -> tuple[int, list[str], list[st
     print(reload_result.stdout, end="")
     print(reload_result.stderr, end="", file=sys.stderr)
     if reload_result.returncode != 0:
-        return reload_result.returncode, installed, reconfigure_links
+        return reload_result.returncode, installed, reconfigure_links, admin_down_links
 
     for link in reconfigure_links:
         if not _link_exists(link):
@@ -1021,8 +1307,19 @@ def _install_systemd_networkd_files(path: Path) -> tuple[int, list[str], list[st
         print(reconfigure.stdout, end="")
         print(reconfigure.stderr, end="", file=sys.stderr)
         if reconfigure.returncode != 0:
-            return reconfigure.returncode, installed, reconfigure_links
-    return 0, installed, reconfigure_links
+            return reconfigure.returncode, installed, reconfigure_links, admin_down_links
+    if admin_down_links and shutil.which("ip") is None:
+        print("ip command not found", file=sys.stderr)
+        return 127, installed, reconfigure_links, admin_down_links
+    for link in admin_down_links:
+        if not _link_exists(link):
+            continue
+        link_down = _run(["ip", "link", "set", "dev", link, "down"])
+        print(link_down.stdout, end="")
+        print(link_down.stderr, end="", file=sys.stderr)
+        if link_down.returncode != 0:
+            return link_down.returncode, installed, reconfigure_links, admin_down_links
+    return 0, installed, reconfigure_links, admin_down_links
 
 
 def _handle_network(action: str, args: list[str]) -> int:
@@ -1041,7 +1338,7 @@ def _handle_network(action: str, args: list[str]) -> int:
                 print(error, file=sys.stderr)
             return 2
         try:
-            files, reconfigure_links = _systemd_networkd_files(config_path)
+            files, reconfigure_links, admin_down_links = _systemd_networkd_files(config_path)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -1049,6 +1346,7 @@ def _handle_network(action: str, args: list[str]) -> int:
             json.dumps(
                 {
                     "network": "validation ok",
+                    "admin_down_links": admin_down_links,
                     "networkd_files": sorted(files),
                     "reconfigure_links": reconfigure_links,
                     "scope": "systemd-networkd",
@@ -1057,7 +1355,7 @@ def _handle_network(action: str, args: list[str]) -> int:
             )
         )
         return 0
-    install_returncode, installed, reconfigure_links = _install_systemd_networkd_files(config_path)
+    install_returncode, installed, reconfigure_links, admin_down_links = _install_systemd_networkd_files(config_path)
     if install_returncode != 0:
         return install_returncode
     vlan_returncode = _apply_vlan_interfaces(config_path)
@@ -1067,6 +1365,7 @@ def _handle_network(action: str, args: list[str]) -> int:
         json.dumps(
             {
                 "network": "systemd-networkd apply complete",
+                "admin_down_links": admin_down_links,
                 "installed_files": installed,
                 "reconfigure_links": reconfigure_links,
             },
@@ -1374,6 +1673,9 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+    if real_apply and _should_run_real_action_with_systemd(action):
+        return _run_real_action_with_systemd(group, action, normalized_args)
 
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),

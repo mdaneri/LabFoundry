@@ -253,6 +253,49 @@ def test_appliance_settings_apply_task_records_dry_run_helper_commands(client):
         assert "apply.labfoundry.internal" in (job.result or "")
 
 
+def test_appliance_apply_failure_renders_command_details(client, monkeypatch):
+    from labfoundry.app.adapters.system import AdapterResult
+    import labfoundry.app.ui as ui_module
+
+    class FailingApplianceSettingsAdapter:
+        dry_run = False
+
+        def read_dhcp_leases(self) -> AdapterResult:
+            return AdapterResult(command=["labfoundry-helper", "dnsmasq", "leases"], dry_run=True, stdout="")
+
+        def validate_appliance_settings_config(self, config_path: str) -> AdapterResult:
+            return AdapterResult(
+                command=["labfoundry-helper", "appliance-settings", "validate", config_path],
+                dry_run=False,
+                stdout="validation ok",
+            )
+
+        def apply_appliance_settings_config(self, config_path: str) -> AdapterResult:
+            return AdapterResult(
+                command=["labfoundry-helper", "appliance-settings", "apply", config_path],
+                dry_run=False,
+                stdout="password=super-secret\nattempted write",
+                stderr="OSError: [Errno 30] Read-only file system: '/etc/systemd/timesyncd.conf.d/labfoundry.conf'",
+                returncode=30,
+            )
+
+    monkeypatch.setattr(ui_module, "SystemAdapter", FailingApplianceSettingsAdapter)
+
+    login(client)
+    page = client.get("/appliance-apply")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
+
+    assert response.status_code == 200
+    assert "Appliance apply task failed" in response.text
+    assert "Appliance Settings failed" in response.text
+    assert "labfoundry-helper appliance-settings apply" in response.text
+    assert "exited 30" in response.text
+    assert "Read-only file system" in response.text
+    assert "password= [redacted]" in response.text
+    assert "super-secret" not in response.text
+
+
 def test_backup_restore_page_exports_settings_archive(client):
     import json
 
@@ -344,7 +387,32 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ApplianceSettings, AuditEvent, DnsRecord, ServiceState
+    from labfoundry.app.models import (
+        ApplianceSettings,
+        AuditEvent,
+        CaCertificate,
+        CaProfile,
+        DhcpReservation,
+        DhcpSettings,
+        DhcpScope,
+        DnsRecord,
+        DnsSettings,
+        FirewallRule,
+        KmsClient,
+        KmsKey,
+        KmsSettings,
+        PhysicalInterface,
+        Route,
+        ServiceState,
+        Setting,
+        VcfBackupSettings,
+        VcfDepotDownloadProfile,
+        VcfOfflineDepotSettings,
+        VcfPrivateRegistrySettings,
+        VlanInterface,
+        WanPolicy,
+    )
+    from labfoundry.app.seed import SEED_EXAMPLES_SETTING_KEY, seed_initial_data
 
     login(client)
     with SessionLocal() as db:
@@ -363,11 +431,55 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
 
     assert reset.status_code == 200
     assert "Factory reset complete" in reset.text
+    assert "without demo resources" in reset.text
+    assert "Non-management NICs are desired admin down" in reset.text
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
         assert settings.fqdn == "labfoundry.labfoundry.internal"
+        eth1 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth1")).scalar_one()
+        assert eth1.mode == "access"
+        non_management = db.execute(select(PhysicalInterface).where(PhysicalInterface.name != "eth0")).scalars().all()
+        assert non_management
+        assert all(interface.admin_state == "down" for interface in non_management)
+        assert all(interface.ip_cidr is None for interface in non_management)
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        assert dns_settings.listen_interface == ""
+        assert dns_settings.listen_address in ("", None)
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        assert dhcp_settings.interface_name == ""
+        assert dhcp_settings.site_address == ""
+        kms_settings = db.execute(select(KmsSettings)).scalar_one()
+        assert kms_settings.listen_interface == ""
+        assert kms_settings.listen_address == ""
+        vcf_backup_settings = db.execute(select(VcfBackupSettings)).scalar_one()
+        assert vcf_backup_settings.listen_interface == ""
+        assert vcf_backup_settings.listen_address == ""
+        vcf_depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        assert vcf_depot_settings.listen_interface == ""
+        assert vcf_depot_settings.listen_address == ""
+        vcf_registry_settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one()
+        assert vcf_registry_settings.listen_interface == ""
+        assert vcf_registry_settings.listen_address == ""
         removed = db.execute(select(DnsRecord).where(DnsRecord.hostname == "remove-me.labfoundry.internal")).scalar_one_or_none()
         assert removed is None
+        assert db.execute(select(VlanInterface)).scalars().all() == []
+        assert db.execute(select(WanPolicy)).scalars().all() == []
+        assert db.execute(select(Route)).scalars().all() == []
+        assert db.execute(select(DnsRecord)).scalars().all() == []
+        assert db.execute(select(DhcpScope)).scalars().all() == []
+        assert db.execute(select(DhcpReservation)).scalars().all() == []
+        assert db.execute(select(FirewallRule)).scalars().all() == []
+        assert db.execute(select(CaProfile)).scalars().all() == []
+        assert db.execute(select(CaCertificate)).scalars().all() == []
+        assert db.execute(select(KmsClient)).scalars().all() == []
+        assert db.execute(select(KmsKey)).scalars().all() == []
+        assert db.execute(select(VcfDepotDownloadProfile)).scalars().all() == []
+        marker = db.execute(select(Setting).where(Setting.key == SEED_EXAMPLES_SETTING_KEY)).scalar_one()
+        assert marker.value == "false"
+        seed_initial_data(db)
+        assert db.execute(select(VlanInterface)).scalars().all() == []
+        assert db.execute(select(DnsRecord)).scalars().all() == []
+        assert db.execute(select(VcfDepotDownloadProfile)).scalars().all() == []
         services = db.execute(select(ServiceState)).scalars().all()
         assert services
         assert all(not service.running and not service.enabled and service.health == "unconfigured" for service in services)
@@ -492,28 +604,39 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "Password Policy" in users.text
     assert "Pending Appliance Changes" in users.text
     assert "Photon OS" in users.text
+    assert "OS account" in users.text
+    assert "Shell" in users.text
+    assert "Temp Password" not in users.text
     assert "admin" in users.text
     assert "vcf-backup" in users.text
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
-        data={"username": "operator", "role": "viewer", "password": "Strong-local1!", "enabled": "on", "csrf": csrf},
+        data={"username": "operator", "role": "viewer", "shell": "/bin/bash", "password": "Strong-local1!", "enabled": "on", "csrf": csrf},
         follow_redirects=True,
     )
     assert created.status_code == 200
     assert "operator" in created.text
+    assert "/bin/bash" in created.text
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "userActionsFormatter" not in app_js.text
     assert "formatter: userActionsFormatter" not in app_js.text
     assert "openUserPasswordModal" in app_js.text
     assert "deleteUserFromMenu" in app_js.text
-    assert "use action menu" in app_js.text
+    assert "Unlock OS account" in app_js.text
+    assert 'field: "shell"' in app_js.text
+    assert "Temp Password" not in app_js.text
 
 
 def test_local_user_reset_modal_endpoint_and_remove(client):
     import html
     import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import User
 
     login(client)
     users = client.get("/users")
@@ -535,7 +658,16 @@ def test_local_user_reset_modal_endpoint_and_remove(client):
         data={"password": "New-temporary1!", "confirm_password": "New-temporary1!", "csrf": csrf},
         follow_redirects=False,
     )
-    assert reset.status_code == 303
+    assert reset.status_code in {200, 303}
+
+    unlock = client.post(f"/users/{user_id}/unlock", data={"csrf": csrf})
+    assert unlock.status_code == 200
+    with SessionLocal() as db:
+        staged_user = db.execute(select(User).where(User.username == "remove-me")).scalar_one()
+        assert staged_user.os_unlock_requested_at is not None
+        assert staged_user.os_sync_status == "pending"
+    apply_page = client.get("/appliance-apply")
+    assert "1 unlock requests" in apply_page.text
 
     deleted = client.post(f"/users/{user_id}/delete", data={"csrf": csrf}, follow_redirects=False)
     assert deleted.status_code == 303
@@ -548,7 +680,6 @@ def test_local_users_password_policy_staging_and_apply_redaction(client):
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import Job, User
-    from labfoundry.app.services.local_users import decrypt_os_password
 
     login(client)
     users = client.get("/users")
@@ -586,8 +717,9 @@ def test_local_users_password_policy_staging_and_apply_redaction(client):
 
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.username == "sync-me")).scalar_one()
-        assert user.pending_os_password_encrypted
-        assert decrypt_os_password(user.pending_os_password_encrypted) == plaintext
+        assert not hasattr(user, "pending_os_password_encrypted")
+        assert not hasattr(user, "password_hash")
+        assert user.shell == "/sbin/nologin"
 
     apply_page = client.get("/appliance-apply")
     assert apply_page.status_code == 200
@@ -607,7 +739,7 @@ def test_local_users_password_policy_staging_and_apply_redaction(client):
         assert "local-users" in (job.result or "")
         assert plaintext not in (job.result or "")
         user = db.execute(select(User).where(User.username == "sync-me")).scalar_one()
-        assert user.pending_os_password_encrypted
+        assert not hasattr(user, "pending_os_password_encrypted")
 
 
 def test_real_local_users_apply_clears_pending_passwords_and_baselines_post_apply(client, monkeypatch, tmp_path):
@@ -653,7 +785,6 @@ def test_real_local_users_apply_clears_pending_passwords_and_baselines_post_appl
 
     with SessionLocal() as db:
         users = db.execute(select(User)).scalars().all()
-        assert all(user.pending_os_password_encrypted is None for user in users)
         assert all(user.os_sync_status == "applied" for user in users)
         baseline = db.execute(select(Setting).where(Setting.key == "appliance_apply.baselines.v1")).scalar_one()
         assert "BridgeStrong1!" not in baseline.value
@@ -1639,7 +1770,17 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
     login(client)
     page = client.get("/vcf-backups")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    user_id = re.search(r'<option value="(\d+)" selected>vcf-backup</option>', page.text).group(1)
+    user_id = re.search(r'<option value="(\d+)" selected>vcf-backup(?: \(disabled\))?</option>', page.text).group(1)
+    reset = client.post(
+        f"/users/{user_id}/password",
+        data={"password": "Backup-user1!", "confirm_password": "Backup-user1!", "csrf": csrf},
+    )
+    assert reset.status_code in {200, 303}
+    enabled_user = client.post(
+        f"/users/{user_id}/edit",
+        data={"username": "vcf-backup", "role": "viewer", "enabled": "on", "csrf": csrf},
+    )
+    assert enabled_user.status_code == 200
     response = client.post(
         "/vcf-backups/settings",
         data={
@@ -1690,6 +1831,54 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
     assert status.json()["remote_directory"] == "/backups"
 
 
+def test_vcf_backups_disabled_disables_default_backup_user(client):
+    import re
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import User
+
+    login(client)
+    page = client.get("/vcf-backups")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    user_id = re.search(r'<option value="(\d+)" selected>vcf-backup(?: \(disabled\))?</option>', page.text).group(1)
+    reset = client.post(
+        f"/users/{user_id}/password",
+        data={"password": "Backup-user1!", "confirm_password": "Backup-user1!", "csrf": csrf},
+    )
+    assert reset.status_code in {200, 303}
+    enabled_user = client.post(
+        f"/users/{user_id}/edit",
+        data={"username": "vcf-backup", "role": "viewer", "enabled": "on", "csrf": csrf},
+    )
+    assert enabled_user.status_code == 200
+
+    disabled_service = client.post(
+        "/vcf-backups/settings",
+        data={
+            "listen_interface": "eth2",
+            "port": "22",
+            "sftp_user_id": user_id,
+            "chroot_enabled": "on",
+            "allow_password_auth": "on",
+            "allow_public_key_auth": "on",
+            "max_sessions": "4",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert disabled_service.status_code == 200
+    with SessionLocal() as db:
+        backup_user = db.execute(select(User).where(User.username == "vcf-backup")).scalar_one()
+        assert backup_user.enabled is False
+        assert backup_user.os_sync_status == "pending"
+    apply_page = client.get("/appliance-apply")
+    assert "Local Users" in apply_page.text
+    assert "pending OS passwords" in apply_page.text
+
+
 def test_vcf_backups_apply_task_captures_sftp_config(client):
     import re
 
@@ -1701,7 +1890,17 @@ def test_vcf_backups_apply_task_captures_sftp_config(client):
     login(client)
     page = client.get("/vcf-backups")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    user_id = re.search(r'<option value="(\d+)" selected>vcf-backup</option>', page.text).group(1)
+    user_id = re.search(r'<option value="(\d+)" selected>vcf-backup(?: \(disabled\))?</option>', page.text).group(1)
+    reset = client.post(
+        f"/users/{user_id}/password",
+        data={"password": "Backup-user1!", "confirm_password": "Backup-user1!", "csrf": csrf},
+    )
+    assert reset.status_code in {200, 303}
+    enabled_user = client.post(
+        f"/users/{user_id}/edit",
+        data={"username": "vcf-backup", "role": "viewer", "enabled": "on", "csrf": csrf},
+    )
+    assert enabled_user.status_code == 200
     settings_response = client.post(
         "/vcf-backups/settings",
         data={
@@ -1824,7 +2023,8 @@ def test_physical_interface_refresh_imports_host_inventory_without_apply_job(cli
         interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "ens192")).scalar_one()
         assert interface.inventory_source == "host"
         assert interface.desired_state_source == "seed"
-        assert interface.ip_cidr == "192.168.49.22/24"
+        assert interface.ip_cidr is None
+        assert interface.admin_state == "down"
         assert db.execute(select(PhysicalInterface).where(PhysicalInterface.name.in_(["eth0", "eth1", "eth2"]))).scalars().all() == []
         assert db.execute(select(VlanInterface).where(VlanInterface.parent_interface == "eth1")).scalars().all() == []
         assert db.execute(select(Route).where(Route.interface_name == "eth1.20")).scalars().all() == []
@@ -2156,7 +2356,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "local-users-sync-20260623-1" in page.text
+    assert "local-users-shell-20260623-1" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 

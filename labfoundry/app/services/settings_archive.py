@@ -37,7 +37,7 @@ from labfoundry.app.models import (
     VlanInterface,
     WanPolicy,
 )
-from labfoundry.app.seed import seed_initial_data
+from labfoundry.app.seed import SEED_EXAMPLES_SETTING_KEY, seed_initial_data
 from labfoundry.app.services.dnsmasq import DNS_CONDITIONAL_FORWARDERS_SETTING_KEY
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY
 from labfoundry.app.services.local_users import LOCAL_USERS_PASSWORD_POLICY_KEY
@@ -248,13 +248,15 @@ def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, 
     ]:
         counts[key] = _insert_rows(db, SCALAR_TABLES[key], data.get(key, []))
     counts["settings"] = _insert_rows(db, Setting, [row for row in data.get("settings", []) if row.get("key") in SAFE_SETTING_KEYS])
+    _disable_startup_example_seed(db)
     db.commit()
     return counts
 
 
 def factory_reset_desired_state(db: Session) -> dict[str, int]:
     _clear_desired_state(db)
-    seed_initial_data(db)
+    seed_initial_data(db, include_examples=False)
+    _disable_startup_example_seed(db)
     _force_services_stopped_unconfigured(db)
     db.commit()
     return desired_state_counts(db)
@@ -298,6 +300,15 @@ def _force_services_stopped_unconfigured(db: Session) -> None:
         service.health = "unconfigured"
         service.detail = "Stopped after settings restore or factory reset."
         db.add(service)
+    db.flush()
+
+
+def _disable_startup_example_seed(db: Session) -> None:
+    existing = db.execute(select(Setting).where(Setting.key == SEED_EXAMPLES_SETTING_KEY)).scalar_one_or_none()
+    if existing is None:
+        db.add(Setting(key=SEED_EXAMPLES_SETTING_KEY, value="false"))
+    else:
+        existing.value = "false"
     db.flush()
 
 

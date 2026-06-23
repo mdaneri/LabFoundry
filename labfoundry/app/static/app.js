@@ -1676,11 +1676,7 @@ async function postUserAction(url, data, csrf, options = {}) {
   const body = new FormData();
   body.set("csrf", csrf);
   for (const [key, value] of Object.entries(data)) {
-    if (["id", "is_new", "is_current", "created_at", "os_sync_status", "os_password_pending"].includes(key)) {
-      continue;
-    }
-    if (key === "temp_password") {
-      body.set("password", value ?? "");
+    if (["id", "is_new", "is_current", "created_at", "os_sync_status", "os_password_pending", "os_account_state", "os_account_detail", "os_unlock_available", "unlock_requested"].includes(key)) {
       continue;
     }
     if (key === "enabled") {
@@ -1722,7 +1718,7 @@ function openUserPasswordModal(data) {
     title.textContent = `Reset ${data.username} password`;
   }
   if (message instanceof HTMLElement) {
-    message.textContent = "Set a temporary local password. API tokens for this user are revoked after reset.";
+    message.textContent = "Set/reset the Photon OS password. The password is held only until global Local Users apply.";
   }
   modal.showModal();
   const passwordInput = form.querySelector('input[name="password"]');
@@ -1739,7 +1735,7 @@ async function deleteUserFromMenu(row, csrf) {
   }
   const confirmed = await requestConfirmation({
     title: `Remove ${data.username}?`,
-    message: "This removes the local LabFoundry account and revokes its API tokens. Authentication provider users are not affected.",
+    message: "This removes the local LabFoundry account, revokes its API tokens, and removes the managed Photon OS account on the next global appliance apply.",
     label: "Remove user",
   });
   if (!confirmed) {
@@ -1752,31 +1748,42 @@ async function deleteUserFromMenu(row, csrf) {
   }
 }
 
+async function unlockUserFromMenu(row, csrf) {
+  clearCaMessage("users-error");
+  const data = row.getData();
+  if (data.is_new) {
+    return;
+  }
+  try {
+    await postUserAction(`/users/${data.id}/unlock`, {}, csrf, { reload: false });
+    showTransientGridStatus("Unlock pending");
+    window.location.reload();
+  } catch (error) {
+    showCaMessage("users-error", error instanceof Error ? error.message : "The unlock request could not be staged.");
+  }
+}
+
 function newUserRow() {
   return {
     id: "__new__",
     username: "",
     role: "viewer",
-    enabled: true,
+    shell: "/sbin/nologin",
+    enabled: false,
     created_at: "",
-    os_sync_status: "password staged after creation",
+    os_sync_status: "password not staged; reset to sync",
     os_password_pending: false,
-    temp_password: "",
+    os_account_state: "absent",
+    os_account_detail: "",
+    os_unlock_available: false,
+    unlock_requested: false,
     is_current: false,
     is_new: true,
   };
 }
 
 function hasRequiredUserFields(data) {
-  return Boolean((data.username || "").trim() && (data.temp_password || "").trim());
-}
-
-function userPasswordFormatter(cell) {
-  const data = cell.getRow().getData();
-  if (data.is_new) {
-    return dnsAddRowHintFormatter(cell, "temporary password...");
-  }
-  return '<span class="muted">use action menu</span>';
+  return Boolean((data.username || "").trim());
 }
 
 async function autoSaveUser(cell, csrf) {
@@ -1822,6 +1829,7 @@ function initializeUsersTable() {
   }
   const csrf = tableElement.dataset.csrf || "";
   const roles = roleValues(JSON.parse(tableElement.dataset.roles || "[]"));
+  const shells = JSON.parse(tableElement.dataset.shells || '["/sbin/nologin","/bin/bash","/bin/sh"]');
   const rows = [...JSON.parse(tableElement.dataset.users || "[]"), newUserRow()];
   try {
     new Tabulator(tableElement, {
@@ -1834,9 +1842,17 @@ function initializeUsersTable() {
       reactiveData: false,
       rowContextMenu: [
         {
-          label: "Reset password",
+          label: "Set/reset Photon OS password",
           action: (_event, row) => openUserPasswordModal(row.getData()),
           disabled: (component) => component.getData().is_new,
+        },
+        {
+          label: "Unlock OS account",
+          action: (_event, row) => unlockUserFromMenu(row, csrf),
+          disabled: (component) => {
+            const data = component.getData();
+            return data.is_new || !data.enabled || !data.os_unlock_available || data.unlock_requested;
+          },
         },
         {
           label: "Remove user",
@@ -1860,6 +1876,14 @@ function initializeUsersTable() {
           cellEdited: (cell) => autoSaveUser(cell, csrf),
         },
         {
+          title: "Shell",
+          field: "shell",
+          editor: "list",
+          editorParams: { values: shells },
+          minWidth: 145,
+          cellEdited: (cell) => autoSaveUser(cell, csrf),
+        },
+        {
           title: "Enabled",
           field: "enabled",
           formatter: "tickCross",
@@ -1869,20 +1893,15 @@ function initializeUsersTable() {
           cellEdited: (cell) => autoSaveUser(cell, csrf),
         },
         {
-          title: "Temp Password",
-          field: "temp_password",
-          editor: "input",
-          editable: (cell) => cell.getRow().getData().is_new,
-          formatter: userPasswordFormatter,
-          cellEdited: (cell) => autoSaveUser(cell, csrf),
-        },
-        {
-          title: "Photon OS",
-          field: "os_sync_status",
+          title: "OS account",
+          field: "os_account_state",
           formatter: (cell) => {
             const value = String(cell.getValue() || "");
-            const pill = value === "synced" ? "good" : value.includes("staged") || value.includes("not staged") ? "warn" : "muted";
-            return `<span class="status-pill ${pill}">${escapeHtml(value)}</span>`;
+            const data = cell.getRow().getData();
+            const pill = value === "present" ? "good" : ["locked", "faillock blocked", "password not set"].includes(value) ? "warn" : "muted";
+            const pending = data.unlock_requested ? ' <span class="status-pill warn">unlock pending</span>' : "";
+            const title = data.os_account_detail ? ` title="${escapeHtml(data.os_account_detail)}"` : "";
+            return `<span class="status-pill ${pill}"${title}>${escapeHtml(value)}</span>${pending}`;
           },
           minWidth: 190,
         },

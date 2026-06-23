@@ -207,9 +207,9 @@ def reconcile_host_physical_interfaces(
         interface.last_seen_at = now
         interface.missing_since = None
         if seed_desired:
-            interface.ip_cidr = host.host_ip_cidr
+            interface.ip_cidr = host.host_ip_cidr if interface.name == "eth0" or interface.role == "management" else None
             interface.mtu = host.host_mtu or interface.mtu
-            interface.admin_state = host.host_admin_state
+            interface.admin_state = host.host_admin_state if interface.name == "eth0" or interface.role == "management" else "down"
     for interface in interfaces:
         if interface.inventory_source == "host" and interface.name not in seen_names and interface.missing_since is None:
             interface.missing_since = now
