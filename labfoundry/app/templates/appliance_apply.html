@@ -102,10 +102,10 @@
             <details class="config-diff" {% if unit.config_diff %}open{% endif %}>
               <summary>{{ "Config diff" if unit.config_diff else "Current config preview" }}</summary>
               {% if unit.config_diff %}
-                <code>{{ unit.config_diff }}</code>
+                <pre><code class="language-diff">{{ unit.config_diff }}</code></pre>
               {% elif not unit.has_baseline %}
                 <p class="muted">No last-applied baseline exists yet. The current rendered config will become the baseline after a successful selected apply.</p>
-                <code>{{ unit.config_preview }}</code>
+                <pre><code>{{ unit.config_preview }}</code></pre>
               {% else %}
                 <p class="muted">The normalized desired-state snapshot changed, but the rendered config preview did not change.</p>
               {% endif %}
@@ -138,4 +138,17 @@
     </details>
   {% endif %}
 </section>
+{% endblock %}
+{% block extra_scripts %}
+  <script>
+    window.Prism = window.Prism || {};
+    window.Prism.manual = true;
+  </script>
+  <script src="/static/vendor/prism/prism-core.min.js"></script>
+  <script src="/static/vendor/prism/prism-diff.min.js"></script>
+  <script>
+    if (window.Prism && typeof window.Prism.highlightAllUnder === "function") {
+      window.Prism.highlightAllUnder(document.querySelector(".appliance-apply-form") || document);
+    }
+  </script>
 {% endblock %}

@@ -23,6 +23,9 @@ def test_login_and_dashboard_render(client):
     assert "HTTPS Repository" not in response.text
     assert "Users" in response.text
     assert "LDAP / Users" not in response.text
+    assert "cdn.tailwindcss.com" not in response.text
+    assert "unpkg.com/htmx" not in response.text
+    assert 'body class="bg-slate-100 text-slate-900"' not in response.text
     assert "/static/brand/labfoundry-mark.svg" in response.text
     assert '<link rel="icon" href="/favicon.ico" type="image/svg+xml">' in response.text
     assert "LF</span>" not in response.text
@@ -643,12 +646,13 @@ def test_local_users_page_separates_ldap_authentication(client):
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
-        data={"username": "operator", "role": "viewer", "shell": "/bin/bash", "password": "Strong-local1!", "enabled": "on", "csrf": csrf},
+        data={"username": "operator", "role": "viewer", "shell": "/bin/bash", "csrf": csrf},
         follow_redirects=True,
     )
     assert created.status_code == 200
     assert "operator" in created.text
     assert "/bin/bash" in created.text
+    assert "disabled" in created.text
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "userActionsFormatter" not in app_js.text
@@ -656,7 +660,15 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "openUserPasswordModal" in app_js.text
     assert "deleteUserFromMenu" in app_js.text
     assert "Unlock OS account" in app_js.text
+    assert "disableUserFromMenu" in app_js.text
+    assert "Disable user" in app_js.text
+    users_table_js = app_js.text.split("function initializeUsersTable()", 1)[1].split("function initializeUserPasswordForm()", 1)[0]
+    enabled_column_js = users_table_js.split('title: "Enabled"', 1)[1].split('title: "OS account"', 1)[0]
+    assert "editor:" not in enabled_column_js
     assert "validatePasswordMatch" in app_js.text
+    assert "initializeNonTabbableHelperControls" in app_js.text
+    assert '".help-icon, .password-toggle"' in app_js.text
+    assert 'control.setAttribute("tabindex", "-1")' in app_js.text
     assert 'field: "shell"' in app_js.text
     assert "Temp Password" not in app_js.text
 
@@ -675,7 +687,7 @@ def test_local_user_reset_modal_endpoint_and_remove(client):
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
-        data={"username": "remove-me", "role": "viewer", "password": "Temporary-pass1!", "enabled": "on", "csrf": csrf},
+        data={"username": "remove-me", "role": "viewer", "csrf": csrf},
         follow_redirects=False,
     )
     assert created.status_code == 303
@@ -685,6 +697,24 @@ def test_local_user_reset_modal_endpoint_and_remove(client):
     rows = json.loads(html.unescape(payload))
     user_id = next(row["id"] for row in rows if row["username"] == "remove-me")
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    reset = client.post(
+        f"/users/{user_id}/password",
+        data={"password": "New-temporary1!", "confirm_password": "New-temporary1!", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert reset.status_code in {200, 303}
+
+    with SessionLocal() as db:
+        enabled_user = db.execute(select(User).where(User.username == "remove-me")).scalar_one()
+        assert enabled_user.enabled is True
+
+    disabled = client.post(f"/users/{user_id}/disable", data={"csrf": csrf})
+    assert disabled.status_code == 200
+    with SessionLocal() as db:
+        disabled_user = db.execute(select(User).where(User.username == "remove-me")).scalar_one()
+        assert disabled_user.enabled is False
+        assert disabled_user.os_sync_status == "pending"
+
     reset = client.post(
         f"/users/{user_id}/password",
         data={"password": "New-temporary1!", "confirm_password": "New-temporary1!", "csrf": csrf},
@@ -732,26 +762,40 @@ def test_local_users_password_policy_staging_and_apply_redaction(client):
     assert policy.status_code == 200
     assert policy.json()["policy"]["min_length"] == 14
 
-    weak = client.post(
+    created = client.post(
         "/users",
-        data={"username": "sync-me", "role": "viewer", "password": "short", "enabled": "on", "csrf": csrf},
+        data={"username": "sync-me", "role": "viewer", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    users = client.get("/users")
+    import html
+    import json
+
+    rows = json.loads(html.unescape(users.text.split("data-users='", 1)[1].split("'", 1)[0]))
+    user_id = next(row["id"] for row in rows if row["username"] == "sync-me")
+
+    weak = client.post(
+        f"/users/{user_id}/password",
+        data={"password": "short", "confirm_password": "short", "csrf": csrf},
     )
     assert weak.status_code == 400
     assert "Password must be at least 14 characters" in weak.text
 
     plaintext = "BridgeStrong1!"
-    created = client.post(
-        "/users",
-        data={"username": "sync-me", "role": "viewer", "password": plaintext, "enabled": "on", "csrf": csrf},
+    reset = client.post(
+        f"/users/{user_id}/password",
+        data={"password": plaintext, "confirm_password": plaintext, "csrf": csrf},
         follow_redirects=False,
     )
-    assert created.status_code == 303
+    assert reset.status_code == 303
 
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.username == "sync-me")).scalar_one()
         assert not hasattr(user, "pending_os_password_encrypted")
         assert not hasattr(user, "password_hash")
         assert user.shell == "/sbin/nologin"
+        assert user.enabled is True
 
     apply_page = client.get("/appliance-apply")
     assert apply_page.status_code == 200
@@ -803,10 +847,22 @@ def test_real_local_users_apply_clears_pending_passwords_and_baselines_post_appl
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
-        data={"username": "real-sync", "role": "viewer", "password": "BridgeStrong1!", "enabled": "on", "csrf": csrf},
+        data={"username": "real-sync", "role": "viewer", "csrf": csrf},
         follow_redirects=False,
     )
     assert created.status_code == 303
+    users = client.get("/users")
+    import html
+    import json
+
+    rows = json.loads(html.unescape(users.text.split("data-users='", 1)[1].split("'", 1)[0]))
+    user_id = next(row["id"] for row in rows if row["username"] == "real-sync")
+    reset = client.post(
+        f"/users/{user_id}/password",
+        data={"password": "BridgeStrong1!", "confirm_password": "BridgeStrong1!", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert reset.status_code == 303
 
     apply_page = client.get("/appliance-apply")
     csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -925,6 +981,9 @@ def test_dns_and_dhcp_pages_render(client):
 
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
+    assert "margin: 0;" in app_css.text
+    assert "background: var(--bg);" in app_css.text
+    assert "color: var(--text);" in app_css.text
     assert ".add-row-hint" in app_css.text
     assert 'tabulator-field="host_label"' in app_css.text
     assert ".alert.warning" in app_css.text
@@ -1809,11 +1868,6 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
         data={"password": "Backup-user1!", "confirm_password": "Backup-user1!", "csrf": csrf},
     )
     assert reset.status_code in {200, 303}
-    enabled_user = client.post(
-        f"/users/{user_id}/edit",
-        data={"username": "vcf-backup", "role": "viewer", "enabled": "on", "csrf": csrf},
-    )
-    assert enabled_user.status_code == 200
     response = client.post(
         "/vcf-backups/settings",
         data={
@@ -1881,11 +1935,6 @@ def test_vcf_backups_disabled_disables_default_backup_user(client):
         data={"password": "Backup-user1!", "confirm_password": "Backup-user1!", "csrf": csrf},
     )
     assert reset.status_code in {200, 303}
-    enabled_user = client.post(
-        f"/users/{user_id}/edit",
-        data={"username": "vcf-backup", "role": "viewer", "enabled": "on", "csrf": csrf},
-    )
-    assert enabled_user.status_code == 200
 
     disabled_service = client.post(
         "/vcf-backups/settings",
@@ -1929,11 +1978,6 @@ def test_vcf_backups_apply_task_captures_sftp_config(client):
         data={"password": "Backup-user1!", "confirm_password": "Backup-user1!", "csrf": csrf},
     )
     assert reset.status_code in {200, 303}
-    enabled_user = client.post(
-        f"/users/{user_id}/edit",
-        data={"username": "vcf-backup", "role": "viewer", "enabled": "on", "csrf": csrf},
-    )
-    assert enabled_user.status_code == 200
     settings_response = client.post(
         "/vcf-backups/settings",
         data={
@@ -2495,6 +2539,11 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     assert "--- last-applied/firewall" in changed_page.text
     assert "+++ current/firewall" in changed_page.text
     assert "allow-global-apply-test" in changed_page.text
+    assert 'class="language-diff"' in changed_page.text
+    assert "/static/vendor/prism/prism-core.min.js" in changed_page.text
+    assert "/static/vendor/prism/prism-diff.min.js" in changed_page.text
+    assert 'typeof window.Prism.highlightAllUnder === "function"' in changed_page.text
+    assert "Prism.highlightAllUnder" in changed_page.text
 
     skipped_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "network"})
     assert skipped_response.status_code == 200

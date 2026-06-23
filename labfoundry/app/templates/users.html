@@ -45,6 +45,19 @@
                   <button class="button tiny secondary" type="submit">Unlock OS account</button>
                 </form>
               {% endif %}
+              {% if user.enabled %}
+                <form
+                  action="/users/{{ user.id }}/disable"
+                  method="post"
+                  data-confirm-modal
+                  data-confirm-title="Disable {{ user.username }}?"
+                  data-confirm-message="This marks the LabFoundry user disabled, revokes its API tokens, and removes the managed Photon OS account on the next global appliance apply."
+                  data-confirm-label="Disable user"
+                >
+                  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                  <button class="button tiny secondary" type="submit" {{ "disabled" if user.id == identity.user_id else "" }}>Disable</button>
+                </form>
+              {% endif %}
               <form
                 action="/users/{{ user.id }}/delete"
                 method="post"

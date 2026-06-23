@@ -147,6 +147,7 @@ from labfoundry.app.services.local_users import (
     DEFAULT_PASSWORD_POLICY,
     DEFAULT_LOCAL_USER_SHELL,
     LOCAL_USER_SHELLS,
+    clear_pending_os_password,
     has_pending_os_password,
     is_valid_user_shell,
     local_user_sync_rows,
@@ -5151,6 +5152,12 @@ def update_vcf_backup_settings_from_ui(
     settings.max_sessions = max_sessions
     settings.config_path = VCF_BACKUP_EFFECTIVE_CONFIG_PATH
     settings.updated_at = utcnow()
+    selected_user = db.get(User, user_id) if user_id else None
+    if settings.enabled and selected_user and selected_user.username == VCF_BACKUP_DEFAULT_USERNAME and not selected_user.enabled:
+        if has_pending_os_password(selected_user) or selected_user.os_password_applied_at:
+            selected_user.enabled = True
+            selected_user.os_sync_status = "pending"
+            db.add(selected_user)
     disabled_default_user = disable_default_vcf_backup_user_when_service_off(db, settings, actor=identity.username)
     db.commit()
     record_audit(db, actor=identity.username, action="update_vcf_backup_settings", resource_type="vcf_backups", resource_id=str(settings.id))
@@ -5316,8 +5323,6 @@ def create_user_from_ui(
     username: str = Form(...),
     role: str = Form(Role.VIEWER.value),
     shell: str = Form(DEFAULT_LOCAL_USER_SHELL),
-    password: str = Form(""),
-    enabled: str | None = Form(None),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -5332,19 +5337,9 @@ def create_user_from_ui(
     if not is_valid_user_shell(shell):
         raise HTTPException(status_code=400, detail=f"Shell must be one of {', '.join(LOCAL_USER_SHELLS)}.")
     shell = normalize_user_shell(shell)
-    next_enabled = enabled == "on"
-    password = password.strip()
-    if next_enabled and not password:
-        raise HTTPException(status_code=400, detail="Set/reset a Photon OS password before enabling this local user.")
-    if password:
-        policy_errors = validate_password(password, username, local_users_password_policy(db))
-        if policy_errors:
-            raise HTTPException(status_code=400, detail=" ".join(policy_errors))
     if db.execute(select(User).where(User.username == username)).scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"User {username} already exists.")
-    user = User(username=username, role=role, shell=shell, enabled=next_enabled)
-    if password:
-        stage_user_os_password(user, password)
+    user = User(username=username, role=role, shell=shell, enabled=False)
     db.add(user)
     db.commit()
     record_audit(db, actor=identity.username, action="create_local_user", resource_type="user", resource_id=str(user.id))
@@ -5358,7 +5353,6 @@ def update_user_from_ui(
     username: str = Form(...),
     role: str = Form(Role.VIEWER.value),
     shell: str = Form(DEFAULT_LOCAL_USER_SHELL),
-    enabled: str | None = Form(None),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -5376,22 +5370,16 @@ def update_user_from_ui(
     if not is_valid_user_shell(shell):
         raise HTTPException(status_code=400, detail=f"Shell must be one of {', '.join(LOCAL_USER_SHELLS)}.")
     shell = normalize_user_shell(shell)
-    next_enabled = enabled == "on"
-    if user.id == identity.user_id and not next_enabled:
-        raise HTTPException(status_code=400, detail="You cannot disable your own active session account.")
+    next_enabled = user.enabled
     protect_last_admin(db, user, next_role=role, next_enabled=next_enabled)
     existing = db.execute(select(User).where(User.username == username, User.id != user.id)).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail=f"User {username} already exists.")
     old_username = user.username
-    has_photon_password = bool(has_pending_os_password(user) or (old_username == username and user.os_password_applied_at))
-    if next_enabled and not has_photon_password:
-        raise HTTPException(status_code=400, detail="Set/reset a Photon OS password before enabling this local user.")
     user.username = username
     user.role = role
     shell_changed = user.shell != shell
     user.shell = shell
-    user.enabled = next_enabled
     if old_username != username:
         rename_pending_os_password(old_username, username)
         user.os_password_applied_at = None
@@ -5403,12 +5391,39 @@ def update_user_from_ui(
         for token in tokens:
             token.owner_username = username
             db.add(token)
-    if not next_enabled:
-        user.os_sync_status = "pending"
-        revoke_user_tokens(db, user, identity.username)
     db.add(user)
     db.commit()
     record_audit(db, actor=identity.username, action="update_local_user", resource_type="user", resource_id=str(user.id))
+    db.refresh(user)
+    return JSONResponse({"user": user_to_dict(user, identity.user_id)})
+
+
+@router.post("/users/{user_id}/disable", response_model=None)
+def disable_user_from_ui(
+    user_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    require_admin_identity(identity)
+    verify_csrf(request, csrf)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.id == identity.user_id:
+        raise HTTPException(status_code=400, detail="You cannot disable your own active session account.")
+    if not user.enabled:
+        return JSONResponse({"user": user_to_dict(user, identity.user_id)})
+    protect_last_admin(db, user, next_enabled=False)
+    user.enabled = False
+    user.os_sync_status = "pending"
+    user.os_unlock_requested_at = None
+    clear_pending_os_password(user)
+    revoke_user_tokens(db, user, identity.username)
+    db.add(user)
+    db.commit()
+    record_audit(db, actor=identity.username, action="disable_local_user", resource_type="user", resource_id=str(user.id))
     db.refresh(user)
     return JSONResponse({"user": user_to_dict(user, identity.user_id)})
 
@@ -5483,6 +5498,7 @@ def reset_user_password_from_ui(
     if policy_errors:
         raise HTTPException(status_code=400, detail=" ".join(policy_errors))
     stage_user_os_password(user, password)
+    user.enabled = True
     db.add(user)
     revoke_user_tokens(db, user, identity.username)
     db.commit()

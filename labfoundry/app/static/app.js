@@ -1676,13 +1676,21 @@ async function postUserAction(url, data, csrf, options = {}) {
   const body = new FormData();
   body.set("csrf", csrf);
   for (const [key, value] of Object.entries(data)) {
-    if (["id", "is_new", "is_current", "created_at", "os_sync_status", "os_password_pending", "os_account_state", "os_account_detail", "os_unlock_available", "unlock_requested"].includes(key)) {
-      continue;
-    }
-    if (key === "enabled") {
-      if (value) {
-        body.set("enabled", "on");
-      }
+    if (
+      [
+        "id",
+        "is_new",
+        "is_current",
+        "created_at",
+        "enabled",
+        "os_sync_status",
+        "os_password_pending",
+        "os_account_state",
+        "os_account_detail",
+        "os_unlock_available",
+        "unlock_requested",
+      ].includes(key)
+    ) {
       continue;
     }
     body.set(key, value ?? "");
@@ -1780,6 +1788,29 @@ async function unlockUserFromMenu(row, csrf) {
   }
 }
 
+async function disableUserFromMenu(row, csrf) {
+  clearCaMessage("users-error");
+  const data = row.getData();
+  if (data.is_new || !data.enabled) {
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `Disable ${data.username}?`,
+    message: "This marks the LabFoundry user disabled, revokes its API tokens, and removes the managed Photon OS account on the next global appliance apply.",
+    label: "Disable user",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await postUserAction(`/users/${data.id}/disable`, {}, csrf, { reload: false });
+    showTransientGridStatus("Disabled");
+    window.location.reload();
+  } catch (error) {
+    showCaMessage("users-error", error instanceof Error ? error.message : "The user could not be disabled.");
+  }
+}
+
 function newUserRow() {
   return {
     id: "__new__",
@@ -1872,6 +1903,14 @@ function initializeUsersTable() {
           },
         },
         {
+          label: "Disable user",
+          action: (_event, row) => disableUserFromMenu(row, csrf),
+          disabled: (component) => {
+            const data = component.getData();
+            return data.is_new || data.is_current || !data.enabled;
+          },
+        },
+        {
           label: "Remove user",
           action: (_event, row) => deleteUserFromMenu(row, csrf),
           disabled: (component) => component.getData().is_new || component.getData().is_current,
@@ -1904,10 +1943,8 @@ function initializeUsersTable() {
           title: "Enabled",
           field: "enabled",
           formatter: "tickCross",
-          editor: true,
           hozAlign: "center",
           width: 110,
-          cellEdited: (cell) => autoSaveUser(cell, csrf),
         },
         {
           title: "OS account",
@@ -3669,6 +3706,15 @@ function initializeSwitchFields() {
   });
 }
 
+function initializeNonTabbableHelperControls() {
+  document.querySelectorAll(".help-icon, .password-toggle").forEach((control) => {
+    if (!(control instanceof HTMLElement)) {
+      return;
+    }
+    control.setAttribute("tabindex", "-1");
+  });
+}
+
 function updateFirewallDesiredState(payload = {}) {
   if (payload.enabled !== undefined) {
     document.querySelectorAll("[data-firewall-enabled-status]").forEach((status) => {
@@ -5405,6 +5451,7 @@ document.addEventListener("DOMContentLoaded", initializeVlanInterfacesTable);
 document.addEventListener("DOMContentLoaded", initializeHostsFileEditor);
 document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
+document.addEventListener("DOMContentLoaded", initializeNonTabbableHelperControls);
 document.addEventListener("DOMContentLoaded", initializeSwitchFields);
 document.addEventListener("DOMContentLoaded", initializeAutosaveForms);
 document.addEventListener("DOMContentLoaded", initializeApplianceSettings);

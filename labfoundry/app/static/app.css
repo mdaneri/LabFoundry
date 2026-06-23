@@ -19,6 +19,9 @@
 
 body {
   min-height: 100vh;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
   font-family: var(--font-sans);
   letter-spacing: 0;
 }
@@ -2056,18 +2059,46 @@ textarea {
   font-size: 13px;
 }
 
-.config-diff code {
+.config-diff pre {
   display: block;
   max-height: 420px;
+  margin: 0;
   overflow: auto;
   border-radius: 6px;
   padding: 12px;
   background: #0f172a;
   color: #dbeafe;
+}
+
+.config-diff code {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.55;
   white-space: pre;
+}
+
+.config-diff .token.coord {
+  color: #93c5fd;
+  font-weight: 750;
+}
+
+.config-diff .token.inserted,
+.config-diff .token.inserted-sign {
+  color: #86efac;
+}
+
+.config-diff .token.deleted,
+.config-diff .token.deleted-sign {
+  color: #fca5a5;
+}
+
+.config-diff .token.prefix.inserted,
+.config-diff .token.prefix.deleted {
+  font-weight: 900;
+}
+
+.config-diff .token.unchanged {
+  color: #dbeafe;
 }
 
 .apply-failure-list {

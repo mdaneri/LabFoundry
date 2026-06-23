@@ -4,15 +4,13 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ app_name }}{% if title %} - {{ title }}{% endif %}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=password-modal-20260623-1">
+    <link rel="stylesheet" href="/static/app.css?v=no-cdn-prism-20260623-1">
     {% block extra_head %}{% endblock %}
   </head>
-  <body class="bg-slate-100 text-slate-900">
+  <body>
     <div class="app-shell">
       <aside class="sidebar">
         <a class="brand" href="/">
@@ -86,7 +84,7 @@
       </form>
     </dialog>
     <script src="/static/vendor/tabulator/tabulator.min.js"></script>
-    <script src="/static/app.js?v=password-modal-20260623-1"></script>
+    <script src="/static/app.js?v=users-enable-menu-20260623-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>
 </html>
