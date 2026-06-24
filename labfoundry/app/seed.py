@@ -368,6 +368,19 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
         db.add(server_profile)
         db.flush()
         db.add(
+            CaProfile(
+                name="VCF KMIP client",
+                certificate_type="client",
+                validity_days=825,
+                key_algorithm="RSA",
+                key_size=2048,
+                key_usage="digitalSignature,keyEncipherment",
+                extended_key_usage="clientAuth",
+                san_required=False,
+                description="Default profile for VCF and KMIP client certificates.",
+            )
+        )
+        db.add(
             CaCertificate(
                 common_name="labfoundry.labfoundry.internal",
                 profile_id=server_profile.id,

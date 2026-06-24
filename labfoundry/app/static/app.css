@@ -158,6 +158,80 @@ textarea {
   margin: -2px 0 12px;
 }
 
+.detail-list {
+  display: grid;
+  gap: 8px;
+}
+
+.detail-list.compact {
+  gap: 6px;
+}
+
+.detail-list > div {
+  display: grid;
+  grid-template-columns: minmax(104px, 0.75fr) minmax(0, 1.25fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.detail-list span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.detail-list strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.ca-download-details {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.secret-value {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.secret-toggle {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0;
+  color: #64748b;
+  background: white;
+  cursor: pointer;
+}
+
+.secret-toggle:hover,
+.secret-toggle:focus-visible {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: var(--accent-dark);
+  outline: none;
+}
+
+.secret-toggle svg {
+  width: 15px;
+  height: 15px;
+  stroke: currentColor;
+  stroke-width: 2;
+  fill: none;
+}
+
 .role-chip,
 .user-chip,
 .status-pill {
@@ -283,6 +357,36 @@ textarea {
 
 .service-summary-grid {
   grid-template-columns: repeat(4, minmax(180px, 1fr));
+}
+
+.ca-status-grid {
+  grid-template-columns: repeat(auto-fit, minmax(132px, 168px));
+  gap: 8px;
+  justify-content: start;
+  margin: 2px 0 12px;
+}
+
+.ca-status-grid > div {
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.ca-status-grid span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.ca-status-grid strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.25;
 }
 
 .metric,
@@ -2352,7 +2456,60 @@ textarea {
   padding: 10px;
   white-space: pre;
   color: #dbeafe;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.config-preview .token.property,
+.config-diff .token.property,
+.terminal-note .token.property {
+  color: #93c5fd;
+}
+
+.config-preview .token.string,
+.config-diff .token.string,
+.terminal-note .token.string {
+  color: #86efac;
+}
+
+.config-preview .token.number,
+.config-diff .token.number,
+.terminal-note .token.number {
+  color: #fbbf24;
+}
+
+.config-preview .token.boolean,
+.config-preview .token.keyword,
+.config-diff .token.boolean,
+.config-diff .token.keyword,
+.terminal-note .token.boolean,
+.terminal-note .token.keyword {
+  color: #c4b5fd;
+}
+
+.config-preview .token.operator,
+.config-preview .token.punctuation,
+.config-diff .token.operator,
+.config-diff .token.punctuation,
+.terminal-note .token.operator,
+.terminal-note .token.punctuation {
+  color: #bfdbfe;
+}
+
+.config-preview .token.comment,
+.config-diff .token.comment,
+.terminal-note .token.comment {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.config-preview .token.section,
+.config-diff .token.section,
+.terminal-note .token.section {
+  color: #f9a8d4;
+  font-weight: 750;
 }
 
 .compact-settings-list {

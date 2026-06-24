@@ -1,6 +1,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -117,6 +118,37 @@ def wan_config_text(
     )
 
 
+def ca_payload_text(root_dir: Path) -> str:
+    root_cert = "-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----\n"
+    cert = "-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n"
+    key = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n"
+    return json.dumps(
+        {
+            "enabled": True,
+            "root": {
+                "common_name": "LabFoundry Internal Root CA",
+                "certificate_pem": root_cert,
+                "private_key_pem": key,
+                "root_cert_path": str(root_dir / "ca" / "root-ca.pem"),
+                "legacy_root_cert_path": str(root_dir / "ca" / "root.crt"),
+                "ca_bundle_path": str(root_dir / "ca" / "ca-bundle.pem"),
+            },
+            "certificates": [
+                {
+                    "common_name": "kms.labfoundry.internal",
+                    "managed_owner": "kms:server",
+                    "certificate_pem": cert,
+                    "chain_pem": cert + root_cert,
+                    "private_key_pem": key,
+                    "cert_path": str(root_dir / "kms" / "certs" / "kms.labfoundry.internal.crt"),
+                    "key_path": str(root_dir / "kms" / "certs" / "kms.labfoundry.internal.key"),
+                    "chain_path": str(root_dir / "kms" / "certs" / "kms.labfoundry.internal-chain.pem"),
+                }
+            ],
+        }
+    )
+
+
 def test_network_helper_validates_vlan_parent_must_be_trunk(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-network.conf"
@@ -184,6 +216,42 @@ def test_wan_helper_allows_nat_on_non_wan_role_target(tmp_path):
     config_path.write_text(wan_config_text(target_role="access", target_wan=False), encoding="utf-8")
 
     assert helper._wan_config_errors(config_path) == []
+
+
+def test_ca_helper_rejects_config_outside_apply_dir(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-ca.json"
+    config_path.write_text(ca_payload_text(tmp_path / "etc" / "labfoundry"), encoding="utf-8")
+
+    try:
+        helper._validate_ca_config_path(str(config_path))
+    except ValueError as exc:
+        assert "CA config must be staged under" in str(exc)
+    else:
+        raise AssertionError("CA config outside apply directory should be rejected")
+
+
+def test_ca_helper_validates_and_writes_managed_files(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "ca"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-ca.json"
+    config_path.write_text(ca_payload_text(managed_root), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "CA_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "_ca_key_matches_certificate", lambda certificate_pem, private_key_pem: True)
+
+    assert helper._handle_ca("validate", [str(config_path)]) == 0
+    assert helper._handle_ca("apply", [str(config_path)]) == 0
+
+    root_ca = managed_root / "ca" / "root-ca.pem"
+    key_path = managed_root / "kms" / "certs" / "kms.labfoundry.internal.key"
+    assert root_ca.read_text(encoding="utf-8").startswith("-----BEGIN CERTIFICATE-----")
+    assert key_path.read_text(encoding="utf-8").startswith("-----BEGIN PRIVATE KEY-----")
+    if os.name != "nt":
+        assert oct(key_path.stat().st_mode & 0o777) == "0o600"
 
 
 def test_wan_helper_apply_routes_nat_and_netem(monkeypatch, tmp_path):
@@ -940,6 +1008,9 @@ def appliance_settings_json(
     resolver_mode: str = "local_dns",
     resolver_servers: list[str] | None = None,
     local_dns_enabled: bool = True,
+    management_https_enabled: bool = False,
+    management_https_cert_path: str = "",
+    management_https_key_path: str = "",
 ) -> str:
     import json
 
@@ -952,6 +1023,10 @@ def appliance_settings_json(
             "management_interface": "eth0",
             "management_ip": "192.168.49.1",
             "management_ip_cidr": "192.168.49.1/24",
+            "management_https_enabled": management_https_enabled,
+            "management_http_port": 8000,
+            "management_https_cert_path": management_https_cert_path,
+            "management_https_key_path": management_https_key_path,
             "ntp_servers": ["time1.google.com", "time2.google.com"],
         }
     )
@@ -969,6 +1044,17 @@ def test_appliance_settings_helper_validates_staged_json(monkeypatch, tmp_path):
     assert helper._handle_appliance_settings("validate", [str(config_path)]) == 0
 
 
+def test_appliance_settings_helper_requires_https_cert_files(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-settings.json"
+    config_path.write_text(appliance_settings_json(management_https_enabled=True), encoding="utf-8")
+
+    errors = helper._appliance_settings_config_errors(config_path)
+
+    assert "management_https_cert_path is required when management HTTPS is enabled." in errors
+    assert "management_https_key_path is required when management HTTPS is enabled." in errors
+
+
 def test_appliance_settings_helper_rejects_invalid_json(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-settings.json"
@@ -979,6 +1065,70 @@ def test_appliance_settings_helper_rejects_invalid_json(tmp_path):
     assert "fqdn must be a valid fully qualified DNS name." in errors
     assert "resolver_mode must be local_dns or external." in errors
     assert "ntp_servers must include at least one server." in errors
+
+
+def test_appliance_settings_helper_writes_management_https_override(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "appliance-settings"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    cert_path = managed_root / "https" / "certs" / "labfoundry.labfoundry.internal.crt"
+    key_path = managed_root / "https" / "certs" / "labfoundry.labfoundry.internal.key"
+    dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
+    redirect_script = tmp_path / "bin" / "labfoundry-http-redirect"
+    redirect_service = tmp_path / "systemd" / "labfoundry-http-redirect.service"
+    timesyncd_dir = tmp_path / "timesyncd.conf.d"
+    apply_dir.mkdir(parents=True)
+    cert_path.parent.mkdir(parents=True)
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    config_path = apply_dir / "labfoundry-settings.json"
+    config_path.write_text(
+        appliance_settings_json(
+            management_https_enabled=True,
+            management_https_cert_path=str(cert_path),
+            management_https_key_path=str(key_path),
+        ),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
+    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
+    monkeypatch.setattr(helper, "LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH", redirect_script)
+    monkeypatch.setattr(helper, "LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH", redirect_service)
+    monkeypatch.setattr(helper, "_ca_key_matches_certificate", lambda certificate_pem, private_key_pem: True)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(
+        helper.shutil,
+        "which",
+        lambda command: {
+            "hostnamectl": "/usr/bin/hostnamectl",
+            "systemd-run": "/usr/bin/systemd-run",
+        }.get(command),
+    )
+
+    assert helper._handle_appliance_settings("apply", [str(config_path)]) == 0
+
+    dropin = (dropin_dir / "management-https.conf").read_text(encoding="utf-8")
+    assert "--ssl-certfile" in dropin
+    assert str(cert_path) in dropin
+    assert "--ssl-keyfile" in dropin
+    assert str(key_path) in dropin
+    assert "Redirecting to" in redirect_script.read_text(encoding="utf-8")
+    redirect_unit = redirect_service.read_text(encoding="utf-8")
+    assert "--port 80 --https-port 8000" in redirect_unit
+    assert ["systemctl", "daemon-reload"] in commands
+    assert ["systemctl", "enable", "--now", "labfoundry-http-redirect.service"] in commands
+    assert ["systemctl", "restart", "labfoundry-http-redirect.service"] in commands
+    assert any(command[:5] == ["/usr/bin/systemd-run", "--quiet", "--collect", "--on-active=3", "--unit=labfoundry-management-ui-restart"] for command in commands)
 
 
 def test_appliance_settings_helper_applies_local_resolver_and_timesyncd(monkeypatch, tmp_path):

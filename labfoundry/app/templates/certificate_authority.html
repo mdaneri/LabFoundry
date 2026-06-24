@@ -13,6 +13,12 @@
     {% if form_error %}
       <div class="alert error">{{ form_error }}</div>
     {% endif %}
+    <div class="metric-grid ca-status-grid">
+      <div><span>Root CA</span><strong>{{ "present" if ca_status_summary.root_present else "not generated" }}</strong></div>
+      <div><span>Issued certs</span><strong>{{ ca_status_summary.issued_count }}</strong></div>
+      <div><span>Managed certs</span><strong>{{ ca_status_summary.managed_count }}</strong></div>
+      <div><span>Expiring soon</span><strong>{{ ca_status_summary.expiring_count }}</strong></div>
+    </div>
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="Certificate Authority views">
       <button class="tab-button active" type="button" data-tab-target="ca-certificates-panel" aria-selected="true">Certificates</button>
       <button class="tab-button" type="button" data-tab-target="ca-profiles-panel" aria-selected="false">Profiles</button>
@@ -39,17 +45,29 @@
         ></div>
         <table id="ca-certificates-fallback" class="data-table dns-fallback-table">
           <thead>
-            <tr><th>Common name</th><th>Profile</th><th>DNS SANs</th><th>IP SANs</th><th>Status</th><th>Enabled</th><th>Actions</th></tr>
+            <tr><th>Common name</th><th>Owner</th><th>Profile</th><th>DNS SANs</th><th>IP SANs</th><th>Status</th><th>Enabled</th><th>Exports</th><th>Actions</th></tr>
           </thead>
           <tbody>
             {% for certificate in ca_certificates %}
               <tr>
                 <td>{{ certificate.common_name }}</td>
+                <td>{{ certificate.managed_owner or "manual" }}</td>
                 <td>{{ certificate.profile.name if certificate.profile else "Unassigned" }}</td>
                 <td>{{ certificate.subject_alt_names }}</td>
                 <td>{{ certificate.ip_addresses }}</td>
                 <td>{{ certificate.status }}</td>
                 <td><span class="status-pill {{ 'good' if certificate.enabled else 'muted' }}">{{ "enabled" if certificate.enabled else "disabled" }}</span></td>
+                <td>
+                  {% if certificate.status == "issued" and certificate.certificate_pem %}
+                    <a class="button tiny secondary" href="/certificate-authority/certificates/{{ certificate.id }}/downloads/certificate.pem">Cert</a>
+                    <a class="button tiny secondary" href="/certificate-authority/certificates/{{ certificate.id }}/downloads/chain.pem">Chain</a>
+                    {% if certificate.private_key_encrypted %}
+                      <a class="button tiny ghost" href="/certificate-authority/certificates/{{ certificate.id }}/downloads/private-key.pem">Private key</a>
+                    {% endif %}
+                  {% else %}
+                    <span class="muted">pending</span>
+                  {% endif %}
+                </td>
                 <td>
                   <form
                     action="/certificate-authority/certificates/{{ certificate.id }}/delete"
@@ -171,7 +189,6 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>CA Settings</h2>
-        <span class="status-pill warn">dry-run</span>
       </div>
       <form class="form-stack" action="/certificate-authority/settings" method="post" data-autosave-form data-autosave-status-id="ca-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -248,7 +265,22 @@
         <a class="button primary" href="/certificate-authority/downloads/root-ca.pem">Download root CA</a>
         <a class="button ghost" href="/certificate-authority/downloads/ca-bundle.pem">Download CA bundle</a>
       </div>
-      <p class="muted">In dry-run development these files are generated from the current CA desired state. On the appliance, the apply helper will own the persisted CA files.</p>
+      <p class="muted">These files come from encrypted LabFoundry CA custody. The appliance filesystem is updated only after global appliance apply.</p>
+      <div class="detail-list compact ca-download-details">
+        <div>
+          <span>Secrets key</span>
+          <strong class="secret-value">
+            <span data-secret-display data-secret-text="{{ ca_status_summary.secrets_key_source }}" data-secret-mask="hidden">hidden</span>
+            <button class="secret-toggle" type="button" data-secret-toggle aria-label="Show secrets key source" aria-pressed="false">
+              <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </button>
+          </strong>
+        </div>
+        <div><span>Backup portability</span><strong>{{ "dedicated key" if ca_status_summary.secrets_key_dedicated else "development fallback" }}</strong></div>
+      </div>
     </div>
 
     {% include "partials/appliance_apply_status.html" %}
@@ -269,8 +301,8 @@
         <p class="muted">The desired CA state passes LabFoundry validation. Appliance validation still runs through the allowlisted CA helper before key or certificate work.</p>
       {% endif %}
       <div class="terminal-note">
-        <strong>{{ ca_settings.storage_path }}/labfoundry-ca.conf</strong>
-        <code>{{ ca_config_preview }}</code>
+        <strong>{{ ca_apply_config_path }}</strong>
+        <code class="language-json">{{ ca_config_preview }}</code>
       </div>
     </div>
   </aside>

@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "sqlite:///./data/labfoundry.db"
     secret_key: str = Field(default="change-me-in-production", min_length=16)
+    secrets_key: str = ""
     session_cookie_name: str = "labfoundry_session"
     csrf_cookie_name: str = "labfoundry_csrf"
     jwt_issuer: str = "labfoundry"

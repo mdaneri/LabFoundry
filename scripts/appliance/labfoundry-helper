@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
@@ -53,6 +54,8 @@ WAN_NAT_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-nat.service")
 WAN_SYSCTL_PATH = Path("/etc/sysctl.d/90-labfoundry-routing-wan.conf")
 APPLIANCE_SETTINGS_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-settings")
 LOCAL_USERS_APPLY_DIR = Path("/var/lib/labfoundry/apply/local-users")
+CA_APPLY_DIR = Path("/var/lib/labfoundry/apply/ca")
+CA_MANAGED_PATH_BASE = Path("/etc/labfoundry")
 LOCAL_USERS_HOME_BASE = Path("/var/lib/labfoundry/users")
 LOCAL_USERS_PWQUALITY_PATH = Path("/etc/security/pwquality.conf")
 LOCAL_USERS_SYSTEM_PASSWORD_PAM_PATH = Path("/etc/pam.d/system-password")
@@ -69,6 +72,11 @@ NETWORKD_DEFAULT_APPLIANCE_FILES = {
 NETWORK_INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 TIMESYNCD_DROPIN_DIR = Path("/etc/systemd/timesyncd.conf.d")
 TIMESYNCD_DROPIN_PATH = TIMESYNCD_DROPIN_DIR / "labfoundry.conf"
+LABFOUNDRY_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/labfoundry.service.d")
+LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH = LABFOUNDRY_SERVICE_DROPIN_DIR / "management-https.conf"
+LABFOUNDRY_UVICORN_COMMAND = "/opt/labfoundry/.venv/bin/python -m uvicorn labfoundry.app.main:app --host 0.0.0.0 --port {port}"
+LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH = Path("/opt/labfoundry/bin/labfoundry-http-redirect")
+LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-http-redirect.service")
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 VCF_BACKUPS_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-backups")
 VCF_BACKUPS_CONFIG_DIR = Path("/etc/ssh/sshd_config.d")
@@ -203,6 +211,170 @@ def _validate_dnsmasq_config_path(path_value: str) -> Path:
     if not path.is_file():
         raise ValueError(f"dnsmasq config does not exist: {path}")
     return path
+
+
+def _validate_ca_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".json":
+        raise ValueError("CA config path must end with .json")
+    if not path.is_relative_to(CA_APPLY_DIR):
+        raise ValueError(f"CA config must be staged under {CA_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"CA config does not exist: {path}")
+    return path
+
+
+def _ca_managed_path(value: str, label: str) -> Path:
+    path = Path(_validate_path(value)).resolve()
+    if not path.is_relative_to(CA_MANAGED_PATH_BASE):
+        raise ValueError(f"{label} must stay under {CA_MANAGED_PATH_BASE}")
+    return path
+
+
+def _pem_errors(value: str, label: str, *, private_key: bool = False) -> list[str]:
+    begin = "PRIVATE KEY" if private_key else "CERTIFICATE"
+    if f"-----BEGIN {begin}-----" not in value or f"-----END {begin}-----" not in value:
+        return [f"{label} must contain a PEM {begin.lower()} block."]
+    return []
+
+
+def _openssl_public_key(value: str, *, private_key: bool) -> str | None:
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        return None
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as temp_file:
+        temp_file.write(value)
+        temp_path = Path(temp_file.name)
+    try:
+        command = [openssl, "pkey", "-pubout", "-in", str(temp_path)] if private_key else [openssl, "x509", "-pubkey", "-noout", "-in", str(temp_path)]
+        result = _run(command)
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _ca_key_matches_certificate(certificate_pem: str, private_key_pem: str) -> bool | None:
+    cert_public = _openssl_public_key(certificate_pem, private_key=False)
+    key_public = _openssl_public_key(private_key_pem, private_key=True)
+    if cert_public is None or key_public is None:
+        return None
+    return bool(cert_public and key_public and cert_public == key_public)
+
+
+def _load_ca_payload(path: Path) -> dict:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"CA config is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("CA config root must be a JSON object")
+    return payload
+
+
+def _ca_payload_errors(path: Path) -> list[str]:
+    errors: list[str] = []
+    try:
+        payload = _load_ca_payload(path)
+    except ValueError as exc:
+        return [str(exc)]
+    root = payload.get("root") if isinstance(payload.get("root"), dict) else {}
+    enabled = bool(payload.get("enabled"))
+    root_cert = str(root.get("certificate_pem") or "")
+    root_key = str(root.get("private_key_pem") or "")
+    errors.extend(_pem_errors(root_cert, "root certificate"))
+    if enabled:
+        errors.extend(_pem_errors(root_key, "root private key", private_key=True))
+    for label in ["root_cert_path", "legacy_root_cert_path", "ca_bundle_path"]:
+        try:
+            _ca_managed_path(str(root.get(label) or ""), label)
+        except ValueError as exc:
+            errors.append(str(exc))
+    certificates = payload.get("certificates")
+    if not isinstance(certificates, list):
+        errors.append("CA certificates must be a list.")
+        return errors
+    for index, certificate in enumerate(certificates, start=1):
+        if not isinstance(certificate, dict):
+            errors.append(f"CA certificate {index} must be an object.")
+            continue
+        name = str(certificate.get("common_name") or f"certificate {index}")
+        certificate_pem = str(certificate.get("certificate_pem") or "")
+        private_key_pem = str(certificate.get("private_key_pem") or "")
+        chain_pem = str(certificate.get("chain_pem") or "")
+        errors.extend(_pem_errors(certificate_pem, f"certificate {name}"))
+        if chain_pem:
+            errors.extend(_pem_errors(chain_pem, f"certificate {name} chain"))
+        managed_owner = str(certificate.get("managed_owner") or "")
+        if managed_owner and not private_key_pem:
+            errors.append(f"managed certificate {name} requires a private key.")
+        if private_key_pem:
+            errors.extend(_pem_errors(private_key_pem, f"certificate {name} private key", private_key=True))
+            matches = _ca_key_matches_certificate(certificate_pem, private_key_pem)
+            if matches is False:
+                errors.append(f"certificate {name} private key does not match the certificate public key.")
+        for label in ["cert_path", "key_path", "chain_path"]:
+            value = str(certificate.get(label) or "")
+            if value:
+                try:
+                    _ca_managed_path(value, f"certificate {name} {label}")
+                except ValueError as exc:
+                    errors.append(str(exc))
+    return errors
+
+
+def _write_secret_file(path: Path, value: str, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value, encoding="utf-8")
+    path.chmod(mode)
+
+
+def _handle_ca(action: str, args: list[str]) -> int:
+    try:
+        config_path = _validate_ca_config_path(args[0])
+    except (IndexError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    errors = _ca_payload_errors(config_path)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    if action == "validate":
+        print(json.dumps({"ca": "validation complete", "config_path": str(config_path)}, sort_keys=True))
+        return 0
+    payload = _load_ca_payload(config_path)
+    root = payload["root"]
+    root_cert = str(root["certificate_pem"])
+    root_cert_path = _ca_managed_path(str(root["root_cert_path"]), "root_cert_path")
+    legacy_root_path = _ca_managed_path(str(root["legacy_root_cert_path"]), "legacy_root_cert_path")
+    bundle_path = _ca_managed_path(str(root["ca_bundle_path"]), "ca_bundle_path")
+    _write_secret_file(root_cert_path, root_cert, 0o644)
+    _write_secret_file(legacy_root_path, root_cert, 0o644)
+    _write_secret_file(bundle_path, root_cert, 0o644)
+    written = [str(root_cert_path), str(legacy_root_path), str(bundle_path)]
+    for certificate in payload["certificates"]:
+        cert_path_value = str(certificate.get("cert_path") or "")
+        key_path_value = str(certificate.get("key_path") or "")
+        chain_path_value = str(certificate.get("chain_path") or "")
+        if cert_path_value:
+            cert_path = _ca_managed_path(cert_path_value, "cert_path")
+            _write_secret_file(cert_path, str(certificate["certificate_pem"]), 0o644)
+            written.append(str(cert_path))
+        if chain_path_value:
+            chain_path = _ca_managed_path(chain_path_value, "chain_path")
+            _write_secret_file(chain_path, str(certificate.get("chain_pem") or certificate["certificate_pem"]), 0o644)
+            written.append(str(chain_path))
+        if key_path_value and certificate.get("private_key_pem"):
+            key_path = _ca_managed_path(key_path_value, "key_path")
+            _write_secret_file(key_path, str(certificate["private_key_pem"]), 0o600)
+            written.append(str(key_path))
+    print(json.dumps({"ca": "apply complete", "config_path": str(config_path), "written_files": written}, sort_keys=True))
+    return 0
+
+
 
 
 def _validate_dnsmasq_config(path: Path) -> subprocess.CompletedProcess[str]:
@@ -416,7 +588,258 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
         normalized = server.strip().strip(".").lower()
         if not HOSTNAME_PATTERN.fullmatch(normalized):
             errors.append(f"ntp server {server} must be a valid DNS name or IP address.")
+
+    management_http_port = payload.get("management_http_port", 8000)
+    try:
+        management_http_port = int(management_http_port)
+    except (TypeError, ValueError):
+        errors.append("management_http_port must be an integer.")
+        management_http_port = 0
+    if management_http_port < 1 or management_http_port > 65535:
+        errors.append("management_http_port must be between 1 and 65535.")
+
+    if bool(payload.get("management_https_enabled")):
+        cert_path_value = str(payload.get("management_https_cert_path") or "")
+        key_path_value = str(payload.get("management_https_key_path") or "")
+        if not cert_path_value:
+            errors.append("management_https_cert_path is required when management HTTPS is enabled.")
+        if not key_path_value:
+            errors.append("management_https_key_path is required when management HTTPS is enabled.")
+        if cert_path_value:
+            try:
+                cert_path = _ca_managed_path(cert_path_value, "management_https_cert_path")
+                if not cert_path.is_file():
+                    errors.append(f"management HTTPS certificate does not exist: {cert_path}")
+                else:
+                    cert_pem = cert_path.read_text(encoding="utf-8")
+                    errors.extend(_pem_errors(cert_pem, "management HTTPS certificate"))
+            except (OSError, ValueError) as exc:
+                errors.append(str(exc))
+        if key_path_value:
+            try:
+                key_path = _ca_managed_path(key_path_value, "management_https_key_path")
+                if not key_path.is_file():
+                    errors.append(f"management HTTPS private key does not exist: {key_path}")
+                else:
+                    key_pem = key_path.read_text(encoding="utf-8")
+                    errors.extend(_pem_errors(key_pem, "management HTTPS private key", private_key=True))
+            except (OSError, ValueError) as exc:
+                errors.append(str(exc))
+        if cert_path_value and key_path_value:
+            try:
+                cert_path = _ca_managed_path(cert_path_value, "management_https_cert_path")
+                key_path = _ca_managed_path(key_path_value, "management_https_key_path")
+                if cert_path.is_file() and key_path.is_file():
+                    matches = _ca_key_matches_certificate(cert_path.read_text(encoding="utf-8"), key_path.read_text(encoding="utf-8"))
+                    if matches is False:
+                        errors.append("management HTTPS private key does not match the certificate public key.")
+            except (OSError, ValueError) as exc:
+                errors.append(str(exc))
     return errors
+
+
+def _labfoundry_service_https_dropin(port: int, cert_path: Path, key_path: Path) -> str:
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "[Service]",
+            "ExecStart=",
+            f"ExecStart={LABFOUNDRY_UVICORN_COMMAND.format(port=port)} --ssl-certfile {cert_path} --ssl-keyfile {key_path}",
+            "",
+        ]
+    )
+
+
+def _grant_labfoundry_service_key_read(key_path: Path) -> None:
+    os.chmod(key_path, 0o640)
+    try:
+        shutil.chown(key_path, user="root", group="labfoundry")
+    except (LookupError, OSError):
+        if os.name != "nt":
+            raise
+
+
+def _http_redirect_script() -> str:
+    return """#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class RedirectHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    https_port = 8000
+
+    def _redirect(self) -> None:
+        host = self.headers.get("Host") or "localhost"
+        if host.startswith("["):
+            end = host.find("]")
+            host = host[: end + 1] if end != -1 else host
+        elif ":" in host:
+            host = host.split(":", 1)[0]
+        location = f"https://{host}:{self.https_port}{self.path}"
+        body = f"Redirecting to {location}\\n".encode("utf-8")
+        self.send_response(308)
+        self.send_header("Location", location)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        self._redirect()
+
+    def do_HEAD(self) -> None:
+        self._redirect()
+
+    def do_POST(self) -> None:
+        self._redirect()
+
+    def do_PUT(self) -> None:
+        self._redirect()
+
+    def do_PATCH(self) -> None:
+        self._redirect()
+
+    def do_DELETE(self) -> None:
+        self._redirect()
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=80)
+    parser.add_argument("--https-port", type=int, default=8000)
+    args = parser.parse_args()
+    RedirectHandler.https_port = args.https_port
+    server = ThreadingHTTPServer((args.host, args.port), RedirectHandler)
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+
+
+def _http_redirect_service(port: int) -> str:
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "[Unit]",
+            "Description=LabFoundry HTTP to HTTPS redirect",
+            "After=network-online.target",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"ExecStart=/usr/bin/python3 {LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH} --host 0.0.0.0 --port 80 --https-port {port}",
+            "Restart=on-failure",
+            "RestartSec=5",
+            "NoNewPrivileges=true",
+            "PrivateTmp=true",
+            "ProtectSystem=full",
+            "ProtectHome=true",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ]
+    )
+
+
+def _configure_http_redirect(enabled: bool, https_port: int) -> int:
+    changed = False
+    if enabled:
+        script_text = _http_redirect_script()
+        LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        current_script = LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.read_text(encoding="utf-8") if LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.exists() else ""
+        if current_script != script_text:
+            LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.write_text(script_text, encoding="utf-8")
+            os.chmod(LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH, 0o755)
+            changed = True
+        service_text = _http_redirect_service(https_port)
+        current_service = LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.read_text(encoding="utf-8") if LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.exists() else ""
+        if current_service != service_text:
+            LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.write_text(service_text, encoding="utf-8")
+            os.chmod(LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH, 0o644)
+            changed = True
+        commands = [["systemctl", "enable", "--now", "labfoundry-http-redirect.service"]]
+        if changed:
+            commands.insert(0, ["systemctl", "daemon-reload"])
+            commands.append(["systemctl", "restart", "labfoundry-http-redirect.service"])
+    else:
+        commands = []
+        if LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.exists():
+            commands.extend([["systemctl", "disable", "--now", "labfoundry-http-redirect.service"], ["systemctl", "daemon-reload"]])
+            LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.unlink()
+        if LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.exists():
+            LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.unlink()
+    for command in commands:
+        result = _run(command)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        if result.returncode != 0:
+            return result.returncode
+    return 0
+
+
+def _configure_labfoundry_management_https(payload: dict) -> int:
+    enabled = bool(payload.get("management_https_enabled"))
+    changed = False
+    port = int(payload.get("management_http_port") or 8000)
+    redirect = _configure_http_redirect(enabled, port)
+    if redirect != 0:
+        return redirect
+    if enabled:
+        cert_path = _ca_managed_path(str(payload["management_https_cert_path"]), "management_https_cert_path")
+        key_path = _ca_managed_path(str(payload["management_https_key_path"]), "management_https_key_path")
+        _grant_labfoundry_service_key_read(key_path)
+        next_text = _labfoundry_service_https_dropin(port, cert_path, key_path)
+        LABFOUNDRY_SERVICE_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+        current_text = LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.read_text(encoding="utf-8") if LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.exists() else ""
+        if current_text != next_text:
+            tmp_target = LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.with_suffix(".conf.tmp")
+            tmp_target.write_text(next_text, encoding="utf-8")
+            os.chmod(tmp_target, 0o644)
+            tmp_target.replace(LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH)
+            changed = True
+    elif LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.exists():
+        LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.unlink()
+        changed = True
+    if not changed:
+        return 0
+
+    daemon_reload = _run(["systemctl", "daemon-reload"])
+    print(daemon_reload.stdout, end="")
+    print(daemon_reload.stderr, end="", file=sys.stderr)
+    if daemon_reload.returncode != 0:
+        return daemon_reload.returncode
+
+    restart_command = ["systemctl", "restart", "labfoundry.service"]
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run is not None:
+        command = [
+            systemd_run,
+            "--quiet",
+            "--collect",
+            "--on-active=3",
+            "--unit=labfoundry-management-ui-restart",
+            *restart_command,
+        ]
+    else:
+        command = restart_command
+    result = _run(command)
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
 
 
 def _timesyncd_config(ntp_servers: list[str]) -> str:
@@ -490,8 +913,9 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                 {
                     "appliance_settings": "validation ok",
                     "resolver_mode": payload["resolver_mode"],
+                    "management_https_enabled": bool(payload.get("management_https_enabled")),
                     "management_interface": payload["management_interface"],
-                    "scope": "systemd-resolved and systemd-timesyncd",
+                    "scope": "systemd-resolved, systemd-timesyncd, and LabFoundry management UI",
                 },
                 sort_keys=True,
             )
@@ -517,11 +941,15 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     resolver = _configure_resolver(management_interface, resolver_servers, domains)
     if resolver.returncode != 0:
         return resolver.returncode
+    management_https = _configure_labfoundry_management_https(payload)
+    if management_https != 0:
+        return management_https
     print(
         json.dumps(
             {
                 "appliance_settings": "apply complete",
                 "fqdn": fqdn,
+                "management_https_enabled": bool(payload.get("management_https_enabled")),
                 "resolver_mode": resolver_mode,
                 "resolver_servers": resolver_servers,
                 "timesyncd_dropin": str(TIMESYNCD_DROPIN_PATH),
@@ -2104,6 +2532,8 @@ def main(argv: list[str]) -> int:
         return _handle_appliance_settings(action, normalized_args)
     if group == "local-users":
         return _handle_local_users(action, normalized_args)
+    if group == "ca":
+        return _handle_ca(action, normalized_args)
     if group == "vcf-backups":
         return _handle_vcf_backups(action, normalized_args)
 

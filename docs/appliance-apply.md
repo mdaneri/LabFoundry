@@ -60,9 +60,15 @@ The Firewall apply unit derives LabFoundry-managed service allow rules from enab
 
 The real VCF Backups apply path is OpenSSH-backed. The `vcf_backups` unit stages LabFoundry's rendered `Match User` drop-in at `/var/lib/labfoundry/apply/vcf-backups/labfoundry-vcf-backups-sshd.conf`, validates that it is LabFoundry-rendered and scoped to the selected backup user, verifies the selected OS account exists, installs `/etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf`, prepares the fixed chroot storage mount and `/backups` upload directory, validates `sshd`, and restarts `sshd` through `labfoundry-helper`. The selected backup user should be synchronized through the Local Users apply unit before VCF Backups is applied. Firewall apply owns the selected interface and port allow rule.
 
+## Certificate Authority Apply
+
+The real Certificate Authority apply path stages JSON at `/var/lib/labfoundry/apply/ca/labfoundry-ca.json`. When enabled, LabFoundry generates and stores the local root CA and issued leaf private keys encrypted in the database with `LABFOUNDRY_SECRETS_KEY`, auto-ensures certificates for LabFoundry HTTPS, KMS/KMIP, VCF Offline Depot, and VCF Private Registry, and renders a redacted apply preview. Through `labfoundry-helper ca validate|apply`, the helper validates the staged JSON, rejects certificate/key mismatches when OpenSSL can check them, writes `root-ca.pem`, `root.crt`, `ca-bundle.pem`, and service certificate/key/chain files under `/etc/labfoundry`, and keeps private keys out of job output.
+
+Settings backups include encrypted CA private-key material. Restoring usable CA custody requires the same `LABFOUNDRY_SECRETS_KEY`; otherwise operators should reissue the CA/certificates.
+
 ## Appliance Settings Apply
 
-The real Appliance Settings apply path stages JSON at `/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json`. The `appliance_settings` unit records the appliance FQDN, resolver mode, resolver servers, local DNS desired-state flag, management interface/IP, and appliance NTP servers. Through `labfoundry-helper appliance-settings validate|apply`, the helper sets the OS hostname to the appliance FQDN, local DNS mode configures the management resolver to `127.0.0.1` with `Domains=~.`, external DNS mode configures the management resolver to the selected external DNS servers and removes the local catch-all domain, and the appliance NTP client is rendered to `/etc/systemd/timesyncd.conf.d/labfoundry.conf` for `systemd-timesyncd`.
+The real Appliance Settings apply path stages JSON at `/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json`. The `appliance_settings` unit records the appliance FQDN, resolver mode, resolver servers, local DNS desired-state flag, management interface/IP, management UI HTTPS preference, and appliance NTP servers. Through `labfoundry-helper appliance-settings validate|apply`, the helper sets the OS hostname to the appliance FQDN, local DNS mode configures the management resolver to `127.0.0.1` with `Domains=~.`, external DNS mode configures the management resolver to the selected external DNS servers and removes the local catch-all domain, and the appliance NTP client is rendered to `/etc/systemd/timesyncd.conf.d/labfoundry.conf` for `systemd-timesyncd`. When management UI HTTPS is enabled, the helper requires the CA-managed `appliance:https` cert/key files, writes `/etc/systemd/system/labfoundry.service.d/management-https.conf`, installs `labfoundry-http-redirect.service` on port 80 for HTTP-to-HTTPS redirects, reloads systemd, and schedules a short delayed restart of `labfoundry.service` so the apply job can be recorded before uvicorn switches to TLS on the existing management port.
 
 ## Baselines And Diffs
 
@@ -70,7 +76,7 @@ After a successful selected apply, LabFoundry stores the selected units' last-ap
 
 When desired state changes later, the global apply page compares the current rendered config preview to the last-applied preview and shows a unified config diff when available. On first apply, no baseline exists yet, so the page shows the current preview instead.
 
-Rendered previews and job results must redact sensitive-looking values such as passwords, tokens, credentials, private keys, robot accounts, activation codes, and uploaded secret contents.
+Rendered previews and job results must redact sensitive-looking values such as passwords, tokens, credentials, private keys, robot accounts, activation codes, encrypted CA private material, and uploaded secret contents.
 
 ## Job Result
 

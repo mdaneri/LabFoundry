@@ -32,7 +32,9 @@ labfoundry ALL=(root) NOPASSWD: \
     /opt/labfoundry/bin/labfoundry-helper dnsmasq leases, \
     /opt/labfoundry/bin/labfoundry-helper dnsmasq leases --real, \
     /opt/labfoundry/bin/labfoundry-helper ca validate *, \
+    /opt/labfoundry/bin/labfoundry-helper ca validate --real *, \
     /opt/labfoundry/bin/labfoundry-helper ca apply *, \
+    /opt/labfoundry/bin/labfoundry-helper ca apply --real *, \
     /opt/labfoundry/bin/labfoundry-helper kms validate *, \
     /opt/labfoundry/bin/labfoundry-helper kms apply *, \
     /opt/labfoundry/bin/labfoundry-helper vcf-backups validate *, \

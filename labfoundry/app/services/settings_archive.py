@@ -134,7 +134,8 @@ def export_settings_archive(db: Session, *, actor: str) -> dict[str, Any]:
         "exported_by": actor,
         "notes": [
             "Contains LabFoundry desired-state configuration only.",
-            "Audit events, jobs, API tokens, password hashes, and uploaded secret bodies are not included.",
+            "Audit events, jobs, API tokens, password hashes, and uploaded secret bodies are not included; encrypted CA private-key material is included for trust portability.",
+            "Restoring usable CA private-key material requires the same LABFOUNDRY_SECRETS_KEY.",
             "Restore updates the control-plane database; host services change only after global appliance apply.",
         ],
         "data": {},

@@ -155,7 +155,7 @@ def managed_service_firewall_rules(
             interface_name="eth0",
             source=_managed_rule_source("mgmt-console", "eth0", interface_networks, source_groups_by_id, source_group_assignments),
             protocol="tcp",
-            ports="22,443,8000",
+            ports="22,80,443,8000",
             priority=10,
         )
     ]
@@ -418,7 +418,7 @@ def render_nftables_config(
         if settings.allow_established:
             lines.append('    ct state established,related accept comment "LabFoundry established traffic"')
         if chain_name == "input" and not replace_labfoundry_service_rules:
-            lines.append('    ip saddr 192.168.49.0/24 tcp dport { 22, 443, 8000 } accept comment "LabFoundry management access"')
+            lines.append('    ip saddr 192.168.49.0/24 tcp dport { 22, 80, 443, 8000 } accept comment "LabFoundry management access"')
         if settings.allow_icmp:
             lines.append('    meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"')
             lines.append('    meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"')

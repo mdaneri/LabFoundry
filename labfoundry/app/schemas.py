@@ -483,6 +483,8 @@ class SettingsResponse(BaseModel):
     repository_path: str
     vcf_backup_path: str
     appliance_fqdn: str
+    management_https_enabled: bool = False
+    management_https_cert_available: bool = False
     external_dns_servers: list[str]
     ntp_servers: list[str]
     appliance_settings_config_path: str
@@ -497,6 +499,7 @@ class SettingsResponse(BaseModel):
 
 class SettingsUpdate(BaseModel):
     appliance_fqdn: str = Field(default="labfoundry.labfoundry.internal", min_length=1, max_length=180)
+    management_https_enabled: bool = False
     external_dns_servers: list[str] = Field(default_factory=lambda: ["1.1.1.1", "9.9.9.9"])
     ntp_servers: list[str] = Field(
         default_factory=lambda: ["time1.google.com", "time2.google.com", "time3.google.com", "time4.google.com"]

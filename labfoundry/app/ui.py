@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import socket
+from datetime import timedelta
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
 from secrets import token_urlsafe
@@ -107,14 +108,25 @@ from labfoundry.app.services.dnsmasq import (
     validate_dns_settings,
 )
 from labfoundry.app.services.ca import (
+    CA_CLIENT_PROFILE_NAME,
+    CA_SERVER_PROFILE_NAME,
+    CA_STAGED_CONFIG_PATH,
+    ManagedCertificateSpec,
     ca_certificate_to_dict,
     ca_profile_to_dict,
-    ensure_development_root_ca,
+    ensure_ca_issued_state,
+    ensure_aware,
+    ensure_default_ca_profiles,
+    ensure_managed_certificate_rows,
+    ensure_root_ca_material,
     join_multiline,
+    render_ca_apply_payload,
     render_ca_config,
+    safe_certificate_name,
     split_multiline,
     validate_ca_state,
 )
+from labfoundry.app.secrets import decrypt_secret, secret_key_status
 from labfoundry.app.services.networking import (
     INTERFACE_MODES,
     INTERFACE_ROLES,
@@ -457,6 +469,139 @@ def get_ca_settings_row(db: Session) -> CaSettings:
     return settings
 
 
+def ca_service_cert_paths(service_dir: str, certificate_name: str) -> tuple[str, str, str]:
+    safe_name = safe_certificate_name(certificate_name)
+    base = f"/etc/labfoundry/{service_dir}/certs/{safe_name}"
+    return f"{base}.crt", f"{base}.key", f"{base}-chain.pem"
+
+
+def kms_client_common_name(client: KmsClient) -> str:
+    match = re.search(r"(?:^|,)CN=([^,]+)", client.certificate_subject or "")
+    return match.group(1).strip() if match else client.name
+
+
+def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
+    specs: list[ManagedCertificateSpec] = []
+    appliance = get_appliance_settings_row(db)
+    management = appliance_settings_management_context(db)
+    appliance_cert, appliance_key, appliance_chain = ca_service_cert_paths("https", appliance.fqdn)
+    specs.append(
+        ManagedCertificateSpec(
+            owner="appliance:https",
+            common_name=appliance.fqdn,
+            dns_names=[appliance.fqdn],
+            ip_addresses=[management["ip"]] if management.get("ip") else [],
+            profile_name=CA_SERVER_PROFILE_NAME,
+            description="Managed LabFoundry appliance HTTPS certificate.",
+            cert_path=appliance_cert,
+            key_path=appliance_key,
+            chain_path=appliance_chain,
+        )
+    )
+
+    kms_settings = get_kms_settings_row(db)
+    if kms_settings.enabled:
+        cert_path, key_path, chain_path = ca_service_cert_paths("kms", kms_settings.server_certificate or kms_settings.hostname)
+        specs.append(
+            ManagedCertificateSpec(
+                owner="kms:server",
+                common_name=kms_settings.hostname,
+                dns_names=[kms_settings.hostname],
+                ip_addresses=[kms_settings.listen_address] if kms_settings.listen_address else [],
+                profile_name=CA_SERVER_PROFILE_NAME,
+                description="Managed KMS/KMIP server TLS certificate.",
+                cert_path=cert_path,
+                key_path=key_path,
+                chain_path=chain_path,
+            )
+        )
+        for client in db.execute(select(KmsClient).where(KmsClient.enabled.is_(True)).order_by(KmsClient.name)).scalars().all():
+            common_name = kms_client_common_name(client)
+            cert_path, key_path, chain_path = ca_service_cert_paths("kms/clients", client.name)
+            specs.append(
+                ManagedCertificateSpec(
+                    owner=f"kms:client:{client.name}",
+                    common_name=common_name,
+                    dns_names=[],
+                    ip_addresses=[],
+                    profile_name=CA_CLIENT_PROFILE_NAME,
+                    description=f"Managed KMIP client certificate for {client.name}.",
+                    cert_path=cert_path,
+                    key_path=key_path,
+                    chain_path=chain_path,
+                )
+            )
+
+    depot_settings = get_vcf_offline_depot_settings_row(db)
+    if depot_settings.enabled:
+        cert_path, key_path, chain_path = ca_service_cert_paths("vcf-offline-depot", depot_settings.server_certificate or depot_settings.hostname)
+        specs.append(
+            ManagedCertificateSpec(
+                owner="vcf_offline_depot:https",
+                common_name=depot_settings.hostname,
+                dns_names=[depot_settings.hostname],
+                ip_addresses=[depot_settings.listen_address] if depot_settings.listen_address else [],
+                profile_name=CA_SERVER_PROFILE_NAME,
+                description="Managed VCF Offline Depot HTTPS certificate.",
+                cert_path=cert_path,
+                key_path=key_path,
+                chain_path=chain_path,
+            )
+        )
+
+    registry_settings = get_vcf_private_registry_settings_row(db)
+    if registry_settings.enabled:
+        cert_path, key_path, chain_path = ca_service_cert_paths("harbor", registry_settings.server_certificate or registry_settings.hostname)
+        specs.append(
+            ManagedCertificateSpec(
+                owner="vcf_private_registry:https",
+                common_name=registry_settings.hostname,
+                dns_names=[registry_settings.hostname],
+                ip_addresses=[registry_settings.listen_address] if registry_settings.listen_address else [],
+                profile_name=CA_SERVER_PROFILE_NAME,
+                description="Managed VCF Private Registry HTTPS certificate.",
+                cert_path=cert_path,
+                key_path=key_path,
+                chain_path=chain_path,
+            )
+        )
+    return specs
+
+
+def ca_certificate_available(db: Session, owner: str) -> bool:
+    certificate = db.execute(select(CaCertificate).where(CaCertificate.managed_owner == owner)).scalar_one_or_none()
+    return bool(certificate and certificate.status == "issued" and certificate.certificate_pem and certificate.private_key_encrypted)
+
+
+def ca_managed_certificate_paths(db: Session, owner: str) -> tuple[str, str, str]:
+    certificate = db.execute(select(CaCertificate).where(CaCertificate.managed_owner == owner)).scalar_one_or_none()
+    if certificate is None or certificate.status != "issued":
+        return "", "", ""
+    return certificate.cert_path or "", certificate.key_path or "", certificate.chain_path or ""
+
+
+def ensure_ca_state(db: Session) -> list[str]:
+    settings = get_ca_settings_row(db)
+    errors: list[str] = []
+    try:
+        changed = ensure_default_ca_profiles(db)
+        profiles = db.execute(select(CaProfile).order_by(CaProfile.name)).scalars().all()
+        changed = ensure_root_ca_material(settings) or changed
+        changed = ensure_managed_certificate_rows(db, settings=settings, profiles=profiles, specs=managed_ca_certificate_specs(db)) or changed
+        certificates = (
+            db.execute(select(CaCertificate).options(selectinload(CaCertificate.profile)).order_by(CaCertificate.common_name))
+            .scalars()
+            .all()
+        )
+        changed = ensure_ca_issued_state(db, settings=settings, profiles=profiles, certificates=certificates) or changed
+        if changed:
+            db.commit()
+    except ValueError as exc:
+        db.rollback()
+        errors.append(str(exc))
+    return errors
+
+
 def get_kms_settings_row(db: Session) -> KmsSettings:
     settings = db.execute(select(KmsSettings)).scalar_one_or_none()
     if settings is None:
@@ -780,11 +925,16 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         db.refresh(dns_settings)
     local_dns_enabled = bool(dns_settings.enabled)
     management = appliance_settings_management_context(db)
+    ca_settings = get_ca_settings_row(db)
+    management_https_cert_path, management_https_key_path, _management_https_chain_path = ca_managed_certificate_paths(db, "appliance:https")
+    management_https_cert_available = bool(management_https_cert_path and management_https_key_path and ca_certificate_available(db, "appliance:https"))
     validation_errors, validation_warnings = validate_appliance_settings(
         settings,
         local_dns_enabled=local_dns_enabled,
         management_interface=management,
         dns_record_conflict=local_dns_enabled and appliance_dns_record_conflict(db, settings.fqdn),
+        ca_enabled=bool(ca_settings.enabled),
+        management_https_cert_available=management_https_cert_available,
     )
     return {
         "app_settings": get_settings(),
@@ -792,6 +942,10 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "appliance_settings": settings,
         "appliance_settings_json": appliance_settings_to_dict(settings),
         "local_dns_enabled": local_dns_enabled,
+        "ca_enabled": bool(ca_settings.enabled),
+        "management_https_cert_available": management_https_cert_available,
+        "management_https_cert_path": management_https_cert_path,
+        "management_https_key_path": management_https_key_path,
         "management_interface": management,
         "appliance_settings_validation_errors": validation_errors,
         "appliance_settings_validation_warnings": validation_warnings,
@@ -799,6 +953,8 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
             settings,
             local_dns_enabled=local_dns_enabled,
             management_interface=management,
+            management_https_cert_path=management_https_cert_path,
+            management_https_key_path=management_https_key_path,
         ),
     }
 
@@ -907,6 +1063,7 @@ def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
     ca_settings = get_ca_settings_row(db)
     uploaded_bundle = uploaded_vcf_registry_ca_bundle(db)
     if ca_settings.enabled:
+        ensure_ca_state(db)
         path = f"{ca_settings.storage_path.rstrip('/')}/ca-bundle.pem"
         return {
             "source": "local-ca",
@@ -938,6 +1095,8 @@ def vcf_private_registry_context(db: Session) -> dict:
         str(ca_bundle_context["source"]),
         bool(ca_bundle_context["available"]),
     )
+    if settings.enabled and get_ca_settings_row(db).enabled and not ca_certificate_available(db, "vcf_private_registry:https"):
+        validation_errors.append("VCF Private Registry requires an issued CA-managed HTTPS certificate before apply.")
     harbor_config_preview = render_harbor_config(settings)
     relocation_preview = render_imgpkg_relocation_preview(settings, bundles)
     return {
@@ -970,6 +1129,8 @@ def vcf_offline_depot_context(db: Session) -> dict:
         bool(secrets["download_token_present"]),
         bool(secrets["activation_code_present"]),
     )
+    if settings.enabled and get_ca_settings_row(db).enabled and not ca_certificate_available(db, "vcf_offline_depot:https"):
+        validation_errors.append("VCF Offline Depot requires an issued CA-managed HTTPS certificate before apply.")
     https_config_preview = render_nginx_depot_config(settings)
     command_preview = render_vcfdt_command_preview(settings, profiles)
     return {
@@ -1118,6 +1279,7 @@ def managed_replaced_firewall_rule_row(rule: FirewallRule) -> dict:
 
 
 def ca_context(db: Session) -> dict:
+    state_errors = ensure_ca_state(db)
     settings = get_ca_settings_row(db)
     profiles = db.execute(select(CaProfile).order_by(CaProfile.name)).scalars().all()
     certificates = (
@@ -1126,7 +1288,18 @@ def ca_context(db: Session) -> dict:
         .all()
     )
     config_preview = render_ca_config(settings=settings, profiles=profiles, certificates=certificates)
-    validation_errors = validate_ca_state(settings=settings, profiles=profiles, certificates=certificates)
+    apply_payload = render_ca_apply_payload(settings, certificates, include_private_keys=True)
+    validation_errors = [*state_errors, *validate_ca_state(settings=settings, profiles=profiles, certificates=certificates)]
+    issued_count = len([certificate for certificate in certificates if certificate.status == "issued"])
+    expiring_count = len(
+        [
+            certificate
+            for certificate in certificates
+            if certificate.status == "issued" and certificate.expires_at and ensure_aware(certificate.expires_at) <= utcnow() + timedelta(days=30)
+        ]
+    )
+    managed_count = len([certificate for certificate in certificates if certificate.managed_owner])
+    key_status = secret_key_status()
     return {
         "ca_settings": settings,
         "ca_profiles": profiles,
@@ -1135,17 +1308,36 @@ def ca_context(db: Session) -> dict:
         "ca_profile_choices": [{"id": profile.id, "label": profile.name} for profile in profiles if profile.enabled],
         "ca_certificates": certificates,
         "ca_config_preview": config_preview,
+        "ca_apply_payload": apply_payload,
+        "ca_apply_config_path": CA_STAGED_CONFIG_PATH,
         "ca_validation_errors": validation_errors,
+        "ca_status_summary": {
+            "root_present": bool(settings.root_certificate_pem),
+            "bundle_present": bool(settings.root_certificate_pem),
+            "issued_count": issued_count,
+            "expiring_count": expiring_count,
+            "managed_count": managed_count,
+            "secrets_key_source": key_status.source,
+            "secrets_key_dedicated": key_status.dedicated,
+        },
     }
 
 
 def kms_context(db: Session) -> dict:
+    ca_state_errors = ensure_ca_state(db)
     settings = get_kms_settings_row(db)
     clients = db.execute(select(KmsClient).order_by(KmsClient.name)).scalars().all()
     keys = db.execute(select(KmsKey).options(selectinload(KmsKey.owner_client)).order_by(KmsKey.name)).scalars().all()
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     config_preview = render_kms_config(settings=settings, clients=clients, keys=keys)
-    validation_errors = validate_kms_state(settings=settings, clients=clients, keys=keys)
+    validation_errors = [*ca_state_errors, *validate_kms_state(settings=settings, clients=clients, keys=keys)]
+    ca_settings = get_ca_settings_row(db)
+    if settings.enabled and ca_settings.enabled and not ca_certificate_available(db, "kms:server"):
+        validation_errors.append("KMS requires an issued CA-managed server certificate before apply.")
+    if settings.enabled and ca_settings.enabled:
+        for client in clients:
+            if client.enabled and not ca_certificate_available(db, f"kms:client:{client.name}"):
+                validation_errors.append(f"KMS client {client.name} requires an issued CA-managed client certificate before apply.")
     return {
         "kms_settings": settings,
         "kms_clients": clients,
@@ -2144,8 +2336,8 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
                 f"{len(ca['ca_certificates'])} certificate requests",
             ],
             validation_errors=ca["ca_validation_errors"],
-            config_path=f"{ca['ca_settings'].storage_path}/labfoundry-ca.conf",
-            config_preview=ca["ca_config_preview"],
+            config_path=CA_STAGED_CONFIG_PATH,
+            config_preview=ca["ca_apply_payload"],
             baseline=baselines.get("ca"),
         ),
         make_appliance_apply_unit(
@@ -2278,6 +2470,7 @@ def stage_appliance_apply_config(config_path: str, config_preview: str) -> str:
     path = Path(config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(config_preview, encoding="utf-8")
+    path.chmod(0o600)
     return str(path)
 
 
@@ -2319,7 +2512,9 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
             config_path = stage_appliance_apply_config(DNSMASQ_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = [adapter.validate_dnsmasq_config(config_path), adapter.apply_dnsmasq_config(config_path), adapter.reload_dnsmasq()]
     elif unit_id == "ca":
-        config_path = f"{context['ca_settings'].storage_path}/labfoundry-ca.conf"
+        config_path = CA_STAGED_CONFIG_PATH
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(CA_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = [adapter.validate_ca_config(config_path), adapter.apply_ca_config(config_path)]
     elif unit_id == "kms":
         results = [adapter.validate_kms_config(context["kms_settings"].config_path), adapter.apply_kms_config(context["kms_settings"].config_path)]
@@ -4415,11 +4610,15 @@ def download_root_ca(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> Response:
+    ensure_ca_state(db)
     settings = get_ca_settings_row(db)
-    cert_bytes, _key_bytes = ensure_development_root_ca(settings)
+    if not settings.root_certificate_pem:
+        changed = ensure_root_ca_material(settings)
+        if changed:
+            db.commit()
     record_audit(db, actor=identity.username, action="download_ca_root_certificate", resource_type="ca", resource_id=str(settings.id))
     return Response(
-        cert_bytes,
+        settings.root_certificate_pem.encode("utf-8"),
         media_type="application/x-pem-file",
         headers={"Content-Disposition": 'attachment; filename="labfoundry-root-ca.pem"'},
     )
@@ -4430,13 +4629,79 @@ def download_ca_bundle(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> Response:
+    ensure_ca_state(db)
     settings = get_ca_settings_row(db)
-    cert_bytes, _key_bytes = ensure_development_root_ca(settings)
+    if not settings.root_certificate_pem:
+        changed = ensure_root_ca_material(settings)
+        if changed:
+            db.commit()
     record_audit(db, actor=identity.username, action="download_ca_bundle", resource_type="ca", resource_id=str(settings.id))
     return Response(
-        cert_bytes,
+        settings.root_certificate_pem.encode("utf-8"),
         media_type="application/x-pem-file",
         headers={"Content-Disposition": 'attachment; filename="labfoundry-ca-bundle.pem"'},
+    )
+
+
+def get_exportable_ca_certificate(db: Session, certificate_id: int) -> CaCertificate:
+    ensure_ca_state(db)
+    certificate = db.get(CaCertificate, certificate_id)
+    if not certificate:
+        raise HTTPException(status_code=404, detail="CA certificate not found")
+    if certificate.status != "issued" or not certificate.certificate_pem:
+        raise HTTPException(status_code=404, detail="CA certificate has not been issued")
+    return certificate
+
+
+@router.get("/certificate-authority/certificates/{certificate_id}/downloads/certificate.pem", response_model=None)
+def download_ca_certificate(
+    certificate_id: int,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    certificate = get_exportable_ca_certificate(db, certificate_id)
+    record_audit(db, actor=identity.username, action="download_ca_certificate", resource_type="ca_certificate", resource_id=str(certificate.id))
+    filename = f"{safe_certificate_name(certificate.common_name)}.crt"
+    return Response(
+        certificate.certificate_pem.encode("utf-8"),
+        media_type="application/x-pem-file",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/certificate-authority/certificates/{certificate_id}/downloads/chain.pem", response_model=None)
+def download_ca_certificate_chain(
+    certificate_id: int,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    certificate = get_exportable_ca_certificate(db, certificate_id)
+    chain = certificate.chain_pem or certificate.certificate_pem
+    record_audit(db, actor=identity.username, action="download_ca_certificate_chain", resource_type="ca_certificate", resource_id=str(certificate.id))
+    filename = f"{safe_certificate_name(certificate.common_name)}-chain.pem"
+    return Response(
+        chain.encode("utf-8"),
+        media_type="application/x-pem-file",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/certificate-authority/certificates/{certificate_id}/downloads/private-key.pem", response_model=None)
+def download_ca_certificate_private_key(
+    certificate_id: int,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    certificate = get_exportable_ca_certificate(db, certificate_id)
+    if not certificate.private_key_encrypted:
+        raise HTTPException(status_code=404, detail="No LabFoundry-generated private key is available for this certificate")
+    private_key = decrypt_secret(certificate.private_key_encrypted)
+    record_audit(db, actor=identity.username, action="download_ca_certificate_private_key", resource_type="ca_certificate", resource_id=str(certificate.id))
+    filename = f"{safe_certificate_name(certificate.common_name)}.key"
+    return Response(
+        private_key.encode("utf-8"),
+        media_type="application/x-pem-file",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -5993,6 +6258,7 @@ def settings_page(
 def update_settings_from_ui(
     request: Request,
     fqdn: str = Form("labfoundry.labfoundry.internal"),
+    management_https_enabled: bool = Form(False),
     external_dns_servers: str = Form(""),
     ntp_servers: str = Form(""),
     csrf: str = Form(...),
@@ -6003,17 +6269,23 @@ def update_settings_from_ui(
     settings = get_appliance_settings_row(db)
     previous_fqdn = settings.fqdn
     settings.fqdn = normalize_fqdn(fqdn) or "labfoundry.labfoundry.internal"
+    settings.management_https_enabled = bool(management_https_enabled)
     settings.external_dns_servers = normalize_multiline_values(external_dns_servers)
     settings.ntp_servers = normalize_multiline_values(ntp_servers)
     settings.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
     settings.updated_at = utcnow()
     dns_settings = get_dns_settings_row(db)
     management = appliance_settings_management_context(db)
+    ca_settings = get_ca_settings_row(db)
+    management_https_cert_path, management_https_key_path, _management_https_chain_path = ca_managed_certificate_paths(db, "appliance:https")
+    management_https_cert_available = bool(management_https_cert_path and management_https_key_path and ca_certificate_available(db, "appliance:https"))
     validation_errors, _validation_warnings = validate_appliance_settings(
         settings,
         local_dns_enabled=bool(dns_settings.enabled),
         management_interface=management,
         dns_record_conflict=bool(dns_settings.enabled) and appliance_dns_record_conflict(db, settings.fqdn),
+        ca_enabled=bool(ca_settings.enabled),
+        management_https_cert_available=management_https_cert_available,
     )
     dns_record_action = None
     if not validation_errors:
@@ -6029,6 +6301,8 @@ def update_settings_from_ui(
                 "status": "saved",
                 "updated_at": saved.updated_at.isoformat(),
                 "fqdn": saved.fqdn,
+                "management_https_enabled": saved.management_https_enabled,
+                "management_https_cert_available": context["management_https_cert_available"],
                 "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
                 "ntp_servers": context["appliance_settings_json"]["ntp_servers"],
                 "local_dns_enabled": context["local_dns_enabled"],

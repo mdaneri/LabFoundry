@@ -101,10 +101,12 @@ python3 -m venv "$LABFOUNDRY_HOME/.venv"
 "$LABFOUNDRY_HOME/.venv/bin/python" -m pip install "$LABFOUNDRY_HOME"
 
 SECRET_KEY="$("$LABFOUNDRY_HOME/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(48))')"
+SECRETS_KEY="$("$LABFOUNDRY_HOME/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(48))')"
 cat >/etc/labfoundry/labfoundry.env <<EOF
 LABFOUNDRY_ENVIRONMENT=appliance
 LABFOUNDRY_DATABASE_URL=sqlite:////var/lib/labfoundry/labfoundry.db
 LABFOUNDRY_SECRET_KEY=$SECRET_KEY
+LABFOUNDRY_SECRETS_KEY=$SECRETS_KEY
 LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME=$BOOTSTRAP_USERNAME
 LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD=$BOOTSTRAP_PASSWORD
 LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true
@@ -171,7 +173,7 @@ table inet labfoundry {
     type filter hook input priority filter; policy drop;
     iifname "lo" accept comment "LabFoundry loopback"
     ct state established,related accept comment "LabFoundry established traffic"
-    ip saddr 192.168.49.0/24 tcp dport { 22, 443, 8000 } accept comment "LabFoundry management access"
+    ip saddr 192.168.49.0/24 tcp dport { 22, 80, 443, 8000 } accept comment "LabFoundry management access"
     meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
     meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
   }

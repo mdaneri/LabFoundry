@@ -84,10 +84,10 @@ class SystemAdapter:
         return helper_result
 
     def apply_ca_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "ca", "apply", config_path], "dry-run: CA apply command recorded")
+        return self._helper_result("ca", "apply", config_path, dry_run_message="dry-run: CA apply command recorded")
 
     def validate_ca_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "ca", "validate", config_path], "dry-run: CA validation command recorded")
+        return self._helper_result("ca", "validate", config_path, dry_run_message="dry-run: CA validation command recorded")
 
     def apply_kms_config(self, config_path: str) -> AdapterResult:
         return self._record_only_result(["labfoundry-helper", "kms", "apply", config_path], "dry-run: KMS apply command recorded")

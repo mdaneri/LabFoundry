@@ -162,6 +162,10 @@ it to Packer.
 
 The generated appliance keeps `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` until
 each helper-backed apply unit is reviewed and promoted.
+Provisioning writes both `LABFOUNDRY_SECRET_KEY` and
+`LABFOUNDRY_SECRETS_KEY`; the latter encrypts CA root and leaf private-key
+material stored in the LabFoundry database and must be preserved for settings
+backup portability.
 Firewall desired state is nftables-backed. Provisioning installs nftables,
 loads `/etc/labfoundry/nftables.d/labfoundry.nft`, and disables the older
 Photon iptables service so LabFoundry has a single firewall owner.
@@ -175,6 +179,13 @@ leases, and the helper exposes only that allowlisted lease readback path.
 DHCP scopes should bind to access physical interfaces with IP CIDR or enabled
 VLAN interfaces with IP CIDR, not trunk or addressless physical interfaces.
 
+Certificate Authority desired state is LabFoundry CA-backed. Real
+`/appliance-apply` stages `/var/lib/labfoundry/apply/ca/labfoundry-ca.json`,
+validates the staged CA/certificate payload through `labfoundry-helper`, and
+writes public CA bundles plus service certificate/key files under
+`/etc/labfoundry`. Private keys are encrypted in the database with
+`LABFOUNDRY_SECRETS_KEY`; previews, jobs, and logs must remain redacted.
+
 Local Users desired state is Photon OS account-backed. Real `/appliance-apply`
 stages `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`, validates
 LabFoundry-owned local usernames, creates or updates enabled users under
@@ -187,6 +198,12 @@ previews, job results, and logs should show only status and counts.
 `LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1` through sudo so account-mutating helper
 commands can run as transient systemd units outside the control-plane service
 sandbox while still using the constrained helper allowlist.
+When Appliance Settings enables CA-backed management UI HTTPS, the helper writes
+`/etc/systemd/system/labfoundry.service.d/management-https.conf` with the
+CA-managed appliance certificate paths, starts `labfoundry-http-redirect.service`
+on port 80 for HTTP-to-HTTPS redirects, reloads systemd, and schedules a short
+delayed `labfoundry.service` restart so the global apply job can finish before
+uvicorn switches to TLS on the existing management port.
 
 Provisioning creates the bootstrap admin OS account under
 `/var/lib/labfoundry/users/<admin>` with `/sbin/nologin` and sets the same

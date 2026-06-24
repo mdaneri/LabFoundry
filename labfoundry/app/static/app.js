@@ -17,6 +17,115 @@ document.addEventListener("click", (event) => {
 
 const DNS_ACTIVE_ZONE_STORAGE_KEY = "labfoundry:dns:active-zone";
 
+function registerLabFoundryPrismLanguages() {
+  if (!window.Prism || !window.Prism.languages) {
+    return;
+  }
+  if (!window.Prism.languages.json) {
+    window.Prism.languages.json = {
+      property: {
+        pattern: /"(?:\\.|[^\\"\r\n])*"(?=\s*:)/,
+        greedy: true,
+      },
+      string: {
+        pattern: /"(?:\\.|[^\\"\r\n])*"(?!\s*:)/,
+        greedy: true,
+      },
+      number: /-?\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b/i,
+      boolean: /\b(?:true|false)\b/,
+      null: {
+        pattern: /\bnull\b/,
+        alias: "keyword",
+      },
+      operator: /:/,
+      punctuation: /[{}\[\],]/,
+    };
+  }
+  if (!window.Prism.languages["labfoundry-config"]) {
+    window.Prism.languages["labfoundry-config"] = {
+      comment: /(^|\n)\s*[#;].*/,
+      section: {
+        pattern: /(^|\n)\s*\[[^\]\r\n]+\]/,
+        alias: "keyword",
+      },
+      property: /[A-Za-z0-9_.-]+(?=\s*=)/,
+      string: {
+        pattern: /"(?:\\.|[^"\\])*"/,
+        greedy: true,
+      },
+      boolean: /\b(?:true|false|yes|no|enabled|disabled|accept|drop|reject)\b/i,
+      number: /\b\d+(?:\.\d+)?(?:\/\d+)?\b/,
+      operator: /=|:|\{|\}/,
+      punctuation: /[\[\](),;]/,
+    };
+  }
+}
+
+function previewLanguageForText(text, element) {
+  if (element.classList.contains("language-diff")) {
+    return "diff";
+  }
+  if (element.classList.contains("language-json")) {
+    return "json";
+  }
+  const trimmed = String(text ?? "").trim();
+  if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length > 1) {
+    try {
+      JSON.parse(trimmed);
+      return "json";
+    } catch {
+      // Non-JSON previews still get the compact LabFoundry config grammar.
+    }
+  }
+  return "labfoundry-config";
+}
+
+function highlightConfigPreviewElement(element) {
+  if (!(element instanceof HTMLElement) || !window.Prism || typeof window.Prism.highlightElement !== "function") {
+    return;
+  }
+  registerLabFoundryPrismLanguages();
+  const language = previewLanguageForText(element.textContent || "", element);
+  element.classList.remove("language-json", "language-labfoundry-config");
+  if (language !== "diff") {
+    element.classList.remove("language-diff");
+  }
+  element.classList.add(`language-${language}`);
+  if (element.parentElement instanceof HTMLElement && element.parentElement.tagName === "PRE") {
+    element.parentElement.classList.remove("language-json", "language-labfoundry-config");
+    if (language !== "diff") {
+      element.parentElement.classList.remove("language-diff");
+    }
+    element.parentElement.classList.add(`language-${language}`);
+  }
+  window.Prism.highlightElement(element);
+}
+
+function highlightConfigPreviews(root = document) {
+  if (!(root instanceof Document || root instanceof HTMLElement)) {
+    return;
+  }
+  root
+    .querySelectorAll(
+      [
+        ".config-preview code",
+        ".config-diff code",
+        ".terminal-note > code",
+        "code.language-json",
+        "code.language-labfoundry-config",
+        "[data-appliance-settings-preview]",
+        "[data-firewall-config-preview]",
+        "[data-dns-config-preview]",
+        "[data-vcf-config-preview]",
+        "[data-vcf-registry-harbor-preview]",
+        "[data-vcf-registry-relocation-preview]",
+        "[data-vcf-depot-command-preview]",
+        "[data-vcf-depot-https-preview]",
+      ].join(", "),
+    )
+    .forEach((element) => highlightConfigPreviewElement(element));
+}
+
 function rememberDnsActiveZone(domain) {
   if (!domain) {
     return;
@@ -743,7 +852,7 @@ async function postCaAction(url, data, csrf, options = {}) {
   const body = new FormData();
   body.set("csrf", csrf);
   for (const [key, value] of Object.entries(data)) {
-    if (key === "id" || key === "is_new" || key === "profile_name") {
+    if (["id", "is_new", "profile_name", "managed_owner", "fingerprint", "cert_path", "has_certificate", "has_private_key"].includes(key)) {
       continue;
     }
     if (key === "enabled" || key === "san_required") {
@@ -797,6 +906,11 @@ function newCaCertificateRow(defaultProfileId = "") {
     ip_addresses: "",
     status: "planned",
     serial_number: "",
+    fingerprint: "",
+    managed_owner: "manual",
+    cert_path: "",
+    has_certificate: false,
+    has_private_key: false,
     enabled: true,
     description: "",
     is_new: true,
@@ -1069,6 +1183,13 @@ function initializeCaCertificatesTable() {
           cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
         },
         {
+          title: "Owner",
+          field: "managed_owner",
+          formatter: (cell) => cell.getValue() || "manual",
+          minWidth: 150,
+          headerSort: true,
+        },
+        {
           title: "Profile",
           field: "profile_id",
           editor: "list",
@@ -1110,6 +1231,31 @@ function initializeCaCertificatesTable() {
           width: 100,
           headerSort: false,
           cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
+        },
+        {
+          title: "Fingerprint",
+          field: "fingerprint",
+          formatter: (cell) => {
+            const value = cell.getValue() || "";
+            return value ? `${value.slice(0, 12)}...` : "";
+          },
+          width: 120,
+          headerSort: false,
+        },
+        {
+          title: "Exports",
+          field: "has_certificate",
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.is_new || !data.has_certificate) {
+              return '<span class="muted">pending</span>';
+            }
+            const base = `/certificate-authority/certificates/${data.id}/downloads`;
+            const privateLink = data.has_private_key ? ` <a class="button tiny ghost" href="${base}/private-key.pem">Key</a>` : "";
+            return `<a class="button tiny secondary" href="${base}/certificate.pem">Cert</a> <a class="button tiny secondary" href="${base}/chain.pem">Chain</a>${privateLink}`;
+          },
+          minWidth: 190,
+          headerSort: false,
         },
         {
           title: "Description",
@@ -3875,6 +4021,27 @@ function initializeNonTabbableHelperControls() {
   });
 }
 
+function initializeSecretToggles() {
+  document.querySelectorAll("[data-secret-toggle]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    const display = button.closest(".secret-value")?.querySelector("[data-secret-display]");
+    if (!(display instanceof HTMLElement)) {
+      return;
+    }
+    const mask = display.dataset.secretMask || "hidden";
+    const secretText = display.dataset.secretText || "";
+    display.textContent = mask;
+    button.addEventListener("click", () => {
+      const nextVisible = button.getAttribute("aria-pressed") !== "true";
+      button.setAttribute("aria-pressed", nextVisible ? "true" : "false");
+      button.setAttribute("aria-label", `${nextVisible ? "Hide" : "Show"} secrets key source`);
+      display.textContent = nextVisible ? secretText : mask;
+    });
+  });
+}
+
 function updateFirewallDesiredState(payload = {}) {
   if (payload.enabled !== undefined) {
     document.querySelectorAll("[data-firewall-enabled-status]").forEach((status) => {
@@ -3939,6 +4106,7 @@ function updateFirewallDesiredState(payload = {}) {
   const configPreview = validationPanel.querySelector("[data-firewall-config-preview]");
   if (configPreview instanceof HTMLElement && typeof payload.config_preview === "string") {
     configPreview.textContent = payload.config_preview;
+    highlightConfigPreviewElement(configPreview);
   }
   const refreshStatus = validationPanel.querySelector("[data-firewall-validation-refresh]");
   if (refreshStatus instanceof HTMLElement) {
@@ -4196,6 +4364,7 @@ function updateApplianceSettingsValidation(payload = {}) {
   const preview = document.querySelector("[data-appliance-settings-preview]");
   if (preview instanceof HTMLElement && typeof payload.config_preview === "string") {
     preview.textContent = payload.config_preview;
+    highlightConfigPreviewElement(preview);
   }
   const management = document.querySelector("[data-appliance-settings-management]");
   if (management instanceof HTMLElement && payload.management_interface) {
@@ -4290,6 +4459,7 @@ function updateDnsValidation(payload = {}) {
   const configPreview = validationPanel.querySelector("[data-dns-config-preview]");
   if (configPreview instanceof HTMLElement && typeof payload.config_preview === "string") {
     configPreview.textContent = payload.config_preview;
+    highlightConfigPreviewElement(configPreview);
   }
 }
 
@@ -4392,6 +4562,7 @@ function updateVcfBackupValidation(payload = {}) {
   }
   if (configPreview instanceof HTMLElement && payload.config_preview !== undefined) {
     configPreview.textContent = payload.config_preview;
+    highlightConfigPreviewElement(configPreview);
   }
   if (validationPanel instanceof HTMLElement && payload.valid !== undefined) {
     const terminalNote = validationPanel.querySelector(".terminal-note");
@@ -4713,9 +4884,11 @@ function updateVcfRegistryValidation(payload = {}) {
   }
   if (harborPreview instanceof HTMLElement && payload.harbor_config_preview !== undefined) {
     harborPreview.textContent = payload.harbor_config_preview;
+    highlightConfigPreviewElement(harborPreview);
   }
   if (relocationPreview instanceof HTMLElement && payload.relocation_preview !== undefined) {
     relocationPreview.textContent = payload.relocation_preview;
+    highlightConfigPreviewElement(relocationPreview);
   }
   if (validationPanel instanceof HTMLElement && payload.valid !== undefined) {
     const firstTerminalNote = validationPanel.querySelector(".terminal-note");
@@ -5256,6 +5429,7 @@ function updateVcfDepotHttpsPreview(payload = {}) {
   }
   if (payload.https_config_preview !== undefined) {
     httpsPreview.textContent = payload.https_config_preview;
+    highlightConfigPreviewElement(httpsPreview);
     return;
   }
   const hostname = payload.hostname || "depot.labfoundry.internal";
@@ -5279,6 +5453,7 @@ function updateVcfDepotHttpsPreview(payload = {}) {
     `  ssl_certificate_key /etc/labfoundry/vcf-offline-depot/certs/${certificateName}.key;`,
     "}",
   ].join("\n") + "\n";
+  highlightConfigPreviewElement(httpsPreview);
 }
 
 function updateVcfDepotValidation(payload = {}) {
@@ -5304,6 +5479,7 @@ function updateVcfDepotValidation(payload = {}) {
   updateVcfDepotHttpsPreview(payload);
   if (commandPreview instanceof HTMLElement && payload.command_preview !== undefined) {
     commandPreview.textContent = payload.command_preview;
+    highlightConfigPreviewElement(commandPreview);
   }
   if (validationPanel instanceof HTMLElement && payload.valid !== undefined) {
     const terminalNote = validationPanel.querySelector(".terminal-note");
@@ -5613,6 +5789,7 @@ document.addEventListener("DOMContentLoaded", initializeHostsFileEditor);
 document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
 document.addEventListener("DOMContentLoaded", initializeNonTabbableHelperControls);
+document.addEventListener("DOMContentLoaded", initializeSecretToggles);
 document.addEventListener("DOMContentLoaded", initializeSwitchFields);
 document.addEventListener("DOMContentLoaded", initializeAutosaveForms);
 document.addEventListener("DOMContentLoaded", initializeApplianceSettings);
@@ -5624,3 +5801,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);
+document.addEventListener("DOMContentLoaded", () => {
+  registerLabFoundryPrismLanguages();
+  highlightConfigPreviews();
+});

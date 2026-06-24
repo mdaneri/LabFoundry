@@ -139,16 +139,3 @@
   {% endif %}
 </section>
 {% endblock %}
-{% block extra_scripts %}
-  <script>
-    window.Prism = window.Prism || {};
-    window.Prism.manual = true;
-  </script>
-  <script src="/static/vendor/prism/prism-core.min.js"></script>
-  <script src="/static/vendor/prism/prism-diff.min.js"></script>
-  <script>
-    if (window.Prism && typeof window.Prism.highlightAllUnder === "function") {
-      window.Prism.highlightAllUnder(document.querySelector(".appliance-apply-form") || document);
-    }
-  </script>
-{% endblock %}

@@ -29,6 +29,8 @@ def test_login_and_dashboard_render(client):
     assert "/static/brand/labfoundry-mark.svg" in response.text
     assert '<link rel="icon" href="/favicon.ico" type="image/svg+xml">' in response.text
     assert "LF</span>" not in response.text
+    assert "/static/vendor/prism/prism-core.min.js" in response.text
+    assert "/static/vendor/prism/prism-diff.min.js" in response.text
     assert client.get("/static/brand/labfoundry-mark.svg").status_code == 200
     assert client.get("/static/brand/labfoundry-appliance-graphic.svg").status_code == 200
     favicon = client.get("/favicon.ico")
@@ -62,8 +64,10 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "Validation" in response.text
     assert "runtime.labfoundry.internal" in response.text
     assert "labfoundry.labfoundry.internal" in response.text
+    assert "Management UI HTTPS" in response.text
     assert "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json" in response.text
     assert "resolver_mode" in response.text
+    assert 'class="language-json" data-appliance-settings-preview' in response.text
 
 
 def test_settings_page_shows_external_dns_editor_when_local_dns_is_disabled(client):
@@ -247,6 +251,80 @@ def test_settings_local_dns_disabled_requires_external_dns_without_dns_registrat
         assert record is None
 
 
+def test_settings_management_https_requires_ca_managed_certificate(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, CaCertificate, CaSettings, DnsSettings
+
+    login(client)
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        ca_settings.enabled = False
+        db.commit()
+
+    page = client.get("/settings")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    invalid = client.post(
+        "/settings",
+        data={
+            "fqdn": "secure.labfoundry.internal",
+            "management_https_enabled": "on",
+            "external_dns_servers": "1.1.1.1",
+            "ntp_servers": "time1.google.com",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert invalid.status_code == 200
+    assert invalid.json()["valid"] is False
+    assert "Management UI HTTPS requires the local LabFoundry CA to be enabled." in invalid.json()["validation_errors"]
+
+    with SessionLocal() as db:
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        ca_settings.enabled = True
+        db.add(
+            CaCertificate(
+                common_name="secure.labfoundry.internal",
+                subject_alt_names="secure.labfoundry.internal",
+                ip_addresses="192.168.49.1",
+                status="issued",
+                certificate_pem="-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n",
+                private_key_encrypted="fernet:v1:test",
+                managed_owner="appliance:https",
+                cert_path="/etc/labfoundry/https/certs/secure.labfoundry.internal.crt",
+                key_path="/etc/labfoundry/https/certs/secure.labfoundry.internal.key",
+                chain_path="/etc/labfoundry/https/certs/secure.labfoundry.internal-chain.pem",
+            )
+        )
+        db.commit()
+
+    valid = client.post(
+        "/settings",
+        data={
+            "fqdn": "secure.labfoundry.internal",
+            "management_https_enabled": "on",
+            "external_dns_servers": "1.1.1.1",
+            "ntp_servers": "time1.google.com",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert valid.status_code == 200
+    payload = valid.json()
+    assert payload["valid"] is True
+    assert payload["management_https_enabled"] is True
+    assert payload["management_https_cert_available"] is True
+    assert '"management_https_enabled": true' in payload["config_preview"]
+    assert "/etc/labfoundry/https/certs/secure.labfoundry.internal.crt" in payload["config_preview"]
+
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        assert settings.management_https_enabled is True
+
+
 def test_appliance_settings_apply_task_records_dry_run_helper_commands(client):
     from sqlalchemy import select
 
@@ -336,7 +414,7 @@ def test_backup_restore_page_exports_settings_archive(client):
     assert "Download settings backup" in page.text
     assert "Restore settings backup" in page.text
     assert "Factory reset settings" in page.text
-    assert "Audit events, jobs, API tokens, password hashes, uploaded secret bodies" in page.text
+    assert "Audit events, jobs, API tokens, password hashes, uploaded secret bodies; CA private material stays encrypted" in page.text
     assert "data-confirm-modal" in page.text
 
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -1252,7 +1330,7 @@ def test_firewall_preview_derives_dns_dhcp_rule_from_dhcp_scope_vlan(client):
     assert source_group_manager is not None
     assert 'data-source-group-select' in source_group_manager.group(1)
     assert '<option value="any">' not in source_group_manager.group(1)
-    assert 'iifname &#34;eth0&#34; ip saddr 10.77.0.0/16 tcp dport { 22, 443, 8000 } accept comment &#34;mgmt-console&#34;' in updated_firewall.text
+    assert 'iifname &#34;eth0&#34; ip saddr 10.77.0.0/16 tcp dport { 22, 80, 443, 8000 } accept comment &#34;mgmt-console&#34;' in updated_firewall.text
     assert 'iifname &#34;eth2.50&#34; ip saddr 10.77.0.0/16 ip daddr 10.77.0.0/16 tcp dport 443 accept comment &#34;grouped-custom&#34;' in updated_firewall.text
     assert 'iifname &#34;eth2.50&#34; udp dport 67 accept comment &#34;sitea-dns-dhcp&#34;' in updated_firewall.text
 
@@ -1310,11 +1388,15 @@ def test_certificate_authority_page_renders(client):
     assert "Changes save automatically." in ca.text
     assert 'href="/appliance-apply"' in ca.text
     assert "Review appliance changes" in ca.text
-    assert "labfoundry-ca.conf" in ca.text
+    assert "labfoundry-ca.json" in ca.text
+    assert 'class="language-json"' in ca.text
     assert "data-confirm-modal" in ca.text
     assert "Downloads" in ca.text
     assert "Download root CA" in ca.text
     assert "Download CA bundle" in ca.text
+    assert "ca-download-details" in ca.text
+    assert 'data-secret-mask="hidden">hidden</span>' in ca.text
+    assert 'data-secret-toggle aria-label="Show secrets key source"' in ca.text
     assert "/certificate-authority/downloads/root-ca.pem" in ca.text
     assert "/certificate-authority/downloads/ca-bundle.pem" in ca.text
 
@@ -1331,6 +1413,46 @@ def test_certificate_authority_downloads_public_pems(client):
     assert bundle.status_code == 200
     assert bundle.headers["content-disposition"] == 'attachment; filename="labfoundry-ca-bundle.pem"'
     assert "BEGIN CERTIFICATE" in bundle.text
+
+
+def test_certificate_authority_issues_encrypted_managed_certs_and_exports(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaCertificate, CaSettings
+
+    with SessionLocal() as db:
+        settings = db.execute(select(CaSettings)).scalar_one()
+        settings.enabled = True
+        db.commit()
+
+    login(client)
+    page = client.get("/certificate-authority")
+    assert page.status_code == 200
+    assert "Managed certs" in page.text
+    assert "appliance:https" in page.text
+    assert "Private key" in page.text
+    assert "BEGIN PRIVATE KEY" not in page.text
+
+    with SessionLocal() as db:
+        settings = db.execute(select(CaSettings)).scalar_one()
+        managed = db.execute(select(CaCertificate).where(CaCertificate.managed_owner == "appliance:https")).scalar_one()
+        assert settings.root_certificate_pem.startswith("-----BEGIN CERTIFICATE-----")
+        assert settings.root_private_key_encrypted.startswith("fernet:v1:")
+        assert "BEGIN PRIVATE KEY" not in settings.root_private_key_encrypted
+        assert managed.status == "issued"
+        assert managed.private_key_encrypted.startswith("fernet:v1:")
+        assert managed.certificate_pem.startswith("-----BEGIN CERTIFICATE-----")
+        certificate_id = managed.id
+
+    cert = client.get(f"/certificate-authority/certificates/{certificate_id}/downloads/certificate.pem")
+    assert cert.status_code == 200
+    assert "BEGIN CERTIFICATE" in cert.text
+    assert "BEGIN PRIVATE KEY" not in cert.text
+
+    key = client.get(f"/certificate-authority/certificates/{certificate_id}/downloads/private-key.pem")
+    assert key.status_code == 200
+    assert "BEGIN PRIVATE KEY" in key.text
 
 
 def test_kms_page_renders(client):
@@ -2488,7 +2610,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "routes-wan-interface-mode-20260623-1" in page.text
+    assert "ca-v1-20260624-3" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
@@ -2533,7 +2655,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     assert "table inet labfoundry" in enabled_payload["config_preview"]
     assert 'comment "mgmt-console"' in enabled_payload["config_preview"]
     assert 'tcp ip saddr' not in enabled_payload["config_preview"]
-    assert 'tcp dport { 22, 443, 8000 } accept comment "mgmt-console"' in enabled_payload["config_preview"]
+    assert 'tcp dport { 22, 80, 443, 8000 } accept comment "mgmt-console"' in enabled_payload["config_preview"]
 
 
 def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
@@ -2597,8 +2719,8 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     assert 'class="language-diff"' in changed_page.text
     assert "/static/vendor/prism/prism-core.min.js" in changed_page.text
     assert "/static/vendor/prism/prism-diff.min.js" in changed_page.text
-    assert 'typeof window.Prism.highlightAllUnder === "function"' in changed_page.text
-    assert "Prism.highlightAllUnder" in changed_page.text
+    assert "Prism.manual = true" in changed_page.text
+    assert "highlightConfigPreviews" in client.get("/static/app.js").text
 
     skipped_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "network"})
     assert skipped_response.status_code == 200

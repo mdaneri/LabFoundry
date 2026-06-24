@@ -12,6 +12,7 @@ APPLIANCE_SETTINGS_DEFAULT_EXTERNAL_DNS_SERVERS = "1.1.1.1\n9.9.9.9"
 APPLIANCE_SETTINGS_DEFAULT_NTP_SERVERS = "time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com"
 APPLIANCE_SETTINGS_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json"
 APPLIANCE_DNS_RECORD_DESCRIPTION = "LabFoundry app-owned appliance FQDN record."
+MANAGEMENT_UI_PORT = 8000
 
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
@@ -20,6 +21,7 @@ def appliance_settings_to_dict(settings: ApplianceSettings) -> dict[str, Any]:
     return {
         "id": settings.id,
         "fqdn": settings.fqdn,
+        "management_https_enabled": settings.management_https_enabled,
         "external_dns_servers": split_servers(settings.external_dns_servers),
         "ntp_servers": split_servers(settings.ntp_servers),
         "config_path": settings.config_path,
@@ -68,6 +70,8 @@ def validate_appliance_settings(
     local_dns_enabled: bool,
     management_interface: dict[str, str],
     dns_record_conflict: bool = False,
+    ca_enabled: bool = False,
+    management_https_cert_available: bool = False,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -103,6 +107,11 @@ def validate_appliance_settings(
         errors.append("Local DNS registration requires a management interface or eth0 with a valid IP CIDR.")
     if dns_record_conflict:
         errors.append("The appliance FQDN already has a user-owned DNS A/AAAA record. Rename it or remove that record before autosave can manage the appliance record.")
+    if settings.management_https_enabled:
+        if not ca_enabled:
+            errors.append("Management UI HTTPS requires the local LabFoundry CA to be enabled.")
+        elif not management_https_cert_available:
+            errors.append("Management UI HTTPS requires an issued CA-managed appliance HTTPS certificate. Apply the CA unit first.")
     if not settings.config_path.startswith("/"):
         errors.append("Appliance settings config path must be absolute.")
     if local_dns_enabled:
@@ -115,6 +124,8 @@ def appliance_settings_preview_payload(
     *,
     local_dns_enabled: bool,
     management_interface: dict[str, str],
+    management_https_cert_path: str = "",
+    management_https_key_path: str = "",
 ) -> dict[str, Any]:
     resolver_mode = "local_dns" if local_dns_enabled else "external"
     resolver_servers = ["127.0.0.1"] if local_dns_enabled else split_servers(settings.external_dns_servers)
@@ -126,6 +137,10 @@ def appliance_settings_preview_payload(
         "management_interface": management_interface.get("name", ""),
         "management_ip": management_interface.get("ip", ""),
         "management_ip_cidr": management_interface.get("ip_cidr", ""),
+        "management_https_enabled": bool(settings.management_https_enabled),
+        "management_http_port": MANAGEMENT_UI_PORT,
+        "management_https_cert_path": management_https_cert_path if settings.management_https_enabled else "",
+        "management_https_key_path": management_https_key_path if settings.management_https_enabled else "",
         "ntp_servers": split_servers(settings.ntp_servers),
     }
 
@@ -135,10 +150,14 @@ def render_appliance_settings_config(
     *,
     local_dns_enabled: bool,
     management_interface: dict[str, str],
+    management_https_cert_path: str = "",
+    management_https_key_path: str = "",
 ) -> str:
     payload = appliance_settings_preview_payload(
         settings,
         local_dns_enabled=local_dns_enabled,
         management_interface=management_interface,
+        management_https_cert_path=management_https_cert_path,
+        management_https_key_path=management_https_key_path,
     )
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"

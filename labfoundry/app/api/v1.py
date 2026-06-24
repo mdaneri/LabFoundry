@@ -18,6 +18,7 @@ from labfoundry.app.models import (
     ApplianceSettings,
     ApiToken,
     AuditEvent,
+    CaCertificate,
     CaSettings,
     DhcpOption,
     DhcpReservation,
@@ -246,9 +247,19 @@ def get_appliance_settings(db: Session) -> ApplianceSettings:
     return settings
 
 
+def ca_managed_certificate_available(db: Session, owner: str) -> tuple[bool, str, str]:
+    certificate = db.execute(select(CaCertificate).where(CaCertificate.managed_owner == owner)).scalar_one_or_none()
+    if certificate is None or certificate.status != "issued":
+        return False, "", ""
+    available = bool(certificate.certificate_pem and certificate.private_key_encrypted and certificate.cert_path and certificate.key_path)
+    return available, certificate.cert_path or "", certificate.key_path or ""
+
+
 def appliance_settings_response(db: Session, app_settings: Settings) -> SettingsResponse:
     desired = get_appliance_settings(db)
     dns_settings = db.execute(select(DnsSettings)).scalar_one_or_none()
+    ca_settings = db.execute(select(CaSettings)).scalar_one_or_none()
+    management_https_cert_available, management_https_cert_path, management_https_key_path = ca_managed_certificate_available(db, "appliance:https")
     local_dns_enabled = bool(dns_settings and dns_settings.enabled)
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     management = management_interface_context(interfaces)
@@ -256,6 +267,8 @@ def appliance_settings_response(db: Session, app_settings: Settings) -> Settings
         desired,
         local_dns_enabled=local_dns_enabled,
         management_interface=management,
+        ca_enabled=bool(ca_settings and ca_settings.enabled),
+        management_https_cert_available=management_https_cert_available,
     )
     return SettingsResponse(
         app_name=app_settings.app_name,
@@ -264,6 +277,8 @@ def appliance_settings_response(db: Session, app_settings: Settings) -> Settings
         repository_path=str(app_settings.repository_path),
         vcf_backup_path=str(app_settings.vcf_backup_path),
         appliance_fqdn=desired.fqdn,
+        management_https_enabled=desired.management_https_enabled,
+        management_https_cert_available=management_https_cert_available,
         external_dns_servers=appliance_settings_to_dict(desired)["external_dns_servers"],
         ntp_servers=appliance_settings_to_dict(desired)["ntp_servers"],
         appliance_settings_config_path=desired.config_path,
@@ -277,6 +292,8 @@ def appliance_settings_response(db: Session, app_settings: Settings) -> Settings
             desired,
             local_dns_enabled=local_dns_enabled,
             management_interface=management,
+            management_https_cert_path=management_https_cert_path,
+            management_https_key_path=management_https_key_path,
         ),
     )
 
@@ -1918,6 +1935,7 @@ def update_app_settings(
 ) -> SettingsResponse:
     desired = get_appliance_settings(db)
     desired.fqdn = normalize_fqdn(payload.appliance_fqdn)
+    desired.management_https_enabled = payload.management_https_enabled
     desired.external_dns_servers = normalize_multiline_values("\n".join(payload.external_dns_servers))
     desired.ntp_servers = normalize_multiline_values("\n".join(payload.ntp_servers))
     desired.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH

@@ -3,6 +3,7 @@ from __future__ import annotations
 from ipaddress import ip_address
 
 from labfoundry.app.models import KmsClient, KmsKey, KmsSettings
+from labfoundry.app.services.ca import safe_certificate_name
 
 
 KMS_BACKENDS = ["pykmip"]
@@ -63,6 +64,7 @@ def render_kms_config(
     clients: list[KmsClient],
     keys: list[KmsKey],
 ) -> str:
+    certificate_name = safe_certificate_name(settings.server_certificate or settings.hostname)
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
         "# Backend: PyKMIP lab KMIP server desired state.",
@@ -76,7 +78,8 @@ def render_kms_config(
         f"database_path={settings.database_path}",
         "",
         "[tls]",
-        f"server_certificate={settings.server_certificate}",
+        f"server_certificate=/etc/labfoundry/kms/certs/{certificate_name}.crt",
+        f"server_private_key=/etc/labfoundry/kms/certs/{certificate_name}.key",
         f"ca_certificate={settings.ca_certificate_path}",
         f"require_client_cert={'yes' if settings.require_client_cert else 'no'}",
         "",

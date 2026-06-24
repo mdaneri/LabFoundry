@@ -33,6 +33,8 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_sqlite_user_sync_columns()
+    _ensure_sqlite_appliance_settings_columns()
+    _ensure_sqlite_ca_columns()
 
 
 def _ensure_sqlite_user_sync_columns() -> None:
@@ -54,6 +56,59 @@ def _ensure_sqlite_user_sync_columns() -> None:
         for name, definition in columns.items():
             if name not in existing:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {name} {definition}"))
+
+
+def _ensure_sqlite_appliance_settings_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "appliance_settings" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("appliance_settings")}
+    columns = {
+        "management_https_enabled": "BOOLEAN DEFAULT 0",
+    }
+    with engine.begin() as connection:
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE appliance_settings ADD COLUMN {name} {definition}"))
+
+
+def _ensure_sqlite_ca_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    with engine.begin() as connection:
+        if "ca_settings" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("ca_settings")}
+            columns = {
+                "root_certificate_pem": "TEXT DEFAULT ''",
+                "root_private_key_encrypted": "TEXT DEFAULT ''",
+                "root_serial_number": "VARCHAR(120) DEFAULT ''",
+                "root_fingerprint": "VARCHAR(128) DEFAULT ''",
+                "root_issued_at": "DATETIME",
+                "root_expires_at": "DATETIME",
+            }
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE ca_settings ADD COLUMN {name} {definition}"))
+        if "ca_certificates" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("ca_certificates")}
+            columns = {
+                "certificate_pem": "TEXT DEFAULT ''",
+                "private_key_encrypted": "TEXT DEFAULT ''",
+                "chain_pem": "TEXT DEFAULT ''",
+                "issuer_common_name": "VARCHAR(180) DEFAULT ''",
+                "fingerprint": "VARCHAR(128) DEFAULT ''",
+                "managed_owner": "VARCHAR(120) DEFAULT ''",
+                "cert_path": "VARCHAR(300) DEFAULT ''",
+                "key_path": "VARCHAR(300) DEFAULT ''",
+                "chain_path": "VARCHAR(300) DEFAULT ''",
+            }
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE ca_certificates ADD COLUMN {name} {definition}"))
 
 
 def get_db() -> Generator[Session, None, None]:
