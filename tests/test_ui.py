@@ -2779,6 +2779,17 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
         assert '"unit_id": "firewall"' in (job.result or "")
 
 
+def test_appliance_apply_runs_firewall_before_wan(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.ui import appliance_apply_units
+
+    login(client)
+    with SessionLocal() as db:
+        unit_ids = [unit["id"] for unit in appliance_apply_units(db)]
+
+    assert unit_ids.index("firewall") < unit_ids.index("wan")
+
+
 def test_network_apply_config_includes_removed_vlan_targets_from_baseline():
     from labfoundry.app.ui import network_config_with_removed_vlans, network_vlan_entries_from_config, removed_network_vlan_entries
 

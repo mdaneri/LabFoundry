@@ -381,6 +381,30 @@ pass should verify SSH, `systemctl status labfoundry`, web UI login,
 `/openapi.json`, `/api/v1/dashboard`, reboot persistence, and dry-run
 `/appliance-apply` job output.
 
+Lifecycle interop testing uses a separate Hyper-V VM set and must not reuse or
+destroy the normal `LabFoundry` test VM. The simple entry point is:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1
+```
+
+The wrapper prepares the tiny Alpine client VHDX, selects the newest appliance
+VHDX under `image/hyperv/output`, creates a unique `LabFoundryLifecycle-*` lab,
+validates DNS, DHCP, firewall, routing, NAT, WAN netem simulation, CA apply
+with a ClientA CSR request and issued-certificate verification, VCF Backup SFTP
+with the `vcf-backup` OS user, and client-side connectivity,
+prints a human-readable console summary, writes `result.json`, then removes the
+VMs it created. It defaults to the local Hyper-V lab password for admin and
+SSH access, and uses a separate policy-compliant default for VCF Backup SFTP
+test access; pass `-AdminPassword`, `-SshPassword`, and `-VcfBackupPassword` to
+override those defaults. Pass `-KeepVms` only when
+preserving a failed lab for inspection. Use `-PrepareNetworksOnly` to set up the
+Hyper-V switches/NAT, `-CleanupVmsOnly` to remove only lifecycle VMs, and
+`-CleanupNetworksOnly` to remove LabFoundry switches/NAT after all attached VMs
+are gone. Details live in
+[`docs/hyperv-lifecycle-testing.md`](docs/hyperv-lifecycle-testing.md).
+
 When troubleshooting a Hyper-V builder VM, use
 `scripts/windows/get-labfoundry-vm-ip.ps1` from an elevated PowerShell session
 to read the current IPv4 address reported by Hyper-V.

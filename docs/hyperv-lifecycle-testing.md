@@ -1,0 +1,171 @@
+# Hyper-V Lifecycle Testing
+
+LabFoundry lifecycle interop tests use a separate Hyper-V lab set. They must not
+reuse or destroy the normal `LabFoundry` test appliance VM.
+
+## Topology
+
+The default lifecycle lab creates these VMs:
+
+- `LabFoundryLifecycle-Appliance`
+- `LabFoundryLifecycle-ClientA`
+- `LabFoundryLifecycle-ClientB`
+
+The appliance attaches to `LabFoundry-Mgmt`, `LabFoundry-SiteA`,
+`LabFoundry-Trunk`, and `LabFoundry-SiteB`. Client A attaches to its SSH
+management switch, SiteA, an access VLAN on the trunk switch, and a dedicated
+LabFoundry management test NIC used only for the CA request path. Client B
+attaches to a management switch plus the WAN-test switch.
+
+The default SiteA test network is tagged VLAN 12 on appliance interface
+`eth1.12` with gateway `192.168.12.1/24`. The separate trunk validation network
+uses VLAN 50 on `eth2.50` with gateway `192.168.60.1/24`. These defaults match
+the current appliance image state and avoid changing a physical parent that
+already owns VLAN children.
+
+The lifecycle script creates differencing disks under
+`test-results/hyperv-lifecycle/<timestamp>/disks`, using the supplied appliance
+and client VHDX files as read-only parents. It also creates per-client NoCloud
+seed ISOs under `test-results/hyperv-lifecycle/<timestamp>/seed` so the client
+VMs boot with SSH access and the test NIC DHCP refresh helper.
+
+The default client parent image path is:
+
+```text
+image/hyperv/clients/alpine-cloud/labfoundry-tiny-linux-client.vhdx
+```
+
+Prepare or refresh that image with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/prepare-tiny-linux-client.ps1
+```
+
+The preparation script downloads Alpine's official UEFI cloud-init QCOW2 image,
+verifies the `.sha512` checksum, and converts it to a dynamic Hyper-V VHDX with
+`qemu-img`. The lifecycle script uses `pycdlib` to build the NoCloud seed ISOs;
+if it is missing, the script installs it with `python -m pip install pycdlib`.
+
+## Single-Command Run
+
+Run from an elevated PowerShell session:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1
+```
+
+The wrapper prepares the Alpine client VHDX if needed, selects the newest
+appliance VHDX under `image/hyperv/output`, creates a unique lifecycle lab name,
+runs the full interop scenario, prints a human-readable summary to the console,
+writes `result.json`, and removes the VMs it created after the test. Pass
+`-KeepVms` only when you want to inspect a failed lab.
+
+The wrapper defaults the LabFoundry admin and SSH passwords to the local Hyper-V
+lab password. The VCF Backup SFTP test password defaults to a separate
+policy-compliant value because Local Users enforces the appliance password
+policy before OS sync. Override them with `-AdminPassword`, `-SshPassword`, and
+`-VcfBackupPassword` when testing a different image.
+
+Useful single-purpose commands:
+
+```powershell
+# Create or repair the LabFoundry Hyper-V switches and management NAT only.
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1 `
+  -PrepareNetworksOnly
+
+# Remove only LabFoundryLifecycle* VMs; keep Hyper-V switches and NAT.
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1 `
+  -CleanupVmsOnly
+
+# Remove LabFoundry switches and management NAT; refuses if VMs are attached.
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1 `
+  -CleanupNetworksOnly
+```
+
+Pass `-CleanupNetworksAfterTest` to remove the switches/NAT after a successful
+test as well as the VMs. Network cleanup is intentionally opt-in because the
+normal `LabFoundry` VM can also be attached to the shared LabFoundry switches.
+
+Use `-PlanOnly` first to print the VM names, VHDX parents, and result path
+without creating or modifying VMs. Use `-ApplianceVhdxPath` when you want a
+specific appliance image instead of the newest discovered VHDX.
+
+## Low-Level Run
+
+The wrapper delegates to `scripts/windows/run-hyperv-lifecycle-test.ps1`. That
+lower-level script is still available when you need explicit control over every
+input:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/run-hyperv-lifecycle-test.ps1 `
+  -ApplianceVhdxPath image/hyperv/output/labfoundry-photon-hyperv/"Virtual Hard Disks"/LabFoundry-Photon-Builder.vhdx `
+  -AdminPassword '<bootstrap-admin-password>' `
+  -SshPassword '<appliance-root-password>' `
+  -CleanupCreatedLab
+```
+
+The default path uses password SSH for both appliance and client probes. The
+default appliance SSH user is `root`; the default client SSH user is `alpine`.
+Key-based client auth is still available by passing an existing `-SshKeyPath`;
+the matching `.pub` file is injected into both client VMs. The scripts do not
+generate SSH keys automatically.
+
+The low-level script only cleans up when `-CleanupCreatedLab` is present. That
+flag removes only VM names created during the current run that start with the
+lifecycle lab prefix. Both scripts refuse to use reserved names such as
+`LabFoundry` and `LabFoundry-Photon-Builder`.
+
+## What It Validates
+
+The lifecycle runner records structured evidence in
+`test-results/hyperv-lifecycle/<timestamp>/result.json`:
+
+- appliance boot, SSH, `labfoundry.service`, `/openapi.json`, and dashboard API
+- physical interface refresh, access NICs, trunk NIC, and VLAN desired state
+- DNS and DHCP desired state plus dnsmasq host-state checks
+- firewall settings, NAT, WAN policy, nftables, routes, and `tc` state
+- WAN impairment evidence through a route-bound netem policy and a live
+  `tc qdisc` assertion on the appliance WAN interface
+- CA enablement, root CA generation/download metadata, Client A CSR request
+  submission over its lifecycle management test NIC, global `ca` appliance
+  apply, issued certificate download from Client A, runner-side certificate
+  signature/subject validation, and CA files under `/etc/labfoundry`
+- VCF Backups SFTP desired state, `vcf-backup` Local Users password staging and
+  OS sync, global `vcf_backups` appliance apply, OpenSSH drop-in host state, and
+  a client-side SFTP probe from Client A to the SiteA appliance address
+- client-side DNS/DHCP/routing probes when client SSH addresses are available
+
+The runner submits only global `/appliance-apply` units. It does not call
+service-specific apply routes.
+
+## Dry-Run Boundary
+
+First-boot images may still have `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`.
+That is useful for control-plane smoke testing, but a real lifecycle interop run
+should use real adapters. If a deliberate dry-run pass is needed, pass
+`-AllowDryRunApply`; otherwise the runner fails when an apply job reports
+dry-run.
+
+## Test Roadmap
+
+Keep the test stack split by ownership:
+
+- PowerShell and Hyper-V orchestration tests should move into Pester. The
+  intended entry point is `Invoke-Pester tests/pester/HyperVLifecycle.Tests.ps1`.
+  Pester should cover wrapper parameter sets, plan-only output, VHDX discovery,
+  switch/NAT preparation, VM cleanup safety, reserved VM protections, and mocked
+  Hyper-V cmdlet behavior.
+- Python appliance and guest assertions must remain pytest-covered. The
+  `scripts/interop/lifecycle_test.py` runner owns HTTP/API flows, global
+  `/appliance-apply`, result JSON evidence, SSH probes, DNS/DHCP checks,
+  firewall/routing/NAT assertions, and client-side connectivity checks.
+
+Use Pester tags for destructive or host-mutating scenarios. Normal Pester tests
+should mock Hyper-V cmdlets; real VM-creating runs should be explicit integration
+tests.
