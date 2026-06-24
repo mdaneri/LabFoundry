@@ -65,6 +65,58 @@ def network_config_text(
     return "\n".join(lines)
 
 
+def wan_config_text(
+    *,
+    bad_nat_source: bool = False,
+    bad_target: bool = False,
+    wan_mode: str = "interface",
+    target_role: str = "wan",
+    target_wan: bool = True,
+) -> str:
+    source = "not-a-cidr" if bad_nat_source else "192.168.50.0/24"
+    outbound = "eth9" if bad_target else "eth1.20"
+    return "\n".join(
+        [
+            "[targets]",
+            "target=eth1.20",
+            "  kind=vlan",
+            f"  role={target_role}",
+            "  ip_cidr=192.168.20.1/24",
+            f"  wan={str(target_wan).lower()}",
+            "",
+            "[routes]",
+            "route=10.20.0.0/24",
+            "  gateway=",
+            "  interface=eth1.20",
+            "  metric=120",
+            "  enabled=true",
+            "  wan_policy=Slow WAN",
+            f"  wan_mode={wan_mode}",
+            "",
+            "[nat_rules]",
+            "nat=SiteA outbound WAN",
+            "  enabled=true",
+            f"  source={source}",
+            f"  source_resolved={source}",
+            f"  outbound_interface={outbound}",
+            "  masquerade=true",
+            "  priority=100",
+            "  description=demo",
+            "",
+            "[wan_policies]",
+            "policy=Slow WAN",
+            "  enabled=true",
+            "  latency_ms=100",
+            "  jitter_ms=10",
+            "  packet_loss_percent=0.5",
+            "  bandwidth_mbit=100",
+            "  corrupt_percent=0",
+            "  duplicate_percent=0",
+            "  reorder_percent=0",
+        ]
+    )
+
+
 def test_network_helper_validates_vlan_parent_must_be_trunk(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-network.conf"
@@ -81,6 +133,98 @@ def test_network_helper_accepts_valid_vlan_config(tmp_path):
     config_path.write_text(network_config_text(), encoding="utf-8")
 
     assert helper._network_config_errors(config_path) == []
+
+
+def test_wan_helper_rejects_config_outside_apply_dir(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-wan.conf"
+    config_path.write_text(wan_config_text(), encoding="utf-8")
+
+    try:
+        helper._validate_wan_config_path(str(config_path))
+    except ValueError as exc:
+        assert "WAN config must be staged under" in str(exc)
+    else:
+        raise AssertionError("WAN config outside apply directory should be rejected")
+
+
+def test_wan_helper_validates_routes_nat_and_netem(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-wan.conf"
+    config_path.write_text(wan_config_text(), encoding="utf-8")
+
+    assert helper._wan_config_errors(config_path) == []
+    nat_config = helper._render_wan_nat_config(helper._parse_wan_config(config_path)["nat_rules"])
+    assert "table ip labfoundry_nat" in nat_config
+    assert 'ip saddr 192.168.50.0/24 oifname "eth1.20" masquerade' in nat_config
+
+
+def test_wan_helper_rejects_bad_nat_source_and_target(tmp_path):
+    helper = load_helper_module()
+    bad_source = tmp_path / "bad-source.conf"
+    bad_source.write_text(wan_config_text(bad_nat_source=True), encoding="utf-8")
+    bad_target = tmp_path / "bad-target.conf"
+    bad_target.write_text(wan_config_text(bad_target=True), encoding="utf-8")
+
+    assert any("source not-a-cidr is not a valid CIDR" in error for error in helper._wan_config_errors(bad_source))
+    assert any("must use an access physical interface or enabled VLAN" in error for error in helper._wan_config_errors(bad_target))
+
+
+def test_wan_helper_rejects_route_wan_mode(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "route-mode.conf"
+    config_path.write_text(wan_config_text(wan_mode="route"), encoding="utf-8")
+
+    assert any("WAN mode route is planned but not supported in v1" in error for error in helper._wan_config_errors(config_path))
+
+
+def test_wan_helper_allows_nat_on_non_wan_role_target(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "nat-access-target.conf"
+    config_path.write_text(wan_config_text(target_role="access", target_wan=False), encoding="utf-8")
+
+    assert helper._wan_config_errors(config_path) == []
+
+
+def test_wan_helper_apply_routes_nat_and_netem(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "wan"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-wan.conf"
+    config_path.write_text(wan_config_text(), encoding="utf-8")
+    nat_dir = tmp_path / "nftables.d"
+    service_path = tmp_path / "labfoundry-nat.service"
+    sysctl_path = tmp_path / "90-labfoundry-routing-wan.conf"
+    commands: list[list[str]] = []
+    input_commands: list[tuple[list[str], str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_run_with_input(command: list[str], input_text: str) -> subprocess.CompletedProcess[str]:
+        input_commands.append((command, input_text))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "WAN_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "WAN_NAT_CONFIG_DIR", nat_dir)
+    monkeypatch.setattr(helper, "WAN_NAT_CONFIG_PATH", nat_dir / "labfoundry-nat.nft")
+    monkeypatch.setattr(helper, "WAN_NAT_SERVICE_PATH", service_path)
+    monkeypatch.setattr(helper, "WAN_SYSCTL_PATH", sysctl_path)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/sbin/{command}")
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper, "_run_with_input", fake_run_with_input)
+
+    assert helper._handle_wan("apply", [str(config_path)]) == 0
+
+    assert input_commands[0][0] == ["nft", "-c", "-f", "-"]
+    assert 'oifname "eth1.20" masquerade' in input_commands[0][1]
+    assert ["sysctl", "-w", "net.ipv4.ip_forward=1"] in commands
+    assert ["nft", "-f", str(nat_dir / "labfoundry-nat.nft")] in commands
+    assert ["ip", "route", "replace", "10.20.0.0/24", "dev", "eth1.20", "metric", "120"] in commands
+    assert ["tc", "qdisc", "replace", "dev", "eth1.20", "root", "netem", "delay", "100ms", "10ms", "loss", "0.5%", "rate", "100mbit"] in commands
+    assert service_path.exists()
+    assert sysctl_path.read_text(encoding="utf-8") == "net.ipv4.ip_forward = 1\n"
 
 
 def test_real_mutating_helper_action_escapes_service_mount_namespace(monkeypatch, tmp_path, capsys):

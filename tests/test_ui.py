@@ -427,6 +427,7 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
         KmsClient,
         KmsKey,
         KmsSettings,
+        NatRule,
         PhysicalInterface,
         Route,
         ServiceState,
@@ -490,6 +491,7 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
         assert removed is None
         assert db.execute(select(VlanInterface)).scalars().all() == []
         assert db.execute(select(WanPolicy)).scalars().all() == []
+        assert db.execute(select(NatRule)).scalars().all() == []
         assert db.execute(select(Route)).scalars().all() == []
         dns_records = db.execute(select(DnsRecord)).scalars().all()
         assert len(dns_records) == 1
@@ -526,24 +528,55 @@ def test_routes_wan_policy_form_renders(client):
     assert response.status_code == 200
     assert "Routes &amp; WAN Simulation" in response.text
     assert "Managed Routes" in response.text
+    assert "NAT Rules" in response.text
     assert "WAN Policies" in response.text
     assert "Pending Appliance Changes" in response.text
     assert "Validation" in response.text
     assert "routes-wan-routes-table" in response.text
+    assert "routes-wan-nat-table" in response.text
     assert "routes-wan-policies-table" in response.text
+    assert "data-mode-options" not in response.text
+    assert "<th>Mode</th>" not in response.text
     assert "+ Add route here" in client.get("/static/app.js").text
+    assert "+ Add NAT rule here" in client.get("/static/app.js").text
     assert "+ Add policy here" in client.get("/static/app.js").text
     assert "Europe WAN" in response.text
+    assert "SiteA outbound WAN" in response.text
     assert "eth1.20" in response.text
     assert "tc qdisc replace" in response.text
+    assert "table ip labfoundry_nat" in response.text
     assert "Review appliance changes" in response.text
+
+
+def test_routes_wan_rejects_route_wan_mode(client):
+    login(client)
+    page = client.get("/routes-wan")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/routes-wan/routes",
+        data={
+            "destination_cidr": "10.21.0.0/24",
+            "gateway": "",
+            "interface_name": "eth1.20",
+            "metric": "120",
+            "wan_policy_id": "",
+            "wan_mode": "route",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 422
+    assert "planned but not supported in v1" in response.text
 
 
 def test_routes_wan_autosave_endpoints_and_apply_task(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Job, WanPolicy
+    from labfoundry.app.models import Job, NatRule, WanPolicy
 
     login(client)
     page = client.get("/routes-wan")
@@ -585,10 +618,30 @@ def test_routes_wan_autosave_endpoints_and_apply_task(client):
         follow_redirects=False,
     )
     assert route_response.status_code == 303
+    nat_response = client.post(
+        "/routes-wan/nat-rules",
+        data={
+            "name": "Metro outbound",
+            "source": "192.168.50.0/24",
+            "outbound_interface": "eth2",
+            "masquerade": "on",
+            "priority": "110",
+            "description": "NAT through test WAN",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert nat_response.status_code == 303
     refreshed = client.get("/routes-wan")
     assert "Metro WAN" in refreshed.text
+    assert "Metro outbound" in refreshed.text
     assert "10.20.0.0/24" in refreshed.text
+    assert "ip saddr 192.168.50.0/24 oifname &#34;eth2&#34; masquerade" in refreshed.text
     assert "tc qdisc replace dev eth1.20" in refreshed.text
+    with SessionLocal() as db:
+        rule = db.execute(select(NatRule).where(NatRule.name == "Metro outbound")).scalar_one()
+        assert rule.outbound_interface == "eth2"
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "wan"})
     assert apply_response.status_code == 200
@@ -598,6 +651,8 @@ def test_routes_wan_autosave_endpoints_and_apply_task(client):
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "wan" in (job.result or "")
+        assert "NAT rules" in (job.result or "")
+        assert "nft -f /etc/labfoundry/nftables.d/labfoundry-nat.nft" in (job.result or "")
         assert "tc qdisc replace dev eth1.20" in (job.result or "")
 
 
@@ -2433,7 +2488,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "local-users-shell-20260623-1" in page.text
+    assert "routes-wan-interface-mode-20260623-1" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 

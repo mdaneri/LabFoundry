@@ -29,10 +29,10 @@ class SystemAdapter:
         return self._record_only_result(["tc", "qdisc", "del", "dev", interface_name, "root"], "dry-run: WAN policy clear command recorded")
 
     def validate_wan_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "wan", "validate", config_path], "dry-run: WAN config validation command recorded")
+        return self._helper_result("wan", "validate", config_path, dry_run_message="dry-run: WAN config validation command recorded")
 
     def apply_wan_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "wan", "apply", config_path], "dry-run: WAN config apply command recorded")
+        return self._helper_result("wan", "apply", config_path, dry_run_message="dry-run: WAN config apply command recorded")
 
     def service_action(self, service: str, action: str) -> AdapterResult:
         return self._record_only_result(["systemctl", action, service], f"dry-run: service {action} recorded for {service}")

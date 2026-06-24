@@ -152,6 +152,22 @@ class Route(Base):
     wan_policy: Mapped[WanPolicy | None] = relationship(back_populates="routes")
 
 
+class NatRule(Base):
+    __tablename__ = "nat_rules"
+    __table_args__ = (UniqueConstraint("name", name="uq_nat_rule_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    source: Mapped[str] = mapped_column(String(240), default="any")
+    outbound_interface: Mapped[str] = mapped_column(String(80), index=True)
+    masquerade: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ServiceState(Base):
     __tablename__ = "service_states"
 

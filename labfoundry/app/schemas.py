@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -227,7 +227,7 @@ class RouteCreate(BaseModel):
     metric: int = Field(default=100, ge=0)
     enabled: bool = True
     wan_policy_id: int | None = None
-    wan_mode: str = "interface"
+    wan_mode: Literal["interface"] = "interface"
 
 
 class RouteResponse(RouteCreate):
@@ -235,6 +235,22 @@ class RouteResponse(RouteCreate):
 
     id: int
     wan_policy: WanPolicyResponse | None = None
+
+
+class NatRuleCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    enabled: bool = True
+    source: str = Field(default="any", min_length=1, max_length=240)
+    outbound_interface: str = Field(min_length=1, max_length=80)
+    masquerade: bool = True
+    priority: int = Field(default=100, ge=0)
+    description: str | None = None
+
+
+class NatRuleResponse(NatRuleCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
 
 
 class WanStatusResponse(BaseModel):

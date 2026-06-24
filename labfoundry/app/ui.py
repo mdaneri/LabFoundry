@@ -41,6 +41,7 @@ from labfoundry.app.models import (
     KmsClient,
     KmsKey,
     KmsSettings,
+    NatRule,
     PhysicalInterface,
     Role,
     Route,
@@ -129,8 +130,10 @@ from labfoundry.app.services.networking import (
 from labfoundry.app.services.routes_wan import (
     WAN_CONFIG_PATH,
     WAN_MODES,
+    nat_rule_to_dict,
     render_wan_config,
     route_to_dict,
+    validate_nat_source,
     validate_wan_state,
     wan_policy_to_dict,
 )
@@ -1201,6 +1204,10 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
         targets.append(
             {
                 "name": interface.name,
+                "kind": "physical",
+                "role": interface.role,
+                "ip_cidr": interface.ip_cidr or "",
+                "wan": interface.role == "wan",
                 "label": f"{interface.name} - physical / {interface.role} / {interface.ip_cidr}",
             }
         )
@@ -1210,6 +1217,10 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
         targets.append(
             {
                 "name": vlan.name,
+                "kind": "vlan",
+                "role": vlan.role,
+                "ip_cidr": vlan.ip_cidr or "",
+                "wan": vlan.role == "wan",
                 "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {vlan.role} / {vlan.ip_cidr}",
             }
         )
@@ -1219,16 +1230,31 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
 def routes_wan_context(db: Session) -> dict:
     routes = db.execute(select(Route).options(selectinload(Route.wan_policy)).order_by(Route.destination_cidr)).scalars().all()
     policies = db.execute(select(WanPolicy).order_by(WanPolicy.name)).scalars().all()
+    nat_rules = db.execute(select(NatRule).order_by(NatRule.priority, NatRule.name)).scalars().all()
     targets = wan_route_targets(db)
-    validation_errors = validate_wan_state(routes, policies, {target["name"] for target in targets})
-    config_preview = render_wan_config(routes)
+    source_groups = firewall_source_group_state_for_db(db)["groups"]
+    source_group_ids = {str(group.get("id", "")) for group in source_groups}
+    validation_errors = validate_wan_state(
+        routes,
+        policies,
+        {target["name"] for target in targets},
+        nat_rules,
+        {target["name"] for target in targets},
+        source_group_ids,
+    )
+    config_preview = render_wan_config(routes, policies, nat_rules, targets, source_groups=source_groups)
     return {
         "routes": routes,
         "policies": policies,
+        "nat_rules": nat_rules,
         "route_rows": [route_to_dict(route) for route in routes],
+        "nat_rule_rows": [nat_rule_to_dict(rule) for rule in nat_rules],
         "policy_rows": [wan_policy_to_dict(policy) for policy in policies],
         "wan_route_targets": targets,
         "wan_route_target_names": [target["name"] for target in targets],
+        "wan_nat_targets": targets,
+        "wan_nat_target_names": [target["name"] for target in targets],
+        "wan_source_groups": source_groups,
         "wan_policy_options": [{"id": policy.id, "label": policy.name} for policy in policies],
         "wan_modes": WAN_MODES,
         "wan_config_path": WAN_CONFIG_PATH,
@@ -1870,6 +1896,51 @@ def network_config_with_removed_vlans(config_preview: str, removed_vlans: list[d
     return "\n".join(lines).strip() + "\n"
 
 
+def wan_route_entries_from_config(config_preview: str) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    current_section = ""
+    current: dict[str, str] | None = None
+    for raw_line in (config_preview or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line.strip("[]")
+            current = None
+            continue
+        if "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if current_section == "routes" and key == "route":
+            current = {"destination_cidr": value}
+            entries.append(current)
+            continue
+        if current_section == "routes" and current is not None:
+            current[key] = value
+    return entries
+
+
+def removed_wan_route_entries(current_preview: str, baseline: dict[str, Any] | None) -> list[dict[str, str]]:
+    baseline_preview = str((baseline or {}).get("config_preview") or "")
+    current_keys = {
+        (entry.get("destination_cidr", ""), entry.get("interface", ""))
+        for entry in wan_route_entries_from_config(current_preview)
+    }
+    removed: list[dict[str, str]] = []
+    for entry in wan_route_entries_from_config(baseline_preview):
+        key = (entry.get("destination_cidr", ""), entry.get("interface", ""))
+        if key[0] and key[1] and key not in current_keys:
+            removed.append(
+                {
+                    "destination_cidr": key[0],
+                    "gateway": entry.get("gateway", ""),
+                    "interface_name": key[1],
+                    "metric": entry.get("metric", "100"),
+                }
+            )
+    return removed
+
+
 def make_appliance_apply_unit(
     *,
     unit_id: str,
@@ -1969,6 +2040,21 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     )
     network_unit["removed_vlan_interfaces"] = network_removed_vlans
 
+    wan_baseline = baselines.get("wan")
+    wan_removed_routes = removed_wan_route_entries(wan["wan_config_preview"], wan_baseline)
+    if wan_removed_routes:
+        wan["wan_config_preview"] = render_wan_config(
+            wan["routes"],
+            wan["policies"],
+            wan["nat_rules"],
+            wan["wan_route_targets"],
+            removed_routes=wan_removed_routes,
+            source_groups=wan["wan_source_groups"],
+        )
+    wan_summary = [f"{len(wan['routes'])} routes", f"{len(wan['nat_rules'])} NAT rules", f"{len(wan['policies'])} WAN policies"]
+    if wan_removed_routes:
+        wan_summary.append(f"{len(wan_removed_routes)} route removals")
+
     return [
         make_appliance_apply_unit(
             unit_id="local_users",
@@ -2008,11 +2094,11 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             label="Routes & WAN Simulation",
             page_url="/routes-wan",
             context=wan,
-            summary=[f"{len(wan['routes'])} routes", f"{len(wan['policies'])} WAN policies"],
+            summary=wan_summary,
             validation_errors=wan["wan_validation_errors"],
             config_path=wan["wan_config_path"],
             config_preview=wan["wan_config_preview"],
-            baseline=baselines.get("wan"),
+            baseline=wan_baseline,
         ),
         make_appliance_apply_unit(
             unit_id="firewall",
@@ -2217,7 +2303,10 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
             config_path = stage_appliance_apply_config(NETWORK_STAGED_CONFIG_PATH, config_preview)
         results = [adapter.validate_network_config(config_path), adapter.apply_network_config(config_path)]
     elif unit_id == "wan":
-        results = [adapter.validate_wan_config(context["wan_config_path"]), adapter.apply_wan_config(context["wan_config_path"])]
+        config_path = context["wan_config_path"]
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(WAN_CONFIG_PATH, unit["raw_config_preview"])
+        results = [adapter.validate_wan_config(config_path), adapter.apply_wan_config(config_path)]
     elif unit_id == "firewall":
         settings = context["firewall_settings"]
         config_path = settings.config_path
@@ -2550,7 +2639,10 @@ def validate_route_form_values(
         if db.get(WanPolicy, parsed_policy_id) is None:
             return Response("WAN policy does not exist.", status_code=422, media_type="text/plain")
         policy_id_value = parsed_policy_id
-    mode_value = wan_mode.strip() if wan_mode.strip() in WAN_MODES else "interface"
+    raw_mode = wan_mode.strip() or "interface"
+    if raw_mode not in WAN_MODES:
+        return Response("WAN route mode is planned but not supported in v1. Use interface mode.", status_code=422, media_type="text/plain")
+    mode_value = "interface"
     return destination, gateway_value, interface_value, metric_value, policy_id_value, mode_value
 
 
@@ -2578,6 +2670,35 @@ def validate_wan_policy_form_values(
         if isinstance(value, Response):
             return value
     return name_value, latency_value, jitter_value, loss_value, bandwidth_value, corrupt_value, duplicate_value, reorder_value
+
+
+def validate_nat_rule_form_values(
+    name: str,
+    source: str,
+    outbound_interface: str,
+    priority: str,
+    masquerade: str | None,
+    db: Session,
+) -> tuple[str, str, str, bool, int] | Response:
+    name_value = name.strip()
+    if not name_value:
+        return Response("NAT rule name is required.", status_code=422, media_type="text/plain")
+    source_value = source.strip() or "any"
+    source_groups = firewall_source_group_state_for_db(db)["groups"]
+    source_errors = validate_nat_source(source_value, {str(group.get("id", "")) for group in source_groups})
+    if source_errors:
+        return Response(source_errors[0], status_code=422, media_type="text/plain")
+    target_names = {target["name"] for target in wan_route_targets(db)}
+    outbound_value = outbound_interface.strip()
+    if outbound_value not in target_names:
+        return Response("Choose an access physical interface or enabled VLAN interface with an IP CIDR.", status_code=422, media_type="text/plain")
+    masquerade_value = masquerade == "on"
+    if not masquerade_value:
+        return Response("NAT v1 supports masquerade only.", status_code=422, media_type="text/plain")
+    priority_value = parse_int_form_value(priority.strip(), "Priority", default=100, minimum=0)
+    if isinstance(priority_value, Response):
+        return priority_value
+    return name_value, source_value, outbound_value, masquerade_value, priority_value
 
 
 @router.post("/routes-wan/routes", response_model=None)
@@ -2665,6 +2786,102 @@ def delete_route_from_ui(
     db.delete(route)
     db.commit()
     record_audit(db, actor=identity.username, action="delete_route", resource_type="route", resource_id=str(route_id))
+    return RedirectResponse("/routes-wan", status_code=303)
+
+
+@router.post("/routes-wan/nat-rules", response_model=None)
+def create_nat_rule_from_ui(
+    request: Request,
+    name: str = Form(""),
+    source: str = Form("any"),
+    outbound_interface: str = Form(""),
+    masquerade: str | None = Form(None),
+    priority: str = Form("100"),
+    description: str = Form(""),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | Response:
+    verify_csrf(request, csrf)
+    parsed = validate_nat_rule_form_values(name, source, outbound_interface, priority, masquerade, db)
+    if isinstance(parsed, Response):
+        return parsed
+    name_value, source_value, outbound_value, masquerade_value, priority_value = parsed
+    rule = NatRule(
+        name=name_value,
+        source=source_value,
+        outbound_interface=outbound_value,
+        masquerade=masquerade_value,
+        priority=priority_value,
+        description=description.strip() or None,
+        enabled=enabled == "on",
+    )
+    db.add(rule)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return Response(f"NAT rule {rule.name} already exists.", status_code=409, media_type="text/plain")
+    record_audit(db, actor=identity.username, action="create_nat_rule", resource_type="nat_rule", resource_id=str(rule.id))
+    return RedirectResponse("/routes-wan", status_code=303)
+
+
+@router.post("/routes-wan/nat-rules/{rule_id}/edit", response_model=None)
+def edit_nat_rule_from_ui(
+    request: Request,
+    rule_id: int,
+    name: str = Form(""),
+    source: str = Form("any"),
+    outbound_interface: str = Form(""),
+    masquerade: str | None = Form(None),
+    priority: str = Form("100"),
+    description: str = Form(""),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | Response:
+    verify_csrf(request, csrf)
+    rule = db.get(NatRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="NAT rule not found")
+    parsed = validate_nat_rule_form_values(name, source, outbound_interface, priority, masquerade, db)
+    if isinstance(parsed, Response):
+        return parsed
+    name_value, source_value, outbound_value, masquerade_value, priority_value = parsed
+    rule.name = name_value
+    rule.source = source_value
+    rule.outbound_interface = outbound_value
+    rule.masquerade = masquerade_value
+    rule.priority = priority_value
+    rule.description = description.strip() or None
+    rule.enabled = enabled == "on"
+    db.add(rule)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return Response(f"NAT rule {rule.name} already exists.", status_code=409, media_type="text/plain")
+    record_audit(db, actor=identity.username, action="update_nat_rule", resource_type="nat_rule", resource_id=str(rule.id))
+    return RedirectResponse("/routes-wan", status_code=303)
+
+
+@router.post("/routes-wan/nat-rules/{rule_id}/delete", response_model=None)
+def delete_nat_rule_from_ui(
+    request: Request,
+    rule_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    rule = db.get(NatRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="NAT rule not found")
+    db.delete(rule)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_nat_rule", resource_type="nat_rule", resource_id=str(rule_id))
     return RedirectResponse("/routes-wan", status_code=303)
 
 

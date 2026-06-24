@@ -15,6 +15,10 @@ labfoundry ALL=(root) NOPASSWD: \
     /opt/labfoundry/bin/labfoundry-helper network validate --real *, \
     /opt/labfoundry/bin/labfoundry-helper network apply *, \
     /opt/labfoundry/bin/labfoundry-helper network apply --real *, \
+    /opt/labfoundry/bin/labfoundry-helper wan validate *, \
+    /opt/labfoundry/bin/labfoundry-helper wan validate --real *, \
+    /opt/labfoundry/bin/labfoundry-helper wan apply *, \
+    /opt/labfoundry/bin/labfoundry-helper wan apply --real *, \
     /opt/labfoundry/bin/labfoundry-helper firewall validate *, \
     /opt/labfoundry/bin/labfoundry-helper firewall validate --real *, \
     /opt/labfoundry/bin/labfoundry-helper firewall apply *, \

@@ -28,6 +28,7 @@ def test_initial_api_resources_are_documented(client):
         "/api/v1/interfaces/physical",
         "/api/v1/vlans",
         "/api/v1/routes",
+        "/api/v1/nat/rules",
         "/api/v1/wan/policies",
         "/api/v1/wan/status",
         "/api/v1/dns/status",
@@ -50,6 +51,13 @@ def test_initial_api_resources_are_documented(client):
     ]
     for path in expected:
         assert path in paths
+
+
+def test_route_wan_mode_contract_is_interface_only(client):
+    schema = client.get("/openapi.json").json()
+    wan_mode = schema["components"]["schemas"]["RouteCreate"]["properties"]["wan_mode"]
+
+    assert wan_mode.get("const") == "interface" or wan_mode.get("enum") == ["interface"]
 
 
 def test_api_routes_have_response_models_or_documented_204(client):

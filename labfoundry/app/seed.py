@@ -19,6 +19,7 @@ from labfoundry.app.models import (
     KmsClient,
     KmsKey,
     KmsSettings,
+    NatRule,
     PhysicalInterface,
     Route,
     ServiceState,
@@ -211,6 +212,19 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
                     wan_policy_id=policy.id,
                 )
             )
+
+    if include_examples and seed_sample_vlan and db.execute(select(NatRule)).first() is None:
+        db.add(
+            NatRule(
+                name="SiteA outbound WAN",
+                source="192.168.50.0/24",
+                outbound_interface="eth1.20",
+                masquerade=True,
+                priority=100,
+                description="Demo outbound masquerade from SiteA through the sample WAN VLAN.",
+                enabled=True,
+            )
+        )
 
     existing_services = {row.service for row in db.execute(select(ServiceState)).scalars().all()}
     for service_state in SERVICE_STATE_DEFAULTS:

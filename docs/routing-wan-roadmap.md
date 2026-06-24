@@ -1,0 +1,59 @@
+# Routing And WAN Roadmap
+
+LabFoundry Routing/WAN v1 is intentionally appliance-owned and conservative. Desired state is edited on `/routes-wan`; host mutation happens only through the global `/appliance-apply` `wan` unit.
+
+## Current V1 Scope
+
+- Static route desired state rendered to `/var/lib/labfoundry/apply/wan/labfoundry-wan.conf`.
+- IPv4 outbound masquerade NAT rules rendered as the LabFoundry-owned `table ip labfoundry_nat`.
+- NAT outbound interfaces can be access physical interfaces with IP CIDRs or enabled VLAN interfaces with IP CIDRs; they do not have to use role `wan`.
+- IPv4 forwarding enabled only when an enabled NAT rule requires it.
+- Interface/VLAN-level WAN simulation through one `tc qdisc replace dev <target> root netem ...` per target with an enabled assigned policy.
+- Disabled or unassigned WAN policy targets clear only LabFoundry-owned root qdisc intent.
+- Route commands use `ip route replace <destination> [via <gateway>] dev <interface> metric <metric>`.
+
+`wan_mode=interface` is the only supported WAN impairment mode in v1. Route-specific impairment is not exposed in the UI or public API until it has a real helper implementation.
+
+## Planned Route-Specific Impairment
+
+Route-specific WAN impairment should let an operator attach a WAN policy to traffic matching a route or route-like destination without impairing all traffic on that interface. This is planned work, not current behavior.
+
+Before exposing a `route` mode, the design needs to settle:
+
+- Packet classification approach: `tc` filters, nftables packet marks, policy routing, or another Photon-safe mechanism.
+- Conflict behavior when multiple routes, NAT rules, firewall rules, or service listeners match the same packets.
+- Rollback semantics for marks, filters, chains, and qdisc state based on the last-applied LabFoundry baseline.
+- Observability in previews and jobs so operators can see every mark/filter/qdisc command that will run.
+- Photon verification commands that prove only the intended destination traffic is impaired.
+
+The likely implementation shape is:
+
+1. Render explicit route impairment entries in the staged WAN config.
+2. Validate destination CIDRs, target interfaces, mark IDs, and policy references in `labfoundry-helper wan validate`.
+3. Install a LabFoundry-owned classification layer, avoiding broad rewrites of unrelated nftables or `tc` state.
+4. Apply `tc` filters and netem classes only for tracked LabFoundry-owned route impairment entries.
+5. Remove disabled or removed route impairment only when it appears in the last-applied baseline.
+
+## NAT Roadmap
+
+NAT v1 is explicit IPv4 masquerade only. Future NAT work can consider:
+
+- Destination NAT and port forwarding with clear listener ownership.
+- Per-rule counters or status readback.
+- IPv6 routing and NAT alternatives where appropriate.
+
+Do not infer broad NAT automatically from interface roles. NAT must remain an explicit desired-state rule reviewed through global appliance apply.
+
+## Verification
+
+Live Photon validation for Routing/WAN changes should inspect both the LabFoundry preview/job and the host state:
+
+```bash
+ip route
+tc qdisc show
+nft list ruleset
+sysctl net.ipv4.ip_forward
+systemctl status labfoundry-nat.service --no-pager
+```
+
+For route-specific impairment work, add packet-level validation that shows matching destination traffic is impaired while unrelated traffic on the same interface is not.

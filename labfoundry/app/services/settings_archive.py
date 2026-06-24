@@ -24,6 +24,7 @@ from labfoundry.app.models import (
     KmsClient,
     KmsKey,
     KmsSettings,
+    NatRule,
     PhysicalInterface,
     Route,
     ServiceState,
@@ -54,6 +55,7 @@ SCALAR_TABLES = {
     "physical_interfaces": PhysicalInterface,
     "vlan_interfaces": VlanInterface,
     "wan_policies": WanPolicy,
+    "nat_rules": NatRule,
     "service_states": ServiceState,
     "appliance_settings": ApplianceSettings,
     "dns_settings": DnsSettings,
@@ -94,6 +96,7 @@ RESTORE_DELETE_MODELS = [
     DnsRecord,
     DnsSettings,
     Route,
+    NatRule,
     WanPolicy,
     VlanInterface,
     PhysicalInterface,
@@ -206,7 +209,7 @@ def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, 
     _clear_desired_state(db)
 
     counts: dict[str, int] = {}
-    for key in ["physical_interfaces", "vlan_interfaces", "wan_policies"]:
+    for key in ["physical_interfaces", "vlan_interfaces", "wan_policies", "nat_rules"]:
         counts[key] = _insert_rows(db, SCALAR_TABLES[key], data.get(key, []))
     db.flush()
 

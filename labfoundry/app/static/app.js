@@ -85,9 +85,9 @@ async function postDnsRecordAction(url, data, csrf, options = {}) {
       body.set("hostname", value ?? "");
       continue;
     }
-    if (key === "enabled") {
+    if (key === "enabled" || key === "masquerade") {
       if (value) {
-        body.set("enabled", "on");
+        body.set(key, "on");
       }
       continue;
     }
@@ -2428,8 +2428,26 @@ function newWanPolicyRow() {
   };
 }
 
+function newWanNatRuleRow(defaultTarget = "") {
+  return {
+    id: "__new__",
+    name: "",
+    enabled: true,
+    source: "any",
+    outbound_interface: defaultTarget,
+    masquerade: true,
+    priority: 100,
+    description: "",
+    is_new: true,
+  };
+}
+
 function hasRequiredWanRouteFields(data) {
   return Boolean((data.destination_cidr || "").trim() && (data.interface_name || "").trim());
+}
+
+function hasRequiredWanNatFields(data) {
+  return Boolean((data.name || "").trim() && (data.outbound_interface || "").trim());
 }
 
 function hasRequiredWanPolicyFields(data) {
@@ -2516,6 +2534,38 @@ async function autoSaveWanPolicy(cell, csrf) {
   }
 }
 
+async function autoSaveWanNatRule(cell, csrf) {
+  clearCaMessage("routes-wan-nat-error");
+  const row = cell.getRow();
+  const data = row.getData();
+  if (data.is_new) {
+    if (!hasRequiredWanNatFields(data)) {
+      return;
+    }
+    try {
+      await postWanAction("/routes-wan/nat-rules", data, csrf, { reload: false });
+      showTransientGridStatus("Added");
+      window.location.reload();
+    } catch (error) {
+      showWanMessage("routes-wan-nat-error", error instanceof Error ? error.message : "The NAT rule could not be added.");
+      if (typeof cell.restoreOldValue === "function") {
+        cell.restoreOldValue();
+      }
+    }
+    return;
+  }
+  try {
+    await postWanAction(`/routes-wan/nat-rules/${data.id}/edit`, data, csrf, { reload: false });
+    showTransientGridStatus("Saved");
+    await refreshNetworkSideStack();
+  } catch (error) {
+    showWanMessage("routes-wan-nat-error", error instanceof Error ? error.message : "The NAT rule could not be saved.");
+    if (typeof cell.restoreOldValue === "function") {
+      cell.restoreOldValue();
+    }
+  }
+}
+
 async function deleteWanRouteFromMenu(row, csrf) {
   clearCaMessage("routes-wan-route-error");
   const data = row.getData();
@@ -2534,6 +2584,27 @@ async function deleteWanRouteFromMenu(row, csrf) {
     await postWanAction(`/routes-wan/routes/${data.id}/delete`, {}, csrf);
   } catch (error) {
     showWanMessage("routes-wan-route-error", error instanceof Error ? error.message : "The route could not be deleted.");
+  }
+}
+
+async function deleteWanNatRuleFromMenu(row, csrf) {
+  clearCaMessage("routes-wan-nat-error");
+  const data = row.getData();
+  if (data.is_new) {
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `Delete NAT rule ${data.name}?`,
+    message: "This removes the NAT rule from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.",
+    label: "Delete NAT rule",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await postWanAction(`/routes-wan/nat-rules/${data.id}/delete`, {}, csrf);
+  } catch (error) {
+    showWanMessage("routes-wan-nat-error", error instanceof Error ? error.message : "The NAT rule could not be deleted.");
   }
 }
 
@@ -2558,6 +2629,104 @@ async function deleteWanPolicyFromMenu(row, csrf) {
   }
 }
 
+function initializeRoutesWanNatTable() {
+  const tableElement = document.getElementById("routes-wan-nat-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  if (typeof Tabulator === "undefined") {
+    showWanMessage("routes-wan-nat-error", "Tabulator did not load. Showing the fallback table.");
+    return;
+  }
+  const csrf = tableElement.dataset.csrf || "";
+  const targets = JSON.parse(tableElement.dataset.natTargetOptions || "[]");
+  const targetValues = Object.fromEntries(targets.map((target) => [target.name, target.label]));
+  const defaultTarget = targets[0]?.name || "";
+  const rows = [...JSON.parse(tableElement.dataset.natRules || "[]"), newWanNatRuleRow(defaultTarget)];
+  try {
+    new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "420px",
+      rowHeight: 28,
+      placeholder: "No NAT rules configured.",
+      reactiveData: false,
+      rowContextMenu: [
+        {
+          label: "Delete NAT rule",
+          action: (_event, row) => deleteWanNatRuleFromMenu(row, csrf),
+          disabled: (component) => component.getData().is_new,
+        },
+      ],
+      columns: [
+        {
+          title: "Name",
+          field: "name",
+          editor: "input",
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add NAT rule here"),
+          minWidth: 160,
+          cellEdited: (cell) => autoSaveWanNatRule(cell, csrf),
+        },
+        {
+          title: "Source",
+          field: "source",
+          editor: "input",
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "any or CIDR"),
+          minWidth: 170,
+          cellEdited: (cell) => autoSaveWanNatRule(cell, csrf),
+        },
+        {
+          title: "Outbound",
+          field: "outbound_interface",
+          editor: "list",
+          editorParams: { values: targetValues },
+          formatter: (cell) => escapeHtml(targetValues[cell.getValue()] || cell.getValue() || "choose interface..."),
+          minWidth: 230,
+          cellEdited: (cell) => autoSaveWanNatRule(cell, csrf),
+        },
+        {
+          title: "Masq",
+          field: "masquerade",
+          formatter: "tickCross",
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 90,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveWanNatRule(cell, csrf),
+        },
+        {
+          title: "Priority",
+          field: "priority",
+          editor: "number",
+          width: 100,
+          cellEdited: (cell) => autoSaveWanNatRule(cell, csrf),
+        },
+        {
+          title: "Enabled",
+          field: "enabled",
+          formatter: "tickCross",
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 100,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveWanNatRule(cell, csrf),
+        },
+        { title: "Description", field: "description", editor: "input", minWidth: 180, cellEdited: (cell) => autoSaveWanNatRule(cell, csrf) },
+      ],
+      rowFormatter: (row) => {
+        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+      },
+    });
+    if (fallback) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    showWanMessage("routes-wan-nat-error", error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
+  }
+}
+
 function initializeRoutesWanRoutesTable() {
   const tableElement = document.getElementById("routes-wan-routes-table");
   if (!(tableElement instanceof HTMLElement)) {
@@ -2573,7 +2742,6 @@ function initializeRoutesWanRoutesTable() {
   const targetValues = Object.fromEntries(targets.map((target) => [target.name, target.label]));
   const policyOptions = JSON.parse(tableElement.dataset.policyOptions || "[]");
   const policyValues = wanPolicyValues(policyOptions);
-  const modeValues = roleValues(JSON.parse(tableElement.dataset.modeOptions || "[]"));
   const defaultTarget = targets[0]?.name || "";
   const rows = [...JSON.parse(tableElement.dataset.routes || "[]"), newWanRouteRow(defaultTarget)];
   try {
@@ -2625,14 +2793,6 @@ function initializeRoutesWanRoutesTable() {
           editorParams: { values: policyValues },
           formatter: (cell) => wanPolicyFormatter(cell, policyValues),
           minWidth: 150,
-          cellEdited: (cell) => autoSaveWanRoute(cell, csrf),
-        },
-        {
-          title: "Mode",
-          field: "wan_mode",
-          editor: "list",
-          editorParams: { values: modeValues },
-          width: 110,
           cellEdited: (cell) => autoSaveWanRoute(cell, csrf),
         },
         {
@@ -5445,6 +5605,7 @@ document.addEventListener("DOMContentLoaded", initializeServicesTable);
 document.addEventListener("DOMContentLoaded", initializeUsersTable);
 document.addEventListener("DOMContentLoaded", initializeUserPasswordForm);
 document.addEventListener("DOMContentLoaded", initializeRoutesWanRoutesTable);
+document.addEventListener("DOMContentLoaded", initializeRoutesWanNatTable);
 document.addEventListener("DOMContentLoaded", initializeRoutesWanPoliciesTable);
 document.addEventListener("DOMContentLoaded", initializePhysicalInterfacesTable);
 document.addEventListener("DOMContentLoaded", initializeVlanInterfacesTable);

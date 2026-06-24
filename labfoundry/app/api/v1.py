@@ -29,6 +29,7 @@ from labfoundry.app.models import (
     FirewallSettings,
     Job,
     KmsSettings,
+    NatRule,
     PhysicalInterface,
     Route,
     ServiceState,
@@ -75,6 +76,8 @@ from labfoundry.app.schemas import (
     FirewallStatusResponse,
     IdentityResponse,
     JobResponse,
+    NatRuleCreate,
+    NatRuleResponse,
     PhysicalInterfaceResponse,
     RouteCreate,
     RouteResponse,
@@ -91,6 +94,9 @@ from labfoundry.app.schemas import (
     WanPolicyResponse,
     WanStatusResponse,
 )
+from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY, firewall_interface_networks, firewall_source_group_state
+from labfoundry.app.services.networking import normalize_interface_mode
+from labfoundry.app.services.routes_wan import validate_nat_source
 from labfoundry.app.security import (
     Identity,
     ALL_SCOPES,
@@ -773,7 +779,21 @@ def apply_vlan(vlan_id: int, identity: Annotated[Identity, Depends(require_scope
 @router.get("/routes", response_model=list[RouteResponse], tags=["Routes"], operation_id="listRoutes")
 def list_routes(identity: Annotated[Identity, Depends(require_scope("read:routes"))], db: Session = Depends(get_db)) -> list[RouteResponse]:
     rows = db.execute(select(Route).options(selectinload(Route.wan_policy)).order_by(Route.destination_cidr)).scalars().all()
-    return [RouteResponse.model_validate(row) for row in rows]
+    return [route_response(row) for row in rows]
+
+
+def route_response(route: Route) -> RouteResponse:
+    return RouteResponse(
+        id=route.id,
+        destination_cidr=route.destination_cidr,
+        gateway=route.gateway,
+        interface_name=route.interface_name,
+        metric=route.metric,
+        enabled=route.enabled,
+        wan_policy_id=route.wan_policy_id,
+        wan_mode="interface",
+        wan_policy=WanPolicyResponse.model_validate(route.wan_policy) if route.wan_policy else None,
+    )
 
 
 @router.post("/routes", response_model=RouteResponse, status_code=201, tags=["Routes"], operation_id="createRoute")
@@ -783,7 +803,7 @@ def create_route(payload: RouteCreate, identity: Annotated[Identity, Depends(req
     db.commit()
     db.refresh(route)
     record_audit(db, actor=identity.username, action="create_route", resource_type="route", resource_id=str(route.id))
-    return RouteResponse.model_validate(db.get(Route, route.id))
+    return route_response(db.get(Route, route.id))
 
 
 @router.get("/routes/{route_id}", response_model=RouteResponse, tags=["Routes"], operation_id="getRoute")
@@ -791,7 +811,7 @@ def get_route(route_id: int, identity: Annotated[Identity, Depends(require_scope
     route = db.execute(select(Route).options(selectinload(Route.wan_policy)).where(Route.id == route_id)).scalar_one_or_none()
     if not route:
         raise HTTPException(status_code=404, detail="Route not found")
-    return RouteResponse.model_validate(route)
+    return route_response(route)
 
 
 @router.patch("/routes/{route_id}", response_model=RouteResponse, tags=["Routes"], operation_id="updateRoute")
@@ -837,16 +857,6 @@ def disable_route(route_id: int, identity: Annotated[Identity, Depends(require_s
     db.commit()
     record_audit(db, actor=identity.username, action="disable_route", resource_type="route", resource_id=str(route_id))
     return get_route(route_id, identity, db)
-
-
-@router.post("/routes/{route_id}/apply", response_model=ServiceActionResponse, tags=["Routes"], operation_id="applyRoute")
-def apply_route(route_id: int, identity: Annotated[Identity, Depends(require_scope("write:routes"))], db: Session = Depends(get_db)) -> ServiceActionResponse:
-    route = db.get(Route, route_id)
-    if not route:
-        raise HTTPException(status_code=404, detail="Route not found")
-    result = SystemAdapter().apply_wan_policy(route.interface_name, route.wan_policy.name if route.wan_policy else "none")
-    record_audit(db, actor=identity.username, action="apply_route_dry_run", resource_type="route", resource_id=str(route_id), detail=" ".join(result.command))
-    return ServiceActionResponse(service=route.interface_name, action="apply", dry_run=result.dry_run, command=result.command)
 
 
 @router.post("/routes/{route_id}/wan-policy", response_model=RouteResponse, tags=["Routes"], operation_id="assignRouteWanPolicy")
@@ -924,24 +934,101 @@ def delete_wan_policy(policy_id: int, identity: Annotated[Identity, Depends(requ
     return Response(status_code=204)
 
 
-@router.post("/wan/apply", response_model=WanStatusResponse, tags=["WAN"], operation_id="applyWanPolicy")
-def apply_wan(identity: Annotated[Identity, Depends(require_scope("write:wan"))], db: Session = Depends(get_db)) -> WanStatusResponse:
-    record_audit(db, actor=identity.username, action="apply_wan_dry_run", resource_type="wan")
-    return get_wan_status(identity, db)
+def nat_outbound_target_names(db: Session) -> set[str]:
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlans = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
+    names = {
+        interface.name
+        for interface in interfaces
+        if interface.ip_cidr and normalize_interface_mode(interface.mode) != "trunk"
+    }
+    names.update({vlan.name for vlan in vlans if vlan.enabled and vlan.ip_cidr})
+    return names
 
 
-@router.post("/wan/clear", response_model=WanStatusResponse, tags=["WAN"], operation_id="clearWanPolicy")
-def clear_wan(identity: Annotated[Identity, Depends(require_scope("write:wan"))], db: Session = Depends(get_db)) -> WanStatusResponse:
-    record_audit(db, actor=identity.username, action="clear_wan_dry_run", resource_type="wan")
-    return get_wan_status(identity, db)
+def nat_source_group_ids(db: Session) -> set[str]:
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlans = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
+    networks = firewall_interface_networks(interfaces, vlans)
+    state = firewall_source_group_state(setting_value(db, FIREWALL_SOURCE_GROUPS_SETTING_KEY), networks)
+    return {str(group.get("id", "")) for group in state["groups"]}
+
+
+def validate_nat_rule_payload(payload: NatRuleCreate, db: Session) -> None:
+    source_errors = validate_nat_source(payload.source, nat_source_group_ids(db))
+    if source_errors:
+        raise HTTPException(status_code=422, detail=source_errors[0])
+    if payload.outbound_interface not in nat_outbound_target_names(db):
+        raise HTTPException(status_code=422, detail="Choose an access physical interface or enabled VLAN interface with an IP CIDR.")
+    if not payload.masquerade:
+        raise HTTPException(status_code=422, detail="NAT v1 supports masquerade only.")
+
+
+@router.get("/nat/rules", response_model=list[NatRuleResponse], tags=["NAT"], operation_id="listNatRules")
+def list_nat_rules(identity: Annotated[Identity, Depends(require_scope("read:wan"))], db: Session = Depends(get_db)) -> list[NatRuleResponse]:
+    rows = db.execute(select(NatRule).order_by(NatRule.priority, NatRule.name)).scalars().all()
+    return [NatRuleResponse.model_validate(row) for row in rows]
+
+
+@router.post("/nat/rules", response_model=NatRuleResponse, status_code=201, tags=["NAT"], operation_id="createNatRule")
+def create_nat_rule(payload: NatRuleCreate, identity: Annotated[Identity, Depends(require_scope("write:wan"))], db: Session = Depends(get_db)) -> NatRuleResponse:
+    validate_nat_rule_payload(payload, db)
+    rule = NatRule(**payload.model_dump())
+    db.add(rule)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"NAT rule {rule.name} already exists") from None
+    db.refresh(rule)
+    record_audit(db, actor=identity.username, action="create_nat_rule", resource_type="nat_rule", resource_id=str(rule.id))
+    return NatRuleResponse.model_validate(rule)
+
+
+@router.get("/nat/rules/{rule_id}", response_model=NatRuleResponse, tags=["NAT"], operation_id="getNatRule")
+def get_nat_rule(rule_id: int, identity: Annotated[Identity, Depends(require_scope("read:wan"))], db: Session = Depends(get_db)) -> NatRuleResponse:
+    rule = db.get(NatRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="NAT rule not found")
+    return NatRuleResponse.model_validate(rule)
+
+
+@router.patch("/nat/rules/{rule_id}", response_model=NatRuleResponse, tags=["NAT"], operation_id="updateNatRule")
+def update_nat_rule(rule_id: int, payload: NatRuleCreate, identity: Annotated[Identity, Depends(require_scope("write:wan"))], db: Session = Depends(get_db)) -> NatRuleResponse:
+    rule = db.get(NatRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="NAT rule not found")
+    validate_nat_rule_payload(payload, db)
+    for key, value in payload.model_dump().items():
+        setattr(rule, key, value)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"NAT rule {rule.name} already exists") from None
+    db.refresh(rule)
+    record_audit(db, actor=identity.username, action="update_nat_rule", resource_type="nat_rule", resource_id=str(rule.id))
+    return NatRuleResponse.model_validate(rule)
+
+
+@router.delete("/nat/rules/{rule_id}", status_code=204, tags=["NAT"], operation_id="deleteNatRule")
+def delete_nat_rule(rule_id: int, identity: Annotated[Identity, Depends(require_scope("write:wan"))], db: Session = Depends(get_db)) -> Response:
+    rule = db.get(NatRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="NAT rule not found")
+    db.delete(rule)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_nat_rule", resource_type="nat_rule", resource_id=str(rule_id))
+    return Response(status_code=204)
 
 
 @router.get("/wan/status", response_model=WanStatusResponse, tags=["WAN"], operation_id="getWanStatus")
 def get_wan_status(identity: Annotated[Identity, Depends(require_scope("read:wan"))], db: Session = Depends(get_db)) -> WanStatusResponse:
     routes = db.execute(select(Route).where(Route.wan_policy_id.is_not(None))).scalars().all()
+    nat_rules = db.execute(select(NatRule).where(NatRule.enabled.is_(True))).scalars().all()
     return WanStatusResponse(
         active_policy_count=len(routes),
-        managed_interfaces=sorted({route.interface_name for route in routes}),
+        managed_interfaces=sorted({route.interface_name for route in routes} | {rule.outbound_interface for rule in nat_rules}),
         dry_run=SystemAdapter().dry_run,
     )
 

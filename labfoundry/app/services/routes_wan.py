@@ -1,10 +1,16 @@
 from ipaddress import ip_address, ip_network
+import re
 
-from labfoundry.app.models import Route, WanPolicy
+from labfoundry.app.models import NatRule, Route, WanPolicy
+from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX, source_group_to_rule_source
 
 
-WAN_CONFIG_PATH = "/etc/labfoundry/network/labfoundry-wan.conf"
-WAN_MODES = ["interface", "route"]
+WAN_CONFIG_PATH = "/var/lib/labfoundry/apply/wan/labfoundry-wan.conf"
+WAN_MODES = ["interface"]
+
+
+def _bool_value(value: bool) -> str:
+    return "true" if value else "false"
 
 
 def wan_policy_to_dict(policy: WanPolicy) -> dict:
@@ -33,7 +39,20 @@ def route_to_dict(route: Route) -> dict:
         "enabled": route.enabled,
         "wan_policy_id": route.wan_policy_id or "",
         "wan_policy_name": route.wan_policy.name if route.wan_policy else "",
-        "wan_mode": route.wan_mode,
+        "wan_mode": "interface",
+    }
+
+
+def nat_rule_to_dict(rule: NatRule) -> dict:
+    return {
+        "id": rule.id,
+        "name": rule.name,
+        "enabled": rule.enabled,
+        "source": rule.source,
+        "outbound_interface": rule.outbound_interface,
+        "masquerade": rule.masquerade,
+        "priority": rule.priority,
+        "description": rule.description or "",
     }
 
 
@@ -73,7 +92,42 @@ def netem_args(policy: WanPolicy) -> list[str]:
     return args
 
 
-def validate_wan_state(routes: list[Route], policies: list[WanPolicy], target_names: set[str]) -> list[str]:
+def validate_nat_source(value: str, source_group_ids: set[str] | None = None) -> list[str]:
+    source_group_ids = source_group_ids or set()
+    raw_value = value.strip()
+    if not raw_value:
+        return ["NAT source is required."]
+    if raw_value.lower() == "any":
+        return []
+    if raw_value.lower().startswith(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):
+        group_id = raw_value[len(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX) :].strip()
+        if group_id in source_group_ids:
+            return []
+        return [f"NAT source references a firewall group that does not exist: {raw_value}."]
+    errors: list[str] = []
+    for item in re.split(r"[\n,]+", raw_value):
+        source = item.strip()
+        if not source:
+            continue
+        try:
+            network = ip_network(source, strict=False)
+        except ValueError:
+            errors.append("NAT source must be 'any', a firewall group reference, or valid IPv4 CIDRs.")
+            break
+        if network.version != 4:
+            errors.append("NAT v1 supports IPv4 source CIDRs only.")
+            break
+    return errors
+
+
+def validate_wan_state(
+    routes: list[Route],
+    policies: list[WanPolicy],
+    target_names: set[str],
+    nat_rules: list[NatRule] | None = None,
+    wan_target_names: set[str] | None = None,
+    source_group_ids: set[str] | None = None,
+) -> list[str]:
     errors: list[str] = []
     policy_ids = {policy.id for policy in policies}
     for route in routes:
@@ -93,6 +147,23 @@ def validate_wan_state(routes: list[Route], policies: list[WanPolicy], target_na
         if route.wan_policy_id and route.wan_policy_id not in policy_ids:
             errors.append(f"Route {route.destination_cidr} references a missing WAN policy.")
 
+    seen_nat_names: set[str] = set()
+    wan_target_names = wan_target_names or set()
+    for rule in nat_rules or []:
+        if not rule.name.strip():
+            errors.append("NAT rule name is required.")
+        normalized_name = rule.name.strip().lower()
+        if normalized_name in seen_nat_names:
+            errors.append(f"NAT rule {rule.name} is duplicated.")
+        seen_nat_names.add(normalized_name)
+        errors.extend(validate_nat_source(rule.source, source_group_ids))
+        if rule.outbound_interface not in wan_target_names:
+            errors.append(f"NAT rule {rule.name} must use an access physical interface or enabled VLAN with an IP CIDR.")
+        if rule.priority < 0:
+            errors.append(f"NAT rule {rule.name} has a negative priority.")
+        if not rule.masquerade:
+            errors.append(f"NAT rule {rule.name} must use masquerade; destination NAT and port forwarding are not supported in v1.")
+
     for policy in policies:
         if not policy.name.strip():
             errors.append("WAN policy name is required.")
@@ -111,33 +182,156 @@ def validate_wan_state(routes: list[Route], policies: list[WanPolicy], target_na
     return errors
 
 
-def render_wan_config(routes: list[Route]) -> str:
+def _policy_by_id(policies: list[WanPolicy]) -> dict[int, WanPolicy]:
+    return {policy.id: policy for policy in policies}
+
+
+def _nat_source_resolved(rule: NatRule, source_groups: list[dict] | None = None) -> str:
+    source = rule.source.strip()
+    if source.lower().startswith(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):
+        group_id = source[len(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX) :].strip()
+        groups_by_id = {str(group.get("id", "")): group for group in source_groups or []}
+        resolved = source_group_to_rule_source(groups_by_id.get(group_id), groups_by_id)
+        return ", ".join(item.strip() for item in re.split(r"[\n,]+", resolved) if item.strip())
+    return source or "any"
+
+
+def _nft_source_expr(source: str) -> str:
+    source_value = source.strip()
+    if not source_value or source_value.lower() == "any":
+        return ""
+    values = [item.strip() for item in re.split(r"[\n,]+", source_value) if item.strip()]
+    if len(values) == 1:
+        return f"ip saddr {values[0]} "
+    return f"ip saddr {{ {', '.join(values)} }} "
+
+
+def render_wan_config(
+    routes: list[Route],
+    policies: list[WanPolicy] | None = None,
+    nat_rules: list[NatRule] | None = None,
+    targets: list[dict[str, str]] | None = None,
+    removed_routes: list[dict[str, str]] | None = None,
+    source_groups: list[dict] | None = None,
+) -> str:
+    policies = policies or []
+    nat_rules = nat_rules or []
+    targets = targets or []
+    policy_lookup = _policy_by_id(policies)
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
-        "# Dry-run preview of desired route and WAN simulation state.",
+        "# Desired route, NAT, and WAN simulation state for Photon appliances.",
         "",
-        "[routes]",
+        "[targets]",
     ]
-    for route in routes:
-        status = "enabled" if route.enabled else "disabled"
-        gateway = route.gateway or "direct"
-        policy = route.wan_policy.name if route.wan_policy else "none"
-        lines.append(
-            f"route={route.destination_cidr},gateway={gateway},interface={route.interface_name},metric={route.metric},wan_policy={policy},status={status}"
+    for target in targets:
+        lines.extend(
+            [
+                f"target={target['name']}",
+                f"  kind={target.get('kind', '')}",
+                f"  role={target.get('role', '')}",
+                f"  ip_cidr={target.get('ip_cidr', '')}",
+                f"  wan={_bool_value(bool(target.get('wan')))}",
+            ]
         )
 
-    lines.extend(["", "[commands]"])
+    lines.extend(
+        [
+            "",
+            "[routes]",
+        ]
+    )
+    for route in routes:
+        policy = policy_lookup.get(route.wan_policy_id or 0) or route.wan_policy
+        lines.extend(
+            [
+                f"route={route.destination_cidr}",
+                f"  gateway={route.gateway or ''}",
+                f"  interface={route.interface_name}",
+                f"  metric={route.metric}",
+                f"  enabled={_bool_value(route.enabled)}",
+                f"  wan_policy={policy.name if policy else ''}",
+                "  wan_mode=interface",
+            ]
+        )
+
+    if removed_routes:
+        lines.extend(["", "[removed_routes]"])
+        for route in removed_routes:
+            lines.extend(
+                [
+                    f"route={route.get('destination_cidr', '')}",
+                    f"  gateway={route.get('gateway', '')}",
+                    f"  interface={route.get('interface_name', '')}",
+                    f"  metric={route.get('metric', '100')}",
+                ]
+            )
+
+    lines.extend(["", "[nat_rules]"])
+    for rule in sorted(nat_rules, key=lambda item: item.priority):
+        lines.extend(
+            [
+                f"nat={rule.name}",
+                f"  enabled={_bool_value(rule.enabled)}",
+                f"  source={rule.source}",
+                f"  source_resolved={_nat_source_resolved(rule, source_groups)}",
+                f"  outbound_interface={rule.outbound_interface}",
+                f"  masquerade={_bool_value(rule.masquerade)}",
+                f"  priority={rule.priority}",
+                f"  description={(rule.description or '').replace(chr(10), ' ')}",
+            ]
+        )
+
+    lines.extend(["", "[wan_policies]"])
+    for policy in policies:
+        lines.extend(
+            [
+                f"policy={policy.name}",
+                f"  enabled={_bool_value(policy.enabled)}",
+                f"  latency_ms={policy.latency_ms}",
+                f"  jitter_ms={policy.jitter_ms}",
+                f"  packet_loss_percent={policy.packet_loss_percent}",
+                f"  bandwidth_mbit={policy.bandwidth_mbit or ''}",
+                f"  corrupt_percent={policy.corrupt_percent or 0.0}",
+                f"  duplicate_percent={policy.duplicate_percent or 0.0}",
+                f"  reorder_percent={policy.reorder_percent or 0.0}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "[rendered_nftables_nat]",
+            "table ip labfoundry_nat {",
+            "  chain postrouting {",
+            "    type nat hook postrouting priority srcnat; policy accept;",
+        ]
+    )
+    for rule in sorted([item for item in nat_rules if item.enabled], key=lambda item: item.priority):
+        source_expr = _nft_source_expr(_nat_source_resolved(rule, source_groups))
+        comment = rule.name.replace('"', "'")
+        lines.append(f'    {source_expr}oifname "{rule.outbound_interface}" masquerade comment "{comment}"')
+    lines.extend(["  }", "}", "", "[commands]"])
+
+    for rule in sorted([item for item in nat_rules if item.enabled], key=lambda item: item.priority):
+        lines.append(f"sysctl -w net.ipv4.ip_forward=1  # required for NAT rule {rule.name}")
+    if any(rule.enabled for rule in nat_rules):
+        lines.append("nft -f /etc/labfoundry/nftables.d/labfoundry-nat.nft")
+
     for route in routes:
         if not route.enabled:
-            lines.append(f"# disabled: {route.destination_cidr}")
+            lines.append(f"ip route del {route.destination_cidr} dev {route.interface_name}  # disabled desired route")
             continue
         command = ["ip", "route", "replace", route.destination_cidr]
         if route.gateway:
             command.extend(["via", route.gateway])
         command.extend(["dev", route.interface_name, "metric", str(route.metric)])
         lines.append(" ".join(command))
-        if route.wan_policy and route.wan_policy.enabled:
-            lines.append(" ".join(["tc", "qdisc", "replace", "dev", route.interface_name, "root", "netem", *netem_args(route.wan_policy)]))
+        policy = policy_lookup.get(route.wan_policy_id or 0) or route.wan_policy
+        if policy and policy.enabled:
+            lines.append(" ".join(["tc", "qdisc", "replace", "dev", route.interface_name, "root", "netem", *netem_args(policy)]))
         else:
             lines.append(" ".join(["tc", "qdisc", "del", "dev", route.interface_name, "root"]))
+    for route in removed_routes or []:
+        lines.append(f"ip route del {route.get('destination_cidr', '')} dev {route.get('interface_name', '')}  # removed managed route")
     return "\n".join(lines).strip() + "\n"
