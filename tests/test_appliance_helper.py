@@ -1088,6 +1088,40 @@ def test_vcf_offline_depot_helper_removes_disabled_nginx_site(monkeypatch, tmp_p
     assert ["/usr/sbin/nginx", "-t"] in commands
 
 
+def patch_appliance_settings_nginx_paths(monkeypatch, helper, tmp_path):
+    nginx_include = tmp_path / "nginx" / "conf.d" / "labfoundry.conf"
+    nginx_main = tmp_path / "nginx" / "nginx.conf"
+    nginx_sites = tmp_path / "nginx" / "sites.d"
+    nginx_management_site = nginx_sites / "management.conf"
+    nginx_main.parent.mkdir(parents=True, exist_ok=True)
+    nginx_main.write_text(
+        "\n".join(
+            [
+                "events { worker_connections 1024; }",
+                "",
+                "http {",
+                "    include mime.types;",
+                "    server {",
+                "        listen 80;",
+                "    }",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(helper, "NGINX_CONF_INCLUDE_PATH", nginx_include)
+    monkeypatch.setattr(helper, "NGINX_MAIN_CONFIG_PATH", nginx_main)
+    monkeypatch.setattr(helper, "NGINX_SITES_DIR", nginx_sites)
+    monkeypatch.setattr(helper, "NGINX_MANAGEMENT_SITE_PATH", nginx_management_site)
+    return {
+        "include": nginx_include,
+        "main": nginx_main,
+        "sites": nginx_sites,
+        "management_site": nginx_management_site,
+    }
+
+
 def appliance_settings_json(
     *,
     resolver_mode: str = "local_dns",
@@ -1257,10 +1291,58 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     assert any(command[:5] == ["/usr/bin/systemd-run", "--quiet", "--collect", "--on-active=3", "--unit=labfoundry-management-ui-restart"] for command in commands)
 
 
+def test_appliance_settings_helper_writes_http_management_proxy_without_https(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "appliance-settings"
+    dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
+    timesyncd_dir = tmp_path / "timesyncd.conf.d"
+    apply_dir.mkdir(parents=True)
+    nginx_paths = patch_appliance_settings_nginx_paths(monkeypatch, helper, tmp_path)
+    config_path = apply_dir / "labfoundry-settings.json"
+    config_path.write_text(appliance_settings_json(management_https_enabled=False), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
+    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(
+        helper.shutil,
+        "which",
+        lambda command: {
+            "hostnamectl": "/usr/bin/hostnamectl",
+            "systemd-run": "/usr/bin/systemd-run",
+            "nginx": "/usr/sbin/nginx",
+        }.get(command),
+    )
+
+    assert helper._handle_appliance_settings("apply", [str(config_path)]) == 0
+
+    dropin = (dropin_dir / "management-https.conf").read_text(encoding="utf-8")
+    assert "--host 127.0.0.1 --port 8000" in dropin
+    management_site = nginx_paths["management_site"].read_text(encoding="utf-8")
+    assert "listen 80 default_server;" in management_site
+    assert "return 308 https://$host$request_uri;" not in management_site
+    assert "listen 443" not in management_site
+    assert "ssl_certificate" not in management_site
+    assert "proxy_pass http://127.0.0.1:8000;" in management_site
+    assert "proxy_set_header X-Forwarded-Proto http;" in management_site
+    assert ["systemctl", "enable", "--now", "nginx"] in commands
+    assert ["/usr/sbin/nginx", "-t"] in commands
+    assert any(command[:5] == ["/usr/bin/systemd-run", "--quiet", "--collect", "--on-active=3", "--unit=labfoundry-management-ui-restart"] for command in commands)
+
+
 def test_appliance_settings_helper_applies_local_resolver_and_timesyncd(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "appliance-settings"
     networkd_dir = tmp_path / "etc" / "systemd" / "network"
+    dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
     timesyncd_dir = tmp_path / "etc" / "systemd" / "timesyncd.conf.d"
     apply_dir.mkdir(parents=True)
     networkd_dir.mkdir(parents=True)
@@ -1281,6 +1363,7 @@ def test_appliance_settings_helper_applies_local_resolver_and_timesyncd(monkeypa
     )
     config_path = apply_dir / "labfoundry-settings.json"
     config_path.write_text(appliance_settings_json(), encoding="utf-8")
+    patch_appliance_settings_nginx_paths(monkeypatch, helper, tmp_path)
     commands: list[list[str]] = []
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1289,10 +1372,19 @@ def test_appliance_settings_helper_applies_local_resolver_and_timesyncd(monkeypa
 
     monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", mgmt_network)
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
     monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
     monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
     monkeypatch.setattr(helper, "_run", fake_run)
-    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/hostnamectl" if command == "hostnamectl" else None)
+    monkeypatch.setattr(
+        helper.shutil,
+        "which",
+        lambda command: {
+            "hostnamectl": "/usr/bin/hostnamectl",
+            "nginx": "/usr/sbin/nginx",
+        }.get(command),
+    )
 
     assert helper._handle_appliance_settings("apply", [str(config_path)]) == 0
 
@@ -1313,6 +1405,7 @@ def test_appliance_settings_helper_applies_external_resolver_without_catchall(mo
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "appliance-settings"
     networkd_dir = tmp_path / "etc" / "systemd" / "network"
+    dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
     timesyncd_dir = tmp_path / "etc" / "systemd" / "timesyncd.conf.d"
     apply_dir.mkdir(parents=True)
     networkd_dir.mkdir(parents=True)
@@ -1326,6 +1419,7 @@ def test_appliance_settings_helper_applies_external_resolver_without_catchall(mo
         appliance_settings_json(resolver_mode="external", resolver_servers=["1.1.1.1", "9.9.9.9"], local_dns_enabled=False),
         encoding="utf-8",
     )
+    patch_appliance_settings_nginx_paths(monkeypatch, helper, tmp_path)
     commands: list[list[str]] = []
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1334,10 +1428,19 @@ def test_appliance_settings_helper_applies_external_resolver_without_catchall(mo
 
     monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", mgmt_network)
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
     monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
     monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
     monkeypatch.setattr(helper, "_run", fake_run)
-    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/hostnamectl" if command == "hostnamectl" else None)
+    monkeypatch.setattr(
+        helper.shutil,
+        "which",
+        lambda command: {
+            "hostnamectl": "/usr/bin/hostnamectl",
+            "nginx": "/usr/sbin/nginx",
+        }.get(command),
+    )
 
     assert helper._handle_appliance_settings("apply", [str(config_path)]) == 0
 

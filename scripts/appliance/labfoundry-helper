@@ -851,15 +851,44 @@ def _remove_nginx_site(site_path: Path) -> int:
     return _reload_nginx()
 
 
-def _management_nginx_config(payload: dict, cert_path: Path, key_path: Path) -> str:
+def _management_proxy_location(upstream_host: str, upstream_port: int, forwarded_proto: str) -> list[str]:
+    return [
+        "  client_max_body_size 512m;",
+        "  location / {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_http_version 1.1;",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        f"    proxy_set_header X-Forwarded-Proto {forwarded_proto};",
+        "    proxy_set_header Upgrade $http_upgrade;",
+        '    proxy_set_header Connection "upgrade";',
+        "  }",
+    ]
+
+
+def _management_nginx_config(payload: dict, cert_path: Path | None = None, key_path: Path | None = None) -> str:
     fqdn = str(payload["fqdn"])
+    https_enabled = bool(payload.get("management_https_enabled"))
     public_http_port = int(payload.get("management_public_http_port") or 80)
     public_https_port = int(payload.get("management_public_https_port") or 443)
     upstream_host = str(payload.get("management_upstream_host") or "127.0.0.1")
     upstream_port = int(payload.get("management_upstream_port") or payload.get("management_http_port") or 8000)
-    return "\n".join(
+    lines = ["# Managed by LabFoundry. Local changes may be overwritten."]
+    if not https_enabled:
+        lines.extend(
+            [
+                "server {",
+                f"  listen {public_http_port} default_server;",
+                f"  server_name {fqdn} _;",
+                *_management_proxy_location(upstream_host, upstream_port, "http"),
+                "}",
+                "",
+            ]
+        )
+        return "\n".join(lines)
+    lines.extend(
         [
-            "# Managed by LabFoundry. Local changes may be overwritten.",
             "server {",
             f"  listen {public_http_port} default_server;",
             "  server_name _;",
@@ -871,21 +900,12 @@ def _management_nginx_config(payload: dict, cert_path: Path, key_path: Path) -> 
             f"  server_name {fqdn};",
             f"  ssl_certificate {cert_path};",
             f"  ssl_certificate_key {key_path};",
-            "  client_max_body_size 512m;",
-            "  location / {",
-            f"    proxy_pass http://{upstream_host}:{upstream_port};",
-            "    proxy_http_version 1.1;",
-            "    proxy_set_header Host $host;",
-            "    proxy_set_header X-Real-IP $remote_addr;",
-            "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
-            "    proxy_set_header X-Forwarded-Proto https;",
-            "    proxy_set_header Upgrade $http_upgrade;",
-            '    proxy_set_header Connection "upgrade";',
-            "  }",
+            *_management_proxy_location(upstream_host, upstream_port, "https"),
             "}",
             "",
         ]
     )
+    return "\n".join(lines)
 
 
 def _configure_labfoundry_management_https(payload: dict) -> int:
@@ -896,29 +916,24 @@ def _configure_labfoundry_management_https(payload: dict) -> int:
     legacy_redirect = _disable_legacy_http_redirect()
     if legacy_redirect != 0:
         return legacy_redirect
+    cert_path: Path | None = None
+    key_path: Path | None = None
     if enabled:
         cert_path = _ca_managed_path(str(payload["management_https_cert_path"]), "management_https_cert_path")
         key_path = _ca_managed_path(str(payload["management_https_key_path"]), "management_https_key_path")
         _grant_labfoundry_service_key_read(key_path)
-        site_apply = _install_nginx_site(NGINX_MANAGEMENT_SITE_PATH, _management_nginx_config(payload, cert_path, key_path))
-        if site_apply != 0:
-            return site_apply
-        next_text = _labfoundry_service_loopback_dropin(upstream_host, port)
-        LABFOUNDRY_SERVICE_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
-        current_text = LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.read_text(encoding="utf-8") if LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.exists() else ""
-        if current_text != next_text:
-            tmp_target = LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.with_suffix(".conf.tmp")
-            tmp_target.write_text(next_text, encoding="utf-8")
-            os.chmod(tmp_target, 0o644)
-            tmp_target.replace(LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH)
-            changed = True
-    else:
-        remove_site = _remove_nginx_site(NGINX_MANAGEMENT_SITE_PATH)
-        if remove_site != 0:
-            return remove_site
-        if LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.exists():
-            LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.unlink()
-            changed = True
+    site_apply = _install_nginx_site(NGINX_MANAGEMENT_SITE_PATH, _management_nginx_config(payload, cert_path, key_path))
+    if site_apply != 0:
+        return site_apply
+    next_text = _labfoundry_service_loopback_dropin(upstream_host, port)
+    LABFOUNDRY_SERVICE_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+    current_text = LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.read_text(encoding="utf-8") if LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.exists() else ""
+    if current_text != next_text:
+        tmp_target = LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.with_suffix(".conf.tmp")
+        tmp_target.write_text(next_text, encoding="utf-8")
+        os.chmod(tmp_target, 0o644)
+        tmp_target.replace(LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH)
+        changed = True
     if not changed:
         return 0
 
