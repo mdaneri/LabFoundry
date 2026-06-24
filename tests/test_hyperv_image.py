@@ -34,33 +34,30 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert 'default     = "192.168.49.30/24"' in template
     assert 'default     = "255.255.255.0"' in template
     assert 'default     = "192.168.49.254"' in template
-    assert 'variable "kickstart_iso_path"' in template
-    assert 'secondary_iso_images = local.secondary_kickstart_iso' in template
-    assert 'ks=/dev/sr1:/photon-ks.json' in template
-    assert "builder_boot_network_args" in template
-    assert "ip=${local.builder_static_address}::${var.builder_static_gateway}:${var.builder_static_netmask}:labfoundry:eth0:none" in template
-    assert "photon.media=cdrom${local.kickstart_network_args}" in template
+    assert 'variable "iso_contains_kickstart"' in template
+    assert "Iso_contains_kickstart must be true" in template
+    assert "secondary_iso_images" not in template
+    assert 'ks=cdrom:/photon-ks.json' in template
+    assert "photon.media=cdrom" in template
+    assert "http_content" not in template
+    assert "http_port_min" not in template
     assert 'default = "Default Switch"' not in template
     assert "build-photon-hyperv-image.ps1" in root_docs
     assert "create-hyperv-switches.ps1" in docs
     assert "builder_static_ip=192.168.49.30/24" in docs
-    assert "New-ISOFile.ps1" in docs
-    assert "labfoundry-photon-kickstart.iso" in docs
-    assert "Mounting secondary dvd drive" in docs
+    assert "labfoundry-photon-with-kickstart.iso" in docs
+    assert "Using remastered Photon ISO" in docs
     assert "[string]$SshPassword = 'VMware01!'" in wrapper
     assert "[string]$BootstrapAdminPassword = 'VMware01!'" in wrapper
-    assert "scripts/windows/New-ISOFile.ps1" in root_docs
-    assert "Thanks to TheDotSource" in root_docs
-    assert "Thanks to TheDotSource" in docs
-    assert "Join-Path $PSScriptRoot 'New-ISOFile.ps1'" in wrapper
-    assert "NewIsoFileUrl" not in wrapper
-    assert "New-ISOFile -source $ksSourceDir -destinationIso $resolvedKickstartIsoPath" in wrapper
-    assert "'-var', \"kickstart_iso_path=$resolvedKickstartIsoPath\"" in wrapper
-    assert "UseHttpKickstartFallback" in wrapper
+    assert "create_photon_kickstart_iso.py" in wrapper
+    assert "Using remastered Photon ISO" in wrapper
+    assert "Packer will boot a single DVD with embedded photon-ks.json." in wrapper
+    assert "'-var', \"iso_contains_kickstart=true\"" in wrapper
+    assert "UseHttpKickstartFallback" not in wrapper
     assert "/image/hyperv/build" in gitignore
-    vendored_iso_helper = Path("scripts/windows/New-ISOFile.ps1").read_text(encoding="utf-8")
-    assert "function New-ISOFile" in vendored_iso_helper
-    assert "IMAPI2FS.MsftFileSystemImage" in vendored_iso_helper
+    remaster_helper = Path("scripts/interop/create_photon_kickstart_iso.py").read_text(encoding="utf-8")
+    assert "iso.add_file" in remaster_helper
+    assert 'rr_name="photon-ks.json"' in remaster_helper
 
 
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():

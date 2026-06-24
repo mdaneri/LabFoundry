@@ -65,13 +65,11 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switc
 The Packer build VM uses the `LabFoundry-Mgmt` switch by default with temporary
 static address `192.168.49.30/24` and gateway `192.168.49.254`. This avoids
 fragile `Default Switch` host-IP detection while still giving the builder NAT
-internet access for `tdnf update`. The wrapper uses the vendored
-`scripts/windows/New-ISOFile.ps1` helper, writes a local `photon-ks.json`,
-creates a `LABFOUNDRYKS` ISO, and passes it to Packer as `kickstart_iso_path`;
-Photon then boots with `ks=/dev/sr1:/photon-ks.json`. Thanks to TheDotSource
-for the original New-ISOFile PowerShell helper that this vendored copy is based
-on. Raw `packer build .` remains available as an HTTP kickstart fallback, but
-the wrapper is the tested Windows Server 2025 path.
+internet access for `tdnf update`. The wrapper writes `photon-ks.json`, embeds
+it into a remastered Photon ISO, and passes that single ISO to Packer. Photon
+then boots with `ks=cdrom:/photon-ks.json`. Raw `packer build .` is
+intentionally blocked unless the ISO is marked as wrapper-prepared; the wrapper
+is the tested Windows Server 2025 path.
 
 The generated appliance intentionally keeps
 `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`. Real host mutation is staged per

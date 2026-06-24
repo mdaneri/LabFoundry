@@ -41,16 +41,11 @@ and `builder_static_gateway=192.168.49.254`. When `builder_static_ip` is set,
 the template automatically uses it as Packer's SSH target. Override those
 variables only when the management subnet is intentionally different.
 
-The wrapper uses the vendored `scripts/windows/New-ISOFile.ps1` helper, renders
-`photon-ks.json`, creates
-`image/hyperv/build/kickstart/labfoundry-photon-kickstart.iso`, and passes it to
-Packer as `kickstart_iso_path`. The Hyper-V builder mounts that file as a
-secondary DVD, and Photon boots with `ks=/dev/sr1:/photon-ks.json`. This avoids
-the Windows Server 2025 early-installer networking failure mode where Photon
-shows the EULA because it never fetched the HTTP kickstart.
-
-Thanks to TheDotSource for the original New-ISOFile PowerShell helper that the
-vendored copy is based on.
+The wrapper renders `photon-ks.json`, embeds it into
+`image/hyperv/build/kickstart/labfoundry-photon-with-kickstart.iso`, and passes
+that single remastered Photon ISO to Packer. Photon boots with
+`ks=cdrom:/photon-ks.json`. This avoids both the Windows Server 2025
+early-installer networking failure mode and the fragile two-DVD Hyper-V path.
 
 Use single quotes around passwords that contain PowerShell metacharacters:
 
@@ -94,10 +89,11 @@ package set.
 If the VM stops at the Photon license agreement or disk selection screen, the
 builder did not load the kickstart file. Stop the build, make sure this
 directory is current, and rerun `scripts/windows/build-photon-hyperv-image.ps1`.
-The Packer log should include `Mounting secondary dvd drive ...labfoundry-photon-kickstart.iso`,
-then `Connected to SSH!`. Raw `packer build .` still uses the built-in HTTP
-kickstart server on port `8591`; pass `-UseHttpKickstartFallback` to the
-wrapper only when intentionally testing that older path.
+The wrapper should print `Using remastered Photon ISO`, and the Packer log
+should move from `Typing the boot command...` to `Connected to SSH!`. If Photon
+shows the EULA, the raw `packer build .` path or an old wrapper was used. Raw
+`packer build .` is intentionally blocked unless `iso_contains_kickstart=true`
+is provided so this failure mode stops before a VM is created.
 
 If Photon installs and SSH works from the Windows host but Packer remains at
 `Waiting for SSH to become available`, query the IPv4 reported by Hyper-V:
