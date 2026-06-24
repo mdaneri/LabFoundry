@@ -55,11 +55,17 @@ packer build `
 ```
 
 Run Packer from an elevated PowerShell session or as a user in the
-`Hyper-V Administrators` group. The Packer build VM uses Hyper-V's
-`Default Switch` by default because the builder needs a host-side IP, DHCP, and
-internet access for kickstart provisioning and `tdnf update`. Use the
-`LabFoundry-Mgmt` switch after the VHDX is built and attached to the final
-appliance VM.
+`Hyper-V Administrators` group. Prepare the LabFoundry Hyper-V management
+network before building:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switches.ps1
+```
+
+The Packer build VM uses the `LabFoundry-Mgmt` switch by default with temporary
+static address `192.168.49.30/24` and gateway `192.168.49.254`. This avoids
+fragile `Default Switch` host-IP detection while still giving the builder NAT
+internet access for kickstart provisioning and `tdnf update`.
 
 The generated appliance intentionally keeps
 `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`. Real host mutation is staged per

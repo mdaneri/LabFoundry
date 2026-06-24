@@ -10,14 +10,16 @@ as a systemd service.
 - Run Packer from an elevated PowerShell session or as a user in the
   `Hyper-V Administrators` group.
 - Packer `>= 1.10`.
-- Hyper-V `Default Switch` available for the Packer build VM. The build uses
-  this switch by default because it provides a host-side IP, DHCP, and outbound
-  internet for the kickstart file and `tdnf update`.
-- LabFoundry lab switches created for the finished appliance VM:
+- LabFoundry Hyper-V lab switches created before the build:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switches.ps1
 ```
+
+The Packer builder uses `LabFoundry-Mgmt` by default. The script assigns the
+host-side switch adapter `192.168.49.254/24` and creates
+`LabFoundry-Mgmt-NAT`, which gives the temporary builder VM outbound internet
+access for the kickstart file and `tdnf update`.
 
 ## Build Inputs
 
@@ -30,20 +32,16 @@ packer init .
 packer build `
   -var "iso_url=https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
   -var "iso_checksum=sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
-  -var "builder_static_ip=<photon-builder-ip>" `
-  -var "builder_static_netmask=<photon-builder-netmask>" `
-  -var "builder_static_gateway=<default-switch-gateway>" `
   -var "ssh_password=<one-time-build-root-password>" `
   -var "bootstrap_admin_password=<initial-labfoundry-admin-password>" `
   .
 ```
 
-For Hyper-V Default Switch, `builder_static_gateway` is the Windows host-side
-vEthernet address that Packer logs as `Host IP for the HyperV machine`, such as
-`172.30.0.1`. Choose `builder_static_ip` from the same subnet, for example
-`172.30.14.160`, and use the matching netmask, for example `255.255.240.0` for
-a `/20` Default Switch network. When `builder_static_ip` is set, the template
-automatically uses it as Packer's SSH target.
+By default, the temporary builder VM uses `LabFoundry-Mgmt` with
+`builder_static_ip=192.168.49.30/24`, `builder_static_netmask=255.255.255.0`,
+and `builder_static_gateway=192.168.49.254`. When `builder_static_ip` is set,
+the template automatically uses it as Packer's SSH target. Override those
+variables only when the management subnet is intentionally different.
 
 Use single quotes around passwords that contain PowerShell metacharacters:
 
@@ -71,15 +69,13 @@ and reboot to finish. Provisioning removes the temporary sudoers entry before
 the image is finalized.
 
 Use `-var "switch_name=<switch>"` only if the replacement switch has a host
-adapter IP, DHCP for the builder VM, and internet access. The LabFoundry
-internal/private lab switches are intended for the finished appliance VM, not
-for the Packer installer VM.
+adapter IP and internet access. The LabFoundry private site/trunk switches are
+intended for the finished appliance VM, not for the Packer installer VM.
 
-Packer logs a line like `Host IP for the HyperV machine: 172.30.0.1`. That is
-the Windows host-side Default Switch address used for the kickstart HTTP URL;
-it is not the Photon guest SSH address. The Photon guest address is the IPv4
-shown by Hyper-V Manager for `LabFoundry-Photon-Builder`, for example
-`172.30.14.160`.
+Packer logs a line like `Host IP for the HyperV machine: 192.168.49.254`. That
+is the Windows host-side `LabFoundry-Mgmt` address used for the kickstart HTTP
+URL; it is not the Photon guest SSH address. The default Photon builder guest
+address is `192.168.49.30`.
 
 The build updates Photon packages during provisioning. On June 21, 2026, the
 Photon 5.0 updates repo exposed `python3` as `3.14.5-2.ph5`; keep the image
@@ -99,7 +95,7 @@ If Photon installs and SSH works from the Windows host but Packer remains at
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-vm-ip.ps1 `
   -Name LabFoundry-Photon-Builder `
-  -SwitchName "Default Switch"
+  -SwitchName "LabFoundry-Mgmt"
 ```
 
 Then verify SSH:
@@ -108,15 +104,14 @@ Then verify SSH:
 ssh root@<photon-vm-ip>
 ```
 
-The Packer template leaves `ssh_host` unset unless `builder_static_ip` is set,
-so the Hyper-V builder can discover the Photon guest IP through KVP by default.
-If SSH is reachable but Packer still does not detect the guest IP, stop the
-build and rerun with either `builder_static_ip` or a queried `ssh_host`:
+The Packer template sets `ssh_host` to the static builder address by default.
+If you override networking and SSH is reachable but Packer still does not
+detect the guest IP, stop the build and rerun with a queried `ssh_host`:
 
 ```powershell
 $photonVmIp = powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-vm-ip.ps1 `
   -Name LabFoundry-Photon-Builder `
-  -SwitchName "Default Switch"
+  -SwitchName "LabFoundry-Mgmt"
 
 packer build `
   -var "ssh_host=$photonVmIp" `
@@ -128,7 +123,7 @@ packer build `
 ```
 
 The helper reads the current Photon guest IPv4 from Hyper-V and filters out the
-host-side Default Switch address.
+host-side management switch address.
 
 Photon's Hyper-V guest integration package is `hyper-v`. The kickstart and
 provisioning scripts install it and enable `hv_kvp_daemon`, `hv_fcopy_daemon`,

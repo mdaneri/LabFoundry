@@ -23,6 +23,19 @@ def test_photon_provisioning_management_network_matches_eth0_only():
     assert "rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.network" in script
 
 
+def test_packer_build_uses_labfoundry_management_network_by_default():
+    template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
+    docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
+
+    assert 'default = "LabFoundry-Mgmt"' in template
+    assert 'default     = "192.168.49.30/24"' in template
+    assert 'default     = "255.255.255.0"' in template
+    assert 'default     = "192.168.49.254"' in template
+    assert 'default = "Default Switch"' not in template
+    assert "create-hyperv-switches.ps1" in docs
+    assert "builder_static_ip=192.168.49.30/24" in docs
+
+
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
     script = Path("scripts/windows/run-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
 

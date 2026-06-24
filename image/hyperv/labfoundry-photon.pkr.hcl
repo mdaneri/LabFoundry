@@ -21,7 +21,7 @@ variable "output_directory" {
 
 variable "switch_name" {
   type    = string
-  default = "Default Switch"
+  default = "LabFoundry-Mgmt"
 }
 
 variable "iso_url" {
@@ -60,20 +60,20 @@ variable "ssh_host" {
 
 variable "builder_static_ip" {
   type        = string
-  default     = ""
-  description = "Optional static IP or CIDR for the installed Photon builder VM, for example 172.30.14.160 or 172.30.14.160/20. When set, Packer uses this address for SSH."
+  default     = "192.168.49.30/24"
+  description = "Static IP or CIDR for the installed Photon builder VM. Packer uses this address for SSH."
 }
 
 variable "builder_static_netmask" {
   type        = string
-  default     = "255.255.240.0"
+  default     = "255.255.255.0"
   description = "Netmask for builder_static_ip when using Photon legacy static kickstart networking."
 }
 
 variable "builder_static_gateway" {
   type        = string
-  default     = "172.30.0.1"
-  description = "Gateway for builder_static_ip. For Hyper-V Default Switch this is normally the host-side vEthernet address."
+  default     = "192.168.49.254"
+  description = "Gateway for builder_static_ip. For LabFoundry-Mgmt this is the Windows host-side vEthernet address."
 }
 
 variable "builder_static_dns" {
