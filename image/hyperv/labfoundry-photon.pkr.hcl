@@ -58,6 +58,12 @@ variable "ssh_host" {
   description = "Optional Photon guest SSH host override. Leave null to let the Hyper-V builder discover the guest IP through KVP."
 }
 
+variable "kickstart_iso_path" {
+  type        = string
+  default     = ""
+  description = "Optional local ISO containing photon-ks.json. When set, Packer attaches it as a secondary DVD and Photon reads kickstart from /dev/sr1."
+}
+
 variable "builder_static_ip" {
   type        = string
   default     = "192.168.49.30/24"
@@ -86,21 +92,25 @@ locals {
   builder_static_address    = var.builder_static_ip != "" ? split("/", var.builder_static_ip)[0] : ""
   builder_boot_network_args = local.builder_static_address != "" ? " ip=${local.builder_static_address}::${var.builder_static_gateway}:${var.builder_static_netmask}:labfoundry:eth0:none nameserver=${var.builder_static_dns[0]}" : ""
   bootstrap_admin_password  = var.bootstrap_admin_password != "" ? var.bootstrap_admin_password : var.ssh_password
+  kickstart_boot_arg        = var.kickstart_iso_path != "" ? "ks=/dev/sr1:/photon-ks.json" : "ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/photon-ks.json"
+  kickstart_network_args    = var.kickstart_iso_path != "" ? "" : local.builder_boot_network_args
+  secondary_kickstart_iso   = var.kickstart_iso_path != "" ? [var.kickstart_iso_path] : []
 }
 
 source "hyperv-iso" "photon" {
-  vm_name            = var.vm_name
-  output_directory   = var.output_directory
-  switch_name        = var.switch_name
-  generation         = 2
-  enable_secure_boot = false
-  cpus               = 2
-  memory             = 4096
-  disk_size          = 40960
-  differencing_disk  = false
-  headless           = true
-  iso_url            = var.iso_url
-  iso_checksum       = var.iso_checksum
+  vm_name              = var.vm_name
+  output_directory     = var.output_directory
+  switch_name          = var.switch_name
+  generation           = 2
+  enable_secure_boot   = false
+  cpus                 = 2
+  memory               = 4096
+  disk_size            = 40960
+  differencing_disk    = false
+  headless             = true
+  iso_url              = var.iso_url
+  iso_checksum         = var.iso_checksum
+  secondary_iso_images = local.secondary_kickstart_iso
   http_content = {
     "/photon-ks.json" = templatefile("${path.root}/http/photon-ks.json.pkrtpl", {
       root_password          = var.ssh_password
@@ -129,7 +139,7 @@ source "hyperv-iso" "photon" {
   boot_keygroup_interval = "250ms"
   boot_command = [
     "c<wait>",
-    "linux /isolinux/vmlinuz root=/dev/ram0 loglevel=3 ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/photon-ks.json insecure_installation=1 photon.media=cdrom${local.builder_boot_network_args}",
+    "linux /isolinux/vmlinuz root=/dev/ram0 loglevel=3 ${local.kickstart_boot_arg} insecure_installation=1 photon.media=cdrom${local.kickstart_network_args}",
     "<enter><wait>",
     "initrd /isolinux/initrd.img",
     "<enter><wait>",

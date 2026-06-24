@@ -19,7 +19,7 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switc
 The Packer builder uses `LabFoundry-Mgmt` by default. The script assigns the
 host-side switch adapter `192.168.49.254/24` and creates
 `LabFoundry-Mgmt-NAT`, which gives the temporary builder VM outbound internet
-access for the kickstart file and `tdnf update`.
+access for `tdnf update`.
 
 ## Build Inputs
 
@@ -27,14 +27,12 @@ Photon publishes the ISO and checksum from the Photon OS download page. The
 current LabFoundry build target uses the Photon OS 5.0 GA full ISO:
 
 ```powershell
-cd image/hyperv
-packer init .
-packer build `
-  -var "iso_url=https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
-  -var "iso_checksum=sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
-  -var "ssh_password=<one-time-build-root-password>" `
-  -var "bootstrap_admin_password=<initial-labfoundry-admin-password>" `
-  .
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/build-photon-hyperv-image.ps1 `
+  -IsoUrl "https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
+  -IsoChecksum "sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
+  -SshPassword "<one-time-build-root-password>" `
+  -BootstrapAdminPassword "<initial-labfoundry-admin-password>"
 ```
 
 By default, the temporary builder VM uses `LabFoundry-Mgmt` with
@@ -43,10 +41,16 @@ and `builder_static_gateway=192.168.49.254`. When `builder_static_ip` is set,
 the template automatically uses it as Packer's SSH target. Override those
 variables only when the management subnet is intentionally different.
 
-The same static address is also passed on the Photon boot command line with
-dracut-style `ip=... nameserver=...` arguments. That installer-time networking
-is required so Photon can download `ks=http://<packer-http-ip>:8591/photon-ks.json`
-before it has read the kickstart file's own network block.
+The wrapper uses the vendored `scripts/windows/New-ISOFile.ps1` helper, renders
+`photon-ks.json`, creates
+`image/hyperv/build/kickstart/labfoundry-photon-kickstart.iso`, and passes it to
+Packer as `kickstart_iso_path`. The Hyper-V builder mounts that file as a
+secondary DVD, and Photon boots with `ks=/dev/sr1:/photon-ks.json`. This avoids
+the Windows Server 2025 early-installer networking failure mode where Photon
+shows the EULA because it never fetched the HTTP kickstart.
+
+Thanks to TheDotSource for the original New-ISOFile PowerShell helper that the
+vendored copy is based on.
 
 Use single quotes around passwords that contain PowerShell metacharacters:
 
@@ -89,12 +93,11 @@ package set.
 
 If the VM stops at the Photon license agreement or disk selection screen, the
 builder did not load the kickstart file. Stop the build, make sure this
-directory is current, verify `LabFoundry-Mgmt` has host address
-`192.168.49.254/24`, and rerun `packer build .`; the template should boot
-Photon through the GRUB command line with
-`ks=http://... insecure_installation=1 photon.media=cdrom ip=192.168.49.30::192.168.49.254:255.255.255.0:labfoundry:eth0:none`.
-The built-in Packer HTTP server is pinned to port `8591` to make
-troubleshooting simpler.
+directory is current, and rerun `scripts/windows/build-photon-hyperv-image.ps1`.
+The Packer log should include `Mounting secondary dvd drive ...labfoundry-photon-kickstart.iso`,
+then `Connected to SSH!`. Raw `packer build .` still uses the built-in HTTP
+kickstart server on port `8591`; pass `-UseHttpKickstartFallback` to the
+wrapper only when intentionally testing that older path.
 
 If Photon installs and SSH works from the Windows host but Packer remains at
 `Waiting for SSH to become available`, query the IPv4 reported by Hyper-V:
@@ -120,13 +123,13 @@ $photonVmIp = powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows
   -Name LabFoundry-Photon-Builder `
   -SwitchName "LabFoundry-Mgmt"
 
-packer build `
-  -var "ssh_host=$photonVmIp" `
-  -var "iso_url=https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
-  -var "iso_checksum=sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
-  -var "ssh_password=<one-time-build-root-password>" `
-  -var "bootstrap_admin_password=<initial-labfoundry-admin-password>" `
-  .
+powershell.exe -ExecutionPolicy Bypass `
+  -File ..\..\scripts\windows\build-photon-hyperv-image.ps1 `
+  -SshHost "$photonVmIp" `
+  -IsoUrl "https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
+  -IsoChecksum "sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
+  -SshPassword "<one-time-build-root-password>" `
+  -BootstrapAdminPassword "<initial-labfoundry-admin-password>"
 ```
 
 The helper reads the current Photon guest IPv4 from Hyper-V and filters out the

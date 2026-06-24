@@ -26,18 +26,41 @@ def test_photon_provisioning_management_network_matches_eth0_only():
 def test_packer_build_uses_labfoundry_management_network_by_default():
     template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
+    root_docs = Path("README.md").read_text(encoding="utf-8")
+    wrapper = Path("scripts/windows/build-photon-hyperv-image.ps1").read_text(encoding="utf-8")
+    gitignore = Path(".gitignore").read_text(encoding="utf-8")
 
     assert 'default = "LabFoundry-Mgmt"' in template
     assert 'default     = "192.168.49.30/24"' in template
     assert 'default     = "255.255.255.0"' in template
     assert 'default     = "192.168.49.254"' in template
+    assert 'variable "kickstart_iso_path"' in template
+    assert 'secondary_iso_images = local.secondary_kickstart_iso' in template
+    assert 'ks=/dev/sr1:/photon-ks.json' in template
     assert "builder_boot_network_args" in template
     assert "ip=${local.builder_static_address}::${var.builder_static_gateway}:${var.builder_static_netmask}:labfoundry:eth0:none" in template
-    assert "photon.media=cdrom${local.builder_boot_network_args}" in template
+    assert "photon.media=cdrom${local.kickstart_network_args}" in template
     assert 'default = "Default Switch"' not in template
+    assert "build-photon-hyperv-image.ps1" in root_docs
     assert "create-hyperv-switches.ps1" in docs
     assert "builder_static_ip=192.168.49.30/24" in docs
-    assert "installer-time networking" in docs
+    assert "New-ISOFile.ps1" in docs
+    assert "labfoundry-photon-kickstart.iso" in docs
+    assert "Mounting secondary dvd drive" in docs
+    assert "[string]$SshPassword = 'VMware01!'" in wrapper
+    assert "[string]$BootstrapAdminPassword = 'VMware01!'" in wrapper
+    assert "scripts/windows/New-ISOFile.ps1" in root_docs
+    assert "Thanks to TheDotSource" in root_docs
+    assert "Thanks to TheDotSource" in docs
+    assert "Join-Path $PSScriptRoot 'New-ISOFile.ps1'" in wrapper
+    assert "NewIsoFileUrl" not in wrapper
+    assert "New-ISOFile -source $ksSourceDir -destinationIso $resolvedKickstartIsoPath" in wrapper
+    assert "'-var', \"kickstart_iso_path=$resolvedKickstartIsoPath\"" in wrapper
+    assert "UseHttpKickstartFallback" in wrapper
+    assert "/image/hyperv/build" in gitignore
+    vendored_iso_helper = Path("scripts/windows/New-ISOFile.ps1").read_text(encoding="utf-8")
+    assert "function New-ISOFile" in vendored_iso_helper
+    assert "IMAPI2FS.MsftFileSystemImage" in vendored_iso_helper
 
 
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():

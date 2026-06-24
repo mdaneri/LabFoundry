@@ -12,6 +12,7 @@ node_modules/
 test-results/
 playwright-report/
 /vcfDownloadTool
+/image/hyperv/build
 /image/hyperv/packer_cache
 /image/hyperv/output
 /image/hyperv/clients

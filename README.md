@@ -41,17 +41,17 @@ metadata showed `python3` as `3.14.5-2.ph5`. LabFoundry keeps
 python3 scripts/check_photon_compatibility.py
 ```
 
-Build inputs are the current Photon OS 5.0 ISO URL and checksum:
+Build inputs are the current Photon OS 5.0 ISO URL and checksum. On Hyper-V,
+use the Windows wrapper so the Photon kickstart is attached as a local
+secondary ISO instead of depending on early installer networking:
 
 ```powershell
-cd image/hyperv
-packer init .
-packer build `
-  -var "iso_url=https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
-  -var "iso_checksum=sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
-  -var "ssh_password=<one-time-build-root-password>" `
-  -var "bootstrap_admin_password=<initial-labfoundry-admin-password>" `
-  .
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/build-photon-hyperv-image.ps1 `
+  -IsoUrl "https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
+  -IsoChecksum "sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
+  -SshPassword "<one-time-build-root-password>" `
+  -BootstrapAdminPassword "<initial-labfoundry-admin-password>"
 ```
 
 Run Packer from an elevated PowerShell session or as a user in the
@@ -65,9 +65,13 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switc
 The Packer build VM uses the `LabFoundry-Mgmt` switch by default with temporary
 static address `192.168.49.30/24` and gateway `192.168.49.254`. This avoids
 fragile `Default Switch` host-IP detection while still giving the builder NAT
-internet access for kickstart provisioning and `tdnf update`. The template also
-passes that static address on the Photon boot command line so the installer can
-download the kickstart file before reading the kickstart network block.
+internet access for `tdnf update`. The wrapper uses the vendored
+`scripts/windows/New-ISOFile.ps1` helper, writes a local `photon-ks.json`,
+creates a `LABFOUNDRYKS` ISO, and passes it to Packer as `kickstart_iso_path`;
+Photon then boots with `ks=/dev/sr1:/photon-ks.json`. Thanks to TheDotSource
+for the original New-ISOFile PowerShell helper that this vendored copy is based
+on. Raw `packer build .` remains available as an HTTP kickstart fallback, but
+the wrapper is the tested Windows Server 2025 path.
 
 The generated appliance intentionally keeps
 `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`. Real host mutation is staged per
