@@ -1003,6 +1003,91 @@ def test_vcf_backups_helper_apply_requires_existing_os_user(monkeypatch, tmp_pat
     assert "Apply the Local Users unit before VCF Backups" in captured.err
 
 
+def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "vcf-offline-depot"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    site_dir = managed_root / "nginx" / "sites.d"
+    cert_path = managed_root / "vcf-offline-depot" / "certs" / "depot.crt"
+    key_path = managed_root / "vcf-offline-depot" / "certs" / "depot.key"
+    nginx_include = tmp_path / "nginx" / "conf.d" / "labfoundry.conf"
+    apply_dir.mkdir(parents=True)
+    cert_path.parent.mkdir(parents=True)
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    config_path = apply_dir / "labfoundry-vcf-offline-depot.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "# Managed by LabFoundry. Local changes may be overwritten.",
+                "server {",
+                "  listen 192.168.50.1:443 ssl;",
+                "  server_name depot.labfoundry.internal;",
+                "  root /mnt/labfoundry-vcf-offline-depot;",
+                "  sendfile on;",
+                "  default_type application/octet-stream;",
+                f"  ssl_certificate {cert_path};",
+                f"  ssl_certificate_key {key_path};",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "NGINX_CONF_INCLUDE_PATH", nginx_include)
+    monkeypatch.setattr(helper, "NGINX_SITES_DIR", site_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_SITE_PATH", site_dir / "vcf-offline-depot.conf")
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/nginx" if command == "nginx" else None)
+
+    assert helper._handle_vcf_offline_depot("validate", [str(config_path)]) == 0
+    assert helper._handle_vcf_offline_depot("apply-https", [str(config_path)]) == 0
+
+    site_text = (site_dir / "vcf-offline-depot.conf").read_text(encoding="utf-8")
+    assert "server_name depot.labfoundry.internal;" in site_text
+    assert "sendfile on;" in site_text
+    assert nginx_include.read_text(encoding="utf-8").strip().endswith(f"include {site_dir}/*.conf;")
+    assert ["/usr/sbin/nginx", "-t"] in commands
+    assert ["systemctl", "enable", "--now", "nginx"] in commands
+
+
+def test_vcf_offline_depot_helper_removes_disabled_nginx_site(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "vcf-offline-depot"
+    site_dir = tmp_path / "sites.d"
+    config_path = apply_dir / "labfoundry-vcf-offline-depot.conf"
+    site_path = site_dir / "vcf-offline-depot.conf"
+    apply_dir.mkdir(parents=True)
+    site_dir.mkdir(parents=True)
+    config_path.write_text("# VCF Offline Depot HTTPS endpoint is disabled.\n", encoding="utf-8")
+    site_path.write_text("server { listen 443 ssl; }\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "NGINX_CONF_INCLUDE_PATH", tmp_path / "nginx" / "conf.d" / "labfoundry.conf")
+    monkeypatch.setattr(helper, "NGINX_SITES_DIR", site_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_SITE_PATH", site_path)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/nginx" if command == "nginx" else None)
+
+    assert helper._handle_vcf_offline_depot("apply-https", [str(config_path)]) == 0
+
+    assert not site_path.exists()
+    assert ["/usr/sbin/nginx", "-t"] in commands
+
+
 def appliance_settings_json(
     *,
     resolver_mode: str = "local_dns",
@@ -1025,6 +1110,10 @@ def appliance_settings_json(
             "management_ip_cidr": "192.168.49.1/24",
             "management_https_enabled": management_https_enabled,
             "management_http_port": 8000,
+            "management_public_http_port": 80,
+            "management_public_https_port": 443,
+            "management_upstream_host": "127.0.0.1",
+            "management_upstream_port": 8000,
             "management_https_cert_path": management_https_cert_path,
             "management_https_key_path": management_https_key_path,
             "ntp_servers": ["time1.google.com", "time2.google.com"],
@@ -1067,7 +1156,7 @@ def test_appliance_settings_helper_rejects_invalid_json(tmp_path):
     assert "ntp_servers must include at least one server." in errors
 
 
-def test_appliance_settings_helper_writes_management_https_override(monkeypatch, tmp_path):
+def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "appliance-settings"
     managed_root = tmp_path / "etc" / "labfoundry"
@@ -1076,9 +1165,34 @@ def test_appliance_settings_helper_writes_management_https_override(monkeypatch,
     dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
     redirect_script = tmp_path / "bin" / "labfoundry-http-redirect"
     redirect_service = tmp_path / "systemd" / "labfoundry-http-redirect.service"
+    nginx_include = tmp_path / "nginx" / "conf.d" / "labfoundry.conf"
+    nginx_main = tmp_path / "nginx" / "nginx.conf"
+    nginx_sites = tmp_path / "nginx" / "sites.d"
+    nginx_management_site = nginx_sites / "management.conf"
     timesyncd_dir = tmp_path / "timesyncd.conf.d"
     apply_dir.mkdir(parents=True)
     cert_path.parent.mkdir(parents=True)
+    nginx_main.parent.mkdir(parents=True)
+    nginx_main.write_text(
+        "\n".join(
+            [
+                "events { worker_connections 1024; }",
+                "",
+                "http {",
+                "    include mime.types;",
+                "    server {",
+                "        listen 80;",
+                "    }",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    redirect_script.parent.mkdir(parents=True)
+    redirect_script.write_text("legacy redirect", encoding="utf-8")
+    redirect_service.parent.mkdir(parents=True)
+    redirect_service.write_text("legacy redirect service", encoding="utf-8")
     cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
     key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
     config_path = apply_dir / "labfoundry-settings.json"
@@ -1104,6 +1218,10 @@ def test_appliance_settings_helper_writes_management_https_override(monkeypatch,
     monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
     monkeypatch.setattr(helper, "LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH", redirect_script)
     monkeypatch.setattr(helper, "LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH", redirect_service)
+    monkeypatch.setattr(helper, "NGINX_CONF_INCLUDE_PATH", nginx_include)
+    monkeypatch.setattr(helper, "NGINX_MAIN_CONFIG_PATH", nginx_main)
+    monkeypatch.setattr(helper, "NGINX_SITES_DIR", nginx_sites)
+    monkeypatch.setattr(helper, "NGINX_MANAGEMENT_SITE_PATH", nginx_management_site)
     monkeypatch.setattr(helper, "_ca_key_matches_certificate", lambda certificate_pem, private_key_pem: True)
     monkeypatch.setattr(helper, "_run", fake_run)
     monkeypatch.setattr(
@@ -1112,22 +1230,30 @@ def test_appliance_settings_helper_writes_management_https_override(monkeypatch,
         lambda command: {
             "hostnamectl": "/usr/bin/hostnamectl",
             "systemd-run": "/usr/bin/systemd-run",
+            "nginx": "/usr/sbin/nginx",
         }.get(command),
     )
 
     assert helper._handle_appliance_settings("apply", [str(config_path)]) == 0
 
     dropin = (dropin_dir / "management-https.conf").read_text(encoding="utf-8")
-    assert "--ssl-certfile" in dropin
-    assert str(cert_path) in dropin
-    assert "--ssl-keyfile" in dropin
-    assert str(key_path) in dropin
-    assert "Redirecting to" in redirect_script.read_text(encoding="utf-8")
-    redirect_unit = redirect_service.read_text(encoding="utf-8")
-    assert "--port 80 --https-port 8000" in redirect_unit
+    assert "--host 127.0.0.1 --port 8000" in dropin
+    assert "--ssl-certfile" not in dropin
+    assert nginx_include.read_text(encoding="utf-8").strip().endswith(f"include {nginx_sites}/*.conf;")
+    assert f"include {nginx_include};" in nginx_main.read_text(encoding="utf-8")
+    management_site = nginx_management_site.read_text(encoding="utf-8")
+    assert "listen 80 default_server;" in management_site
+    assert "return 308 https://$host$request_uri;" in management_site
+    assert "listen 443 ssl default_server;" in management_site
+    assert f"ssl_certificate {cert_path};" in management_site
+    assert f"ssl_certificate_key {key_path};" in management_site
+    assert "proxy_pass http://127.0.0.1:8000;" in management_site
+    assert not redirect_script.exists()
+    assert not redirect_service.exists()
     assert ["systemctl", "daemon-reload"] in commands
-    assert ["systemctl", "enable", "--now", "labfoundry-http-redirect.service"] in commands
-    assert ["systemctl", "restart", "labfoundry-http-redirect.service"] in commands
+    assert ["systemctl", "disable", "--now", "labfoundry-http-redirect.service"] in commands
+    assert ["systemctl", "enable", "--now", "nginx"] in commands
+    assert ["/usr/sbin/nginx", "-t"] in commands
     assert any(command[:5] == ["/usr/bin/systemd-run", "--quiet", "--collect", "--on-active=3", "--unit=labfoundry-management-ui-restart"] for command in commands)
 
 

@@ -13,6 +13,9 @@ APPLIANCE_SETTINGS_DEFAULT_NTP_SERVERS = "time1.google.com\ntime2.google.com\nti
 APPLIANCE_SETTINGS_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json"
 APPLIANCE_DNS_RECORD_DESCRIPTION = "LabFoundry app-owned appliance FQDN record."
 MANAGEMENT_UI_PORT = 8000
+MANAGEMENT_UI_PUBLIC_HTTP_PORT = 80
+MANAGEMENT_UI_PUBLIC_HTTPS_PORT = 443
+MANAGEMENT_UI_UPSTREAM_HOST = "127.0.0.1"
 
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
@@ -139,6 +142,10 @@ def appliance_settings_preview_payload(
         "management_ip_cidr": management_interface.get("ip_cidr", ""),
         "management_https_enabled": bool(settings.management_https_enabled),
         "management_http_port": MANAGEMENT_UI_PORT,
+        "management_public_http_port": MANAGEMENT_UI_PUBLIC_HTTP_PORT,
+        "management_public_https_port": MANAGEMENT_UI_PUBLIC_HTTPS_PORT,
+        "management_upstream_host": MANAGEMENT_UI_UPSTREAM_HOST,
+        "management_upstream_port": MANAGEMENT_UI_PORT,
         "management_https_cert_path": management_https_cert_path if settings.management_https_enabled else "",
         "management_https_key_path": management_https_key_path if settings.management_https_enabled else "",
         "ntp_servers": split_servers(settings.ntp_servers),

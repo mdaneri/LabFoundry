@@ -198,12 +198,14 @@ previews, job results, and logs should show only status and counts.
 `LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1` through sudo so account-mutating helper
 commands can run as transient systemd units outside the control-plane service
 sandbox while still using the constrained helper allowlist.
-When Appliance Settings enables CA-backed management UI HTTPS, the helper writes
-`/etc/systemd/system/labfoundry.service.d/management-https.conf` with the
-CA-managed appliance certificate paths, starts `labfoundry-http-redirect.service`
-on port 80 for HTTP-to-HTTPS redirects, reloads systemd, and schedules a short
-delayed `labfoundry.service` restart so the global apply job can finish before
-uvicorn switches to TLS on the existing management port.
+When Appliance Settings enables CA-backed management UI HTTPS, nginx owns the
+public front door. The helper writes `/etc/nginx/conf.d/labfoundry.conf`,
+`/etc/labfoundry/nginx/sites.d/management.conf`, and a loopback-only
+`labfoundry.service` override, then nginx redirects public HTTP/80 to HTTPS/443
+and reverse-proxies to uvicorn on `127.0.0.1:8000`. The helper disables the
+retired `labfoundry-http-redirect.service` if present, reloads nginx/systemd,
+and schedules a short delayed `labfoundry.service` restart so the global apply
+job can finish before uvicorn moves behind nginx.
 
 Provisioning creates the bootstrap admin OS account under
 `/var/lib/labfoundry/users/<admin>` with `/sbin/nologin` and sets the same

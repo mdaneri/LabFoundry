@@ -129,16 +129,22 @@ class SystemAdapter:
         return self._record_only_result(["labfoundry-helper", "vcf-private-registry", "relocate-bundles", config_path], "dry-run: VCF private registry bundle relocation command recorded")
 
     def validate_vcf_offline_depot_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "vcf-offline-depot", "validate", config_path], "dry-run: VCF Offline Depot validation command recorded")
+        return self._helper_result("vcf-offline-depot", "validate", config_path, dry_run_message="dry-run: VCF Offline Depot validation command recorded")
 
     def stage_vcf_offline_depot_tool(self, archive_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "vcf-offline-depot", "stage-tool", archive_path], "dry-run: VCF Download Tool staging command recorded")
+        if not self.dry_run and not archive_path.startswith("/"):
+            return AdapterResult(
+                command=["labfoundry-helper", "vcf-offline-depot", "stage-tool", archive_path],
+                dry_run=False,
+                stdout="VCF Download Tool archive staging is recorded; uploaded relative archive path is managed by the LabFoundry control plane.",
+            )
+        return self._helper_result("vcf-offline-depot", "stage-tool", archive_path, dry_run_message="dry-run: VCF Download Tool staging command recorded")
 
     def sync_vcf_offline_depot(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "vcf-offline-depot", "sync", config_path], "dry-run: VCF Offline Depot sync command recorded")
+        return self._helper_result("vcf-offline-depot", "sync", config_path, dry_run_message="dry-run: VCF Offline Depot sync command recorded")
 
     def apply_vcf_offline_depot_https_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "vcf-offline-depot", "apply-https", config_path], "dry-run: VCF Offline Depot HTTPS apply command recorded")
+        return self._helper_result("vcf-offline-depot", "apply-https", config_path, dry_run_message="dry-run: VCF Offline Depot HTTPS apply command recorded")
 
     def _record_only_result(self, command: list[str], stdout: str) -> AdapterResult:
         return AdapterResult(command=command, dry_run=True, stdout=stdout)

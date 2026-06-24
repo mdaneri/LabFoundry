@@ -74,9 +74,15 @@ TIMESYNCD_DROPIN_DIR = Path("/etc/systemd/timesyncd.conf.d")
 TIMESYNCD_DROPIN_PATH = TIMESYNCD_DROPIN_DIR / "labfoundry.conf"
 LABFOUNDRY_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/labfoundry.service.d")
 LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH = LABFOUNDRY_SERVICE_DROPIN_DIR / "management-https.conf"
-LABFOUNDRY_UVICORN_COMMAND = "/opt/labfoundry/.venv/bin/python -m uvicorn labfoundry.app.main:app --host 0.0.0.0 --port {port}"
+LABFOUNDRY_UVICORN_COMMAND = "/opt/labfoundry/.venv/bin/python -m uvicorn labfoundry.app.main:app --host {host} --port {port}"
 LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH = Path("/opt/labfoundry/bin/labfoundry-http-redirect")
 LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-http-redirect.service")
+NGINX_CONF_INCLUDE_PATH = Path("/etc/nginx/conf.d/labfoundry.conf")
+NGINX_MAIN_CONFIG_PATH = Path("/etc/nginx/nginx.conf")
+NGINX_SITES_DIR = Path("/etc/labfoundry/nginx/sites.d")
+NGINX_MANAGEMENT_SITE_PATH = NGINX_SITES_DIR / "management.conf"
+VCF_DEPOT_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-offline-depot")
+VCF_DEPOT_SITE_PATH = NGINX_SITES_DIR / "vcf-offline-depot.conf"
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 VCF_BACKUPS_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-backups")
 VCF_BACKUPS_CONFIG_DIR = Path("/etc/ssh/sshd_config.d")
@@ -597,6 +603,20 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
         management_http_port = 0
     if management_http_port < 1 or management_http_port > 65535:
         errors.append("management_http_port must be between 1 and 65535.")
+    for field_name in ["management_public_http_port", "management_public_https_port", "management_upstream_port"]:
+        value = payload.get(field_name, 80 if field_name.endswith("http_port") else 443 if field_name.endswith("https_port") else management_http_port)
+        try:
+            port_value = int(value)
+        except (TypeError, ValueError):
+            errors.append(f"{field_name} must be an integer.")
+            continue
+        if port_value < 1 or port_value > 65535:
+            errors.append(f"{field_name} must be between 1 and 65535.")
+    upstream_host = str(payload.get("management_upstream_host") or "127.0.0.1").strip()
+    try:
+        ip_interface(f"{upstream_host}/32" if ":" not in upstream_host else f"{upstream_host}/128")
+    except ValueError:
+        errors.append("management_upstream_host must be an IP address.")
 
     if bool(payload.get("management_https_enabled")):
         cert_path_value = str(payload.get("management_https_cert_path") or "")
@@ -638,13 +658,13 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
     return errors
 
 
-def _labfoundry_service_https_dropin(port: int, cert_path: Path, key_path: Path) -> str:
+def _labfoundry_service_loopback_dropin(host: str, port: int) -> str:
     return "\n".join(
         [
             "# Managed by LabFoundry. Local changes may be overwritten.",
             "[Service]",
             "ExecStart=",
-            f"ExecStart={LABFOUNDRY_UVICORN_COMMAND.format(port=port)} --ssl-certfile {cert_path} --ssl-keyfile {key_path}",
+            f"ExecStart={LABFOUNDRY_UVICORN_COMMAND.format(host=host, port=port)}",
             "",
         ]
     )
@@ -659,129 +679,7 @@ def _grant_labfoundry_service_key_read(key_path: Path) -> None:
             raise
 
 
-def _http_redirect_script() -> str:
-    return """#!/usr/bin/env python3
-from __future__ import annotations
-
-import argparse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-
-class RedirectHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-    https_port = 8000
-
-    def _redirect(self) -> None:
-        host = self.headers.get("Host") or "localhost"
-        if host.startswith("["):
-            end = host.find("]")
-            host = host[: end + 1] if end != -1 else host
-        elif ":" in host:
-            host = host.split(":", 1)[0]
-        location = f"https://{host}:{self.https_port}{self.path}"
-        body = f"Redirecting to {location}\\n".encode("utf-8")
-        self.send_response(308)
-        self.send_header("Location", location)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
-
-    def do_GET(self) -> None:
-        self._redirect()
-
-    def do_HEAD(self) -> None:
-        self._redirect()
-
-    def do_POST(self) -> None:
-        self._redirect()
-
-    def do_PUT(self) -> None:
-        self._redirect()
-
-    def do_PATCH(self) -> None:
-        self._redirect()
-
-    def do_DELETE(self) -> None:
-        self._redirect()
-
-    def log_message(self, format: str, *args: object) -> None:
-        return
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=80)
-    parser.add_argument("--https-port", type=int, default=8000)
-    args = parser.parse_args()
-    RedirectHandler.https_port = args.https_port
-    server = ThreadingHTTPServer((args.host, args.port), RedirectHandler)
-    server.serve_forever()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-"""
-
-
-def _http_redirect_service(port: int) -> str:
-    return "\n".join(
-        [
-            "# Managed by LabFoundry. Local changes may be overwritten.",
-            "[Unit]",
-            "Description=LabFoundry HTTP to HTTPS redirect",
-            "After=network-online.target",
-            "Wants=network-online.target",
-            "",
-            "[Service]",
-            "Type=simple",
-            f"ExecStart=/usr/bin/python3 {LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH} --host 0.0.0.0 --port 80 --https-port {port}",
-            "Restart=on-failure",
-            "RestartSec=5",
-            "NoNewPrivileges=true",
-            "PrivateTmp=true",
-            "ProtectSystem=full",
-            "ProtectHome=true",
-            "",
-            "[Install]",
-            "WantedBy=multi-user.target",
-            "",
-        ]
-    )
-
-
-def _configure_http_redirect(enabled: bool, https_port: int) -> int:
-    changed = False
-    if enabled:
-        script_text = _http_redirect_script()
-        LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        current_script = LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.read_text(encoding="utf-8") if LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.exists() else ""
-        if current_script != script_text:
-            LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.write_text(script_text, encoding="utf-8")
-            os.chmod(LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH, 0o755)
-            changed = True
-        service_text = _http_redirect_service(https_port)
-        current_service = LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.read_text(encoding="utf-8") if LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.exists() else ""
-        if current_service != service_text:
-            LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.write_text(service_text, encoding="utf-8")
-            os.chmod(LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH, 0o644)
-            changed = True
-        commands = [["systemctl", "enable", "--now", "labfoundry-http-redirect.service"]]
-        if changed:
-            commands.insert(0, ["systemctl", "daemon-reload"])
-            commands.append(["systemctl", "restart", "labfoundry-http-redirect.service"])
-    else:
-        commands = []
-        if LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.exists():
-            commands.extend([["systemctl", "disable", "--now", "labfoundry-http-redirect.service"], ["systemctl", "daemon-reload"]])
-            LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.unlink()
-        if LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.exists():
-            LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.unlink()
+def _run_checked_commands(commands: list[list[str]]) -> int:
     for command in commands:
         result = _run(command)
         print(result.stdout, end="")
@@ -791,18 +689,221 @@ def _configure_http_redirect(enabled: bool, https_port: int) -> int:
     return 0
 
 
+def _disable_legacy_http_redirect() -> int:
+    commands: list[list[str]] = []
+    if LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.exists():
+        commands.extend([["systemctl", "disable", "--now", "labfoundry-http-redirect.service"], ["systemctl", "daemon-reload"]])
+    if LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.exists():
+        LABFOUNDRY_HTTP_REDIRECT_SERVICE_PATH.unlink()
+    if LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.exists():
+        LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH.unlink()
+    return _run_checked_commands(commands)
+
+
+def _nginx_binary() -> str | None:
+    return shutil.which("nginx") or ("/usr/sbin/nginx" if Path("/usr/sbin/nginx").exists() else None)
+
+
+def _install_nginx_include() -> None:
+    NGINX_SITES_DIR.mkdir(parents=True, exist_ok=True)
+    NGINX_CONF_INCLUDE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    include_text = "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            f"include {NGINX_SITES_DIR}/*.conf;",
+            "",
+        ]
+    )
+    current = NGINX_CONF_INCLUDE_PATH.read_text(encoding="utf-8") if NGINX_CONF_INCLUDE_PATH.exists() else ""
+    if current != include_text:
+        NGINX_CONF_INCLUDE_PATH.write_text(include_text, encoding="utf-8")
+        os.chmod(NGINX_CONF_INCLUDE_PATH, 0o644)
+    _ensure_nginx_main_config_includes_labfoundry()
+
+
+def _http_block_end_offset(text: str) -> int:
+    match = re.search(r"(?m)^http\s*\{", text)
+    if not match:
+        return -1
+    depth = 1
+    index = match.end()
+    while index < len(text):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
+def _ensure_nginx_main_config_includes_labfoundry() -> None:
+    if not NGINX_MAIN_CONFIG_PATH.exists():
+        return
+    text = NGINX_MAIN_CONFIG_PATH.read_text(encoding="utf-8")
+    include_line = f"    include {NGINX_CONF_INCLUDE_PATH};"
+    if str(NGINX_CONF_INCLUDE_PATH) in text:
+        return
+    end_offset = _http_block_end_offset(text)
+    if end_offset < 0:
+        return
+    prefix = text[:end_offset].rstrip()
+    suffix = text[end_offset:]
+    next_text = f"{prefix}\n\n    # Managed by LabFoundry. Local changes may be overwritten.\n{include_line}\n{suffix}"
+    tmp_target = NGINX_MAIN_CONFIG_PATH.with_suffix(".conf.tmp")
+    tmp_target.write_text(next_text, encoding="utf-8")
+    os.chmod(tmp_target, 0o644)
+    tmp_target.replace(NGINX_MAIN_CONFIG_PATH)
+
+
+def _nginx_test_command() -> subprocess.CompletedProcess[str]:
+    nginx = _nginx_binary()
+    if nginx is None:
+        return subprocess.CompletedProcess(["nginx", "-t"], 127, "", "nginx command not found\n")
+    return _run([nginx, "-t"])
+
+
+def _reload_nginx() -> int:
+    commands = [["systemctl", "enable", "--now", "nginx"]]
+    reload_result = _run(["systemctl", "reload", "nginx"])
+    if reload_result.returncode == 0:
+        print(reload_result.stdout, end="")
+        print(reload_result.stderr, end="", file=sys.stderr)
+        return _run_checked_commands(commands)
+    commands.append(["systemctl", "restart", "nginx"])
+    return _run_checked_commands(commands)
+
+
+def _nginx_site_metadata(text: str) -> list[tuple[str, set[str]]]:
+    metadata: list[tuple[str, set[str]]] = []
+    for block in re.findall(r"server\s*\{(?P<body>.*?)\n\}", text, flags=re.DOTALL):
+        names: set[str] = set()
+        listens: set[str] = set()
+        for raw in block.splitlines():
+            line = raw.strip().rstrip(";")
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("server_name "):
+                names.update(item for item in line.split()[1:] if item != "_")
+            elif line.startswith("listen "):
+                value = " ".join(part for part in line.split()[1:] if part not in {"ssl", "http2", "default_server"})
+                listens.add(value)
+        for name in names:
+            metadata.append((name, listens))
+    return metadata
+
+
+def _nginx_site_conflict(site_path: Path, text: str) -> str:
+    if not NGINX_SITES_DIR.exists():
+        return ""
+    candidate = _nginx_site_metadata(text)
+    for other_path in NGINX_SITES_DIR.glob("*.conf"):
+        if other_path.resolve() == site_path.resolve() or not other_path.is_file():
+            continue
+        for name, listens in _nginx_site_metadata(other_path.read_text(encoding="utf-8")):
+            for candidate_name, candidate_listens in candidate:
+                if name == candidate_name and listens.intersection(candidate_listens):
+                    return f"nginx site {site_path.name} duplicates server_name {name} on {', '.join(sorted(listens.intersection(candidate_listens)))}."
+    return ""
+
+
+def _install_nginx_site(site_path: Path, text: str) -> int:
+    nginx = _nginx_binary()
+    if nginx is None:
+        print("nginx command not found", file=sys.stderr)
+        return 127
+    _install_nginx_include()
+    conflict = _nginx_site_conflict(site_path, text)
+    if conflict:
+        print(conflict, file=sys.stderr)
+        return 2
+    previous = site_path.read_text(encoding="utf-8") if site_path.exists() else None
+    site_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_target = site_path.with_suffix(".conf.tmp")
+    tmp_target.write_text(text, encoding="utf-8")
+    os.chmod(tmp_target, 0o644)
+    tmp_target.replace(site_path)
+    validation = _nginx_test_command()
+    print(validation.stdout, end="")
+    print(validation.stderr, end="", file=sys.stderr)
+    if validation.returncode != 0:
+        if previous is None:
+            site_path.unlink(missing_ok=True)
+        else:
+            site_path.write_text(previous, encoding="utf-8")
+            os.chmod(site_path, 0o644)
+        return validation.returncode
+    return _reload_nginx()
+
+
+def _remove_nginx_site(site_path: Path) -> int:
+    if not site_path.exists():
+        return 0
+    _install_nginx_include()
+    site_path.unlink()
+    validation = _nginx_test_command()
+    print(validation.stdout, end="")
+    print(validation.stderr, end="", file=sys.stderr)
+    if validation.returncode != 0:
+        return validation.returncode
+    return _reload_nginx()
+
+
+def _management_nginx_config(payload: dict, cert_path: Path, key_path: Path) -> str:
+    fqdn = str(payload["fqdn"])
+    public_http_port = int(payload.get("management_public_http_port") or 80)
+    public_https_port = int(payload.get("management_public_https_port") or 443)
+    upstream_host = str(payload.get("management_upstream_host") or "127.0.0.1")
+    upstream_port = int(payload.get("management_upstream_port") or payload.get("management_http_port") or 8000)
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "server {",
+            f"  listen {public_http_port} default_server;",
+            "  server_name _;",
+            "  return 308 https://$host$request_uri;",
+            "}",
+            "",
+            "server {",
+            f"  listen {public_https_port} ssl default_server;",
+            f"  server_name {fqdn};",
+            f"  ssl_certificate {cert_path};",
+            f"  ssl_certificate_key {key_path};",
+            "  client_max_body_size 512m;",
+            "  location / {",
+            f"    proxy_pass http://{upstream_host}:{upstream_port};",
+            "    proxy_http_version 1.1;",
+            "    proxy_set_header Host $host;",
+            "    proxy_set_header X-Real-IP $remote_addr;",
+            "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "    proxy_set_header Upgrade $http_upgrade;",
+            '    proxy_set_header Connection "upgrade";',
+            "  }",
+            "}",
+            "",
+        ]
+    )
+
+
 def _configure_labfoundry_management_https(payload: dict) -> int:
     enabled = bool(payload.get("management_https_enabled"))
     changed = False
-    port = int(payload.get("management_http_port") or 8000)
-    redirect = _configure_http_redirect(enabled, port)
-    if redirect != 0:
-        return redirect
+    port = int(payload.get("management_upstream_port") or payload.get("management_http_port") or 8000)
+    upstream_host = str(payload.get("management_upstream_host") or "127.0.0.1")
+    legacy_redirect = _disable_legacy_http_redirect()
+    if legacy_redirect != 0:
+        return legacy_redirect
     if enabled:
         cert_path = _ca_managed_path(str(payload["management_https_cert_path"]), "management_https_cert_path")
         key_path = _ca_managed_path(str(payload["management_https_key_path"]), "management_https_key_path")
         _grant_labfoundry_service_key_read(key_path)
-        next_text = _labfoundry_service_https_dropin(port, cert_path, key_path)
+        site_apply = _install_nginx_site(NGINX_MANAGEMENT_SITE_PATH, _management_nginx_config(payload, cert_path, key_path))
+        if site_apply != 0:
+            return site_apply
+        next_text = _labfoundry_service_loopback_dropin(upstream_host, port)
         LABFOUNDRY_SERVICE_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
         current_text = LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.read_text(encoding="utf-8") if LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.exists() else ""
         if current_text != next_text:
@@ -811,9 +912,13 @@ def _configure_labfoundry_management_https(payload: dict) -> int:
             os.chmod(tmp_target, 0o644)
             tmp_target.replace(LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH)
             changed = True
-    elif LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.exists():
-        LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.unlink()
-        changed = True
+    else:
+        remove_site = _remove_nginx_site(NGINX_MANAGEMENT_SITE_PATH)
+        if remove_site != 0:
+            return remove_site
+        if LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.exists():
+            LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH.unlink()
+            changed = True
     if not changed:
         return 0
 
@@ -2478,6 +2583,168 @@ def _handle_vcf_backups(action: str, args: list[str]) -> int:
     return 0
 
 
+def _validate_vcf_depot_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".conf":
+        raise ValueError("VCF Offline Depot nginx config path must end with .conf")
+    if not path.is_relative_to(VCF_DEPOT_APPLY_DIR):
+        raise ValueError(f"VCF Offline Depot nginx config must be staged under {VCF_DEPOT_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"VCF Offline Depot nginx config does not exist: {path}")
+    return path
+
+
+def _nginx_directive(text: str, directive: str) -> list[str]:
+    values: list[str] = []
+    for match in re.finditer(rf"^\s*{re.escape(directive)}\s+([^;]+);", text, flags=re.MULTILINE):
+        values.append(match.group(1).strip())
+    return values
+
+
+def _listen_address_and_port(value: str) -> tuple[str, int]:
+    parts = value.split()
+    listen = parts[0] if parts else ""
+    if listen.startswith("[") and "]:" in listen:
+        host, port_text = listen.rsplit(":", 1)
+        host = host.strip("[]")
+    elif ":" in listen:
+        host, port_text = listen.rsplit(":", 1)
+    else:
+        host, port_text = "0.0.0.0", listen
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise ValueError(f"nginx listen port is invalid: {listen}") from exc
+    if port < 1 or port > 65535:
+        raise ValueError(f"nginx listen port must be between 1 and 65535: {listen}")
+    try:
+        ip_interface(f"{host}/32" if ":" not in host else f"{host}/128")
+    except ValueError as exc:
+        raise ValueError(f"nginx listen address is invalid: {host}") from exc
+    return host, port
+
+
+def _vcf_depot_config_errors(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [str(exc)]
+    errors: list[str] = []
+    if "VCF Offline Depot HTTPS endpoint is disabled" in text:
+        return []
+    server_names = _nginx_directive(text, "server_name")
+    if not server_names:
+        errors.append("VCF Offline Depot nginx config must include server_name.")
+    else:
+        for name in server_names[0].split():
+            if not HOSTNAME_PATTERN.fullmatch(name.strip().strip(".").lower()):
+                errors.append(f"VCF Offline Depot server_name {name} must be a valid fully qualified DNS name.")
+    listens = _nginx_directive(text, "listen")
+    if not listens:
+        errors.append("VCF Offline Depot nginx config must include listen.")
+    for listen in listens:
+        try:
+            _listen_address_and_port(listen)
+        except ValueError as exc:
+            errors.append(str(exc))
+    roots = _nginx_directive(text, "root")
+    if not roots:
+        errors.append("VCF Offline Depot nginx config must include root.")
+    else:
+        if not roots[0].startswith("/"):
+            errors.append("VCF Offline Depot root must be an absolute path.")
+    for directive, label, private in [
+        ("ssl_certificate", "VCF Offline Depot certificate", False),
+        ("ssl_certificate_key", "VCF Offline Depot private key", True),
+    ]:
+        values = _nginx_directive(text, directive)
+        if not values:
+            errors.append(f"VCF Offline Depot nginx config must include {directive}.")
+            continue
+        try:
+            cert_path = _ca_managed_path(values[0], directive)
+            if not cert_path.is_file():
+                errors.append(f"{label} does not exist: {cert_path}")
+            else:
+                errors.extend(_pem_errors(cert_path.read_text(encoding="utf-8"), label, private_key=private))
+        except (OSError, ValueError) as exc:
+            errors.append(str(exc))
+    if "sendfile on;" not in text:
+        errors.append("VCF Offline Depot nginx config must enable sendfile for static artifact serving.")
+    if "default_type application/octet-stream;" not in text:
+        errors.append("VCF Offline Depot nginx config must set default_type application/octet-stream.")
+    return errors
+
+
+def _handle_vcf_offline_depot(action: str, args: list[str]) -> int:
+    if action == "stage-tool":
+        if len(args) != 1:
+            print("vcf-offline-depot stage-tool requires exactly one archive path", file=sys.stderr)
+            return 2
+        archive_path = Path(args[0])
+        if not archive_path.is_file():
+            print(f"VCF Download Tool archive does not exist: {archive_path}", file=sys.stderr)
+            return 2
+        if not archive_path.name.startswith("vcf-download-tool-") or not archive_path.name.endswith(".tar.gz"):
+            print("VCF Download Tool archive must be named vcf-download-tool-*.tar.gz.", file=sys.stderr)
+            return 2
+        print(json.dumps({"vcf_offline_depot": "stage-tool ok", "archive": archive_path.name}, sort_keys=True))
+        return 0
+
+    if len(args) != 1:
+        print(f"vcf-offline-depot {action} requires exactly one staged nginx config path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _validate_vcf_depot_config_path(args[0])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    errors = _vcf_depot_config_errors(config_path)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    text = config_path.read_text(encoding="utf-8")
+    disabled = "VCF Offline Depot HTTPS endpoint is disabled" in text
+
+    if action == "validate":
+        print(
+            json.dumps(
+                {
+                    "vcf_offline_depot": "validation ok",
+                    "enabled": not disabled,
+                    "scope": "nginx HTTPS static file server",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if action == "sync":
+        print(json.dumps({"vcf_offline_depot": "sync command intent recorded", "enabled": not disabled}, sort_keys=True))
+        return 0
+    if action == "apply-https":
+        if disabled:
+            result = _remove_nginx_site(VCF_DEPOT_SITE_PATH)
+        else:
+            result = _install_nginx_site(VCF_DEPOT_SITE_PATH, text)
+        if result != 0:
+            return result
+        print(
+            json.dumps(
+                {
+                    "vcf_offline_depot": "https apply complete",
+                    "enabled": not disabled,
+                    "config_path": str(VCF_DEPOT_SITE_PATH),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    print(f"unsupported vcf-offline-depot action: {action}", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         return _usage()
@@ -2536,6 +2803,8 @@ def main(argv: list[str]) -> int:
         return _handle_ca(action, normalized_args)
     if group == "vcf-backups":
         return _handle_vcf_backups(action, normalized_args)
+    if group == "vcf-offline-depot":
+        return _handle_vcf_offline_depot(action, normalized_args)
 
     print("real helper execution is not implemented for this apply unit", file=sys.stderr)
     return 78

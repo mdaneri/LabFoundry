@@ -2,6 +2,7 @@ from labfoundry.app.models import VcfDepotDownloadProfile, VcfOfflineDepotSettin
 from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_COMPONENTS,
     VCF_DEPOT_ESX_DISABLED_PLATFORMS,
+    render_nginx_depot_config,
     render_vcfdt_command_preview,
     validate_vcf_depot_state,
 )
@@ -180,3 +181,27 @@ def test_vcf_depot_command_preview_uses_staged_secret_paths():
     assert "--component-version=9.1.0.0100" in preview
     assert "vcf-download-tool esx configuration -D esxio-9.1-INTL -D armEsx-9.1-INTL" in preview
     assert "--depot-download-activation-code-file=/etc/labfoundry/vcf-offline-depot/secrets/activation-code.txt" in preview
+
+
+def test_vcf_depot_nginx_preview_uses_ca_paths_and_static_file_directives():
+    settings = VcfOfflineDepotSettings(
+        enabled=True,
+        hostname="depot.labfoundry.internal",
+        listen_address="192.168.50.1",
+        port=443,
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+    )
+
+    preview = render_nginx_depot_config(
+        settings,
+        certificate_path="/etc/labfoundry/vcf-offline-depot/certs/depot.crt",
+        key_path="/etc/labfoundry/vcf-offline-depot/certs/depot.key",
+    )
+
+    assert "listen 192.168.50.1:443 ssl;" in preview
+    assert "root /mnt/labfoundry-vcf-offline-depot;" in preview
+    assert "sendfile on;" in preview
+    assert "default_type application/octet-stream;" in preview
+    assert "ssl_certificate /etc/labfoundry/vcf-offline-depot/certs/depot.crt;" in preview
+    assert "ssl_certificate_key /etc/labfoundry/vcf-offline-depot/certs/depot.key;" in preview
+    assert "BEGIN PRIVATE KEY" not in preview

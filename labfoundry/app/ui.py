@@ -254,6 +254,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_LEGACY_STORE_PATH,
     VCF_DEPOT_PROFILE_TYPES,
     VCF_DEPOT_SKUS,
+    VCF_DEPOT_STAGED_CONFIG_PATH,
     VCF_DEPOT_TELEMETRY_CHOICES,
     VCF_DEPOT_TOKEN_NAME_KEY,
     VCF_DEPOT_TOKEN_VALUE_KEY,
@@ -1129,9 +1130,10 @@ def vcf_offline_depot_context(db: Session) -> dict:
         bool(secrets["download_token_present"]),
         bool(secrets["activation_code_present"]),
     )
+    depot_cert_path, depot_key_path, _depot_chain_path = ca_managed_certificate_paths(db, "vcf_offline_depot:https")
     if settings.enabled and get_ca_settings_row(db).enabled and not ca_certificate_available(db, "vcf_offline_depot:https"):
         validation_errors.append("VCF Offline Depot requires an issued CA-managed HTTPS certificate before apply.")
-    https_config_preview = render_nginx_depot_config(settings)
+    https_config_preview = render_nginx_depot_config(settings, certificate_path=depot_cert_path, key_path=depot_key_path)
     command_preview = render_vcfdt_command_preview(settings, profiles)
     return {
         "vcf_depot_settings": settings,
@@ -1141,6 +1143,8 @@ def vcf_offline_depot_context(db: Session) -> dict:
         "vcf_depot_available_interfaces": available_interfaces,
         "vcf_depot_endpoint": vcf_depot_endpoint(settings),
         "vcf_depot_https_config_preview": https_config_preview,
+        "vcf_depot_https_cert_path": depot_cert_path,
+        "vcf_depot_https_key_path": depot_key_path,
         "vcf_depot_command_preview": command_preview,
         "vcf_depot_validation_errors": validation_errors,
         "vcf_depot_validation_warnings": validation_warnings,
@@ -2526,12 +2530,16 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         results = [adapter.validate_vcf_backup_config(config_path), adapter.apply_vcf_backup_config(config_path)]
     elif unit_id == "vcf_offline_depot":
         settings = context["vcf_depot_settings"]
+        config_path = settings.config_path
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(VCF_DEPOT_STAGED_CONFIG_PATH, context["vcf_depot_https_config_preview"])
         results = [
-            adapter.validate_vcf_offline_depot_config(settings.config_path),
-            adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path),
-            adapter.sync_vcf_offline_depot(settings.config_path),
-            adapter.apply_vcf_offline_depot_https_config(settings.config_path),
+            adapter.validate_vcf_offline_depot_config(config_path),
+            adapter.sync_vcf_offline_depot(config_path),
+            adapter.apply_vcf_offline_depot_https_config(config_path),
         ]
+        if settings.tool_archive_path:
+            results.insert(1, adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path))
     elif unit_id == "vcf_private_registry":
         settings = context["vcf_registry_settings"]
         results = [

@@ -13,6 +13,7 @@ VCF_DEPOT_DEFAULT_HOSTNAME = "depot.labfoundry.internal"
 VCF_DEPOT_LEGACY_STORE_PATH = "/srv/repository"
 VCF_DEPOT_DEFAULT_STORE_PATH = "/mnt/labfoundry-vcf-offline-depot"
 VCF_DEPOT_DEFAULT_CONFIG_PATH = "/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf"
+VCF_DEPOT_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/vcf-offline-depot/labfoundry-vcf-offline-depot.conf"
 VCF_DEPOT_UPLOAD_DIR = Path("vcfDownloadTool")
 VCF_DEPOT_ARCHIVE_PATTERN = "vcf-download-tool-*.tar.gz"
 VCF_DEPOT_TOKEN_NAME_KEY = "vcf_depot_download_token_name"
@@ -171,11 +172,26 @@ def setting_secret_state(name_setting: Setting | None, value_setting: Setting | 
     return SecretState(present=present, filename=filename, updated_at=updated_at)
 
 
-def render_nginx_depot_config(settings: VcfOfflineDepotSettings) -> str:
+def render_nginx_depot_config(
+    settings: VcfOfflineDepotSettings,
+    *,
+    certificate_path: str = "",
+    key_path: str = "",
+) -> str:
     certificate_name = settings.server_certificate or settings.hostname or VCF_DEPOT_DEFAULT_HOSTNAME
+    certificate_path = certificate_path or "/etc/labfoundry/vcf-offline-depot/certs/" + certificate_name + ".crt"
+    key_path = key_path or "/etc/labfoundry/vcf-offline-depot/certs/" + certificate_name + ".key"
+    if not settings.enabled:
+        return "\n".join(
+            [
+                "# Managed by LabFoundry. Local changes may be overwritten.",
+                "# VCF Offline Depot HTTPS endpoint is disabled.",
+                "",
+            ]
+        )
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
-        "# Dry-run preview of desired HTTPS endpoint for the VCF Offline Depot.",
+        "# Desired HTTPS endpoint for the VCF Offline Depot.",
         f"# Depot store: {settings.depot_store_path}",
         f"# VCF endpoint: https://{vcf_depot_endpoint(settings)}/",
         "",
@@ -183,9 +199,14 @@ def render_nginx_depot_config(settings: VcfOfflineDepotSettings) -> str:
         f"  listen {settings.listen_address}:{settings.port} ssl;",
         f"  server_name {settings.hostname};",
         f"  root {settings.depot_store_path};",
+        "  sendfile on;",
+        "  tcp_nopush on;",
+        "  directio 8m;",
         "  autoindex on;",
-        "  ssl_certificate /etc/labfoundry/vcf-offline-depot/certs/" + certificate_name + ".crt;",
-        "  ssl_certificate_key /etc/labfoundry/vcf-offline-depot/certs/" + certificate_name + ".key;",
+        "  types { }",
+        "  default_type application/octet-stream;",
+        f"  ssl_certificate {certificate_path};",
+        f"  ssl_certificate_key {key_path};",
         "}",
     ]
     return "\n".join(lines).strip() + "\n"
