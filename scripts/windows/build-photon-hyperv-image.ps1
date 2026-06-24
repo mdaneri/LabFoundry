@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '')]
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -18,6 +19,7 @@ param(
     [string[]]$BuilderStaticDns = @('1.1.1.1', '9.9.9.9'),
     [string]$PackerDirectory = '',
     [string]$PreparedIsoPath = '',
+    [switch]$KeepExistingOutput,
     [switch]$ValidateOnly,
     [switch]$PrepareIsoOnly
 )
@@ -324,7 +326,15 @@ Write-PackerVarFile -Path $varFilePath -Variables $packerVariables
 Write-Host "Using Packer var-file: $varFilePath"
 
 $packerArgs = @(
-    $(if ($ValidateOnly) { 'validate' } else { 'build' }),
+    $(if ($ValidateOnly) { 'validate' } else { 'build' })
+)
+
+if (-not $ValidateOnly -and -not $KeepExistingOutput) {
+    Write-Host "Packer build will replace any existing output directory for this build."
+    $packerArgs += '-force'
+}
+
+$packerArgs += @(
     '-var-file', $varFilePath,
     '.'
 )

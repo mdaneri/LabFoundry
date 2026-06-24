@@ -46,6 +46,10 @@ The wrapper renders `photon-ks.json`, embeds it into
 that single remastered Photon ISO to Packer. Photon boots with
 `ks=cdrom:/photon-ks.json`. This avoids both the Windows Server 2025
 early-installer networking failure mode and the fragile two-DVD Hyper-V path.
+Build runs pass Packer's `-force` flag by default so the fixed output directory
+can be rebuilt in one command. Use `-OutputDirectory <path>` to keep multiple
+artifacts or `-KeepExistingOutput` when you want Packer to fail instead of
+replacing an existing output directory.
 
 Use single quotes around passwords that contain PowerShell metacharacters:
 

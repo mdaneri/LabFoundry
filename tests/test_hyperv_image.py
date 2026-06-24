@@ -54,6 +54,9 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "Packer will boot a single DVD with embedded photon-ks.json." in wrapper
     assert "Write-PackerVarFile" in wrapper
     assert "Using Packer var-file" in wrapper
+    assert "[switch]$KeepExistingOutput" in wrapper
+    assert "Packer build will replace any existing output directory for this build." in wrapper
+    assert "$packerArgs += '-force'" in wrapper
     assert "'-var-file', $varFilePath" in wrapper
     assert "builder_static_dns       = $BuilderStaticDns" in wrapper
     assert "UseHttpKickstartFallback" not in wrapper

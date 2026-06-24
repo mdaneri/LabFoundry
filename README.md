@@ -43,7 +43,7 @@ python3 scripts/check_photon_compatibility.py
 
 Build inputs are the current Photon OS 5.0 ISO URL and checksum. On Hyper-V,
 use the Windows wrapper so the Photon kickstart is attached as a local
-secondary ISO instead of depending on early installer networking:
+single remastered ISO instead of depending on early installer networking:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
@@ -69,7 +69,10 @@ internet access for `tdnf update`. The wrapper writes `photon-ks.json`, embeds
 it into a remastered Photon ISO, and passes that single ISO to Packer. Photon
 then boots with `ks=cdrom:/photon-ks.json`. Raw `packer build .` is
 intentionally blocked unless the ISO is marked as wrapper-prepared; the wrapper
-is the tested Windows Server 2025 path.
+is the tested Windows Server 2025 path. Build runs pass Packer's `-force` flag
+by default so the fixed output directory can be rebuilt in one command. Use
+`-OutputDirectory <path>` to keep multiple artifacts or `-KeepExistingOutput`
+when you want Packer to fail instead of replacing an existing output directory.
 
 The generated appliance intentionally keeps
 `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`. Real host mutation is staged per
