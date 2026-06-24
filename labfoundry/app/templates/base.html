@@ -7,7 +7,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=nginx-frontdoor-20260624-1">
+    <link rel="stylesheet" href="/static/app.css?v=apply-inline-20260624-1">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -23,7 +23,6 @@
         <nav class="nav-stack" aria-label="Primary">
           {% set nav = [
             ("Dashboard", "/dashboard"),
-            ("Appliance Apply", "/appliance-apply"),
             ("Physical Interfaces", "/physical-interfaces"),
             ("VLAN Interfaces", "/vlan-interfaces"),
             ("Routes & WAN Simulation", "/routes-wan"),
@@ -47,6 +46,16 @@
             <a class="nav-link {% if request.url.path == href %}active{% endif %}" href="{{ href }}">{{ label }}</a>
           {% endfor %}
         </nav>
+        {% set pending_apply_count = sidebar_pending_apply_count|default(0) %}
+        <div class="sidebar-apply">
+          <a class="sidebar-apply-link {% if pending_apply_count %}pending{% else %}current{% endif %} {% if request.url.path == '/appliance-apply' %}active{% endif %}" href="/appliance-apply">
+            <span class="sidebar-apply-text">
+              <strong>{% if pending_apply_count %}Review appliance changes{% else %}Appliance Apply{% endif %}</strong>
+              <small>{% if pending_apply_count %}{{ pending_apply_count }} pending {{ 'unit' if pending_apply_count == 1 else 'units' }}{% else %}Desired state current{% endif %}</small>
+            </span>
+            <span class="sidebar-apply-badge">{% if pending_apply_count %}pending{% else %}current{% endif %}</span>
+          </a>
+        </div>
       </aside>
 
       <main class="main-pane">
@@ -66,6 +75,18 @@
             </div>
           {% endif %}
         </header>
+
+        {% set page_apply_status = appliance_apply_status|default(None) %}
+        {% if page_apply_status and page_apply_status.changed %}
+          <div class="page-apply-notice {{ 'needs-attention' if page_apply_status.validation_errors else 'pending' }}">
+            <div class="page-apply-notice-main">
+              <span class="status-pill {{ page_apply_status.pill }}">{{ page_apply_status.state }}</span>
+              <strong>{{ page_apply_status.label }} has pending appliance changes</strong>
+              <span>Review and submit them from the global apply workflow.</span>
+            </div>
+            <a class="button secondary compact-button" href="/appliance-apply">Review appliance changes</a>
+          </div>
+        {% endif %}
 
         {% block content %}{% endblock %}
       </main>
@@ -90,7 +111,7 @@
     </script>
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
-    <script src="/static/app.js?v=nginx-frontdoor-20260624-1"></script>
+    <script src="/static/app.js?v=apply-inline-20260624-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>
 </html>

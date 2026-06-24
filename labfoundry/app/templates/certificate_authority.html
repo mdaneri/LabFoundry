@@ -243,10 +243,10 @@
             <input type="number" name="intermediate_valid_days" value="{{ ca_settings.intermediate_valid_days }}" min="90">
           </label>
         </div>
-        <label>
-          <span class="field-label"><span>Storage path</span><button class="help-icon" type="button" data-help="Appliance path where CA material and rendered config are intended to live. In development this is only captured by the dry-run adapter.">i</button></span>
-          <input name="storage_path" value="{{ ca_settings.storage_path }}">
-        </label>
+        <div class="derived-field fixed-value-field">
+          <span class="field-label"><span>Storage path</span><button class="help-icon" type="button" data-help="Appliance-owned path where CA material and rendered config are written by global appliance apply. This path is informational in the web UI.">i</button></span>
+          <strong>{{ ca_settings.storage_path }}</strong>
+        </div>
         <label class="switch-field"><span class="field-label"><span>Publish CRL</span><button class="help-icon" type="button" data-help="Scaffolds CRL publication desired state for future revocation support.">i</button></span><input class="switch-input" type="checkbox" name="publish_crl" {{ "checked" if ca_settings.publish_crl else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>OCSP enabled</span><button class="help-icon" type="button" data-help="Scaffolds OCSP responder desired state. The MVP records intent but does not start a responder.">i</button></span><input class="switch-input" type="checkbox" name="ocsp_enabled" {{ "checked" if ca_settings.ocsp_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <input type="hidden" name="state" value="{{ ca_settings.state }}">

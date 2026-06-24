@@ -38,6 +38,18 @@ def test_login_and_dashboard_render(client):
     assert favicon.headers["content-type"].startswith("image/svg+xml")
 
 
+def test_sidebar_appliance_apply_uses_bottom_pending_cta(client):
+    login(client)
+    response = client.get("/certificate-authority")
+
+    assert response.status_code == 200
+    assert 'class="sidebar-apply-link pending' in response.text
+    assert 'href="/appliance-apply"' in response.text
+    assert "Review appliance changes" in response.text
+    assert "pending unit" in response.text
+    assert 'class="nav-link " href="/appliance-apply"' not in response.text
+
+
 def test_settings_page_renders_autosave_validation_and_preview(client, monkeypatch):
     from sqlalchemy import select
 
@@ -60,7 +72,7 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert response.text.count('class="help-icon"') >= 2
     assert 'textarea name="external_dns_servers"' not in response.text
     assert 'input type="hidden" name="external_dns_servers"' in response.text
-    assert "Pending Appliance Changes" in response.text
+    assert "Appliance Settings has pending appliance changes" in response.text
     assert "Validation" in response.text
     assert "runtime.labfoundry.internal" in response.text
     assert "labfoundry.labfoundry.internal" in response.text
@@ -349,6 +361,10 @@ def test_appliance_settings_apply_task_records_dry_run_helper_commands(client):
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
     assert apply_response.status_code == 200
     assert "Appliance apply task succeeded" in apply_response.text
+    assert "Task Steps" in apply_response.text
+    assert "Appliance Settings" in apply_response.text
+    assert "Done" in apply_response.text
+    assert "data-apply-progress-modal" not in apply_response.text
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert "appliance_settings" in (job.result or "")
@@ -393,6 +409,8 @@ def test_appliance_apply_failure_renders_command_details(client, monkeypatch):
     assert response.status_code == 200
     assert "Appliance apply task failed" in response.text
     assert "Appliance Settings failed" in response.text
+    assert "Task Steps" in response.text
+    assert "Failed" in response.text
     assert "labfoundry-helper appliance-settings apply" in response.text
     assert "exited 30" in response.text
     assert "Read-only file system" in response.text
@@ -608,7 +626,7 @@ def test_routes_wan_policy_form_renders(client):
     assert "Managed Routes" in response.text
     assert "NAT Rules" in response.text
     assert "WAN Policies" in response.text
-    assert "Pending Appliance Changes" in response.text
+    assert "Routes &amp; WAN Simulation has pending appliance changes" in response.text
     assert "Validation" in response.text
     assert "routes-wan-routes-table" in response.text
     assert "routes-wan-nat-table" in response.text
@@ -769,7 +787,7 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "Reset password" in users.text
     assert "Remove" in users.text
     assert "Password Policy" in users.text
-    assert "Pending Appliance Changes" in users.text
+    assert "Local Users has pending appliance changes" in users.text
     assert "Photon OS" in users.text
     assert "OS account" in users.text
     assert "Shell" in users.text
@@ -1094,6 +1112,12 @@ def test_dns_and_dhcp_pages_render(client):
     assert "form[data-confirm-modal]" in app_js.text
     assert "confirm-modal" in app_js.text
     assert "initializeAutosaveForms" in app_js.text
+    assert "initializeApplianceApplyProgress" in app_js.text
+    assert "Submitting appliance changes" in app_js.text
+    assert "Waiting for result" in app_js.text
+    assert "data-apply-submit-tracker" in app_js.text
+    assert "data-apply-progress-modal" not in app_js.text
+    assert "index === 0 ? \"Applying\"" not in app_js.text
     assert "initializeDhcpScopesTable" in app_js.text
     assert "autoSaveDhcpScope" in app_js.text
     assert "+ Add IP zone here" in app_js.text
@@ -1125,6 +1149,12 @@ def test_dns_and_dhcp_pages_render(client):
     assert ".tag-suggestions" in app_css.text
     assert ".autosave-status" in app_css.text
     assert ".appliance-apply-form" in app_css.text
+    assert ".apply-change-set-panel" in app_css.text
+    assert ".apply-submit-bar" not in app_css.text
+    assert ".page-apply-notice" in app_css.text
+    assert ".apply-inline-tracker" in app_css.text
+    assert ".apply-progress-modal" not in app_css.text
+    assert ".apply-step-row" in app_css.text
     assert ".confirm-modal" in app_css.text
     assert ".confirm-modal::backdrop" in app_css.text
     assert "backdrop-filter" not in app_css.text
@@ -1391,6 +1421,10 @@ def test_certificate_authority_page_renders(client):
     assert "labfoundry-ca.json" in ca.text
     assert 'class="language-json"' in ca.text
     assert "data-confirm-modal" in ca.text
+    assert '<strong>/etc/labfoundry/ca</strong>' in ca.text
+    assert "fixed-value-field" in ca.text
+    assert 'name="storage_path"' not in ca.text
+    assert '<input name="storage_path"' not in ca.text
     assert "Downloads" in ca.text
     assert "Download root CA" in ca.text
     assert "Download CA bundle" in ca.text
@@ -1475,6 +1509,9 @@ def test_kms_page_renders(client):
     assert "/var/lib/labfoundry/kms/pykmip.db" in kms.text
     assert "<span>Database path</span>" not in kms.text
     assert "<span>Config path</span>" not in kms.text
+    assert "<span>Client CA path</span>" in kms.text
+    assert "fixed-value-field" in kms.text
+    assert 'name="ca_certificate_path"' not in kms.text
     assert 'name="database_path"' not in kms.text
     assert 'name="config_path"' not in kms.text
     assert "data-confirm-modal" in kms.text
@@ -1503,7 +1540,7 @@ def test_kms_settings_autosave_returns_json(client):
             "port": "5696",
             "hostname": "kms.labfoundry.internal",
             "server_certificate": "kms.labfoundry.internal",
-            "ca_certificate_path": "/etc/labfoundry/ca/root.crt",
+            "ca_certificate_path": "/tmp/rogue-client-ca.crt",
             "database_path": "/tmp/rogue-kms.db",
             "config_path": "/tmp/rogue-kms.conf",
             "require_client_cert": "on",
@@ -1519,6 +1556,8 @@ def test_kms_settings_autosave_returns_json(client):
     assert "enabled" in refreshed.text
     assert "/tmp/rogue-kms.db" not in refreshed.text
     assert "/tmp/rogue-kms.conf" not in refreshed.text
+    assert "/tmp/rogue-client-ca.crt" not in refreshed.text
+    assert "/etc/labfoundry/ca/root.crt" in refreshed.text
     assert "/var/lib/labfoundry/kms/pykmip.db" in refreshed.text
     assert "/etc/labfoundry/kms/pykmip.conf" in refreshed.text
 
@@ -1616,6 +1655,7 @@ def test_vcf_private_registry_page_models_harbor_and_bundle_relocation(client):
     assert "eth2 - access / access / 192.168.50.1" in page.text
     assert 'data-address="192.168.50.1"' in page.text
     assert "data-vcf-registry-derived-address" in page.text
+    assert page.text.count("fixed-value-field") >= 1
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "initializeVcfRegistrySettings" in app_js.text
@@ -1790,6 +1830,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert 'data-vcf-depot-tool-name' not in tool_metric
     assert 'data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab"' in page.text
     assert "/mnt/labfoundry-vcf-offline-depot" in page.text
+    assert "Depot store volume" in page.text
+    assert page.text.count("fixed-value-field") >= 1
     assert "depot.labfoundry.internal" in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
@@ -2610,7 +2652,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "nginx-frontdoor-20260624-1" in page.text
+    assert "apply-inline-20260624-1" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
@@ -2668,6 +2710,11 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     page = client.get("/appliance-apply")
     assert page.status_code == 200
     assert "Appliance Change Set" in page.text
+    change_set_markup = page.text.split('class="panel apply-change-set-panel"', 1)[1].split('<div class="apply-unit-list">', 1)[0]
+    assert "Submit appliance changes" in change_set_markup
+    assert "data-apply-submit-tracker" in change_set_markup
+    assert "apply-submit-bar" not in page.text
+    assert "data-apply-progress-modal" not in page.text
     assert "No last-applied baseline exists yet" in page.text
     assert 'value="firewall"' in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -2960,6 +3007,11 @@ def test_services_ui_records_dry_run_action(client):
 
 
 def test_ca_settings_autosave_returns_json(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings
+
     login(client)
     page = client.get("/certificate-authority")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -2979,7 +3031,7 @@ def test_ca_settings_autosave_returns_json(client):
             "root_valid_days": "3650",
             "intermediate_valid_days": "1825",
             "publish_crl": "on",
-            "storage_path": "/etc/labfoundry/ca",
+            "storage_path": "/tmp/operator-edited-ca",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -2988,6 +3040,9 @@ def test_ca_settings_autosave_returns_json(client):
     assert response.status_code == 200
     assert response.json()["status"] == "saved"
     assert "LabFoundry Test Root CA" in client.get("/certificate-authority").text
+    with SessionLocal() as db:
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        assert ca_settings.storage_path == "/etc/labfoundry/ca"
 
 
 def test_ca_apply_task_captures_current_desired_state(client):

@@ -296,7 +296,15 @@ def verify_csrf(request: Request, token: str) -> None:
 
 
 def render(request: Request, template: str, context: dict, status_code: int = 200) -> HTMLResponse:
+    context = dict(context)
     identity = context.pop("identity", None)
+    if identity and "sidebar_pending_apply_count" not in context:
+        if "changed_apply_unit_count" in context:
+            context["sidebar_pending_apply_count"] = context["changed_apply_unit_count"]
+        elif isinstance(context.get("appliance_apply_status"), dict):
+            context["sidebar_pending_apply_count"] = context["appliance_apply_status"].get("sidebar_pending_apply_count", 0)
+        else:
+            context["sidebar_pending_apply_count"] = 0
     return templates.TemplateResponse(
         request,
         template,
@@ -2400,7 +2408,9 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
 
 
 def appliance_apply_status(db: Session, unit_id: str) -> dict[str, Any]:
-    for unit in appliance_apply_units(db):
+    units = appliance_apply_units(db)
+    sidebar_count = len([unit for unit in units if unit["changed"]])
+    for unit in units:
         if unit["id"] == unit_id:
             if unit["validation_errors"]:
                 state = "needs attention"
@@ -2411,8 +2421,8 @@ def appliance_apply_status(db: Session, unit_id: str) -> dict[str, Any]:
             else:
                 state = "current"
                 pill = "good"
-            return {"state": state, "pill": pill, **unit}
-    return {"state": "unknown", "pill": "muted", "changed": False, "validation_errors": []}
+            return {"state": state, "pill": pill, "sidebar_pending_apply_count": sidebar_count, **unit}
+    return {"state": "unknown", "pill": "muted", "changed": False, "validation_errors": [], "sidebar_pending_apply_count": sidebar_count}
 
 
 def appliance_apply_context(db: Session) -> dict[str, Any]:
@@ -4730,7 +4740,6 @@ def update_ca_settings_from_ui(
     intermediate_valid_days: int = Form(1825),
     publish_crl: str | None = Form(None),
     ocsp_enabled: str | None = Form(None),
-    storage_path: str = Form("/etc/labfoundry/ca"),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -4751,7 +4760,7 @@ def update_ca_settings_from_ui(
     settings.intermediate_valid_days = intermediate_valid_days
     settings.publish_crl = publish_crl == "on"
     settings.ocsp_enabled = ocsp_enabled == "on"
-    settings.storage_path = storage_path.strip() or "/etc/labfoundry/ca"
+    settings.storage_path = settings.storage_path.strip() or "/etc/labfoundry/ca"
     settings.updated_at = utcnow()
     db.commit()
     record_audit(db, actor=identity.username, action="update_ca_settings", resource_type="ca", resource_id=str(settings.id))
@@ -4982,7 +4991,6 @@ def update_kms_settings_from_ui(
     port: int = Form(5696),
     hostname: str = Form("kms.labfoundry.internal"),
     server_certificate: str = Form("kms.labfoundry.internal"),
-    ca_certificate_path: str = Form("/etc/labfoundry/ca/root.crt"),
     require_client_cert: str | None = Form(None),
     allow_register: str | None = Form(None),
     allow_destroy: str | None = Form(None),
@@ -4999,7 +5007,7 @@ def update_kms_settings_from_ui(
     settings.port = port
     settings.hostname = hostname.strip() or "kms.labfoundry.internal"
     settings.server_certificate = server_certificate.strip() or settings.hostname
-    settings.ca_certificate_path = ca_certificate_path.strip() or "/etc/labfoundry/ca/root.crt"
+    settings.ca_certificate_path = settings.ca_certificate_path.strip() or "/etc/labfoundry/ca/root.crt"
     settings.database_path = KMS_DEFAULT_DATABASE_PATH
     settings.config_path = KMS_DEFAULT_CONFIG_PATH
     settings.require_client_cert = require_client_cert == "on"

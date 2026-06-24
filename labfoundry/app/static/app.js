@@ -5769,6 +5769,76 @@ function initializeTabs() {
   });
 }
 
+function initializeApplianceApplyProgress() {
+  const form = document.querySelector("[data-appliance-apply-form]");
+  if (!(form instanceof HTMLFormElement)) {
+    return;
+  }
+  const tracker = document.querySelector("[data-apply-submit-tracker]");
+  const steps = document.querySelector("[data-apply-submit-steps]");
+  const title = document.querySelector("[data-apply-submit-title]");
+  const detail = document.querySelector("[data-apply-submit-detail]");
+  const submitButton = form.querySelector("[data-apply-submit-button]");
+  if (!(tracker instanceof HTMLElement) || !(steps instanceof HTMLElement)) {
+    return;
+  }
+
+  const selectedUnits = () =>
+    Array.from(form.querySelectorAll("[data-apply-unit-checkbox]:checked")).flatMap((checkbox) => {
+      if (!(checkbox instanceof HTMLInputElement) || checkbox.disabled) {
+        return [];
+      }
+      const card = checkbox.closest("[data-apply-unit-card]");
+      if (!(card instanceof HTMLElement)) {
+        return [];
+      }
+      return [
+        {
+          id: card.dataset.applyUnitId || checkbox.value,
+          label: card.dataset.applyUnitLabel || checkbox.value,
+        },
+      ];
+    });
+
+  const renderStep = (unit, state, className = "") => {
+    const row = document.createElement("div");
+    row.className = `apply-step-row ${className}`.trim();
+
+    const name = document.createElement("span");
+    name.className = "apply-step-name";
+    name.textContent = unit.label;
+
+    const line = document.createElement("span");
+    line.className = "apply-step-line";
+
+    const status = document.createElement("span");
+    status.className = "apply-step-state";
+    status.textContent = state;
+
+    row.append(name, line, status);
+    return row;
+  };
+
+  form.addEventListener("submit", (event) => {
+    const units = selectedUnits();
+    if (!units.length) {
+      return;
+    }
+    if (title instanceof HTMLElement) {
+      title.textContent = "Submitting appliance changes";
+    }
+    if (detail instanceof HTMLElement) {
+      detail.textContent = "The server is validating and applying the selected units. This list stays on the page and refreshes with real per-unit results when the task completes.";
+    }
+    steps.replaceChildren(...units.map((unit) => renderStep(unit, "Waiting for result", "waiting")));
+    tracker.classList.remove("hidden");
+    if (submitButton instanceof HTMLButtonElement) {
+      submitButton.disabled = true;
+      submitButton.textContent = "Submitting...";
+    }
+  });
+}
+
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
@@ -5806,6 +5876,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);
+document.addEventListener("DOMContentLoaded", initializeApplianceApplyProgress);
 document.addEventListener("DOMContentLoaded", () => {
   registerLabFoundryPrismLanguages();
   highlightConfigPreviews();

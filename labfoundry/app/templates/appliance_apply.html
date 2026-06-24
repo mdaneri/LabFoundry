@@ -2,68 +2,105 @@
 {% block page_title %}Appliance Apply{% endblock %}
 {% block content %}
 <section class="page-stack">
-  <div class="panel">
-    <div class="panel-head">
-      <div>
-        <h2>Appliance Change Set</h2>
-        <p class="muted">Review changed desired state, select what should be submitted, and execute through LabFoundry adapters.</p>
-      </div>
-      <span class="status-pill {{ 'warn' if changed_apply_unit_count else 'good' }}">{{ changed_apply_unit_count }} changed</span>
-    </div>
-    {% if apply_error %}
-      <div class="alert error">{{ apply_error }}</div>
-    {% endif %}
-    {% if apply_task %}
-      <div class="alert {{ 'success' if apply_task.status == 'succeeded' else 'error' }}">
-        <strong>Appliance apply task {{ apply_task.status }}</strong>
-        <p>{{ apply_task.id }}{% if apply_task_dry_run %} recorded as dry-run.{% endif %}</p>
-        {% if apply_task_dry_run %}
-          <p>Dry-run mode recorded the commands without changing the host.</p>
-        {% endif %}
-        {% if apply_task.status != 'succeeded' and apply_failure_summaries %}
-          <div class="apply-failure-list">
-            {% for failure in apply_failure_summaries %}
-              <div class="apply-failure-item">
-                <strong>{{ failure.label }} failed</strong>
-                {% for command in failure.commands %}
-                  <details class="apply-failure-command">
-                    <summary>{{ command.command_line }} exited {{ command.returncode }}</summary>
-                    {% if command.stderr %}
-                      <div class="apply-failure-output">
-                        <span>stderr</span>
-                        <code>{{ command.stderr }}</code>
-                      </div>
-                    {% endif %}
-                    {% if command.stdout %}
-                      <div class="apply-failure-output">
-                        <span>stdout</span>
-                        <code>{{ command.stdout }}</code>
-                      </div>
-                    {% endif %}
-                  </details>
-                {% endfor %}
-              </div>
-            {% endfor %}
-          </div>
-        {% elif apply_task.status != 'succeeded' and apply_task.error %}
-          <p>{{ apply_task.error }}</p>
-        {% endif %}
-      </div>
-    {% endif %}
-  </div>
-
-  <form class="appliance-apply-form" action="/appliance-apply" method="post">
+  <form class="appliance-apply-form page-stack" action="/appliance-apply" method="post" data-appliance-apply-form>
     <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="panel apply-change-set-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Appliance Change Set</h2>
+          <p class="muted">Review changed desired state, select what should be submitted, and execute through LabFoundry adapters.</p>
+        </div>
+        <div class="apply-change-set-actions">
+          <span class="status-pill {{ 'warn' if changed_apply_unit_count else 'good' }}">{{ changed_apply_unit_count }} changed</span>
+          {% if changed_apply_units %}
+            <button class="button primary" type="submit" data-apply-submit-button>Submit appliance changes</button>
+          {% endif %}
+        </div>
+      </div>
+      {% if apply_error %}
+        <div class="alert error">{{ apply_error }}</div>
+      {% endif %}
+      {% if apply_task %}
+        <div class="alert {{ 'success' if apply_task.status == 'succeeded' else 'error' }}">
+          <strong>Appliance apply task {{ apply_task.status }}</strong>
+          <p>{{ apply_task.id }}{% if apply_task_dry_run %} recorded as dry-run.{% endif %}</p>
+          {% if apply_task_dry_run %}
+            <p>Dry-run mode recorded the commands without changing the host.</p>
+          {% endif %}
+          {% if apply_task.status != 'succeeded' and apply_failure_summaries %}
+            <div class="apply-failure-list">
+              {% for failure in apply_failure_summaries %}
+                <div class="apply-failure-item">
+                  <strong>{{ failure.label }} failed</strong>
+                  {% for command in failure.commands %}
+                    <details class="apply-failure-command">
+                      <summary>{{ command.command_line }} exited {{ command.returncode }}</summary>
+                      {% if command.stderr %}
+                        <div class="apply-failure-output">
+                          <span>stderr</span>
+                          <code>{{ command.stderr }}</code>
+                        </div>
+                      {% endif %}
+                      {% if command.stdout %}
+                        <div class="apply-failure-output">
+                          <span>stdout</span>
+                          <code>{{ command.stdout }}</code>
+                        </div>
+                      {% endif %}
+                    </details>
+                  {% endfor %}
+                </div>
+              {% endfor %}
+            </div>
+          {% elif apply_task.status != 'succeeded' and apply_task.error %}
+            <p>{{ apply_task.error }}</p>
+          {% endif %}
+        </div>
+        {% if applied_unit_results %}
+          <div class="apply-result-panel">
+            <div class="panel-head compact">
+              <div>
+                <h2>Task Steps</h2>
+                <p class="muted">Selected appliance units from the last submit.</p>
+              </div>
+              <span class="status-pill {{ 'good' if apply_task.status == 'succeeded' else 'warn' }}">{{ apply_task.status }}</span>
+            </div>
+            <div class="apply-step-list">
+              {% for result in applied_unit_results %}
+                <div class="apply-step-row {{ 'done' if result.success else 'failed' }}">
+                  <span class="apply-step-name">{{ result.label }}</span>
+                  <span class="apply-step-line"></span>
+                  <span class="apply-step-state">{{ "Done" if result.success else "Failed" }}</span>
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% endif %}
+      {% endif %}
+      {% if changed_apply_units %}
+        <div class="apply-inline-tracker hidden" data-apply-submit-tracker>
+          <div class="apply-inline-tracker-head">
+            <div>
+              <strong data-apply-submit-title>Submitting appliance changes</strong>
+              <p class="muted" data-apply-submit-detail>Selected appliance units will report here while the page submits.</p>
+            </div>
+            <span class="status-pill warn">running</span>
+          </div>
+          <div class="apply-step-list" data-apply-submit-steps></div>
+        </div>
+      {% endif %}
+    </div>
     {% if changed_apply_units %}
       <div class="apply-unit-list">
         {% for unit in changed_apply_units %}
-          <article class="panel apply-unit-card">
+          <article class="panel apply-unit-card" data-apply-unit-card data-apply-unit-id="{{ unit.id }}" data-apply-unit-label="{{ unit.label }}">
             <div class="apply-unit-head">
               <label class="apply-unit-select">
                 <input
                   type="checkbox"
                   name="selected_units"
                   value="{{ unit.id }}"
+                  data-apply-unit-checkbox
                   {% if not selected_apply_unit_ids or unit.id in selected_apply_unit_ids %}checked{% endif %}
                   {{ "disabled" if unit.validation_errors else "" }}
                 >
@@ -112,9 +149,6 @@
             </details>
           </article>
         {% endfor %}
-      </div>
-      <div class="apply-submit-bar">
-        <button class="button primary" type="submit">Submit appliance changes</button>
       </div>
     {% else %}
       <div class="panel empty-state">

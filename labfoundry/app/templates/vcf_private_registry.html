@@ -167,7 +167,7 @@
           <span class="field-label"><span>Robot account</span><button class="help-icon" type="button" data-help="Harbor robot account name used by appliance tasks. Tokens and passwords are provisioned by helpers and are never shown in LabFoundry previews.">i</button></span>
           <input name="robot_account" value="{{ vcf_registry_settings.robot_account }}">
         </label>
-        <div class="derived-field">
+        <div class="derived-field fixed-value-field">
           <span class="field-label"><span>Registry storage path</span><button class="help-icon" type="button" data-help="Fixed appliance volume mount for Harbor registry content. This is not a routine UI-configurable host path in the MVP.">i</button></span>
           <strong data-vcf-registry-storage>{{ vcf_registry_settings.storage_path }}</strong>
         </div>

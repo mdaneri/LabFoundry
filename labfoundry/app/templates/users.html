@@ -79,20 +79,6 @@
   <aside class="side-stack">
     <div class="panel">
       <div class="panel-head">
-        <h2>Pending Appliance Changes</h2>
-        <span class="status-pill {{ appliance_apply_status.pill }}">{{ appliance_apply_status.state }}</span>
-      </div>
-      <div class="settings-list compact-list">
-        <div><span>Apply unit</span><strong>Local Users</strong></div>
-        <div><span>Pending passwords</span><strong>{{ appliance_apply_status.context.local_user_pending_password_count }}</strong></div>
-        <div><span>Unlock requests</span><strong>{{ appliance_apply_status.context.local_user_unlock_request_count }}</strong></div>
-        <div><span>Removed OS accounts</span><strong>{{ appliance_apply_status.context.local_user_removed_users|length }}</strong></div>
-      </div>
-      <a class="button secondary full-width" href="/appliance-apply">Review appliance changes</a>
-    </div>
-
-    <div class="panel">
-      <div class="panel-head">
         <h2>Password Policy</h2>
         <span class="status-pill good">strict</span>
       </div>

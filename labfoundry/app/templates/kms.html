@@ -168,10 +168,10 @@
           <span class="field-label"><span>Server certificate</span><button class="help-icon" type="button" data-help="Certificate common name or request name LabFoundry should use for the KMIP TLS endpoint.">i</button></span>
           <input name="server_certificate" value="{{ kms_settings.server_certificate }}">
         </label>
-        <label>
-          <span class="field-label"><span>Client CA path</span><button class="help-icon" type="button" data-help="Appliance path to the CA certificate used to verify KMIP client certificates.">i</button></span>
-          <input name="ca_certificate_path" value="{{ kms_settings.ca_certificate_path }}">
-        </label>
+        <div class="derived-field fixed-value-field">
+          <span class="field-label"><span>Client CA path</span><button class="help-icon" type="button" data-help="Appliance-owned path to the CA certificate used to verify KMIP client certificates. This path is informational in the web UI.">i</button></span>
+          <strong>{{ kms_settings.ca_certificate_path }}</strong>
+        </div>
         <label class="switch-field"><span class="field-label"><span>Require client certificates</span><button class="help-icon" type="button" data-help="Requires mutual TLS for KMIP clients. Keep this enabled for VCF-style labs.">i</button></span><input class="switch-input" type="checkbox" name="require_client_cert" {{ "checked" if kms_settings.require_client_cert else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>Allow register</span><button class="help-icon" type="button" data-help="Allows clients to register keys or objects through KMIP when the backend supports it.">i</button></span><input class="switch-input" type="checkbox" name="allow_register" {{ "checked" if kms_settings.allow_register else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>Allow destroy</span><button class="help-icon" type="button" data-help="Allows destructive KMIP destroy operations. Leave disabled unless a lab workflow explicitly needs it.">i</button></span><input class="switch-input" type="checkbox" name="allow_destroy" {{ "checked" if kms_settings.allow_destroy else "" }}><span class="switch-track" aria-hidden="true"></span></label>
