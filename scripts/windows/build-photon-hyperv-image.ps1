@@ -233,6 +233,25 @@ function New-RemasteredPhotonIso {
     }
 }
 
+function ConvertTo-HclLiteral {
+    param([AllowNull()]$Value)
+
+    return ConvertTo-Json -InputObject $Value -Compress
+}
+
+function Write-PackerVarFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][hashtable]$Variables
+    )
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+    $lines = foreach ($key in ($Variables.Keys | Sort-Object)) {
+        "$key = $(ConvertTo-HclLiteral -Value $Variables[$key])"
+    }
+    [System.IO.File]::WriteAllLines($Path, [string[]]$lines, [System.Text.UTF8Encoding]::new($false))
+}
+
 if ([string]::IsNullOrWhiteSpace($PackerDirectory)) {
     $PackerDirectory = Join-Path $PSScriptRoot '..\..\image\hyperv'
 }
@@ -247,6 +266,7 @@ if ([string]::IsNullOrWhiteSpace($PreparedIsoPath)) {
 }
 
 $buildDir = Join-Path $packerDir 'build'
+$varFilePath = Join-Path $buildDir 'packer-vars\labfoundry-photon.auto.pkrvars.hcl'
 $ksSourceDir = Join-Path $buildDir 'kickstart-src'
 $kickstartJson = Join-Path $ksSourceDir 'photon-ks.json'
 $resolvedPreparedIsoPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PreparedIsoPath)
@@ -278,33 +298,36 @@ if ($PrepareIsoOnly) {
     return
 }
 
-$packerArgs = @(
-    $(if ($ValidateOnly) { 'validate' } else { 'build' }),
-    '-var', "iso_url=$resolvedPreparedIsoPath",
-    '-var', "iso_checksum=$preparedIsoChecksum",
-    '-var', "iso_contains_kickstart=true",
-    '-var', "ssh_password=$SshPassword",
-    '-var', "bootstrap_admin_password=$BootstrapAdminPassword",
-    '-var', "vm_name=$VmName",
-    '-var', "switch_name=$SwitchName",
-    '-var', "builder_static_ip=$BuilderStaticIp",
-    '-var', "builder_static_netmask=$BuilderStaticNetmask",
-    '-var', "builder_static_gateway=$BuilderStaticGateway"
-)
-
-$dnsJson = ConvertTo-Json -InputObject $BuilderStaticDns -Compress
-$dnsJson = $dnsJson -replace '"', '\"'
-$packerArgs += @('-var', "builder_static_dns=$dnsJson")
+$packerVariables = @{
+    iso_url                  = $resolvedPreparedIsoPath
+    iso_checksum             = $preparedIsoChecksum
+    iso_contains_kickstart   = $true
+    ssh_password             = $SshPassword
+    bootstrap_admin_password = $BootstrapAdminPassword
+    vm_name                  = $VmName
+    switch_name              = $SwitchName
+    builder_static_ip        = $BuilderStaticIp
+    builder_static_netmask   = $BuilderStaticNetmask
+    builder_static_gateway   = $BuilderStaticGateway
+    builder_static_dns       = $BuilderStaticDns
+}
 
 if (-not [string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    $packerArgs += @('-var', "output_directory=$OutputDirectory")
+    $packerVariables["output_directory"] = $OutputDirectory
 }
 
 if (-not [string]::IsNullOrWhiteSpace($SshHost)) {
-    $packerArgs += @('-var', "ssh_host=$SshHost")
+    $packerVariables["ssh_host"] = $SshHost
 }
 
-$packerArgs += '.'
+Write-PackerVarFile -Path $varFilePath -Variables $packerVariables
+Write-Host "Using Packer var-file: $varFilePath"
+
+$packerArgs = @(
+    $(if ($ValidateOnly) { 'validate' } else { 'build' }),
+    '-var-file', $varFilePath,
+    '.'
+)
 
 Push-Location $packerDir
 try {

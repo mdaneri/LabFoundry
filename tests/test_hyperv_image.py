@@ -52,7 +52,10 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "create_photon_kickstart_iso.py" in wrapper
     assert "Using remastered Photon ISO" in wrapper
     assert "Packer will boot a single DVD with embedded photon-ks.json." in wrapper
-    assert "'-var', \"iso_contains_kickstart=true\"" in wrapper
+    assert "Write-PackerVarFile" in wrapper
+    assert "Using Packer var-file" in wrapper
+    assert "'-var-file', $varFilePath" in wrapper
+    assert "builder_static_dns       = $BuilderStaticDns" in wrapper
     assert "UseHttpKickstartFallback" not in wrapper
     assert "/image/hyperv/build" in gitignore
     remaster_helper = Path("scripts/interop/create_photon_kickstart_iso.py").read_text(encoding="utf-8")
