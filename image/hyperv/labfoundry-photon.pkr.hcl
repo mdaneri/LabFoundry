@@ -83,8 +83,9 @@ variable "builder_static_dns" {
 }
 
 locals {
-  builder_static_address   = var.builder_static_ip != "" ? split("/", var.builder_static_ip)[0] : ""
-  bootstrap_admin_password = var.bootstrap_admin_password != "" ? var.bootstrap_admin_password : var.ssh_password
+  builder_static_address    = var.builder_static_ip != "" ? split("/", var.builder_static_ip)[0] : ""
+  builder_boot_network_args = local.builder_static_address != "" ? " ip=${local.builder_static_address}::${var.builder_static_gateway}:${var.builder_static_netmask}:labfoundry:eth0:none nameserver=${var.builder_static_dns[0]}" : ""
+  bootstrap_admin_password  = var.bootstrap_admin_password != "" ? var.bootstrap_admin_password : var.ssh_password
 }
 
 source "hyperv-iso" "photon" {
@@ -128,7 +129,7 @@ source "hyperv-iso" "photon" {
   boot_keygroup_interval = "250ms"
   boot_command = [
     "c<wait>",
-    "linux /isolinux/vmlinuz root=/dev/ram0 loglevel=3 ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/photon-ks.json insecure_installation=1 photon.media=cdrom",
+    "linux /isolinux/vmlinuz root=/dev/ram0 loglevel=3 ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/photon-ks.json insecure_installation=1 photon.media=cdrom${local.builder_boot_network_args}",
     "<enter><wait>",
     "initrd /isolinux/initrd.img",
     "<enter><wait>",

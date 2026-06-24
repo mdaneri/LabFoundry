@@ -65,7 +65,9 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switc
 The Packer build VM uses the `LabFoundry-Mgmt` switch by default with temporary
 static address `192.168.49.30/24` and gateway `192.168.49.254`. This avoids
 fragile `Default Switch` host-IP detection while still giving the builder NAT
-internet access for kickstart provisioning and `tdnf update`.
+internet access for kickstart provisioning and `tdnf update`. The template also
+passes that static address on the Photon boot command line so the installer can
+download the kickstart file before reading the kickstart network block.
 
 The generated appliance intentionally keeps
 `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`. Real host mutation is staged per

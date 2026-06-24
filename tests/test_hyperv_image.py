@@ -31,9 +31,13 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert 'default     = "192.168.49.30/24"' in template
     assert 'default     = "255.255.255.0"' in template
     assert 'default     = "192.168.49.254"' in template
+    assert "builder_boot_network_args" in template
+    assert "ip=${local.builder_static_address}::${var.builder_static_gateway}:${var.builder_static_netmask}:labfoundry:eth0:none" in template
+    assert "photon.media=cdrom${local.builder_boot_network_args}" in template
     assert 'default = "Default Switch"' not in template
     assert "create-hyperv-switches.ps1" in docs
     assert "builder_static_ip=192.168.49.30/24" in docs
+    assert "installer-time networking" in docs
 
 
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():

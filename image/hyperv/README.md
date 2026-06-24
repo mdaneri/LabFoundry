@@ -43,6 +43,11 @@ and `builder_static_gateway=192.168.49.254`. When `builder_static_ip` is set,
 the template automatically uses it as Packer's SSH target. Override those
 variables only when the management subnet is intentionally different.
 
+The same static address is also passed on the Photon boot command line with
+dracut-style `ip=... nameserver=...` arguments. That installer-time networking
+is required so Photon can download `ks=http://<packer-http-ip>:8591/photon-ks.json`
+before it has read the kickstart file's own network block.
+
 Use single quotes around passwords that contain PowerShell metacharacters:
 
 ```powershell
@@ -84,10 +89,12 @@ package set.
 
 If the VM stops at the Photon license agreement or disk selection screen, the
 builder did not load the kickstart file. Stop the build, make sure this
-directory is current, and rerun `packer build .`; the template should boot
-Photon through the GRUB command line with `ks=http://...
-insecure_installation=1 photon.media=cdrom`. The built-in Packer HTTP server is
-pinned to port `8591` to make troubleshooting simpler.
+directory is current, verify `LabFoundry-Mgmt` has host address
+`192.168.49.254/24`, and rerun `packer build .`; the template should boot
+Photon through the GRUB command line with
+`ks=http://... insecure_installation=1 photon.media=cdrom ip=192.168.49.30::192.168.49.254:255.255.255.0:labfoundry:eth0:none`.
+The built-in Packer HTTP server is pinned to port `8591` to make
+troubleshooting simpler.
 
 If Photon installs and SSH works from the Windows host but Packer remains at
 `Waiting for SSH to become available`, query the IPv4 reported by Hyper-V:
