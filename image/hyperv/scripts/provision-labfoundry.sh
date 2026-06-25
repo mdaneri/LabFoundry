@@ -155,6 +155,7 @@ rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.
 chmod 0644 /etc/resolv.conf
 
 log_step "configuring default LabFoundry management nginx proxy"
+install -d -o root -g root -m 0755 /etc/nginx/conf.d
 rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf
 cat >/etc/nginx/conf.d/labfoundry.conf <<'EOF'
 # Managed by LabFoundry. Local changes may be overwritten.

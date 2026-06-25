@@ -30,6 +30,7 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
 
     assert "tdnf -y install" in script and "nginx" in script
     assert "configuring default LabFoundry management nginx proxy" in script
+    assert "install -d -o root -g root -m 0755 /etc/nginx/conf.d" in script
     assert "/etc/nginx/conf.d/labfoundry.conf" in script
     assert "/etc/labfoundry/nginx/sites.d/management.conf" in script
     assert "rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf" in script
