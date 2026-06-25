@@ -13,12 +13,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Test-IsAdministrator {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
 function Find-LatestApplianceVhdx {
     param([string]$RepoRoot)
 
@@ -39,10 +33,6 @@ function Find-LatestApplianceVhdx {
         throw "No appliance VHDX found under $outputRoot. Build the image first or pass -VhdxPath."
     }
     return $selected.FullName
-}
-
-if (-not (Test-IsAdministrator)) {
-    throw "Run this script from an elevated PowerShell session."
 }
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path

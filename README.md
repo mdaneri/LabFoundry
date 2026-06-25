@@ -78,7 +78,9 @@ when you want Packer to fail instead of replacing an existing output directory.
 
 The generated appliance intentionally keeps
 `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`. Real host mutation is staged per
-apply unit after the helper-backed command path is reviewed.
+apply unit after the helper-backed command path is reviewed. Build disposable
+demo or lifecycle images with `-EnableRealSystemAdapters` when the VM should
+actually mutate Photon services through the reviewed helper paths.
 Firewall desired state is nftables-backed. The image installs nftables and
 boots with management access to SSH, HTTPS, and the LabFoundry web UI.
 

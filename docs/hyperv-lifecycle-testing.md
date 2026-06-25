@@ -144,6 +144,10 @@ The lifecycle runner records structured evidence in
   submission over its lifecycle management test NIC, global `ca` appliance
   apply, issued certificate download from Client A, runner-side certificate
   signature/subject validation, and CA files under `/etc/labfoundry`
+- CA-backed management HTTPS desired state, the global `appliance_settings`
+  apply unit, HTTP-to-HTTPS redirect behavior on the management front door, and
+  HTTPS `/openapi.json` reachability with the locally issued appliance
+  certificate
 - VCF Backups SFTP desired state, `vcf-backup` Local Users password staging and
   OS sync, global `vcf_backups` appliance apply, OpenSSH drop-in host state, and
   a client-side SFTP probe from Client A to the SiteA appliance address
@@ -156,9 +160,9 @@ service-specific apply routes.
 
 First-boot images may still have `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`.
 That is useful for control-plane smoke testing, but a real lifecycle interop run
-should use real adapters. If a deliberate dry-run pass is needed, pass
-`-AllowDryRunApply`; otherwise the runner fails when an apply job reports
-dry-run.
+should use an appliance image built with `-EnableRealSystemAdapters`. If a
+deliberate dry-run pass is needed, pass `-AllowDryRunApply`; otherwise the
+runner fails when an apply job reports dry-run.
 
 ## Test Roadmap
 

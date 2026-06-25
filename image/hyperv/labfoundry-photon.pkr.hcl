@@ -93,9 +93,16 @@ variable "builder_static_dns" {
   description = "DNS servers for builder_static_ip."
 }
 
+variable "dry_run_system_adapters" {
+  type        = bool
+  default     = true
+  description = "Keep LabFoundry system adapters in dry-run mode. Set false only for disposable lifecycle/demo images that should mutate Photon services."
+}
+
 locals {
-  builder_static_address   = var.builder_static_ip != "" ? split("/", var.builder_static_ip)[0] : ""
-  bootstrap_admin_password = var.bootstrap_admin_password != "" ? var.bootstrap_admin_password : var.ssh_password
+  builder_static_address       = var.builder_static_ip != "" ? split("/", var.builder_static_ip)[0] : ""
+  bootstrap_admin_password     = var.bootstrap_admin_password != "" ? var.bootstrap_admin_password : var.ssh_password
+  dry_run_system_adapters_text = var.dry_run_system_adapters ? "true" : "false"
 }
 
 source "hyperv-iso" "photon" {
@@ -182,7 +189,8 @@ build {
 
   provisioner "shell" {
     environment_vars = [
-      "LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD=${local.bootstrap_admin_password}"
+      "LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD=${local.bootstrap_admin_password}",
+      "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}"
     ]
     execute_command = "echo '${var.ssh_password}' | sudo -S -E sh -c '{{ .Vars }} {{ .Path }}'"
     script          = "${path.root}/scripts/provision-labfoundry.sh"

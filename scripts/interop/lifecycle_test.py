@@ -12,6 +12,7 @@ import html
 import http.cookiejar
 import json
 import re
+import ssl
 import subprocess
 import sys
 import urllib.error
@@ -298,7 +299,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "url": args.client_ca_request_url or args.appliance_url,
             },
         },
-        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "ca", "vcf_backups"],
+        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "ca", "appliance_settings", "vcf_backups"],
         "checks": [
             "appliance health",
             "interface and VLAN desired state",
@@ -596,6 +597,67 @@ def configure_ca(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]
     return {"root_ca": certificate_summary(root_ca)}
 
 
+def configure_management_https(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    status, body, _headers = client.request("GET", "/settings")
+    if status >= 400:
+        raise LifecycleError(f"GET /settings failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    form = {
+        "fqdn": "labfoundry.labfoundry.internal",
+        "management_https_enabled": "on",
+        "external_dns_servers": "1.1.1.1\n9.9.9.9",
+        "ntp_servers": "time1.google.com\ntime2.google.com",
+        "csrf": csrf,
+    }
+    status, response_body, _headers = client.request(
+        "POST",
+        "/settings",
+        form=form,
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    if status >= 400:
+        raise LifecycleError(f"Management HTTPS settings update failed with HTTP {status}: {response_body[:500]}")
+    payload = json.loads(response_body)
+    if not payload.get("valid"):
+        raise LifecycleError(f"Management HTTPS desired state is invalid: {payload.get('validation_errors')}")
+    if not payload.get("management_https_enabled") or not payload.get("management_https_cert_available"):
+        raise LifecycleError("Management HTTPS desired state did not report an available CA-managed certificate.")
+    return {
+        "fqdn": payload.get("fqdn"),
+        "management_https_enabled": payload.get("management_https_enabled"),
+        "management_https_cert_available": payload.get("management_https_cert_available"),
+        "config_path": payload.get("config_path"),
+    }
+
+
+def https_request_unverified(url: str) -> tuple[int, str, dict[str, str]]:
+    request = urllib.request.Request(url, method="GET")
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=context) as response:
+            return response.status, response.read().decode("utf-8", errors="replace"), dict(response.headers.items())
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", errors="replace"), dict(exc.headers.items())
+
+
+def management_https_check(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    http_status, _http_body, http_headers = client.request("GET", "/openapi.json", follow_redirects=False)
+    if http_status not in {301, 302, 307, 308}:
+        raise LifecycleError(f"HTTP management endpoint should redirect after HTTPS apply, got HTTP {http_status}")
+    location = http_headers.get("Location", "")
+    if not location.lower().startswith("https://"):
+        raise LifecycleError(f"HTTP management redirect did not point at HTTPS: {location}")
+    parsed = urllib.parse.urlparse(args.appliance_url)
+    host = parsed.hostname or args.appliance_ssh_host
+    https_url = f"https://{host}/openapi.json"
+    https_status, https_body, _https_headers = https_request_unverified(https_url)
+    if https_status >= 400 or '"openapi"' not in https_body:
+        raise LifecycleError(f"HTTPS management endpoint failed with HTTP {https_status}")
+    return {"http_status": http_status, "redirect_location": location, "https_status": https_status, "https_url": https_url}
+
+
 def extract_ca_profile_id(body: str, profile_name: str) -> str:
     for match in re.finditer(r'<option value="(\d+)">([^<]+)</option>', body):
         if html.unescape(match.group(2)).strip() == profile_name:
@@ -755,7 +817,7 @@ def apply_units(client: HttpClient, units: list[str], args: argparse.Namespace) 
     status, response_body, _headers = client.request("POST", "/appliance-apply", form=form)
     if status >= 400:
         raise LifecycleError(f"Appliance apply failed with HTTP {status}: {response_body[:800]}")
-    if not args.allow_dry_run and re.search(r"\bdry-run\b", response_body, flags=re.IGNORECASE):
+    if not args.allow_dry_run and re.search(r"\brecorded\s+as\s+dry-run\b|\bDry-run\s+mode\s+recorded\b", response_body, flags=re.IGNORECASE):
         raise LifecycleError("Appliance apply reported dry-run; rerun with --allow-dry-run or enable real adapters for lifecycle validation.")
     return {"http_status": status, "selected_units": units, "response_contains_job": "appliance-apply" in response_body}
 
@@ -1068,6 +1130,9 @@ def main() -> int:
         run_step(results, "client-checks", client_checks, args)
         run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)
         run_step(results, "vcf-backup-client-check", vcf_backup_client_check, args)
+        run_step(results, "configure-management-https", configure_management_https, client, args)
+        run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings"], args)
+        run_step(results, "management-https-check", management_https_check, client, args)
         result["status"] = "passed"
         return_code = 0
     except Exception as exc:  # noqa: BLE001

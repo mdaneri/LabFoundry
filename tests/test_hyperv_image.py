@@ -38,6 +38,9 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "proxy_pass http://127.0.0.1:8000;" in script
     assert "nginx -t" in script
     assert "systemctl enable --now nginx" in script
+    assert 'LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"' in script
+    assert 'log_step "system adapter dry-run mode: $LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS"' in script
+    assert "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=$LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS" in script
     assert "HTTP/80, proxied to uvicorn on `127.0.0.1:8000`" in docs
     assert "proxying HTTP/80 to" in root_docs
 
@@ -54,6 +57,9 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert 'default     = "255.255.255.0"' in template
     assert 'default     = "192.168.49.254"' in template
     assert 'variable "iso_contains_kickstart"' in template
+    assert 'variable "dry_run_system_adapters"' in template
+    assert 'dry_run_system_adapters_text = var.dry_run_system_adapters ? "true" : "false"' in template
+    assert '"LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}"' in template
     assert "Iso_contains_kickstart must be true" in template
     assert "secondary_iso_images" not in template
     assert 'ks=cdrom:/photon-ks.json' in template
@@ -74,10 +80,12 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "Write-PackerVarFile" in wrapper
     assert "Using Packer var-file" in wrapper
     assert "[switch]$KeepExistingOutput" in wrapper
+    assert "[switch]$EnableRealSystemAdapters" in wrapper
     assert "Packer build will replace any existing output directory for this build." in wrapper
     assert "$packerArgs += '-force'" in wrapper
     assert "'-var-file', $varFilePath" in wrapper
     assert "builder_static_dns       = $BuilderStaticDns" in wrapper
+    assert "dry_run_system_adapters  = -not $EnableRealSystemAdapters" in wrapper
     assert "UseHttpKickstartFallback" not in wrapper
     assert "/image/hyperv/build" in gitignore
     remaster_helper = Path("scripts/interop/create_photon_kickstart_iso.py").read_text(encoding="utf-8")
@@ -127,7 +135,7 @@ def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
     assert "get-labfoundry-vm-ip.ps1" in script
     assert "VM already exists: $Name. Pass -Redeploy" in script
     assert "Remove-VM -Name $Name -Force" in script
-    assert "Run this script from an elevated PowerShell session." in script
+    assert "Run this script from an elevated PowerShell session." not in script
     assert "create-labfoundry-test-vm.ps1 -WaitForIp" in docs
     assert "pass `-Redeploy` to remove and recreate only that VM" in docs
 
@@ -252,7 +260,7 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
 
     plan = module.lifecycle_plan(args)
 
-    assert plan["apply_units"] == ["local_users", "network", "firewall", "wan", "dnsmasq", "ca", "vcf_backups"]
+    assert plan["apply_units"] == ["local_users", "network", "firewall", "wan", "dnsmasq", "ca", "appliance_settings", "vcf_backups"]
     assert plan["interfaces"]["vlan"]["name"] == "eth2.50"
     assert plan["interfaces"]["client_ca_request"]["name"] == "eth3"
     assert plan["interfaces"]["client_ca_request"]["ip_cidr"] == "192.168.49.20/24"
@@ -286,11 +294,16 @@ def test_lifecycle_runner_covers_ca_vcf_backups_wan_noise_and_console_summary():
 
     assert "--vcf-backup-password" in script
     assert "--client-ca-request-interface" in script
+    assert "configure_management_https" in script
+    assert "management_https_check" in script
+    assert "apply-appliance-settings-unit" in script
+    assert "HTTP management endpoint should redirect after HTTPS apply" in script
+    assert "https_request_unverified" in script
     assert "configure-vcf-backups" in script
     assert "vcf-backup-client-check" in script
     assert "sshpass -p" in script
     assert "redact_text" in script
-    assert '"local_users", "network", "firewall", "wan", "dnsmasq", "ca", "vcf_backups"' in script
+    assert '"local_users", "network", "firewall", "wan", "dnsmasq", "ca", "appliance_settings", "vcf_backups"' in script
     assert "certificate_summary" in script
     assert "root_ca" in script
     assert "ca-client-certificate-request" in script

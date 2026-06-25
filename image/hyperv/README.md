@@ -53,6 +53,12 @@ can be rebuilt in one command. Use `-OutputDirectory <path>` to keep multiple
 artifacts or `-KeepExistingOutput` when you want Packer to fail instead of
 replacing an existing output directory.
 
+The wrapper keeps `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` by default so a
+first-boot image records host-mutation command intent instead of changing
+Photon services. For a disposable demo or lifecycle image that should really
+apply nginx, dnsmasq, nftables, networkd, and other host changes, add
+`-EnableRealSystemAdapters` to the build command.
+
 Use single quotes around passwords that contain PowerShell metacharacters:
 
 ```powershell

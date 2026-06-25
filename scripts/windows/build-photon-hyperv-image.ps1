@@ -20,6 +20,7 @@ param(
     [string]$PackerDirectory = '',
     [string]$PreparedIsoPath = '',
     [switch]$KeepExistingOutput,
+    [switch]$EnableRealSystemAdapters,
     [switch]$ValidateOnly,
     [switch]$PrepareIsoOnly
 )
@@ -312,6 +313,7 @@ $packerVariables = @{
     builder_static_netmask   = $BuilderStaticNetmask
     builder_static_gateway   = $BuilderStaticGateway
     builder_static_dns       = $BuilderStaticDns
+    dry_run_system_adapters  = -not $EnableRealSystemAdapters
 }
 
 if (-not [string]::IsNullOrWhiteSpace($OutputDirectory)) {
