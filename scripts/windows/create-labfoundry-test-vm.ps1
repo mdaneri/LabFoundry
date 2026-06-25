@@ -5,6 +5,10 @@ param(
     [int64]$MemoryStartupBytes = 4GB,
     [int]$ProcessorCount = 2,
     [switch]$Redeploy,
+    [switch]$ResetDataDisks,
+    [switch]$SkipLabNetworkAdapters,
+    [int]$SiteVlanId = 12,
+    [int]$TaggedVlanId = 50,
     [switch]$NoStart,
     [switch]$SkipNetworkPrepare,
     [switch]$WaitForIp,
@@ -35,6 +39,37 @@ function Find-LatestApplianceVhdx {
     return $selected.FullName
 }
 
+function Remove-ExistingDataDisks {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [string]$OsVhdxPath,
+        [string[]]$DiskNames
+    )
+
+    $osDiskDirectory = (Resolve-Path -LiteralPath (Split-Path -Parent $OsVhdxPath)).Path
+    $osDiskPath = (Resolve-Path -LiteralPath $OsVhdxPath).Path
+
+    foreach ($diskName in $DiskNames) {
+        $candidatePath = Join-Path $osDiskDirectory $diskName
+        if (-not (Test-Path -LiteralPath $candidatePath)) {
+            continue
+        }
+
+        $resolvedCandidatePath = (Resolve-Path -LiteralPath $candidatePath).Path
+        if ($resolvedCandidatePath -eq $osDiskPath) {
+            throw "Refusing to remove OS disk as a data disk: $resolvedCandidatePath"
+        }
+        if ((Split-Path -Parent $resolvedCandidatePath) -ne $osDiskDirectory) {
+            throw "Refusing to remove data disk outside the appliance disk directory: $resolvedCandidatePath"
+        }
+
+        if ($PSCmdlet.ShouldProcess($resolvedCandidatePath, 'Remove existing LabFoundry data disk')) {
+            Remove-Item -LiteralPath $resolvedCandidatePath -Force
+            Write-Host "Removed existing data disk: $resolvedCandidatePath"
+        }
+    }
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $VhdxPath) {
     $VhdxPath = Find-LatestApplianceVhdx -RepoRoot $repoRoot
@@ -61,12 +96,19 @@ if ($existing -and $Redeploy) {
     }
 }
 
+if ($ResetDataDisks) {
+    Remove-ExistingDataDisks -OsVhdxPath $resolvedVhdxPath -DiskNames @('LabFoundry-Depot.vhdx', 'LabFoundry-Backups.vhdx')
+}
+
 if ($PSCmdlet.ShouldProcess($Name, "Create LabFoundry test VM from $resolvedVhdxPath")) {
     & (Join-Path $PSScriptRoot 'create-labfoundry-vm.ps1') `
         -Name $Name `
         -VhdxPath $resolvedVhdxPath `
         -MemoryStartupBytes $MemoryStartupBytes `
-        -ProcessorCount $ProcessorCount
+        -ProcessorCount $ProcessorCount `
+        -SkipLabNetworkAdapters:$SkipLabNetworkAdapters `
+        -SiteVlanId $SiteVlanId `
+        -TaggedVlanId $TaggedVlanId
     if (-not $?) {
         throw "LabFoundry VM creation failed."
     }

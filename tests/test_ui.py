@@ -559,12 +559,11 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
         assert settings.fqdn == "labfoundry.labfoundry.internal"
-        eth1 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth1")).scalar_one()
-        assert eth1.mode == "access"
-        non_management = db.execute(select(PhysicalInterface).where(PhysicalInterface.name != "eth0")).scalars().all()
-        assert non_management
-        assert all(interface.admin_state == "down" for interface in non_management)
-        assert all(interface.ip_cidr is None for interface in non_management)
+        interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+        assert [interface.name for interface in interfaces] == ["eth0"]
+        assert interfaces[0].role == "management"
+        assert interfaces[0].admin_state == "up"
+        assert interfaces[0].ip_cidr == "192.168.49.1/24"
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         assert dns_settings.listen_interface == ""
         assert dns_settings.listen_address in ("", None)

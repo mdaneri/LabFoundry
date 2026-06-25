@@ -8,7 +8,10 @@ param(
     [string]$DepotVhdxPath,
     [string]$BackupVhdxPath,
     [int64]$DepotDiskSizeBytes = 500GB,
-    [int64]$BackupDiskSizeBytes = 500GB
+    [int64]$BackupDiskSizeBytes = 500GB,
+    [switch]$SkipLabNetworkAdapters,
+    [int]$SiteVlanId = 12,
+    [int]$TaggedVlanId = 50
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +57,30 @@ function Ensure-DataDisk {
     }
 }
 
+function Add-LabNetworkAdapters {
+    param(
+        [string]$VMName,
+        [int]$SiteTag,
+        [int]$TaggedVlanTag
+    )
+
+    if ($PSCmdlet.ShouldProcess("$VMName/SiteA", 'Add SiteA lab NIC')) {
+        Add-VMNetworkAdapter -VMName $VMName -Name 'SiteA' -SwitchName 'LabFoundry-SiteA'
+        Set-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName 'SiteA' -Trunk -AllowedVlanIdList "$SiteTag" -NativeVlanId 0
+        Write-Host "Attached SiteA NIC on LabFoundry-SiteA as trunk VLAN $SiteTag"
+    }
+    if ($PSCmdlet.ShouldProcess("$VMName/Trunk", 'Add tagged VLAN lab NIC')) {
+        Add-VMNetworkAdapter -VMName $VMName -Name 'Trunk' -SwitchName 'LabFoundry-Trunk'
+        Set-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName 'Trunk' -Trunk -AllowedVlanIdList "$TaggedVlanTag" -NativeVlanId 0
+        Write-Host "Attached Trunk NIC on LabFoundry-Trunk as trunk VLAN $TaggedVlanTag"
+    }
+    if ($PSCmdlet.ShouldProcess("$VMName/WAN-Test", 'Add WAN test lab NIC')) {
+        Add-VMNetworkAdapter -VMName $VMName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'
+        Set-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName 'WAN-Test' -Untagged
+        Write-Host "Attached WAN-Test NIC on LabFoundry-SiteB as untagged"
+    }
+}
+
 $resolvedDepotVhdxPath = Resolve-DataDiskPath -ExplicitPath $DepotVhdxPath -DefaultName 'LabFoundry-Depot.vhdx'
 $resolvedBackupVhdxPath = Resolve-DataDiskPath -ExplicitPath $BackupVhdxPath -DefaultName 'LabFoundry-Backups.vhdx'
 
@@ -66,6 +93,9 @@ if ($PSCmdlet.ShouldProcess($Name, 'Create LabFoundry Hyper-V VM')) {
     Set-VMFirmware -VMName $Name -EnableSecureBoot Off
     Add-VMHardDiskDrive -VMName $Name -ControllerType SCSI -Path $resolvedDepotVhdxPath
     Add-VMHardDiskDrive -VMName $Name -ControllerType SCSI -Path $resolvedBackupVhdxPath
+    if (-not $SkipLabNetworkAdapters) {
+        Add-LabNetworkAdapters -VMName $Name -SiteTag $SiteVlanId -TaggedVlanTag $TaggedVlanId
+    }
     Write-Host "Created VM: $Name"
     Write-Host "Attached VCF Offline Depot disk: $resolvedDepotVhdxPath"
     Write-Host "Attached VCF Backups disk: $resolvedBackupVhdxPath"

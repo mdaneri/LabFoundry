@@ -16,11 +16,15 @@ def load_lifecycle_runner():
 
 def test_photon_provisioning_management_network_matches_eth0_only():
     script = Path("image/hyperv/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    main = Path("labfoundry/app/main.py").read_text(encoding="utf-8")
+    seed = Path("labfoundry/app/seed.py").read_text(encoding="utf-8")
 
     assert 'LABFOUNDRY_MGMT_INTERFACE="${LABFOUNDRY_MGMT_INTERFACE:-eth0}"' in script
     assert 'printf \'Name=%s\\n\\n\' "$LABFOUNDRY_MGMT_INTERFACE"' in script
     assert "Name=eth* en*" not in script
     assert "rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.network" in script
+    assert 'seed_initial_data(db, include_examples=settings.environment != "appliance")' in main
+    assert "if include_examples:" in seed
 
 
 def test_photon_provisioning_installs_default_nginx_management_proxy():
@@ -123,14 +127,26 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
 
 def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
     script = Path("scripts/windows/create-labfoundry-test-vm.ps1").read_text(encoding="utf-8")
+    vm_script = Path("scripts/windows/create-labfoundry-vm.ps1").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
 
     assert "[string]$Name = 'LabFoundry'" in script
     assert "[switch]$Redeploy" in script
+    assert "[switch]$ResetDataDisks" in script
+    assert "[switch]$SkipLabNetworkAdapters" in script
+    assert "[int]$SiteVlanId = 12" in script
+    assert "[int]$TaggedVlanId = 50" in script
     assert "[switch]$WaitForIp" in script
     assert "Find-LatestApplianceVhdx" in script
+    assert "Remove-ExistingDataDisks" in script
+    assert "LabFoundry-Depot.vhdx" in script
+    assert "LabFoundry-Backups.vhdx" in script
+    assert "Refusing to remove OS disk as a data disk" in script
     assert "create-hyperv-switches.ps1" in script
     assert "create-labfoundry-vm.ps1" in script
+    assert "-SkipLabNetworkAdapters:$SkipLabNetworkAdapters" in script
+    assert "-SiteVlanId $SiteVlanId" in script
+    assert "-TaggedVlanId $TaggedVlanId" in script
     assert "start-labfoundry-vm.ps1" in script
     assert "get-labfoundry-vm-ip.ps1" in script
     assert "VM already exists: $Name. Pass -Redeploy" in script
@@ -138,6 +154,19 @@ def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
     assert "Run this script from an elevated PowerShell session." not in script
     assert "create-labfoundry-test-vm.ps1 -WaitForIp" in docs
     assert "pass `-Redeploy` to remove and recreate only that VM" in docs
+    assert "same appliance-side lab NIC layout as the lifecycle" in docs
+    assert "SiteA` on `LabFoundry-SiteA` as trunk VLAN 12" in docs
+    assert "`Trunk` on" in docs and "`LabFoundry-Trunk` as trunk VLAN 50" in docs
+    assert "WAN-Test` on `LabFoundry-SiteB` as" in docs
+    assert "[switch]$SkipLabNetworkAdapters" in vm_script
+    assert "[int]$SiteVlanId = 12" in vm_script
+    assert "[int]$TaggedVlanId = 50" in vm_script
+    assert "Add-LabNetworkAdapters" in vm_script
+    assert "Add-VMNetworkAdapter -VMName $VMName -Name 'SiteA' -SwitchName 'LabFoundry-SiteA'" in vm_script
+    assert "Set-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName 'SiteA' -Trunk -AllowedVlanIdList \"$SiteTag\" -NativeVlanId 0" in vm_script
+    assert "Add-VMNetworkAdapter -VMName $VMName -Name 'Trunk' -SwitchName 'LabFoundry-Trunk'" in vm_script
+    assert "Set-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName 'Trunk' -Trunk -AllowedVlanIdList \"$TaggedVlanTag\" -NativeVlanId 0" in vm_script
+    assert "Add-VMNetworkAdapter -VMName $VMName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'" in vm_script
 
 
 def test_lifecycle_hyperv_script_does_not_cleanup_without_explicit_flag():

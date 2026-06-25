@@ -121,55 +121,59 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
         db.flush()
 
     if db.execute(select(PhysicalInterface)).first() is None:
-        db.add_all(
-            [
-                PhysicalInterface(
-                    name="eth0",
-                    mac_address="02:15:5d:00:10:01",
-                    driver="hv_netvsc",
-                    speed="10 Gbps",
-                    host_ip_cidr="192.168.49.1/24",
-                    host_mtu=1500,
-                    host_admin_state="up",
-                    ip_cidr="192.168.49.1/24",
-                    mtu=1500,
-                    role="management",
-                    mode="access",
-                    inventory_source="seed",
-                    desired_state_source="seed",
-                ),
-                PhysicalInterface(
-                    name="eth1",
-                    mac_address="02:15:5d:00:10:02",
-                    driver="hv_netvsc",
-                    speed="10 Gbps",
-                    host_mtu=1500,
-                    host_admin_state="up" if include_examples else "down",
-                    mtu=1500,
-                    admin_state="up" if include_examples else "down",
-                    role="access",
-                    mode="trunk" if include_examples else "access",
-                    inventory_source="seed",
-                    desired_state_source="seed",
-                ),
-                PhysicalInterface(
-                    name="eth2",
-                    mac_address="02:15:5d:00:10:03",
-                    driver="hv_netvsc",
-                    speed="10 Gbps",
-                    host_ip_cidr="192.168.50.1/24" if include_examples else None,
-                    host_mtu=1500,
-                    host_admin_state="up" if include_examples else "down",
-                    ip_cidr="192.168.50.1/24" if include_examples else None,
-                    mtu=1500,
-                    admin_state="up" if include_examples else "down",
-                    role="access",
-                    mode="access",
-                    inventory_source="seed",
-                    desired_state_source="seed",
-                ),
-            ]
-        )
+        physical_interfaces = [
+            PhysicalInterface(
+                name="eth0",
+                mac_address="02:15:5d:00:10:01",
+                driver="hv_netvsc",
+                speed="10 Gbps",
+                host_ip_cidr="192.168.49.1/24",
+                host_mtu=1500,
+                host_admin_state="up",
+                ip_cidr="192.168.49.1/24",
+                mtu=1500,
+                role="management",
+                mode="access",
+                inventory_source="seed",
+                desired_state_source="seed",
+            )
+        ]
+        if include_examples:
+            physical_interfaces.extend(
+                [
+                    PhysicalInterface(
+                        name="eth1",
+                        mac_address="02:15:5d:00:10:02",
+                        driver="hv_netvsc",
+                        speed="10 Gbps",
+                        host_mtu=1500,
+                        host_admin_state="up",
+                        mtu=1500,
+                        admin_state="up",
+                        role="access",
+                        mode="trunk",
+                        inventory_source="seed",
+                        desired_state_source="seed",
+                    ),
+                    PhysicalInterface(
+                        name="eth2",
+                        mac_address="02:15:5d:00:10:03",
+                        driver="hv_netvsc",
+                        speed="10 Gbps",
+                        host_ip_cidr="192.168.50.1/24",
+                        host_mtu=1500,
+                        host_admin_state="up",
+                        ip_cidr="192.168.50.1/24",
+                        mtu=1500,
+                        admin_state="up",
+                        role="access",
+                        mode="access",
+                        inventory_source="seed",
+                        desired_state_source="seed",
+                    ),
+                ]
+            )
+        db.add_all(physical_interfaces)
         db.flush()
 
     eth1_parent = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth1")).scalar_one_or_none()

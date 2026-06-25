@@ -20,9 +20,10 @@ STATIC_DIR = APP_DIR / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
     init_db()
     with SessionLocal() as db:
-        seed_initial_data(db)
+        seed_initial_data(db, include_examples=settings.environment != "appliance")
     yield
 
 

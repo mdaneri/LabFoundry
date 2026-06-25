@@ -294,6 +294,21 @@ prints the management IP when `-WaitForIp` is used. If `LabFoundry` already
 exists, pass `-Redeploy` to remove and recreate only that VM, or pass `-Name`
 to create a separate test VM.
 
+The sample VM uses the same appliance-side lab NIC layout as the lifecycle
+interop test: the first adapter is management on `LabFoundry-Mgmt`, then
+`SiteA` on `LabFoundry-SiteA` as trunk VLAN 12, `Trunk` on
+`LabFoundry-Trunk` as trunk VLAN 50, and `WAN-Test` on `LabFoundry-SiteB` as
+untagged WAN test traffic. Pass `-SkipLabNetworkAdapters` only when you need a
+management-only VM.
+
+For a clean appliance data start, also pass `-ResetDataDisks`. The wrapper
+removes the default Depot and Backups data VHDX files next to the selected OS
+disk, then lets `create-labfoundry-vm.ps1` create fresh empty data disks:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-test-vm.ps1 -Redeploy -ResetDataDisks -WaitForIp
+```
+
 The finished appliance VM gets two additional dynamic VHDX data disks by
 default:
 
