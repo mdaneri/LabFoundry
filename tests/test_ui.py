@@ -38,6 +38,13 @@ def test_login_and_dashboard_render(client):
     assert favicon.headers["content-type"].startswith("image/svg+xml")
 
 
+def test_unauthenticated_ui_request_redirects_to_login(client):
+    response = client.get("/certificate-authority", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
 def test_sidebar_appliance_apply_uses_bottom_pending_cta(client):
     login(client)
     response = client.get("/certificate-authority")

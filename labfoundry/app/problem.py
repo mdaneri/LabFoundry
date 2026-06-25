@@ -2,7 +2,18 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+
+
+def should_redirect_to_login(request: Request, exc: HTTPException) -> bool:
+    if exc.status_code != 401 or exc.detail != "Authentication required":
+        return False
+    path = request.url.path
+    return not (
+        path == "/openapi.json"
+        or path.startswith("/api/")
+        or path in {"/api/docs", "/api/redoc"}
+    )
 
 
 def problem_response(
@@ -30,7 +41,9 @@ def problem_response(
 
 def install_problem_handlers(app: FastAPI) -> None:
     @app.exception_handler(HTTPException)
-    async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse | RedirectResponse:
+        if should_redirect_to_login(request, exc):
+            return RedirectResponse("/login", status_code=303)
         title = "Unauthorized" if exc.status_code == 401 else "Request failed"
         return problem_response(
             status_code=exc.status_code,
