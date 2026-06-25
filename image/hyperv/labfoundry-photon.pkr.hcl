@@ -61,7 +61,7 @@ variable "ssh_host" {
 variable "iso_contains_kickstart" {
   type        = bool
   default     = false
-  description = "Set true only for a Photon ISO remastered by scripts/windows/build-photon-hyperv-image.ps1 with photon-ks.json embedded."
+  description = "Set true only for a Photon ISO remastered by scripts/windows/build-photon-hyperv-image.ps1 with photon-ks.json and the LabFoundry GRUB auto-install entry embedded."
 
   validation {
     condition     = var.iso_contains_kickstart
@@ -128,18 +128,8 @@ source "hyperv-iso" "photon" {
   ssh_timeout            = "45m"
   ssh_handshake_attempts = 200
   shutdown_command       = "echo '${var.ssh_password}' | sudo -S systemctl poweroff"
-
-  boot_wait              = "2s"
-  boot_keygroup_interval = "250ms"
-  boot_command = [
-    "c<wait>",
-    "linux /isolinux/vmlinuz root=/dev/ram0 loglevel=3 ks=cdrom:/photon-ks.json insecure_installation=1 photon.media=cdrom",
-    "<enter><wait>",
-    "initrd /isolinux/initrd.img",
-    "<enter><wait>",
-    "boot",
-    "<enter>"
-  ]
+  # The remastered ISO owns the GRUB auto-install entry; Packer should not race
+  # the VM console by typing boot commands.
 }
 
 build {

@@ -296,7 +296,7 @@ if ($preparedIso.Length -le 0) {
 }
 $preparedIsoChecksum = "sha512:$(Get-FileHashHex -Path $resolvedPreparedIsoPath -Algorithm SHA512)"
 Write-Host "Using remastered Photon ISO: $resolvedPreparedIsoPath"
-Write-Host "Packer will boot a single DVD with embedded photon-ks.json."
+Write-Host "Packer will boot a single DVD with embedded photon-ks.json and a GRUB auto-install entry."
 
 if ($PrepareIsoOnly) {
     Write-Host "Remastered Photon ISO prepared at $resolvedPreparedIsoPath"

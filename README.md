@@ -68,11 +68,13 @@ The Packer build VM uses the `LabFoundry-Mgmt` switch by default with temporary
 static address `192.168.49.30/24` and gateway `192.168.49.254`. This avoids
 fragile `Default Switch` host-IP detection while still giving the builder NAT
 internet access for `tdnf update`. The wrapper writes `photon-ks.json`, embeds
-it into a remastered Photon ISO, and passes that single ISO to Packer. Photon
-then boots with `ks=cdrom:/photon-ks.json`. Raw `packer build .` is
-intentionally blocked unless the ISO is marked as wrapper-prepared; the wrapper
-is the tested Windows Server 2025 path. Build runs pass Packer's `-force` flag
-by default so the fixed output directory can be rebuilt in one command. Use
+it into a remastered Photon ISO, replaces the ISO's UEFI GRUB config with a
+LabFoundry auto-install entry, and passes that single ISO to Packer. Photon then
+boots with `ks=cdrom:/photon-ks.json` without Packer typing boot commands. Raw
+`packer build .` is intentionally blocked unless the ISO is marked as
+wrapper-prepared; the wrapper is the tested Windows Server 2025 path. Build
+runs pass Packer's `-force` flag by default so the fixed output directory can be
+rebuilt in one command. Use
 `-OutputDirectory <path>` to keep multiple artifacts or `-KeepExistingOutput`
 when you want Packer to fail instead of replacing an existing output directory.
 Use `-PackerOnError abort` to keep a failed builder VM for debugging, or

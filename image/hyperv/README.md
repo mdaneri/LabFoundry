@@ -45,9 +45,11 @@ variables only when the management subnet is intentionally different.
 
 The wrapper renders `photon-ks.json`, embeds it into
 `image/hyperv/build/kickstart/labfoundry-photon-with-kickstart.iso`, and passes
-that single remastered Photon ISO to Packer. Photon boots with
-`ks=cdrom:/photon-ks.json`. This avoids both the Windows Server 2025
-early-installer networking failure mode and the fragile two-DVD Hyper-V path.
+that single remastered Photon ISO to Packer. The remastered ISO also replaces
+the UEFI GRUB config with a LabFoundry auto-install entry, so Photon boots with
+`ks=cdrom:/photon-ks.json` without Packer typing boot commands. This avoids the
+Windows Server 2025 early-installer networking failure mode, the fragile
+two-DVD Hyper-V path, and boot-menu timing races.
 Build runs pass Packer's `-force` flag by default so the fixed output directory
 can be rebuilt in one command. Use `-OutputDirectory <path>` to keep multiple
 artifacts or `-KeepExistingOutput` when you want Packer to fail instead of
@@ -105,8 +107,9 @@ If the VM stops at the Photon license agreement or disk selection screen, the
 builder did not load the kickstart file. Stop the build, make sure this
 directory is current, and rerun `scripts/windows/build-photon-hyperv-image.ps1`.
 The wrapper should print `Using remastered Photon ISO`, and the Packer log
-should move from `Typing the boot command...` to `Connected to SSH!`. If Photon
-shows the EULA, the raw `packer build .` path or an old wrapper was used. Raw
+should wait for SSH without printing `Typing the boot command...`. If Photon
+shows the EULA, the ISO did not include the LabFoundry GRUB auto-install entry,
+or the raw `packer build .` path or an old wrapper was used. Raw
 `packer build .` is intentionally blocked unless `iso_contains_kickstart=true`
 is provided so this failure mode stops before a VM is created.
 

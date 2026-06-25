@@ -33,7 +33,7 @@
 ## Photon OS Appliance Deployment
 
 - The first real OS appliance target is Photon OS 5.0 on Hyper-V. Keep image-build work under `image/hyperv/`.
-- The Hyper-V image is automated with Packer, Photon kickstart JSON, and provisioning scripts. Do not replace it with manual-only install steps unless the automation path is also kept current.
+- The Hyper-V image is automated with Packer, Photon kickstart JSON, an ISO-embedded GRUB auto-install entry, and provisioning scripts. Do not replace it with manual-only install steps unless the automation path is also kept current.
 - Photon appliance provisioning should run `tdnf -y makecache` and `tdnf -y update` before installing LabFoundry so the image lands on the current Photon 5.0 package stream.
 - Photon 5.0 GA started at Python 3.11, but the updated Photon 5.0 package stream may be newer; on June 21, 2026 live repo metadata showed `python3` as `3.14.5-2.ph5`. Keep LabFoundry at `requires-python >=3.12` and run `python scripts/check_photon_compatibility.py` before treating Photon compatibility as healthy.
 - The appliance installs LabFoundry under `/opt/labfoundry`, stores environment in `/etc/labfoundry/labfoundry.env`, stores durable state in `/var/lib/labfoundry`, writes local logs under `/var/log/labfoundry`, and preserves fixed service mounts under `/mnt/labfoundry-vcf-*`.

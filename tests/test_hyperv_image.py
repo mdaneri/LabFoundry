@@ -84,8 +84,9 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert '"LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}"' in template
     assert "Iso_contains_kickstart must be true" in template
     assert "secondary_iso_images" not in template
-    assert 'ks=cdrom:/photon-ks.json' in template
-    assert "photon.media=cdrom" in template
+    assert "boot_command" not in template
+    assert "boot_keygroup_interval" not in template
+    assert "Packer should not race" in template
     assert "http_content" not in template
     assert "http_port_min" not in template
     assert 'default = "Default Switch"' not in template
@@ -94,11 +95,12 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "builder_static_ip=192.168.49.30/24" in docs
     assert "labfoundry-photon-with-kickstart.iso" in docs
     assert "Using remastered Photon ISO" in docs
+    assert "without Packer typing boot commands" in docs
     assert "[string]$SshPassword = 'VMware01!'" in wrapper
     assert "[string]$BootstrapAdminPassword = 'VMware01!'" in wrapper
     assert "create_photon_kickstart_iso.py" in wrapper
     assert "Using remastered Photon ISO" in wrapper
-    assert "Packer will boot a single DVD with embedded photon-ks.json." in wrapper
+    assert "Packer will boot a single DVD with embedded photon-ks.json and a GRUB auto-install entry." in wrapper
     assert "Write-PackerVarFile" in wrapper
     assert "Using Packer var-file" in wrapper
     assert "[ValidateSet('cleanup', 'abort', 'ask', 'run-cleanup-provisioner')]" in wrapper
@@ -116,6 +118,13 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     remaster_helper = Path("scripts/interop/create_photon_kickstart_iso.py").read_text(encoding="utf-8")
     assert "iso.add_file" in remaster_helper
     assert 'rr_name="photon-ks.json"' in remaster_helper
+    assert "GRUB_BOOT_CONFIG" in remaster_helper
+    assert "ks=cdrom:/photon-ks.json" in remaster_helper
+    assert "photon.media=cdrom" in remaster_helper
+    assert 'iso_path="/EFI/BOOT/GRUB.CFG;1"' in remaster_helper
+    assert 'rr_name="grub.cfg"' in remaster_helper
+    assert "iso.add_fp" in remaster_helper
+    assert "iso.rm_file" in remaster_helper
 
 
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
