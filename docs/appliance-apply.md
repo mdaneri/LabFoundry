@@ -36,7 +36,7 @@ Passwords are available for OS sync only when an administrator creates or resets
 
 ## Physical Interface Inventory
 
-Refreshing Physical Interfaces is inventory only. It reads observed Linux NIC facts from the appliance and updates LabFoundry's model, but it does not run the network adapter or apply desired state to the host.
+Refreshing Physical Interfaces is inventory only. Appliance startup refreshes observed Linux NIC facts automatically, and operators can also run the same refresh manually from the page. Both paths update LabFoundry's observed model, but neither runs the network adapter nor applies desired state to the host.
 
 ## Network Apply
 
