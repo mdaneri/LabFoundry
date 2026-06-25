@@ -2,6 +2,8 @@ __pycache__/
 .pytest_cache/
 .vscode/
 .venv/
+.env
+.env.local
 data/
 *.pyc
 *.pyo
