@@ -193,12 +193,14 @@ def test_lifecycle_hyperv_script_finds_alpine_ips_and_pins_plink_hostkeys():
     assert "Wait-GuestIPv4 -Name $clientAName" in script
     assert "function Test-TcpPort" in script
     assert "Get-PlinkHostKey" in script
+    assert "$applianceHostKey = Get-PlinkHostKey -HostName $ApplianceIPAddress" in script
     assert "(Get-Date).AddMinutes(4)" in script
     assert "$ErrorActionPreference = 'Continue'" in script
     assert "Timed out waiting for SSH host key" in script
     assert "Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'SiteA' -Trunk" in script
     assert "Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'SiteA-Test' -Access -VlanId $SiteVlanId" in script
     assert "Appliance-Mgmt-Test" in script
+    assert "'--appliance-ssh-hostkey'" in script
     assert "'--client-a-hostkey'" in script
     assert "'--client-b-hostkey'" in script
 

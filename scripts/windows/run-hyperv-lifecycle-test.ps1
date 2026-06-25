@@ -497,6 +497,7 @@ try {
     }
 
     Start-Sleep -Seconds 20
+    $applianceHostKey = Get-PlinkHostKey -HostName $ApplianceIPAddress -UserName $ApplianceSshUser -Password $SshPassword
     $clientAHost = Wait-GuestIPv4 -Name $clientAName
     $clientBHost = Wait-GuestIPv4 -Name $clientBName
     $clientAHostKey = Get-PlinkHostKey -HostName $clientAHost -UserName $ClientSshUser -Password $SshPassword
@@ -522,6 +523,7 @@ try {
     if ($SshKeyPath) { $pythonArgs += @('--ssh-key', $SshKeyPath) }
     if ($SshPassword) { $pythonArgs += @('--ssh-password', $SshPassword) }
     if ($AllowDryRunApply) { $pythonArgs += '--allow-dry-run' }
+    if ($applianceHostKey) { $pythonArgs += @('--appliance-ssh-hostkey', $applianceHostKey) }
     if ($clientAHost) { $pythonArgs += @('--client-a-host', $clientAHost) }
     if ($clientBHost) { $pythonArgs += @('--client-b-host', $clientBHost) }
     if ($clientAHostKey) { $pythonArgs += @('--client-a-hostkey', $clientAHostKey) }
