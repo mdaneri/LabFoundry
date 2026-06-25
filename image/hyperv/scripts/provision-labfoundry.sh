@@ -12,6 +12,7 @@ LABFOUNDRY_MGMT_INTERFACE="${LABFOUNDRY_MGMT_INTERFACE:-eth0}"
 LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"
 BOOTSTRAP_USERNAME="${LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME:-admin}"
 BOOTSTRAP_PASSWORD="${LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD:-}"
+BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/usr/bin/pwsh}"
 
 log_step() {
   printf '\n==> LabFoundry appliance: %s\n' "$1"
@@ -32,7 +33,7 @@ log_step "applying Photon OS updates"
 tdnf -y update
 
 log_step "installing Photon appliance packages"
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables dnsmasq nginx
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables dnsmasq nginx powershell
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
@@ -53,14 +54,20 @@ install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/firewall"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/dnsmasq"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/kms"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/local-users"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-backups"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-offline-depot"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/dnsmasq"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/kms"
 install -d -o root -g root -m 0755 "$LABFOUNDRY_STATE/users"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG/kms"
 install -d -o root -g root -m 0755 /etc/labfoundry
 install -d -o root -g root -m 0755 /etc/labfoundry/dnsmasq.d
+install -d -o root -g root -m 0755 /etc/labfoundry/kms
+install -d -o root -g root -m 0755 /etc/labfoundry/kms/policies
+install -d -o root -g root -m 0755 /etc/pykmip
 install -d -o root -g root -m 0755 /etc/labfoundry/nginx/sites.d
 install -d -o root -g root -m 0755 /etc/labfoundry/ssh/authorized_keys
 install -d -o root -g root -m 0755 /etc/ssh/sshd_config.d
@@ -71,9 +78,19 @@ install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-registry
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-offline-depot
 
 if ! id "$BOOTSTRAP_USERNAME" >/dev/null 2>&1; then
-  useradd --home-dir "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME" --create-home --shell /sbin/nologin "$BOOTSTRAP_USERNAME"
+  useradd --home-dir "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME" --create-home --shell "$BOOTSTRAP_SHELL" "$BOOTSTRAP_USERNAME"
+else
+  usermod --shell "$BOOTSTRAP_SHELL" "$BOOTSTRAP_USERNAME"
 fi
+touch /etc/shells
+grep -qxF "$BOOTSTRAP_SHELL" /etc/shells || printf '%s\n' "$BOOTSTRAP_SHELL" >>/etc/shells
 printf '%s:%s\n' "$BOOTSTRAP_USERNAME" "$BOOTSTRAP_PASSWORD" | chpasswd
+cat >/etc/sudoers.d/labfoundry-bootstrap-admin <<EOF
+# Managed by LabFoundry image provisioning. Bootstrap appliance administrator.
+$BOOTSTRAP_USERNAME ALL=(ALL) ALL
+EOF
+chmod 0440 /etc/sudoers.d/labfoundry-bootstrap-admin
+visudo -cf /etc/sudoers.d/labfoundry-bootstrap-admin
 
 cat >/etc/labfoundry/build-info <<EOF
 build_time_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -123,7 +140,7 @@ chown root:labfoundry /etc/labfoundry/labfoundry.env
 
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/hyperv/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
-install -o root -g root -m 0640 "$LABFOUNDRY_HOME/image/hyperv/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
+install -o root -g root -m 0440 "$LABFOUNDRY_HOME/image/hyperv/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
 visudo -cf /etc/sudoers.d/labfoundry-helper
 
 chown -R root:root "$LABFOUNDRY_HOME"
@@ -134,7 +151,17 @@ find "$LABFOUNDRY_HOME/.venv" -type d -exec chmod 0755 {} +
 find "$LABFOUNDRY_HOME/.venv" -type f -exec chmod u+rw,go+r {} +
 find "$LABFOUNDRY_HOME/.venv/bin" -type f -exec chmod a+rx {} +
 chmod 0755 "$LABFOUNDRY_HOME/bin" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
+cat >/etc/ssh/sshd_config.d/labfoundry-root-login.conf <<'EOF'
+# Managed by LabFoundry. Local changes may be overwritten by Appliance Settings apply.
+PermitRootLogin no
+EOF
+chmod 0644 /etc/ssh/sshd_config.d/labfoundry-root-login.conf
 chown -R labfoundry:labfoundry "$LABFOUNDRY_STATE" "$LABFOUNDRY_LOG"
+chmod 0711 "$LABFOUNDRY_STATE"
+if id "$BOOTSTRAP_USERNAME" >/dev/null 2>&1 && [ -d "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME" ]; then
+  chown "$BOOTSTRAP_USERNAME:$(id -gn "$BOOTSTRAP_USERNAME")" "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME"
+  chmod 0750 "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME"
+fi
 
 log_step "configuring final appliance management network"
 {

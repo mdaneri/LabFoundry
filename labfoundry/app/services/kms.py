@@ -13,6 +13,11 @@ KMS_KEY_STATES = ["pre-active", "active", "deactivated", "compromised", "destroy
 KMS_DEFAULT_OPERATIONS = ["locate", "get", "register", "create"]
 KMS_DEFAULT_DATABASE_PATH = "/var/lib/labfoundry/kms/pykmip.db"
 KMS_DEFAULT_CONFIG_PATH = "/etc/labfoundry/kms/pykmip.conf"
+KMS_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/kms/pykmip.conf"
+KMS_POLICY_PATH = "/etc/labfoundry/kms/policies"
+KMS_LOG_PATH = "/var/log/labfoundry/kms/server.log"
+KMS_SERVER_CERT_BASE = "/etc/labfoundry/kms/certs"
+KMS_DNS_RECORD_DESCRIPTION = "LabFoundry app-owned KMS/KMIP endpoint record."
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -65,55 +70,55 @@ def render_kms_config(
     keys: list[KmsKey],
 ) -> str:
     certificate_name = safe_certificate_name(settings.server_certificate or settings.hostname)
+    host = settings.listen_address.strip() if settings.enabled else "127.0.0.1"
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
+        f"# LabFoundry KMS enabled: {str(bool(settings.enabled)).lower()}",
+        f"# LabFoundry KMS endpoint hostname: {settings.hostname}",
         "# Backend: PyKMIP lab KMIP server desired state.",
         "[server]",
-        f"backend={settings.backend}",
-        f"enabled={'yes' if settings.enabled else 'no'}",
-        f"hostname={settings.hostname}",
-        f"host={settings.listen_address}",
+        f"hostname={host}",
         f"port={settings.port}",
-        f"interface={settings.listen_interface}",
+        f"certificate_path={KMS_SERVER_CERT_BASE}/{certificate_name}.crt",
+        f"key_path={KMS_SERVER_CERT_BASE}/{certificate_name}.key",
+        f"ca_path={settings.ca_certificate_path}",
+        "auth_suite=TLS1.2",
+        f"policy_path={KMS_POLICY_PATH}",
+        f"enable_tls_client_auth={str(bool(settings.require_client_cert))}",
+        "logging_level=INFO",
         f"database_path={settings.database_path}",
         "",
-        "[tls]",
-        f"server_certificate=/etc/labfoundry/kms/certs/{certificate_name}.crt",
-        f"server_private_key=/etc/labfoundry/kms/certs/{certificate_name}.key",
-        f"ca_certificate={settings.ca_certificate_path}",
-        f"require_client_cert={'yes' if settings.require_client_cert else 'no'}",
+        "# LabFoundry policy intent:",
+        f"# allow_register={'yes' if settings.allow_register else 'no'}",
+        f"# allow_destroy={'yes' if settings.allow_destroy else 'no'}",
         "",
-        "[policy]",
-        f"allow_register={'yes' if settings.allow_register else 'no'}",
-        f"allow_destroy={'yes' if settings.allow_destroy else 'no'}",
-        "",
-        "[clients]",
+        "# LabFoundry KMIP clients:",
     ]
     for client in clients:
         if not client.enabled:
             continue
         lines.extend(
             [
-                f"client={client.name}",
-                f"  subject={client.certificate_subject}",
-                f"  role={client.role}",
-                f"  operations={join_csv(split_csv(client.allowed_operations))}",
+                f"# client={client.name}",
+                f"#   subject={client.certificate_subject}",
+                f"#   role={client.role}",
+                f"#   operations={join_csv(split_csv(client.allowed_operations))}",
             ]
         )
-    lines.extend(["", "[keys]"])
+    lines.extend(["", "# LabFoundry staged KMS keys:"])
     for key in keys:
         if not key.enabled:
             continue
         owner = key.owner_client.name if key.owner_client else "unassigned"
         lines.extend(
             [
-                f"key={key.name}",
-                f"  algorithm={key.algorithm}",
-                f"  length={key.length}",
-                f"  usage={join_csv(split_csv(key.usage))}",
-                f"  state={key.state}",
-                f"  owner={owner}",
-                f"  exportable={'yes' if key.exportable else 'no'}",
+                f"# key={key.name}",
+                f"#   algorithm={key.algorithm}",
+                f"#   length={key.length}",
+                f"#   usage={join_csv(split_csv(key.usage))}",
+                f"#   state={key.state}",
+                f"#   owner={owner}",
+                f"#   exportable={'yes' if key.exportable else 'no'}",
             ]
         )
     return "\n".join(lines).strip() + "\n"

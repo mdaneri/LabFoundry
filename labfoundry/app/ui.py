@@ -206,8 +206,10 @@ from labfoundry.app.services.kms import (
     KMS_CLIENT_ROLES,
     KMS_DEFAULT_CONFIG_PATH,
     KMS_DEFAULT_DATABASE_PATH,
+    KMS_DNS_RECORD_DESCRIPTION,
     KMS_KEY_ALGORITHMS,
     KMS_KEY_STATES,
+    KMS_STAGED_CONFIG_PATH,
     join_csv,
     kms_client_to_dict,
     kms_key_to_dict,
@@ -719,6 +721,20 @@ def service_bind_options(db: Session) -> list[dict[str, str]]:
     return options
 
 
+def resolve_single_service_bind(db: Session, listen_interface: str, listen_address: str) -> tuple[str, str]:
+    options = service_bind_options(db)
+    options_by_name = {option["name"]: option for option in options}
+    selected_interface = listen_interface.strip()
+    selected_address = listen_address.strip()
+    if selected_address:
+        address_match = next((option for option in options if option["address"] == selected_address), None)
+        if address_match and (not selected_interface or selected_interface not in options_by_name or options_by_name[selected_interface]["address"] != selected_address):
+            selected_interface = address_match["name"]
+    if selected_interface in options_by_name:
+        return selected_interface, options_by_name[selected_interface]["address"]
+    return selected_interface, ""
+
+
 def vcf_backup_context(db: Session) -> dict:
     settings = get_vcf_backup_settings_row(db)
     users = db.execute(select(User).order_by(User.username)).scalars().all()
@@ -945,6 +961,8 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         ca_enabled=bool(ca_settings.enabled),
         management_https_cert_available=management_https_cert_available,
     )
+    if settings.root_ssh_enabled and get_settings().dry_run_system_adapters:
+        validation_warnings.append("Root SSH is enabled as desired state, but dry-run system adapters are active. Global appliance apply will record intent without changing sshd.")
     return {
         "app_settings": get_settings(),
         "runtime_hostname": socket.gethostname(),
@@ -1293,6 +1311,8 @@ def managed_replaced_firewall_rule_row(rule: FirewallRule) -> dict:
 def ca_context(db: Session) -> dict:
     state_errors = ensure_ca_state(db)
     settings = get_ca_settings_row(db)
+    available_interfaces = service_bind_options(db)
+    available_names = {option["name"] for option in available_interfaces}
     profiles = db.execute(select(CaProfile).order_by(CaProfile.name)).scalars().all()
     certificates = (
         db.execute(select(CaCertificate).options(selectinload(CaCertificate.profile)).order_by(CaCertificate.common_name))
@@ -1302,6 +1322,12 @@ def ca_context(db: Session) -> dict:
     config_preview = render_ca_config(settings=settings, profiles=profiles, certificates=certificates)
     apply_payload = render_ca_apply_payload(settings, certificates, include_private_keys=True)
     validation_errors = [*state_errors, *validate_ca_state(settings=settings, profiles=profiles, certificates=certificates)]
+    selected_interfaces = split_interfaces(settings.listen_interface)
+    invalid_interfaces = [interface for interface in selected_interfaces if interface not in available_names]
+    if settings.enabled and not selected_interfaces:
+        validation_errors.append("CA service requires at least one listen interface.")
+    if settings.enabled and invalid_interfaces:
+        validation_errors.append("CA listen interfaces must be access physical interfaces or enabled VLANs with IP addresses.")
     issued_count = len([certificate for certificate in certificates if certificate.status == "issued"])
     expiring_count = len(
         [
@@ -1318,6 +1344,10 @@ def ca_context(db: Session) -> dict:
         "ca_profile_rows": [ca_profile_to_dict(profile) for profile in profiles],
         "ca_certificate_rows": [ca_certificate_to_dict(certificate) for certificate in certificates],
         "ca_profile_choices": [{"id": profile.id, "label": profile.name} for profile in profiles if profile.enabled],
+        "available_interfaces": available_interfaces,
+        "available_ca_addresses": available_service_listen_addresses(settings.listen_address, available_interfaces),
+        "selected_ca_interfaces": selected_interfaces,
+        "selected_ca_addresses": split_addresses(settings.listen_address),
         "ca_certificates": certificates,
         "ca_config_preview": config_preview,
         "ca_apply_payload": apply_payload,
@@ -1336,20 +1366,47 @@ def ca_context(db: Session) -> dict:
 
 
 def kms_context(db: Session) -> dict:
-    ca_state_errors = ensure_ca_state(db)
     settings = get_kms_settings_row(db)
+    available_interfaces = service_bind_options(db)
+    listen_options = {option["name"]: option for option in available_interfaces}
+    changed = False
+    if settings.listen_interface in listen_options:
+        derived_address = listen_options[settings.listen_interface]["address"]
+        if settings.listen_address != derived_address:
+            settings.listen_address = derived_address
+            changed = True
+    normalized_hostname = normalize_dns_hostname(settings.hostname)
+    if normalized_hostname and settings.hostname != normalized_hostname:
+        settings.hostname = normalized_hostname
+        changed = True
+    if settings.enabled:
+        dns_action = ensure_dns_for_kms(db, settings, actor=None, previous_hostname=settings.hostname)
+        changed = bool(dns_action) or changed
+    if changed:
+        settings.updated_at = utcnow()
+        db.commit()
+        db.refresh(settings)
+    ca_state_errors = ensure_ca_state(db)
     clients = db.execute(select(KmsClient).order_by(KmsClient.name)).scalars().all()
     keys = db.execute(select(KmsKey).options(selectinload(KmsKey.owner_client)).order_by(KmsKey.name)).scalars().all()
-    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     config_preview = render_kms_config(settings=settings, clients=clients, keys=keys)
     validation_errors = [*ca_state_errors, *validate_kms_state(settings=settings, clients=clients, keys=keys)]
     ca_settings = get_ca_settings_row(db)
-    if settings.enabled and ca_settings.enabled and not ca_certificate_available(db, "kms:server"):
-        validation_errors.append("KMS requires an issued CA-managed server certificate before apply.")
-    if settings.enabled and ca_settings.enabled:
-        for client in clients:
-            if client.enabled and not ca_certificate_available(db, f"kms:client:{client.name}"):
-                validation_errors.append(f"KMS client {client.name} requires an issued CA-managed client certificate before apply.")
+    if settings.enabled:
+        if settings.listen_interface not in listen_options:
+            validation_errors.append("KMS listen interface must be an access physical interface or enabled VLAN with an IP address.")
+        if kms_dns_record_conflict(db, settings.hostname):
+            validation_errors.append("KMS hostname conflicts with an existing non-KMS DNS record.")
+        if not ca_settings.enabled:
+            validation_errors.append("KMS requires Certificate Authority to be enabled before activation.")
+        elif ca_state_errors:
+            validation_errors.append("KMS cannot be activated until Certificate Authority state is healthy.")
+        elif not ca_certificate_available(db, "kms:server"):
+            validation_errors.append("KMS requires an issued CA-managed server certificate before apply.")
+        else:
+            for client in clients:
+                if client.enabled and not ca_certificate_available(db, f"kms:client:{client.name}"):
+                    validation_errors.append(f"KMS client {client.name} requires an issued CA-managed client certificate before apply.")
     return {
         "kms_settings": settings,
         "kms_clients": clients,
@@ -1361,9 +1418,10 @@ def kms_context(db: Session) -> dict:
         "kms_client_roles": KMS_CLIENT_ROLES,
         "kms_key_algorithms": KMS_KEY_ALGORITHMS,
         "kms_key_states": KMS_KEY_STATES,
-        "available_interfaces": interfaces,
+        "available_interfaces": available_interfaces,
         "kms_config_preview": config_preview,
         "kms_validation_errors": validation_errors,
+        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
         "kms_lab_notice": (
             "PyKMIP is useful for KMIP lab and compatibility testing. Treat this backend as a lab KMS, "
             "not a production HSM or hardened enterprise key manager."
@@ -1708,6 +1766,129 @@ def ensure_dns_for_vcf_offline_depot(db: Session, settings: VcfOfflineDepotSetti
     return "created"
 
 
+def kms_dns_record_conflict(db: Session, hostname: str) -> bool:
+    normalized = normalize_dns_hostname(hostname)
+    if not normalized:
+        return False
+    records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == normalized,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+        )
+    ).scalars().all()
+    return any(record.description != KMS_DNS_RECORD_DESCRIPTION for record in records)
+
+
+def ensure_dns_for_kms(db: Session, settings: KmsSettings, actor: str | None, *, previous_hostname: str | None = None) -> str | None:
+    hostname = normalize_dns_hostname(settings.hostname)
+    if not hostname or not settings.listen_address.strip():
+        return None
+    try:
+        parsed_address = ip_address(settings.listen_address.strip())
+    except ValueError:
+        return None
+    record_type = "AAAA" if parsed_address.version == 6 else "A"
+    address = str(parsed_address)
+    if validate_dns_record(hostname, record_type, address):
+        return None
+    settings.hostname = hostname
+    actions: list[str] = []
+    existing = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == hostname,
+            DnsRecord.record_type == record_type,
+        )
+    ).scalar_one_or_none()
+    if existing and existing.description != KMS_DNS_RECORD_DESCRIPTION:
+        actions.append("conflict")
+    elif existing:
+        if existing.address != address or not existing.enabled:
+            existing.address = address
+            existing.enabled = True
+            existing.description = KMS_DNS_RECORD_DESCRIPTION
+            db.flush()
+            if actor:
+                record_audit(
+                    db,
+                    actor=actor,
+                    action="update_dns_record_from_kms",
+                    resource_type="dns_record",
+                    resource_id=str(existing.id),
+                    detail=f"{hostname} {record_type} -> {address}",
+                )
+            actions.append("updated")
+        else:
+            actions.append("unchanged")
+    else:
+        record = DnsRecord(
+            hostname=hostname,
+            record_type=record_type,
+            address=address,
+            description=KMS_DNS_RECORD_DESCRIPTION,
+            enabled=True,
+        )
+        db.add(record)
+        db.flush()
+        if actor:
+            record_audit(
+                db,
+                actor=actor,
+                action="create_dns_record_from_kms",
+                resource_type="dns_record",
+                resource_id=str(record.id),
+                detail=f"{hostname} {record_type} -> {address}",
+            )
+        actions.append("created")
+
+    stale_records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == hostname,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+            DnsRecord.record_type != record_type,
+        )
+    ).scalars().all()
+    for record in stale_records:
+        if record.description != KMS_DNS_RECORD_DESCRIPTION:
+            continue
+        db.delete(record)
+        if actor:
+            record_audit(
+                db,
+                actor=actor,
+                action="delete_dns_record_from_kms_ip_family_change",
+                resource_type="dns_record",
+                resource_id=str(record.id),
+                detail=f"{record.hostname} {record.record_type}",
+            )
+        actions.append("removed-stale")
+
+    previous = normalize_dns_hostname(previous_hostname or "")
+    if previous and previous != hostname:
+        old_records = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == previous,
+                DnsRecord.record_type.in_(["A", "AAAA"]),
+            )
+        ).scalars().all()
+        for record in old_records:
+            if record.description != KMS_DNS_RECORD_DESCRIPTION:
+                continue
+            db.delete(record)
+            if actor:
+                record_audit(
+                    db,
+                    actor=actor,
+                    action="delete_dns_record_from_kms_rename",
+                    resource_type="dns_record",
+                    resource_id=str(record.id),
+                    detail=f"{record.hostname} {record.record_type}",
+                )
+            actions.append("removed-old")
+    if actions:
+        db.flush()
+    return "+".join(actions) if actions else None
+
+
 def remove_dns_for_vcf_offline_depot_hostname(db: Session, hostname: str, actor: str) -> str | None:
     normalized_hostname = normalize_dns_hostname(hostname)
     if not normalized_hostname:
@@ -1763,6 +1944,22 @@ def available_dns_listen_addresses(
                 add(str(ip_interface(vlan.ip_cidr).ip), vlan.name)
             except ValueError:
                 add(vlan.ip_cidr, vlan.name)
+    return choices
+
+
+def available_service_listen_addresses(current_addresses: str | None, listen_options: list[dict[str, str]]) -> list[dict[str, str]]:
+    choices: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(address: str | None, source: str) -> None:
+        for item in split_addresses(address):
+            if item not in seen:
+                seen.add(item)
+                choices.append({"address": item, "source": source})
+
+    add(current_addresses, "current")
+    for option in listen_options:
+        add(option.get("address"), option["name"])
     return choices
 
 
@@ -2284,6 +2481,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             summary=[
                 f"FQDN {appliance_settings['appliance_settings'].fqdn}",
                 f"resolver {'local DNS' if appliance_settings['local_dns_enabled'] else 'external DNS'}",
+                f"root SSH {'enabled' if appliance_settings['appliance_settings'].root_ssh_enabled else 'disabled'}",
                 f"{len(appliance_settings['appliance_settings_json']['ntp_servers'])} NTP servers",
             ],
             validation_errors=appliance_settings["appliance_settings_validation_errors"],
@@ -2359,7 +2557,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             context=kms,
             summary=["service enabled" if kms["kms_settings"].enabled else "service disabled", f"{len(kms['kms_clients'])} clients", f"{len(kms['kms_keys'])} keys"],
             validation_errors=kms["kms_validation_errors"],
-            config_path=kms["kms_settings"].config_path,
+            config_path=KMS_STAGED_CONFIG_PATH,
             config_preview=kms["kms_config_preview"],
             baseline=baselines.get("kms"),
         ),
@@ -2531,7 +2729,10 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
             config_path = stage_appliance_apply_config(CA_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = [adapter.validate_ca_config(config_path), adapter.apply_ca_config(config_path)]
     elif unit_id == "kms":
-        results = [adapter.validate_kms_config(context["kms_settings"].config_path), adapter.apply_kms_config(context["kms_settings"].config_path)]
+        config_path = KMS_STAGED_CONFIG_PATH
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(KMS_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+        results = [adapter.validate_kms_config(config_path), adapter.apply_kms_config(config_path)]
     elif unit_id == "vcf_backups":
         settings = context["vcf_backup_settings"]
         config_path = settings.config_path
@@ -2697,6 +2898,7 @@ def submit_appliance_apply(
                 "identity": identity,
                 **appliance_apply_context(db),
                 "apply_error": "Select at least one appliance change to submit.",
+                "selected_apply_unit_ids": selected_ids,
             },
             status_code=422,
         )
@@ -4727,6 +4929,10 @@ def download_ca_certificate_private_key(
 def update_ca_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
+    listen_interfaces: list[str] = Form(default_factory=list),
+    listen_addresses: list[str] = Form(default_factory=list),
+    listen_interfaces_present: str | None = Form(None),
+    listen_addresses_present: str | None = Form(None),
     root_common_name: str = Form(...),
     organization: str = Form(...),
     organizational_unit: str = Form(""),
@@ -4746,7 +4952,19 @@ def update_ca_settings_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_ca_settings_row(db)
+    available_options = service_bind_options(db)
+    available_names = {item["name"] for item in available_options}
+    selected_interfaces = [interface.strip() for interface in listen_interfaces if interface.strip()]
+    if available_names:
+        selected_interfaces = [interface for interface in selected_interfaces if interface in available_names]
+    if listen_interfaces_present is None and not selected_interfaces:
+        selected_interfaces = [interface for interface in split_interfaces(settings.listen_interface) if interface in available_names]
+    selected_addresses = split_addresses(join_addresses(listen_addresses))
+    if listen_addresses_present is None and not selected_addresses:
+        selected_addresses = split_addresses(settings.listen_address)
     settings.enabled = enabled == "on"
+    settings.listen_interface = join_interfaces(selected_interfaces)
+    settings.listen_address = join_addresses(selected_addresses)
     settings.root_common_name = root_common_name.strip()
     settings.organization = organization.strip()
     settings.organizational_unit = organizational_unit.strip()
@@ -4765,7 +4983,20 @@ def update_ca_settings_from_ui(
     db.commit()
     record_audit(db, actor=identity.username, action="update_ca_settings", resource_type="ca", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave") == "1":
-        return JSONResponse({"status": "saved", "updated_at": settings.updated_at.isoformat()})
+        db.refresh(settings)
+        context = ca_context(db)
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": settings.updated_at.isoformat(),
+                "enabled": settings.enabled,
+                "listen_interfaces": split_interfaces(settings.listen_interface),
+                "listen_addresses": split_addresses(settings.listen_address),
+                "validation_errors": context["ca_validation_errors"],
+                "config_preview": context["ca_config_preview"],
+                "apply_payload": context["ca_apply_payload"],
+            }
+        )
     return RedirectResponse("/certificate-authority", status_code=303)
 
 
@@ -4986,8 +5217,8 @@ def update_kms_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
     backend: str = Form("pykmip"),
-    listen_interface: str = Form("eth1"),
-    listen_address: str = Form("192.168.50.1"),
+    listen_interface: str = Form(""),
+    listen_address: str = Form(""),
     port: int = Form(5696),
     hostname: str = Form("kms.labfoundry.internal"),
     server_certificate: str = Form("kms.labfoundry.internal"),
@@ -5000,13 +5231,15 @@ def update_kms_settings_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_kms_settings_row(db)
+    previous_hostname = settings.hostname
+    selected_interface, selected_address = resolve_single_service_bind(db, listen_interface, listen_address)
     settings.enabled = enabled == "on"
     settings.backend = backend.strip().lower() or "pykmip"
-    settings.listen_interface = listen_interface.strip() or "eth1"
-    settings.listen_address = listen_address.strip() or "192.168.50.1"
+    settings.listen_interface = selected_interface
+    settings.listen_address = selected_address
     settings.port = port
-    settings.hostname = hostname.strip() or "kms.labfoundry.internal"
-    settings.server_certificate = server_certificate.strip() or settings.hostname
+    settings.hostname = normalize_dns_hostname(hostname.strip() or "kms.labfoundry.internal")
+    settings.server_certificate = normalize_dns_hostname(server_certificate.strip() or settings.hostname)
     settings.ca_certificate_path = settings.ca_certificate_path.strip() or "/etc/labfoundry/ca/root.crt"
     settings.database_path = KMS_DEFAULT_DATABASE_PATH
     settings.config_path = KMS_DEFAULT_CONFIG_PATH
@@ -5014,10 +5247,30 @@ def update_kms_settings_from_ui(
     settings.allow_register = allow_register == "on"
     settings.allow_destroy = allow_destroy == "on"
     settings.updated_at = utcnow()
+    if settings.enabled:
+        ensure_dns_for_kms(db, settings, identity.username, previous_hostname=previous_hostname)
+        ensure_ca_state(db)
     db.commit()
     record_audit(db, actor=identity.username, action="update_kms_settings", resource_type="kms", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave") == "1":
-        return JSONResponse({"status": "saved", "updated_at": settings.updated_at.isoformat()})
+        context = kms_context(db)
+        saved_settings = context["kms_settings"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": saved_settings.updated_at.isoformat(),
+                "enabled": saved_settings.enabled,
+                "listen_interface": saved_settings.listen_interface,
+                "listen_address": saved_settings.listen_address,
+                "port": saved_settings.port,
+                "hostname": saved_settings.hostname,
+                "server_certificate": saved_settings.server_certificate,
+                "valid": not context["kms_validation_errors"],
+                "validation_errors": context["kms_validation_errors"],
+                "config_path": KMS_DEFAULT_CONFIG_PATH,
+                "config_preview": context["kms_config_preview"],
+            }
+        )
     return RedirectResponse("/kms", status_code=303)
 
 
@@ -5228,7 +5481,8 @@ def update_vcf_offline_depot_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
     hostname: str = Form(VCF_DEPOT_DEFAULT_HOSTNAME),
-    listen_interface: str = Form("eth2"),
+    listen_interface: str = Form(""),
+    listen_address: str = Form(""),
     port: int = Form(443),
     server_certificate: str = Form(VCF_DEPOT_DEFAULT_HOSTNAME),
     telemetry_choice: str = Form("DISABLE"),
@@ -5242,15 +5496,12 @@ def update_vcf_offline_depot_settings_from_ui(
     verify_csrf(request, csrf)
     settings = get_vcf_offline_depot_settings_row(db)
     previous_hostname = settings.hostname
-    listen_options = {option["name"]: option for option in service_bind_options(db)}
-    selected_interface = listen_interface.strip() or "eth2"
-    if selected_interface not in listen_options:
-        raise HTTPException(status_code=400, detail="Select an access physical interface or VLAN interface with an IP address.")
+    selected_interface, selected_address = resolve_single_service_bind(db, listen_interface, listen_address)
 
     settings.enabled = enabled == "on"
     settings.hostname = hostname.strip() or VCF_DEPOT_DEFAULT_HOSTNAME
     settings.listen_interface = selected_interface
-    settings.listen_address = listen_options[selected_interface]["address"]
+    settings.listen_address = selected_address
     settings.port = port
     settings.server_certificate = server_certificate.strip() or settings.hostname
     settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
@@ -5448,7 +5699,8 @@ def update_vcf_private_registry_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
     hostname: str = Form(VCF_REGISTRY_DEFAULT_HOSTNAME),
-    listen_interface: str = Form("eth2"),
+    listen_interface: str = Form(""),
+    listen_address: str = Form(""),
     port: int = Form(443),
     harbor_project: str = Form(VCF_REGISTRY_DEFAULT_PROJECT),
     server_certificate: str = Form(VCF_REGISTRY_DEFAULT_HOSTNAME),
@@ -5461,14 +5713,11 @@ def update_vcf_private_registry_settings_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_vcf_private_registry_settings_row(db)
-    listen_options = {option["name"]: option for option in service_bind_options(db)}
-    selected_interface = listen_interface.strip() or "eth2"
-    if selected_interface not in listen_options:
-        raise HTTPException(status_code=400, detail="Select an access physical interface or VLAN interface with an IP address.")
+    selected_interface, selected_address = resolve_single_service_bind(db, listen_interface, listen_address)
     settings.enabled = enabled == "on"
     settings.hostname = hostname.strip() or VCF_REGISTRY_DEFAULT_HOSTNAME
     settings.listen_interface = selected_interface
-    settings.listen_address = listen_options[selected_interface]["address"]
+    settings.listen_address = selected_address
     settings.port = port
     settings.harbor_project = harbor_project.strip() or VCF_REGISTRY_DEFAULT_PROJECT
     settings.storage_path = VCF_REGISTRY_DEFAULT_STORAGE_PATH
@@ -5618,7 +5867,8 @@ def vcf_backups_page(
 def update_vcf_backup_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
-    listen_interface: str = Form("eth2"),
+    listen_interface: str = Form(""),
+    listen_address: str = Form(""),
     port: int = Form(22),
     sftp_user_id: str = Form(""),
     chroot_enabled: str | None = Form(None),
@@ -5634,13 +5884,10 @@ def update_vcf_backup_settings_from_ui(
     user_id = int(sftp_user_id) if str(sftp_user_id).strip() else None
     if user_id and not db.get(User, user_id):
         raise HTTPException(status_code=400, detail="Selected SFTP user does not exist.")
-    listen_options = {option["name"]: option for option in service_bind_options(db)}
-    selected_interface = listen_interface.strip() or "eth2"
-    if selected_interface not in listen_options:
-        raise HTTPException(status_code=400, detail="Select an access physical interface or VLAN interface with an IP address.")
+    selected_interface, selected_address = resolve_single_service_bind(db, listen_interface, listen_address)
     settings.enabled = enabled == "on"
     settings.listen_interface = selected_interface
-    settings.listen_address = listen_options[selected_interface]["address"]
+    settings.listen_address = selected_address
     settings.port = port
     settings.sftp_user_id = user_id
     settings.storage_path = VCF_BACKUP_DEFAULT_VOLUME_MOUNT
@@ -6275,6 +6522,7 @@ def update_settings_from_ui(
     request: Request,
     fqdn: str = Form("labfoundry.labfoundry.internal"),
     management_https_enabled: bool = Form(False),
+    root_ssh_enabled: bool = Form(False),
     external_dns_servers: str = Form(""),
     ntp_servers: str = Form(""),
     csrf: str = Form(...),
@@ -6286,6 +6534,7 @@ def update_settings_from_ui(
     previous_fqdn = settings.fqdn
     settings.fqdn = normalize_fqdn(fqdn) or "labfoundry.labfoundry.internal"
     settings.management_https_enabled = bool(management_https_enabled)
+    settings.root_ssh_enabled = bool(root_ssh_enabled)
     settings.external_dns_servers = normalize_multiline_values(external_dns_servers)
     settings.ntp_servers = normalize_multiline_values(ntp_servers)
     settings.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
@@ -6319,6 +6568,7 @@ def update_settings_from_ui(
                 "fqdn": saved.fqdn,
                 "management_https_enabled": saved.management_https_enabled,
                 "management_https_cert_available": context["management_https_cert_available"],
+                "root_ssh_enabled": saved.root_ssh_enabled,
                 "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
                 "ntp_servers": context["appliance_settings_json"]["ntp_servers"],
                 "local_dns_enabled": context["local_dns_enabled"],

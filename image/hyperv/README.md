@@ -52,6 +52,9 @@ Build runs pass Packer's `-force` flag by default so the fixed output directory
 can be rebuilt in one command. Use `-OutputDirectory <path>` to keep multiple
 artifacts or `-KeepExistingOutput` when you want Packer to fail instead of
 replacing an existing output directory.
+By default, failed builds still use Packer's normal cleanup behavior. To keep
+the temporary builder VM for debugging, add `-PackerOnError abort`; to choose at
+failure time, use `-PackerOnError ask`.
 
 The wrapper keeps `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` by default so a
 first-boot image records host-mutation command intent instead of changing
@@ -162,7 +165,9 @@ it to Packer.
   Python, and the package update marker.
 - A masked `systemd-ssh-generator` so Photon does not try to advertise or bind
   automatic SSH-over-AF_VSOCK sockets on Hyper-V. Normal TCP SSH remains
-  provided by `sshd`.
+  provided by `sshd`. Root SSH login starts disabled through the
+  LabFoundry-owned `labfoundry-root-login.conf` drop-in and can be enabled from
+  Appliance Settings, then enforced through global appliance apply.
 - `/var/lib/labfoundry` durable SQLite state.
 - `/var/log/labfoundry` local service logs.
 - Fixed appliance mounts under `/mnt/labfoundry-vcf-*`.
@@ -171,7 +176,8 @@ it to Packer.
   management firewall.
 - `dnsmasq` for the shared DNS/DHCP appliance service.
 - `/opt/labfoundry/bin/labfoundry-helper` constrained appliance helper.
-- `/etc/sudoers.d/labfoundry-helper` constrained helper allowlist.
+- `/etc/sudoers.d/labfoundry-helper` permitting the service user to run only
+  the constrained helper binary as root.
 
 The generated appliance keeps `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` until
 each helper-backed apply unit is reviewed and promoted.
@@ -199,6 +205,14 @@ writes public CA bundles plus service certificate/key files under
 `/etc/labfoundry`. Private keys are encrypted in the database with
 `LABFOUNDRY_SECRETS_KEY`; previews, jobs, and logs must remain redacted.
 
+KMS / KMIP desired state is PyKMIP-backed for lab compatibility testing. Real
+`/appliance-apply` stages `/var/lib/labfoundry/apply/kms/pykmip.conf`,
+requires an enabled healthy CA with issued KMS server/client certificates,
+installs `/etc/labfoundry/kms/pykmip.conf` and `/etc/pykmip/server.conf`, and
+manages `labfoundry-kms.service`. The KMS listener binds to the IP derived from
+the selected access physical interface or enabled VLAN. Disabling KMS stops and
+disables the service while preserving `/var/lib/labfoundry/kms/pykmip.db`.
+
 Local Users desired state is Photon OS account-backed. Real `/appliance-apply`
 stages `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`, validates
 LabFoundry-owned local usernames, creates or updates enabled users under
@@ -223,10 +237,17 @@ the retired `labfoundry-http-redirect.service` if present, reloads
 nginx/systemd, and schedules a short delayed `labfoundry.service` restart so the
 global apply job can finish before uvicorn moves behind nginx.
 
+Appliance Settings also owns the root SSH login switch. The image provisions
+`/etc/ssh/sshd_config.d/labfoundry-root-login.conf` with `PermitRootLogin no`;
+global appliance apply rewrites that LabFoundry-owned drop-in, validates
+`sshd`, and restarts `sshd` when the operator enables or disables root SSH.
+
 Provisioning creates the bootstrap admin OS account under
-`/var/lib/labfoundry/users/<admin>` with `/sbin/nologin` and sets the same
+`/var/lib/labfoundry/users/<admin>` with `/usr/bin/pwsh` and sets the same
 bootstrap password used for the initial web login, so the admin account exists
-on Photon before first appliance apply.
+on Photon before first appliance apply. The image installs Photon's
+`powershell` package for this shell and grants the bootstrap admin normal
+password-backed sudo through `/etc/sudoers.d/labfoundry-bootstrap-admin`.
 
 VCF Backups desired state is OpenSSH-backed. Provisioning leaves the default
 `vcf-backup` account absent from Photon OS until Local Users apply creates it.

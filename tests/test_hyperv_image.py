@@ -29,10 +29,24 @@ def test_photon_provisioning_management_network_matches_eth0_only():
 
 def test_photon_provisioning_installs_default_nginx_management_proxy():
     script = Path("image/hyperv/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    systemd_unit = Path("image/hyperv/systemd/labfoundry.service").read_text(encoding="utf-8")
+    sudoers = Path("image/hyperv/sudoers.d/labfoundry-helper").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
     root_docs = Path("README.md").read_text(encoding="utf-8")
 
     assert "tdnf -y install" in script and "nginx" in script
+    assert "tdnf -y install" in script and "powershell" in script
+    assert 'BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/usr/bin/pwsh}"' in script
+    assert '--shell "$BOOTSTRAP_SHELL"' in script
+    assert "touch /etc/shells" in script
+    assert 'grep -qxF "$BOOTSTRAP_SHELL" /etc/shells' in script
+    assert "labfoundry-bootstrap-admin" in script
+    assert "$BOOTSTRAP_USERNAME ALL=(ALL) ALL" in script
+    assert "visudo -cf /etc/sudoers.d/labfoundry-bootstrap-admin" in script
+    assert 'chmod 0711 "$LABFOUNDRY_STATE"' in script
+    assert 'chown "$BOOTSTRAP_USERNAME:$(id -gn "$BOOTSTRAP_USERNAME")" "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME"' in script
+    assert 'chmod 0750 "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME"' in script
+    assert "UMask=0027" in systemd_unit
     assert "configuring default LabFoundry management nginx proxy" in script
     assert "install -d -o root -g root -m 0755 /etc/nginx/conf.d" in script
     assert "/etc/nginx/conf.d/labfoundry.conf" in script
@@ -45,6 +59,10 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"' in script
     assert 'log_step "system adapter dry-run mode: $LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS"' in script
     assert "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=$LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS" in script
+    assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/image/hyperv/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
+    assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
+    assert "labfoundry-root-login.conf" in script
+    assert "PermitRootLogin no" in script
     assert "HTTP/80, proxied to uvicorn on `127.0.0.1:8000`" in docs
     assert "proxying HTTP/80 to" in root_docs
 
@@ -83,10 +101,13 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "Packer will boot a single DVD with embedded photon-ks.json." in wrapper
     assert "Write-PackerVarFile" in wrapper
     assert "Using Packer var-file" in wrapper
+    assert "[ValidateSet('cleanup', 'abort', 'ask', 'run-cleanup-provisioner')]" in wrapper
+    assert "[string]$PackerOnError = 'cleanup'" in wrapper
     assert "[switch]$KeepExistingOutput" in wrapper
     assert "[switch]$EnableRealSystemAdapters" in wrapper
     assert "Packer build will replace any existing output directory for this build." in wrapper
     assert "$packerArgs += '-force'" in wrapper
+    assert '$packerArgs += "-on-error=$PackerOnError"' in wrapper
     assert "'-var-file', $varFilePath" in wrapper
     assert "builder_static_dns       = $BuilderStaticDns" in wrapper
     assert "dry_run_system_adapters  = -not $EnableRealSystemAdapters" in wrapper
@@ -158,6 +179,8 @@ def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
     assert "SiteA` on `LabFoundry-SiteA` as trunk VLAN 12" in docs
     assert "`Trunk` on" in docs and "`LabFoundry-Trunk` as trunk VLAN 50" in docs
     assert "WAN-Test` on `LabFoundry-SiteB` as" in docs
+    assert "`/var/lib/labfoundry/users/<admin>` with `/usr/bin/pwsh`" in docs
+    assert "`powershell` package" in docs
     assert "[switch]$SkipLabNetworkAdapters" in vm_script
     assert "[int]$SiteVlanId = 12" in vm_script
     assert "[int]$TaggedVlanId = 50" in vm_script
@@ -289,7 +312,17 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
 
     plan = module.lifecycle_plan(args)
 
-    assert plan["apply_units"] == ["local_users", "network", "firewall", "wan", "dnsmasq", "ca", "appliance_settings", "vcf_backups"]
+    assert plan["apply_units"] == [
+        "local_users",
+        "network",
+        "firewall",
+        "wan",
+        "dnsmasq",
+        "ca",
+        "kms",
+        "appliance_settings",
+        "vcf_backups",
+    ]
     assert plan["interfaces"]["vlan"]["name"] == "eth2.50"
     assert plan["interfaces"]["client_ca_request"]["name"] == "eth3"
     assert plan["interfaces"]["client_ca_request"]["ip_cidr"] == "192.168.49.20/24"
@@ -329,15 +362,32 @@ def test_lifecycle_runner_covers_ca_vcf_backups_wan_noise_and_console_summary():
     assert "HTTP management endpoint should redirect after HTTPS apply" in script
     assert "https_request_unverified" in script
     assert "configure-vcf-backups" in script
+    assert "configure-kms" in script
+    assert '"/kms/clients"' in script
+    assert '"name": "vcf-management"' in script
+    assert "Hyper-V lifecycle KMIP client" in script
+    assert "labfoundry-kms.service" in script
+    assert "kms_files" in script
+    assert "kms_service" in script
+    assert "kms_tls" in script
+    assert "apply-kms-unit" in script
+    assert "Appliance apply task failed" in script
+    assert "/etc/labfoundry/kms/clients/vcf-management.crt" in script
+    assert "/etc/labfoundry/kms/clients/certs/vcf-management.crt" not in script
+    assert "missing $path" in script
+    assert "stderr:" in script
+    assert "stdout:" in script
     assert "vcf-backup-client-check" in script
     assert "sshpass -p" in script
     assert "redact_text" in script
-    assert '"local_users", "network", "firewall", "wan", "dnsmasq", "ca", "appliance_settings", "vcf_backups"' in script
+    assert '"local_users", "network", "firewall", "wan", "dnsmasq", "ca", "kms", "appliance_settings", "vcf_backups"' in script
     assert "certificate_summary" in script
     assert "root_ca" in script
     assert "ca-client-certificate-request" in script
     assert "ca-client-certificate-check" in script
     assert "create_client_csr" in script
+    assert '"listen_interfaces_present": "1"' in script
+    assert '"listen_interfaces": [args.site_interface]' in script
     assert "ca_request_url" in script
     assert "Cookie: " in script
     assert "--connect-timeout 10 --max-time 30" in script
@@ -352,6 +402,29 @@ def test_lifecycle_runner_covers_ca_vcf_backups_wan_noise_and_console_summary():
     assert "tc qdisc show dev {args.wan_interface} | grep -E 'netem.*delay 25ms'" in script
     assert "Lifecycle summary" in script
     assert "Result JSON:" in script
+
+
+def test_lifecycle_runner_summarizes_apply_validation_html():
+    module = load_lifecycle_runner()
+    summary = module.summarize_html_response(
+        """
+        <!doctype html>
+        <html>
+          <body>
+            <aside>LabFoundry navigation noise</aside>
+            <div class="alert error">Resolve validation errors before submitting appliance changes.</div>
+            <article>
+              <strong>Certificate Authority</strong>
+              <div class="alert error"><div>CA service requires at least one listen interface.</div></div>
+            </article>
+          </body>
+        </html>
+        """
+    )
+
+    assert summary.startswith("Resolve validation errors before submitting appliance changes.")
+    assert "CA service requires at least one listen interface." in summary
+    assert "doctype" not in summary.lower()
 
 
 def test_lifecycle_roadmap_splits_pester_and_pytest_ownership():

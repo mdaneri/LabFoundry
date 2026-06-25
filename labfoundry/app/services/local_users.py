@@ -12,7 +12,8 @@ LOCAL_USERS_PASSWORD_POLICY_KEY = "local_users.password_policy.v1"
 LOCAL_USERS_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/local-users/labfoundry-users.json"
 LOCAL_USERS_CONFIG_VERSION = 1
 DEFAULT_LOCAL_USER_SHELL = "/sbin/nologin"
-LOCAL_USER_SHELLS = [DEFAULT_LOCAL_USER_SHELL, "/bin/bash", "/bin/sh"]
+POWERSHELL_LOCAL_USER_SHELL = "/usr/bin/pwsh"
+LOCAL_USER_SHELLS = [DEFAULT_LOCAL_USER_SHELL, "/bin/bash", "/bin/sh", POWERSHELL_LOCAL_USER_SHELL]
 
 USERNAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 RESERVED_USERNAMES = {

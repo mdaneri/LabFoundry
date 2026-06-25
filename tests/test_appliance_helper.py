@@ -18,6 +18,30 @@ def load_helper_module():
     return module
 
 
+def kms_config_text(managed_root: Path, *, enabled: bool = True, database_path: Path | None = None) -> str:
+    database_path = database_path or Path("/var/lib/labfoundry/kms/pykmip.db")
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            f"# LabFoundry KMS enabled: {str(enabled).lower()}",
+            "# LabFoundry KMS endpoint hostname: kms.labfoundry.internal",
+            "# Backend: PyKMIP lab KMIP server desired state.",
+            "[server]",
+            "hostname=192.168.50.1",
+            "port=5696",
+            f"certificate_path={managed_root / 'kms' / 'certs' / 'kms.labfoundry.internal.crt'}",
+            f"key_path={managed_root / 'kms' / 'certs' / 'kms.labfoundry.internal.key'}",
+            f"ca_path={managed_root / 'ca' / 'root.crt'}",
+            "auth_suite=TLS1.2",
+            f"policy_path={managed_root / 'kms' / 'policies'}",
+            "enable_tls_client_auth=True",
+            "logging_level=INFO",
+            f"database_path={database_path}",
+            "",
+        ]
+    )
+
+
 def network_config_text(
     *,
     eth2_mode: str = "trunk",
@@ -502,6 +526,81 @@ def test_network_helper_refuses_to_delete_non_vlan_link(monkeypatch, tmp_path):
     assert helper._apply_vlan_interfaces(config_path) == 2
 
 
+def test_kms_helper_rejects_config_outside_apply_dir(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "pykmip.conf"
+    config_path.write_text(kms_config_text(tmp_path), encoding="utf-8")
+
+    assert helper._handle_kms("validate", [str(config_path)]) == 2
+
+
+def test_kms_helper_validates_disabled_staged_config(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "kms"
+    state_dir = tmp_path / "state" / "kms"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    apply_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    config_path = apply_dir / "pykmip.conf"
+    config_path.write_text(kms_config_text(managed_root, enabled=False, database_path=state_dir / "pykmip.db"), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "KMS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "KMS_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "KMS_CONFIG_DIR", managed_root / "kms")
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+
+    assert helper._handle_kms("validate", [str(config_path)]) == 0
+
+
+def test_kms_helper_apply_installs_pykmip_service(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "kms"
+    state_dir = tmp_path / "state" / "kms"
+    log_dir = tmp_path / "log" / "kms"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    pykmip_dir = tmp_path / "etc" / "pykmip"
+    service_path = tmp_path / "systemd" / "labfoundry-kms.service"
+    config_path = apply_dir / "pykmip.conf"
+    cert_path = managed_root / "kms" / "certs" / "kms.labfoundry.internal.crt"
+    key_path = managed_root / "kms" / "certs" / "kms.labfoundry.internal.key"
+    ca_path = managed_root / "ca" / "root.crt"
+    apply_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    cert_path.parent.mkdir(parents=True)
+    ca_path.parent.mkdir(parents=True)
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    ca_path.write_text("-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    config_path.write_text(kms_config_text(managed_root, database_path=state_dir / "pykmip.db"), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "KMS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "KMS_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "KMS_LOG_DIR", log_dir)
+    monkeypatch.setattr(helper, "KMS_CONFIG_DIR", managed_root / "kms")
+    monkeypatch.setattr(helper, "KMS_CONFIG_PATH", managed_root / "kms" / "pykmip.conf")
+    monkeypatch.setattr(helper, "KMS_POLICY_DIR", managed_root / "kms" / "policies")
+    monkeypatch.setattr(helper, "KMS_SERVICE_PATH", service_path)
+    monkeypatch.setattr(helper, "PYKMIP_CONFIG_DIR", pykmip_dir)
+    monkeypatch.setattr(helper, "PYKMIP_CONFIG_PATH", pykmip_dir / "server.conf")
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/opt/labfoundry/.venv/bin/pykmip-server" if command == "pykmip-server" else None)
+
+    assert helper._handle_kms("apply", [str(config_path)]) == 0
+
+    assert (managed_root / "kms" / "pykmip.conf").is_file()
+    assert (pykmip_dir / "server.conf").is_file()
+    assert "pykmip-server" in service_path.read_text(encoding="utf-8")
+    assert ["systemctl", "daemon-reload"] in commands
+    assert ["systemctl", "enable", "labfoundry-kms.service"] in commands
+    assert ["systemctl", "restart", "labfoundry-kms.service"] in commands
+
+
 def test_dnsmasq_helper_validates_staged_config(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "dnsmasq"
@@ -782,6 +881,22 @@ def test_local_users_helper_applies_per_user_shell(monkeypatch, tmp_path):
 
     assert helper._handle_local_users("apply", [str(config_path)]) == 0
     assert ["usermod", "--shell", "/bin/bash", "sync-user"] in commands
+
+
+def test_local_users_helper_allows_powershell_shell(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    payload = json.loads(local_users_json(password=None))
+    payload["users"][0]["shell"] = "/usr/bin/pwsh"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+
+    assert helper._handle_local_users("validate", [str(config_path)]) == 0
+    captured = capsys.readouterr()
+    assert '"local_users": "validation ok"' in captured.out
 
 
 def test_local_users_helper_unlock_request_resets_passwd_and_faillock(monkeypatch, tmp_path):
@@ -1114,11 +1229,21 @@ def patch_appliance_settings_nginx_paths(monkeypatch, helper, tmp_path):
     monkeypatch.setattr(helper, "NGINX_MAIN_CONFIG_PATH", nginx_main)
     monkeypatch.setattr(helper, "NGINX_SITES_DIR", nginx_sites)
     monkeypatch.setattr(helper, "NGINX_MANAGEMENT_SITE_PATH", nginx_management_site)
+    sshd_config_dir = tmp_path / "ssh" / "sshd_config.d"
+    sshd_root_login = sshd_config_dir / "labfoundry-root-login.conf"
+    sshd_main = tmp_path / "ssh" / "sshd_config"
+    sshd_main.parent.mkdir(parents=True, exist_ok=True)
+    sshd_main.write_text("PermitRootLogin no\nPasswordAuthentication no\nSubsystem sftp /usr/libexec/sftp-server\n", encoding="utf-8")
+    monkeypatch.setattr(helper, "SSHD_CONFIG_DIR", sshd_config_dir)
+    monkeypatch.setattr(helper, "SSHD_MAIN_CONFIG_PATH", sshd_main)
+    monkeypatch.setattr(helper, "SSHD_ROOT_LOGIN_CONFIG_PATH", sshd_root_login)
     return {
         "include": nginx_include,
         "main": nginx_main,
         "sites": nginx_sites,
         "management_site": nginx_management_site,
+        "sshd_main": sshd_main,
+        "sshd_root_login": sshd_root_login,
     }
 
 
@@ -1130,6 +1255,7 @@ def appliance_settings_json(
     management_https_enabled: bool = False,
     management_https_cert_path: str = "",
     management_https_key_path: str = "",
+    root_ssh_enabled: bool = False,
 ) -> str:
     import json
 
@@ -1143,6 +1269,7 @@ def appliance_settings_json(
             "management_ip": "192.168.49.1",
             "management_ip_cidr": "192.168.49.1/24",
             "management_https_enabled": management_https_enabled,
+            "root_ssh_enabled": root_ssh_enabled,
             "management_http_port": 8000,
             "management_public_http_port": 80,
             "management_public_https_port": 443,
@@ -1203,10 +1330,15 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     nginx_main = tmp_path / "nginx" / "nginx.conf"
     nginx_sites = tmp_path / "nginx" / "sites.d"
     nginx_management_site = nginx_sites / "management.conf"
+    sshd_config_dir = tmp_path / "ssh" / "sshd_config.d"
+    sshd_root_login = sshd_config_dir / "labfoundry-root-login.conf"
+    sshd_main = tmp_path / "ssh" / "sshd_config"
     timesyncd_dir = tmp_path / "timesyncd.conf.d"
     apply_dir.mkdir(parents=True)
     cert_path.parent.mkdir(parents=True)
     nginx_main.parent.mkdir(parents=True)
+    sshd_main.parent.mkdir(parents=True)
+    sshd_main.write_text("PermitRootLogin no\nPasswordAuthentication no\nSubsystem sftp /usr/libexec/sftp-server\n", encoding="utf-8")
     nginx_main.write_text(
         "\n".join(
             [
@@ -1235,6 +1367,7 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
             management_https_enabled=True,
             management_https_cert_path=str(cert_path),
             management_https_key_path=str(key_path),
+            root_ssh_enabled=True,
         ),
         encoding="utf-8",
     )
@@ -1256,6 +1389,9 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     monkeypatch.setattr(helper, "NGINX_MAIN_CONFIG_PATH", nginx_main)
     monkeypatch.setattr(helper, "NGINX_SITES_DIR", nginx_sites)
     monkeypatch.setattr(helper, "NGINX_MANAGEMENT_SITE_PATH", nginx_management_site)
+    monkeypatch.setattr(helper, "SSHD_CONFIG_DIR", sshd_config_dir)
+    monkeypatch.setattr(helper, "SSHD_MAIN_CONFIG_PATH", sshd_main)
+    monkeypatch.setattr(helper, "SSHD_ROOT_LOGIN_CONFIG_PATH", sshd_root_login)
     monkeypatch.setattr(helper, "_ca_key_matches_certificate", lambda certificate_pem, private_key_pem: True)
     monkeypatch.setattr(helper, "_run", fake_run)
     monkeypatch.setattr(
@@ -1265,6 +1401,7 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
             "hostnamectl": "/usr/bin/hostnamectl",
             "systemd-run": "/usr/bin/systemd-run",
             "nginx": "/usr/sbin/nginx",
+            "sshd": "/usr/sbin/sshd",
         }.get(command),
     )
 
@@ -1282,12 +1419,21 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     assert f"ssl_certificate {cert_path};" in management_site
     assert f"ssl_certificate_key {key_path};" in management_site
     assert "proxy_pass http://127.0.0.1:8000;" in management_site
+    root_login = sshd_root_login.read_text(encoding="utf-8")
+    assert "PermitRootLogin yes" in root_login
+    assert "PasswordAuthentication yes" in root_login
+    sshd_main_text = sshd_main.read_text(encoding="utf-8")
+    assert "Include /etc/ssh/sshd_config.d/*.conf" in sshd_main_text
+    assert "# LabFoundry manages this directive through labfoundry-root-login.conf: PermitRootLogin no" in sshd_main_text
+    assert "# LabFoundry manages this directive through labfoundry-root-login.conf: PasswordAuthentication no" in sshd_main_text
     assert not redirect_script.exists()
     assert not redirect_service.exists()
     assert ["systemctl", "daemon-reload"] in commands
     assert ["systemctl", "disable", "--now", "labfoundry-http-redirect.service"] in commands
     assert ["systemctl", "enable", "--now", "nginx"] in commands
     assert ["/usr/sbin/nginx", "-t"] in commands
+    assert ["/usr/sbin/sshd", "-t"] in commands
+    assert ["systemctl", "restart", "sshd"] in commands
     assert any(command[:5] == ["/usr/bin/systemd-run", "--quiet", "--collect", "--on-active=3", "--unit=labfoundry-management-ui-restart"] for command in commands)
 
 
@@ -1319,6 +1465,7 @@ def test_appliance_settings_helper_writes_http_management_proxy_without_https(mo
             "hostnamectl": "/usr/bin/hostnamectl",
             "systemd-run": "/usr/bin/systemd-run",
             "nginx": "/usr/sbin/nginx",
+            "sshd": "/usr/sbin/sshd",
         }.get(command),
     )
 
@@ -1333,8 +1480,14 @@ def test_appliance_settings_helper_writes_http_management_proxy_without_https(mo
     assert "ssl_certificate" not in management_site
     assert "proxy_pass http://127.0.0.1:8000;" in management_site
     assert "proxy_set_header X-Forwarded-Proto http;" in management_site
+    root_login = nginx_paths["sshd_root_login"].read_text(encoding="utf-8")
+    assert "PermitRootLogin no" in root_login
+    assert "PasswordAuthentication yes" not in root_login
+    assert "Include /etc/ssh/sshd_config.d/*.conf" in nginx_paths["sshd_main"].read_text(encoding="utf-8")
     assert ["systemctl", "enable", "--now", "nginx"] in commands
     assert ["/usr/sbin/nginx", "-t"] in commands
+    assert ["/usr/sbin/sshd", "-t"] in commands
+    assert ["systemctl", "restart", "sshd"] in commands
     assert any(command[:5] == ["/usr/bin/systemd-run", "--quiet", "--collect", "--on-active=3", "--unit=labfoundry-management-ui-restart"] for command in commands)
 
 
@@ -1383,6 +1536,7 @@ def test_appliance_settings_helper_applies_local_resolver_and_timesyncd(monkeypa
         lambda command: {
             "hostnamectl": "/usr/bin/hostnamectl",
             "nginx": "/usr/sbin/nginx",
+            "sshd": "/usr/sbin/sshd",
         }.get(command),
     )
 
@@ -1439,6 +1593,7 @@ def test_appliance_settings_helper_applies_external_resolver_without_catchall(mo
         lambda command: {
             "hostnamectl": "/usr/bin/hostnamectl",
             "nginx": "/usr/sbin/nginx",
+            "sshd": "/usr/sbin/sshd",
         }.get(command),
     )
 

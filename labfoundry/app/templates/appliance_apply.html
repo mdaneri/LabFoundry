@@ -101,7 +101,7 @@
                   name="selected_units"
                   value="{{ unit.id }}"
                   data-apply-unit-checkbox
-                  {% if not selected_apply_unit_ids or unit.id in selected_apply_unit_ids %}checked{% endif %}
+                  {% if selected_apply_unit_ids is not defined or unit.id in selected_apply_unit_ids %}checked{% endif %}
                   {{ "disabled" if unit.validation_errors else "" }}
                 >
                 <span>
@@ -149,6 +149,13 @@
             </details>
           </article>
         {% endfor %}
+      </div>
+      <div class="panel apply-submit-panel">
+        <div>
+          <strong>Submit selected appliance changes</strong>
+          <p class="muted">Selected valid units will be validated and applied through the global appliance workflow.</p>
+        </div>
+        <button class="button primary" type="submit" data-apply-submit-button>Submit appliance changes</button>
       </div>
     {% else %}
       <div class="panel empty-state">

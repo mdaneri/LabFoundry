@@ -67,6 +67,7 @@ def _ensure_sqlite_appliance_settings_columns() -> None:
     existing = {column["name"] for column in inspector.get_columns("appliance_settings")}
     columns = {
         "management_https_enabled": "BOOLEAN DEFAULT 0",
+        "root_ssh_enabled": "BOOLEAN DEFAULT 0",
     }
     with engine.begin() as connection:
         for name, definition in columns.items():
@@ -89,6 +90,8 @@ def _ensure_sqlite_ca_columns() -> None:
                 "root_fingerprint": "VARCHAR(128) DEFAULT ''",
                 "root_issued_at": "DATETIME",
                 "root_expires_at": "DATETIME",
+                "listen_interface": "VARCHAR(80) DEFAULT ''",
+                "listen_address": "VARCHAR(240) DEFAULT ''",
             }
             for name, definition in columns.items():
                 if name not in existing:

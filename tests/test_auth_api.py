@@ -42,6 +42,28 @@ def test_api_token_is_shown_only_once_in_list(client):
     assert "raw_token" not in response.text
 
 
+def test_settings_api_updates_root_ssh_desired_state(client):
+    token, _metadata = create_token(client, scopes=["admin:all", "read:dashboard"])
+
+    response = client.patch(
+        "/api/v1/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "appliance_fqdn": "api.labfoundry.internal",
+            "management_https_enabled": False,
+            "root_ssh_enabled": True,
+            "external_dns_servers": ["1.1.1.1", "9.9.9.9"],
+            "ntp_servers": ["time1.google.com"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["appliance_fqdn"] == "api.labfoundry.internal"
+    assert payload["root_ssh_enabled"] is True
+    assert '"root_ssh_enabled": true' in payload["config_preview"]
+
+
 def test_scope_restrictions_are_enforced(client):
     token, _metadata = create_token(client, scopes=["read:dashboard"])
     response = client.post(

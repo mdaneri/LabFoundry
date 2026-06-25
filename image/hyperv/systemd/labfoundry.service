@@ -11,6 +11,7 @@ WorkingDirectory=/var/lib/labfoundry
 EnvironmentFile=/etc/labfoundry/labfoundry.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1
+UMask=0027
 ExecStart=/opt/labfoundry/.venv/bin/python -m uvicorn labfoundry.app.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=5

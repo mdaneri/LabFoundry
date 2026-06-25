@@ -77,8 +77,11 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "runtime.labfoundry.internal" in response.text
     assert "labfoundry.labfoundry.internal" in response.text
     assert "Management UI HTTPS" in response.text
+    assert "Root SSH login" in response.text
+    assert "data-appliance-settings-root-ssh" in response.text
     assert "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json" in response.text
     assert "resolver_mode" in response.text
+    assert "root_ssh_enabled" in response.text
     assert 'class="language-json" data-appliance-settings-preview' in response.text
 
 
@@ -120,6 +123,7 @@ def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
         "/settings",
         data={
             "fqdn": "console.labfoundry.internal",
+            "root_ssh_enabled": "on",
             "external_dns_servers": "8.8.8.8\n1.1.1.1",
             "ntp_servers": "time.cloudflare.com\ntime.google.com",
             "csrf": csrf,
@@ -131,6 +135,7 @@ def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
     payload = response.json()
     assert payload["status"] == "saved"
     assert payload["fqdn"] == "console.labfoundry.internal"
+    assert payload["root_ssh_enabled"] is True
     assert payload["external_dns_servers"] == ["8.8.8.8", "1.1.1.1"]
     assert payload["ntp_servers"] == ["time.cloudflare.com", "time.google.com"]
     assert payload["dns_record_action"] in {"created", "updated", "unchanged", "created+removed-old", "updated+removed-old"}
@@ -138,10 +143,12 @@ def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
     assert '"resolver_mode": "local_dns"' in payload["config_preview"]
     assert '"resolver_servers": [' in payload["config_preview"]
     assert '"127.0.0.1"' in payload["config_preview"]
+    assert '"root_ssh_enabled": true' in payload["config_preview"]
 
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
         assert settings.fqdn == "console.labfoundry.internal"
+        assert settings.root_ssh_enabled is True
         record = db.execute(
             select(DnsRecord).where(DnsRecord.hostname == "console.labfoundry.internal", DnsRecord.record_type == "A")
         ).scalar_one()
@@ -1130,6 +1137,11 @@ def test_dns_and_dhcp_pages_render(client):
     assert "autoSaveDhcpReservation" in app_js.text
     assert "+ Add reservation here" in app_js.text
     assert 'title: "DNS name / FQDN"' in app_js.text
+    assert "initializeCaSettings" in app_js.text
+    assert "data-ca-config-preview" in app_js.text
+    assert "data-ca-derived-address" not in app_js.text
+    assert "initializeServiceBindEditors" in app_js.text
+    assert "data-tag-single" in app_js.text
     assert "X-LabFoundry-Autosave" in app_js.text
     assert "tag-editor:change" in app_js.text
     assert "data-tag-menu-toggle" in app_js.text
@@ -1149,7 +1161,12 @@ def test_dns_and_dhcp_pages_render(client):
     assert ".autosave-status" in app_css.text
     assert ".appliance-apply-form" in app_css.text
     assert ".apply-change-set-panel" in app_css.text
-    assert ".apply-submit-bar" not in app_css.text
+    assert ".form-grid > label > .field-label" in app_css.text
+    assert ".service-bind-editor" in app_css.text
+    assert ".apply-submit-panel" in app_css.text
+    assert ".config-diff code" in app_css.text
+    assert "overflow-wrap: anywhere;" in app_css.text
+    assert "white-space: pre-wrap;" in app_css.text
     assert ".page-apply-notice" in app_css.text
     assert ".apply-inline-tracker" in app_css.text
     assert ".apply-progress-modal" not in app_css.text
@@ -1414,6 +1431,21 @@ def test_certificate_authority_page_renders(client):
     assert "VCF service TLS" in ca.text
     assert "labfoundry.labfoundry.internal" in ca.text
     assert 'data-autosave-status-id="ca-settings-autosave-status"' in ca.text
+    assert "Listen interfaces" in ca.text
+    assert "Listen addresses" in ca.text
+    assert 'name="listen_interfaces_present"' in ca.text
+    assert 'name="listen_addresses_present"' in ca.text
+    assert 'name="listen_interfaces"' in ca.text
+    assert 'name="listen_addresses"' in ca.text
+    assert 'placeholder="Add interface..."' in ca.text
+    assert 'placeholder="Add listen address..."' in ca.text
+    assert 'data-tag-option="eth2"' in ca.text
+    assert 'data-tag-option="192.168.50.1"' in ca.text
+    assert "eth1 - unused / trunk" not in ca.text
+    assert "Derived address" not in ca.text
+    assert 'data-ca-derived-address' not in ca.text
+    assert 'name="listen_interface"' not in ca.text
+    assert 'name="listen_address"' not in ca.text
     assert "Changes save automatically." in ca.text
     assert 'href="/appliance-apply"' in ca.text
     assert "Review appliance changes" in ca.text
@@ -1446,6 +1478,35 @@ def test_certificate_authority_downloads_public_pems(client):
     assert bundle.status_code == 200
     assert bundle.headers["content-disposition"] == 'attachment; filename="labfoundry-ca-bundle.pem"'
     assert "BEGIN CERTIFICATE" in bundle.text
+
+
+def test_ca_apply_payload_leaves_csr_private_key_empty():
+    import json
+
+    from labfoundry.app.models import CaCertificate, CaSettings
+    from labfoundry.app.services.ca import render_ca_apply_payload
+
+    settings = CaSettings(
+        enabled=True,
+        root_common_name="LabFoundry Test Root CA",
+        root_certificate_pem="-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----\n",
+        storage_path="/etc/labfoundry/ca",
+    )
+    certificate = CaCertificate(
+        common_name="client-a.labfoundry.internal",
+        status="issued",
+        certificate_pem="-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n",
+        chain_pem="-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n",
+        csr_text="-----BEGIN CERTIFICATE REQUEST-----\ncsr\n-----END CERTIFICATE REQUEST-----\n",
+        cert_path="/etc/labfoundry/ca/client-a.crt",
+        key_path="",
+        chain_path="/etc/labfoundry/ca/client-a-chain.pem",
+        enabled=True,
+    )
+
+    payload = json.loads(render_ca_apply_payload(settings, [certificate], include_private_keys=True))
+
+    assert payload["certificates"][0]["private_key_pem"] == ""
 
 
 def test_certificate_authority_issues_encrypted_managed_certs_and_exports(client):
@@ -1500,6 +1561,14 @@ def test_kms_page_renders(client):
     assert "vcf-management" in kms.text
     assert "vcf-sddc-manager-aes" in kms.text
     assert "kms.labfoundry.internal" in kms.text
+    assert "Listen interface" in kms.text
+    assert "Listen address" in kms.text
+    assert "service-bind-editor" in kms.text
+    assert 'data-tag-name="listen_interface"' in kms.text
+    assert 'data-tag-name="listen_address"' in kms.text
+    assert "data-tag-single" in kms.text
+    assert "192.168.50.1" in kms.text
+    assert "eth2 - access / access / 192.168.50.1" in kms.text
     assert 'data-autosave-status-id="kms-settings-autosave-status"' in kms.text
     assert "Changes save automatically." in kms.text
     assert 'href="/appliance-apply"' in kms.text
@@ -1519,6 +1588,7 @@ def test_kms_page_renders(client):
     assert app_js.status_code == 200
     assert "initializeKmsKeysTable" in app_js.text
     assert "initializeKmsClientsTable" in app_js.text
+    assert "initializeKmsSettings" in app_js.text
     assert "+ Add key here" in app_js.text
     assert "+ Add client here" in app_js.text
     assert "deleteKmsKeyFromMenu" in app_js.text
@@ -1526,6 +1596,11 @@ def test_kms_page_renders(client):
 
 
 def test_kms_settings_autosave_returns_json(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
     login(client)
     page = client.get("/kms")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -1534,8 +1609,8 @@ def test_kms_settings_autosave_returns_json(client):
         data={
             "enabled": "on",
             "backend": "pykmip",
-            "listen_interface": "eth1",
-            "listen_address": "192.168.50.1",
+            "listen_interface": "eth2",
+            "listen_address": "10.0.0.99",
             "port": "5696",
             "hostname": "kms.labfoundry.internal",
             "server_certificate": "kms.labfoundry.internal",
@@ -1550,7 +1625,10 @@ def test_kms_settings_autosave_returns_json(client):
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "saved"
+    payload = response.json()
+    assert payload["status"] == "saved"
+    assert payload["listen_address"] == "192.168.50.1"
+    assert "KMS requires Certificate Authority to be enabled before activation." in payload["validation_errors"]
     refreshed = client.get("/kms")
     assert "enabled" in refreshed.text
     assert "/tmp/rogue-kms.db" not in refreshed.text
@@ -1559,6 +1637,54 @@ def test_kms_settings_autosave_returns_json(client):
     assert "/etc/labfoundry/ca/root.crt" in refreshed.text
     assert "/var/lib/labfoundry/kms/pykmip.db" in refreshed.text
     assert "/etc/labfoundry/kms/pykmip.conf" in refreshed.text
+    assert "10.0.0.99" not in refreshed.text
+
+    with SessionLocal() as db:
+        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert record.address == "192.168.50.1"
+        assert "KMS/KMIP endpoint" in (record.description or "")
+
+
+def test_kms_enable_autocreates_ca_managed_certificate_rows(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaCertificate, CaSettings
+
+    login(client)
+    with SessionLocal() as db:
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        ca_settings.enabled = True
+        db.commit()
+
+    page = client.get("/kms")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/kms/settings",
+        data={
+            "enabled": "on",
+            "backend": "pykmip",
+            "listen_interface": "eth2",
+            "port": "5696",
+            "hostname": "kms.labfoundry.internal",
+            "server_certificate": "kms.labfoundry.internal",
+            "require_client_cert": "on",
+            "allow_register": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["validation_errors"] == []
+
+    with SessionLocal() as db:
+        server_cert = db.execute(select(CaCertificate).where(CaCertificate.managed_owner == "kms:server")).scalar_one()
+        client_cert = db.execute(select(CaCertificate).where(CaCertificate.managed_owner == "kms:client:vcf-management")).scalar_one()
+        assert server_cert.status == "issued"
+        assert server_cert.ip_addresses == "192.168.50.1"
+        assert server_cert.cert_path == "/etc/labfoundry/kms/certs/kms.labfoundry.internal.crt"
+        assert client_cert.status == "issued"
 
 
 def test_kms_apply_task_captures_current_desired_state(client):
@@ -1580,6 +1706,7 @@ def test_kms_apply_task_captures_current_desired_state(client):
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
+        assert "/var/lib/labfoundry/apply/kms/pykmip.conf" in (job.result or "")
         assert "pykmip" in (job.result or "")
         assert "vcf-sddc-manager-aes" in (job.result or "")
 
@@ -1599,13 +1726,16 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert 'href="/appliance-apply"' in page.text
     assert "Review appliance changes" in page.text
     assert "VCF Backup SFTP desired state is disabled" in page.text
-    assert "Derived address" in page.text
+    assert "Listen interface" in page.text
+    assert "Listen address" in page.text
+    assert "service-bind-editor" in page.text
+    assert 'data-tag-name="listen_interface"' in page.text
+    assert 'data-tag-name="listen_address"' in page.text
     assert page.text.count("fixed-value-field") >= 2
     assert "<span>Config path</span>" not in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
-    assert 'data-address="192.168.50.1"' in page.text
-    assert "data-vcf-derived-address" in page.text
+    assert 'data-service-bind-address="192.168.50.1"' in page.text
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "initializeVcfBackupSettings" in app_js.text
@@ -1652,8 +1782,9 @@ def test_vcf_private_registry_page_models_harbor_and_bundle_relocation(client):
     assert "harbor_admin_password: &lt;provisioned-by-labfoundry-helper&gt;" in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
-    assert 'data-address="192.168.50.1"' in page.text
-    assert "data-vcf-registry-derived-address" in page.text
+    assert "Listen address" in page.text
+    assert "service-bind-editor" in page.text
+    assert 'data-service-bind-address="192.168.50.1"' in page.text
     assert page.text.count("fixed-value-field") >= 1
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
@@ -1834,6 +1965,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "depot.labfoundry.internal" in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
+    assert "Listen interface" in page.text
+    assert "Listen address" in page.text
+    assert "service-bind-editor" in page.text
+    assert 'data-service-bind-address="192.168.50.1"' in page.text
     assert 'action="/vcf-offline-depot/settings"' in page.text
     assert 'data-autosave-status-id="vcf-depot-settings-status"' in page.text
     assert 'data-components=' in page.text
@@ -2651,7 +2786,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "apply-inline-20260624-1" in page.text
+    assert "apply-diff-20260625-1" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
@@ -2712,11 +2847,18 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     change_set_markup = page.text.split('class="panel apply-change-set-panel"', 1)[1].split('<div class="apply-unit-list">', 1)[0]
     assert "Submit appliance changes" in change_set_markup
     assert "data-apply-submit-tracker" in change_set_markup
-    assert "apply-submit-bar" not in page.text
+    assert "apply-submit-panel" in page.text
+    assert page.text.count("data-apply-submit-button") == 2
     assert "data-apply-progress-modal" not in page.text
     assert "No last-applied baseline exists yet" in page.text
     assert 'value="firewall"' in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    empty_response = client.post("/appliance-apply", data={"csrf": csrf})
+    assert empty_response.status_code == 422
+    assert "Select at least one appliance change to submit." in empty_response.text
+    firewall_input = empty_response.text.split('value="firewall"', 1)[1].split(">", 1)[0]
+    assert "checked" not in firewall_input
 
     baseline_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"})
     assert baseline_response.status_code == 200
@@ -3029,6 +3171,10 @@ def test_ca_settings_autosave_returns_json(client):
         "/certificate-authority/settings",
         data={
             "enabled": "on",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": ["eth1", "eth2"],
+            "listen_addresses": ["192.168.50.1", "10.0.0.99"],
             "root_common_name": "LabFoundry Test Root CA",
             "organization": "LabFoundry",
             "organizational_unit": "Lab",
@@ -3048,11 +3194,17 @@ def test_ca_settings_autosave_returns_json(client):
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "saved"
+    payload = response.json()
+    assert payload["status"] == "saved"
+    assert payload["listen_interfaces"] == ["eth2"]
+    assert payload["listen_addresses"] == ["192.168.50.1", "10.0.0.99"]
+    assert "10.0.0.99" in payload["config_preview"]
     assert "LabFoundry Test Root CA" in client.get("/certificate-authority").text
     with SessionLocal() as db:
         ca_settings = db.execute(select(CaSettings)).scalar_one()
         assert ca_settings.storage_path == "/etc/labfoundry/ca"
+        assert ca_settings.listen_interface == "eth2"
+        assert ca_settings.listen_address == "192.168.50.1\n10.0.0.99"
 
 
 def test_ca_apply_task_captures_current_desired_state(client):

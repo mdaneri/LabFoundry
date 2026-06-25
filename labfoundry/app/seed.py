@@ -33,7 +33,7 @@ from labfoundry.app.models import (
     WanPolicy,
 )
 from labfoundry.app.services.appliance_settings import APPLIANCE_DNS_RECORD_DESCRIPTION, normalize_fqdn
-from labfoundry.app.services.local_users import stage_user_os_password
+from labfoundry.app.services.local_users import DEFAULT_LOCAL_USER_SHELL, POWERSHELL_LOCAL_USER_SHELL, stage_user_os_password
 from labfoundry.app.services.dnsmasq import join_domains, split_domains, validate_dns_record
 from labfoundry.app.services.networking import normalize_interface_mode
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
@@ -106,6 +106,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
         bootstrap_user = User(
             username=settings.bootstrap_admin_username,
             role="admin",
+            shell=POWERSHELL_LOCAL_USER_SHELL if settings.environment == "appliance" else DEFAULT_LOCAL_USER_SHELL,
         )
         stage_user_os_password(bootstrap_user, settings.bootstrap_admin_password)
         db.add(bootstrap_user)
@@ -400,7 +401,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
             KmsSettings(
                 enabled=False,
                 backend="pykmip",
-                listen_interface="eth1" if include_examples else "",
+                listen_interface="eth2" if include_examples else "",
                 listen_address="192.168.50.1" if include_examples else "",
                 port=5696,
                 hostname="kms.labfoundry.internal",

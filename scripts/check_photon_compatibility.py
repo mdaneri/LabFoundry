@@ -18,6 +18,7 @@ DEPENDENCY_IMPORTS = [
     "itsdangerous",
     "jinja2",
     "jwt",
+    "kmip",
     "multipart",
     "pydantic_settings",
     "sqlalchemy",

@@ -279,6 +279,7 @@ def appliance_settings_response(db: Session, app_settings: Settings) -> Settings
         appliance_fqdn=desired.fqdn,
         management_https_enabled=desired.management_https_enabled,
         management_https_cert_available=management_https_cert_available,
+        root_ssh_enabled=desired.root_ssh_enabled,
         external_dns_servers=appliance_settings_to_dict(desired)["external_dns_servers"],
         ntp_servers=appliance_settings_to_dict(desired)["ntp_servers"],
         appliance_settings_config_path=desired.config_path,
@@ -1936,6 +1937,7 @@ def update_app_settings(
     desired = get_appliance_settings(db)
     desired.fqdn = normalize_fqdn(payload.appliance_fqdn)
     desired.management_https_enabled = payload.management_https_enabled
+    desired.root_ssh_enabled = payload.root_ssh_enabled
     desired.external_dns_servers = normalize_multiline_values("\n".join(payload.external_dns_servers))
     desired.ntp_servers = normalize_multiline_values("\n".join(payload.ntp_servers))
     desired.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH

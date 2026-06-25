@@ -19,6 +19,8 @@ param(
     [string[]]$BuilderStaticDns = @('1.1.1.1', '9.9.9.9'),
     [string]$PackerDirectory = '',
     [string]$PreparedIsoPath = '',
+    [ValidateSet('cleanup', 'abort', 'ask', 'run-cleanup-provisioner')]
+    [string]$PackerOnError = 'cleanup',
     [switch]$KeepExistingOutput,
     [switch]$EnableRealSystemAdapters,
     [switch]$ValidateOnly,
@@ -334,6 +336,10 @@ $packerArgs = @(
 if (-not $ValidateOnly -and -not $KeepExistingOutput) {
     Write-Host "Packer build will replace any existing output directory for this build."
     $packerArgs += '-force'
+}
+
+if (-not $ValidateOnly) {
+    $packerArgs += "-on-error=$PackerOnError"
 }
 
 $packerArgs += @(

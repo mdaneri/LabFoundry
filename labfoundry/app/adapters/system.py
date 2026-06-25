@@ -90,10 +90,10 @@ class SystemAdapter:
         return self._helper_result("ca", "validate", config_path, dry_run_message="dry-run: CA validation command recorded")
 
     def apply_kms_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "kms", "apply", config_path], "dry-run: KMS apply command recorded")
+        return self._helper_result("kms", "apply", config_path, dry_run_message="dry-run: KMS apply command recorded")
 
     def validate_kms_config(self, config_path: str) -> AdapterResult:
-        return self._record_only_result(["labfoundry-helper", "kms", "validate", config_path], "dry-run: KMS validation command recorded")
+        return self._helper_result("kms", "validate", config_path, dry_run_message="dry-run: KMS validation command recorded")
 
     def apply_network_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("network", "apply", config_path, dry_run_message="dry-run: network apply command recorded")

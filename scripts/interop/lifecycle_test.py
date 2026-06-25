@@ -191,6 +191,23 @@ def extract_csrf(body: str) -> str:
     raise LifecycleError("CSRF token not found in HTML response.")
 
 
+def summarize_html_response(body: str, *, limit: int = 1200) -> str:
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", body)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    anchors = [
+        "Resolve validation errors before submitting appliance changes.",
+        "Select at least one appliance change to submit.",
+        "Appliance apply task failed",
+    ]
+    for anchor in anchors:
+        index = text.find(anchor)
+        if index >= 0:
+            return text[index : index + limit]
+    return text[:limit]
+
+
 def ssh_username(args: argparse.Namespace, role: str) -> str:
     if args.ssh_user:
         return args.ssh_user
@@ -281,7 +298,12 @@ def ssh_command(
 
 def require_success(result: dict[str, Any], label: str) -> None:
     if result["returncode"] != 0:
-        raise LifecycleError(f"{label} failed with exit {result['returncode']}: {result['stderr'] or result['stdout']}")
+        details = []
+        if result.get("stderr"):
+            details.append(f"stderr: {result['stderr']}")
+        if result.get("stdout"):
+            details.append(f"stdout: {result['stdout']}")
+        raise LifecycleError(f"{label} failed with exit {result['returncode']}: {' '.join(details) or 'no output'}")
 
 
 def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
@@ -299,13 +321,14 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "url": args.client_ca_request_url or args.appliance_url,
             },
         },
-        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "ca", "appliance_settings", "vcf_backups"],
+        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "ca", "kms", "appliance_settings", "vcf_backups"],
         "checks": [
             "appliance health",
             "interface and VLAN desired state",
             "DNS and DHCP desired state",
             "firewall, routing, NAT, and WAN desired state",
             "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification",
+            "KMS desired state, DNS/firewall apply, PyKMIP service, and TLS client-certificate probe",
             "VCF Backup desired state, local user sync, SFTP listener, and client probe",
             "client DNS/DHCP/routing probes",
         ],
@@ -575,6 +598,8 @@ def configure_ca(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]
     csrf = extract_csrf(body)
     form = {
         "enabled": "on",
+        "listen_interfaces_present": "1",
+        "listen_interfaces": [args.site_interface],
         "root_common_name": "LabFoundry Lifecycle Root CA",
         "organization": "LabFoundry",
         "organizational_unit": "Interop",
@@ -807,6 +832,60 @@ def configure_vcf_backups(client: HttpClient, args: argparse.Namespace) -> dict[
     }
 
 
+def configure_kms(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    status, body, _headers = client.request("GET", "/kms")
+    if status >= 400:
+        raise LifecycleError(f"GET /kms failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    hostname = f"kms.{args.domain}"
+    status, response_body, _headers = client.request(
+        "POST",
+        "/kms/settings",
+        form={
+            "enabled": "on",
+            "backend": "pykmip",
+            "listen_interface": args.site_interface,
+            "port": "5696",
+            "hostname": hostname,
+            "server_certificate": hostname,
+            "require_client_cert": "on",
+            "allow_register": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    if status >= 400:
+        raise LifecycleError(f"KMS settings update failed with HTTP {status}: {response_body[:500]}")
+    payload = json.loads(response_body)
+    if not payload.get("valid"):
+        raise LifecycleError(f"KMS desired state is invalid: {payload.get('validation_errors')}")
+    status, client_body, _headers = client.request(
+        "POST",
+        "/kms/clients",
+        form={
+            "name": "vcf-management",
+            "certificate_subject": f"CN=vcf-management.{args.domain},O=LabFoundry",
+            "role": "service",
+            "allowed_operations": "locate,get,register,create,activate",
+            "description": "Hyper-V lifecycle KMIP client",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    if status not in {200, 302, 303, 409}:
+        raise LifecycleError(f"KMS client setup failed with HTTP {status}: {client_body[:500]}")
+    return {
+        "hostname": payload.get("hostname"),
+        "listen_interface": payload.get("listen_interface"),
+        "listen_address": payload.get("listen_address"),
+        "port": payload.get("port"),
+        "config_path": payload.get("config_path"),
+        "client": "vcf-management",
+        "valid": payload.get("valid"),
+    }
+
+
 def apply_units(client: HttpClient, units: list[str], args: argparse.Namespace) -> dict[str, Any]:
     status, body, _headers = client.request("GET", "/appliance-apply")
     if status >= 400:
@@ -816,7 +895,9 @@ def apply_units(client: HttpClient, units: list[str], args: argparse.Namespace) 
     form.extend(("selected_units", unit) for unit in units)
     status, response_body, _headers = client.request("POST", "/appliance-apply", form=form)
     if status >= 400:
-        raise LifecycleError(f"Appliance apply failed with HTTP {status}: {response_body[:800]}")
+        raise LifecycleError(f"Appliance apply failed with HTTP {status}: {summarize_html_response(response_body)}")
+    if "Appliance apply task failed" in response_body:
+        raise LifecycleError(f"Appliance apply task failed: {summarize_html_response(response_body)}")
     if not args.allow_dry_run and re.search(r"\brecorded\s+as\s+dry-run\b|\bDry-run\s+mode\s+recorded\b", response_body, flags=re.IGNORECASE):
         raise LifecycleError("Appliance apply reported dry-run; rerun with --allow-dry-run or enable real adapters for lifecycle validation.")
     return {"http_status": status, "selected_units": units, "response_contains_job": "appliance-apply" in response_body}
@@ -840,6 +921,7 @@ def appliance_health(client: HttpClient, args: argparse.Namespace) -> dict[str, 
 
 
 def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
+    site_ip = str(ip_interface(args.site_cidr).ip)
     checks = {
         "network": "ip -br addr && ip route",
         "dnsmasq": "test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && getent hosts interop-appliance.labfoundry.internal",
@@ -850,6 +932,23 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
             f"tc qdisc show dev {args.wan_interface} | grep -E 'netem.*delay 25ms'"
         ),
         "ca": "test -f /etc/labfoundry/ca/ca-bundle.pem && openssl x509 -in /etc/labfoundry/ca/root-ca.pem -noout -subject",
+        "kms_files": (
+            "for path in "
+            "/etc/labfoundry/kms/pykmip.conf "
+            "/etc/pykmip/server.conf "
+            "/etc/labfoundry/kms/certs/kms.labfoundry.internal.crt "
+            "/etc/labfoundry/kms/certs/kms.labfoundry.internal.key "
+            "/etc/labfoundry/kms/clients/vcf-management.crt "
+            "/etc/labfoundry/kms/clients/vcf-management.key; "
+            "do test -f \"$path\" || { echo \"missing $path\"; exit 1; }; done"
+        ),
+        "kms_service": "systemctl is-active labfoundry-kms.service || (systemctl status labfoundry-kms.service --no-pager; journalctl -u labfoundry-kms.service -n 80 --no-pager; exit 1)",
+        "kms_tls": (
+            f"timeout 10 openssl s_client -connect {site_ip}:5696 "
+            "-cert /etc/labfoundry/kms/clients/vcf-management.crt "
+            "-key /etc/labfoundry/kms/clients/vcf-management.key "
+            "-CAfile /etc/labfoundry/ca/root.crt -verify_return_error </dev/null"
+        ),
         "vcf_backups": (
             "test -f /etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf && "
             "grep -E 'Match User vcf-backup|ForceCommand internal-sftp' /etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf && "
@@ -1050,11 +1149,13 @@ def format_step_summary(step: dict[str, Any]) -> str:
         detail = f"{evidence.get('common_name', '')} certificate id {evidence.get('certificate_id', '')}"
     elif name == "configure-vcf-backups":
         detail = f"{evidence.get('sftp_username', 'vcf-backup')} on {evidence.get('listen_address', '')}:{22}"
+    elif name == "configure-kms":
+        detail = f"{evidence.get('hostname', 'kms')} on {evidence.get('listen_address', '')}:{evidence.get('port', 5696)}"
     elif name == "configure-firewall-wan":
         policy = evidence.get("wan_policy") or {}
         route = evidence.get("route") or {}
         detail = f"{policy.get('latency_ms', 0)}ms delay, {policy.get('jitter_ms', 0)}ms jitter on {route.get('interface_name', '')}"
-    elif name in {"apply-connectivity-units", "apply-ca-unit", "apply-lifecycle-units"}:
+    elif name in {"apply-connectivity-units", "apply-ca-unit", "apply-kms-unit", "apply-lifecycle-units"}:
         detail = ", ".join(evidence.get("selected_units", []))
     elif name == "host-state-checks":
         detail = ", ".join(sorted(evidence.keys()))
@@ -1116,6 +1217,7 @@ def main() -> int:
         run_step(results, "configure-firewall-wan", configure_firewall_wan, client, args)
         run_step(results, "configure-ca", configure_ca, client, args)
         run_step(results, "configure-vcf-backups", configure_vcf_backups, client, args)
+        run_step(results, "configure-kms", configure_kms, client, args)
         run_step(
             results,
             "apply-connectivity-units",
@@ -1126,6 +1228,7 @@ def main() -> int:
         )
         run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
         run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
+        run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "kms"], args)
         run_step(results, "host-state-checks", host_state_checks, args)
         run_step(results, "client-checks", client_checks, args)
         run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)

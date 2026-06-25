@@ -12,6 +12,7 @@ dependencies = [
   "jinja2>=3.1.4",
   "pyjwt>=2.9.0",
   "pydantic-settings>=2.6.0",
+  "pykmip==0.10.0",
   "python-multipart>=0.0.12",
   "sqlalchemy>=2.0.36",
   "uvicorn[standard]>=0.32.0",

@@ -427,6 +427,10 @@ def render_ca_config(
         "managed_by": "LabFoundry",
         "enabled": settings.enabled,
         "storage_path": settings.storage_path,
+        "publication": {
+            "listen_interfaces": settings.listen_interface,
+            "listen_addresses": settings.listen_address,
+        },
         "root": {
             "common_name": settings.root_common_name,
             "organization": settings.organization,
@@ -466,6 +470,10 @@ def render_ca_apply_payload(settings: CaSettings, certificates: list[CaCertifica
     payload = {
         "enabled": settings.enabled,
         "storage_path": settings.storage_path,
+        "publication": {
+            "listen_interfaces": settings.listen_interface,
+            "listen_addresses": settings.listen_address,
+        },
         "root": {
             "common_name": settings.root_common_name,
             "certificate_pem": settings.root_certificate_pem,
@@ -481,13 +489,16 @@ def render_ca_apply_payload(settings: CaSettings, certificates: list[CaCertifica
     for certificate in certificates:
         if not certificate.enabled or certificate.status == "revoked":
             continue
+        private_key_pem = ""
+        if certificate.private_key_encrypted:
+            private_key_pem = decrypt_secret(certificate.private_key_encrypted) if include_private_keys else "[redacted]"
         payload["certificates"].append(
             {
                 "common_name": certificate.common_name,
                 "managed_owner": certificate.managed_owner or "manual",
                 "certificate_pem": certificate.certificate_pem,
                 "chain_pem": certificate.chain_pem or f"{certificate.certificate_pem}{settings.root_certificate_pem}",
-                "private_key_pem": decrypt_secret(certificate.private_key_encrypted) if include_private_keys and certificate.private_key_encrypted else "[redacted]",
+                "private_key_pem": private_key_pem,
                 "cert_path": certificate.cert_path,
                 "key_path": certificate.key_path,
                 "chain_path": certificate.chain_path,

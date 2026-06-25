@@ -129,9 +129,9 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>KMS Settings</h2>
-        <span class="status-pill warn">dry-run</span>
+        <span class="status-pill {{ 'warn' if system_adapter_dry_run else 'good' }}">{{ "dry-run" if system_adapter_dry_run else "live" }}</span>
       </div>
-      <form class="form-stack" action="/kms/settings" method="post" data-autosave-form data-autosave-status-id="kms-settings-autosave-status">
+      <form class="form-stack" action="/kms/settings" method="post" data-autosave-form data-kms-settings data-autosave-status-id="kms-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the KMIP service as enabled desired state. It does not start PyKMIP until global appliance apply runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if kms_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label>
@@ -142,19 +142,67 @@
             {% endfor %}
           </select>
         </label>
-        <label>
-          <span class="field-label"><span>Listen interface</span><button class="help-icon" type="button" data-help="Network interface where the KMIP server should listen. Use a lab/service network, not management, unless you intend management clients to connect.">i</button></span>
-          <select name="listen_interface">
-            {% for interface in available_interfaces %}
-              <option value="{{ interface.name }}" {{ "selected" if kms_settings.listen_interface == interface.name else "" }}>{{ interface.name }} - {{ interface.role }} / {{ interface.mode }}</option>
-            {% endfor %}
-          </select>
-        </label>
+        <div class="service-bind-editor" data-service-bind>
+          <div class="form-field">
+            <span class="field-label"><span>Listen interface</span><button class="help-icon" type="button" data-help="Network interface where the KMIP server should listen. Use a lab/service network, not management, unless you intend management clients to connect.">i</button></span>
+            <div class="tag-editor" data-tag-editor data-tag-single data-tag-name="listen_interface" data-service-bind-interface>
+              <div class="tag-editor-tags" data-tag-list>
+                {% if kms_settings.listen_interface %}
+                  <span class="tag-token" data-value="{{ kms_settings.listen_interface }}">
+                    <span>{{ kms_settings.listen_interface }}</span>
+                    <button type="button" data-tag-remove aria-label="Remove {{ kms_settings.listen_interface }}">×</button>
+                    <input type="hidden" name="listen_interface" value="{{ kms_settings.listen_interface }}">
+                  </span>
+                {% endif %}
+              </div>
+              <input class="tag-editor-input" type="text" placeholder="Add interface..." list="kms-interface-options" data-tag-entry autocomplete="off">
+              <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface">+</button>
+              <div class="tag-suggestions" data-tag-menu hidden>
+                {% for interface in available_interfaces %}
+                  <button type="button" data-tag-option="{{ interface.name }}" data-service-bind-address="{{ interface.address }}">
+                    <strong>{{ interface.name }}</strong>
+                    <small>{{ interface.label }}</small>
+                  </button>
+                {% endfor %}
+              </div>
+            </div>
+            <datalist id="kms-interface-options">
+              {% for interface in available_interfaces %}
+                <option value="{{ interface.name }}">{{ interface.label }}</option>
+              {% endfor %}
+            </datalist>
+          </div>
+          <div class="form-field">
+            <span class="field-label"><span>Listen address</span><button class="help-icon" type="button" data-help="Appliance IP for the KMIP listener. Selecting an address selects the matching access or VLAN interface.">i</button></span>
+            <div class="tag-editor" data-tag-editor data-tag-single data-tag-name="listen_address" data-service-bind-address>
+              <div class="tag-editor-tags" data-tag-list>
+                {% if kms_settings.listen_address %}
+                  <span class="tag-token" data-value="{{ kms_settings.listen_address }}">
+                    <span>{{ kms_settings.listen_address }}</span>
+                    <button type="button" data-tag-remove aria-label="Remove {{ kms_settings.listen_address }}">×</button>
+                    <input type="hidden" name="listen_address" value="{{ kms_settings.listen_address }}">
+                  </span>
+                {% endif %}
+              </div>
+              <input class="tag-editor-input" type="text" placeholder="Add listen address..." list="kms-address-options" data-tag-entry autocomplete="off">
+              <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing listen address">+</button>
+              <div class="tag-suggestions" data-tag-menu hidden>
+                {% for interface in available_interfaces %}
+                  <button type="button" data-tag-option="{{ interface.address }}" data-service-bind-interface="{{ interface.name }}">
+                    <strong>{{ interface.address }}</strong>
+                    <small>{{ interface.name }}</small>
+                  </button>
+                {% endfor %}
+              </div>
+            </div>
+            <datalist id="kms-address-options">
+              {% for interface in available_interfaces %}
+                <option value="{{ interface.address }}">{{ interface.name }}</option>
+              {% endfor %}
+            </datalist>
+          </div>
+        </div>
         <div class="form-grid">
-          <label>
-            <span class="field-label"><span>Listen address</span><button class="help-icon" type="button" data-help="IP address bound by the KMIP service on the selected interface.">i</button></span>
-            <input name="listen_address" value="{{ kms_settings.listen_address }}">
-          </label>
           <label>
             <span class="field-label"><span>Port</span><button class="help-icon" type="button" data-help="KMIP commonly uses TCP 5696. Change only if a lab client expects a different port.">i</button></span>
             <input type="number" name="port" value="{{ kms_settings.port }}" min="1" max="65535">
@@ -184,21 +232,21 @@
     <div class="panel">
       <div class="panel-head">
         <h2>Validation</h2>
-        <span class="status-pill {{ 'good' if not kms_validation_errors else 'warn' }}">{{ "valid" if not kms_validation_errors else "needs attention" }}</span>
+        <span class="status-pill {{ 'good' if not kms_validation_errors else 'warn' }}" data-kms-validation-status>{{ "valid" if not kms_validation_errors else "needs attention" }}</span>
       </div>
       {% if kms_validation_errors %}
-        <div class="alert error">
+        <div class="alert error" data-kms-validation-errors>
           {% for error in kms_validation_errors %}
             <div>{{ error }}</div>
           {% endfor %}
         </div>
       {% endif %}
       {% if not kms_validation_errors %}
-        <p class="muted">The desired KMS state passes LabFoundry validation. Appliance validation still runs through the allowlisted KMS helper before PyKMIP changes are applied.</p>
+        <p class="muted" data-kms-validation-message>The desired KMS state passes LabFoundry validation. Appliance validation still runs through the allowlisted KMS helper before PyKMIP changes are applied.</p>
       {% endif %}
       <div class="terminal-note">
-        <strong>{{ kms_settings.config_path }}</strong>
-        <code>{{ kms_config_preview }}</code>
+        <strong data-kms-config-path>{{ kms_settings.config_path }}</strong>
+        <code data-kms-config-preview>{{ kms_config_preview }}</code>
       </div>
     </div>
   </aside>

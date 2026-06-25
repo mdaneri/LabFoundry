@@ -2507,6 +2507,119 @@ function initializeKmsKeysTable() {
   }
 }
 
+function updateCaSettingsPreview(payload = {}) {
+  const configPreview = document.querySelector("[data-ca-config-preview]");
+  if (configPreview instanceof HTMLElement && payload.config_preview) {
+    configPreview.textContent = payload.config_preview;
+    highlightConfigPreviewElement(configPreview);
+  }
+}
+
+function initializeCaSettings() {
+  document.querySelectorAll("[data-ca-settings]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      updateCaSettingsPreview(event.detail || {});
+    });
+  });
+}
+
+function serviceBindSelection(form, payload = {}) {
+  const interfaceEditor = form.querySelector("[data-service-bind-interface]");
+  const addressEditor = form.querySelector("[data-service-bind-address]");
+  const interfaceName = payload.listen_interface || tagEditorValues(interfaceEditor).slice(-1)[0] || "";
+  const address = payload.listen_address || tagEditorValues(addressEditor).slice(-1)[0] || "";
+  return { interfaceName, address };
+}
+
+function updateKmsDerivedAddress(form, payload = {}) {
+  const portInput = form.querySelector('input[name="port"]');
+  const port = payload.port || portInput?.value || "5696";
+  const configPath = document.querySelector("[data-kms-config-path]");
+  if (configPath instanceof HTMLElement && payload.config_path) {
+    configPath.textContent = payload.config_path;
+  }
+  const configPreview = document.querySelector("[data-kms-config-preview]");
+  if (configPreview instanceof HTMLElement && payload.config_preview) {
+    configPreview.textContent = payload.config_preview;
+    highlightConfigPreviewElement(configPreview);
+  }
+  const hostInput = form.querySelector('input[name="hostname"]');
+  if (hostInput instanceof HTMLInputElement && payload.hostname) {
+    hostInput.value = payload.hostname;
+  }
+  const certInput = form.querySelector('input[name="server_certificate"]');
+  if (certInput instanceof HTMLInputElement && payload.server_certificate) {
+    certInput.value = payload.server_certificate;
+  }
+  const portField = form.querySelector('input[name="port"]');
+  if (portField instanceof HTMLInputElement && payload.port) {
+    portField.value = String(port);
+  }
+}
+
+function updateKmsValidation(payload = {}) {
+  const status = document.querySelector("[data-kms-validation-status]");
+  const validationPanel = status?.closest(".panel");
+  if (!(status instanceof HTMLElement) || !(validationPanel instanceof HTMLElement)) {
+    return;
+  }
+  const errors = Array.isArray(payload.validation_errors) ? payload.validation_errors : [];
+  status.textContent = errors.length ? "needs attention" : "valid";
+  status.classList.toggle("good", errors.length === 0);
+  status.classList.toggle("warn", errors.length > 0);
+  const terminalNote = validationPanel.querySelector(".terminal-note");
+  let errorBox = validationPanel.querySelector("[data-kms-validation-errors]");
+  const validMessage = validationPanel.querySelector("[data-kms-validation-message]");
+  if (errors.length === 0) {
+    errorBox?.remove();
+    if (!(validMessage instanceof HTMLElement) && terminalNote instanceof HTMLElement) {
+      const message = document.createElement("p");
+      message.className = "muted";
+      message.setAttribute("data-kms-validation-message", "");
+      message.textContent = "The desired KMS state passes LabFoundry validation. Appliance validation still runs through the allowlisted KMS helper before PyKMIP changes are applied.";
+      validationPanel.insertBefore(message, terminalNote);
+    }
+    return;
+  }
+  validMessage?.remove();
+  if (!(errorBox instanceof HTMLElement) && terminalNote instanceof HTMLElement) {
+    errorBox = document.createElement("div");
+    errorBox.className = "alert error";
+    errorBox.setAttribute("data-kms-validation-errors", "");
+    validationPanel.insertBefore(errorBox, terminalNote);
+  }
+  if (errorBox instanceof HTMLElement) {
+    errorBox.innerHTML = "";
+    errors.forEach((error) => {
+      const row = document.createElement("div");
+      row.textContent = error;
+      errorBox.appendChild(row);
+    });
+  }
+}
+
+function initializeKmsSettings() {
+  document.querySelectorAll("[data-kms-settings]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const portInput = form.querySelector('input[name="port"]');
+    const refresh = () => updateKmsDerivedAddress(form);
+    if (portInput instanceof HTMLInputElement) {
+      portInput.addEventListener("input", refresh);
+    }
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      const payload = event.detail || {};
+      updateKmsDerivedAddress(form, payload);
+      updateKmsValidation(payload);
+    });
+    refresh();
+  });
+}
+
 function showWanMessage(elementId, message) {
   showCaMessage(elementId, message, "error");
 }
@@ -4372,6 +4485,10 @@ function updateApplianceSettingsValidation(payload = {}) {
     const ip = payload.management_interface.ip ? ` / ${payload.management_interface.ip}` : "";
     management.textContent = `${name}${ip}`;
   }
+  const rootSsh = document.querySelector("[data-appliance-settings-root-ssh]");
+  if (rootSsh instanceof HTMLElement && payload.root_ssh_enabled !== undefined) {
+    rootSsh.textContent = payload.root_ssh_enabled ? "enabled" : "disabled";
+  }
   const dnsStatus = document.querySelector("[data-appliance-settings-dns-status]");
   if (dnsStatus instanceof HTMLElement) {
     const localDnsEnabled = Boolean(payload.local_dns_enabled);
@@ -4475,16 +4592,9 @@ function initializeDnsSettings() {
 }
 
 function updateVcfBackupDerivedAddress(form, payload = {}) {
-  const interfaceSelect = form.querySelector('select[name="listen_interface"]');
   const portInput = form.querySelector('input[name="port"]');
-  if (!(interfaceSelect instanceof HTMLSelectElement)) {
-    return;
-  }
-  const selectedOption = interfaceSelect.selectedOptions[0];
-  const address = payload.listen_address || selectedOption?.dataset.address || "";
-  const interfaceName = payload.listen_interface || interfaceSelect.value || "";
+  const { interfaceName, address } = serviceBindSelection(form, payload);
   const port = payload.port || portInput?.value || "22";
-  const derivedAddress = document.querySelector("[data-vcf-derived-address]");
   const endpoint = document.querySelector("[data-vcf-endpoint]");
   const host = document.querySelector("[data-vcf-host]");
   const targetPort = document.querySelector("[data-vcf-port]");
@@ -4496,9 +4606,6 @@ function updateVcfBackupDerivedAddress(form, payload = {}) {
   const chrootLabel = document.querySelector("[data-vcf-chroot-label]");
   const authMethods = document.querySelector("[data-vcf-auth-methods]");
   const maxSessions = document.querySelector("[data-vcf-max-sessions]");
-  if (derivedAddress instanceof HTMLElement) {
-    derivedAddress.textContent = address || "no interface IP";
-  }
   if (endpoint instanceof HTMLElement) {
     endpoint.textContent = address ? `${address}:${port}` : `no interface IP:${port}`;
   }
@@ -4604,12 +4711,8 @@ function initializeVcfBackupSettings() {
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
-    const interfaceSelect = form.querySelector('select[name="listen_interface"]');
     const portInput = form.querySelector('input[name="port"]');
     const refresh = () => updateVcfBackupDerivedAddress(form);
-    if (interfaceSelect instanceof HTMLSelectElement) {
-      interfaceSelect.addEventListener("change", refresh);
-    }
     if (portInput instanceof HTMLInputElement) {
       portInput.addEventListener("input", refresh);
     }
@@ -4805,20 +4908,13 @@ function initializeVcfRegistryBundlesTable() {
 }
 
 function updateVcfRegistrySummary(form, payload = {}) {
-  const interfaceSelect = form.querySelector('select[name="listen_interface"]');
   const portInput = form.querySelector('input[name="port"]');
   const hostnameInput = form.querySelector('input[name="hostname"]');
   const projectInput = form.querySelector('input[name="harbor_project"]');
-  if (!(interfaceSelect instanceof HTMLSelectElement)) {
-    return;
-  }
-  const selectedOption = interfaceSelect.selectedOptions[0];
-  const address = payload.listen_address || selectedOption?.dataset.address || "";
-  const interfaceName = payload.listen_interface || interfaceSelect.value || "";
+  const { interfaceName, address } = serviceBindSelection(form, payload);
   const port = payload.port || portInput?.value || "443";
   const hostname = payload.hostname || hostnameInput?.value || "";
   const endpointValue = payload.endpoint || (port === "443" || port === 443 ? hostname : `${hostname}:${port}`);
-  const derivedAddress = document.querySelector("[data-vcf-registry-derived-address]");
   const endpoint = document.querySelector("[data-vcf-registry-endpoint]");
   const interfaceLabel = document.querySelector("[data-vcf-registry-interface]");
   const project = document.querySelector("[data-vcf-registry-project]");
@@ -4826,9 +4922,6 @@ function updateVcfRegistrySummary(form, payload = {}) {
   const storagePaths = document.querySelectorAll("[data-vcf-registry-storage]");
   const caBundleSource = document.querySelector("[data-vcf-registry-ca-bundle-source]");
   const caBundlePath = document.querySelector("[data-vcf-registry-ca-bundle-path]");
-  if (derivedAddress instanceof HTMLElement) {
-    derivedAddress.textContent = address || "no interface IP";
-  }
   if (endpoint instanceof HTMLElement) {
     endpoint.textContent = endpointValue || "registry hostname required";
   }
@@ -4944,12 +5037,11 @@ function initializeVcfRegistrySettings() {
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
-    const interfaceSelect = form.querySelector('select[name="listen_interface"]');
     const portInput = form.querySelector('input[name="port"]');
     const hostnameInput = form.querySelector('input[name="hostname"]');
     const projectInput = form.querySelector('input[name="harbor_project"]');
     const refresh = () => updateVcfRegistrySummary(form);
-    [interfaceSelect, portInput, hostnameInput, projectInput].forEach((input) => {
+    [portInput, hostnameInput, projectInput].forEach((input) => {
       if (input instanceof HTMLElement) {
         input.addEventListener("input", refresh);
         input.addEventListener("change", refresh);
@@ -5335,20 +5427,13 @@ function initializeVcfDepotProfilesTable() {
 }
 
 function updateVcfDepotSummary(form, payload = {}) {
-  const interfaceSelect = form.querySelector('select[name="listen_interface"]');
   const portInput = form.querySelector('input[name="port"]');
   const hostnameInput = form.querySelector('input[name="hostname"]');
   const certificateInput = form.querySelector('input[name="server_certificate"]');
-  if (!(interfaceSelect instanceof HTMLSelectElement)) {
-    return;
-  }
-  const selectedOption = interfaceSelect.selectedOptions[0];
-  const address = payload.listen_address || selectedOption?.dataset.address || "";
-  const interfaceName = payload.listen_interface || interfaceSelect.value || "";
+  const { interfaceName, address } = serviceBindSelection(form, payload);
   const port = payload.port || portInput?.value || "443";
   const hostname = payload.hostname || hostnameInput?.value || "";
   const endpointValue = payload.endpoint || (port === "443" || port === 443 ? hostname : `${hostname}:${port}`);
-  const derivedAddress = document.querySelector("[data-vcf-depot-derived-address]");
   const endpoint = document.querySelector("[data-vcf-depot-endpoint]");
   const interfaceLabel = document.querySelector("[data-vcf-depot-interface]");
   const storePaths = document.querySelectorAll("[data-vcf-depot-store]");
@@ -5358,9 +5443,6 @@ function updateVcfDepotSummary(form, payload = {}) {
   const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
   const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
   const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
-  if (derivedAddress instanceof HTMLElement) {
-    derivedAddress.textContent = address || "no interface IP";
-  }
   if (endpoint instanceof HTMLElement) {
     endpoint.textContent = endpointValue || "depot hostname required";
   }
@@ -5540,12 +5622,11 @@ function initializeVcfDepotSettings() {
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
-    const interfaceSelect = form.querySelector('select[name="listen_interface"]');
     const portInput = form.querySelector('input[name="port"]');
     const hostnameInput = form.querySelector('input[name="hostname"]');
     const certificateInput = form.querySelector('input[name="server_certificate"]');
     const refresh = () => updateVcfDepotSummary(form);
-    [interfaceSelect, portInput, hostnameInput, certificateInput].forEach((input) => {
+    [portInput, hostnameInput, certificateInput].forEach((input) => {
       if (input instanceof HTMLElement) {
         input.addEventListener("input", refresh);
         input.addEventListener("change", refresh);
@@ -5582,6 +5663,7 @@ function initializeTagEditors() {
     const toggle = editor.querySelector("[data-tag-menu-toggle]");
     const menu = editor.querySelector("[data-tag-menu]");
     const name = editor.dataset.tagName || "";
+    const singleValue = editor.hasAttribute("data-tag-single");
     if (!(editor instanceof HTMLElement) || !(input instanceof HTMLInputElement) || !(list instanceof HTMLElement) || !name) {
       return;
     }
@@ -5618,6 +5700,9 @@ function initializeTagEditors() {
       const value = String(rawValue || "").trim().replace(/,$/, "");
       if (!value || currentValues().some((item) => item.toLowerCase() === value.toLowerCase())) {
         return;
+      }
+      if (singleValue) {
+        list.querySelectorAll(".tag-token").forEach((token) => token.remove());
       }
 
       const token = document.createElement("span");
@@ -5706,6 +5791,98 @@ function initializeTagEditors() {
   });
 }
 
+function tagEditorValues(editor) {
+  if (!(editor instanceof HTMLElement)) {
+    return [];
+  }
+  return Array.from(editor.querySelectorAll(".tag-token")).map((token) => token.getAttribute("data-value") || "").filter(Boolean);
+}
+
+function setTagEditorSingleValue(editor, value) {
+  if (!(editor instanceof HTMLElement)) {
+    return;
+  }
+  const list = editor.querySelector("[data-tag-list]");
+  const name = editor.dataset.tagName || "";
+  if (!(list instanceof HTMLElement) || !name) {
+    return;
+  }
+  list.replaceChildren();
+  const trimmedValue = String(value || "").trim();
+  if (!trimmedValue) {
+    return;
+  }
+  const token = document.createElement("span");
+  token.className = "tag-token";
+  token.setAttribute("data-value", trimmedValue);
+
+  const label = document.createElement("span");
+  label.textContent = trimmedValue;
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.setAttribute("data-tag-remove", "");
+  remove.setAttribute("aria-label", `Remove ${trimmedValue}`);
+  remove.textContent = "×";
+  remove.addEventListener("click", () => {
+    token.remove();
+    editor.dispatchEvent(new CustomEvent("tag-editor:change", { bubbles: true }));
+  });
+
+  const hidden = document.createElement("input");
+  hidden.type = "hidden";
+  hidden.name = name;
+  hidden.value = trimmedValue;
+  token.append(label, remove, hidden);
+  list.append(token);
+}
+
+function initializeServiceBindEditors() {
+  document.querySelectorAll("[data-service-bind]").forEach((container) => {
+    if (!(container instanceof HTMLElement)) {
+      return;
+    }
+    const interfaceEditor = container.querySelector("[data-service-bind-interface]");
+    const addressEditor = container.querySelector("[data-service-bind-address]");
+    if (!(interfaceEditor instanceof HTMLElement) || !(addressEditor instanceof HTMLElement)) {
+      return;
+    }
+    let syncing = false;
+    const interfaceOptions = () =>
+      Array.from(interfaceEditor.querySelectorAll("[data-tag-option]")).map((option) => ({
+        name: option.getAttribute("data-tag-option") || "",
+        address: option.getAttribute("data-service-bind-address") || "",
+      }));
+    const addressOptions = () =>
+      Array.from(addressEditor.querySelectorAll("[data-tag-option]")).map((option) => ({
+        address: option.getAttribute("data-tag-option") || "",
+        name: option.getAttribute("data-service-bind-interface") || "",
+      }));
+    const syncFromInterface = () => {
+      if (syncing) {
+        return;
+      }
+      syncing = true;
+      const selectedInterface = tagEditorValues(interfaceEditor).slice(-1)[0] || "";
+      const match = interfaceOptions().find((option) => option.name === selectedInterface);
+      setTagEditorSingleValue(addressEditor, match?.address || "");
+      syncing = false;
+    };
+    const syncFromAddress = () => {
+      if (syncing) {
+        return;
+      }
+      syncing = true;
+      const selectedAddress = tagEditorValues(addressEditor).slice(-1)[0] || "";
+      const match = addressOptions().find((option) => option.address === selectedAddress);
+      setTagEditorSingleValue(interfaceEditor, match?.name || "");
+      syncing = false;
+    };
+    interfaceEditor.addEventListener("tag-editor:change", syncFromInterface);
+    addressEditor.addEventListener("tag-editor:change", syncFromAddress);
+  });
+}
+
 function initializeTabs() {
   document.querySelectorAll("[data-tab-target]").forEach((button) => {
     if (!(button instanceof HTMLButtonElement)) {
@@ -5778,7 +5955,7 @@ function initializeApplianceApplyProgress() {
   const steps = document.querySelector("[data-apply-submit-steps]");
   const title = document.querySelector("[data-apply-submit-title]");
   const detail = document.querySelector("[data-apply-submit-detail]");
-  const submitButton = form.querySelector("[data-apply-submit-button]");
+  const submitButtons = Array.from(form.querySelectorAll("[data-apply-submit-button]")).filter((button) => button instanceof HTMLButtonElement);
   if (!(tracker instanceof HTMLElement) || !(steps instanceof HTMLElement)) {
     return;
   }
@@ -5832,10 +6009,10 @@ function initializeApplianceApplyProgress() {
     }
     steps.replaceChildren(...units.map((unit) => renderStep(unit, "Waiting for result", "waiting")));
     tracker.classList.remove("hidden");
-    if (submitButton instanceof HTMLButtonElement) {
-      submitButton.disabled = true;
-      submitButton.textContent = "Submitting...";
-    }
+    submitButtons.forEach((button) => {
+      button.disabled = true;
+      button.textContent = "Submitting...";
+    });
   });
 }
 
@@ -5845,8 +6022,10 @@ document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpReservationsTable);
 document.addEventListener("DOMContentLoaded", initializeCaProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeCaCertificatesTable);
+document.addEventListener("DOMContentLoaded", initializeCaSettings);
 document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
+document.addEventListener("DOMContentLoaded", initializeKmsSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);
@@ -5875,6 +6054,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
+document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);
 document.addEventListener("DOMContentLoaded", initializeApplianceApplyProgress);
 document.addEventListener("DOMContentLoaded", () => {

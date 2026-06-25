@@ -140,23 +140,71 @@
           <input name="hostname" value="{{ vcf_depot_settings.hostname }}">
           <small class="muted" data-vcf-depot-dns-status>DNS record follows the selected listen address.</small>
         </label>
-        <label>
-          <span class="field-label"><span>Listen interface</span><button class="help-icon" type="button" data-help="Access-mode physical interfaces and VLAN interfaces with configured IP addresses can host the depot. Trunk physical NICs are not direct bind targets.">i</button></span>
-          <select name="listen_interface">
-            {% for interface in vcf_depot_available_interfaces %}
-              <option value="{{ interface.name }}" data-address="{{ interface.address }}" {{ "selected" if vcf_depot_settings.listen_interface == interface.name else "" }}>{{ interface.label }}</option>
-            {% endfor %}
-          </select>
-        </label>
+        <div class="service-bind-editor" data-service-bind>
+          <div class="form-field">
+            <span class="field-label"><span>Listen interface</span><button class="help-icon" type="button" data-help="Access-mode physical interfaces and VLAN interfaces with configured IP addresses can host the depot. Trunk physical NICs are not direct bind targets.">i</button></span>
+            <div class="tag-editor" data-tag-editor data-tag-single data-tag-name="listen_interface" data-service-bind-interface>
+              <div class="tag-editor-tags" data-tag-list>
+                {% if vcf_depot_settings.listen_interface %}
+                  <span class="tag-token" data-value="{{ vcf_depot_settings.listen_interface }}">
+                    <span>{{ vcf_depot_settings.listen_interface }}</span>
+                    <button type="button" data-tag-remove aria-label="Remove {{ vcf_depot_settings.listen_interface }}">×</button>
+                    <input type="hidden" name="listen_interface" value="{{ vcf_depot_settings.listen_interface }}">
+                  </span>
+                {% endif %}
+              </div>
+              <input class="tag-editor-input" type="text" placeholder="Add interface..." list="vcf-depot-interface-options" data-tag-entry autocomplete="off">
+              <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface">+</button>
+              <div class="tag-suggestions" data-tag-menu hidden>
+                {% for interface in vcf_depot_available_interfaces %}
+                  <button type="button" data-tag-option="{{ interface.name }}" data-service-bind-address="{{ interface.address }}">
+                    <strong>{{ interface.name }}</strong>
+                    <small>{{ interface.label }}</small>
+                  </button>
+                {% endfor %}
+              </div>
+            </div>
+            <datalist id="vcf-depot-interface-options">
+              {% for interface in vcf_depot_available_interfaces %}
+                <option value="{{ interface.name }}">{{ interface.label }}</option>
+              {% endfor %}
+            </datalist>
+          </div>
+          <div class="form-field">
+            <span class="field-label"><span>Listen address</span><button class="help-icon" type="button" data-help="Appliance IP for the depot endpoint. Selecting an address selects the matching access or VLAN interface.">i</button></span>
+            <div class="tag-editor" data-tag-editor data-tag-single data-tag-name="listen_address" data-service-bind-address>
+              <div class="tag-editor-tags" data-tag-list>
+                {% if vcf_depot_settings.listen_address %}
+                  <span class="tag-token" data-value="{{ vcf_depot_settings.listen_address }}">
+                    <span>{{ vcf_depot_settings.listen_address }}</span>
+                    <button type="button" data-tag-remove aria-label="Remove {{ vcf_depot_settings.listen_address }}">×</button>
+                    <input type="hidden" name="listen_address" value="{{ vcf_depot_settings.listen_address }}">
+                  </span>
+                {% endif %}
+              </div>
+              <input class="tag-editor-input" type="text" placeholder="Add listen address..." list="vcf-depot-address-options" data-tag-entry autocomplete="off">
+              <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing listen address">+</button>
+              <div class="tag-suggestions" data-tag-menu hidden>
+                {% for interface in vcf_depot_available_interfaces %}
+                  <button type="button" data-tag-option="{{ interface.address }}" data-service-bind-interface="{{ interface.name }}">
+                    <strong>{{ interface.address }}</strong>
+                    <small>{{ interface.name }}</small>
+                  </button>
+                {% endfor %}
+              </div>
+            </div>
+            <datalist id="vcf-depot-address-options">
+              {% for interface in vcf_depot_available_interfaces %}
+                <option value="{{ interface.address }}">{{ interface.name }}</option>
+              {% endfor %}
+            </datalist>
+          </div>
+        </div>
         <div class="form-grid">
           <label>
             <span class="field-label"><span>HTTPS port</span><button class="help-icon" type="button" data-help="TLS port exposed for the offline depot. Port 443 is the default endpoint for VCF clients.">i</button></span>
             <input type="number" name="port" value="{{ vcf_depot_settings.port }}" min="1" max="65535">
           </label>
-          <div class="derived-field">
-            <span class="field-label"><span>Derived address</span><button class="help-icon" type="button" data-help="LabFoundry derives this from the selected interface IP CIDR. Change the network page if the address is wrong.">i</button></span>
-            <strong data-vcf-depot-derived-address>{{ vcf_depot_settings.listen_address }}</strong>
-          </div>
         </div>
         <label>
           <span class="field-label"><span>Server certificate</span><button class="help-icon" type="button" data-help="Certificate object/name the appliance helper uses for depot HTTPS. Certificate material is not rendered in previews.">i</button></span>

@@ -593,7 +593,12 @@ textarea {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
   margin-bottom: 12px;
+}
+
+.panel-head > div {
+  min-width: 0;
 }
 
 .panel-head.compact {
@@ -1375,6 +1380,13 @@ textarea {
   gap: 10px;
 }
 
+.service-bind-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px;
+}
+
 .form-grid > label,
 .derived-field {
   display: grid;
@@ -1426,6 +1438,11 @@ label > span,
   align-items: center;
   gap: 6px;
   margin-bottom: 5px;
+}
+
+.form-grid > label > .field-label {
+  align-items: flex-start;
+  min-height: 32px;
 }
 
 .field-label > span:first-child {
@@ -2202,12 +2219,14 @@ textarea {
 .apply-unit-list {
   display: grid;
   gap: 14px;
+  min-width: 0;
 }
 
 .apply-change-set-panel {
   position: sticky;
   top: 0;
   z-index: 7;
+  min-width: 0;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
@@ -2221,6 +2240,7 @@ textarea {
 
 .apply-unit-card {
   gap: 14px;
+  min-width: 0;
 }
 
 .apply-unit-head {
@@ -2228,6 +2248,8 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .apply-unit-select {
@@ -2274,6 +2296,7 @@ textarea {
 .config-diff {
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .config-diff summary,
@@ -2286,7 +2309,11 @@ textarea {
 
 .config-diff pre {
   display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   max-height: 420px;
+  box-sizing: border-box;
   margin: 0;
   overflow: auto;
   border-radius: 6px;
@@ -2299,7 +2326,24 @@ textarea {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.55;
-  white-space: pre;
+  display: block;
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.apply-submit-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.apply-submit-panel p {
+  margin: 4px 0 0;
 }
 
 .config-diff .token.coord {
@@ -2895,6 +2939,10 @@ textarea {
   .service-grid,
   .service-control-row,
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .service-bind-editor {
     grid-template-columns: 1fr;
   }
 
