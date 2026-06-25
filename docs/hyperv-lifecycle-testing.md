@@ -68,6 +68,11 @@ policy-compliant value because Local Users enforces the appliance password
 policy before OS sync. Override them with `-AdminPassword`, `-SshPassword`, and
 `-VcfBackupPassword` when testing a different image.
 
+The lifecycle web probe defaults to `http://<ApplianceIPAddress>`. Fresh
+appliance images install nginx and proxy public HTTP/80 to uvicorn on
+`127.0.0.1:8000`; override the probe with `-ApplianceUrl` only when testing a
+different management front door such as HTTPS.
+
 Useful single-purpose commands:
 
 ```powershell

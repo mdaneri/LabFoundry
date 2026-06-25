@@ -23,6 +23,24 @@ def test_photon_provisioning_management_network_matches_eth0_only():
     assert "rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.network" in script
 
 
+def test_photon_provisioning_installs_default_nginx_management_proxy():
+    script = Path("image/hyperv/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
+    root_docs = Path("README.md").read_text(encoding="utf-8")
+
+    assert "tdnf -y install" in script and "nginx" in script
+    assert "configuring default LabFoundry management nginx proxy" in script
+    assert "/etc/nginx/conf.d/labfoundry.conf" in script
+    assert "/etc/labfoundry/nginx/sites.d/management.conf" in script
+    assert "rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf" in script
+    assert "listen 80 default_server;" in script
+    assert "proxy_pass http://127.0.0.1:8000;" in script
+    assert "nginx -t" in script
+    assert "systemctl enable --now nginx" in script
+    assert "HTTP/80, proxied to uvicorn on `127.0.0.1:8000`" in docs
+    assert "proxying HTTP/80 to" in root_docs
+
+
 def test_packer_build_uses_labfoundry_management_network_by_default():
     template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
@@ -68,8 +86,19 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
 
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
     script = Path("scripts/windows/run-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
+    wrapper = Path("scripts/windows/invoke-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
+    runner = Path("scripts/interop/lifecycle_test.py").read_text(encoding="utf-8")
 
     assert "[string]$LabName = 'LabFoundryLifecycle'" in script
+    assert "[string]$ApplianceUrl = ''" in script
+    assert '$ApplianceUrl = "http://${ApplianceIPAddress}"' in script
+    assert "'--appliance-url', $ApplianceUrl" in script
+    assert '"http://${ApplianceIPAddress}:8000"' not in script
+    assert "[string]$ApplianceUrl = ''" in wrapper
+    assert '"http://${ApplianceIPAddress}"' in wrapper
+    assert '"http://${ApplianceIPAddress}:8000"' not in wrapper
+    assert "'-ApplianceUrl', $ApplianceUrl" in wrapper
+    assert 'parser.add_argument("--appliance-url", default="http://192.168.49.1")' in runner
     assert "[string]$SiteInterface = 'eth1.12'" in script
     assert "[string]$SiteCidr = '192.168.12.1/24'" in script
     assert "[int]$SiteVlanId = 12" in script
@@ -81,6 +110,25 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
     assert "image\\hyperv\\clients\\alpine-cloud\\labfoundry-tiny-linux-client.vhdx" in script
     assert "Running lifecycle appliance VM(s) may already own ${ApplianceIPAddress}" in script
     assert "-CleanupVmsOnly" in script
+
+
+def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
+    script = Path("scripts/windows/create-labfoundry-test-vm.ps1").read_text(encoding="utf-8")
+    docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
+
+    assert "[string]$Name = 'LabFoundry'" in script
+    assert "[switch]$Redeploy" in script
+    assert "[switch]$WaitForIp" in script
+    assert "Find-LatestApplianceVhdx" in script
+    assert "create-hyperv-switches.ps1" in script
+    assert "create-labfoundry-vm.ps1" in script
+    assert "start-labfoundry-vm.ps1" in script
+    assert "get-labfoundry-vm-ip.ps1" in script
+    assert "VM already exists: $Name. Pass -Redeploy" in script
+    assert "Remove-VM -Name $Name -Force" in script
+    assert "Run this script from an elevated PowerShell session." in script
+    assert "create-labfoundry-test-vm.ps1 -WaitForIp" in docs
+    assert "pass `-Redeploy` to remove and recreate only that VM" in docs
 
 
 def test_lifecycle_hyperv_script_does_not_cleanup_without_explicit_flag():

@@ -6,6 +6,7 @@ param(
     [string]$ClientVhdxPath = '',
     [string]$ClientManagementSwitch = 'Default Switch',
     [string]$ApplianceIPAddress = '192.168.49.1',
+    [string]$ApplianceUrl = '',
     [int64]$ApplianceMemoryStartupBytes = 4GB,
     [int64]$ClientMemoryStartupBytes = 1GB,
     [int]$ApplianceProcessorCount = 2,
@@ -34,6 +35,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')
+if (-not $ApplianceUrl) {
+    $ApplianceUrl = "http://${ApplianceIPAddress}"
+}
 if (-not $ClientVhdxPath) {
     $ClientVhdxPath = Join-Path $repoRoot 'image\hyperv\clients\alpine-cloud\labfoundry-tiny-linux-client.vhdx'
 }
@@ -397,6 +401,7 @@ if ($PlanOnly) {
         tagged_vlan_cidr = $TaggedVlanCidr
         wan_cidr = $WanCidr
         result_root = $resultRoot
+        appliance_url = $ApplianceUrl
         cleanup_created_lab = [bool]$CleanupCreatedLab
         reserved_vms_not_touched = @('LabFoundry', 'LabFoundry-Photon-Builder')
     } | ConvertTo-Json -Depth 5
@@ -499,7 +504,7 @@ try {
 
     $pythonArgs = @(
         (Join-Path $repoRoot 'scripts\interop\lifecycle_test.py'),
-        '--appliance-url', "http://${ApplianceIPAddress}",
+        '--appliance-url', $ApplianceUrl,
         '--appliance-ssh-host', $ApplianceIPAddress,
         '--username', $AdminUsername,
         '--password', $AdminPassword,

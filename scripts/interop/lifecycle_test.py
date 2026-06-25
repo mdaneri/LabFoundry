@@ -93,7 +93,7 @@ def utc_now() -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run LabFoundry appliance lifecycle interop checks.")
-    parser.add_argument("--appliance-url", default="http://192.168.49.1:8000")
+    parser.add_argument("--appliance-url", default="http://192.168.49.1")
     parser.add_argument("--username", default="admin")
     parser.add_argument("--password", required=True)
     parser.add_argument("--result-dir", default="test-results/hyperv-lifecycle/latest")

@@ -24,6 +24,8 @@ builder lives in [`image/hyperv/`](image/hyperv/) and provisions:
 - `/var/log/labfoundry` for local logs;
 - fixed appliance mount points under `/mnt/labfoundry-vcf-*`;
 - `labfoundry.service` running uvicorn from a Python virtual environment;
+- nginx enabled as the default management front door, proxying HTTP/80 to
+  uvicorn on `127.0.0.1:8000`;
 - `labfoundry-firewall.service` loading the appliance nftables firewall;
 - `/opt/labfoundry/bin/labfoundry-helper` and a constrained sudoers template.
 

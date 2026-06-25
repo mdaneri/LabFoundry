@@ -24,6 +24,10 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
+    [string]$ApplianceUrl = '',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
     [string]$SiteInterface = 'eth1.12',
 
     [Parameter(ParameterSetName = 'Run')]
@@ -163,6 +167,7 @@ if (-not $ApplianceVhdxPath) {
 if (-not $ClientVhdxPath) {
     $ClientVhdxPath = Join-Path $repoRoot 'image\hyperv\clients\alpine-cloud\labfoundry-tiny-linux-client.vhdx'
 }
+$effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "http://${ApplianceIPAddress}" }
 
 if (-not $SkipClientPrepare -and -not $PlanOnly) {
     & (Join-Path $PSScriptRoot 'prepare-tiny-linux-client.ps1')
@@ -179,6 +184,7 @@ $arguments = @(
     '-ClientVhdxPath', $ClientVhdxPath,
     '-ClientManagementSwitch', $ClientManagementSwitch,
     '-ApplianceIPAddress', $ApplianceIPAddress,
+    '-ApplianceUrl', $ApplianceUrl,
     '-SiteInterface', $SiteInterface,
     '-SiteCidr', $SiteCidr,
     '-SiteVlanId', "$SiteVlanId",
@@ -206,6 +212,7 @@ if ($PlanOnly) {
 Write-Host "Lifecycle lab: $LabName"
 Write-Host "Appliance VHDX: $ApplianceVhdxPath"
 Write-Host "Client VHDX: $ClientVhdxPath"
+Write-Host "Appliance URL: $effectiveApplianceUrl"
 Write-Host ("Cleanup created VMs: {0}" -f (-not $KeepVms))
 
 & powershell.exe @arguments

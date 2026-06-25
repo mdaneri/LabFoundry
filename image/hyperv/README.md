@@ -2,7 +2,9 @@
 
 This directory contains the first real-OS appliance image path for LabFoundry.
 It builds a Photon OS 5.0 Hyper-V VHDX and provisions the FastAPI control plane
-as a systemd service.
+as a systemd service behind nginx. The first-boot management front door is
+HTTP/80, proxied to uvicorn on `127.0.0.1:8000`; Appliance Settings can later
+move the public management listener to HTTPS.
 
 ## Host Prerequisites
 
@@ -274,18 +276,27 @@ into the builder VM.
 
 ## Boot The VHDX
 
-After Packer completes, use the existing Hyper-V scripts. The finished
-appliance VM gets two additional dynamic VHDX data disks by default:
+After Packer completes, create and start the test appliance VM with the wrapper:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-test-vm.ps1 -WaitForIp
+```
+
+The wrapper finds the latest appliance VHDX under `image/hyperv/output`,
+prepares the LabFoundry Hyper-V switches, creates `LabFoundry`, starts it, and
+prints the management IP when `-WaitForIp` is used. If `LabFoundry` already
+exists, pass `-Redeploy` to remove and recreate only that VM, or pass `-Name`
+to create a separate test VM.
+
+The finished appliance VM gets two additional dynamic VHDX data disks by
+default:
 
 - `LabFoundry-Depot.vhdx`, intended for `/mnt/labfoundry-vcf-offline-depot`;
 - `LabFoundry-Backups.vhdx`, intended for `/mnt/labfoundry-vcf-backups`.
 
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switches.ps1
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-vm.ps1 `
-  -VhdxPath 'image/hyperv/output/labfoundry-photon-hyperv/Virtual Hard Disks/LabFoundry-Photon-Builder.vhdx'
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/start-labfoundry-vm.ps1
-```
+Use `create-hyperv-switches.ps1`, `create-labfoundry-vm.ps1`, and
+`start-labfoundry-vm.ps1` directly only when you need to control each step by
+hand.
 
 The default data disks are dynamic 500 GB VHDX files stored next to the OS
 VHDX. Override them with `-DepotVhdxPath`, `-BackupVhdxPath`,

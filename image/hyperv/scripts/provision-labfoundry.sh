@@ -154,6 +154,61 @@ rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.
 } >/etc/resolv.conf
 chmod 0644 /etc/resolv.conf
 
+log_step "configuring default LabFoundry management nginx proxy"
+rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf
+cat >/etc/nginx/conf.d/labfoundry.conf <<'EOF'
+# Managed by LabFoundry. Local changes may be overwritten.
+include /etc/labfoundry/nginx/sites.d/*.conf;
+EOF
+chmod 0644 /etc/nginx/conf.d/labfoundry.conf
+cat >/etc/labfoundry/nginx/sites.d/management.conf <<'EOF'
+# Managed by LabFoundry. Local changes may be overwritten.
+server {
+  listen 80 default_server;
+  server_name labfoundry.internal _;
+  client_max_body_size 512m;
+  location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto http;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}
+EOF
+chmod 0644 /etc/labfoundry/nginx/sites.d/management.conf
+if [ -f /etc/nginx/nginx.conf ] &&
+  ! grep -Eq 'include[[:space:]]+/etc/nginx/conf\.d/\*\.conf;' /etc/nginx/nginx.conf &&
+  ! grep -Fq '/etc/nginx/conf.d/labfoundry.conf' /etc/nginx/nginx.conf; then
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("/etc/nginx/nginx.conf")
+text = path.read_text(encoding="utf-8")
+start = text.find("http")
+brace = text.find("{", start)
+if start >= 0 and brace >= 0:
+    depth = 1
+    index = brace + 1
+    while index < len(text):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                include = "\n    # Managed by LabFoundry. Local changes may be overwritten.\n    include /etc/nginx/conf.d/labfoundry.conf;\n"
+                text = text[:index].rstrip() + include + text[index:]
+                path.write_text(text, encoding="utf-8")
+                break
+        index += 1
+PY
+fi
+nginx -t
+
 log_step "enabling appliance services"
 systemctl daemon-reload
 systemctl enable systemd-networkd
@@ -163,6 +218,7 @@ systemctl enable --now hv_kvp_daemon || true
 systemctl enable --now hv_fcopy_daemon || true
 systemctl enable --now hv_vss_daemon || true
 systemctl enable labfoundry
+systemctl enable --now nginx
 
 log_step "configuring LabFoundry nftables firewall"
 install -d -o root -g root -m 0755 /etc/labfoundry/nftables.d
