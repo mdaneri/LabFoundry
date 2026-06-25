@@ -16,7 +16,7 @@ param(
     [string]$BuilderStaticIp = '192.168.49.30/24',
     [string]$BuilderStaticNetmask = '255.255.255.0',
     [string]$BuilderStaticGateway = '192.168.49.254',
-    [string[]]$BuilderStaticDns = @('1.1.1.1', '9.9.9.9'),
+    [string[]]$BuilderStaticDns = @(),
     [string]$PackerDirectory = '',
     [string]$PreparedIsoPath = '',
     [ValidateSet('cleanup', 'abort', 'ask', 'run-cleanup-provisioner')]
@@ -41,6 +41,28 @@ function Get-BuilderAddress {
         return ''
     }
     return ($Cidr -split '/', 2)[0]
+}
+
+function Get-HostIpv4DnsServers {
+    param([string]$ExcludedInterfaceAlias = 'vEthernet (LabFoundry-Mgmt)')
+
+    $dnsRows = Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue
+    $servers = foreach ($row in $dnsRows) {
+        if ($row.InterfaceAlias -eq $ExcludedInterfaceAlias) {
+            continue
+        }
+        foreach ($server in $row.ServerAddresses) {
+            if ([string]::IsNullOrWhiteSpace($server)) {
+                continue
+            }
+            if ($server -eq '0.0.0.0' -or $server -like '127.*' -or $server -like '169.254.*') {
+                continue
+            }
+            $server
+        }
+    }
+
+    return @($servers | Select-Object -Unique)
 }
 
 function New-PhotonKickstart {
@@ -261,8 +283,18 @@ if ([string]::IsNullOrWhiteSpace($PackerDirectory)) {
     $PackerDirectory = Join-Path $PSScriptRoot '..\..\image\hyperv'
 }
 
+if ($null -eq $BuilderStaticDns) {
+    $BuilderStaticDns = @()
+}
+
 if ($BuilderStaticIp -and $BuilderStaticDns.Count -eq 0) {
-    throw "-BuilderStaticDns must contain at least one DNS server when -BuilderStaticIp is set."
+    $BuilderStaticDns = @(Get-HostIpv4DnsServers)
+    if ($BuilderStaticDns.Count -eq 0) {
+        $BuilderStaticDns = @('1.1.1.1', '9.9.9.9')
+        Write-Warning "Could not discover host IPv4 DNS servers; falling back to public DNS: $($BuilderStaticDns -join ', ')"
+    } else {
+        Write-Host "Using host IPv4 DNS for Photon builder/appliance: $($BuilderStaticDns -join ', ')"
+    }
 }
 
 $packerDir = Resolve-RepoPath $PackerDirectory

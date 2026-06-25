@@ -101,6 +101,7 @@ variable "dry_run_system_adapters" {
 
 locals {
   builder_static_address       = var.builder_static_ip != "" ? split("/", var.builder_static_ip)[0] : ""
+  builder_static_dns_text      = join(" ", var.builder_static_dns)
   bootstrap_admin_password     = var.bootstrap_admin_password != "" ? var.bootstrap_admin_password : var.ssh_password
   dry_run_system_adapters_text = var.dry_run_system_adapters ? "true" : "false"
 }
@@ -180,7 +181,8 @@ build {
   provisioner "shell" {
     environment_vars = [
       "LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD=${local.bootstrap_admin_password}",
-      "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}"
+      "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}",
+      "LABFOUNDRY_MGMT_DNS=${local.builder_static_dns_text}"
     ]
     execute_command = "echo '${var.ssh_password}' | sudo -S -E sh -c '{{ .Vars }} {{ .Path }}'"
     script          = "${path.root}/scripts/provision-labfoundry.sh"

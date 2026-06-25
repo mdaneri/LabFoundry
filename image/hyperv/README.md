@@ -41,7 +41,13 @@ By default, the temporary builder VM uses `LabFoundry-Mgmt` with
 `builder_static_ip=192.168.49.30/24`, `builder_static_netmask=255.255.255.0`,
 and `builder_static_gateway=192.168.49.254`. When `builder_static_ip` is set,
 the template automatically uses it as Packer's SSH target. Override those
-variables only when the management subnet is intentionally different.
+variables only when the management subnet is intentionally different. When
+`-BuilderStaticDns` is omitted, the wrapper discovers the host's active IPv4 DNS
+servers and uses them for both the temporary Photon builder and the final
+appliance management interface. This is the preferred Hyper-V Server 2025 path
+when public resolvers such as `1.1.1.1` are blocked upstream. Pass
+`-BuilderStaticDns <server1>,<server2>` only when the builder VM should use a
+specific resolver set.
 
 The wrapper renders `photon-ks.json`, embeds it into
 `image/hyperv/build/kickstart/labfoundry-photon-with-kickstart.iso`, and passes

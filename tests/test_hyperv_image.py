@@ -80,8 +80,10 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert 'default     = "192.168.49.254"' in template
     assert 'variable "iso_contains_kickstart"' in template
     assert 'variable "dry_run_system_adapters"' in template
+    assert 'builder_static_dns_text      = join(" ", var.builder_static_dns)' in template
     assert 'dry_run_system_adapters_text = var.dry_run_system_adapters ? "true" : "false"' in template
     assert '"LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}"' in template
+    assert '"LABFOUNDRY_MGMT_DNS=${local.builder_static_dns_text}"' in template
     assert "Iso_contains_kickstart must be true" in template
     assert "secondary_iso_images" not in template
     assert "boot_command" not in template
@@ -93,11 +95,17 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "build-photon-hyperv-image.ps1" in root_docs
     assert "create-hyperv-switches.ps1" in docs
     assert "builder_static_ip=192.168.49.30/24" in docs
+    assert "discovers the host's active IPv4 DNS" in docs
     assert "labfoundry-photon-with-kickstart.iso" in docs
     assert "Using remastered Photon ISO" in docs
     assert "without Packer typing boot commands" in docs
     assert "[string]$SshPassword = 'VMware01!'" in wrapper
     assert "[string]$BootstrapAdminPassword = 'VMware01!'" in wrapper
+    assert "[string[]]$BuilderStaticDns = @()" in wrapper
+    assert "function Get-HostIpv4DnsServers" in wrapper
+    assert "Get-DnsClientServerAddress -AddressFamily IPv4" in wrapper
+    assert "Using host IPv4 DNS for Photon builder/appliance" in wrapper
+    assert "falling back to public DNS" in wrapper
     assert "create_photon_kickstart_iso.py" in wrapper
     assert "Using remastered Photon ISO" in wrapper
     assert "Packer will boot a single DVD with embedded photon-ks.json and a GRUB auto-install entry." in wrapper

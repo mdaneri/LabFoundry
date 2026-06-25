@@ -67,8 +67,11 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switc
 The Packer build VM uses the `LabFoundry-Mgmt` switch by default with temporary
 static address `192.168.49.30/24` and gateway `192.168.49.254`. This avoids
 fragile `Default Switch` host-IP detection while still giving the builder NAT
-internet access for `tdnf update`. The wrapper writes `photon-ks.json`, embeds
-it into a remastered Photon ISO, replaces the ISO's UEFI GRUB config with a
+internet access for `tdnf update`. Unless `-BuilderStaticDns` is supplied, the
+wrapper discovers the host's active IPv4 DNS servers and uses them for both the
+temporary Photon builder and the finished appliance management interface, with
+public DNS only as a fallback. The wrapper writes `photon-ks.json`, embeds it
+into a remastered Photon ISO, replaces the ISO's UEFI GRUB config with a
 LabFoundry auto-install entry, and passes that single ISO to Packer. Photon then
 boots with `ks=cdrom:/photon-ks.json` without Packer typing boot commands. Raw
 `packer build .` is intentionally blocked unless the ISO is marked as
