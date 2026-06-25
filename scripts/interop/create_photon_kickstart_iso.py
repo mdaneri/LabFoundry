@@ -17,6 +17,11 @@ menuentry 'Install LabFoundry Photon OS with kickstart' {
 }
 """
 
+GRUB_CONFIG_TARGETS = (
+    ("/BOOT/GRUB2/GRUB.CFG;1", "grub.cfg"),
+    ("/EFI/BOOT/GRUB.CFG;1", "grub.cfg"),
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -28,18 +33,48 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def replace_or_add_text_file(iso, *, iso_path: str, rr_name: str, text: str) -> None:
-    rr_path = f"{iso_path.rsplit('/', 1)[0]}/{rr_name}"
-    for lookup in ({"rr_path": rr_path}, {"iso_path": iso_path}):
+def iso_record_exists(iso, *, iso_path: str) -> bool:
+    try:
+        iso.get_record(iso_path=iso_path)
+    except Exception:
+        return False
+    return True
+
+
+def remove_file_if_present(iso, *, iso_path: str, rr_name: str) -> None:
+    rr_path = f"{iso_path.rsplit('/', 1)[0].lower()}/{rr_name}"
+    for lookup in ({"iso_path": iso_path}, {"rr_path": rr_path}):
         try:
             iso.get_record(**lookup)
         except Exception:
             continue
         iso.rm_file(**lookup)
-        break
+        return
 
+
+def replace_text_file(iso, *, iso_path: str, rr_name: str, text: str) -> None:
+    parent_iso_path = iso_path.rsplit("/", 1)[0]
+    if not iso_record_exists(iso, iso_path=parent_iso_path):
+        raise ValueError(f"ISO parent path is missing: {parent_iso_path}")
+
+    remove_file_if_present(iso, iso_path=iso_path, rr_name=rr_name)
     payload = text.encode("utf-8")
     iso.add_fp(io.BytesIO(payload), len(payload), iso_path=iso_path, rr_name=rr_name)
+
+
+def replace_grub_config(iso) -> str:
+    failures = []
+    for iso_path, rr_name in GRUB_CONFIG_TARGETS:
+        try:
+            replace_text_file(iso, iso_path=iso_path, rr_name=rr_name, text=GRUB_BOOT_CONFIG)
+        except Exception as exc:
+            failures.append(f"{iso_path}: {exc}")
+            continue
+        return iso_path
+
+    targets = ", ".join(iso_path for iso_path, _ in GRUB_CONFIG_TARGETS)
+    detail = "; ".join(failures)
+    raise RuntimeError(f"Could not embed LabFoundry GRUB config. Tried: {targets}. {detail}")
 
 
 def main() -> int:
@@ -69,16 +104,12 @@ def main() -> int:
     iso.open(str(source_iso))
     try:
         iso.add_file(str(kickstart), iso_path="/PHOTONKS.JSON;1", rr_name="photon-ks.json")
-        replace_or_add_text_file(
-            iso,
-            iso_path="/EFI/BOOT/GRUB.CFG;1",
-            rr_name="grub.cfg",
-            text=GRUB_BOOT_CONFIG,
-        )
+        grub_path = replace_grub_config(iso)
         iso.write(str(output))
     finally:
         iso.close()
 
+    print(f"embedded GRUB auto-install config at {grub_path}", file=sys.stderr)
     print(output)
     return 0
 

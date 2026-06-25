@@ -119,12 +119,16 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "iso.add_file" in remaster_helper
     assert 'rr_name="photon-ks.json"' in remaster_helper
     assert "GRUB_BOOT_CONFIG" in remaster_helper
+    assert "GRUB_CONFIG_TARGETS" in remaster_helper
+    assert '"/BOOT/GRUB2/GRUB.CFG;1"' in remaster_helper
     assert "ks=cdrom:/photon-ks.json" in remaster_helper
     assert "photon.media=cdrom" in remaster_helper
-    assert 'iso_path="/EFI/BOOT/GRUB.CFG;1"' in remaster_helper
-    assert 'rr_name="grub.cfg"' in remaster_helper
+    assert '"/EFI/BOOT/GRUB.CFG;1"' in remaster_helper
+    assert '"/BOOT/GRUB2/GRUB.CFG;1", "grub.cfg"' in remaster_helper
+    assert '"/EFI/BOOT/GRUB.CFG;1", "grub.cfg"' in remaster_helper
     assert "iso.add_fp" in remaster_helper
     assert "iso.rm_file" in remaster_helper
+    assert "Could not embed LabFoundry GRUB config" in remaster_helper
 
 
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
