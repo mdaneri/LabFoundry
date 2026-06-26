@@ -233,6 +233,8 @@ function Ensure-NetworkAdapter {
 }
 
 function Set-LifecycleNetworkTopology {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
     Ensure-NetworkAdapter -VMName $applianceName -Name 'SiteA' -SwitchName 'LabFoundry-SiteA'
     Ensure-NetworkAdapter -VMName $applianceName -Name 'Trunk' -SwitchName 'LabFoundry-Trunk'
     Ensure-NetworkAdapter -VMName $applianceName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'
@@ -429,6 +431,8 @@ function Resolve-SafeChildPath {
 }
 
 function Reset-LifecycleApplianceVm {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
     Assert-SafeLifecycleName -Name $applianceName
     $safeApplianceDisk = Resolve-SafeChildPath -Path $applianceDisk -Root $diskRoot
 
