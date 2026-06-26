@@ -84,6 +84,8 @@ The real VCF Offline Depot apply path stages nginx config at `/var/lib/labfoundr
 
 After a successful selected apply, LabFoundry stores the selected units' last-applied baseline in the existing `settings` table. The baseline includes the normalized snapshot hash, compact summary, rendered config preview, config path, and apply timestamp.
 
+On fresh Photon appliance startup, LabFoundry records the factory desired-state baseline automatically when there is no existing baseline, no appliance-apply job, and no non-auth operator audit event. This startup baseline is comparison metadata only: it does not submit an apply job, run helper commands, or mutate host services. It also records the provisioned bootstrap admin OS account as synced because image provisioning already created that Photon account and set its password.
+
 When desired state changes later, the global apply page compares the current rendered config preview to the last-applied preview and shows a unified config diff when available. On first apply, no baseline exists yet, so the page shows the current preview instead.
 
 Rendered previews and job results must redact sensitive-looking values such as passwords, tokens, credentials, private keys, robot accounts, activation codes, encrypted CA private material, and uploaded secret contents.

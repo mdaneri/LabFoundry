@@ -2927,6 +2927,82 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
         assert '"unit_id": "firewall"' in (job.result or "")
 
 
+def test_appliance_startup_initializes_factory_apply_baseline(monkeypatch, tmp_path):
+    from sqlalchemy import select
+    from starlette.testclient import TestClient
+
+    import labfoundry.app.database as database
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.models import AuditEvent, Setting, User
+
+    db_path = tmp_path / "labfoundry-appliance-baseline.db"
+    monkeypatch.setenv("LABFOUNDRY_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("LABFOUNDRY_SECRET_KEY", "test-secret-key-with-enough-length")
+    monkeypatch.setenv("LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD", "labfoundry-admin")
+    monkeypatch.setenv("LABFOUNDRY_ENVIRONMENT", "appliance")
+    get_settings.cache_clear()
+    database.engine.dispose()
+    database.engine = database.create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    database.SessionLocal.configure(bind=database.engine)
+
+    from labfoundry.app.main import create_app
+
+    with TestClient(create_app()) as test_client:
+        login(test_client)
+        page = test_client.get("/appliance-apply")
+        assert page.status_code == 200
+        assert "No Pending Appliance Changes" in page.text
+        assert "11 changed" not in page.text
+
+    with database.SessionLocal() as db:
+        baseline = db.execute(select(Setting).where(Setting.key == "appliance_apply.baselines.v1")).scalar_one()
+        assert '"local_users"' in baseline.value
+        assert '"vcf_private_registry"' in baseline.value
+        admin = db.execute(select(User).where(User.username == "admin")).scalar_one()
+        assert admin.os_sync_status == "applied"
+        assert admin.os_password_applied_at is not None
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "initialize_factory_appliance_apply_baseline")).scalar_one()
+        assert event.actor == "system"
+
+    get_settings.cache_clear()
+
+
+def test_factory_apply_baseline_skips_after_operator_activity(monkeypatch, tmp_path):
+    from sqlalchemy import select
+
+    import labfoundry.app.database as database
+    from labfoundry.app.audit import record_audit
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.models import Setting
+    from labfoundry.app.seed import seed_initial_data
+    from labfoundry.app.ui import initialize_factory_appliance_apply_baseline
+
+    db_path = tmp_path / "labfoundry-appliance-edited.db"
+    monkeypatch.setenv("LABFOUNDRY_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("LABFOUNDRY_SECRET_KEY", "test-secret-key-with-enough-length")
+    monkeypatch.setenv("LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD", "labfoundry-admin")
+    monkeypatch.setenv("LABFOUNDRY_ENVIRONMENT", "appliance")
+    get_settings.cache_clear()
+    database.engine.dispose()
+    database.engine = database.create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    database.SessionLocal.configure(bind=database.engine)
+    database.init_db()
+
+    with database.SessionLocal() as db:
+        seed_initial_data(db, include_examples=False)
+        record_audit(db, actor="admin", action="update_appliance_settings", resource_type="settings")
+        assert initialize_factory_appliance_apply_baseline(db) is False
+        assert db.execute(select(Setting).where(Setting.key == "appliance_apply.baselines.v1")).scalar_one_or_none() is None
+
+    get_settings.cache_clear()
+
+
 def test_appliance_apply_runs_firewall_before_wan(client):
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.ui import appliance_apply_units

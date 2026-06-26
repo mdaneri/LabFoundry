@@ -14,6 +14,7 @@ from labfoundry.app.database import SessionLocal, init_db
 from labfoundry.app.problem import install_problem_handlers
 from labfoundry.app.seed import seed_initial_data
 from labfoundry.app.services.networking import sync_host_physical_interfaces
+from labfoundry.app.ui import initialize_factory_appliance_apply_baseline
 from labfoundry.app.ui import router as ui_router
 
 APP_DIR = Path(__file__).resolve().parent
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         seed_initial_data(db, include_examples=settings.environment != "appliance")
         refresh_startup_host_inventory(db, environment=settings.environment)
+        initialize_factory_appliance_apply_baseline(db)
     yield
 
 

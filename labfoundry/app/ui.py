@@ -2802,6 +2802,50 @@ def update_appliance_apply_baselines(db: Session, units: list[dict[str, Any]], s
     save_appliance_apply_baselines(db, baselines)
 
 
+def _has_operator_appliance_activity(db: Session) -> bool:
+    if db.execute(select(Job.id).where(Job.type == "appliance-apply").limit(1)).first() is not None:
+        return True
+    return db.execute(select(AuditEvent.id).where(AuditEvent.resource_type != "auth").limit(1)).first() is not None
+
+
+def _mark_provisioned_bootstrap_admin_applied(db: Session) -> None:
+    settings = get_settings()
+    bootstrap_user = db.execute(select(User).where(User.username == settings.bootstrap_admin_username)).scalar_one_or_none()
+    if bootstrap_user is None or not bootstrap_user.enabled:
+        return
+    timestamp = utcnow()
+    clear_pending_os_password(bootstrap_user)
+    bootstrap_user.os_password_applied_at = bootstrap_user.os_password_applied_at or timestamp
+    bootstrap_user.os_sync_applied_at = bootstrap_user.os_sync_applied_at or timestamp
+    bootstrap_user.os_sync_status = "applied"
+    bootstrap_user.os_sync_error = None
+    bootstrap_user.os_unlock_requested_at = None
+    db.add(bootstrap_user)
+
+
+def initialize_factory_appliance_apply_baseline(db: Session) -> bool:
+    settings = get_settings()
+    if settings.environment != "appliance":
+        return False
+    if setting_value(db, APPLIANCE_APPLY_BASELINES_KEY):
+        return False
+    if _has_operator_appliance_activity(db):
+        return False
+
+    _mark_provisioned_bootstrap_admin_applied(db)
+    units = appliance_apply_units(db)
+    update_appliance_apply_baselines(db, units, {unit["id"] for unit in units})
+    db.commit()
+    record_audit(
+        db,
+        actor="system",
+        action="initialize_factory_appliance_apply_baseline",
+        resource_type="appliance_apply",
+        detail=f"{len(units)} factory desired-state units baselined without host mutation",
+    )
+    return True
+
+
 @router.get("/favicon.ico", response_model=None)
 def favicon() -> FileResponse:
     return FileResponse(STATIC_DIR / "brand" / "labfoundry-mark.svg", media_type="image/svg+xml")
