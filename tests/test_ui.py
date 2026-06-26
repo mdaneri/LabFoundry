@@ -52,9 +52,60 @@ def test_sidebar_appliance_apply_uses_bottom_pending_cta(client):
     assert response.status_code == 200
     assert 'class="sidebar-apply-link pending' in response.text
     assert 'href="/appliance-apply"' in response.text
+    assert "data-appliance-apply-sidebar" in response.text
+    assert "data-appliance-apply-sidebar-title" in response.text
+    assert "data-appliance-apply-sidebar-detail" in response.text
+    assert "data-appliance-apply-sidebar-badge" in response.text
     assert "Review appliance changes" in response.text
     assert "pending unit" in response.text
     assert 'class="nav-link " href="/appliance-apply"' not in response.text
+
+
+def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.ui import appliance_apply_units, update_appliance_apply_baselines
+
+    login(client)
+    with SessionLocal() as db:
+        units = appliance_apply_units(db)
+        update_appliance_apply_baselines(db, units, {unit["id"] for unit in units})
+        db.commit()
+
+    current = client.get("/appliance-apply/status")
+    assert current.status_code == 200
+    assert current.json() == {
+        "pending_count": 0,
+        "label": "Appliance Apply",
+        "detail": "Desired state current",
+        "badge": "current",
+    }
+
+    page = client.get("/dns")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/dns/settings",
+        data={
+            "enabled": "on",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": ["eth2"],
+            "listen_addresses": ["192.168.50.1"],
+            "upstream_servers": "8.8.8.8",
+            "cache_size": "500",
+            "expand_hosts": "on",
+            "authoritative": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    pending = client.get("/appliance-apply/status")
+    assert pending.status_code == 200
+    assert pending.json()["pending_count"] > 0
+    assert pending.json()["label"] == "Review appliance changes"
+    assert "pending unit" in pending.json()["detail"]
+    assert pending.json()["badge"] == "pending"
 
 
 def test_settings_page_renders_autosave_validation_and_preview(client, monkeypatch):
@@ -1161,6 +1212,9 @@ def test_dns_and_dhcp_pages_render(client):
     assert "form[data-confirm-modal]" in app_js.text
     assert "confirm-modal" in app_js.text
     assert "initializeAutosaveForms" in app_js.text
+    assert "LABFOUNDRY_MUTATING_METHODS" in app_js.text
+    assert "scheduleApplianceApplySidebarRefresh" in app_js.text
+    assert 'fetch("/appliance-apply/status"' in app_js.text
     assert "initializeApplianceApplyProgress" in app_js.text
     assert "Submitting appliance changes" in app_js.text
     assert "Waiting for result" in app_js.text

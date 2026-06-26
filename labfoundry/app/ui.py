@@ -3261,6 +3261,23 @@ def appliance_apply_page(
     return render(request, "appliance_apply.html", {"identity": identity, **appliance_apply_context(db)})
 
 
+@router.get("/appliance-apply/status", response_class=JSONResponse, response_model=None)
+def appliance_apply_status_api(
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    context = appliance_apply_context(db)
+    pending_count = context["changed_apply_unit_count"]
+    return JSONResponse(
+        {
+            "pending_count": pending_count,
+            "label": "Review appliance changes" if pending_count else "Appliance Apply",
+            "detail": f"{pending_count} pending {'unit' if pending_count == 1 else 'units'}" if pending_count else "Desired state current",
+            "badge": "pending" if pending_count else "current",
+        }
+    )
+
+
 @router.post("/appliance-apply", response_class=HTMLResponse, response_model=None)
 def submit_appliance_apply(
     request: Request,

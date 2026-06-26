@@ -48,12 +48,12 @@
         </nav>
         {% set pending_apply_count = sidebar_pending_apply_count|default(0) %}
         <div class="sidebar-apply">
-          <a class="sidebar-apply-link {% if pending_apply_count %}pending{% else %}current{% endif %} {% if request.url.path == '/appliance-apply' %}active{% endif %}" href="/appliance-apply">
+          <a class="sidebar-apply-link {% if pending_apply_count %}pending{% else %}current{% endif %} {% if request.url.path == '/appliance-apply' %}active{% endif %}" href="/appliance-apply" data-appliance-apply-sidebar data-pending-count="{{ pending_apply_count }}">
             <span class="sidebar-apply-text">
-              <strong>{% if pending_apply_count %}Review appliance changes{% else %}Appliance Apply{% endif %}</strong>
-              <small>{% if pending_apply_count %}{{ pending_apply_count }} pending {{ 'unit' if pending_apply_count == 1 else 'units' }}{% else %}Desired state current{% endif %}</small>
+              <strong data-appliance-apply-sidebar-title>{% if pending_apply_count %}Review appliance changes{% else %}Appliance Apply{% endif %}</strong>
+              <small data-appliance-apply-sidebar-detail>{% if pending_apply_count %}{{ pending_apply_count }} pending {{ 'unit' if pending_apply_count == 1 else 'units' }}{% else %}Desired state current{% endif %}</small>
             </span>
-            <span class="sidebar-apply-badge">{% if pending_apply_count %}pending{% else %}current{% endif %}</span>
+            <span class="sidebar-apply-badge" data-appliance-apply-sidebar-badge>{% if pending_apply_count %}pending{% else %}current{% endif %}</span>
           </a>
         </div>
       </aside>
@@ -111,7 +111,7 @@
     </script>
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
-    <script src="/static/app.js?v=vcfdt-start-visible-20260626-1"></script>
+    <script src="/static/app.js?v=appliance-apply-sidebar-status-20260626-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>
 </html>

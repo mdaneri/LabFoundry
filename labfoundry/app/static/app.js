@@ -16,6 +16,46 @@ document.addEventListener("click", (event) => {
 });
 
 const DNS_ACTIVE_ZONE_STORAGE_KEY = "labfoundry:dns:active-zone";
+const LABFOUNDRY_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+let applianceApplySidebarRefreshTimer = 0;
+
+function labFoundryRequestMethod(input, init = {}) {
+  return String(init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+}
+
+function isLabFoundrySameOriginRequest(input) {
+  try {
+    const rawUrl = input instanceof Request ? input.url : String(input);
+    const url = new URL(rawUrl, window.location.href);
+    return url.origin === window.location.origin && url.pathname !== "/appliance-apply/status";
+  } catch {
+    return false;
+  }
+}
+
+function scheduleApplianceApplySidebarRefresh() {
+  window.clearTimeout(applianceApplySidebarRefreshTimer);
+  applianceApplySidebarRefreshTimer = window.setTimeout(() => {
+    refreshApplianceApplySidebar().catch(() => {});
+  }, 50);
+}
+
+if (typeof window.fetch === "function" && !window.fetch.labFoundryApplyStatusWrapped) {
+  const nativeFetch = window.fetch.bind(window);
+  const wrappedFetch = async (input, init = {}) => {
+    const method = labFoundryRequestMethod(input, init);
+    const shouldRefresh =
+      LABFOUNDRY_MUTATING_METHODS.has(method) &&
+      isLabFoundrySameOriginRequest(input);
+    const response = await nativeFetch(input, init);
+    if (shouldRefresh && response.ok) {
+      scheduleApplianceApplySidebarRefresh();
+    }
+    return response;
+  };
+  wrappedFetch.labFoundryApplyStatusWrapped = true;
+  window.fetch = wrappedFetch;
+}
 
 function registerLabFoundryPrismLanguages() {
   if (!window.Prism || !window.Prism.languages) {
@@ -4032,6 +4072,45 @@ function setAutosaveStatus(element, message, state = "idle") {
   }
   element.textContent = message;
   element.dataset.state = state;
+}
+
+function updateApplianceApplySidebar(payload = {}) {
+  const sidebar = document.querySelector("[data-appliance-apply-sidebar]");
+  if (!(sidebar instanceof HTMLElement)) {
+    return;
+  }
+  const pendingCount = Number(payload.pending_count || 0);
+  const hasPending = pendingCount > 0;
+  const title = sidebar.querySelector("[data-appliance-apply-sidebar-title]");
+  const detail = sidebar.querySelector("[data-appliance-apply-sidebar-detail]");
+  const badge = sidebar.querySelector("[data-appliance-apply-sidebar-badge]");
+  sidebar.dataset.pendingCount = String(pendingCount);
+  sidebar.classList.toggle("pending", hasPending);
+  sidebar.classList.toggle("current", !hasPending);
+  if (title instanceof HTMLElement) {
+    title.textContent = hasPending ? "Review appliance changes" : "Appliance Apply";
+  }
+  if (detail instanceof HTMLElement) {
+    detail.textContent = hasPending ? `${pendingCount} pending ${pendingCount === 1 ? "unit" : "units"}` : "Desired state current";
+  }
+  if (badge instanceof HTMLElement) {
+    badge.textContent = hasPending ? "pending" : "current";
+  }
+}
+
+async function refreshApplianceApplySidebar() {
+  if (!document.querySelector("[data-appliance-apply-sidebar]")) {
+    return;
+  }
+  const response = await fetch("/appliance-apply/status", {
+    method: "GET",
+    credentials: "same-origin",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    return;
+  }
+  updateApplianceApplySidebar(await response.json());
 }
 
 function initializeAutosaveForms() {
