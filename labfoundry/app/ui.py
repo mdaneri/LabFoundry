@@ -5,6 +5,8 @@ import re
 import shlex
 import shutil
 import socket
+import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
@@ -22,7 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 from labfoundry.app.audit import record_audit
 from labfoundry.app.adapters.system import SystemAdapter
 from labfoundry.app.config import get_settings
-from labfoundry.app.database import get_db
+from labfoundry.app.database import SessionLocal, get_db
 from labfoundry.app.models import (
     ApplianceSettings,
     ApiToken,
@@ -254,13 +256,16 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_DEFAULT_HOSTNAME,
     VCF_DEPOT_DEFAULT_STORE_PATH,
     VCF_DEPOT_ESX_DISABLED_PLATFORMS,
+    VCF_DEPOT_EXTRACT_DIR,
     VCF_DEPOT_LEGACY_STORE_PATH,
     VCF_DEPOT_PROFILE_TYPES,
     VCF_DEPOT_SKUS,
+    VCF_DEPOT_STAGED_ACTIVATION_FILE,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
     VCF_DEPOT_STAGED_CONFIG_PATH,
+    VCF_DEPOT_STAGED_TOKEN_FILE,
     VCF_DEPOT_STAGED_TOOL_DIR,
     VCF_DEPOT_TELEMETRY_CHOICES,
     VCF_DEPOT_TOKEN_NAME_KEY,
@@ -278,6 +283,8 @@ from labfoundry.app.services.vcf_offline_depot import (
     vcf_depot_profile_to_dict,
     vcf_depot_settings_to_dict,
     vcfdt_commands_for_profile,
+    _find_vcf_download_tool_binary,
+    _safe_extract_tar_gz,
 )
 from labfoundry.app.token_service import create_token_for_user
 
@@ -1321,6 +1328,163 @@ def vcf_depot_command_entry(command: list[str], *, dry_run: bool) -> dict[str, A
     }
 
 
+def vcf_depot_runtime_secret_path(staged_path: str) -> Path:
+    name = Path(staged_path).name
+    return VCF_DEPOT_VDT_LOG_PATH.parent.parent / "secrets" / name
+
+
+def vcf_depot_runtime_command(command: list[str], tool_path: Path) -> list[str]:
+    runtime_command: list[str] = []
+    for arg in command:
+        if arg == "vcf-download-tool":
+            runtime_command.append(str(tool_path))
+        elif arg == f"--depot-download-token-file={VCF_DEPOT_STAGED_TOKEN_FILE}":
+            runtime_command.append(f"--depot-download-token-file={vcf_depot_runtime_secret_path(VCF_DEPOT_STAGED_TOKEN_FILE)}")
+        elif arg == f"--depot-download-activation-code-file={VCF_DEPOT_STAGED_ACTIVATION_FILE}":
+            runtime_command.append(f"--depot-download-activation-code-file={vcf_depot_runtime_secret_path(VCF_DEPOT_STAGED_ACTIVATION_FILE)}")
+        else:
+            runtime_command.append(arg)
+    return runtime_command
+
+
+def resolve_vcf_download_tool(settings: VcfOfflineDepotSettings) -> Path:
+    archive = Path(settings.tool_archive_path)
+    if VCF_DEPOT_EXTRACT_DIR.exists():
+        try:
+            return _find_vcf_download_tool_binary(VCF_DEPOT_EXTRACT_DIR)
+        except FileNotFoundError:
+            pass
+    if archive.is_file():
+        _safe_extract_tar_gz(archive, VCF_DEPOT_EXTRACT_DIR)
+        return _find_vcf_download_tool_binary(VCF_DEPOT_EXTRACT_DIR)
+    staged = Path(VCF_DEPOT_STAGED_TOOL_DIR) / "vcf-download-tool"
+    if staged.is_file():
+        return staged
+    raise FileNotFoundError(f"VCF Download Tool archive does not exist: {archive}")
+
+
+def vcf_download_tool_home(tool_path: Path) -> Path:
+    return tool_path.parent.parent if tool_path.parent.name == "bin" else tool_path.parent
+
+
+def write_vcf_depot_runtime_file(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value, encoding="utf-8")
+    path.chmod(0o600)
+
+
+def prepare_vcf_depot_runtime(settings: VcfOfflineDepotSettings, db: Session) -> Path:
+    tool_path = resolve_vcf_download_tool(settings)
+    tool_home = vcf_download_tool_home(tool_path)
+    VCF_DEPOT_VDT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VCF_DEPOT_VDT_LOG_PATH.touch(exist_ok=True)
+    token = setting_value(db, VCF_DEPOT_TOKEN_VALUE_KEY)
+    if token.strip():
+        write_vcf_depot_runtime_file(vcf_depot_runtime_secret_path(VCF_DEPOT_STAGED_TOKEN_FILE), token)
+    activation_code = setting_value(db, VCF_DEPOT_ACTIVATION_VALUE_KEY)
+    if activation_code.strip():
+        write_vcf_depot_runtime_file(vcf_depot_runtime_secret_path(VCF_DEPOT_STAGED_ACTIVATION_FILE), activation_code)
+    telemetry_choice = settings.telemetry_choice if settings.telemetry_choice in VCF_DEPOT_TELEMETRY_CHOICES else "DISABLE"
+    if telemetry_choice != "NOT_PROVIDED":
+        telemetry_file = tool_home / "conf" / "telemetry" / "telemetry.flag"
+        write_vcf_depot_runtime_file(telemetry_file, f"obtu.telemetry.config={telemetry_choice}\n")
+    Path(settings.depot_store_path).mkdir(parents=True, exist_ok=True)
+    return tool_path
+
+
+def append_vcf_depot_log(text: str) -> None:
+    VCF_DEPOT_VDT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with VCF_DEPOT_VDT_LOG_PATH.open("a", encoding="utf-8", errors="replace") as handle:
+        handle.write(text)
+        if not text.endswith("\n"):
+            handle.write("\n")
+
+
+def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        profile = db.get(VcfDepotDownloadProfile, profile_id)
+        settings = get_vcf_offline_depot_settings_row(db)
+        started = utcnow()
+        if job:
+            job.status = JobStatus.RUNNING.value
+            job.started_at = started
+            job.progress_percent = 5
+            db.commit()
+        if not job or not profile:
+            return
+        try:
+            commands = vcfdt_commands_for_profile(settings, profile)
+            tool_path = prepare_vcf_depot_runtime(settings, db)
+            command_results: list[dict[str, Any]] = []
+            append_vcf_depot_log(
+                "\n".join(
+                    [
+                        "",
+                        f"===== LabFoundry VCFDT job {job_id} started {started.isoformat()} =====",
+                        f"profile={profile.name}",
+                        f"tool={tool_path}",
+                        f"depot_store={settings.depot_store_path}",
+                        "",
+                    ]
+                )
+            )
+            for index, command in enumerate(commands, start=1):
+                runtime_command = vcf_depot_runtime_command(command, tool_path)
+                command_line = " ".join(shlex.quote(value) for value in runtime_command)
+                append_vcf_depot_log(f"$ {command_line}\n")
+                completed = subprocess.run(
+                    runtime_command,
+                    cwd=str(vcf_download_tool_home(tool_path)),
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                )
+                if completed.stdout:
+                    append_vcf_depot_log(completed.stdout)
+                if completed.stderr:
+                    append_vcf_depot_log(completed.stderr)
+                command_results.append(
+                    {
+                        "command": runtime_command,
+                        "command_line": command_line,
+                        "returncode": completed.returncode,
+                        "stdout": apply_output_excerpt(completed.stdout),
+                        "stderr": apply_output_excerpt(completed.stderr),
+                    }
+                )
+                job.progress_percent = int(index / max(len(commands), 1) * 95)
+                job.result = json.dumps({**json.loads(job.result or "{}"), "commands": command_results}, indent=2)
+                db.commit()
+                if completed.returncode != 0:
+                    raise RuntimeError(f"VCFDT command exited with code {completed.returncode}.")
+            finished = utcnow()
+            profile.status = "synced"
+            profile.updated_at = finished
+            job.status = JobStatus.SUCCEEDED.value
+            job.finished_at = finished
+            job.progress_percent = 100
+            job.error = None
+            append_vcf_depot_log(f"===== LabFoundry VCFDT job {job_id} succeeded {finished.isoformat()} =====\n")
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - background worker must persist failures instead of crashing silently.
+            finished = utcnow()
+            profile.status = "blocked"
+            profile.updated_at = finished
+            job.status = JobStatus.FAILED.value
+            job.finished_at = finished
+            job.progress_percent = 100
+            job.error = str(exc)
+            append_vcf_depot_log(f"ERROR: {exc}\n")
+            append_vcf_depot_log(f"===== LabFoundry VCFDT job {job_id} failed {finished.isoformat()} =====\n")
+            db.commit()
+
+
+def queue_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
+    thread = threading.Thread(target=run_vcf_depot_download_job, args=(job_id, profile_id), daemon=True)
+    thread.start()
+
+
 def firewall_context(db: Session) -> dict:
     settings = get_firewall_settings_row(db)
     rules = db.execute(select(FirewallRule).order_by(FirewallRule.priority, FirewallRule.name)).scalars().all()
@@ -2247,6 +2411,7 @@ SECRET_LINE_PATTERN = re.compile(
 )
 PRIVATE_KEY_BEGIN_PATTERN = re.compile(r"-----BEGIN .*PRIVATE KEY-----")
 PRIVATE_KEY_END_PATTERN = re.compile(r"-----END .*PRIVATE KEY-----")
+JWT_PATH_SEGMENT_PATTERN = re.compile(r"(?<=/)[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}(?=/|$)")
 
 
 def redact_config_preview(config_preview: str) -> str:
@@ -2269,7 +2434,7 @@ def redact_config_preview(config_preview: str) -> str:
             else:
                 lines.append("[redacted sensitive line]")
             continue
-        lines.append(line)
+        lines.append(JWT_PATH_SEGMENT_PATTERN.sub("[redacted-token]", line))
     return "\n".join(lines)
 
 
@@ -5997,8 +6162,8 @@ def start_vcf_depot_profile_download_from_ui(
     )
     if validation_errors:
         raise HTTPException(status_code=400, detail=" ".join(validation_errors))
-    dry_run = get_settings().dry_run_system_adapters
-    commands = [vcf_depot_command_entry(command, dry_run=dry_run) for command in vcfdt_commands_for_profile(settings, profile)]
+    system_dry_run = get_settings().dry_run_system_adapters
+    commands = [vcf_depot_command_entry(command, dry_run=False) for command in vcfdt_commands_for_profile(settings, profile)]
     if not commands:
         raise HTTPException(status_code=400, detail="The VCFDT download profile did not produce any commands.")
     now = utcnow()
@@ -6006,42 +6171,47 @@ def start_vcf_depot_profile_download_from_ui(
         "profile_id": profile.id,
         "profile_name": profile.name,
         "profile_type": profile.profile_type,
-        "dry_run": dry_run,
+        "dry_run": False,
+        "system_adapter_dry_run": system_dry_run,
+        "log_path": str(VCF_DEPOT_VDT_LOG_PATH),
         "commands": commands,
         "validation_warnings": validation_warnings,
     }
     job = Job(
         id=f"job_{uuid4().hex[:12]}",
         type="vcf-depot-download",
-        status=JobStatus.SUCCEEDED.value,
+        status=JobStatus.PENDING.value,
         created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
+        started_at=None,
+        finished_at=None,
+        progress_percent=0,
         result=json.dumps(job_result, indent=2),
     )
-    profile.status = "ready" if dry_run else "synced"
+    profile.status = "ready"
     profile.updated_at = now
     db.add(job)
     db.commit()
+    queue_vcf_depot_download_job(job.id, profile.id)
     record_audit(
         db,
         actor=identity.username,
         action="start_vcf_depot_profile_download",
         resource_type="job",
         resource_id=job.id,
-        detail=f"profile={profile.name}; dry_run={dry_run}",
+        detail=f"profile={profile.name}; log={VCF_DEPOT_VDT_LOG_PATH}",
     )
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         return JSONResponse(
             {
                 "status": "started",
                 "job_id": job.id,
-                "job_status": job.status,
+                "job_status": JobStatus.RUNNING.value,
                 "profile_id": profile.id,
                 "profile_name": profile.name,
                 "profile_status": profile.status,
-                "dry_run": dry_run,
+                "dry_run": False,
+                "system_adapter_dry_run": system_dry_run,
+                "log_path": str(VCF_DEPOT_VDT_LOG_PATH),
                 "commands": commands,
                 "validation_warnings": validation_warnings,
             }

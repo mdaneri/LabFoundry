@@ -1055,7 +1055,15 @@ def test_logs_page_renders_fixed_source_tabs_and_redacts_vcfdt_log(client, tmp_p
     vcfdt_log = tmp_path / "vdt.log"
     app_log = tmp_path / "labfoundry.log"
     kms_log = tmp_path / "kms.log"
-    vcfdt_log.write_text("download started\ntoken=secret-download-token\ndownload complete\n", encoding="utf-8")
+    jwt_segment = (
+        "eyJ2ZXIiOiIyIiwidHlwIjoiSldUIiwiYWxnIjoiUlMyNTYifQ."
+        "eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIiwiaWF0IjoxNzgyNDQ1MzcxfQ."
+        "signatureSegmentLongEnoughToLookLikeJwt"
+    )
+    vcfdt_log.write_text(
+        f"download started\ntoken=secret-download-token\nGET https://dl.broadcom.com/{jwt_segment}/PROD/file.json\ndownload complete\n",
+        encoding="utf-8",
+    )
     app_log.write_text("app ready\n", encoding="utf-8")
     monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_VDT_LOG_PATH", vcfdt_log)
     monkeypatch.setattr("labfoundry.app.ui.LABFOUNDRY_APP_LOG_PATH", app_log)
@@ -1073,7 +1081,9 @@ def test_logs_page_renders_fixed_source_tabs_and_redacts_vcfdt_log(client, tmp_p
     assert str(vcfdt_log) in response.text
     assert "download started" in response.text
     assert "token= [redacted]" in response.text
+    assert "https://dl.broadcom.com/[redacted-token]/PROD/file.json" in response.text
     assert "secret-download-token" not in response.text
+    assert jwt_segment not in response.text
     assert "Log file has not been written yet." in response.text
 
 
@@ -2219,7 +2229,7 @@ def test_vcf_offline_depot_accepts_pasted_download_token(client):
     assert "pasted-secret-token" not in apply_page.text
 
 
-def test_vcf_offline_depot_manual_profile_download_records_job(client, tmp_path):
+def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, monkeypatch):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -2231,6 +2241,8 @@ def test_vcf_offline_depot_manual_profile_download_records_job(client, tmp_path)
 
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     make_vcfdt_archive(archive_path)
+    queued: list[tuple[str, int]] = []
+    monkeypatch.setattr("labfoundry.app.ui.queue_vcf_depot_download_job", lambda job_id, profile_id: queued.append((job_id, profile_id)))
     with SessionLocal() as db:
         settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
         settings.tool_archive_path = str(archive_path)
@@ -2263,7 +2275,8 @@ def test_vcf_offline_depot_manual_profile_download_records_job(client, tmp_path)
     assert payload["status"] == "started"
     assert payload["profile_name"] == "vcf-install"
     assert payload["profile_status"] == "ready"
-    assert payload["dry_run"] is True
+    assert payload["dry_run"] is False
+    assert payload["log_path"] == "/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log"
     assert len(payload["commands"]) == 2
     assert payload["commands"][0]["command"][0] == "/opt/labfoundry/vcf-download-tool/vcf-download-tool"
     assert "--depot-download-token-file=/etc/labfoundry/vcf-offline-depot/secrets/download-token.txt" in payload["commands"][0]["command"]
@@ -2272,8 +2285,11 @@ def test_vcf_offline_depot_manual_profile_download_records_job(client, tmp_path)
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "vcf-depot-download")).scalar_one()
         profile = db.get(VcfDepotDownloadProfile, profile_id)
-        assert job.status == "succeeded"
+        assert queued == [(job.id, profile_id)]
+        assert job.status == "pending"
         assert '"profile_name": "vcf-install"' in (job.result or "")
+        assert '"dry_run": false' in (job.result or "")
+        assert '"log_path": "/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log"' in (job.result or "")
         assert "/opt/labfoundry/vcf-download-tool/vcf-download-tool" in (job.result or "")
         assert "--depot-download-token-file=/etc/labfoundry/vcf-offline-depot/secrets/download-token.txt" in (job.result or "")
         assert "manual-secret-token" not in (job.result or "")
