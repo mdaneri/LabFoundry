@@ -48,7 +48,7 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
-    [string]$ApplianceSshUser = 'root',
+    [string]$ApplianceSshUser = 'admin',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]

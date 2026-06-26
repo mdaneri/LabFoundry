@@ -495,7 +495,7 @@ def render_ca_apply_payload(settings: CaSettings, certificates: list[CaCertifica
         payload["certificates"].append(
             {
                 "common_name": certificate.common_name,
-                "managed_owner": certificate.managed_owner or "manual",
+                "managed_owner": certificate.managed_owner or "",
                 "certificate_pem": certificate.certificate_pem,
                 "chain_pem": certificate.chain_pem or f"{certificate.certificate_pem}{settings.root_certificate_pem}",
                 "private_key_pem": private_key_pem,

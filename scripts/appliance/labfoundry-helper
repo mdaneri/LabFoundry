@@ -58,6 +58,8 @@ KMS_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-kms.service")
 PYKMIP_CONFIG_DIR = Path("/etc/pykmip")
 PYKMIP_CONFIG_PATH = PYKMIP_CONFIG_DIR / "server.conf"
 PYKMIP_SERVER_VENV_PATH = Path("/opt/labfoundry/.venv/bin/pykmip-server")
+LABFOUNDRY_VENV_PYTHON_PATH = Path("/opt/labfoundry/.venv/bin/python")
+PYKMIP_COMPAT_SCRIPT_PATH = Path("/opt/labfoundry/labfoundry/app/services/pykmip_compat_server.py")
 NETWORK_APPLY_DIR = Path("/var/lib/labfoundry/apply/network")
 WAN_APPLY_DIR = Path("/var/lib/labfoundry/apply/wan")
 WAN_NAT_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
@@ -340,9 +342,9 @@ def _ca_payload_errors(path: Path) -> list[str]:
         errors.extend(_pem_errors(certificate_pem, f"certificate {name}"))
         if chain_pem:
             errors.extend(_pem_errors(chain_pem, f"certificate {name} chain"))
-        managed_owner = str(certificate.get("managed_owner") or "")
-        if managed_owner and not private_key_pem:
-            errors.append(f"managed certificate {name} requires a private key.")
+        key_path_value = str(certificate.get("key_path") or "")
+        if key_path_value and not private_key_pem:
+            errors.append(f"certificate {name} key_path requires a private key.")
         if private_key_pem:
             errors.extend(_pem_errors(private_key_pem, f"certificate {name} private key", private_key=True))
             matches = _ca_key_matches_certificate(certificate_pem, private_key_pem)
@@ -651,7 +653,7 @@ def _pykmip_server_path() -> str | None:
 
 
 def _install_kms_service(config_path: Path) -> None:
-    pykmip_server = _pykmip_server_path() or str(PYKMIP_SERVER_VENV_PATH)
+    python_path = str(LABFOUNDRY_VENV_PYTHON_PATH if LABFOUNDRY_VENV_PYTHON_PATH.exists() else sys.executable)
     KMS_SERVICE_PATH.parent.mkdir(parents=True, exist_ok=True)
     KMS_SERVICE_PATH.write_text(
         "\n".join(
@@ -663,7 +665,7 @@ def _install_kms_service(config_path: Path) -> None:
                 "",
                 "[Service]",
                 "Type=simple",
-                f"ExecStart={pykmip_server} -f {config_path} -l {KMS_LOG_DIR / 'server.log'} -o {KMS_POLICY_DIR} -d {KMS_STATE_DIR / 'pykmip.db'}",
+                f"ExecStart={python_path} {PYKMIP_COMPAT_SCRIPT_PATH} -f {config_path} -l {KMS_LOG_DIR / 'server.log'} -o {KMS_POLICY_DIR} -d {KMS_STATE_DIR / 'pykmip.db'}",
                 "Restart=on-failure",
                 "RestartSec=5",
                 "NoNewPrivileges=true",

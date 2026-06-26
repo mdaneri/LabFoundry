@@ -111,18 +111,21 @@ powershell.exe -ExecutionPolicy Bypass `
   -File scripts/windows/run-hyperv-lifecycle-test.ps1 `
   -ApplianceVhdxPath image/hyperv/output/labfoundry-photon-hyperv/"Virtual Hard Disks"/LabFoundry-Photon-Builder.vhdx `
   -AdminPassword '<bootstrap-admin-password>' `
-  -SshPassword '<appliance-root-password>' `
+  -SshPassword '<bootstrap-admin-password>' `
   -CleanupCreatedLab
 ```
 
 The default path uses password SSH for both appliance and client probes. The
-default appliance SSH user is `root`; the default client SSH user is `alpine`.
-Key-based client auth is still available by passing an existing `-SshKeyPath`;
-the matching `.pub` file is injected into both client VMs. The scripts do not
-generate SSH keys automatically. When using Plink, the Hyper-V script discovers
-and pins the appliance and client SSH host keys for the test run so rebuilt VMs
-can safely reuse the same lab IPs without depending on PuTTY's cached host key
-state.
+default appliance SSH user is `admin` because root SSH is disabled by default on
+fresh appliance images. Appliance host-state probes log in as `admin` and run the
+existing Linux checks through `sudo sh -lc`; pass `-ApplianceSshUser root` only
+for images where Appliance Settings has enabled root SSH. The default client SSH
+user is `alpine`. Key-based client auth is still available by passing an
+existing `-SshKeyPath`; the matching `.pub` file is injected into both client
+VMs. The scripts do not generate SSH keys automatically. When using Plink, the
+Hyper-V script discovers and pins the appliance and client SSH host keys for the
+test run so rebuilt VMs can safely reuse the same lab IPs without depending on
+PuTTY's cached host key state.
 
 The low-level script only cleans up when `-CleanupCreatedLab` is present. That
 flag removes only VM names created during the current run that start with the

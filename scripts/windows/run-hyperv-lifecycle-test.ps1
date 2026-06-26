@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '')]
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$LabName = 'LabFoundryLifecycle',
@@ -21,7 +22,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$AdminPassword,
     [string]$SshUser = '',
-    [string]$ApplianceSshUser = 'root',
+    [string]$ApplianceSshUser = 'admin',
     [string]$ClientSshUser = 'alpine',
     [string]$SshKeyPath = '',
     [string]$SshPassword = '',
@@ -68,6 +69,7 @@ function Assert-InputVhdx {
 }
 
 function New-LifecycleDifferencingDisk {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [string]$ParentPath,
         [string]$ChildPath,
@@ -83,6 +85,7 @@ function New-LifecycleDifferencingDisk {
 }
 
 function New-LifecycleVm {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [string]$Name,
         [string]$VhdxPath,
@@ -114,7 +117,7 @@ function Ensure-ClientSshKey {
         if ($SshPassword) {
             return ''
         }
-        throw "Client SSH access requires -SshPassword or an existing -SshKeyPath."
+        throw 'Client SSH access requires -SshPassword or an existing -SshKeyPath.'
     }
     $publicPath = "$SshKeyPath.pub"
     if (-not (Test-Path -LiteralPath $publicPath)) {
@@ -124,6 +127,7 @@ function Ensure-ClientSshKey {
 }
 
 function New-CloudInitSeedIso {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [string]$Path,
         [string]$HostName,
@@ -138,7 +142,7 @@ function New-CloudInitSeedIso {
     }
 
     if ($PSCmdlet.ShouldProcess($Path, "Create NoCloud seed disk for $HostName")) {
-        python -c "import pycdlib" 2>$null
+        python -c 'import pycdlib' 2>$null
         if ($LASTEXITCODE -ne 0) {
             python -m pip install pycdlib
         }
@@ -163,6 +167,7 @@ function New-CloudInitSeedIso {
 }
 
 function Ensure-HardDisk {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [string]$VMName,
         [string]$Path
@@ -179,6 +184,7 @@ function Ensure-HardDisk {
 }
 
 function Ensure-DvdDrive {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [string]$VMName,
         [string]$Path
@@ -202,6 +208,7 @@ function Ensure-DvdDrive {
 }
 
 function Ensure-NetworkAdapter {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [string]$VMName,
         [string]$Name,
@@ -243,8 +250,8 @@ function Get-GuestIPv4 {
     )
 
     $addresses = Get-VMNetworkAdapter -VMName $Name |
-        Select-Object -ExpandProperty IPAddresses |
-        Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '169.254.*' }
+    Select-Object -ExpandProperty IPAddresses |
+    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '169.254.*' }
     return $addresses | Select-Object -First 1
 }
 
@@ -271,13 +278,13 @@ function Get-NeighborIPv4ForAdapter {
     }
     $mac = ConvertTo-HyphenMac -MacAddress $adapter.MacAddress
     $neighbors = Get-NetNeighbor -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.LinkLayerAddress -eq $mac -and
-            $_.IPAddress -match '^\d+\.\d+\.\d+\.\d+$' -and
-            $_.IPAddress -notlike '169.254.*' -and
-            $_.State -ne 'Unreachable'
-        } |
-        Sort-Object -Property State, IPAddress
+    Where-Object {
+        $_.LinkLayerAddress -eq $mac -and
+        $_.IPAddress -match '^\d+\.\d+\.\d+\.\d+$' -and
+        $_.IPAddress -notlike '169.254.*' -and
+        $_.State -ne 'Unreachable'
+    } |
+    Sort-Object -Property State, IPAddress
     return $neighbors | Select-Object -ExpandProperty IPAddress -First 1
 }
 
@@ -317,9 +324,11 @@ function Test-TcpPort {
         }
         $client.EndConnect($connect)
         return $true
-    } catch {
+    }
+    catch {
         return $false
-    } finally {
+    }
+    finally {
         $client.Close()
     }
 }
@@ -347,7 +356,8 @@ function Get-PlinkHostKey {
         try {
             $output = & plink -batch -ssh -pw $Password "$UserName@$HostName" 'hostname' 2>&1
             $exitCode = $LASTEXITCODE
-        } finally {
+        }
+        finally {
             $ErrorActionPreference = $previousErrorActionPreference
         }
         $text = ($output | Out-String)
@@ -388,32 +398,32 @@ if ($existingPrimary -and $existingPrimary.State -eq 'Running' -and $ApplianceIP
 
 if ($PlanOnly) {
     [pscustomobject]@{
-        lab_name = $LabName
-        appliance_vm = $applianceName
-        client_a_vm = $clientAName
-        client_b_vm = $clientBName
-        appliance_vhdx = (Resolve-Path -LiteralPath $ApplianceVhdxPath).Path
-        client_vhdx = (Resolve-Path -LiteralPath $ClientVhdxPath).Path
-        site_interface = $SiteInterface
-        site_cidr = $SiteCidr
-        site_vlan_id = $SiteVlanId
-        tagged_vlan_id = $VlanId
-        tagged_vlan_cidr = $TaggedVlanCidr
-        wan_cidr = $WanCidr
-        result_root = $resultRoot
-        appliance_url = $ApplianceUrl
-        cleanup_created_lab = [bool]$CleanupCreatedLab
+        lab_name                 = $LabName
+        appliance_vm             = $applianceName
+        client_a_vm              = $clientAName
+        client_b_vm              = $clientBName
+        appliance_vhdx           = (Resolve-Path -LiteralPath $ApplianceVhdxPath).Path
+        client_vhdx              = (Resolve-Path -LiteralPath $ClientVhdxPath).Path
+        site_interface           = $SiteInterface
+        site_cidr                = $SiteCidr
+        site_vlan_id             = $SiteVlanId
+        tagged_vlan_id           = $VlanId
+        tagged_vlan_cidr         = $TaggedVlanCidr
+        wan_cidr                 = $WanCidr
+        result_root              = $resultRoot
+        appliance_url            = $ApplianceUrl
+        cleanup_created_lab      = [bool]$CleanupCreatedLab
         reserved_vms_not_touched = @('LabFoundry', 'LabFoundry-Photon-Builder')
     } | ConvertTo-Json -Depth 5
     return
 }
 
 $runningLifecycleAppliances = Get-VM -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.Name -like 'LabFoundryLifecycle*-Appliance' -and
-        $_.Name -ne $applianceName -and
-        $_.State -eq 'Running'
-    }
+Where-Object {
+    $_.Name -like 'LabFoundryLifecycle*-Appliance' -and
+    $_.Name -ne $applianceName -and
+    $_.State -eq 'Running'
+}
 if ($runningLifecycleAppliances -and $ApplianceIPAddress -eq '192.168.49.1') {
     $names = ($runningLifecycleAppliances | Select-Object -ExpandProperty Name) -join ', '
     throw "Running lifecycle appliance VM(s) may already own ${ApplianceIPAddress}: $names. Run invoke-hyperv-lifecycle-test.ps1 -CleanupVmsOnly or stop those VMs before starting a new lifecycle lab."
@@ -436,7 +446,8 @@ if (-not $AllowExistingLifecycleLab) {
     New-LifecycleDifferencingDisk -ParentPath $ApplianceVhdxPath -ChildPath $applianceDisk -Label 'appliance'
     New-LifecycleDifferencingDisk -ParentPath $ClientVhdxPath -ChildPath $clientADisk -Label 'client A'
     New-LifecycleDifferencingDisk -ParentPath $ClientVhdxPath -ChildPath $clientBDisk -Label 'client B'
-} else {
+}
+else {
     if (-not (Test-Path -LiteralPath $applianceDisk)) { New-LifecycleDifferencingDisk -ParentPath $ApplianceVhdxPath -ChildPath $applianceDisk -Label 'appliance' }
     if (-not (Test-Path -LiteralPath $clientADisk)) { New-LifecycleDifferencingDisk -ParentPath $ClientVhdxPath -ChildPath $clientADisk -Label 'client A' }
     if (-not (Test-Path -LiteralPath $clientBDisk)) { New-LifecycleDifferencingDisk -ParentPath $ClientVhdxPath -ChildPath $clientBDisk -Label 'client B' }
@@ -478,7 +489,8 @@ try {
         if ($PSCmdlet.ShouldProcess("$clientAName/SiteA-Test", "Enable access VLAN $SiteVlanId")) {
             Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'SiteA-Test' -Access -VlanId $SiteVlanId
         }
-    } else {
+    }
+    else {
         if ($PSCmdlet.ShouldProcess("$applianceName/SiteA", 'Use untagged SiteA traffic')) {
             Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'SiteA' -Untagged
         }
@@ -535,7 +547,8 @@ try {
             throw "Lifecycle interop runner failed with exit code $LASTEXITCODE"
         }
     }
-} finally {
+}
+finally {
     if ($CleanupCreatedLab) {
         foreach ($name in $createdVms) {
             Assert-SafeLifecycleName -Name $name
@@ -544,8 +557,9 @@ try {
                 Remove-VM -Name $name -Force
             }
         }
-    } else {
-        Write-Host "Lifecycle VMs were left in place. Cleanup requires -CleanupCreatedLab and only touches lifecycle-created VM names."
+    }
+    else {
+        Write-Host 'Lifecycle VMs were left in place. Cleanup requires -CleanupCreatedLab and only touches lifecycle-created VM names.'
     }
 }
 

@@ -218,9 +218,11 @@ KMS / KMIP desired state is PyKMIP-backed for lab compatibility testing. Real
 `/appliance-apply` stages `/var/lib/labfoundry/apply/kms/pykmip.conf`,
 requires an enabled healthy CA with issued KMS server/client certificates,
 installs `/etc/labfoundry/kms/pykmip.conf` and `/etc/pykmip/server.conf`, and
-manages `labfoundry-kms.service`. The KMS listener binds to the IP derived from
-the selected access physical interface or enabled VLAN. Disabling KMS stops and
-disables the service while preserving `/var/lib/labfoundry/kms/pykmip.db`.
+manages `labfoundry-kms.service`. The service launches PyKMIP through
+LabFoundry's compatibility wrapper for current Photon Python streams. The KMS
+listener binds to the IP derived from the selected access physical interface or
+enabled VLAN. Disabling KMS stops and disables the service while preserving
+`/var/lib/labfoundry/kms/pykmip.db`.
 
 Local Users desired state is Photon OS account-backed. Real `/appliance-apply`
 stages `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`, validates

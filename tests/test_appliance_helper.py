@@ -280,6 +280,56 @@ def test_ca_helper_validates_and_writes_managed_files(monkeypatch, tmp_path):
         assert oct(key_path.stat().st_mode & 0o777) == "0o600"
 
 
+def test_ca_helper_allows_csr_certificate_without_private_key(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "ca"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    apply_dir.mkdir(parents=True)
+    payload = json.loads(ca_payload_text(managed_root))
+    payload["certificates"].append(
+        {
+            "common_name": "client-a.labfoundry.internal",
+            "managed_owner": "",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n",
+            "chain_pem": "-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n",
+            "private_key_pem": "",
+            "cert_path": str(managed_root / "ca" / "client-a.crt"),
+            "key_path": "",
+            "chain_path": str(managed_root / "ca" / "client-a-chain.pem"),
+        }
+    )
+    config_path = apply_dir / "labfoundry-ca.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "CA_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "_ca_key_matches_certificate", lambda certificate_pem, private_key_pem: True)
+
+    assert helper._handle_ca("validate", [str(config_path)]) == 0
+    assert helper._handle_ca("apply", [str(config_path)]) == 0
+
+    assert (managed_root / "ca" / "client-a.crt").read_text(encoding="utf-8").startswith("-----BEGIN CERTIFICATE-----")
+    assert not (managed_root / "ca" / "client-a.key").exists()
+
+
+def test_ca_helper_rejects_key_path_without_private_key(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "ca"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    apply_dir.mkdir(parents=True)
+    payload = json.loads(ca_payload_text(managed_root))
+    payload["certificates"][0]["private_key_pem"] = ""
+    config_path = apply_dir / "labfoundry-ca.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "CA_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+
+    errors = helper._ca_payload_errors(config_path)
+
+    assert "certificate kms.labfoundry.internal key_path requires a private key." in errors
+
+
 def test_wan_helper_apply_routes_nat_and_netem(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "wan"
@@ -597,7 +647,7 @@ def test_kms_helper_apply_installs_pykmip_service(monkeypatch, tmp_path):
 
     assert (managed_root / "kms" / "pykmip.conf").is_file()
     assert (pykmip_dir / "server.conf").is_file()
-    assert "pykmip-server" in service_path.read_text(encoding="utf-8")
+    assert "pykmip_compat_server.py" in service_path.read_text(encoding="utf-8")
     assert ["systemctl", "daemon-reload"] in commands
     assert ["systemctl", "enable", "labfoundry-kms.service"] in commands
     assert ["systemctl", "restart", "labfoundry-kms.service"] in commands

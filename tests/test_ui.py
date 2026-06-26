@@ -1549,6 +1549,7 @@ def test_ca_apply_payload_leaves_csr_private_key_empty():
 
     payload = json.loads(render_ca_apply_payload(settings, [certificate], include_private_keys=True))
 
+    assert payload["certificates"][0]["managed_owner"] == ""
     assert payload["certificates"][0]["private_key_pem"] == ""
 
 

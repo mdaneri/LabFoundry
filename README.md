@@ -195,7 +195,7 @@ VCF Offline Depot stages nginx HTTPS static-site config under `/var/lib/labfound
 
 The firewall preview derives LabFoundry-managed service allow rules from service desired state, including management, DNS, DHCP, KMS, VCF Backup, VCF Offline Depot, and VCF Private Registry listeners. Managed listener rules default to the built-in `Any` group; operators can create, rename, remove, and assign firewall groups containing `any`, CIDRs, addresses, or other groups when rule sources or destinations need narrower access. DHCP bootstrap remains interface-bound on UDP/67 because clients may not have an address yet. Moving a DHCP scope or service listener to a VLAN such as `eth2.50` also changes the Firewall apply unit. In development, system adapters remain dry-run by default and record command intent instead of mutating host services directly.
 
-KMS / KMIP is PyKMIP-backed and intended for lab compatibility testing, not production HSM use. The KMS page derives its listen address from the selected service interface, manages an app-owned DNS record for the KMS hostname, and requires an enabled healthy CA before activation. Real KMS apply stages `/var/lib/labfoundry/apply/kms/pykmip.conf`, installs `/etc/labfoundry/kms/pykmip.conf` and `/etc/pykmip/server.conf`, and manages `labfoundry-kms.service`; disabling KMS stops the service while preserving `/var/lib/labfoundry/kms/pykmip.db`.
+KMS / KMIP is PyKMIP-backed and intended for lab compatibility testing, not production HSM use. The KMS page derives its listen address from the selected service interface, manages an app-owned DNS record for the KMS hostname, and requires an enabled healthy CA before activation. Real KMS apply stages `/var/lib/labfoundry/apply/kms/pykmip.conf`, installs `/etc/labfoundry/kms/pykmip.conf` and `/etc/pykmip/server.conf`, and manages `labfoundry-kms.service`; the service launches PyKMIP through LabFoundry's compatibility wrapper so current Photon Python streams remain supported. Disabling KMS stops the service while preserving `/var/lib/labfoundry/kms/pykmip.db`.
 
 On the Photon appliance, real mutating helper actions re-enter through a transient `systemd-run` service when `LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1` is set. This keeps the web control plane inside its restricted `labfoundry.service` sandbox while allowing the reviewed root helper to write approved `/etc` configuration files from outside the service's read-only mount namespace.
 
@@ -436,9 +436,11 @@ with a ClientA CSR request and issued-certificate verification, VCF Backup SFTP
 with the `vcf-backup` OS user, and client-side connectivity,
 prints a human-readable console summary, writes `result.json`, then removes the
 VMs it created. It defaults to the local Hyper-V lab password for admin and
-SSH access, and uses a separate policy-compliant default for VCF Backup SFTP
-test access; pass `-AdminPassword`, `-SshPassword`, and `-VcfBackupPassword` to
-override those defaults. Pass `-KeepVms` only when
+appliance/client SSH access; appliance host-state probes log in as `admin`
+because root SSH is disabled by default, then run checks through sudo. It uses a
+separate policy-compliant default for VCF Backup SFTP test access; pass
+`-AdminPassword`, `-SshPassword`, and `-VcfBackupPassword` to override those
+defaults. Pass `-KeepVms` only when
 preserving a failed lab for inspection. Use `-PrepareNetworksOnly` to set up the
 Hyper-V switches/NAT, `-CleanupVmsOnly` to remove only lifecycle VMs, and
 `-CleanupNetworksOnly` to remove LabFoundry switches/NAT after all attached VMs

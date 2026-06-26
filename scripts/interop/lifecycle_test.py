@@ -8,6 +8,7 @@ guest assertions so failures produce reusable evidence instead of console fog.
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import http.cookiejar
 import json
@@ -112,7 +113,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--client-ca-request-cidr", default="192.168.49.20/24")
     parser.add_argument("--client-ca-request-url", default="")
     parser.add_argument("--ssh-user", default="", help="Compatibility override for both appliance and client SSH users.")
-    parser.add_argument("--appliance-ssh-user", default="root")
+    parser.add_argument("--appliance-ssh-user", default="admin")
     parser.add_argument("--client-ssh-user", default="alpine")
     parser.add_argument("--ssh-key", default="")
     parser.add_argument("--ssh-password", default="")
@@ -226,6 +227,16 @@ def ssh_hostkey(host: str, args: argparse.Namespace, role: str) -> str:
     return ""
 
 
+def appliance_ssh_command(args: argparse.Namespace, command: str) -> str:
+    if ssh_username(args, "appliance") == "root":
+        return command
+    quoted_command = shell_single_quote(command)
+    if args.ssh_password:
+        quoted_password = shell_single_quote(args.ssh_password)
+        return f"printf '%s\\n' {quoted_password} | sudo -S -p '' sh -lc {quoted_command}"
+    return f"sudo -n sh -lc {quoted_command}"
+
+
 def redact_text(value: str, secrets: list[str] | None = None) -> str:
     redacted = value
     for secret in secrets or []:
@@ -249,18 +260,19 @@ def ssh_command(
     if not host:
         raise LifecycleError("SSH host was not provided.")
     user = ssh_username(args, role)
+    remote_command = appliance_ssh_command(args, command) if role == "appliance" else command
     secrets = [args.ssh_password, *(redact_values or [])]
     if args.ssh_password:
-        plink_args = ["plink", "-batch", "-ssh", "-pw", args.ssh_password, f"{user}@{host}", command]
+        plink_args = ["plink", "-batch", "-ssh", "-pw", args.ssh_password, f"{user}@{host}", remote_command]
         hostkey = ssh_hostkey(host, args, role)
         if hostkey:
             plink_args[3:3] = ["-hostkey", hostkey]
         redacted = ["plink", "-batch", "-ssh"]
         if hostkey:
             redacted.extend(["-hostkey", hostkey])
-        redacted.extend(["-pw", "[redacted]", f"{user}@{host}", redact_text(command, secrets)])
+        redacted.extend(["-pw", "[redacted]", f"{user}@{host}", redact_text(remote_command, secrets)])
         try:
-            completed = subprocess.run(plink_args, text=True, capture_output=True, timeout=120)
+            completed = subprocess.run(plink_args, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=120)
         except subprocess.TimeoutExpired as exc:
             return {
                 "command": redacted,
@@ -278,9 +290,9 @@ def ssh_command(
     if args.ssh_key:
         ssh_args.extend(["-i", args.ssh_key])
     target = f"{user}@{host}"
-    redacted_command = redact_sequence([*ssh_args, target, command], secrets)
+    redacted_command = redact_sequence([*ssh_args, target, remote_command], secrets)
     try:
-        completed = subprocess.run([*ssh_args, target, command], text=True, capture_output=True, timeout=120)
+        completed = subprocess.run([*ssh_args, target, remote_command], text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=120)
     except subprocess.TimeoutExpired as exc:
         return {
             "command": redacted_command,
@@ -920,16 +932,71 @@ def appliance_health(client: HttpClient, args: argparse.Namespace) -> dict[str, 
     return {"openapi_status": openapi[0], "dashboard_keys": sorted(dashboard.keys()), "ssh": ssh}
 
 
+def direct_dns_a_query_command(name: str, server: str, expected_ip: str) -> str:
+    script = f"""
+import random
+import socket
+import struct
+import sys
+
+name = {name!r}
+server = {server!r}
+expected_ip = {expected_ip!r}
+query_id = random.randrange(0, 65536)
+qname = b"".join(bytes([len(part)]) + part.encode("ascii") for part in name.rstrip(".").split(".")) + b"\\0"
+packet = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + qname + struct.pack("!HH", 1, 1)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(5)
+sock.sendto(packet, (server, 53))
+data, _ = sock.recvfrom(512)
+if len(data) < 12:
+    sys.exit("short DNS response")
+response_id, flags, _qdcount, ancount, _nscount, _arcount = struct.unpack("!HHHHHH", data[:12])
+if response_id != query_id:
+    sys.exit("DNS response ID mismatch")
+rcode = flags & 0x000F
+if rcode != 0:
+    sys.exit(f"DNS query failed with rcode {{rcode}}")
+offset = 12
+while offset < len(data) and data[offset] != 0:
+    offset += data[offset] + 1
+offset += 5
+answers = []
+for _ in range(ancount):
+    if offset >= len(data):
+        break
+    if data[offset] & 0xC0 == 0xC0:
+        offset += 2
+    else:
+        while offset < len(data) and data[offset] != 0:
+            offset += data[offset] + 1
+        offset += 1
+    if offset + 10 > len(data):
+        break
+    rtype, rclass, _ttl, rdlen = struct.unpack("!HHIH", data[offset:offset + 10])
+    offset += 10
+    rdata = data[offset:offset + rdlen]
+    offset += rdlen
+    if rtype == 1 and rclass == 1 and rdlen == 4:
+        answers.append(socket.inet_ntoa(rdata))
+print("\\n".join(answers))
+if expected_ip not in answers:
+    sys.exit(f"expected {{expected_ip}} from {{server}} for {{name}}, got {{answers}}")
+"""
+    encoded = base64.b64encode(script.strip().encode("utf-8")).decode("ascii")
+    return f"printf %s {encoded} | base64 -d | python3 -"
+
+
 def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
     site_ip = str(ip_interface(args.site_cidr).ip)
     checks = {
         "network": "ip -br addr && ip route",
-        "dnsmasq": "test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && getent hosts interop-appliance.labfoundry.internal",
-        "firewall": "nft list ruleset | sed -n '1,160p'",
+        "dnsmasq": f"test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && {direct_dns_a_query_command('interop-appliance.labfoundry.internal', site_ip, site_ip)}",
+        "firewall": "nft list ruleset | head -n 160",
         "wan": (
             f"sysctl net.ipv4.ip_forward; "
             f"tc qdisc show dev {args.wan_interface}; "
-            f"tc qdisc show dev {args.wan_interface} | grep -E 'netem.*delay 25ms'"
+            f"tc qdisc show dev {args.wan_interface} | grep netem | grep delay | grep 25ms"
         ),
         "ca": "test -f /etc/labfoundry/ca/ca-bundle.pem && openssl x509 -in /etc/labfoundry/ca/root-ca.pem -noout -subject",
         "kms_files": (
@@ -938,20 +1005,21 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
             "/etc/pykmip/server.conf "
             "/etc/labfoundry/kms/certs/kms.labfoundry.internal.crt "
             "/etc/labfoundry/kms/certs/kms.labfoundry.internal.key "
-            "/etc/labfoundry/kms/clients/vcf-management.crt "
-            "/etc/labfoundry/kms/clients/vcf-management.key; "
+            "/etc/labfoundry/kms/clients/certs/vcf-management.crt "
+            "/etc/labfoundry/kms/clients/certs/vcf-management.key; "
             "do test -f \"$path\" || { echo \"missing $path\"; exit 1; }; done"
         ),
         "kms_service": "systemctl is-active labfoundry-kms.service || (systemctl status labfoundry-kms.service --no-pager; journalctl -u labfoundry-kms.service -n 80 --no-pager; exit 1)",
         "kms_tls": (
             f"timeout 10 openssl s_client -connect {site_ip}:5696 "
-            "-cert /etc/labfoundry/kms/clients/vcf-management.crt "
-            "-key /etc/labfoundry/kms/clients/vcf-management.key "
+            "-cert /etc/labfoundry/kms/clients/certs/vcf-management.crt "
+            "-key /etc/labfoundry/kms/clients/certs/vcf-management.key "
             "-CAfile /etc/labfoundry/ca/root.crt -verify_return_error </dev/null"
         ),
         "vcf_backups": (
             "test -f /etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf && "
-            "grep -E 'Match User vcf-backup|ForceCommand internal-sftp' /etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf && "
+            "grep -F Match\\ User\\ vcf-backup /etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf && "
+            "grep -F ForceCommand\\ internal-sftp /etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf && "
             "id vcf-backup && "
             "test -d /mnt/labfoundry-vcf-backups/backups && "
             "systemctl is-active sshd"

@@ -231,6 +231,7 @@ def test_lifecycle_single_command_wrapper_prepares_runs_and_cleans_up_by_default
     assert "ParameterSetName = 'CleanupNetworks'" in script
     assert "ParameterSetName = 'CleanupVms'" in script
     assert "[string]$AdminPassword = 'VMware01!'" in script
+    assert "[string]$ApplianceSshUser = 'admin'" in script
     assert "[string]$SshPassword = 'VMware01!'" in script
     assert "[string]$VcfBackupPassword = 'VMware01!Test'" in script
     assert "'-VcfBackupPassword', $VcfBackupPassword" in script
@@ -269,6 +270,7 @@ def test_lifecycle_cleanup_scripts_are_scoped_to_labfoundry_assets():
 def test_lifecycle_hyperv_script_finds_alpine_ips_and_pins_plink_hostkeys():
     script = Path("scripts/windows/run-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
 
+    assert "[string]$ApplianceSshUser = 'admin'" in script
     assert "Get-NetNeighbor -AddressFamily IPv4" in script
     assert "ConvertTo-HyphenMac" in script
     assert "Wait-GuestIPv4 -Name $clientAName" in script
@@ -375,6 +377,9 @@ def test_lifecycle_runner_supports_alpine_doas_and_plink_hostkeys():
 def test_lifecycle_runner_covers_ca_vcf_backups_wan_noise_and_console_summary():
     script = Path("scripts/interop/lifecycle_test.py").read_text(encoding="utf-8")
 
+    assert "direct_dns_a_query_command" in script
+    assert "base64 -d | python3 -" in script
+    assert '"dnsmasq": "test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && getent hosts interop-appliance.labfoundry.internal"' not in script
     assert "--vcf-backup-password" in script
     assert "--client-ca-request-interface" in script
     assert "configure_management_https" in script
@@ -393,8 +398,8 @@ def test_lifecycle_runner_covers_ca_vcf_backups_wan_noise_and_console_summary():
     assert "kms_tls" in script
     assert "apply-kms-unit" in script
     assert "Appliance apply task failed" in script
-    assert "/etc/labfoundry/kms/clients/vcf-management.crt" in script
-    assert "/etc/labfoundry/kms/clients/certs/vcf-management.crt" not in script
+    assert "/etc/labfoundry/kms/clients/certs/vcf-management.crt" in script
+    assert "/etc/labfoundry/kms/clients/vcf-management.crt" not in script
     assert "missing $path" in script
     assert "stderr:" in script
     assert "stdout:" in script
@@ -420,7 +425,7 @@ def test_lifecycle_runner_covers_ca_vcf_backups_wan_noise_and_console_summary():
     assert "-o /dev/null -w '%{http_code}'" in script
     assert "apply-connectivity-units" in script
     assert "apply-ca-unit" in script
-    assert "tc qdisc show dev {args.wan_interface} | grep -E 'netem.*delay 25ms'" in script
+    assert "tc qdisc show dev {args.wan_interface} | grep netem | grep delay | grep 25ms" in script
     assert "Lifecycle summary" in script
     assert "Result JSON:" in script
 
