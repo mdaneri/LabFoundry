@@ -117,6 +117,7 @@
           <thead>
             <tr>
               <th>Name</th>
+              <th>Start</th>
               <th>Type</th>
               <th>SKU</th>
               <th>VCF version</th>
@@ -125,7 +126,6 @@
               <th>Component</th>
               <th>Disabled ESX platforms</th>
               <th>Enabled</th>
-              <th>Start</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -133,6 +133,12 @@
             {% for profile in vcf_depot_profiles %}
               <tr>
                 <td>{{ profile.name }}</td>
+                <td>
+                  <form action="/vcf-offline-depot/profiles/{{ profile.id }}/download" method="post">
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button class="button tiny secondary" type="submit" {{ "disabled" if not profile.enabled else "" }}>Start</button>
+                  </form>
+                </td>
                 <td>{{ profile.profile_type }}</td>
                 <td>{{ profile.sku }}</td>
                 <td>{{ profile.vcf_version }}</td>
@@ -141,12 +147,6 @@
                 <td>{{ profile.component or "all components" }}</td>
                 <td>{{ profile.disabled_platforms.replace("\n", ", ") if profile.disabled_platforms else "none" }}</td>
                 <td>{{ "yes" if profile.enabled else "no" }}</td>
-                <td>
-                  <form action="/vcf-offline-depot/profiles/{{ profile.id }}/download" method="post">
-                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
-                    <button class="button tiny secondary" type="submit" {{ "disabled" if not profile.enabled else "" }}>Start</button>
-                  </form>
-                </td>
                 <td>
                   <form
                     action="/vcf-offline-depot/profiles/{{ profile.id }}/delete"

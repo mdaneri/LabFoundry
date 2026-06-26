@@ -1993,6 +1993,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert 'action="/vcf-offline-depot/download-token"' in page.text
     assert "/vcf-offline-depot/profiles/" in page.text
     assert "Start" in page.text
+    assert page.text.index("<th>Name</th>") < page.text.index("<th>Start</th>") < page.text.index("<th>Type</th>")
     assert 'href="/logs"' in page.text
     assert "Generate activation ID" in page.text
     assert "Software depot ID" in page.text
@@ -2042,6 +2043,9 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
     assert "initializeVcfDepotTokenPaste" in app_js.text
     assert "startVcfDepotProfileDownload" in app_js.text
+    assert 'label: "Start download"' in app_js.text
+    profiles_table_js = app_js.text.split("function initializeVcfDepotProfilesTable", 1)[1]
+    assert profiles_table_js.index('title: "Name"') < profiles_table_js.index('title: "Start"') < profiles_table_js.index('title: "Type"')
 
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200

@@ -5329,6 +5329,14 @@ function initializeVcfDepotProfilesTable() {
       reactiveData: false,
       rowContextMenu: [
         {
+          label: "Start download",
+          action: (_event, row) => startVcfDepotProfileDownload(row, csrf),
+          disabled: (component) => {
+            const data = component.getData();
+            return data.is_new || !data.enabled;
+          },
+        },
+        {
           label: "Delete profile",
           action: (_event, row) => deleteVcfDepotProfileFromMenu(row, csrf),
         },
@@ -5341,6 +5349,19 @@ function initializeVcfDepotProfilesTable() {
           formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add profile here"),
           minWidth: 180,
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Start",
+          field: "start",
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            const disabled = data.is_new || !data.enabled ? " disabled" : "";
+            return `<button class="button tiny secondary" type="button" data-vcf-depot-start-download${disabled}>Start</button>`;
+          },
+          width: 90,
+          hozAlign: "center",
+          headerSort: false,
+          cellClick: (_event, cell) => startVcfDepotProfileDownload(cell.getRow(), csrf),
         },
         {
           title: "Type",
@@ -5452,19 +5473,6 @@ function initializeVcfDepotProfilesTable() {
           editorParams: { values: { planned: "planned", ready: "ready", synced: "synced", blocked: "blocked" } },
           width: 110,
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
-        },
-        {
-          title: "Start",
-          field: "start",
-          formatter: (cell) => {
-            const data = cell.getRow().getData();
-            const disabled = data.is_new || !data.enabled ? " disabled" : "";
-            return `<button class="button tiny secondary" type="button" data-vcf-depot-start-download${disabled}>Start</button>`;
-          },
-          width: 90,
-          hozAlign: "center",
-          headerSort: false,
-          cellClick: (_event, cell) => startVcfDepotProfileDownload(cell.getRow(), csrf),
         },
       ],
       rowFormatter: (row) => {
