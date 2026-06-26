@@ -1588,8 +1588,14 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
 def format_step_summary(step: dict[str, Any]) -> str:
     status = str(step.get("status", "unknown")).upper()
     name = str(step.get("name", "unknown"))
+    status_token = f"[{status}]"
+    if getattr(sys.stdout, "isatty", lambda: False)():
+        if status == "PASSED":
+            status_token = f"\x1b[32m{status_token}\x1b[0m"
+        elif status == "FAILED":
+            status_token = f"\x1b[31m{status_token}\x1b[0m"
     if step.get("error"):
-        return f"[{status}] {name}: {step['error']}"
+        return f"{status_token} {name}: {step['error']}"
     evidence = step.get("evidence") or {}
     detail = ""
     if name == "configure-ca":
@@ -1627,7 +1633,7 @@ def format_step_summary(step: dict[str, Any]) -> str:
         loss_policy = evidence.get("loss_policy") or {}
         restored_policy = (evidence.get("restore") or {}).get("restored_policy") or {}
         detail = f"{loss_policy.get('packet_loss_percent', 100)}% loss blocked ping; restored to {restored_policy.get('packet_loss_percent', 0)}%"
-    return f"[{status}] {name}{': ' + detail if detail else ''}"
+    return f"{status_token} {name}{': ' + detail if detail else ''}"
 
 
 def print_human_summary(result: dict[str, Any], result_path: Path) -> None:

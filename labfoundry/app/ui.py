@@ -1684,7 +1684,7 @@ def ca_context(db: Session) -> dict:
         .all()
     )
     config_preview = render_ca_config(settings=settings, profiles=profiles, certificates=certificates)
-    apply_payload = render_ca_apply_payload(settings, certificates, include_private_keys=True)
+    apply_payload = render_ca_apply_payload(settings, certificates, include_private_keys=False)
     validation_errors = [*state_errors, *validate_ca_state(settings=settings, profiles=profiles, certificates=certificates)]
     selected_interfaces = split_interfaces(settings.listen_interface)
     invalid_interfaces = [interface for interface in selected_interfaces if interface not in available_names]

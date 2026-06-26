@@ -3703,6 +3703,25 @@ def test_ca_apply_task_captures_current_desired_state(client):
         assert "LabFoundry Internal Root CA" in (job.result or "")
 
 
+def test_appliance_apply_status_redacts_undecryptable_ca_private_key(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings
+
+    with SessionLocal() as db:
+        settings = db.execute(select(CaSettings)).scalar_one()
+        settings.root_private_key_encrypted = "not-a-valid-fernet-token"
+        db.commit()
+
+    login(client)
+    response = client.get("/dns")
+
+    assert response.status_code == 200
+    assert "DNS Settings" in response.text
+    assert "not-a-valid-fernet-token" not in response.text
+
+
 def test_dns_settings_accept_multiple_listen_interfaces(client):
     login(client)
     page = client.get("/dns")
