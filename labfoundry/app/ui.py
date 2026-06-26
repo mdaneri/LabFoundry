@@ -2,9 +2,10 @@ import difflib
 import hashlib
 import json
 import re
+import shlex
 import shutil
 import socket
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
 from secrets import token_urlsafe
@@ -260,6 +261,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
     VCF_DEPOT_STAGED_CONFIG_PATH,
+    VCF_DEPOT_STAGED_TOOL_DIR,
     VCF_DEPOT_TELEMETRY_CHOICES,
     VCF_DEPOT_TOKEN_NAME_KEY,
     VCF_DEPOT_TOKEN_VALUE_KEY,
@@ -275,12 +277,16 @@ from labfoundry.app.services.vcf_offline_depot import (
     vcf_depot_endpoint,
     vcf_depot_profile_to_dict,
     vcf_depot_settings_to_dict,
+    vcfdt_commands_for_profile,
 )
 from labfoundry.app.token_service import create_token_for_user
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 TEMPLATES_DIR = APP_DIR / "templates"
+VCF_DEPOT_VDT_LOG_PATH = Path("/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log")
+LABFOUNDRY_APP_LOG_PATH = Path("/var/log/labfoundry/labfoundry.log")
+KMS_SERVER_LOG_PATH = Path("/var/log/labfoundry/kms/server.log")
 NETWORK_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/network/labfoundry-network.conf"
 DNSMASQ_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf"
 
@@ -1058,6 +1064,33 @@ def store_uploaded_vcf_depot_secret(
     return Path(upload.filename).name
 
 
+def store_pasted_vcf_depot_secret(
+    db: Session,
+    value: str,
+    *,
+    name_key: str,
+    value_key: str,
+    display_name: str,
+    actor: str,
+    action: str,
+) -> str:
+    if len(value.encode("utf-8")) > 128 * 1024:
+        raise HTTPException(status_code=400, detail="VCFDT credential text must be 128 KB or smaller.")
+    if not value.strip():
+        raise HTTPException(status_code=400, detail="VCFDT credential text cannot be empty.")
+    name_setting = set_setting_value(db, name_key, display_name)
+    set_setting_value(db, value_key, value)
+    record_audit(
+        db,
+        actor=actor,
+        action=action,
+        resource_type="setting",
+        resource_id=str(name_setting.id),
+        detail=display_name,
+    )
+    return display_name
+
+
 def store_uploaded_vcf_depot_archive(settings: VcfOfflineDepotSettings, archive_file: UploadFile | None) -> str | None:
     if archive_file is None or not archive_file.filename:
         return None
@@ -1112,6 +1145,39 @@ def vcf_depot_secret_context(db: Session) -> dict[str, object]:
         "download_token_present": token_state.present,
         "activation_code_present": activation_state.present,
     }
+
+
+def vcf_depot_download_job_rows(db: Session) -> list[dict[str, str]]:
+    jobs = (
+        db.execute(
+            select(Job)
+            .where(Job.type == "vcf-depot-download")
+            .order_by(desc(Job.created_at))
+            .limit(5)
+        )
+        .scalars()
+        .all()
+    )
+    rows: list[dict[str, str]] = []
+    for job in jobs:
+        profile_name = ""
+        dry_run = False
+        try:
+            result = json.loads(job.result or "{}")
+            profile_name = str(result.get("profile_name") or "")
+            dry_run = bool(result.get("dry_run"))
+        except json.JSONDecodeError:
+            pass
+        rows.append(
+            {
+                "id": job.id,
+                "status": job.status,
+                "profile_name": profile_name,
+                "created_at": job.created_at.isoformat() if job.created_at else "",
+                "dry_run": "yes" if dry_run else "no",
+            }
+        )
+    return rows
 
 
 def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
@@ -1201,6 +1267,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         "vcf_depot_https_cert_path": depot_cert_path,
         "vcf_depot_https_key_path": depot_key_path,
         "vcf_depot_command_preview": command_preview,
+        "vcf_depot_download_jobs": vcf_depot_download_job_rows(db),
         "vcf_depot_validation_errors": validation_errors,
         "vcf_depot_validation_warnings": validation_warnings,
         "vcf_depot_download_token": secrets["download_token"],
@@ -1221,6 +1288,36 @@ def vcf_offline_depot_context(db: Session) -> dict:
         ],
         "vcf_depot_telemetry_choices": sorted(VCF_DEPOT_TELEMETRY_CHOICES),
         "vcf_depot_archive_pattern": VCF_DEPOT_ARCHIVE_PATTERN,
+    }
+
+
+def vcf_depot_secret_snapshot(context: dict[str, Any]) -> str:
+    token_state = context["vcf_depot_download_token"]
+    activation_state = context["vcf_depot_activation_code"]
+    return "\n".join(
+        [
+            "# VCFDT input file status",
+            "# Contents are not rendered here.",
+            f"# Download input file: {'staged' if token_state.present else 'not staged'}",
+            f"# Download input updated: {token_state.updated_at or 'never'}",
+            f"# ESX input file: {'staged' if activation_state.present else 'not staged'}",
+            f"# ESX input updated: {activation_state.updated_at or 'never'}",
+        ]
+    )
+
+
+def vcf_depot_command_entry(command: list[str], *, dry_run: bool) -> dict[str, Any]:
+    resolved = [
+        f"{VCF_DEPOT_STAGED_TOOL_DIR}/vcf-download-tool" if value == "vcf-download-tool" else value
+        for value in command
+    ]
+    return {
+        "command": resolved,
+        "command_line": " ".join(shlex.quote(value) for value in resolved),
+        "dry_run": dry_run,
+        "stdout": "dry-run: VCFDT download command recorded" if dry_run else "",
+        "stderr": "",
+        "returncode": 0,
     }
 
 
@@ -2614,7 +2711,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             validation_errors=vcf_depot["vcf_depot_validation_errors"],
             validation_warnings=vcf_depot["vcf_depot_validation_warnings"],
             config_path=vcf_depot["vcf_depot_settings"].config_path,
-            config_preview=f"{vcf_depot['vcf_depot_https_config_preview']}\n\n# VCFDT command preview\n{vcf_depot['vcf_depot_command_preview']}",
+            config_preview=f"{vcf_depot['vcf_depot_https_config_preview']}\n\n{vcf_depot_secret_snapshot(vcf_depot)}\n\n# VCFDT command preview\n{vcf_depot['vcf_depot_command_preview']}",
             baseline=baselines.get("vcf_offline_depot"),
         ),
         make_appliance_apply_unit(
@@ -2680,6 +2777,52 @@ def apply_output_excerpt(value: str, *, limit: int = 2400) -> str:
     if len(redacted) <= limit:
         return redacted
     return f"{redacted[:limit].rstrip()}\n... output truncated ..."
+
+
+def tail_fixed_log_file(path: Path, *, max_bytes: int = 64 * 1024, max_lines: int = 240) -> dict[str, Any]:
+    try:
+        if not path.exists():
+            return {"path": str(path), "available": False, "lines": [], "size_bytes": 0, "updated_at": "", "error": ""}
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > max_bytes:
+                handle.seek(size - max_bytes)
+            raw = handle.read(max_bytes)
+    except OSError as exc:
+        return {"path": str(path), "available": False, "lines": [], "size_bytes": 0, "updated_at": "", "error": str(exc)}
+    text = raw.decode("utf-8", errors="replace")
+    lines = redact_config_preview(text).splitlines()[-max_lines:]
+    updated_at = utcnow()
+    try:
+        updated_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        pass
+    return {
+        "path": str(path),
+        "available": True,
+        "lines": lines,
+        "size_bytes": size,
+        "updated_at": updated_at.isoformat(),
+        "truncated": size > max_bytes,
+    }
+
+
+def logs_context() -> dict[str, Any]:
+    sources = [
+        ("vcfdt", "VCFDT", VCF_DEPOT_VDT_LOG_PATH),
+        ("app", "LabFoundry", LABFOUNDRY_APP_LOG_PATH),
+        ("kms", "KMS", KMS_SERVER_LOG_PATH),
+    ]
+    return {
+        "log_sources": [
+            {
+                "id": source_id,
+                "label": label,
+                **tail_fixed_log_file(path),
+            }
+            for source_id, label, path in sources
+        ]
+    }
 
 
 def appliance_apply_failure_summaries(unit_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -5655,6 +5798,47 @@ def update_vcf_offline_depot_settings_from_ui(
     return RedirectResponse("/vcf-offline-depot", status_code=303)
 
 
+@router.post("/vcf-offline-depot/download-token", response_model=None)
+def paste_vcf_depot_download_token_from_ui(
+    request: Request,
+    download_token_text: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    display_name = store_pasted_vcf_depot_secret(
+        db,
+        download_token_text,
+        name_key=VCF_DEPOT_TOKEN_NAME_KEY,
+        value_key=VCF_DEPOT_TOKEN_VALUE_KEY,
+        display_name="pasted token",
+        actor=identity.username,
+        action="paste_vcf_depot_download_token",
+    )
+    db.commit()
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = vcf_offline_depot_context(db)
+        token_state = context["vcf_depot_download_token"]
+        validation_errors = context["vcf_depot_validation_errors"]
+        validation_warnings = context["vcf_depot_validation_warnings"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "download_token_present": token_state.present,
+                "download_token_name": display_name,
+                "download_token_updated_at": token_state.updated_at,
+                "valid": not validation_errors,
+                "validation_errors": validation_errors,
+                "validation_warnings": validation_warnings,
+                "config_path": context["vcf_depot_settings"].config_path,
+                "https_config_preview": context["vcf_depot_https_config_preview"],
+                "command_preview": context["vcf_depot_command_preview"],
+            }
+        )
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
 @router.post("/vcf-offline-depot/software-depot-id/generate", response_model=None)
 def generate_vcf_depot_software_depot_id_from_ui(
     request: Request,
@@ -5785,6 +5969,83 @@ def edit_vcf_depot_profile_from_ui(
         db.rollback()
         raise HTTPException(status_code=400, detail="A VCFDT download profile with this name already exists.") from exc
     record_audit(db, actor=identity.username, action="update_vcf_depot_profile", resource_type="vcf_depot_profile", resource_id=str(profile.id))
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+@router.post("/vcf-offline-depot/profiles/{profile_id}/download", response_model=None)
+def start_vcf_depot_profile_download_from_ui(
+    request: Request,
+    profile_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    settings = get_vcf_offline_depot_settings_row(db)
+    profile = db.get(VcfDepotDownloadProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="VCFDT download profile not found.")
+    if not profile.enabled:
+        raise HTTPException(status_code=400, detail="Enable the VCFDT download profile before starting a download.")
+    secrets = vcf_depot_secret_context(db)
+    validation_errors, validation_warnings = validate_vcf_depot_state(
+        settings,
+        [profile],
+        {interface["name"] for interface in service_bind_options(db)},
+        bool(secrets["download_token_present"]),
+        bool(secrets["activation_code_present"]),
+    )
+    if validation_errors:
+        raise HTTPException(status_code=400, detail=" ".join(validation_errors))
+    dry_run = get_settings().dry_run_system_adapters
+    commands = [vcf_depot_command_entry(command, dry_run=dry_run) for command in vcfdt_commands_for_profile(settings, profile)]
+    if not commands:
+        raise HTTPException(status_code=400, detail="The VCFDT download profile did not produce any commands.")
+    now = utcnow()
+    job_result = {
+        "profile_id": profile.id,
+        "profile_name": profile.name,
+        "profile_type": profile.profile_type,
+        "dry_run": dry_run,
+        "commands": commands,
+        "validation_warnings": validation_warnings,
+    }
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="vcf-depot-download",
+        status=JobStatus.SUCCEEDED.value,
+        created_by=identity.username,
+        started_at=now,
+        finished_at=now,
+        progress_percent=100,
+        result=json.dumps(job_result, indent=2),
+    )
+    profile.status = "ready" if dry_run else "synced"
+    profile.updated_at = now
+    db.add(job)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="start_vcf_depot_profile_download",
+        resource_type="job",
+        resource_id=job.id,
+        detail=f"profile={profile.name}; dry_run={dry_run}",
+    )
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        return JSONResponse(
+            {
+                "status": "started",
+                "job_id": job.id,
+                "job_status": job.status,
+                "profile_id": profile.id,
+                "profile_name": profile.name,
+                "profile_status": profile.status,
+                "dry_run": dry_run,
+                "commands": commands,
+                "validation_warnings": validation_warnings,
+            }
+        )
     return RedirectResponse("/vcf-offline-depot", status_code=303)
 
 
@@ -6487,6 +6748,21 @@ def services(
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     return render(request, "services.html", {"identity": identity, **services_template_context(db)})
+
+
+@router.get("/logs", response_class=HTMLResponse, response_model=None)
+def logs_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+) -> HTMLResponse:
+    return render(
+        request,
+        "logs.html",
+        {
+            "identity": identity,
+            **logs_context(),
+        },
+    )
 
 
 @router.get("/audit-log", response_class=HTMLResponse, response_model=None)

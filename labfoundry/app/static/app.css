@@ -1372,6 +1372,13 @@ textarea {
   gap: 12px;
 }
 
+.inline-action-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .form-field {
   display: grid;
   gap: 6px;

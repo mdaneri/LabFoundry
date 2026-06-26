@@ -5264,6 +5264,35 @@ async function deleteVcfDepotProfileFromMenu(row, csrf) {
   }
 }
 
+async function startVcfDepotProfileDownload(row, csrf) {
+  const data = row.getData();
+  if (data.is_new) {
+    return;
+  }
+  if (!data.enabled) {
+    showVcfDepotMessage("Enable the VCFDT download profile before starting a download.");
+    return;
+  }
+  try {
+    const body = new FormData();
+    body.set("csrf", csrf);
+    const response = await fetch(`/vcf-offline-depot/profiles/${data.id}/download`, {
+      method: "POST",
+      body,
+      credentials: "same-origin",
+      headers: { "X-LabFoundry-Autosave": "1" },
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || "The VCFDT download job could not be started.");
+    }
+    row.update({ status: payload.profile_status || data.status });
+    showVcfDepotMessage(`Download job ${payload.job_id} ${payload.dry_run ? "recorded" : "started"} for ${payload.profile_name}.`, "success");
+  } catch (error) {
+    showVcfDepotMessage(error instanceof Error ? error.message : "The VCFDT download job could not be started.");
+  }
+}
+
 function initializeVcfDepotProfilesTable() {
   const tableElement = document.getElementById("vcf-depot-profiles-table");
   if (!(tableElement instanceof HTMLElement)) {
@@ -5423,6 +5452,19 @@ function initializeVcfDepotProfilesTable() {
           editorParams: { values: { planned: "planned", ready: "ready", synced: "synced", blocked: "blocked" } },
           width: 110,
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Start",
+          field: "start",
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            const disabled = data.is_new || !data.enabled ? " disabled" : "";
+            return `<button class="button tiny secondary" type="button" data-vcf-depot-start-download${disabled}>Start</button>`;
+          },
+          width: 90,
+          hozAlign: "center",
+          headerSort: false,
+          cellClick: (_event, cell) => startVcfDepotProfileDownload(cell.getRow(), csrf),
         },
       ],
       rowFormatter: (row) => {
@@ -5709,6 +5751,65 @@ function initializeVcfDepotSoftwareDepotIdGenerator() {
         if (message instanceof HTMLElement) {
           message.textContent = error instanceof Error ? error.message : "Activation ID generation failed.";
           message.classList.add("error-text");
+        }
+      } finally {
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = false;
+        }
+      }
+    });
+  });
+}
+
+function initializeVcfDepotTokenPaste() {
+  document.querySelectorAll("[data-vcf-depot-token-paste]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const button = form.querySelector("button[type='submit']");
+    const textarea = form.querySelector('textarea[name="download_token_text"]');
+    const status = form.querySelector("[data-vcf-depot-token-paste-status]");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!(textarea instanceof HTMLTextAreaElement) || !textarea.value.trim()) {
+        if (status instanceof HTMLElement) {
+          status.textContent = "Paste the token text before staging the file.";
+          status.classList.add("error-text");
+        }
+        return;
+      }
+      if (button instanceof HTMLButtonElement) {
+        button.disabled = true;
+      }
+      if (status instanceof HTMLElement) {
+        status.textContent = "Staging token file...";
+        status.classList.remove("error-text");
+      }
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: new FormData(form),
+          credentials: "same-origin",
+          headers: { "X-LabFoundry-Autosave": "1" },
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || "Download token could not be staged.");
+        }
+        const settingsForm = document.querySelector("[data-vcf-depot-settings]");
+        if (settingsForm instanceof HTMLFormElement) {
+          updateVcfDepotSummary(settingsForm, payload);
+        }
+        updateVcfDepotValidation(payload);
+        textarea.value = "";
+        if (status instanceof HTMLElement) {
+          status.textContent = "Token file staged. Contents are hidden.";
+          status.classList.remove("error-text");
+        }
+      } catch (error) {
+        if (status instanceof HTMLElement) {
+          status.textContent = error instanceof Error ? error.message : "Download token could not be staged.";
+          status.classList.add("error-text");
         }
       } finally {
         if (button instanceof HTMLButtonElement) {
@@ -6131,6 +6232,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSoftwareDepotIdGenerator);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotTokenPaste);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);
