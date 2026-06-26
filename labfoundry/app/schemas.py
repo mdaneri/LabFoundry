@@ -154,6 +154,9 @@ class VcfOfflineDepotStatusResponse(BaseModel):
     depot_store_path: str
     tool_archive_name: str
     tool_version: str
+    software_depot_id: str
+    software_depot_id_generated_at: str
+    software_depot_id_error: str
     download_token_present: bool
     activation_code_present: bool
     profile_count: int

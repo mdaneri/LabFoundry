@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
+import subprocess
 import tarfile
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -18,11 +20,15 @@ VCF_DEPOT_DEFAULT_CONFIG_PATH = "/etc/labfoundry/nginx/sites.d/vcf-offline-depot
 VCF_DEPOT_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/vcf-offline-depot/labfoundry-vcf-offline-depot.conf"
 VCF_DEPOT_STAGED_TOOL_DIR = "/opt/labfoundry/vcf-download-tool"
 VCF_DEPOT_UPLOAD_DIR = Path("vcfDownloadTool")
+VCF_DEPOT_EXTRACT_DIR = VCF_DEPOT_UPLOAD_DIR / "active-tool"
 VCF_DEPOT_ARCHIVE_PATTERN = "vcf-download-tool-*.tar.gz"
 VCF_DEPOT_TOKEN_NAME_KEY = "vcf_depot_download_token_name"
 VCF_DEPOT_TOKEN_VALUE_KEY = "vcf_depot_download_token_value"
 VCF_DEPOT_ACTIVATION_NAME_KEY = "vcf_depot_activation_code_name"
 VCF_DEPOT_ACTIVATION_VALUE_KEY = "vcf_depot_activation_code_value"
+VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY = "vcf_depot_software_depot_id"
+VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY = "vcf_depot_software_depot_id_generated_at"
+VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY = "vcf_depot_software_depot_id_error"
 VCF_DEPOT_STAGED_TOKEN_FILE = "/etc/labfoundry/vcf-offline-depot/secrets/download-token.txt"
 VCF_DEPOT_STAGED_ACTIVATION_FILE = "/etc/labfoundry/vcf-offline-depot/secrets/activation-code.txt"
 VCF_DEPOT_STATUS_VALUES = {"planned", "ready", "synced", "blocked"}
@@ -91,6 +97,14 @@ class SecretState:
     updated_at: str = ""
 
 
+@dataclass(frozen=True)
+class SoftwareDepotIdResult:
+    success: bool
+    software_depot_id: str
+    command: list[str]
+    error: str = ""
+
+
 def find_local_vcf_download_tool_archive(upload_dir: Path = VCF_DEPOT_UPLOAD_DIR) -> Path | None:
     if not upload_dir.exists():
         return None
@@ -117,6 +131,83 @@ def safe_archive_upload_name(filename: str) -> str:
     if not re.fullmatch(r"vcf-download-tool-[A-Za-z0-9._-]+\.tar\.gz", name):
         raise ValueError("Upload the VCF Download Tool file named vcf-download-tool-*.tar.gz.")
     return name
+
+
+def _safe_extract_tar_gz(archive_path: Path, destination: Path) -> None:
+    destination_resolved = destination.resolve()
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            target = (destination / member.name).resolve()
+            if target != destination_resolved and destination_resolved not in target.parents:
+                raise ValueError("VCF Download Tool archive contains an unsafe path.")
+        archive.extractall(destination)
+
+
+def _find_vcf_download_tool_binary(extraction_dir: Path) -> Path:
+    candidates = [
+        extraction_dir / "vcf-download-tool",
+        extraction_dir / "bin" / "vcf-download-tool",
+    ]
+    candidates.extend(path for path in extraction_dir.rglob("vcf-download-tool") if path.is_file())
+    for candidate in candidates:
+        if candidate.is_file():
+            candidate.chmod(candidate.stat().st_mode | 0o111)
+            return candidate
+    raise FileNotFoundError("The uploaded VCF Download Tool archive does not contain a vcf-download-tool executable.")
+
+
+def parse_software_depot_id(output: str) -> str:
+    uuid_match = re.search(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", output)
+    if uuid_match:
+        return uuid_match.group(0)
+    for line in output.splitlines():
+        if "vcf-download-tool" in line:
+            continue
+        if "software" not in line.lower() or "depot" not in line.lower() or "id" not in line.lower():
+            continue
+        match = re.search(r"([A-Za-z0-9][A-Za-z0-9._:-]{7,})\s*$", line.strip())
+        if match:
+            return match.group(1)
+    for line in output.splitlines():
+        stripped = line.strip()
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,}", stripped) and "vcf-download-tool" not in stripped:
+            return stripped
+    return ""
+
+
+def generate_vcf_software_depot_id(
+    archive_path: str | Path,
+    *,
+    extraction_dir: Path = VCF_DEPOT_EXTRACT_DIR,
+    timeout_seconds: int = 90,
+) -> SoftwareDepotIdResult:
+    archive = Path(archive_path)
+    command = ["vcf-download-tool", "configuration", "generate", "--software-depot-id"]
+    if not archive.is_file():
+        return SoftwareDepotIdResult(False, "", command, f"VCF Download Tool archive does not exist: {archive}")
+    try:
+        _safe_extract_tar_gz(archive, extraction_dir)
+        tool = _find_vcf_download_tool_binary(extraction_dir)
+        completed = subprocess.run(
+            [str(tool), "configuration", "generate", "--software-depot-id"],
+            cwd=str(tool.parent),
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except (OSError, tarfile.TarError, ValueError, subprocess.SubprocessError) as exc:
+        return SoftwareDepotIdResult(False, "", command, str(exc))
+    output = "\n".join(part for part in [completed.stdout, completed.stderr] if part)
+    software_depot_id = parse_software_depot_id(output)
+    if completed.returncode != 0:
+        return SoftwareDepotIdResult(False, software_depot_id, command, f"VCFDT exited with code {completed.returncode}.")
+    if not software_depot_id:
+        return SoftwareDepotIdResult(False, "", command, "VCFDT did not print a software depot ID.")
+    return SoftwareDepotIdResult(True, software_depot_id, command)
 
 
 def vcf_depot_endpoint(settings: VcfOfflineDepotSettings) -> str:

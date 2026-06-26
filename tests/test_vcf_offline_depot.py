@@ -2,6 +2,7 @@ from labfoundry.app.models import VcfDepotDownloadProfile, VcfOfflineDepotSettin
 from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_COMPONENTS,
     VCF_DEPOT_ESX_DISABLED_PLATFORMS,
+    parse_software_depot_id,
     render_nginx_depot_config,
     render_vcfdt_command_preview,
     validate_vcf_depot_state,
@@ -162,6 +163,12 @@ def test_vcf_depot_validation_allows_https_only_without_vcfdt_upload():
 
     assert errors == []
     assert warnings == []
+
+
+def test_vcf_depot_parses_generated_software_depot_id():
+    assert parse_software_depot_id("Software Depot ID: 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n") == "8c9506c6-7bdf-44d5-b2e9-50d829d66b99"
+    assert parse_software_depot_id("Use activation code for software depot id LF-DEPOT-9-1-001\n") == "LF-DEPOT-9-1-001"
+    assert parse_software_depot_id("vcf-download-tool configuration generate --software-depot-id\n") == ""
 
 
 def test_vcf_depot_command_preview_uses_staged_secret_paths():

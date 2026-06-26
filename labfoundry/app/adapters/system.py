@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 import subprocess
 
 from labfoundry.app.config import get_settings
@@ -132,13 +133,8 @@ class SystemAdapter:
         return self._helper_result("vcf-offline-depot", "validate", config_path, dry_run_message="dry-run: VCF Offline Depot validation command recorded")
 
     def stage_vcf_offline_depot_tool(self, archive_path: str) -> AdapterResult:
-        if not self.dry_run and not archive_path.startswith("/"):
-            return AdapterResult(
-                command=["labfoundry-helper", "vcf-offline-depot", "stage-tool", archive_path],
-                dry_run=False,
-                stdout="VCF Download Tool archive staging is recorded; uploaded relative archive path is managed by the LabFoundry control plane.",
-            )
-        return self._helper_result("vcf-offline-depot", "stage-tool", archive_path, dry_run_message="dry-run: VCF Download Tool staging command recorded")
+        helper_archive_path = str(Path(archive_path).resolve()) if not archive_path.startswith("/") else archive_path
+        return self._helper_result("vcf-offline-depot", "stage-tool", helper_archive_path, dry_run_message="dry-run: VCF Download Tool extraction command recorded")
 
     def sync_vcf_offline_depot(self, config_path: str) -> AdapterResult:
         return self._helper_result("vcf-offline-depot", "sync", config_path, dry_run_message="dry-run: VCF Offline Depot sync command recorded")

@@ -5454,6 +5454,7 @@ function updateVcfDepotSummary(form, payload = {}) {
   const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
   const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
   const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
+  const softwareDepotGenerateButton = document.querySelector("[data-vcf-depot-generate-id] button[type='submit']");
   if (endpoint instanceof HTMLElement) {
     endpoint.textContent = endpointValue || "depot hostname required";
   }
@@ -5478,6 +5479,9 @@ function updateVcfDepotSummary(form, payload = {}) {
         toolStatus.textContent = payload.tool_archive_name ? "tool staged" : "upload required";
       }
     });
+    if (softwareDepotGenerateButton instanceof HTMLButtonElement) {
+      softwareDepotGenerateButton.disabled = !payload.tool_archive_name;
+    }
   }
   if (payload.tool_version !== undefined) {
     toolVersions.forEach((toolVersion) => {
@@ -5492,6 +5496,7 @@ function updateVcfDepotSummary(form, payload = {}) {
   if (activationStatus instanceof HTMLElement && payload.activation_code_present !== undefined) {
     activationStatus.textContent = payload.activation_code_present ? payload.activation_code_name || "uploaded" : "not uploaded";
   }
+  updateVcfDepotSoftwareDepotId(payload);
   if (dnsStatus instanceof HTMLElement && payload.dns_record_action !== undefined) {
     const dnsMessages = {
       created: "DNS record created for this endpoint.",
@@ -5513,6 +5518,26 @@ function updateVcfDepotSummary(form, payload = {}) {
     server_certificate: payload.server_certificate || certificateInput?.value || hostname,
   };
   updateVcfDepotHttpsPreview(livePreviewPayload);
+}
+
+function updateVcfDepotSoftwareDepotId(payload = {}) {
+  const softwareDepotId = document.querySelector("[data-vcf-depot-software-depot-id]");
+  const softwareDepotMessage = document.querySelector("[data-vcf-depot-software-depot-message]");
+  if (softwareDepotId instanceof HTMLElement && payload.software_depot_id !== undefined) {
+    softwareDepotId.textContent = payload.software_depot_id || "not generated";
+  }
+  if (softwareDepotMessage instanceof HTMLElement && (payload.software_depot_id_error !== undefined || payload.software_depot_id_generated_at !== undefined)) {
+    if (payload.software_depot_id_error) {
+      softwareDepotMessage.textContent = payload.software_depot_id_error;
+      softwareDepotMessage.classList.add("error-text");
+    } else if (payload.software_depot_id_generated_at) {
+      softwareDepotMessage.textContent = `Generated ${new Date(payload.software_depot_id_generated_at).toLocaleString()}.`;
+      softwareDepotMessage.classList.remove("error-text");
+    } else {
+      softwareDepotMessage.textContent = "Upload VCFDT to generate the Broadcom activation ID.";
+      softwareDepotMessage.classList.remove("error-text");
+    }
+  }
 }
 
 function updateVcfDepotHttpsPreview(payload = {}) {
@@ -5649,6 +5674,48 @@ function initializeVcfDepotSettings() {
       updateVcfDepotValidation(payload);
     });
     refresh();
+  });
+}
+
+function initializeVcfDepotSoftwareDepotIdGenerator() {
+  document.querySelectorAll("[data-vcf-depot-generate-id]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const button = form.querySelector("button[type='submit']");
+    const message = form.querySelector("[data-vcf-depot-software-depot-message]");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (button instanceof HTMLButtonElement) {
+        button.disabled = true;
+      }
+      if (message instanceof HTMLElement) {
+        message.textContent = "Generating activation ID...";
+        message.classList.remove("error-text");
+      }
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: new FormData(form),
+          credentials: "same-origin",
+          headers: { "X-LabFoundry-Autosave": "1" },
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.software_depot_id_error || "Activation ID generation failed.");
+        }
+        updateVcfDepotSoftwareDepotId(payload);
+      } catch (error) {
+        if (message instanceof HTMLElement) {
+          message.textContent = error instanceof Error ? error.message : "Activation ID generation failed.";
+          message.classList.add("error-text");
+        }
+      } finally {
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = false;
+        }
+      }
+    });
   });
 }
 
@@ -6063,6 +6130,7 @@ document.addEventListener("DOMContentLoaded", initializeDnsSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotSoftwareDepotIdGenerator);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);

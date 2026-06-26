@@ -256,6 +256,9 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_LEGACY_STORE_PATH,
     VCF_DEPOT_PROFILE_TYPES,
     VCF_DEPOT_SKUS,
+    VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
+    VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
+    VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
     VCF_DEPOT_STAGED_CONFIG_PATH,
     VCF_DEPOT_TELEMETRY_CHOICES,
     VCF_DEPOT_TOKEN_NAME_KEY,
@@ -263,6 +266,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_UPLOAD_DIR,
     detect_vcf_download_tool_version,
     find_local_vcf_download_tool_archive,
+    generate_vcf_software_depot_id,
     render_nginx_depot_config,
     render_vcfdt_command_preview,
     safe_archive_upload_name,
@@ -1071,6 +1075,30 @@ def store_uploaded_vcf_depot_archive(settings: VcfOfflineDepotSettings, archive_
     return archive_name
 
 
+def vcf_depot_software_depot_id_context(db: Session) -> dict[str, str]:
+    software_id = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY)).scalar_one_or_none()
+    generated_at = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY)).scalar_one_or_none()
+    error = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY)).scalar_one_or_none()
+    return {
+        "id": software_id.value if software_id else "",
+        "generated_at": generated_at.value if generated_at else "",
+        "error": error.value if error else "",
+    }
+
+
+def generate_and_store_vcf_software_depot_id(db: Session, settings: VcfOfflineDepotSettings) -> dict[str, str]:
+    result = generate_vcf_software_depot_id(settings.tool_archive_path)
+    if result.success:
+        generated_at = utcnow().isoformat()
+        set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY, result.software_depot_id)
+        set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY, generated_at)
+        set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY, "")
+        return {"id": result.software_depot_id, "generated_at": generated_at, "error": ""}
+    error = result.error or "VCFDT software depot ID generation failed."
+    set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY, error)
+    return {**vcf_depot_software_depot_id_context(db), "error": error}
+
+
 def vcf_depot_secret_context(db: Session) -> dict[str, object]:
     token_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_NAME_KEY)).scalar_one_or_none()
     token_value = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_VALUE_KEY)).scalar_one_or_none()
@@ -1149,6 +1177,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
     profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
     available_interfaces = service_bind_options(db)
     secrets = vcf_depot_secret_context(db)
+    software_depot_id = vcf_depot_software_depot_id_context(db)
     validation_errors, validation_warnings = validate_vcf_depot_state(
         settings,
         profiles,
@@ -1176,6 +1205,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         "vcf_depot_validation_warnings": validation_warnings,
         "vcf_depot_download_token": secrets["download_token"],
         "vcf_depot_activation_code": secrets["activation_code"],
+        "vcf_depot_software_depot_id": software_depot_id,
         "vcf_depot_download_token_present": secrets["download_token_present"],
         "vcf_depot_activation_code_present": secrets["activation_code_present"],
         "vcf_depot_profile_types": sorted(VCF_DEPOT_PROFILE_TYPES),
@@ -5552,6 +5582,9 @@ def update_vcf_offline_depot_settings_from_ui(
     settings.config_path = VCF_DEPOT_DEFAULT_CONFIG_PATH
     settings.telemetry_choice = telemetry_choice if telemetry_choice in VCF_DEPOT_TELEMETRY_CHOICES else "DISABLE"
     uploaded_archive_name = store_uploaded_vcf_depot_archive(settings, tool_archive_file)
+    software_depot_id_result: dict[str, str] | None = None
+    if uploaded_archive_name:
+        software_depot_id_result = generate_and_store_vcf_software_depot_id(db, settings)
     uploaded_token_name = store_uploaded_vcf_depot_secret(
         db,
         download_token_file,
@@ -5585,6 +5618,8 @@ def update_vcf_offline_depot_settings_from_ui(
         validation_warnings = context["vcf_depot_validation_warnings"]
         token_state = context["vcf_depot_download_token"]
         activation_state = context["vcf_depot_activation_code"]
+        software_depot_id = context["vcf_depot_software_depot_id"]
+        software_depot_id_payload = software_depot_id_result or software_depot_id
         return JSONResponse(
             {
                 "status": "saved",
@@ -5598,6 +5633,9 @@ def update_vcf_offline_depot_settings_from_ui(
                 "depot_store_path": saved_settings.depot_store_path,
                 "tool_archive_name": uploaded_archive_name or Path(saved_settings.tool_archive_path).name if saved_settings.tool_archive_path else "",
                 "tool_version": saved_settings.tool_version,
+                "software_depot_id": software_depot_id_payload["id"],
+                "software_depot_id_generated_at": software_depot_id_payload["generated_at"],
+                "software_depot_id_error": software_depot_id_payload["error"],
                 "download_token_present": token_state.present,
                 "download_token_name": uploaded_token_name or token_state.filename,
                 "download_token_updated_at": token_state.updated_at,
@@ -5613,6 +5651,41 @@ def update_vcf_offline_depot_settings_from_ui(
                 "https_config_preview": context["vcf_depot_https_config_preview"],
                 "command_preview": context["vcf_depot_command_preview"],
             }
+        )
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+@router.post("/vcf-offline-depot/software-depot-id/generate", response_model=None)
+def generate_vcf_depot_software_depot_id_from_ui(
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    settings = get_vcf_offline_depot_settings_row(db)
+    if not settings.tool_archive_path:
+        raise HTTPException(status_code=400, detail="Upload VCFDT before generating the software depot ID.")
+    result = generate_and_store_vcf_software_depot_id(db, settings)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="generate_vcf_depot_software_depot_id",
+        resource_type="vcf_offline_depot",
+        resource_id=str(settings.id),
+        success=not bool(result["error"]),
+        detail="software depot ID generated" if result["id"] and not result["error"] else "software depot ID generation failed",
+    )
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        return JSONResponse(
+            {
+                "status": "generated" if not result["error"] else "error",
+                "software_depot_id": result["id"],
+                "software_depot_id_generated_at": result["generated_at"],
+                "software_depot_id_error": result["error"],
+            },
+            status_code=200 if not result["error"] else 400,
         )
     return RedirectResponse("/vcf-offline-depot", status_code=303)
 

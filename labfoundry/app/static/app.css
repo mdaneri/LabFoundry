@@ -450,6 +450,10 @@ textarea {
   font-size: 12px;
 }
 
+.error-text {
+  color: #b42318;
+}
+
 .icon-button {
   display: inline-grid;
   place-items: center;

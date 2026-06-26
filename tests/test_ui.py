@@ -1943,7 +1943,11 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import DnsRecord, Job, Setting
-    from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_ACTIVATION_VALUE_KEY, VCF_DEPOT_TOKEN_VALUE_KEY
+    from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_ACTIVATION_VALUE_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
+        VCF_DEPOT_TOKEN_VALUE_KEY,
+    )
 
     login(client)
     legacy = client.get("/https-repository", follow_redirects=False)
@@ -1959,6 +1963,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Review appliance changes" in page.text
     assert "VCF Download Tool" in page.text
     assert "Choose VCFDT tool" in page.text
+    assert "Generate activation ID" in page.text
+    assert "Software depot ID" in page.text
     assert "Choose VCFDT archive" not in page.text
     assert "DNS record follows the selected listen address." in page.text
     tool_metric = page.text.split("<span>VCF Download Tool</span>", 1)[1].split("</div>", 1)[0]
@@ -2002,6 +2008,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Old endpoint DNS record removed." in app_js.text
     assert "updateVcfDepotHttpsPreview" in app_js.text
     assert "updateVcfDepotValidation" in app_js.text
+    assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
 
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
@@ -2035,6 +2042,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["endpoint"] == "depot.labfoundry.internal"
     assert payload["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
     assert payload["tool_version"] == "9.1.0.0100.25429019"
+    assert payload["software_depot_id"] == ""
+    assert "vcf-download-tool executable" in payload["software_depot_id_error"]
     assert payload["download_token_present"] is True
     assert payload["activation_code_present"] is True
     assert payload["valid"] is True
@@ -2047,6 +2056,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     with SessionLocal() as db:
         token_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_VALUE_KEY)).scalar_one()
         activation_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_VALUE_KEY)).scalar_one()
+        software_id_error = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY)).scalar_one()
         dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "depot.labfoundry.internal",
@@ -2055,6 +2065,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         ).scalar_one()
         assert token_secret.value == "super-secret-token"
         assert activation_secret.value == "super-secret-activation"
+        assert "vcf-download-tool executable" in software_id_error.value
         assert dns_record.address == "192.168.50.1"
         assert dns_record.enabled is True
 
@@ -2106,6 +2117,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert status.status_code == 200
     assert status.json()["hostname"] == "offline-depot.labfoundry.internal"
     assert status.json()["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
+    assert status.json()["software_depot_id"] == ""
+    assert "vcf-download-tool executable" in status.json()["software_depot_id_error"]
     assert status.json()["download_token_present"] is True
     assert status.json()["activation_code_present"] is True
     assert "super-secret" not in status.text
@@ -2125,6 +2138,57 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         assert "vcf-download-tool binaries download" in (job.result or "")
         assert "super-secret-token" not in (job.result or "")
         assert "super-secret-activation" not in (job.result or "")
+
+
+def test_vcf_offline_depot_generates_software_depot_id(client, tmp_path, monkeypatch):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting, VcfOfflineDepotSettings
+    from labfoundry.app.services.vcf_offline_depot import (
+        SoftwareDepotIdResult,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
+    )
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    archive_path.write_bytes(b"placeholder")
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        settings.tool_archive_path = str(archive_path)
+        settings.tool_version = "9.1.0"
+        db.commit()
+
+    def fake_generate(archive_path_value):
+        assert str(archive_path_value) == str(archive_path)
+        return SoftwareDepotIdResult(
+            success=True,
+            software_depot_id="8c9506c6-7bdf-44d5-b2e9-50d829d66b99",
+            command=["vcf-download-tool", "configuration", "generate", "--software-depot-id"],
+        )
+
+    monkeypatch.setattr("labfoundry.app.ui.generate_vcf_software_depot_id", fake_generate)
+    login(client)
+    page = client.get("/vcf-offline-depot")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/vcf-offline-depot/software-depot-id/generate",
+        data={"csrf": csrf},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "generated"
+    assert payload["software_depot_id"] == "8c9506c6-7bdf-44d5-b2e9-50d829d66b99"
+    assert payload["software_depot_id_error"] == ""
+    assert payload["software_depot_id_generated_at"]
+    with SessionLocal() as db:
+        software_id = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY)).scalar_one()
+        generated_at = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY)).scalar_one()
+        assert software_id.value == "8c9506c6-7bdf-44d5-b2e9-50d829d66b99"
+        assert generated_at.value == payload["software_depot_id_generated_at"]
 
 
 def test_vcf_offline_depot_migrates_legacy_store_path(client):
@@ -2793,7 +2857,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "apply-diff-20260625-1" in page.text
+    assert "vcfdt-activation-20260626-1" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 

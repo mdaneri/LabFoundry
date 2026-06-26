@@ -50,9 +50,23 @@
           <div class="settings-list">
             <div><span>Tool file</span><strong data-vcf-depot-tool-name>{{ vcf_depot_settings_json.tool_archive_name or "not uploaded" }}</strong></div>
             <div><span>Version</span><strong data-vcf-depot-tool-version>{{ vcf_depot_settings.tool_version or "unknown" }}</strong></div>
+            <div><span>Software depot ID</span><strong data-vcf-depot-software-depot-id>{{ vcf_depot_software_depot_id.id or "not generated" }}</strong></div>
             <div><span>Download token</span><strong data-vcf-depot-token-status>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "not uploaded" }}</strong></div>
             <div><span>Activation code</span><strong data-vcf-depot-activation-status>{{ vcf_depot_activation_code.filename if vcf_depot_activation_code.present else "not uploaded" }}</strong></div>
           </div>
+          <form class="inline-action-form" action="/vcf-offline-depot/software-depot-id/generate" method="post" data-vcf-depot-generate-id>
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <button class="button secondary compact-button" type="submit" {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Generate activation ID</button>
+            <small class="muted" data-vcf-depot-software-depot-message>
+              {% if vcf_depot_software_depot_id.error %}
+                {{ vcf_depot_software_depot_id.error }}
+              {% elif vcf_depot_software_depot_id.generated_at %}
+                Generated {{ vcf_depot_software_depot_id.generated_at }}
+              {% else %}
+                Upload VCFDT to generate the Broadcom activation ID.
+              {% endif %}
+            </small>
+          </form>
         </section>
       </div>
 

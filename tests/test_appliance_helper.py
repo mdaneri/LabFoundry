@@ -1,8 +1,10 @@
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import subprocess
+import tarfile
 from pathlib import Path
 
 
@@ -1172,6 +1174,33 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
     assert nginx_include.read_text(encoding="utf-8").strip().endswith(f"include {site_dir}/*.conf;")
     assert ["/usr/sbin/nginx", "-t"] in commands
     assert ["systemctl", "enable", "--now", "nginx"] in commands
+
+
+def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    payload = b"#!/bin/sh\necho software depot id 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = tarfile.TarInfo("vcfdt/bin/vcf-download-tool")
+        info.mode = 0o644
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
+    monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+
+    assert helper._handle_vcf_offline_depot("stage-tool", [str(archive_path)]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["vcf_offline_depot"] == "stage-tool complete"
+    assert payload["executable"] == str(tool_dir / "vcf-download-tool")
+    wrapper = tool_dir / "vcf-download-tool"
+    extracted = tool_dir / "extracted" / "vcfdt" / "bin" / "vcf-download-tool"
+    assert wrapper.is_file()
+    assert extracted.is_file()
+    assert os.access(wrapper, os.X_OK)
+    assert os.access(extracted, os.X_OK)
+    assert str(extracted) in wrapper.read_text(encoding="utf-8")
 
 
 def test_vcf_offline_depot_helper_removes_disabled_nginx_site(monkeypatch, tmp_path):
