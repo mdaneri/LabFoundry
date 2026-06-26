@@ -432,8 +432,9 @@ powershell.exe -ExecutionPolicy Bypass `
 The wrapper prepares the tiny Alpine client VHDX, selects the newest appliance
 VHDX under `image/hyperv/output`, creates a unique `LabFoundryLifecycle-*` lab,
 validates DNS, DHCP, firewall, routing, NAT, WAN netem simulation, CA apply
-with a ClientA CSR request and issued-certificate verification, VCF Backup SFTP
-with the `vcf-backup` OS user, client-side connectivity, and by default a
+with deterministic packet-loss/recovery proof, CA apply with a ClientA CSR
+request and issued-certificate verification, VCF Backup SFTP with the
+`vcf-backup` OS user, client-side connectivity, and by default a
 backup/restore redeploy pass that confirms the restored ClientA certificate has
 the same serial number and SHA-256 fingerprint as the pre-restore certificate
 and that the restored CA archive fingerprints match the original settings

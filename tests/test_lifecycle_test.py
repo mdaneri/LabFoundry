@@ -85,3 +85,15 @@ def test_restored_certificate_baseline_check_rejects_changed_fingerprint(tmp_pat
                 },
             },
         )
+
+
+def test_wan_policy_payload_sets_loss_without_changing_latency_baseline():
+    lifecycle = load_lifecycle_module()
+
+    payload = lifecycle.wan_policy_payload(packet_loss_percent=100.0)
+
+    assert payload["name"] == "Lifecycle WAN"
+    assert payload["latency_ms"] == 25
+    assert payload["jitter_ms"] == 5
+    assert payload["packet_loss_percent"] == 100.0
+    assert payload["bandwidth_mbit"] == 100

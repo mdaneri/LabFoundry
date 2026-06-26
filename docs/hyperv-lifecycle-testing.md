@@ -154,6 +154,9 @@ The lifecycle runner records structured evidence in
 - firewall settings, NAT, WAN policy, nftables, routes, and `tc` state
 - WAN impairment evidence through a route-bound netem policy and a live
   `tc qdisc` assertion on the appliance WAN interface
+- deterministic WAN packet-loss evidence by temporarily applying 100% loss,
+  proving Client A cannot ping Client B across the WAN path, restoring the
+  normal 25ms/5ms/0% loss policy, and proving the ping recovers
 - CA enablement, root CA generation/download metadata, Client A CSR request
   submission over its lifecycle management test NIC, global `ca` appliance
   apply, issued certificate download from Client A, runner-side certificate

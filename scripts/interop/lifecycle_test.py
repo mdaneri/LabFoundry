@@ -603,18 +603,7 @@ def configure_firewall_wan(client: HttpClient, args: argparse.Namespace) -> dict
         },
     )
     policies = client.json_request("GET", "/api/v1/wan/policies")
-    policy_payload = {
-        "name": "Lifecycle WAN",
-        "description": "Hyper-V lifecycle interop WAN policy",
-        "enabled": True,
-        "latency_ms": 25,
-        "jitter_ms": 5,
-        "packet_loss_percent": 0.0,
-        "bandwidth_mbit": 100,
-        "corrupt_percent": 0.0,
-        "duplicate_percent": 0.0,
-        "reorder_percent": 0.0,
-    }
+    policy_payload = wan_policy_payload(packet_loss_percent=0.0)
     existing_policy = next((row for row in policies if row.get("name") == policy_payload["name"]), None)
     if existing_policy:
         policy = client.json_request("PATCH", f"/api/v1/wan/policies/{existing_policy['id']}", json_body=policy_payload)
@@ -659,6 +648,30 @@ def configure_firewall_wan(client: HttpClient, args: argparse.Namespace) -> dict
     else:
         nat = client.json_request("POST", "/api/v1/nat/rules", json_body=nat_payload)
     return {"wan_policy": policy, "route": route, "nat": nat}
+
+
+def wan_policy_payload(*, packet_loss_percent: float) -> dict[str, Any]:
+    return {
+        "name": "Lifecycle WAN",
+        "description": "Hyper-V lifecycle interop WAN policy",
+        "enabled": True,
+        "latency_ms": 25,
+        "jitter_ms": 5,
+        "packet_loss_percent": packet_loss_percent,
+        "bandwidth_mbit": 100,
+        "corrupt_percent": 0.0,
+        "duplicate_percent": 0.0,
+        "reorder_percent": 0.0,
+    }
+
+
+def set_lifecycle_wan_policy(client: HttpClient, *, packet_loss_percent: float) -> dict[str, Any]:
+    policies = client.json_request("GET", "/api/v1/wan/policies")
+    payload = wan_policy_payload(packet_loss_percent=packet_loss_percent)
+    existing_policy = next((row for row in policies if row.get("name") == payload["name"]), None)
+    if not existing_policy:
+        raise LifecycleError("Lifecycle WAN policy was not found; configure-firewall-wan must run before WAN loss checks.")
+    return client.json_request("PATCH", f"/api/v1/wan/policies/{existing_policy['id']}", json_body=payload)
 
 
 def certificate_summary(pem: str) -> dict[str, Any]:
@@ -1278,6 +1291,89 @@ def client_checks(args: argparse.Namespace) -> dict[str, Any]:
     return evidence
 
 
+def wan_packet_loss_check(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    if args.skip_client_checks:
+        return {"skipped": "client checks disabled"}
+    if not args.client_a_host or not args.client_b_host:
+        return {"skipped": "client hosts not provided"}
+
+    evidence: dict[str, Any] = {}
+    cleanup_evidence: dict[str, Any] = {}
+    original_error: Exception | None = None
+    site = ip_interface(args.site_cidr)
+    wan = ip_interface(args.wan_cidr)
+    site_ip = str(site.ip)
+    wan_ip = str(wan.ip)
+    wan_peer_ip = second_host_address(args.wan_cidr)
+    elevate = elevation_probe()
+    client_b_setup = (
+        f"ELEV=\"$({elevate})\"; test -n \"$ELEV\"; "
+        f"$ELEV ip addr replace {wan_peer_ip}/{wan.network.prefixlen} dev eth1; "
+        "$ELEV ip link set eth1 up; "
+        f"$ELEV ip route replace {site.network} via {wan_ip} dev eth1; "
+        "ip -br addr"
+    )
+    loss_ping = (
+        f"ELEV=\"$({elevate})\"; test -n \"$ELEV\"; "
+        "$ELEV /usr/local/sbin/labfoundry-refresh-test-dhcp 2>/dev/null || /usr/local/sbin/labfoundry-refresh-test-dhcp 2>/dev/null || true; "
+        f"$ELEV ip route replace {wan.network} via {site_ip} dev eth1; "
+        f"ping -c 3 -W 1 {wan_peer_ip}; rc=$?; "
+        "test \"$rc\" -ne 0"
+    )
+    recovery_ping = (
+        f"ELEV=\"$({elevate})\"; test -n \"$ELEV\"; "
+        "$ELEV /usr/local/sbin/labfoundry-refresh-test-dhcp 2>/dev/null || /usr/local/sbin/labfoundry-refresh-test-dhcp 2>/dev/null || true; "
+        f"$ELEV ip route replace {wan.network} via {site_ip} dev eth1; "
+        f"ping -c 2 -W 2 {wan_peer_ip}"
+    )
+
+    try:
+        evidence["loss_policy"] = set_lifecycle_wan_policy(client, packet_loss_percent=100.0)
+        evidence["loss_apply"] = apply_units(client, ["wan"], args)
+        loss_host = ssh_command(
+            args.appliance_ssh_host,
+            args,
+            f"tc qdisc show dev {args.wan_interface} | grep netem | grep loss | grep 100",
+            role="appliance",
+        )
+        require_success(loss_host, "host WAN 100 percent loss check")
+        evidence["loss_host"] = loss_host
+        client_b = ssh_command(args.client_b_host, args, client_b_setup, role="client")
+        require_success(client_b, "client B WAN loss setup")
+        evidence["client_b_setup"] = client_b
+        client_a_loss = ssh_command(args.client_a_host, args, loss_ping, role="client")
+        require_success(client_a_loss, "client A WAN loss expected ping failure")
+        evidence["client_a_loss_ping"] = client_a_loss
+    except Exception as exc:  # noqa: BLE001 - restore normal WAN policy before reporting the original failure
+        original_error = exc
+    finally:
+        try:
+            cleanup_evidence["restored_policy"] = set_lifecycle_wan_policy(client, packet_loss_percent=0.0)
+            cleanup_evidence["restore_apply"] = apply_units(client, ["wan"], args)
+            restore_host = ssh_command(
+                args.appliance_ssh_host,
+                args,
+                f"tc qdisc show dev {args.wan_interface} | grep netem | grep delay | grep 25ms && ! tc qdisc show dev {args.wan_interface} | grep -q 'loss 100'",
+                role="appliance",
+            )
+            require_success(restore_host, "host WAN loss restore check")
+            cleanup_evidence["restore_host"] = restore_host
+            client_b_recovery = ssh_command(args.client_b_host, args, client_b_setup, role="client")
+            require_success(client_b_recovery, "client B WAN recovery setup")
+            cleanup_evidence["client_b_recovery_setup"] = client_b_recovery
+            client_a_recovery = ssh_command(args.client_a_host, args, recovery_ping, role="client")
+            require_success(client_a_recovery, "client A WAN recovery ping")
+            cleanup_evidence["client_a_recovery_ping"] = client_a_recovery
+        except Exception as cleanup_exc:  # noqa: BLE001
+            if original_error is not None:
+                raise LifecycleError(f"{original_error}; WAN loss cleanup also failed: {cleanup_exc}") from cleanup_exc
+            raise
+    evidence["restore"] = cleanup_evidence
+    if original_error is not None:
+        raise original_error
+    return evidence
+
+
 def run_step(results: list[StepResult], name: str, func, *args) -> Any:  # type: ignore[no-untyped-def]
     step = StepResult(name=name, status="running")
     results.append(step)
@@ -1449,6 +1545,7 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "kms"], args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
+    run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)
     run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)
     run_step(results, "vcf-backup-client-check", vcf_backup_client_check, args)
     run_step(results, "configure-management-https", configure_management_https, client, args)
@@ -1476,6 +1573,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
     run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "kms"], args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
+    run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)
     cert_evidence = run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)
     if args.certificate_baseline_result:
         run_step(results, "restored-certificate-baseline-check", restored_certificate_baseline_check, args, cert_evidence)
@@ -1525,6 +1623,10 @@ def format_step_summary(step: dict[str, Any]) -> str:
         detail = str(evidence.get("target", ""))
     elif name == "client-checks":
         detail = ", ".join(sorted(evidence.keys()))
+    elif name == "wan-packet-loss-check":
+        loss_policy = evidence.get("loss_policy") or {}
+        restored_policy = (evidence.get("restore") or {}).get("restored_policy") or {}
+        detail = f"{loss_policy.get('packet_loss_percent', 100)}% loss blocked ping; restored to {restored_policy.get('packet_loss_percent', 0)}%"
     return f"[{status}] {name}{': ' + detail if detail else ''}"
 
 
