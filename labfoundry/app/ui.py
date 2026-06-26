@@ -259,6 +259,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_EXTRACT_DIR,
     VCF_DEPOT_LEGACY_STORE_PATH,
     VCF_DEPOT_PROFILE_TYPES,
+    VCF_DEPOT_RUNTIME_TOOL_DIR,
     VCF_DEPOT_SKUS,
     VCF_DEPOT_STAGED_ACTIVATION_FILE,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
@@ -1315,7 +1316,7 @@ def vcf_depot_secret_snapshot(context: dict[str, Any]) -> str:
 
 def vcf_depot_command_entry(command: list[str], *, dry_run: bool) -> dict[str, Any]:
     resolved = [
-        f"{VCF_DEPOT_STAGED_TOOL_DIR}/vcf-download-tool" if value == "vcf-download-tool" else value
+        f"{VCF_DEPOT_RUNTIME_TOOL_DIR}/bin/vcf-download-tool" if value == "vcf-download-tool" else value
         for value in command
     ]
     return {

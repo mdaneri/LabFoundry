@@ -2214,7 +2214,7 @@ def test_vcf_offline_depot_accepts_pasted_download_token(client):
     assert payload["download_token_present"] is True
     assert payload["download_token_name"] == "pasted token"
     assert payload["download_token_updated_at"]
-    assert "--depot-download-token-file=/etc/labfoundry/vcf-offline-depot/secrets/download-token.txt" in payload["command_preview"]
+    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in payload["command_preview"]
     assert "pasted-secret-token" not in response.text
 
     with SessionLocal() as db:
@@ -2278,8 +2278,8 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
     assert payload["dry_run"] is False
     assert payload["log_path"] == "/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log"
     assert len(payload["commands"]) == 2
-    assert payload["commands"][0]["command"][0] == "/opt/labfoundry/vcf-download-tool/vcf-download-tool"
-    assert "--depot-download-token-file=/etc/labfoundry/vcf-offline-depot/secrets/download-token.txt" in payload["commands"][0]["command"]
+    assert payload["commands"][0]["command"][0] == "/var/lib/labfoundry/vcfDownloadTool/active-tool/bin/vcf-download-tool"
+    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in payload["commands"][0]["command"]
     assert "manual-secret-token" not in response.text
 
     with SessionLocal() as db:
@@ -2290,8 +2290,8 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
         assert '"profile_name": "vcf-install"' in (job.result or "")
         assert '"dry_run": false' in (job.result or "")
         assert '"log_path": "/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log"' in (job.result or "")
-        assert "/opt/labfoundry/vcf-download-tool/vcf-download-tool" in (job.result or "")
-        assert "--depot-download-token-file=/etc/labfoundry/vcf-offline-depot/secrets/download-token.txt" in (job.result or "")
+        assert "/var/lib/labfoundry/vcfDownloadTool/active-tool/bin/vcf-download-tool" in (job.result or "")
+        assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in (job.result or "")
         assert "manual-secret-token" not in (job.result or "")
         assert profile and profile.status == "ready"
 

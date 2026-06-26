@@ -228,11 +228,12 @@ def test_vcf_depot_command_preview_uses_staged_secret_paths():
 
     assert "vcf-download-tool binaries list" in preview
     assert "--depot-store=/mnt/labfoundry-vcf-offline-depot" in preview
-    assert "--depot-download-token-file=/etc/labfoundry/vcf-offline-depot/secrets/download-token.txt" in preview
+    assert "VCFDT_HOME=/var/lib/labfoundry/vcfDownloadTool/active-tool" in preview
+    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in preview
     assert "--component=VRA" in preview
     assert "--component-version=9.1.0.0100" in preview
     assert "vcf-download-tool esx configuration -D esxio-9.1-INTL -D armEsx-9.1-INTL" in preview
-    assert "--depot-download-activation-code-file=/etc/labfoundry/vcf-offline-depot/secrets/activation-code.txt" in preview
+    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in preview
     assert '> "${VCFDT_HOME}/conf/esxUserConfig.json"' in preview
     assert '"disabledPlatforms": [' in preview
     assert '"esxio-9.1-INTL"' in preview

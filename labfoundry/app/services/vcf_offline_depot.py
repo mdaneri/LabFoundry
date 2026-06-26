@@ -19,6 +19,7 @@ VCF_DEPOT_DEFAULT_STORE_PATH = "/mnt/labfoundry-vcf-offline-depot"
 VCF_DEPOT_DEFAULT_CONFIG_PATH = "/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf"
 VCF_DEPOT_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/vcf-offline-depot/labfoundry-vcf-offline-depot.conf"
 VCF_DEPOT_STAGED_TOOL_DIR = "/opt/labfoundry/vcf-download-tool"
+VCF_DEPOT_RUNTIME_TOOL_DIR = "/var/lib/labfoundry/vcfDownloadTool/active-tool"
 VCF_DEPOT_UPLOAD_DIR = Path("vcfDownloadTool")
 VCF_DEPOT_EXTRACT_DIR = VCF_DEPOT_UPLOAD_DIR / "active-tool"
 VCF_DEPOT_ARCHIVE_PATTERN = "vcf-download-tool-*.tar.gz"
@@ -29,8 +30,8 @@ VCF_DEPOT_ACTIVATION_VALUE_KEY = "vcf_depot_activation_code_value"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY = "vcf_depot_software_depot_id"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY = "vcf_depot_software_depot_id_generated_at"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY = "vcf_depot_software_depot_id_error"
-VCF_DEPOT_STAGED_TOKEN_FILE = "/etc/labfoundry/vcf-offline-depot/secrets/download-token.txt"
-VCF_DEPOT_STAGED_ACTIVATION_FILE = "/etc/labfoundry/vcf-offline-depot/secrets/activation-code.txt"
+VCF_DEPOT_STAGED_TOKEN_FILE = f"{VCF_DEPOT_RUNTIME_TOOL_DIR}/secrets/download-token.txt"
+VCF_DEPOT_STAGED_ACTIVATION_FILE = f"{VCF_DEPOT_RUNTIME_TOOL_DIR}/secrets/activation-code.txt"
 VCF_DEPOT_STATUS_VALUES = {"planned", "ready", "synced", "blocked"}
 VCF_DEPOT_PROFILE_TYPES = {"binaries", "metadata", "esx"}
 VCF_DEPOT_SKUS = {"VCF", "VVF"}
@@ -413,11 +414,11 @@ def render_vcfdt_command_preview(settings: VcfOfflineDepotSettings, profiles: li
         f"# Resolved download-token flag: --depot-download-token-file={VCF_DEPOT_STAGED_TOKEN_FILE}",
         f"# Resolved activation-code flag: --depot-download-activation-code-file={VCF_DEPOT_STAGED_ACTIVATION_FILE}",
         "",
-        f"VCFDT_HOME={shlex.quote(VCF_DEPOT_STAGED_TOOL_DIR)}",
+        f"VCFDT_HOME={shlex.quote(VCF_DEPOT_RUNTIME_TOOL_DIR)}",
         f"DEPOT_STORE={shlex.quote(settings.depot_store_path)}",
         f"TOKEN_FILE={shlex.quote(VCF_DEPOT_STAGED_TOKEN_FILE)}",
         f"ACTIVATION_CODE_FILE={shlex.quote(VCF_DEPOT_STAGED_ACTIVATION_FILE)}",
-        'VCFDT="${VCFDT_HOME}/vcf-download-tool"',
+        'VCFDT="${VCFDT_HOME}/bin/vcf-download-tool"',
         'vcf-download-tool() { "${VCFDT}" "$@"; }',
         "",
         'mkdir -p "${DEPOT_STORE}"',
