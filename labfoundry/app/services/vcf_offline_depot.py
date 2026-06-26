@@ -155,7 +155,7 @@ def _find_vcf_download_tool_binary(extraction_dir: Path) -> Path:
     for candidate in candidates:
         if candidate.is_file():
             candidate.chmod(candidate.stat().st_mode | 0o111)
-            return candidate
+            return candidate.resolve()
     raise FileNotFoundError("The uploaded VCF Download Tool archive does not contain a vcf-download-tool executable.")
 
 

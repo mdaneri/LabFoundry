@@ -1,7 +1,11 @@
+import io
+import tarfile
+
 from labfoundry.app.models import VcfDepotDownloadProfile, VcfOfflineDepotSettings
 from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_COMPONENTS,
     VCF_DEPOT_ESX_DISABLED_PLATFORMS,
+    generate_vcf_software_depot_id,
     parse_software_depot_id,
     render_nginx_depot_config,
     render_vcfdt_command_preview,
@@ -169,6 +173,28 @@ def test_vcf_depot_parses_generated_software_depot_id():
     assert parse_software_depot_id("Software Depot ID: 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n") == "8c9506c6-7bdf-44d5-b2e9-50d829d66b99"
     assert parse_software_depot_id("Use activation code for software depot id LF-DEPOT-9-1-001\n") == "LF-DEPOT-9-1-001"
     assert parse_software_depot_id("vcf-download-tool configuration generate --software-depot-id\n") == ""
+
+
+def test_vcf_depot_generates_software_depot_id_from_extracted_tool(tmp_path, monkeypatch):
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    payload = b"placeholder executable"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = tarfile.TarInfo("bin/vcf-download-tool")
+        info.mode = 0o644
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    def fake_run(command, **kwargs):
+        assert command[0] == str((tmp_path / "active-tool" / "bin" / "vcf-download-tool").resolve())
+        assert kwargs["cwd"] == str((tmp_path / "active-tool" / "bin").resolve())
+        return type("Completed", (), {"returncode": 0, "stdout": "Software Depot ID: 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n", "stderr": ""})()
+
+    monkeypatch.setattr("labfoundry.app.services.vcf_offline_depot.subprocess.run", fake_run)
+    result = generate_vcf_software_depot_id(archive_path, extraction_dir=tmp_path / "active-tool")
+
+    assert result.success is True
+    assert result.software_depot_id == "8c9506c6-7bdf-44d5-b2e9-50d829d66b99"
+    assert result.error == ""
 
 
 def test_vcf_depot_command_preview_uses_staged_secret_paths():
