@@ -35,6 +35,7 @@ def init_db() -> None:
     _ensure_sqlite_user_sync_columns()
     _ensure_sqlite_appliance_settings_columns()
     _ensure_sqlite_ca_columns()
+    _ensure_sqlite_vcf_depot_columns()
 
 
 def _ensure_sqlite_user_sync_columns() -> None:
@@ -112,6 +113,22 @@ def _ensure_sqlite_ca_columns() -> None:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(text(f"ALTER TABLE ca_certificates ADD COLUMN {name} {definition}"))
+
+
+def _ensure_sqlite_vcf_depot_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "vcf_depot_download_profiles" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("vcf_depot_download_profiles")}
+    columns = {
+        "patches_only": "BOOLEAN DEFAULT 0",
+    }
+    with engine.begin() as connection:
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE vcf_depot_download_profiles ADD COLUMN {name} {definition}"))
 
 
 def get_db() -> Generator[Session, None, None]:

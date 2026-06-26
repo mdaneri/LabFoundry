@@ -5077,6 +5077,7 @@ function newVcfDepotProfileRow() {
     binary_type: "INSTALL",
     automated_install: true,
     upgrades_only: false,
+    patches_only: false,
     component: "",
     component_version: "",
     disabled_platforms: [],
@@ -5202,7 +5203,7 @@ async function postVcfDepotProfileAction(url, data, csrf) {
     if (["id", "is_new", "created_at", "updated_at"].includes(key)) {
       continue;
     }
-    if (["enabled", "automated_install", "upgrades_only"].includes(key)) {
+    if (["enabled", "automated_install", "upgrades_only", "patches_only"].includes(key)) {
       if (value) {
         body.set(key, "on");
       }
@@ -5360,6 +5361,16 @@ function initializeVcfDepotProfilesTable() {
           editor: "tickCross",
           hozAlign: "center",
           width: 120,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
+          title: "Patches only",
+          field: "patches_only",
+          formatter: "tickCross",
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 115,
           headerSort: false,
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
         },

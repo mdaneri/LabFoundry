@@ -5627,6 +5627,7 @@ def create_vcf_depot_profile_from_ui(
     binary_type: str = Form("INSTALL"),
     automated_install: str | None = Form(None),
     upgrades_only: str | None = Form(None),
+    patches_only: str | None = Form(None),
     component: str = Form(""),
     component_version: str = Form(""),
     disabled_platforms: str = Form(""),
@@ -5646,6 +5647,7 @@ def create_vcf_depot_profile_from_ui(
         binary_type=binary_type.strip() or "INSTALL",
         automated_install=automated_install == "on",
         upgrades_only=upgrades_only == "on",
+        patches_only=patches_only == "on",
         component=component.strip(),
         component_version=component_version.strip(),
         disabled_platforms=disabled_platforms.strip(),
@@ -5674,6 +5676,7 @@ def edit_vcf_depot_profile_from_ui(
     binary_type: str = Form("INSTALL"),
     automated_install: str | None = Form(None),
     upgrades_only: str | None = Form(None),
+    patches_only: str | None = Form(None),
     component: str = Form(""),
     component_version: str = Form(""),
     disabled_platforms: str = Form(""),
@@ -5695,6 +5698,7 @@ def edit_vcf_depot_profile_from_ui(
     profile.binary_type = binary_type.strip() or "INSTALL"
     profile.automated_install = automated_install == "on"
     profile.upgrades_only = upgrades_only == "on"
+    profile.patches_only = patches_only == "on"
     profile.component = component.strip()
     profile.component_version = component_version.strip()
     profile.disabled_platforms = disabled_platforms.strip()

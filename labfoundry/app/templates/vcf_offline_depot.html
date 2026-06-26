@@ -82,6 +82,7 @@
               <th>SKU</th>
               <th>VCF version</th>
               <th>Binary type</th>
+              <th>Patch-only</th>
               <th>Component</th>
               <th>Disabled ESX platforms</th>
               <th>Enabled</th>
@@ -96,6 +97,7 @@
                 <td>{{ profile.sku }}</td>
                 <td>{{ profile.vcf_version }}</td>
                 <td>{{ profile.binary_type }}</td>
+                <td>{{ "yes" if profile.patches_only else "no" }}</td>
                 <td>{{ profile.component or "all components" }}</td>
                 <td>{{ profile.disabled_platforms.replace("\n", ", ") if profile.disabled_platforms else "none" }}</td>
                 <td>{{ "yes" if profile.enabled else "no" }}</td>

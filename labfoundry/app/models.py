@@ -525,6 +525,7 @@ class VcfDepotDownloadProfile(Base):
     binary_type: Mapped[str] = mapped_column(String(20), default="INSTALL")
     automated_install: Mapped[bool] = mapped_column(Boolean, default=True)
     upgrades_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    patches_only: Mapped[bool] = mapped_column(Boolean, default=False)
     component: Mapped[str] = mapped_column(String(80), default="")
     component_version: Mapped[str] = mapped_column(String(80), default="")
     disabled_platforms: Mapped[str] = mapped_column(Text, default="")

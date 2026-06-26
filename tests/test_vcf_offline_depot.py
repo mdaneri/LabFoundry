@@ -145,6 +145,25 @@ def test_vcf_depot_validation_uses_esx_disabled_platform_catalog(tmp_path):
     assert any("unsupported disabled platform embeddedEsx-5.5-INTL" in error for error in errors)
 
 
+def test_vcf_depot_validation_allows_https_only_without_vcfdt_upload():
+    settings = VcfOfflineDepotSettings(
+        enabled=True,
+        hostname="depot.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        port=443,
+        server_certificate="depot.labfoundry.internal",
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        telemetry_choice="DISABLE",
+        config_path="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf",
+    )
+
+    errors, warnings = validate_vcf_depot_state(settings, [], {"eth2"})
+
+    assert errors == []
+    assert warnings == []
+
+
 def test_vcf_depot_command_preview_uses_staged_secret_paths():
     settings = VcfOfflineDepotSettings(
         hostname="depot.labfoundry.internal",
@@ -181,6 +200,39 @@ def test_vcf_depot_command_preview_uses_staged_secret_paths():
     assert "--component-version=9.1.0.0100" in preview
     assert "vcf-download-tool esx configuration -D esxio-9.1-INTL -D armEsx-9.1-INTL" in preview
     assert "--depot-download-activation-code-file=/etc/labfoundry/vcf-offline-depot/secrets/activation-code.txt" in preview
+    assert '> "${VCFDT_HOME}/conf/esxUserConfig.json"' in preview
+    assert '"disabledPlatforms": [' in preview
+    assert '"esxio-9.1-INTL"' in preview
+    assert "obtu.telemetry.config=DISABLE" in preview
+
+
+def test_vcf_depot_command_preview_supports_patch_only_profiles():
+    settings = VcfOfflineDepotSettings(
+        hostname="depot.labfoundry.internal",
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        tool_archive_path="vcfDownloadTool/vcf-download-tool-9.1.0.test.tar.gz",
+        tool_version="9.1.0",
+        telemetry_choice="NOT_PROVIDED",
+    )
+    profiles = [
+        VcfDepotDownloadProfile(
+            name="VCF 9.1 EP01 patches",
+            profile_type="binaries",
+            sku="VCF",
+            vcf_version="9.1.0",
+            binary_type="UPGRADE",
+            patches_only=True,
+            component_version="9.1.0.0100",
+            enabled=True,
+        )
+    ]
+
+    preview = render_vcfdt_command_preview(settings, profiles)
+
+    assert "--patches-only" in preview
+    assert "--upgrades-only" not in preview
+    assert "--component-version=9.1.0.0100" in preview
+    assert "Telemetry choice is not provided" in preview
 
 
 def test_vcf_depot_nginx_preview_uses_ca_paths_and_static_file_directives():

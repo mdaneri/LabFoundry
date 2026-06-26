@@ -167,7 +167,7 @@ status: disabled until VCF Backups is enabled and Local Users apply creates the 
 
 Set/reset this account from `Users`, then apply Local Users before exposing the SFTP endpoint beyond a development lab.
 
-VCF Offline Depot uses the proprietary VCF Download Tool to stage disconnected VCF 9 depot content. Upload the VCF Download Tool file (`vcf-download-tool-*.tar.gz`) and Broadcom token or activation-code files through the UI; global appliance apply records show only sanitized filenames, presence flags, and command intent. When enabled, the depot apply unit stages nginx config under `/var/lib/labfoundry/apply/vcf-offline-depot/`, serves the fixed depot store as an HTTPS static document root, and uses the CA-managed `vcf_offline_depot:https` certificate/key file paths.
+VCF Offline Depot uses the proprietary VCF Download Tool to stage disconnected VCF 9 depot content. Upload the VCF Download Tool file (`vcf-download-tool-*.tar.gz`) and Broadcom token or activation-code files through the UI; global appliance apply records show only sanitized filenames, presence flags, and generated command intent. The generated VCFDT script uses staged secret file paths, writes the telemetry flag, supports install, upgrade, upgrade-only, patch-only, Day-N component, and ESX activation-code workflows, and writes ESX disabled-platform selections to `conf/esxUserConfig.json`. When enabled, the depot apply unit stages nginx config under `/var/lib/labfoundry/apply/vcf-offline-depot/`, serves the fixed depot store as an HTTPS static document root, and uses the CA-managed `vcf_offline_depot:https` certificate/key file paths.
 
 ## Appliance Apply Workflow
 
