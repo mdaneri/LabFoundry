@@ -14,8 +14,8 @@
     <div class="metric-grid service-summary-grid">
       <div class="metric">
         <span>Endpoint</span>
-        <strong data-vcf-endpoint>{{ vcf_backup_settings.listen_address }}:{{ vcf_backup_settings.port }}</strong>
-        <small data-vcf-interface>{{ vcf_backup_settings.listen_interface }}</small>
+        <strong data-vcf-endpoint>{{ vcf_backup_primary_listen_address or "no interface IP" }}:{{ vcf_backup_settings.port }}</strong>
+        <small data-vcf-interface>{{ vcf_backup_bind_label }}</small>
       </div>
       <div class="metric">
         <span>SFTP user</span>
@@ -40,7 +40,7 @@
         <p class="muted">Configure SDDC Manager or other VCF components to use this endpoint after global appliance apply completes.</p>
       </div>
       <div class="settings-list">
-        <div><span>Host</span><strong data-vcf-host>{{ vcf_backup_settings.listen_address }}</strong></div>
+        <div><span>Host</span><strong data-vcf-host>{{ vcf_backup_primary_listen_address or "no interface IP" }}</strong></div>
         <div><span>Port</span><strong data-vcf-port>{{ vcf_backup_settings.port }}</strong></div>
         <div><span>Username</span><strong data-vcf-target-user>{{ vcf_backup_settings.sftp_user.username if vcf_backup_settings.sftp_user else "select a user" }}</strong></div>
         <div><span>Remote directory</span><strong data-vcf-remote-directory>{{ vcf_backup_remote_directory }}</strong></div>
@@ -66,18 +66,20 @@
             {% endfor %}
           </select>
         </label>
+        <input type="hidden" name="listen_interfaces_present" value="1">
+        <input type="hidden" name="listen_addresses_present" value="1">
         <div class="service-bind-editor" data-service-bind>
           <div class="form-field">
-            <span class="field-label"><span>Listen interface</span><button class="help-icon" type="button" data-help="Access-mode physical interfaces and VLAN interfaces with configured IP addresses can host the SFTP endpoint. Trunk physical NICs are not direct bind targets.">i</button></span>
-            <div class="tag-editor" data-tag-editor data-tag-single data-tag-name="listen_interface" data-service-bind-interface>
+            <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more access-mode physical interfaces and VLAN interfaces with configured IP addresses can host the SFTP endpoint. Trunk physical NICs are not direct bind targets.">i</button></span>
+            <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
               <div class="tag-editor-tags" data-tag-list>
-                {% if vcf_backup_settings.listen_interface %}
-                  <span class="tag-token" data-value="{{ vcf_backup_settings.listen_interface }}">
-                    <span>{{ vcf_backup_settings.listen_interface }}</span>
-                    <button type="button" data-tag-remove aria-label="Remove {{ vcf_backup_settings.listen_interface }}">×</button>
-                    <input type="hidden" name="listen_interface" value="{{ vcf_backup_settings.listen_interface }}">
+                {% for interface_name in selected_vcf_backup_interfaces %}
+                  <span class="tag-token" data-value="{{ interface_name }}">
+                    <span>{{ interface_name }}</span>
+                    <button type="button" data-tag-remove aria-label="Remove {{ interface_name }}">×</button>
+                    <input type="hidden" name="listen_interfaces" value="{{ interface_name }}">
                   </span>
-                {% endif %}
+                {% endfor %}
               </div>
               <input class="tag-editor-input" type="text" placeholder="Add interface..." list="vcf-backup-interface-options" data-tag-entry autocomplete="off">
               <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface">+</button>
@@ -97,31 +99,31 @@
             </datalist>
           </div>
           <div class="form-field">
-            <span class="field-label"><span>Listen address</span><button class="help-icon" type="button" data-help="Appliance IP for the SFTP endpoint. Selecting an address selects the matching access or VLAN interface.">i</button></span>
-            <div class="tag-editor" data-tag-editor data-tag-single data-tag-name="listen_address" data-service-bind-address>
+            <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="One or more appliance IP addresses for the SFTP endpoint. The first address is shown as the primary VCF target; firewall review covers every selected interface.">i</button></span>
+            <div class="tag-editor" data-tag-editor data-tag-name="listen_addresses" data-service-bind-address>
               <div class="tag-editor-tags" data-tag-list>
-                {% if vcf_backup_settings.listen_address %}
-                  <span class="tag-token" data-value="{{ vcf_backup_settings.listen_address }}">
-                    <span>{{ vcf_backup_settings.listen_address }}</span>
-                    <button type="button" data-tag-remove aria-label="Remove {{ vcf_backup_settings.listen_address }}">×</button>
-                    <input type="hidden" name="listen_address" value="{{ vcf_backup_settings.listen_address }}">
+                {% for address in selected_vcf_backup_addresses %}
+                  <span class="tag-token" data-value="{{ address }}">
+                    <span>{{ address }}</span>
+                    <button type="button" data-tag-remove aria-label="Remove {{ address }}">×</button>
+                    <input type="hidden" name="listen_addresses" value="{{ address }}">
                   </span>
-                {% endif %}
+                {% endfor %}
               </div>
               <input class="tag-editor-input" type="text" placeholder="Add listen address..." list="vcf-backup-address-options" data-tag-entry autocomplete="off">
               <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing listen address">+</button>
               <div class="tag-suggestions" data-tag-menu hidden>
-                {% for interface in available_interfaces %}
-                  <button type="button" data-tag-option="{{ interface.address }}" data-service-bind-interface="{{ interface.name }}">
-                    <strong>{{ interface.address }}</strong>
-                    <small>{{ interface.name }}</small>
+                {% for item in available_vcf_backup_addresses %}
+                  <button type="button" data-tag-option="{{ item.address }}">
+                    <strong>{{ item.address }}</strong>
+                    <small>{{ item.source }}</small>
                   </button>
                 {% endfor %}
               </div>
             </div>
             <datalist id="vcf-backup-address-options">
-              {% for interface in available_interfaces %}
-                <option value="{{ interface.address }}">{{ interface.name }}</option>
+              {% for item in available_vcf_backup_addresses %}
+                <option value="{{ item.address }}">{{ item.source }}</option>
               {% endfor %}
             </datalist>
           </div>

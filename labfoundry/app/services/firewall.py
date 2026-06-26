@@ -15,6 +15,7 @@ from labfoundry.app.models import (
     VcfPrivateRegistrySettings,
     VlanInterface,
 )
+from labfoundry.app.services.dnsmasq import split_interfaces
 
 
 FIREWALL_DIRECTIONS = ["input", "forward", "output"]
@@ -162,53 +163,57 @@ def managed_service_firewall_rules(
     rules.extend(dns_firewall_rules(dns_settings, interface_networks, source_groups_by_id, source_group_assignments))
     rules.extend(dhcp_firewall_rules(dhcp_settings, dhcp_scopes))
     if kms_settings.enabled:
-        rules.append(
-            _service_firewall_rule(
-                name="kms-kmip",
-                service="KMS / KMIP",
-                interface_name=kms_settings.listen_interface,
-                source=_managed_rule_source("kms-kmip", kms_settings.listen_interface, interface_networks, source_groups_by_id, source_group_assignments),
-                protocol="tcp",
-                ports=str(kms_settings.port),
-                priority=60,
+        for index, interface_name in enumerate(split_interfaces(kms_settings.listen_interface), start=1):
+            rules.append(
+                _service_firewall_rule(
+                    name=f"kms-kmip-{interface_name}",
+                    service="KMS / KMIP",
+                    interface_name=interface_name,
+                    source=_managed_rule_source("kms-kmip", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                    protocol="tcp",
+                    ports=str(kms_settings.port),
+                    priority=60 + index,
+                )
             )
-        )
     if vcf_backup_settings.enabled:
-        rules.append(
-            _service_firewall_rule(
-                name="vcf-backups-sftp",
-                service="VCF Backups SFTP",
-                interface_name=vcf_backup_settings.listen_interface,
-                source=_managed_rule_source("vcf-backups-sftp", vcf_backup_settings.listen_interface, interface_networks, source_groups_by_id, source_group_assignments),
-                protocol="tcp",
-                ports=str(vcf_backup_settings.port),
-                priority=70,
+        for index, interface_name in enumerate(split_interfaces(vcf_backup_settings.listen_interface), start=1):
+            rules.append(
+                _service_firewall_rule(
+                    name=f"vcf-backups-sftp-{interface_name}",
+                    service="VCF Backups SFTP",
+                    interface_name=interface_name,
+                    source=_managed_rule_source("vcf-backups-sftp", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                    protocol="tcp",
+                    ports=str(vcf_backup_settings.port),
+                    priority=70 + index,
+                )
             )
-        )
     if vcf_depot_settings.enabled:
-        rules.append(
-            _service_firewall_rule(
-                name="vcf-offline-depot",
-                service="VCF Offline Depot",
-                interface_name=vcf_depot_settings.listen_interface,
-                source=_managed_rule_source("vcf-offline-depot", vcf_depot_settings.listen_interface, interface_networks, source_groups_by_id, source_group_assignments),
-                protocol="tcp",
-                ports=str(vcf_depot_settings.port),
-                priority=80,
+        for index, interface_name in enumerate(split_interfaces(vcf_depot_settings.listen_interface), start=1):
+            rules.append(
+                _service_firewall_rule(
+                    name=f"vcf-offline-depot-{interface_name}",
+                    service="VCF Offline Depot",
+                    interface_name=interface_name,
+                    source=_managed_rule_source("vcf-offline-depot", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                    protocol="tcp",
+                    ports=str(vcf_depot_settings.port),
+                    priority=80 + index,
+                )
             )
-        )
     if vcf_registry_settings.enabled:
-        rules.append(
-            _service_firewall_rule(
-                name="vcf-private-registry",
-                service="VCF Private Registry",
-                interface_name=vcf_registry_settings.listen_interface,
-                source=_managed_rule_source("vcf-private-registry", vcf_registry_settings.listen_interface, interface_networks, source_groups_by_id, source_group_assignments),
-                protocol="tcp",
-                ports=str(vcf_registry_settings.port),
-                priority=90,
+        for index, interface_name in enumerate(split_interfaces(vcf_registry_settings.listen_interface), start=1):
+            rules.append(
+                _service_firewall_rule(
+                    name=f"vcf-private-registry-{interface_name}",
+                    service="VCF Private Registry",
+                    interface_name=interface_name,
+                    source=_managed_rule_source("vcf-private-registry", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                    protocol="tcp",
+                    ports=str(vcf_registry_settings.port),
+                    priority=90 + index,
+                )
             )
-        )
     return rules
 
 

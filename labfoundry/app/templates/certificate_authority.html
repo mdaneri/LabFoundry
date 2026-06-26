@@ -190,14 +190,14 @@
       <div class="panel-head">
         <h2>CA Settings</h2>
       </div>
-      <form class="form-stack" action="/certificate-authority/settings" method="post" data-autosave-form data-ca-settings data-autosave-status-id="ca-settings-autosave-status">
+      <form class="form-stack" action="/certificate-authority/settings" method="post" data-autosave-form data-ca-settings data-service-bind data-autosave-status-id="ca-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the CA as enabled desired state. It does not generate keys until global appliance apply runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if ca_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <input type="hidden" name="listen_interfaces_present" value="1">
         <input type="hidden" name="listen_addresses_present" value="1">
         <div class="form-field">
           <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more available network interfaces where CA publication should be reachable. Use the same interface picker pattern as DNS.">i</button></span>
-          <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces">
+          <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
             <div class="tag-editor-tags" data-tag-list>
               {% for interface_name in selected_ca_interfaces %}
                 <span class="tag-token" data-value="{{ interface_name }}">
@@ -226,7 +226,7 @@
         </div>
         <div class="form-field">
           <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="Optional appliance IP addresses for CA publication. Select one or more known addresses or type a custom address.">i</button></span>
-          <div class="tag-editor" data-tag-editor data-tag-name="listen_addresses">
+          <div class="tag-editor" data-tag-editor data-tag-name="listen_addresses" data-service-bind-address>
             <div class="tag-editor-tags" data-tag-list>
               {% for address in selected_ca_addresses %}
                 <span class="tag-token" data-value="{{ address }}">

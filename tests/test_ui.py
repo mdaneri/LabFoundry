@@ -1659,12 +1659,14 @@ def test_kms_page_renders(client):
     assert "vcf-management" in kms.text
     assert "vcf-sddc-manager-aes" in kms.text
     assert "kms.labfoundry.internal" in kms.text
-    assert "Listen interface" in kms.text
-    assert "Listen address" in kms.text
+    assert "Listen interfaces" in kms.text
+    assert "Listen addresses" in kms.text
     assert "service-bind-editor" in kms.text
-    assert 'data-tag-name="listen_interface"' in kms.text
-    assert 'data-tag-name="listen_address"' in kms.text
-    assert "data-tag-single" in kms.text
+    assert 'name="listen_interfaces_present"' in kms.text
+    assert 'name="listen_addresses_present"' in kms.text
+    assert 'data-tag-name="listen_interfaces"' in kms.text
+    assert 'data-tag-name="listen_addresses"' in kms.text
+    assert "data-tag-single" not in kms.text
     assert "192.168.50.1" in kms.text
     assert "eth2 - access / access / 192.168.50.1" in kms.text
     assert 'data-autosave-status-id="kms-settings-autosave-status"' in kms.text
@@ -1726,6 +1728,7 @@ def test_kms_settings_autosave_returns_json(client):
     payload = response.json()
     assert payload["status"] == "saved"
     assert payload["listen_address"] == "192.168.50.1"
+    assert payload["listen_addresses"] == ["192.168.50.1", "10.0.0.99"]
     assert "KMS requires Certificate Authority to be enabled before activation." in payload["validation_errors"]
     refreshed = client.get("/kms")
     assert "enabled" in refreshed.text
@@ -1735,12 +1738,43 @@ def test_kms_settings_autosave_returns_json(client):
     assert "/etc/labfoundry/ca/root.crt" in refreshed.text
     assert "/var/lib/labfoundry/kms/pykmip.db" in refreshed.text
     assert "/etc/labfoundry/kms/pykmip.conf" in refreshed.text
-    assert "10.0.0.99" not in refreshed.text
+    assert "10.0.0.99" in refreshed.text
 
     with SessionLocal() as db:
         record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
         assert record.address == "192.168.50.1"
         assert "KMS/KMIP endpoint" in (record.description or "")
+
+
+def test_kms_settings_accept_multiple_listen_targets(client):
+    login(client)
+    page = client.get("/kms")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/kms/settings",
+        data={
+            "enabled": "on",
+            "backend": "pykmip",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": ["eth2", "eth0"],
+            "listen_addresses": ["192.168.50.1", "192.168.49.1"],
+            "port": "5696",
+            "hostname": "kms.labfoundry.internal",
+            "server_certificate": "kms.labfoundry.internal",
+            "require_client_cert": "on",
+            "allow_register": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["listen_interfaces"] == ["eth2", "eth0"]
+    assert payload["listen_addresses"] == ["192.168.50.1", "192.168.49.1"]
+    assert "# LabFoundry KMS listen interfaces: eth2, eth0" in payload["config_preview"]
+    assert "# LabFoundry KMS listen addresses: 192.168.50.1, 192.168.49.1" in payload["config_preview"]
 
 
 def test_kms_enable_autocreates_ca_managed_certificate_rows(client):
@@ -1824,11 +1858,11 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert 'href="/appliance-apply"' in page.text
     assert "Review appliance changes" in page.text
     assert "VCF Backup SFTP desired state is disabled" in page.text
-    assert "Listen interface" in page.text
-    assert "Listen address" in page.text
+    assert "Listen interfaces" in page.text
+    assert "Listen addresses" in page.text
     assert "service-bind-editor" in page.text
-    assert 'data-tag-name="listen_interface"' in page.text
-    assert 'data-tag-name="listen_address"' in page.text
+    assert 'data-tag-name="listen_interfaces"' in page.text
+    assert 'data-tag-name="listen_addresses"' in page.text
     assert page.text.count("fixed-value-field") >= 2
     assert "<span>Config path</span>" not in page.text
     assert "eth1 - access / trunk" not in page.text
@@ -1880,7 +1914,7 @@ def test_vcf_private_registry_page_models_harbor_and_bundle_relocation(client):
     assert "harbor_admin_password: &lt;provisioned-by-labfoundry-helper&gt;" in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
-    assert "Listen address" in page.text
+    assert "Listen addresses" in page.text
     assert "service-bind-editor" in page.text
     assert 'data-service-bind-address="192.168.50.1"' in page.text
     assert page.text.count("fixed-value-field") >= 1
@@ -1923,6 +1957,7 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
     assert settings_response.status_code == 200
     assert settings_response.json()["status"] == "saved"
     assert settings_response.json()["listen_address"] == "192.168.50.1"
+    assert settings_response.json()["listen_addresses"] == ["192.168.50.1"]
     assert settings_response.json()["endpoint"] == "registry.labfoundry.internal"
     assert settings_response.json()["dns_record_action"] == "created"
     assert settings_response.json()["ca_bundle_source"] == "uploaded"
@@ -1940,6 +1975,29 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
         ).scalar_one()
         assert dns_record.address == "192.168.50.1"
         assert dns_record.enabled is True
+
+    multi_response = client.post(
+        "/vcf-private-registry/settings",
+        data={
+            "enabled": "on",
+            "hostname": "registry.labfoundry.internal",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": ["eth2", "eth0"],
+            "listen_addresses": ["192.168.50.1", "192.168.49.1"],
+            "port": "443",
+            "harbor_project": "vcf-supervisor-services",
+            "server_certificate": "registry.labfoundry.internal",
+            "robot_account": "robot$vcf-supervisor-services",
+            "relocation_dry_run": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert multi_response.status_code == 200
+    assert multi_response.json()["listen_interfaces"] == ["eth2", "eth0"]
+    assert multi_response.json()["listen_addresses"] == ["192.168.50.1", "192.168.49.1"]
+    assert "labfoundry_listen_interfaces: ['eth2', 'eth0']" in multi_response.json()["harbor_config_preview"]
 
     moved_response = client.post(
         "/vcf-private-registry/settings",
@@ -2075,8 +2133,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "depot.labfoundry.internal" in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
-    assert "Listen interface" in page.text
-    assert "Listen address" in page.text
+    assert "Listen interfaces" in page.text
+    assert "Listen addresses" in page.text
     assert "service-bind-editor" in page.text
     assert 'data-service-bind-address="192.168.50.1"' in page.text
     assert 'action="/vcf-offline-depot/settings"' in page.text
@@ -2142,6 +2200,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     payload = response.json()
     assert payload["status"] == "saved"
     assert payload["listen_address"] == "192.168.50.1"
+    assert payload["listen_addresses"] == ["192.168.50.1"]
     assert payload["endpoint"] == "depot.labfoundry.internal"
     assert payload["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
     assert payload["tool_version"] == "9.1.0.0100.25429019"
@@ -2156,6 +2215,29 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "super-secret-token" not in response.text
     assert "super-secret-activation" not in response.text
 
+    multi_response = client.post(
+        "/vcf-offline-depot/settings",
+        data={
+            "enabled": "on",
+            "hostname": "depot.labfoundry.internal",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": ["eth0", "eth2"],
+            "listen_addresses": ["192.168.49.1", "192.168.50.1"],
+            "port": "443",
+            "server_certificate": "depot.labfoundry.internal",
+            "telemetry_choice": "DISABLE",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert multi_response.status_code == 200
+    multi_payload = multi_response.json()
+    assert multi_payload["listen_interfaces"] == ["eth0", "eth2"]
+    assert multi_payload["listen_addresses"] == ["192.168.49.1", "192.168.50.1"]
+    assert "listen 192.168.49.1:443 ssl;" in multi_payload["https_config_preview"]
+    assert "listen 192.168.50.1:443 ssl;" in multi_payload["https_config_preview"]
+
     with SessionLocal() as db:
         token_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_VALUE_KEY)).scalar_one()
         activation_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_VALUE_KEY)).scalar_one()
@@ -2169,7 +2251,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         assert token_secret.value == "super-secret-token"
         assert activation_secret.value == "super-secret-activation"
         assert "vcf-download-tool executable" in software_id_error.value
-        assert dns_record.address == "192.168.50.1"
+        assert dns_record.address == "192.168.49.1"
         assert dns_record.enabled is True
 
     moved_response = client.post(
@@ -2529,7 +2611,7 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
     assert response.json()["storage_path"] == "/mnt/labfoundry-vcf-backups"
     assert response.json()["remote_directory"] == "/backups"
     assert response.json()["valid"] is True
-    assert "# Service listener target: 192.168.50.1:22" in response.json()["config_preview"]
+    assert "# Service listener targets: 192.168.50.1:22" in response.json()["config_preview"]
     assert "Match User vcf-backup" in response.json()["config_preview"]
     assert "ForceCommand internal-sftp -d /backups" in response.json()["config_preview"]
     assert "enabled" in client.get("/vcf-backups").text
@@ -2551,6 +2633,40 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
     assert status.json()["sftp_username"] == "vcf-backup"
     assert status.json()["storage_path"] == "/mnt/labfoundry-vcf-backups"
     assert status.json()["remote_directory"] == "/backups"
+
+
+def test_vcf_backups_settings_accept_multiple_listen_targets(client):
+    import re
+
+    login(client)
+    page = client.get("/vcf-backups")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    user_id = re.search(r'<option value="(\d+)" selected>vcf-backup(?: \(disabled\))?</option>', page.text).group(1)
+    response = client.post(
+        "/vcf-backups/settings",
+        data={
+            "enabled": "on",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": ["eth0", "eth2"],
+            "listen_addresses": ["192.168.49.1", "192.168.50.1"],
+            "port": "22",
+            "sftp_user_id": user_id,
+            "chroot_enabled": "on",
+            "allow_password_auth": "on",
+            "allow_public_key_auth": "on",
+            "max_sessions": "4",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["listen_interfaces"] == ["eth0", "eth2"]
+    assert payload["listen_addresses"] == ["192.168.49.1", "192.168.50.1"]
+    assert "# Listen interfaces: eth0, eth2" in payload["config_preview"]
+    assert "# Service listener targets: 192.168.49.1:22, 192.168.50.1:22" in payload["config_preview"]
 
 
 def test_vcf_backups_disabled_disables_default_backup_user(client):
@@ -3068,7 +3184,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "vcfdt-manual-download-20260626-1" in page.text
+    assert "service-bind-multi-20260626-1" in page.text
     assert "initializeSwitchFields" in client.get("/static/app.js").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 

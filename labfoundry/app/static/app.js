@@ -2569,9 +2569,18 @@ function initializeCaSettings() {
 function serviceBindSelection(form, payload = {}) {
   const interfaceEditor = form.querySelector("[data-service-bind-interface]");
   const addressEditor = form.querySelector("[data-service-bind-address]");
-  const interfaceName = payload.listen_interface || tagEditorValues(interfaceEditor).slice(-1)[0] || "";
-  const address = payload.listen_address || tagEditorValues(addressEditor).slice(-1)[0] || "";
-  return { interfaceName, address };
+  const interfaces = Array.isArray(payload.listen_interfaces) ? payload.listen_interfaces : tagEditorValues(interfaceEditor);
+  const addresses = Array.isArray(payload.listen_addresses) ? payload.listen_addresses : tagEditorValues(addressEditor);
+  const interfaceName = payload.listen_interface || interfaces[0] || "";
+  const address = payload.listen_address || addresses[0] || "";
+  return {
+    interfaceName,
+    address,
+    interfaces,
+    addresses,
+    interfaceLabel: interfaces.length ? interfaces.join(", ") : interfaceName,
+    addressLabel: addresses.length ? addresses.join(", ") : address,
+  };
 }
 
 function updateKmsDerivedAddress(form, payload = {}) {
@@ -4672,12 +4681,12 @@ function initializeDnsSettings() {
 
 function updateVcfBackupDerivedAddress(form, payload = {}) {
   const portInput = form.querySelector('input[name="port"]');
-  const { interfaceName, address } = serviceBindSelection(form, payload);
+  const { interfaceLabel: bindInterfaceLabel, address, addresses, addressLabel } = serviceBindSelection(form, payload);
   const port = payload.port || portInput?.value || "22";
   const endpoint = document.querySelector("[data-vcf-endpoint]");
   const host = document.querySelector("[data-vcf-host]");
   const targetPort = document.querySelector("[data-vcf-port]");
-  const interfaceLabel = document.querySelector("[data-vcf-interface]");
+  const interfaceElement = document.querySelector("[data-vcf-interface]");
   const sftpUser = document.querySelector("[data-vcf-sftp-user]");
   const targetUser = document.querySelector("[data-vcf-target-user]");
   const storagePaths = document.querySelectorAll("[data-vcf-storage-path]");
@@ -4694,8 +4703,8 @@ function updateVcfBackupDerivedAddress(form, payload = {}) {
   if (targetPort instanceof HTMLElement) {
     targetPort.textContent = String(port);
   }
-  if (interfaceLabel instanceof HTMLElement) {
-    interfaceLabel.textContent = interfaceName;
+  if (interfaceElement instanceof HTMLElement) {
+    interfaceElement.textContent = `${bindInterfaceLabel || "no interface"} / ${addressLabel || "no interface IP"}`;
   }
   if (sftpUser instanceof HTMLElement && payload.sftp_username !== undefined) {
     sftpUser.textContent = payload.sftp_username || "not selected";
@@ -4990,7 +4999,7 @@ function updateVcfRegistrySummary(form, payload = {}) {
   const portInput = form.querySelector('input[name="port"]');
   const hostnameInput = form.querySelector('input[name="hostname"]');
   const projectInput = form.querySelector('input[name="harbor_project"]');
-  const { interfaceName, address } = serviceBindSelection(form, payload);
+  const { interfaceLabel: bindInterfaceLabel, addressLabel } = serviceBindSelection(form, payload);
   const port = payload.port || portInput?.value || "443";
   const hostname = payload.hostname || hostnameInput?.value || "";
   const endpointValue = payload.endpoint || (port === "443" || port === 443 ? hostname : `${hostname}:${port}`);
@@ -5005,7 +5014,7 @@ function updateVcfRegistrySummary(form, payload = {}) {
     endpoint.textContent = endpointValue || "registry hostname required";
   }
   if (interfaceLabel instanceof HTMLElement) {
-    interfaceLabel.textContent = `${interfaceName} / ${address || "no interface IP"}`;
+    interfaceLabel.textContent = `${bindInterfaceLabel || "no interface"} / ${addressLabel || "no interface IP"}`;
   }
   if (project instanceof HTMLElement) {
     project.textContent = payload.harbor_project || projectInput?.value || "";
@@ -5570,7 +5579,7 @@ function updateVcfDepotSummary(form, payload = {}) {
   const portInput = form.querySelector('input[name="port"]');
   const hostnameInput = form.querySelector('input[name="hostname"]');
   const certificateInput = form.querySelector('input[name="server_certificate"]');
-  const { interfaceName, address } = serviceBindSelection(form, payload);
+  const { interfaceLabel: bindInterfaceLabel, address, addressLabel } = serviceBindSelection(form, payload);
   const port = payload.port || portInput?.value || "443";
   const hostname = payload.hostname || hostnameInput?.value || "";
   const endpointValue = payload.endpoint || (port === "443" || port === 443 ? hostname : `${hostname}:${port}`);
@@ -5588,7 +5597,7 @@ function updateVcfDepotSummary(form, payload = {}) {
     endpoint.textContent = endpointValue || "depot hostname required";
   }
   if (interfaceLabel instanceof HTMLElement) {
-    interfaceLabel.textContent = `${interfaceName} / ${address || "no interface IP"}`;
+    interfaceLabel.textContent = `${bindInterfaceLabel || "no interface"} / ${addressLabel || "no interface IP"}`;
   }
   if (payload.depot_store_path) {
     storePaths.forEach((storePath) => {
@@ -5643,6 +5652,7 @@ function updateVcfDepotSummary(form, payload = {}) {
     hostname,
     endpoint: endpointValue,
     listen_address: address,
+    listen_addresses: addresses,
     port,
     server_certificate: payload.server_certificate || certificateInput?.value || hostname,
   };
@@ -5681,8 +5691,14 @@ function updateVcfDepotHttpsPreview(payload = {}) {
   }
   const hostname = payload.hostname || "depot.labfoundry.internal";
   const endpoint = payload.endpoint || hostname;
-  const listenAddress = payload.listen_address || "0.0.0.0";
   const port = payload.port || "443";
+  const listenAddresses = Array.isArray(payload.listen_addresses)
+    ? payload.listen_addresses
+    : String(payload.listen_address || "")
+        .split(/[\n,]+/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+  const listenLines = (listenAddresses.length ? listenAddresses : ["0.0.0.0"]).map((listenAddress) => `  listen ${listenAddress}:${port} ssl;`);
   const depotStorePath = payload.depot_store_path || document.querySelector("[data-vcf-depot-store]")?.textContent || "/mnt/labfoundry-vcf-offline-depot";
   const certificateName = payload.server_certificate || hostname;
   httpsPreview.textContent = [
@@ -5692,7 +5708,7 @@ function updateVcfDepotHttpsPreview(payload = {}) {
     `# VCF endpoint: https://${endpoint}/`,
     "",
     "server {",
-    `  listen ${listenAddress}:${port} ssl;`,
+    ...listenLines,
     `  server_name ${hostname};`,
     `  root ${depotStorePath};`,
     "  sendfile on;",
@@ -6103,6 +6119,44 @@ function setTagEditorSingleValue(editor, value) {
   list.append(token);
 }
 
+function addTagEditorValue(editor, value) {
+  if (!(editor instanceof HTMLElement)) {
+    return;
+  }
+  const list = editor.querySelector("[data-tag-list]");
+  const name = editor.dataset.tagName || "";
+  if (!(list instanceof HTMLElement) || !name) {
+    return;
+  }
+  const trimmedValue = String(value || "").trim();
+  if (!trimmedValue || tagEditorValues(editor).some((item) => item.toLowerCase() === trimmedValue.toLowerCase())) {
+    return;
+  }
+  const token = document.createElement("span");
+  token.className = "tag-token";
+  token.setAttribute("data-value", trimmedValue);
+
+  const label = document.createElement("span");
+  label.textContent = trimmedValue;
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.setAttribute("data-tag-remove", "");
+  remove.setAttribute("aria-label", `Remove ${trimmedValue}`);
+  remove.textContent = "×";
+  remove.addEventListener("click", () => {
+    token.remove();
+    editor.dispatchEvent(new CustomEvent("tag-editor:change", { bubbles: true }));
+  });
+
+  const hidden = document.createElement("input");
+  hidden.type = "hidden";
+  hidden.name = name;
+  hidden.value = trimmedValue;
+  token.append(label, remove, hidden);
+  list.append(token);
+}
+
 function initializeServiceBindEditors() {
   document.querySelectorAll("[data-service-bind]").forEach((container) => {
     if (!(container instanceof HTMLElement)) {
@@ -6129,9 +6183,12 @@ function initializeServiceBindEditors() {
         return;
       }
       syncing = true;
-      const selectedInterface = tagEditorValues(interfaceEditor).slice(-1)[0] || "";
-      const match = interfaceOptions().find((option) => option.name === selectedInterface);
-      setTagEditorSingleValue(addressEditor, match?.address || "");
+      tagEditorValues(interfaceEditor).forEach((selectedInterface) => {
+        const match = interfaceOptions().find((option) => option.name === selectedInterface);
+        if (match?.address) {
+          addTagEditorValue(addressEditor, match.address);
+        }
+      });
       syncing = false;
     };
     const syncFromAddress = () => {
@@ -6139,9 +6196,12 @@ function initializeServiceBindEditors() {
         return;
       }
       syncing = true;
-      const selectedAddress = tagEditorValues(addressEditor).slice(-1)[0] || "";
-      const match = addressOptions().find((option) => option.address === selectedAddress);
-      setTagEditorSingleValue(interfaceEditor, match?.name || "");
+      tagEditorValues(addressEditor).forEach((selectedAddress) => {
+        const match = addressOptions().find((option) => option.address === selectedAddress);
+        if (match?.name) {
+          addTagEditorValue(interfaceEditor, match.name);
+        }
+      });
       syncing = false;
     };
     interfaceEditor.addEventListener("tag-editor:change", syncFromInterface);

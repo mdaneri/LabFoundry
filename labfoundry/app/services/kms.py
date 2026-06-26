@@ -4,6 +4,7 @@ from ipaddress import ip_address
 
 from labfoundry.app.models import KmsClient, KmsKey, KmsSettings
 from labfoundry.app.services.ca import safe_certificate_name
+from labfoundry.app.services.dnsmasq import split_addresses, split_interfaces
 
 
 KMS_BACKENDS = ["pykmip"]
@@ -70,11 +71,15 @@ def render_kms_config(
     keys: list[KmsKey],
 ) -> str:
     certificate_name = safe_certificate_name(settings.server_certificate or settings.hostname)
-    host = settings.listen_address.strip() if settings.enabled else "127.0.0.1"
+    listen_addresses = split_addresses(settings.listen_address)
+    host = listen_addresses[0] if settings.enabled and listen_addresses else "127.0.0.1"
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
         f"# LabFoundry KMS enabled: {str(bool(settings.enabled)).lower()}",
         f"# LabFoundry KMS endpoint hostname: {settings.hostname}",
+        f"# LabFoundry KMS listen interfaces: {', '.join(split_interfaces(settings.listen_interface)) or 'none'}",
+        f"# LabFoundry KMS listen addresses: {', '.join(listen_addresses) or 'none'}",
+        "# PyKMIP accepts one bind host; LabFoundry uses the first selected listen address.",
         "# Backend: PyKMIP lab KMIP server desired state.",
         "[server]",
         f"hostname={host}",
@@ -134,12 +139,16 @@ def validate_kms_state(
     if settings.backend not in KMS_BACKENDS:
         errors.append("KMS backend must be pykmip for the MVP scaffold.")
     if settings.enabled:
-        if not settings.listen_interface.strip():
+        if not split_interfaces(settings.listen_interface):
             errors.append("KMS listen interface is required.")
-        try:
-            ip_address(settings.listen_address)
-        except ValueError:
-            errors.append("KMS listen address must be a valid IPv4 or IPv6 address.")
+        listen_addresses = split_addresses(settings.listen_address)
+        if not listen_addresses:
+            errors.append("KMS listen address is required.")
+        for address in listen_addresses:
+            try:
+                ip_address(address)
+            except ValueError:
+                errors.append(f"KMS listen address {address} must be a valid IPv4 or IPv6 address.")
     if settings.port < 1 or settings.port > 65535:
         errors.append("KMS port must be between 1 and 65535.")
     if not settings.hostname.strip():

@@ -11,6 +11,7 @@ from ipaddress import ip_address
 from pathlib import Path
 
 from labfoundry.app.models import Setting, VcfDepotDownloadProfile, VcfOfflineDepotSettings
+from labfoundry.app.services.dnsmasq import split_addresses, split_interfaces
 
 
 VCF_DEPOT_DEFAULT_HOSTNAME = "depot.labfoundry.internal"
@@ -290,9 +291,14 @@ def render_nginx_depot_config(
         "# Desired HTTPS endpoint for the VCF Offline Depot.",
         f"# Depot store: {settings.depot_store_path}",
         f"# VCF endpoint: https://{vcf_depot_endpoint(settings)}/",
+        f"# Listen interfaces: {', '.join(split_interfaces(settings.listen_interface)) or 'none'}",
+        f"# Listen addresses: {', '.join(split_addresses(settings.listen_address)) or 'none'}",
         "",
         "server {",
-        f"  listen {settings.listen_address}:{settings.port} ssl;",
+        *[
+            f"  listen {address}:{settings.port} ssl;"
+            for address in (split_addresses(settings.listen_address) or ["0.0.0.0"])
+        ],
         f"  server_name {settings.hostname};",
         f"  root {settings.depot_store_path};",
         "  sendfile on;",
@@ -480,15 +486,21 @@ def validate_vcf_depot_state(
     if hostname.endswith(".local"):
         warnings.append("Avoid .local for VCF labs; use labfoundry.internal or another non-.local internal domain.")
     if settings.enabled:
-        if not settings.listen_interface.strip():
+        listen_interfaces = split_interfaces(settings.listen_interface)
+        listen_addresses = split_addresses(settings.listen_address)
+        if not listen_interfaces:
             errors.append("Listen interface is required.")
-        elif interface_names is not None and settings.listen_interface not in interface_names:
-            errors.append(f"Listen interface {settings.listen_interface} is not configured as an access physical or VLAN interface with an IP address.")
-        if settings.listen_address.strip():
+        elif interface_names is not None:
+            for interface in listen_interfaces:
+                if interface not in interface_names:
+                    errors.append(f"Listen interface {interface} is not configured as an access physical or VLAN interface with an IP address.")
+        if not listen_addresses:
+            errors.append("Listen address is required.")
+        for address in listen_addresses:
             try:
-                ip_address(settings.listen_address.strip())
+                ip_address(address)
             except ValueError:
-                errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
+                errors.append(f"Listen address {address} is not a valid IP address.")
     if settings.port < 1 or settings.port > 65535:
         errors.append("Depot HTTPS port must be between 1 and 65535.")
     for path_label, path_value in [

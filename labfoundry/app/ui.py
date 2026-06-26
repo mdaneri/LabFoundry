@@ -9,7 +9,7 @@ import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_interface, ip_network
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from secrets import token_urlsafe
 from typing import Any
 from uuid import uuid4
@@ -292,7 +292,7 @@ from labfoundry.app.token_service import create_token_for_user
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 TEMPLATES_DIR = APP_DIR / "templates"
-VCF_DEPOT_VDT_LOG_PATH = Path("/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log")
+VCF_DEPOT_VDT_LOG_PATH = PurePosixPath("/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log")
 LABFOUNDRY_APP_LOG_PATH = Path("/var/log/labfoundry/labfoundry.log")
 KMS_SERVER_LOG_PATH = Path("/var/log/labfoundry/kms/server.log")
 NETWORK_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/network/labfoundry-network.conf"
@@ -753,6 +753,63 @@ def resolve_single_service_bind(db: Session, listen_interface: str, listen_addre
     return selected_interface, ""
 
 
+def resolve_service_bind_targets(
+    db: Session,
+    listen_interfaces: list[str],
+    listen_addresses: list[str],
+    *,
+    current_interface: str = "",
+    current_address: str = "",
+    listen_interfaces_present: str | None = None,
+    listen_addresses_present: str | None = None,
+) -> tuple[str, str]:
+    options = service_bind_options(db)
+    options_by_name = {option["name"]: option for option in options}
+    options_by_address = {option["address"]: option for option in options if option.get("address")}
+
+    selected_interfaces = split_interfaces(join_interfaces(listen_interfaces))
+    if listen_interfaces_present is None and not selected_interfaces:
+        selected_interfaces = split_interfaces(current_interface)
+    selected_interfaces = [interface for interface in selected_interfaces if interface in options_by_name]
+
+    selected_addresses = split_addresses(join_addresses(listen_addresses))
+    if listen_addresses_present is None and not selected_addresses:
+        selected_addresses = split_addresses(current_address)
+
+    for address in list(selected_addresses):
+        match = options_by_address.get(address)
+        if match and match["name"] not in selected_interfaces:
+            selected_interfaces.append(match["name"])
+    derived_addresses: list[str] = []
+    for interface in selected_interfaces:
+        address = options_by_name[interface].get("address", "")
+        if address and address not in derived_addresses:
+            derived_addresses.append(address)
+    selected_addresses = [*derived_addresses, *[address for address in selected_addresses if address not in derived_addresses]]
+
+    return join_interfaces(selected_interfaces), join_addresses(selected_addresses)
+
+
+def primary_listen_address(raw_address: str | None) -> str:
+    addresses = split_addresses(raw_address)
+    return addresses[0] if addresses else ""
+
+
+def primary_listen_interface(raw_interface: str | None) -> str:
+    interfaces = split_interfaces(raw_interface)
+    return interfaces[0] if interfaces else ""
+
+
+def service_bind_label(raw_interface: str | None, raw_address: str | None) -> str:
+    interfaces = split_interfaces(raw_interface)
+    addresses = split_addresses(raw_address)
+    if not interfaces and not addresses:
+        return "not selected"
+    interface_label = ", ".join(interfaces) if interfaces else "no interface"
+    address_label = ", ".join(addresses) if addresses else "no interface IP"
+    return f"{interface_label} / {address_label}"
+
+
 def vcf_backup_context(db: Session) -> dict:
     settings = get_vcf_backup_settings_row(db)
     users = db.execute(select(User).order_by(User.username)).scalars().all()
@@ -764,6 +821,11 @@ def vcf_backup_context(db: Session) -> dict:
         "vcf_backup_settings_json": vcf_backup_settings_to_dict(settings),
         "vcf_backup_users": users,
         "available_interfaces": available_interfaces,
+        "selected_vcf_backup_interfaces": split_interfaces(settings.listen_interface),
+        "selected_vcf_backup_addresses": split_addresses(settings.listen_address),
+        "available_vcf_backup_addresses": available_service_listen_addresses(settings.listen_address, available_interfaces),
+        "vcf_backup_primary_listen_address": primary_listen_address(settings.listen_address),
+        "vcf_backup_bind_label": service_bind_label(settings.listen_interface, settings.listen_address),
         "vcf_backup_remote_directory": vcf_backup_remote_directory(settings),
         "vcf_backup_config_preview": config_preview,
         "vcf_backup_validation_errors": validation_errors,
@@ -1234,6 +1296,11 @@ def vcf_private_registry_context(db: Session) -> dict:
         "vcf_registry_bundles": bundles,
         "vcf_registry_bundle_rows": [vcf_registry_bundle_to_dict(bundle) for bundle in bundles],
         "vcf_registry_available_interfaces": available_interfaces,
+        "selected_vcf_registry_interfaces": split_interfaces(settings.listen_interface),
+        "selected_vcf_registry_addresses": split_addresses(settings.listen_address),
+        "available_vcf_registry_addresses": available_service_listen_addresses(settings.listen_address, available_interfaces),
+        "vcf_registry_primary_listen_address": primary_listen_address(settings.listen_address),
+        "vcf_registry_bind_label": service_bind_label(settings.listen_interface, settings.listen_address),
         "vcf_registry_endpoint": vcf_registry_endpoint(settings),
         "vcf_registry_harbor_config_preview": harbor_config_preview,
         "vcf_registry_relocation_preview": relocation_preview,
@@ -1270,6 +1337,11 @@ def vcf_offline_depot_context(db: Session) -> dict:
         "vcf_depot_profiles": profiles,
         "vcf_depot_profile_rows": [vcf_depot_profile_to_dict(profile) for profile in profiles],
         "vcf_depot_available_interfaces": available_interfaces,
+        "selected_vcf_depot_interfaces": split_interfaces(settings.listen_interface),
+        "selected_vcf_depot_addresses": split_addresses(settings.listen_address),
+        "available_vcf_depot_addresses": available_service_listen_addresses(settings.listen_address, available_interfaces),
+        "vcf_depot_primary_listen_address": primary_listen_address(settings.listen_address),
+        "vcf_depot_bind_label": service_bind_label(settings.listen_interface, settings.listen_address),
         "vcf_depot_endpoint": vcf_depot_endpoint(settings),
         "vcf_depot_https_config_preview": https_config_preview,
         "vcf_depot_https_cert_path": depot_cert_path,
@@ -1660,13 +1732,18 @@ def ca_context(db: Session) -> dict:
 def kms_context(db: Session) -> dict:
     settings = get_kms_settings_row(db)
     available_interfaces = service_bind_options(db)
-    listen_options = {option["name"]: option for option in available_interfaces}
     changed = False
-    if settings.listen_interface in listen_options:
-        derived_address = listen_options[settings.listen_interface]["address"]
-        if settings.listen_address != derived_address:
-            settings.listen_address = derived_address
-            changed = True
+    normalized_interfaces, normalized_addresses = resolve_service_bind_targets(
+        db,
+        [],
+        [],
+        current_interface=settings.listen_interface,
+        current_address=settings.listen_address,
+    )
+    if normalized_interfaces != settings.listen_interface or normalized_addresses != settings.listen_address:
+        settings.listen_interface = normalized_interfaces
+        settings.listen_address = normalized_addresses
+        changed = True
     normalized_hostname = normalize_dns_hostname(settings.hostname)
     if normalized_hostname and settings.hostname != normalized_hostname:
         settings.hostname = normalized_hostname
@@ -1685,7 +1762,12 @@ def kms_context(db: Session) -> dict:
     validation_errors = [*ca_state_errors, *validate_kms_state(settings=settings, clients=clients, keys=keys)]
     ca_settings = get_ca_settings_row(db)
     if settings.enabled:
-        if settings.listen_interface not in listen_options:
+        invalid_interfaces = [
+            interface
+            for interface in split_interfaces(settings.listen_interface)
+            if interface not in {option["name"] for option in available_interfaces}
+        ]
+        if invalid_interfaces:
             validation_errors.append("KMS listen interface must be an access physical interface or enabled VLAN with an IP address.")
         if kms_dns_record_conflict(db, settings.hostname):
             validation_errors.append("KMS hostname conflicts with an existing non-KMS DNS record.")
@@ -1711,6 +1793,9 @@ def kms_context(db: Session) -> dict:
         "kms_key_algorithms": KMS_KEY_ALGORITHMS,
         "kms_key_states": KMS_KEY_STATES,
         "available_interfaces": available_interfaces,
+        "selected_kms_interfaces": split_interfaces(settings.listen_interface),
+        "selected_kms_addresses": split_addresses(settings.listen_address),
+        "available_kms_addresses": available_service_listen_addresses(settings.listen_address, available_interfaces),
         "kms_config_preview": config_preview,
         "kms_validation_errors": validation_errors,
         "system_adapter_dry_run": get_settings().dry_run_system_adapters,
@@ -1948,10 +2033,11 @@ def ensure_dns_for_dhcp_reservation(db: Session, reservation: DhcpReservation, a
 
 def ensure_dns_for_vcf_registry(db: Session, settings: VcfPrivateRegistrySettings, actor: str) -> str | None:
     hostname = normalize_dns_hostname(settings.hostname)
-    if not hostname or not settings.listen_address.strip():
+    selected_address = primary_listen_address(settings.listen_address)
+    if not hostname or not selected_address:
         return None
     try:
-        parsed_address = ip_address(settings.listen_address.strip())
+        parsed_address = ip_address(selected_address)
     except ValueError:
         return None
     record_type = "AAAA" if parsed_address.version == 6 else "A"
@@ -2004,10 +2090,11 @@ def ensure_dns_for_vcf_registry(db: Session, settings: VcfPrivateRegistrySetting
 
 def ensure_dns_for_vcf_offline_depot(db: Session, settings: VcfOfflineDepotSettings, actor: str) -> str | None:
     hostname = normalize_dns_hostname(settings.hostname)
-    if not hostname or not settings.listen_address.strip():
+    selected_address = primary_listen_address(settings.listen_address)
+    if not hostname or not selected_address:
         return None
     try:
-        parsed_address = ip_address(settings.listen_address.strip())
+        parsed_address = ip_address(selected_address)
     except ValueError:
         return None
     record_type = "AAAA" if parsed_address.version == 6 else "A"
@@ -2073,10 +2160,11 @@ def kms_dns_record_conflict(db: Session, hostname: str) -> bool:
 
 def ensure_dns_for_kms(db: Session, settings: KmsSettings, actor: str | None, *, previous_hostname: str | None = None) -> str | None:
     hostname = normalize_dns_hostname(settings.hostname)
-    if not hostname or not settings.listen_address.strip():
+    selected_address = primary_listen_address(settings.listen_address)
+    if not hostname or not selected_address:
         return None
     try:
-        parsed_address = ip_address(settings.listen_address.strip())
+        parsed_address = ip_address(selected_address)
     except ValueError:
         return None
     record_type = "AAAA" if parsed_address.version == 6 else "A"
@@ -5352,19 +5440,18 @@ def update_ca_settings_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_ca_settings_row(db)
-    available_options = service_bind_options(db)
-    available_names = {item["name"] for item in available_options}
-    selected_interfaces = [interface.strip() for interface in listen_interfaces if interface.strip()]
-    if available_names:
-        selected_interfaces = [interface for interface in selected_interfaces if interface in available_names]
-    if listen_interfaces_present is None and not selected_interfaces:
-        selected_interfaces = [interface for interface in split_interfaces(settings.listen_interface) if interface in available_names]
-    selected_addresses = split_addresses(join_addresses(listen_addresses))
-    if listen_addresses_present is None and not selected_addresses:
-        selected_addresses = split_addresses(settings.listen_address)
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        listen_interfaces,
+        listen_addresses,
+        current_interface=settings.listen_interface,
+        current_address=settings.listen_address,
+        listen_interfaces_present=listen_interfaces_present,
+        listen_addresses_present=listen_addresses_present,
+    )
     settings.enabled = enabled == "on"
-    settings.listen_interface = join_interfaces(selected_interfaces)
-    settings.listen_address = join_addresses(selected_addresses)
+    settings.listen_interface = selected_interfaces
+    settings.listen_address = selected_addresses
     settings.root_common_name = root_common_name.strip()
     settings.organization = organization.strip()
     settings.organizational_unit = organizational_unit.strip()
@@ -5617,6 +5704,10 @@ def update_kms_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
     backend: str = Form("pykmip"),
+    listen_interfaces: list[str] = Form(default_factory=list),
+    listen_addresses: list[str] = Form(default_factory=list),
+    listen_interfaces_present: str | None = Form(None),
+    listen_addresses_present: str | None = Form(None),
     listen_interface: str = Form(""),
     listen_address: str = Form(""),
     port: int = Form(5696),
@@ -5632,11 +5723,19 @@ def update_kms_settings_from_ui(
     verify_csrf(request, csrf)
     settings = get_kms_settings_row(db)
     previous_hostname = settings.hostname
-    selected_interface, selected_address = resolve_single_service_bind(db, listen_interface, listen_address)
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        [*listen_interfaces, listen_interface],
+        [*listen_addresses, listen_address],
+        current_interface=settings.listen_interface,
+        current_address=settings.listen_address,
+        listen_interfaces_present=listen_interfaces_present,
+        listen_addresses_present=listen_addresses_present,
+    )
     settings.enabled = enabled == "on"
     settings.backend = backend.strip().lower() or "pykmip"
-    settings.listen_interface = selected_interface
-    settings.listen_address = selected_address
+    settings.listen_interface = selected_interfaces
+    settings.listen_address = selected_addresses
     settings.port = port
     settings.hostname = normalize_dns_hostname(hostname.strip() or "kms.labfoundry.internal")
     settings.server_certificate = normalize_dns_hostname(server_certificate.strip() or settings.hostname)
@@ -5660,8 +5759,10 @@ def update_kms_settings_from_ui(
                 "status": "saved",
                 "updated_at": saved_settings.updated_at.isoformat(),
                 "enabled": saved_settings.enabled,
-                "listen_interface": saved_settings.listen_interface,
-                "listen_address": saved_settings.listen_address,
+                "listen_interface": primary_listen_interface(saved_settings.listen_interface),
+                "listen_address": primary_listen_address(saved_settings.listen_address),
+                "listen_interfaces": split_interfaces(saved_settings.listen_interface),
+                "listen_addresses": split_addresses(saved_settings.listen_address),
                 "port": saved_settings.port,
                 "hostname": saved_settings.hostname,
                 "server_certificate": saved_settings.server_certificate,
@@ -5881,6 +5982,10 @@ def update_vcf_offline_depot_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
     hostname: str = Form(VCF_DEPOT_DEFAULT_HOSTNAME),
+    listen_interfaces: list[str] = Form(default_factory=list),
+    listen_addresses: list[str] = Form(default_factory=list),
+    listen_interfaces_present: str | None = Form(None),
+    listen_addresses_present: str | None = Form(None),
     listen_interface: str = Form(""),
     listen_address: str = Form(""),
     port: int = Form(443),
@@ -5896,12 +6001,20 @@ def update_vcf_offline_depot_settings_from_ui(
     verify_csrf(request, csrf)
     settings = get_vcf_offline_depot_settings_row(db)
     previous_hostname = settings.hostname
-    selected_interface, selected_address = resolve_single_service_bind(db, listen_interface, listen_address)
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        [*listen_interfaces, listen_interface],
+        [*listen_addresses, listen_address],
+        current_interface=settings.listen_interface,
+        current_address=settings.listen_address,
+        listen_interfaces_present=listen_interfaces_present,
+        listen_addresses_present=listen_addresses_present,
+    )
 
     settings.enabled = enabled == "on"
     settings.hostname = hostname.strip() or VCF_DEPOT_DEFAULT_HOSTNAME
-    settings.listen_interface = selected_interface
-    settings.listen_address = selected_address
+    settings.listen_interface = selected_interfaces
+    settings.listen_address = selected_addresses
     settings.port = port
     settings.server_certificate = server_certificate.strip() or settings.hostname
     settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
@@ -5952,8 +6065,10 @@ def update_vcf_offline_depot_settings_from_ui(
                 "updated_at": saved_settings.updated_at.isoformat(),
                 "hostname": saved_settings.hostname,
                 "endpoint": context["vcf_depot_endpoint"],
-                "listen_interface": saved_settings.listen_interface,
-                "listen_address": saved_settings.listen_address,
+                "listen_interface": primary_listen_interface(saved_settings.listen_interface),
+                "listen_address": primary_listen_address(saved_settings.listen_address),
+                "listen_interfaces": split_interfaces(saved_settings.listen_interface),
+                "listen_addresses": split_addresses(saved_settings.listen_address),
                 "port": saved_settings.port,
                 "server_certificate": saved_settings.server_certificate,
                 "depot_store_path": saved_settings.depot_store_path,
@@ -6269,6 +6384,10 @@ def update_vcf_private_registry_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
     hostname: str = Form(VCF_REGISTRY_DEFAULT_HOSTNAME),
+    listen_interfaces: list[str] = Form(default_factory=list),
+    listen_addresses: list[str] = Form(default_factory=list),
+    listen_interfaces_present: str | None = Form(None),
+    listen_addresses_present: str | None = Form(None),
     listen_interface: str = Form(""),
     listen_address: str = Form(""),
     port: int = Form(443),
@@ -6283,11 +6402,19 @@ def update_vcf_private_registry_settings_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_vcf_private_registry_settings_row(db)
-    selected_interface, selected_address = resolve_single_service_bind(db, listen_interface, listen_address)
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        [*listen_interfaces, listen_interface],
+        [*listen_addresses, listen_address],
+        current_interface=settings.listen_interface,
+        current_address=settings.listen_address,
+        listen_interfaces_present=listen_interfaces_present,
+        listen_addresses_present=listen_addresses_present,
+    )
     settings.enabled = enabled == "on"
     settings.hostname = hostname.strip() or VCF_REGISTRY_DEFAULT_HOSTNAME
-    settings.listen_interface = selected_interface
-    settings.listen_address = selected_address
+    settings.listen_interface = selected_interfaces
+    settings.listen_address = selected_addresses
     settings.port = port
     settings.harbor_project = harbor_project.strip() or VCF_REGISTRY_DEFAULT_PROJECT
     settings.storage_path = VCF_REGISTRY_DEFAULT_STORAGE_PATH
@@ -6312,8 +6439,10 @@ def update_vcf_private_registry_settings_from_ui(
                 "status": "saved",
                 "updated_at": saved_settings.updated_at.isoformat(),
                 "hostname": saved_settings.hostname,
-                "listen_interface": saved_settings.listen_interface,
-                "listen_address": saved_settings.listen_address,
+                "listen_interface": primary_listen_interface(saved_settings.listen_interface),
+                "listen_address": primary_listen_address(saved_settings.listen_address),
+                "listen_interfaces": split_interfaces(saved_settings.listen_interface),
+                "listen_addresses": split_addresses(saved_settings.listen_address),
                 "port": saved_settings.port,
                 "endpoint": context["vcf_registry_endpoint"],
                 "harbor_project": saved_settings.harbor_project,
@@ -6437,6 +6566,10 @@ def vcf_backups_page(
 def update_vcf_backup_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
+    listen_interfaces: list[str] = Form(default_factory=list),
+    listen_addresses: list[str] = Form(default_factory=list),
+    listen_interfaces_present: str | None = Form(None),
+    listen_addresses_present: str | None = Form(None),
     listen_interface: str = Form(""),
     listen_address: str = Form(""),
     port: int = Form(22),
@@ -6454,10 +6587,18 @@ def update_vcf_backup_settings_from_ui(
     user_id = int(sftp_user_id) if str(sftp_user_id).strip() else None
     if user_id and not db.get(User, user_id):
         raise HTTPException(status_code=400, detail="Selected SFTP user does not exist.")
-    selected_interface, selected_address = resolve_single_service_bind(db, listen_interface, listen_address)
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        [*listen_interfaces, listen_interface],
+        [*listen_addresses, listen_address],
+        current_interface=settings.listen_interface,
+        current_address=settings.listen_address,
+        listen_interfaces_present=listen_interfaces_present,
+        listen_addresses_present=listen_addresses_present,
+    )
     settings.enabled = enabled == "on"
-    settings.listen_interface = selected_interface
-    settings.listen_address = selected_address
+    settings.listen_interface = selected_interfaces
+    settings.listen_address = selected_addresses
     settings.port = port
     settings.sftp_user_id = user_id
     settings.storage_path = VCF_BACKUP_DEFAULT_VOLUME_MOUNT
@@ -6492,8 +6633,10 @@ def update_vcf_backup_settings_from_ui(
             {
                 "status": "saved",
                 "updated_at": saved_settings.updated_at.isoformat(),
-                "listen_interface": saved_settings.listen_interface,
-                "listen_address": saved_settings.listen_address,
+                "listen_interface": primary_listen_interface(saved_settings.listen_interface),
+                "listen_address": primary_listen_address(saved_settings.listen_address),
+                "listen_interfaces": split_interfaces(saved_settings.listen_interface),
+                "listen_addresses": split_addresses(saved_settings.listen_address),
                 "port": saved_settings.port,
                 "sftp_username": saved_settings.sftp_user.username if saved_settings.sftp_user else "",
                 "storage_path": saved_settings.storage_path,

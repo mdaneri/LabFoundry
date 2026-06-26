@@ -4,6 +4,7 @@ import re
 from ipaddress import ip_address
 
 from labfoundry.app.models import VcfPrivateRegistrySettings, VcfRegistryBundle
+from labfoundry.app.services.dnsmasq import split_addresses, split_interfaces
 
 
 VCF_REGISTRY_DEFAULT_STORAGE_PATH = "/mnt/labfoundry-vcf-registry"
@@ -96,6 +97,8 @@ def render_harbor_config(settings: VcfPrivateRegistrySettings) -> str:
         f"labfoundry_ca_bundle: {ca_bundle_path}",
         f"labfoundry_listen_interface: {settings.listen_interface}",
         f"labfoundry_listen_address: {settings.listen_address}",
+        f"labfoundry_listen_interfaces: {split_interfaces(settings.listen_interface)}",
+        f"labfoundry_listen_addresses: {split_addresses(settings.listen_address)}",
     ]
     return "\n".join(lines).strip() + "\n"
 
@@ -142,15 +145,21 @@ def validate_vcf_registry_state(
     if settings.enabled and managed_dns_names is not None and hostname.lower() not in managed_dns_names:
         warnings.append(f"Registry hostname {hostname} is not present in managed DNS records.")
     if settings.enabled:
-        if not settings.listen_interface.strip():
+        listen_interfaces = split_interfaces(settings.listen_interface)
+        listen_addresses = split_addresses(settings.listen_address)
+        if not listen_interfaces:
             errors.append("Listen interface is required.")
-        elif interface_names is not None and settings.listen_interface not in interface_names:
-            errors.append(f"Listen interface {settings.listen_interface} is not configured as an access physical or VLAN interface with an IP address.")
-        if settings.listen_address.strip():
+        elif interface_names is not None:
+            for interface in listen_interfaces:
+                if interface not in interface_names:
+                    errors.append(f"Listen interface {interface} is not configured as an access physical or VLAN interface with an IP address.")
+        if not listen_addresses:
+            errors.append("Listen address is required.")
+        for address in listen_addresses:
             try:
-                ip_address(settings.listen_address.strip())
+                ip_address(address)
             except ValueError:
-                errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
+                errors.append(f"Listen address {address} is not a valid IP address.")
     port = settings.port or 443
     if port < 1 or port > 65535:
         errors.append("Registry HTTPS port must be between 1 and 65535.")

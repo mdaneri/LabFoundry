@@ -1,6 +1,7 @@
 from ipaddress import ip_address
 
 from labfoundry.app.models import User, VcfBackupSettings
+from labfoundry.app.services.dnsmasq import split_addresses, split_interfaces
 
 
 VCF_BACKUP_DEFAULT_VOLUME_MOUNT = "/mnt/labfoundry-vcf-backups"
@@ -45,15 +46,21 @@ def validate_vcf_backup_state(settings: VcfBackupSettings, users: list[User], in
     if settings.enabled and selected_user is not None and not selected_user.enabled:
         errors.append(f"SFTP user {selected_user.username} is disabled.")
     if settings.enabled:
-        if not settings.listen_interface.strip():
+        listen_interfaces = split_interfaces(settings.listen_interface)
+        listen_addresses = split_addresses(settings.listen_address)
+        if not listen_interfaces:
             errors.append("Listen interface is required.")
-        elif interface_names is not None and settings.listen_interface not in interface_names:
-            errors.append(f"Listen interface {settings.listen_interface} is not configured as a physical or VLAN interface.")
-        if settings.listen_address.strip():
+        elif interface_names is not None:
+            for interface in listen_interfaces:
+                if interface not in interface_names:
+                    errors.append(f"Listen interface {interface} is not configured as a physical or VLAN interface.")
+        if not listen_addresses:
+            errors.append("Listen address is required.")
+        for address in listen_addresses:
             try:
-                ip_address(settings.listen_address.strip())
+                ip_address(address)
             except ValueError:
-                errors.append(f"Listen address {settings.listen_address} is not a valid IP address.")
+                errors.append(f"Listen address {address} is not a valid IP address.")
     if settings.port < 1 or settings.port > 65535:
         errors.append("SFTP port must be between 1 and 65535.")
     if not settings.storage_path.startswith("/"):
@@ -76,6 +83,8 @@ def render_vcf_backup_config(settings: VcfBackupSettings) -> str:
         f"# LabFoundry VCF Backups user: {username}",
         f"# Backup volume mount: {settings.storage_path}",
         f"# VCF remote directory: {remote_directory}",
+        f"# Listen interfaces: {', '.join(split_interfaces(settings.listen_interface)) or 'none'}",
+        f"# Listen addresses: {', '.join(split_addresses(settings.listen_address)) or 'none'}",
         "# The selected listen target is enforced by the LabFoundry firewall apply unit.",
         "",
     ]
@@ -84,7 +93,7 @@ def render_vcf_backup_config(settings: VcfBackupSettings) -> str:
 
     lines = [
         *common_header,
-        f"# Service listener target: {settings.listen_address}:{settings.port}",
+        f"# Service listener targets: {', '.join(f'{address}:{settings.port}' for address in split_addresses(settings.listen_address)) or 'none'}",
         f"Match User {username}",
         "  AuthorizedKeysFile /etc/labfoundry/ssh/authorized_keys/%u",
         f"  ChrootDirectory {settings.storage_path}",
@@ -101,7 +110,7 @@ def render_vcf_backup_config(settings: VcfBackupSettings) -> str:
     if not settings.chroot_enabled:
         lines = [
             *common_header,
-            f"# Service listener target: {settings.listen_address}:{settings.port}",
+            f"# Service listener targets: {', '.join(f'{address}:{settings.port}' for address in split_addresses(settings.listen_address)) or 'none'}",
             f"Match User {username}",
             "  AuthorizedKeysFile /etc/labfoundry/ssh/authorized_keys/%u",
             f"  ForceCommand internal-sftp -d {remote_directory}",

@@ -15,7 +15,7 @@
       <div class="metric">
         <span>Registry endpoint</span>
         <strong data-vcf-registry-endpoint>{{ vcf_registry_endpoint }}</strong>
-        <small data-vcf-registry-interface>{{ vcf_registry_settings.listen_interface }} / {{ vcf_registry_settings.listen_address }}</small>
+        <small data-vcf-registry-interface>{{ vcf_registry_bind_label }}</small>
       </div>
       <div class="metric">
         <span>Harbor project</span>
@@ -107,18 +107,20 @@
             <input name="harbor_project" value="{{ vcf_registry_settings.harbor_project }}">
           </label>
         </div>
+        <input type="hidden" name="listen_interfaces_present" value="1">
+        <input type="hidden" name="listen_addresses_present" value="1">
         <div class="service-bind-editor" data-service-bind>
           <div class="form-field">
-            <span class="field-label"><span>Listen interface</span><button class="help-icon" type="button" data-help="Access-mode physical interfaces and VLAN interfaces with configured IP addresses can host Harbor. Trunk physical NICs are not direct bind targets.">i</button></span>
-            <div class="tag-editor" data-tag-editor data-tag-single data-tag-name="listen_interface" data-service-bind-interface>
+            <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more access-mode physical interfaces and VLAN interfaces with configured IP addresses can host Harbor. Trunk physical NICs are not direct bind targets.">i</button></span>
+            <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
               <div class="tag-editor-tags" data-tag-list>
-                {% if vcf_registry_settings.listen_interface %}
-                  <span class="tag-token" data-value="{{ vcf_registry_settings.listen_interface }}">
-                    <span>{{ vcf_registry_settings.listen_interface }}</span>
-                    <button type="button" data-tag-remove aria-label="Remove {{ vcf_registry_settings.listen_interface }}">×</button>
-                    <input type="hidden" name="listen_interface" value="{{ vcf_registry_settings.listen_interface }}">
+                {% for interface_name in selected_vcf_registry_interfaces %}
+                  <span class="tag-token" data-value="{{ interface_name }}">
+                    <span>{{ interface_name }}</span>
+                    <button type="button" data-tag-remove aria-label="Remove {{ interface_name }}">×</button>
+                    <input type="hidden" name="listen_interfaces" value="{{ interface_name }}">
                   </span>
-                {% endif %}
+                {% endfor %}
               </div>
               <input class="tag-editor-input" type="text" placeholder="Add interface..." list="vcf-registry-interface-options" data-tag-entry autocomplete="off">
               <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface">+</button>
@@ -138,31 +140,31 @@
             </datalist>
           </div>
           <div class="form-field">
-            <span class="field-label"><span>Listen address</span><button class="help-icon" type="button" data-help="Appliance IP for the Harbor endpoint. Selecting an address selects the matching access or VLAN interface.">i</button></span>
-            <div class="tag-editor" data-tag-editor data-tag-single data-tag-name="listen_address" data-service-bind-address>
+            <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="One or more appliance IP addresses for Harbor reachability. The first address backs the app-owned DNS record while firewall review covers every selected interface.">i</button></span>
+            <div class="tag-editor" data-tag-editor data-tag-name="listen_addresses" data-service-bind-address>
               <div class="tag-editor-tags" data-tag-list>
-                {% if vcf_registry_settings.listen_address %}
-                  <span class="tag-token" data-value="{{ vcf_registry_settings.listen_address }}">
-                    <span>{{ vcf_registry_settings.listen_address }}</span>
-                    <button type="button" data-tag-remove aria-label="Remove {{ vcf_registry_settings.listen_address }}">×</button>
-                    <input type="hidden" name="listen_address" value="{{ vcf_registry_settings.listen_address }}">
+                {% for address in selected_vcf_registry_addresses %}
+                  <span class="tag-token" data-value="{{ address }}">
+                    <span>{{ address }}</span>
+                    <button type="button" data-tag-remove aria-label="Remove {{ address }}">×</button>
+                    <input type="hidden" name="listen_addresses" value="{{ address }}">
                   </span>
-                {% endif %}
+                {% endfor %}
               </div>
               <input class="tag-editor-input" type="text" placeholder="Add listen address..." list="vcf-registry-address-options" data-tag-entry autocomplete="off">
               <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing listen address">+</button>
               <div class="tag-suggestions" data-tag-menu hidden>
-                {% for interface in vcf_registry_available_interfaces %}
-                  <button type="button" data-tag-option="{{ interface.address }}" data-service-bind-interface="{{ interface.name }}">
-                    <strong>{{ interface.address }}</strong>
-                    <small>{{ interface.name }}</small>
+                {% for item in available_vcf_registry_addresses %}
+                  <button type="button" data-tag-option="{{ item.address }}">
+                    <strong>{{ item.address }}</strong>
+                    <small>{{ item.source }}</small>
                   </button>
                 {% endfor %}
               </div>
             </div>
             <datalist id="vcf-registry-address-options">
-              {% for interface in vcf_registry_available_interfaces %}
-                <option value="{{ interface.address }}">{{ interface.name }}</option>
+              {% for item in available_vcf_registry_addresses %}
+                <option value="{{ item.address }}">{{ item.source }}</option>
               {% endfor %}
             </datalist>
           </div>

@@ -80,11 +80,11 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
                 enabled=True,
             )
         ],
-        kms_settings=KmsSettings(enabled=True, listen_interface="eth2.50", port=5696),
-        vcf_backup_settings=VcfBackupSettings(enabled=True, listen_interface="eth2.50", port=22),
-        vcf_depot_settings=VcfOfflineDepotSettings(enabled=True, listen_interface="eth2.50", port=8443),
-        vcf_registry_settings=VcfPrivateRegistrySettings(enabled=True, listen_interface="eth2.50", port=9443),
-        interface_networks={"eth0": "192.168.49.0/24", "eth2.50": "192.168.50.0/24"},
+        kms_settings=KmsSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=5696),
+        vcf_backup_settings=VcfBackupSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=22),
+        vcf_depot_settings=VcfOfflineDepotSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=8443),
+        vcf_registry_settings=VcfPrivateRegistrySettings(enabled=True, listen_interface="eth2.50\neth3.60", port=9443),
+        interface_networks={"eth0": "192.168.49.0/24", "eth2.50": "192.168.50.0/24", "eth3.60": "192.168.60.0/24"},
     )
 
     by_name = {rule.name: rule for rule in rules}
@@ -96,11 +96,15 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     assert by_name["sitea-dns-dhcp"].source == "any"
     assert by_name["sitea-dns-dhcp"].destination_port == "67"
     assert by_name["mgmt-console"].source == "any"
-    assert by_name["vcf-backups-sftp"].source == "any"
-    assert by_name["kms-kmip"].destination_port == "5696"
-    assert by_name["vcf-backups-sftp"].destination_port == "22"
-    assert by_name["vcf-offline-depot"].destination_port == "8443"
-    assert by_name["vcf-private-registry"].destination_port == "9443"
+    assert by_name["vcf-backups-sftp-eth2.50"].source == "any"
+    assert by_name["kms-kmip-eth2.50"].destination_port == "5696"
+    assert by_name["kms-kmip-eth3.60"].interface_name == "eth3.60"
+    assert by_name["vcf-backups-sftp-eth2.50"].destination_port == "22"
+    assert by_name["vcf-backups-sftp-eth3.60"].interface_name == "eth3.60"
+    assert by_name["vcf-offline-depot-eth2.50"].destination_port == "8443"
+    assert by_name["vcf-offline-depot-eth3.60"].interface_name == "eth3.60"
+    assert by_name["vcf-private-registry-eth2.50"].destination_port == "9443"
+    assert by_name["vcf-private-registry-eth3.60"].interface_name == "eth3.60"
 
 
 def test_managed_service_firewall_rules_use_assigned_source_group():
@@ -123,7 +127,7 @@ def test_managed_service_firewall_rules_use_assigned_source_group():
     settings = FirewallSettings(enabled=True, default_input_policy="drop")
     config = render_nftables_config(settings, [], rules, replace_labfoundry_service_rules=True)
 
-    assert 'iifname "eth2.50" ip saddr { 10.10.0.0/16, 10.20.0.0/16 } tcp dport 22 accept comment "vcf-backups-sftp"' in config
+    assert 'iifname "eth2.50" ip saddr { 10.10.0.0/16, 10.20.0.0/16 } tcp dport 22 accept comment "vcf-backups-sftp-eth2.50"' in config
 
 
 def test_custom_firewall_rules_resolve_source_and_destination_groups():
