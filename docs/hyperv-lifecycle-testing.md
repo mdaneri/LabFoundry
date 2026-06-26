@@ -59,8 +59,19 @@ powershell.exe -ExecutionPolicy Bypass `
 The wrapper prepares the Alpine client VHDX if needed, selects the newest
 appliance VHDX under `image/hyperv/output`, creates a unique lifecycle lab name,
 runs the full interop scenario, prints a human-readable summary to the console,
-writes `result.json`, and removes the VMs it created after the test. Pass
-`-KeepVms` only when you want to inspect a failed lab.
+writes `result.json`, and removes the VMs it created after the test. By
+default, a successful first pass exports a settings backup, redeploys the
+appliance VM from the parent VHDX, restores the backup on the fresh appliance,
+applies the restored desired state, and reruns the host/client checks. The
+restored pass also compares the pre-restore and post-restore Client A CA
+certificate serial number and SHA-256 fingerprint, then exports the restored
+settings state and compares the archived root CA plus CA-managed certificate
+fingerprints against the original backup. Backup/restore portability fails
+loudly when certificate identity changes. Pass `-SkipBackupRestoreTest` for the
+older single-pass lifecycle run, and pass `-KeepVms` only when you want to
+inspect a failed lab. Default two-pass runs write `initial/result.json`,
+`restored/result.json`, `settings-backup.json`, and
+`restored/restored-settings-backup.json` under the timestamped result directory.
 
 The wrapper defaults the LabFoundry admin and SSH passwords to the local Hyper-V
 lab password. The VCF Backup SFTP test password defaults to a separate
@@ -155,6 +166,9 @@ The lifecycle runner records structured evidence in
   OS sync, global `vcf_backups` appliance apply, OpenSSH drop-in host state, and
   a client-side SFTP probe from Client A to the SiteA appliance address
 - client-side DNS/DHCP/routing probes when client SSH addresses are available
+- settings backup export, appliance redeploy, settings restore, restored
+  desired-state apply, downloaded Client A certificate comparison, and restored
+  CA archive certificate comparison unless `-SkipBackupRestoreTest` is used
 
 The runner submits only global `/appliance-apply` units. It does not call
 service-specific apply routes.

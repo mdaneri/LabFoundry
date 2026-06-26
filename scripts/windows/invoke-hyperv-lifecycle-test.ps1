@@ -97,6 +97,10 @@ param(
     [Parameter(ParameterSetName = 'Plan')]
     [switch]$AllowDryRunApply,
 
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [switch]$SkipBackupRestoreTest,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Plan')]
     [switch]$PlanOnly
 )
@@ -184,7 +188,7 @@ $arguments = @(
     '-ClientVhdxPath', $ClientVhdxPath,
     '-ClientManagementSwitch', $ClientManagementSwitch,
     '-ApplianceIPAddress', $ApplianceIPAddress,
-    '-ApplianceUrl', $ApplianceUrl,
+    '-ApplianceUrl', $effectiveApplianceUrl,
     '-SiteInterface', $SiteInterface,
     '-SiteCidr', $SiteCidr,
     '-SiteVlanId', "$SiteVlanId",
@@ -205,6 +209,9 @@ if (-not $KeepVms) {
 if ($AllowDryRunApply) {
     $arguments += '-AllowDryRunApply'
 }
+if ($SkipBackupRestoreTest) {
+    $arguments += '-SkipBackupRestoreTest'
+}
 if ($PlanOnly) {
     $arguments += '-PlanOnly'
 }
@@ -213,6 +220,7 @@ Write-Host "Lifecycle lab: $LabName"
 Write-Host "Appliance VHDX: $ApplianceVhdxPath"
 Write-Host "Client VHDX: $ClientVhdxPath"
 Write-Host "Appliance URL: $effectiveApplianceUrl"
+Write-Host ("Backup/restore validation: {0}" -f (-not $SkipBackupRestoreTest))
 Write-Host ("Cleanup created VMs: {0}" -f (-not $KeepVms))
 
 & powershell.exe @arguments

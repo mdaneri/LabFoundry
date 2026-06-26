@@ -152,7 +152,7 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
     assert "[string]$ApplianceUrl = ''" in wrapper
     assert '"http://${ApplianceIPAddress}"' in wrapper
     assert '"http://${ApplianceIPAddress}:8000"' not in wrapper
-    assert "'-ApplianceUrl', $ApplianceUrl" in wrapper
+    assert "'-ApplianceUrl', $effectiveApplianceUrl" in wrapper
     assert 'parser.add_argument("--appliance-url", default="http://192.168.49.1")' in runner
     assert "[string]$SiteInterface = 'eth1.12'" in script
     assert "[string]$SiteCidr = '192.168.12.1/24'" in script

@@ -433,18 +433,22 @@ The wrapper prepares the tiny Alpine client VHDX, selects the newest appliance
 VHDX under `image/hyperv/output`, creates a unique `LabFoundryLifecycle-*` lab,
 validates DNS, DHCP, firewall, routing, NAT, WAN netem simulation, CA apply
 with a ClientA CSR request and issued-certificate verification, VCF Backup SFTP
-with the `vcf-backup` OS user, and client-side connectivity,
-prints a human-readable console summary, writes `result.json`, then removes the
-VMs it created. It defaults to the local Hyper-V lab password for admin and
+with the `vcf-backup` OS user, client-side connectivity, and by default a
+backup/restore redeploy pass that confirms the restored ClientA certificate has
+the same serial number and SHA-256 fingerprint as the pre-restore certificate
+and that the restored CA archive fingerprints match the original settings
+backup.
+It prints a human-readable console summary, writes `result.json`, then removes
+the VMs it created. It defaults to the local Hyper-V lab password for admin and
 appliance/client SSH access; appliance host-state probes log in as `admin`
 because root SSH is disabled by default, then run checks through sudo. It uses a
 separate policy-compliant default for VCF Backup SFTP test access; pass
 `-AdminPassword`, `-SshPassword`, and `-VcfBackupPassword` to override those
-defaults. Pass `-KeepVms` only when
-preserving a failed lab for inspection. Use `-PrepareNetworksOnly` to set up the
-Hyper-V switches/NAT, `-CleanupVmsOnly` to remove only lifecycle VMs, and
-`-CleanupNetworksOnly` to remove LabFoundry switches/NAT after all attached VMs
-are gone. Details live in
+defaults. Pass `-SkipBackupRestoreTest` only when you need the older single-pass
+run, and pass `-KeepVms` only when preserving a failed lab for inspection. Use
+`-PrepareNetworksOnly` to set up the Hyper-V switches/NAT, `-CleanupVmsOnly` to
+remove only lifecycle VMs, and `-CleanupNetworksOnly` to remove LabFoundry
+switches/NAT after all attached VMs are gone. Details live in
 [`docs/hyperv-lifecycle-testing.md`](docs/hyperv-lifecycle-testing.md).
 
 When troubleshooting a Hyper-V builder VM, use

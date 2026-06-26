@@ -28,6 +28,7 @@ param(
     [string]$SshPassword = '',
     [string]$VcfBackupPassword = 'VMware01!Test',
     [switch]$AllowDryRunApply,
+    [switch]$SkipBackupRestoreTest,
     [switch]$AllowExistingLifecycleLab,
     [switch]$CleanupCreatedLab,
     [switch]$PlanOnly
@@ -107,7 +108,9 @@ function New-LifecycleVm {
         New-VM -Name $Name -Generation 2 -MemoryStartupBytes $MemoryStartupBytes -VHDPath $VhdxPath -SwitchName $SwitchName | Out-Null
         Set-VMProcessor -VMName $Name -Count $ProcessorCount
         Set-VMFirmware -VMName $Name -EnableSecureBoot Off
-        $createdVms.Add($Name)
+        if (-not $createdVms.Contains($Name)) {
+            $createdVms.Add($Name)
+        }
         Write-Host "Created lifecycle VM: $Name"
     }
 }
@@ -226,6 +229,43 @@ function Ensure-NetworkAdapter {
     }
     if ($PSCmdlet.ShouldProcess("$VMName/$Name", "Add NIC on $SwitchName")) {
         Add-VMNetworkAdapter -VMName $VMName -Name $Name -SwitchName $SwitchName
+    }
+}
+
+function Set-LifecycleNetworkTopology {
+    Ensure-NetworkAdapter -VMName $applianceName -Name 'SiteA' -SwitchName 'LabFoundry-SiteA'
+    Ensure-NetworkAdapter -VMName $applianceName -Name 'Trunk' -SwitchName 'LabFoundry-Trunk'
+    Ensure-NetworkAdapter -VMName $applianceName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'
+    Ensure-NetworkAdapter -VMName $clientAName -Name 'SiteA-Test' -SwitchName 'LabFoundry-SiteA'
+    Ensure-NetworkAdapter -VMName $clientAName -Name 'VLAN-Test' -SwitchName 'LabFoundry-Trunk'
+    Ensure-NetworkAdapter -VMName $clientAName -Name 'Appliance-Mgmt-Test' -SwitchName 'LabFoundry-Mgmt'
+    Ensure-NetworkAdapter -VMName $clientBName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'
+
+    if ($PSCmdlet.ShouldProcess("$applianceName/Trunk", "Enable trunk VLAN $VlanId")) {
+        Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'Trunk' -Trunk -AllowedVlanIdList "$VlanId" -NativeVlanId 0
+    }
+    if ($PSCmdlet.ShouldProcess("$clientAName/VLAN-Test", "Enable access VLAN $VlanId")) {
+        Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'VLAN-Test' -Access -VlanId $VlanId
+    }
+    if ($SiteInterface -match '\.(\d+)$') {
+        $siteTaggedVlanId = [int]$Matches[1]
+        if ($SiteVlanId -ne $siteTaggedVlanId) {
+            throw "SiteInterface $SiteInterface uses VLAN $siteTaggedVlanId but SiteVlanId is $SiteVlanId."
+        }
+        if ($PSCmdlet.ShouldProcess("$applianceName/SiteA", "Enable trunk VLAN $SiteVlanId")) {
+            Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'SiteA' -Trunk -AllowedVlanIdList "$SiteVlanId" -NativeVlanId 0
+        }
+        if ($PSCmdlet.ShouldProcess("$clientAName/SiteA-Test", "Enable access VLAN $SiteVlanId")) {
+            Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'SiteA-Test' -Access -VlanId $SiteVlanId
+        }
+    }
+    else {
+        if ($PSCmdlet.ShouldProcess("$applianceName/SiteA", 'Use untagged SiteA traffic')) {
+            Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'SiteA' -Untagged
+        }
+        if ($PSCmdlet.ShouldProcess("$clientAName/SiteA-Test", 'Use untagged SiteA traffic')) {
+            Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'SiteA-Test' -Untagged
+        }
     }
 }
 
@@ -373,6 +413,51 @@ function Get-PlinkHostKey {
     return ''
 }
 
+function Resolve-SafeChildPath {
+    param(
+        [string]$Path,
+        [string]$Root
+    )
+
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    $pathFull = [System.IO.Path]::GetFullPath($Path)
+    $rootPrefix = "$rootFull\"
+    if (-not ($pathFull.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase))) {
+        throw "Refusing to operate on path outside lifecycle artifact root: $pathFull"
+    }
+    return $pathFull
+}
+
+function Reset-LifecycleApplianceVm {
+    Assert-SafeLifecycleName -Name $applianceName
+    $safeApplianceDisk = Resolve-SafeChildPath -Path $applianceDisk -Root $diskRoot
+
+    $existing = Get-VM -Name $applianceName -ErrorAction SilentlyContinue
+    if ($existing) {
+        if ($PSCmdlet.ShouldProcess($applianceName, 'Remove lifecycle appliance VM before restore validation redeploy')) {
+            Stop-VM -Name $applianceName -Force -TurnOff -ErrorAction SilentlyContinue
+            Remove-VM -Name $applianceName -Force
+        }
+    }
+    if (Test-Path -LiteralPath $safeApplianceDisk) {
+        if ($PSCmdlet.ShouldProcess($safeApplianceDisk, 'Remove lifecycle appliance differencing disk before restore validation redeploy')) {
+            Remove-Item -LiteralPath $safeApplianceDisk -Force
+        }
+    }
+
+    New-LifecycleDifferencingDisk -ParentPath $ApplianceVhdxPath -ChildPath $safeApplianceDisk -Label 'restored appliance'
+    New-LifecycleVm -Name $applianceName -VhdxPath $safeApplianceDisk -SwitchName 'LabFoundry-Mgmt' -MemoryStartupBytes $ApplianceMemoryStartupBytes -ProcessorCount $ApplianceProcessorCount
+    Set-LifecycleNetworkTopology
+    if ((Get-VM -Name $applianceName).State -ne 'Running') {
+        if ($PSCmdlet.ShouldProcess($applianceName, 'Start redeployed lifecycle appliance VM')) {
+            Start-VM -Name $applianceName
+        }
+    }
+    Wait-VMRunning -Name $applianceName
+    Start-Sleep -Seconds 20
+    return Get-PlinkHostKey -HostName $ApplianceIPAddress -UserName $ApplianceSshUser -Password $SshPassword
+}
+
 $applianceName = "$LabName-Appliance"
 $clientAName = "$LabName-ClientA"
 $clientBName = "$LabName-ClientB"
@@ -412,6 +497,7 @@ if ($PlanOnly) {
         wan_cidr                 = $WanCidr
         result_root              = $resultRoot
         appliance_url            = $ApplianceUrl
+        backup_restore_test      = -not [bool]$SkipBackupRestoreTest
         cleanup_created_lab      = [bool]$CleanupCreatedLab
         reserved_vms_not_touched = @('LabFoundry', 'LabFoundry-Photon-Builder')
     } | ConvertTo-Json -Depth 5
@@ -464,40 +550,7 @@ try {
     Ensure-DvdDrive -VMName $clientAName -Path $clientASeedIso
     Ensure-DvdDrive -VMName $clientBName -Path $clientBSeedIso
 
-    Ensure-NetworkAdapter -VMName $applianceName -Name 'SiteA' -SwitchName 'LabFoundry-SiteA'
-    Ensure-NetworkAdapter -VMName $applianceName -Name 'Trunk' -SwitchName 'LabFoundry-Trunk'
-    Ensure-NetworkAdapter -VMName $applianceName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'
-    Ensure-NetworkAdapter -VMName $clientAName -Name 'SiteA-Test' -SwitchName 'LabFoundry-SiteA'
-    Ensure-NetworkAdapter -VMName $clientAName -Name 'VLAN-Test' -SwitchName 'LabFoundry-Trunk'
-    Ensure-NetworkAdapter -VMName $clientAName -Name 'Appliance-Mgmt-Test' -SwitchName 'LabFoundry-Mgmt'
-    Ensure-NetworkAdapter -VMName $clientBName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'
-
-    if ($PSCmdlet.ShouldProcess("$applianceName/Trunk", "Enable trunk VLAN $VlanId")) {
-        Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'Trunk' -Trunk -AllowedVlanIdList "$VlanId" -NativeVlanId 0
-    }
-    if ($PSCmdlet.ShouldProcess("$clientAName/VLAN-Test", "Enable access VLAN $VlanId")) {
-        Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'VLAN-Test' -Access -VlanId $VlanId
-    }
-    if ($SiteInterface -match '\.(\d+)$') {
-        $siteTaggedVlanId = [int]$Matches[1]
-        if ($SiteVlanId -ne $siteTaggedVlanId) {
-            throw "SiteInterface $SiteInterface uses VLAN $siteTaggedVlanId but SiteVlanId is $SiteVlanId."
-        }
-        if ($PSCmdlet.ShouldProcess("$applianceName/SiteA", "Enable trunk VLAN $SiteVlanId")) {
-            Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'SiteA' -Trunk -AllowedVlanIdList "$SiteVlanId" -NativeVlanId 0
-        }
-        if ($PSCmdlet.ShouldProcess("$clientAName/SiteA-Test", "Enable access VLAN $SiteVlanId")) {
-            Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'SiteA-Test' -Access -VlanId $SiteVlanId
-        }
-    }
-    else {
-        if ($PSCmdlet.ShouldProcess("$applianceName/SiteA", 'Use untagged SiteA traffic')) {
-            Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'SiteA' -Untagged
-        }
-        if ($PSCmdlet.ShouldProcess("$clientAName/SiteA-Test", 'Use untagged SiteA traffic')) {
-            Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'SiteA-Test' -Untagged
-        }
-    }
+    Set-LifecycleNetworkTopology
 
     foreach ($name in @($applianceName, $clientAName, $clientBName)) {
         if ((Get-VM -Name $name).State -ne 'Running') {
@@ -515,7 +568,7 @@ try {
     $clientAHostKey = Get-PlinkHostKey -HostName $clientAHost -UserName $ClientSshUser -Password $SshPassword
     $clientBHostKey = Get-PlinkHostKey -HostName $clientBHost -UserName $ClientSshUser -Password $SshPassword
 
-    $pythonArgs = @(
+    $basePythonArgs = @(
         (Join-Path $repoRoot 'scripts\interop\lifecycle_test.py'),
         '--appliance-url', $ApplianceUrl,
         '--appliance-ssh-host', $ApplianceIPAddress,
@@ -523,7 +576,6 @@ try {
         '--password', $AdminPassword,
         '--appliance-ssh-user', $ApplianceSshUser,
         '--client-ssh-user', $ClientSshUser,
-        '--result-dir', $resultRoot,
         '--vcf-backup-password', $VcfBackupPassword,
         '--site-interface', $SiteInterface,
         '--site-cidr', $SiteCidr,
@@ -531,30 +583,92 @@ try {
         '--vlan-cidr', $TaggedVlanCidr,
         '--wan-cidr', $WanCidr
     )
-    if ($SshUser) { $pythonArgs += @('--ssh-user', $SshUser) }
-    if ($SshKeyPath) { $pythonArgs += @('--ssh-key', $SshKeyPath) }
-    if ($SshPassword) { $pythonArgs += @('--ssh-password', $SshPassword) }
-    if ($AllowDryRunApply) { $pythonArgs += '--allow-dry-run' }
-    if ($applianceHostKey) { $pythonArgs += @('--appliance-ssh-hostkey', $applianceHostKey) }
-    if ($clientAHost) { $pythonArgs += @('--client-a-host', $clientAHost) }
-    if ($clientBHost) { $pythonArgs += @('--client-b-host', $clientBHost) }
-    if ($clientAHostKey) { $pythonArgs += @('--client-a-hostkey', $clientAHostKey) }
-    if ($clientBHostKey) { $pythonArgs += @('--client-b-hostkey', $clientBHostKey) }
+    if ($SshUser) { $basePythonArgs += @('--ssh-user', $SshUser) }
+    if ($SshKeyPath) { $basePythonArgs += @('--ssh-key', $SshKeyPath) }
+    if ($SshPassword) { $basePythonArgs += @('--ssh-password', $SshPassword) }
+    if ($AllowDryRunApply) { $basePythonArgs += '--allow-dry-run' }
+
+    function New-LifecyclePythonArgs {
+        param(
+            [string]$RunResultRoot,
+            [string]$CurrentApplianceHostKey,
+            [string]$CurrentClientAHost,
+            [string]$CurrentClientBHost,
+            [string]$CurrentClientAHostKey,
+            [string]$CurrentClientBHostKey
+        )
+
+        $runnerArgs = @($basePythonArgs)
+        $runnerArgs += @('--result-dir', $RunResultRoot)
+        if ($CurrentApplianceHostKey) { $runnerArgs += @('--appliance-ssh-hostkey', $CurrentApplianceHostKey) }
+        if ($CurrentClientAHost) { $runnerArgs += @('--client-a-host', $CurrentClientAHost) }
+        if ($CurrentClientBHost) { $runnerArgs += @('--client-b-host', $CurrentClientBHost) }
+        if ($CurrentClientAHostKey) { $runnerArgs += @('--client-a-hostkey', $CurrentClientAHostKey) }
+        if ($CurrentClientBHostKey) { $runnerArgs += @('--client-b-hostkey', $CurrentClientBHostKey) }
+        return $runnerArgs
+    }
+
+    $initialResultRoot = if ($SkipBackupRestoreTest) { $resultRoot } else { Join-Path $resultRoot 'initial' }
+    $restoredResultRoot = Join-Path $resultRoot 'restored'
+    $backupArchivePath = Join-Path $resultRoot 'settings-backup.json'
+    $initialResultPath = Join-Path $initialResultRoot 'result.json'
+
+    $initialPythonArgs = New-LifecyclePythonArgs `
+        -RunResultRoot $initialResultRoot `
+        -CurrentApplianceHostKey $applianceHostKey `
+        -CurrentClientAHost $clientAHost `
+        -CurrentClientBHost $clientBHost `
+        -CurrentClientAHostKey $clientAHostKey `
+        -CurrentClientBHostKey $clientBHostKey
+    if (-not $SkipBackupRestoreTest) {
+        $initialPythonArgs += @('--export-settings-backup', $backupArchivePath)
+    }
 
     if ($PSCmdlet.ShouldProcess($LabName, 'Run lifecycle interop scenario')) {
-        python @pythonArgs
+        python @initialPythonArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Lifecycle interop runner failed with exit code $LASTEXITCODE"
+        }
+        if (-not $SkipBackupRestoreTest) {
+            if (-not (Test-Path -LiteralPath $backupArchivePath)) {
+                throw "Lifecycle backup archive was not created: $backupArchivePath"
+            }
+            Write-Host "Lifecycle settings backup: $backupArchivePath"
+            Write-Host 'Redeploying lifecycle appliance VM for restore validation...'
+            $applianceHostKey = Reset-LifecycleApplianceVm
+            $clientAHost = Wait-GuestIPv4 -Name $clientAName
+            $clientBHost = Wait-GuestIPv4 -Name $clientBName
+            $clientAHostKey = Get-PlinkHostKey -HostName $clientAHost -UserName $ClientSshUser -Password $SshPassword
+            $clientBHostKey = Get-PlinkHostKey -HostName $clientBHost -UserName $ClientSshUser -Password $SshPassword
+
+            $restoredPythonArgs = New-LifecyclePythonArgs `
+                -RunResultRoot $restoredResultRoot `
+                -CurrentApplianceHostKey $applianceHostKey `
+                -CurrentClientAHost $clientAHost `
+                -CurrentClientBHost $clientBHost `
+                -CurrentClientAHostKey $clientAHostKey `
+                -CurrentClientBHostKey $clientBHostKey
+            $restoredPythonArgs += @(
+                '--restore-settings-backup', $backupArchivePath,
+                '--restored-state-run',
+                '--certificate-baseline-result', $initialResultPath
+            )
+            python @restoredPythonArgs
+            if ($LASTEXITCODE -ne 0) {
+                throw "Lifecycle restore interop runner failed with exit code $LASTEXITCODE"
+            }
         }
     }
 }
 finally {
     if ($CleanupCreatedLab) {
-        foreach ($name in $createdVms) {
+        foreach ($name in ($createdVms | Select-Object -Unique)) {
             Assert-SafeLifecycleName -Name $name
             if ($PSCmdlet.ShouldProcess($name, 'Remove lifecycle VM created by this run')) {
                 Stop-VM -Name $name -Force -TurnOff -ErrorAction SilentlyContinue
-                Remove-VM -Name $name -Force
+                if (Get-VM -Name $name -ErrorAction SilentlyContinue) {
+                    Remove-VM -Name $name -Force
+                }
             }
         }
     }

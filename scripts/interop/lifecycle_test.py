@@ -12,6 +12,7 @@ import base64
 import html
 import http.cookiejar
 import json
+import random
 import re
 import ssl
 import subprocess
@@ -124,6 +125,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vcf-backup-password", default="VMware01!Test")
     parser.add_argument("--allow-dry-run", action="store_true", help="Allow apply units to report dry-run instead of failing.")
     parser.add_argument("--skip-client-checks", action="store_true")
+    parser.add_argument("--export-settings-backup", default="", help="Write a settings backup archive after the full lifecycle run passes.")
+    parser.add_argument("--restore-settings-backup", default="", help="Restore a settings backup archive before running restored-state checks.")
+    parser.add_argument("--certificate-baseline-result", default="", help="Compare restored CA certificate evidence with a previous lifecycle result.json.")
+    parser.add_argument("--restored-state-run", action="store_true", help="Run restored-state checks instead of configuring desired state from scratch.")
     parser.add_argument("--plan-only", action="store_true", help="Write the intended lifecycle plan without changing the appliance.")
     return parser.parse_args(argv)
 
@@ -132,8 +137,43 @@ class HttpClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.cookie_jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
+        self.https_context = ssl.create_default_context()
+        self.https_context.check_hostname = False
+        self.https_context.verify_mode = ssl.CERT_NONE
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.cookie_jar),
+            urllib.request.HTTPSHandler(context=self.https_context),
+        )
         self.bearer_token = ""
+
+    def request_bytes(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        form: dict[str, Any] | list[tuple[str, Any]] | None = None,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        follow_redirects: bool = True,
+    ) -> tuple[int, bytes, dict[str, str]]:
+        url = f"{self.base_url}{path}"
+        request_headers = dict(headers or {})
+        if self.bearer_token:
+            request_headers.setdefault("Authorization", f"Bearer {self.bearer_token}")
+        if json_body is not None:
+            body = json.dumps(json_body).encode("utf-8")
+            request_headers["Content-Type"] = "application/json"
+        elif form is not None:
+            body = urllib.parse.urlencode(form, doseq=True).encode("utf-8")
+            request_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
+        opener = self.opener if follow_redirects else no_redirect_opener(self.cookie_jar, self.https_context)
+        try:
+            with opener.open(request, timeout=30) as response:
+                return response.status, response.read(), dict(response.headers.items())
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read(), dict(exc.headers.items())
 
     def request(
         self,
@@ -145,24 +185,53 @@ class HttpClient:
         headers: dict[str, str] | None = None,
         follow_redirects: bool = True,
     ) -> tuple[int, str, dict[str, str]]:
-        url = f"{self.base_url}{path}"
-        body: bytes | None = None
-        request_headers = dict(headers or {})
-        if self.bearer_token:
-            request_headers.setdefault("Authorization", f"Bearer {self.bearer_token}")
-        if json_body is not None:
-            body = json.dumps(json_body).encode("utf-8")
-            request_headers["Content-Type"] = "application/json"
-        elif form is not None:
-            body = urllib.parse.urlencode(form, doseq=True).encode("utf-8")
-            request_headers["Content-Type"] = "application/x-www-form-urlencoded"
-        request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
-        opener = self.opener if follow_redirects else no_redirect_opener(self.cookie_jar)
-        try:
-            with opener.open(request, timeout=30) as response:
-                return response.status, response.read().decode("utf-8", errors="replace"), dict(response.headers.items())
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", errors="replace"), dict(exc.headers.items())
+        status, body, response_headers = self.request_bytes(
+            method,
+            path,
+            json_body=json_body,
+            form=form,
+            headers=headers,
+            follow_redirects=follow_redirects,
+        )
+        return status, body.decode("utf-8", errors="replace"), response_headers
+
+    def multipart_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        fields: dict[str, str],
+        files: dict[str, tuple[str, bytes, str]],
+    ) -> tuple[int, str, dict[str, str]]:
+        boundary = f"----LabFoundryLifecycle{random.randrange(0, 1_000_000_000):09d}"
+        chunks: list[bytes] = []
+        for name, value in fields.items():
+            chunks.extend(
+                [
+                    f"--{boundary}\r\n".encode("utf-8"),
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"),
+                    value.encode("utf-8"),
+                    b"\r\n",
+                ]
+            )
+        for name, (filename, content, content_type) in files.items():
+            chunks.extend(
+                [
+                    f"--{boundary}\r\n".encode("utf-8"),
+                    f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode("utf-8"),
+                    f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"),
+                    content,
+                    b"\r\n",
+                ]
+            )
+        chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+        status, body, headers = self.request_bytes(
+            method,
+            path,
+            body=b"".join(chunks),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        return status, body.decode("utf-8", errors="replace"), headers
 
     def json_request(self, method: str, path: str, *, json_body: dict[str, Any] | None = None) -> Any:
         status, body, _headers = self.request(method, path, json_body=json_body)
@@ -176,8 +245,11 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def no_redirect_opener(cookie_jar: http.cookiejar.CookieJar) -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar), NoRedirectHandler)
+def no_redirect_opener(cookie_jar: http.cookiejar.CookieJar, https_context: ssl.SSLContext | None = None) -> urllib.request.OpenerDirector:
+    handlers: list[Any] = [urllib.request.HTTPCookieProcessor(cookie_jar), NoRedirectHandler]
+    if https_context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=https_context))
+    return urllib.request.build_opener(*handlers)
 
 
 def extract_csrf(body: str) -> str:
@@ -345,6 +417,9 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "client DNS/DHCP/routing probes",
         ],
         "client_checks_enabled": not args.skip_client_checks,
+        "settings_backup_export": bool(args.export_settings_backup),
+        "settings_backup_restore": bool(args.restore_settings_backup),
+        "certificate_baseline_check": bool(args.certificate_baseline_result),
     }
 
 
@@ -596,6 +671,7 @@ def certificate_summary(pem: str) -> dict[str, Any]:
             "subject": certificate.subject.rfc4514_string(),
             "issuer": certificate.issuer.rfc4514_string(),
             "serial_number": format(certificate.serial_number, "x"),
+            "sha256_fingerprint": certificate.fingerprint(hashes.SHA256()).hex(),
             "not_before": certificate.not_valid_before_utc.isoformat(),
             "not_after": certificate.not_valid_after_utc.isoformat(),
         }
@@ -692,6 +768,7 @@ def management_https_check(client: HttpClient, args: argparse.Namespace) -> dict
     https_status, https_body, _https_headers = https_request_unverified(https_url)
     if https_status >= 400 or '"openapi"' not in https_body:
         raise LifecycleError(f"HTTPS management endpoint failed with HTTP {https_status}")
+    client.base_url = f"https://{host}"
     return {"http_status": http_status, "redirect_location": location, "https_status": https_status, "https_url": https_url}
 
 
@@ -764,6 +841,7 @@ def ca_client_certificate_request(client: HttpClient, args: argparse.Namespace) 
         "test -n \"$ELEV\"; "
         f"$ELEV ip link set {args.client_ca_request_interface} up; "
         f"$ELEV ip addr replace {ca_request.ip}/{ca_request.network.prefixlen} dev {args.client_ca_request_interface}; "
+        f"$ELEV ip neigh flush {urllib.parse.urlparse(ca_request_url).hostname or ''} dev {args.client_ca_request_interface} 2>/dev/null || true; "
         "http_code=$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "
         f"-X POST -H {shell_single_quote('Cookie: ' + cookie_header)} "
         f"--data-urlencode csrf={shell_single_quote(csrf)} "
@@ -799,7 +877,7 @@ def extract_vcf_backup_user_id(body: str) -> str:
     return match.group(1)
 
 
-def configure_vcf_backups(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+def stage_vcf_backup_password(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
     status, body, _headers = client.request("GET", "/vcf-backups")
     if status >= 400:
         raise LifecycleError(f"GET /vcf-backups failed with HTTP {status}")
@@ -813,6 +891,16 @@ def configure_vcf_backups(client: HttpClient, args: argparse.Namespace) -> dict[
     )
     if status not in {200, 302, 303}:
         raise LifecycleError(f"VCF backup user password staging failed with HTTP {status}: {reset_body[:500]}")
+    return {"username": "vcf-backup", "password_staged": True}
+
+
+def configure_vcf_backups(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    status, body, _headers = client.request("GET", "/vcf-backups")
+    if status >= 400:
+        raise LifecycleError(f"GET /vcf-backups failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    user_id = extract_vcf_backup_user_id(body)
+    stage_vcf_backup_password(client, args)
     status, response_body, _headers = client.request(
         "POST",
         "/vcf-backups/settings",
@@ -1111,12 +1199,14 @@ def ca_client_certificate_check(client: HttpClient, args: argparse.Namespace) ->
     cookie_header = session_cookie_header(client)
     ca_request = ip_interface(args.client_ca_request_cidr)
     ca_request_url = (args.client_ca_request_url or args.appliance_url).rstrip("/")
+    ca_request_host = urllib.parse.urlparse(ca_request_url).hostname or ""
     elevate = elevation_probe()
     command = (
         f"ELEV=\"$({elevate})\"; "
         "test -n \"$ELEV\"; "
         f"$ELEV ip link set {args.client_ca_request_interface} up; "
         f"$ELEV ip addr replace {ca_request.ip}/{ca_request.network.prefixlen} dev {args.client_ca_request_interface}; "
+        f"$ELEV ip neigh flush {ca_request_host} dev {args.client_ca_request_interface} 2>/dev/null || true; "
         "http_code=$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "
         f"-H {shell_single_quote('Cookie: ' + cookie_header)} "
         f"{ca_request_url}/certificate-authority/certificates/{certificate_id}/downloads/certificate.pem); "
@@ -1201,6 +1291,202 @@ def run_step(results: list[StepResult], name: str, func, *args) -> Any:  # type:
     return evidence
 
 
+def export_settings_backup(client: HttpClient, args: argparse.Namespace, archive_path: str) -> dict[str, Any]:
+    status, body, _headers = client.request("GET", "/backup-restore")
+    if status >= 400:
+        raise LifecycleError(f"GET /backup-restore failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    status, archive_bytes, response_headers = client.request_bytes("POST", "/backup-restore/export", form={"csrf": csrf})
+    if status >= 400:
+        raise LifecycleError(f"Settings backup export failed with HTTP {status}: {archive_bytes[:500].decode('utf-8', errors='replace')}")
+    archive = json.loads(archive_bytes.decode("utf-8"))
+    path = Path(archive_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(archive_bytes)
+    data = archive.get("data") or {}
+    return {
+        "path": str(path),
+        "kind": archive.get("kind"),
+        "schema_version": archive.get("schema_version"),
+        "content_disposition": response_headers.get("Content-Disposition", ""),
+        "total_rows": sum(len(value) for value in data.values() if isinstance(value, list)),
+        "tables": sorted(data.keys()),
+    }
+
+
+def restore_settings_backup(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    archive_path = Path(args.restore_settings_backup)
+    if not archive_path.exists():
+        raise LifecycleError(f"Settings backup archive not found: {archive_path}")
+    status, body, _headers = client.request("GET", "/backup-restore")
+    if status >= 400:
+        raise LifecycleError(f"GET /backup-restore failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    status, response_body, _headers = client.multipart_request(
+        "POST",
+        "/backup-restore/restore",
+        fields={"csrf": csrf},
+        files={"archive_file": (archive_path.name, archive_path.read_bytes(), "application/json")},
+    )
+    if status >= 400 or "Settings restored" not in response_body:
+        raise LifecycleError(f"Settings backup restore failed with HTTP {status}: {summarize_html_response(response_body)}")
+    archive = json.loads(archive_path.read_text(encoding="utf-8"))
+    data = archive.get("data") or {}
+    return {
+        "path": str(archive_path),
+        "http_status": status,
+        "total_rows": sum(len(value) for value in data.values() if isinstance(value, list)),
+        "services_forced_stopped": "Services are stopped and unconfigured" in response_body,
+    }
+
+
+def step_evidence(result: dict[str, Any], step_name: str) -> dict[str, Any]:
+    for step in result.get("steps", []):
+        if step.get("name") == step_name and step.get("status") == "passed":
+            evidence = step.get("evidence")
+            if isinstance(evidence, dict):
+                return evidence
+    raise LifecycleError(f"Could not find passed step {step_name!r} in baseline result.")
+
+
+def restored_certificate_baseline_check(args: argparse.Namespace, restored_evidence: dict[str, Any]) -> dict[str, Any]:
+    baseline_path = Path(args.certificate_baseline_result)
+    if not baseline_path.exists():
+        raise LifecycleError(f"Certificate baseline result not found: {baseline_path}")
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    initial_evidence = step_evidence(baseline, "ca-client-certificate-check")
+    initial_certificate = initial_evidence.get("certificate") or {}
+    restored_certificate = restored_evidence.get("certificate") or {}
+    comparisons = {
+        "common_name": (initial_evidence.get("common_name"), restored_evidence.get("common_name")),
+        "serial_number": (initial_certificate.get("serial_number"), restored_certificate.get("serial_number")),
+        "sha256_fingerprint": (initial_certificate.get("sha256_fingerprint"), restored_certificate.get("sha256_fingerprint")),
+        "subject": (initial_certificate.get("subject"), restored_certificate.get("subject")),
+        "issuer": (initial_certificate.get("issuer"), restored_certificate.get("issuer")),
+    }
+    mismatches = {key: {"initial": pair[0], "restored": pair[1]} for key, pair in comparisons.items() if pair[0] != pair[1]}
+    if mismatches:
+        raise LifecycleError(f"Restored certificate does not match pre-restore certificate: {mismatches}")
+    return {
+        "baseline_result": str(baseline_path),
+        "common_name": restored_evidence.get("common_name"),
+        "serial_number": restored_certificate.get("serial_number"),
+        "sha256_fingerprint": restored_certificate.get("sha256_fingerprint"),
+    }
+
+
+def ca_archive_certificate_identity(archive: dict[str, Any]) -> dict[str, Any]:
+    data = archive.get("data") or {}
+    identity: dict[str, Any] = {"root_ca": None, "certificates": {}}
+    settings_rows = data.get("ca_settings") or []
+    for row in settings_rows:
+        root_pem = row.get("root_certificate_pem")
+        if root_pem:
+            identity["root_ca"] = certificate_summary(root_pem)
+            break
+    for row in data.get("ca_certificates") or []:
+        certificate_pem = row.get("certificate_pem")
+        common_name = str(row.get("common_name") or "")
+        if not certificate_pem or not common_name:
+            continue
+        summary = certificate_summary(certificate_pem)
+        identity["certificates"][common_name] = {
+            "status": row.get("status"),
+            "managed_owner": row.get("managed_owner") or "",
+            "serial_number": summary.get("serial_number"),
+            "sha256_fingerprint": summary.get("sha256_fingerprint"),
+            "subject": summary.get("subject"),
+            "issuer": summary.get("issuer"),
+        }
+    return identity
+
+
+def restored_ca_archive_baseline_check(args: argparse.Namespace, restored_archive_path: str) -> dict[str, Any]:
+    baseline_path = Path(args.restore_settings_backup)
+    restored_path = Path(restored_archive_path)
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    restored = json.loads(restored_path.read_text(encoding="utf-8"))
+    baseline_identity = ca_archive_certificate_identity(baseline)
+    restored_identity = ca_archive_certificate_identity(restored)
+    if baseline_identity != restored_identity:
+        raise LifecycleError("Restored CA archive certificates do not match the pre-restore settings backup.")
+    certificates = restored_identity.get("certificates") or {}
+    root_ca = restored_identity.get("root_ca") or {}
+    return {
+        "baseline_archive": str(baseline_path),
+        "restored_archive": str(restored_path),
+        "root_ca_sha256_fingerprint": root_ca.get("sha256_fingerprint"),
+        "certificate_count": len(certificates),
+        "certificates": {
+            common_name: {
+                "serial_number": values.get("serial_number"),
+                "sha256_fingerprint": values.get("sha256_fingerprint"),
+                "managed_owner": values.get("managed_owner"),
+            }
+            for common_name, values in sorted(certificates.items())
+        },
+    }
+
+
+def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argparse.Namespace) -> None:
+    run_step(results, "appliance-health", appliance_health, client, args)
+    run_step(results, "configure-network", configure_network, client, args)
+    run_step(results, "configure-dns-dhcp", configure_dns_dhcp, client, args)
+    run_step(results, "configure-firewall-wan", configure_firewall_wan, client, args)
+    run_step(results, "configure-ca", configure_ca, client, args)
+    run_step(results, "configure-vcf-backups", configure_vcf_backups, client, args)
+    run_step(results, "configure-kms", configure_kms, client, args)
+    run_step(
+        results,
+        "apply-connectivity-units",
+        apply_units,
+        client,
+        ["local_users", "network", "firewall", "wan", "dnsmasq", "vcf_backups"],
+        args,
+    )
+    run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
+    run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
+    run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "kms"], args)
+    run_step(results, "host-state-checks", host_state_checks, args)
+    run_step(results, "client-checks", client_checks, args)
+    run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)
+    run_step(results, "vcf-backup-client-check", vcf_backup_client_check, args)
+    run_step(results, "configure-management-https", configure_management_https, client, args)
+    run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings"], args)
+    run_step(results, "management-https-check", management_https_check, client, args)
+    if args.export_settings_backup:
+        run_step(results, "export-settings-backup", export_settings_backup, client, args, args.export_settings_backup)
+
+
+def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: argparse.Namespace) -> None:
+    if not args.restore_settings_backup:
+        raise LifecycleError("--restored-state-run requires --restore-settings-backup.")
+    run_step(results, "appliance-health", appliance_health, client, args)
+    run_step(results, "restore-settings-backup", restore_settings_backup, client, args)
+    run_step(results, "stage-vcf-backup-password", stage_vcf_backup_password, client, args)
+    run_step(
+        results,
+        "apply-connectivity-units",
+        apply_units,
+        client,
+        ["local_users", "network", "firewall", "wan", "dnsmasq", "vcf_backups"],
+        args,
+    )
+    run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
+    run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "kms"], args)
+    run_step(results, "host-state-checks", host_state_checks, args)
+    run_step(results, "client-checks", client_checks, args)
+    cert_evidence = run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)
+    if args.certificate_baseline_result:
+        run_step(results, "restored-certificate-baseline-check", restored_certificate_baseline_check, args, cert_evidence)
+    restored_archive_path = str(Path(args.result_dir) / "restored-settings-backup.json")
+    run_step(results, "export-restored-settings-backup", export_settings_backup, client, args, restored_archive_path)
+    run_step(results, "restored-ca-archive-baseline-check", restored_ca_archive_baseline_check, args, restored_archive_path)
+    run_step(results, "vcf-backup-client-check", vcf_backup_client_check, args)
+    run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings"], args)
+    run_step(results, "management-https-check", management_https_check, client, args)
+
+
 def format_step_summary(step: dict[str, Any]) -> str:
     status = str(step.get("status", "unknown")).upper()
     name = str(step.get("name", "unknown"))
@@ -1215,6 +1501,10 @@ def format_step_summary(step: dict[str, Any]) -> str:
         detail = f"{evidence.get('common_name', '')} via {evidence.get('profile', '')}"
     elif name == "ca-client-certificate-check":
         detail = f"{evidence.get('common_name', '')} certificate id {evidence.get('certificate_id', '')}"
+    elif name == "restored-certificate-baseline-check":
+        detail = f"{evidence.get('common_name', '')} fingerprint {str(evidence.get('sha256_fingerprint', ''))[:16]}"
+    elif name == "restored-ca-archive-baseline-check":
+        detail = f"{evidence.get('certificate_count', 0)} CA certificates"
     elif name == "configure-vcf-backups":
         detail = f"{evidence.get('sftp_username', 'vcf-backup')} on {evidence.get('listen_address', '')}:{22}"
     elif name == "configure-kms":
@@ -1227,6 +1517,10 @@ def format_step_summary(step: dict[str, Any]) -> str:
         detail = ", ".join(evidence.get("selected_units", []))
     elif name == "host-state-checks":
         detail = ", ".join(sorted(evidence.keys()))
+    elif name in {"export-settings-backup", "restore-settings-backup", "export-restored-settings-backup"}:
+        detail = f"{evidence.get('total_rows', 0)} rows"
+    elif name == "stage-vcf-backup-password":
+        detail = str(evidence.get("username", "vcf-backup"))
     elif name == "vcf-backup-client-check":
         detail = str(evidence.get("target", ""))
     elif name == "client-checks":
@@ -1279,31 +1573,10 @@ def main() -> int:
 
     client = HttpClient(args.appliance_url)
     try:
-        run_step(results, "appliance-health", appliance_health, client, args)
-        run_step(results, "configure-network", configure_network, client, args)
-        run_step(results, "configure-dns-dhcp", configure_dns_dhcp, client, args)
-        run_step(results, "configure-firewall-wan", configure_firewall_wan, client, args)
-        run_step(results, "configure-ca", configure_ca, client, args)
-        run_step(results, "configure-vcf-backups", configure_vcf_backups, client, args)
-        run_step(results, "configure-kms", configure_kms, client, args)
-        run_step(
-            results,
-            "apply-connectivity-units",
-            apply_units,
-            client,
-            ["local_users", "network", "firewall", "wan", "dnsmasq", "vcf_backups"],
-            args,
-        )
-        run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
-        run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
-        run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "kms"], args)
-        run_step(results, "host-state-checks", host_state_checks, args)
-        run_step(results, "client-checks", client_checks, args)
-        run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)
-        run_step(results, "vcf-backup-client-check", vcf_backup_client_check, args)
-        run_step(results, "configure-management-https", configure_management_https, client, args)
-        run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings"], args)
-        run_step(results, "management-https-check", management_https_check, client, args)
+        if args.restored_state_run:
+            run_restored_lifecycle(results, client, args)
+        else:
+            run_full_lifecycle(results, client, args)
         result["status"] = "passed"
         return_code = 0
     except Exception as exc:  # noqa: BLE001
