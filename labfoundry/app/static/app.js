@@ -258,21 +258,23 @@ async function postDnsRecordAction(url, data, csrf, options = {}) {
   }
 }
 
-function newDnsRecordRow(domain) {
+function newDnsRecordRow(domain, suggestedAddress = "") {
   return {
     id: "__new__",
     hostname: "",
     host_label: "",
     domain,
     record_type: "A",
-    address: "",
+    address: suggestedAddress,
+    suggested_ipv4: suggestedAddress,
     description: "",
     enabled: true,
     is_new: true,
-    reverse_status: "pending",
-    reverse_label: "",
-    reverse_ptr: "",
-    reverse_zone: "",
+    ...dnsRecordReverseStatus({
+      record_type: "A",
+      address: suggestedAddress,
+      enabled: true,
+    }),
   };
 }
 
@@ -413,6 +415,20 @@ async function autoSaveDnsRecord(cell, csrf) {
   const row = cell.getRow();
   const data = row.getData();
   if (data.is_new) {
+    const field = cell.getField();
+    if (field === "record_type" && data.suggested_ipv4) {
+      if (data.record_type !== "A" && data.address === data.suggested_ipv4) {
+        await row.update({ address: "", ...dnsRecordReverseStatus({ ...data, address: "" }) });
+        return;
+      }
+      if (data.record_type === "A" && !data.address) {
+        await row.update({ address: data.suggested_ipv4, ...dnsRecordReverseStatus({ ...data, address: data.suggested_ipv4 }) });
+        return;
+      }
+    }
+    if (["record_type", "address", "enabled"].includes(field)) {
+      await row.update(dnsRecordReverseStatus(row.getData()));
+    }
     if (!hasRequiredDnsRecordFields(data)) {
       return;
     }
@@ -3599,7 +3615,7 @@ function initializeDnsRecordsTable() {
 function initializeDnsRecordsTableElement(tableElement) {
   const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
   const domain = tableElement.dataset.domain || "";
-  const records = [...JSON.parse(tableElement.dataset.records || "[]"), newDnsRecordRow(domain)];
+  const records = [...JSON.parse(tableElement.dataset.records || "[]"), newDnsRecordRow(domain, tableElement.dataset.suggestedIpv4 || "")];
   const csrf = tableElement.dataset.csrf || "";
 
   try {
@@ -4005,8 +4021,29 @@ function initializeHostsFileEditor() {
       if (!file) {
         return;
       }
-      editor.value = await file.text();
+      const fileText = await file.text();
+      if (window.LabFoundryCodeMirror && typeof window.LabFoundryCodeMirror.setValue === "function") {
+        window.LabFoundryCodeMirror.setValue(editor, fileText);
+        window.LabFoundryCodeMirror.focus(editor);
+        return;
+      }
+      editor.value = fileText;
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
       editor.focus();
+    });
+  });
+}
+
+function initializeCodeMirrorEditors() {
+  if (!window.LabFoundryCodeMirror || typeof window.LabFoundryCodeMirror.enhanceTextarea !== "function") {
+    return;
+  }
+  document.querySelectorAll("textarea[data-codemirror-editor]").forEach((textarea) => {
+    if (!(textarea instanceof HTMLTextAreaElement)) {
+      return;
+    }
+    window.LabFoundryCodeMirror.enhanceTextarea(textarea, {
+      language: textarea.dataset.codemirrorLanguage || "labfoundry-hosts",
     });
   });
 }
@@ -5578,8 +5615,7 @@ function initializeVcfDepotProfilesTable() {
 function updateVcfDepotSummary(form, payload = {}) {
   const portInput = form.querySelector('input[name="port"]');
   const hostnameInput = form.querySelector('input[name="hostname"]');
-  const certificateInput = form.querySelector('input[name="server_certificate"]');
-  const { interfaceLabel: bindInterfaceLabel, address, addressLabel } = serviceBindSelection(form, payload);
+  const { interfaceLabel: bindInterfaceLabel, address, addressLabel, addresses } = serviceBindSelection(form, payload);
   const port = payload.port || portInput?.value || "443";
   const hostname = payload.hostname || hostnameInput?.value || "";
   const endpointValue = payload.endpoint || (port === "443" || port === 443 ? hostname : `${hostname}:${port}`);
@@ -5592,7 +5628,7 @@ function updateVcfDepotSummary(form, payload = {}) {
   const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
   const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
   const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
-  const softwareDepotGenerateButton = document.querySelector("[data-vcf-depot-generate-id] button[type='submit']");
+  const softwareDepotGenerateButtons = document.querySelectorAll("[data-vcf-depot-generate-id] button[type='submit']");
   if (endpoint instanceof HTMLElement) {
     endpoint.textContent = endpointValue || "depot hostname required";
   }
@@ -5617,9 +5653,11 @@ function updateVcfDepotSummary(form, payload = {}) {
         toolStatus.textContent = payload.tool_archive_name ? "tool staged" : "upload required";
       }
     });
-    if (softwareDepotGenerateButton instanceof HTMLButtonElement) {
-      softwareDepotGenerateButton.disabled = !payload.tool_archive_name;
-    }
+    softwareDepotGenerateButtons.forEach((softwareDepotGenerateButton) => {
+      if (softwareDepotGenerateButton instanceof HTMLButtonElement) {
+        softwareDepotGenerateButton.disabled = !payload.tool_archive_name;
+      }
+    });
   }
   if (payload.tool_version !== undefined) {
     toolVersions.forEach((toolVersion) => {
@@ -5654,16 +5692,34 @@ function updateVcfDepotSummary(form, payload = {}) {
     listen_address: address,
     listen_addresses: addresses,
     port,
-    server_certificate: payload.server_certificate || certificateInput?.value || hostname,
+    server_certificate: payload.server_certificate || hostname,
   };
   updateVcfDepotHttpsPreview(livePreviewPayload);
 }
 
 function updateVcfDepotSoftwareDepotId(payload = {}) {
   const softwareDepotId = document.querySelector("[data-vcf-depot-software-depot-id]");
+  const softwareDepotCell = document.querySelector("[data-vcf-depot-software-depot-cell]");
   const softwareDepotMessage = document.querySelector("[data-vcf-depot-software-depot-message]");
   if (softwareDepotId instanceof HTMLElement && payload.software_depot_id !== undefined) {
-    softwareDepotId.textContent = payload.software_depot_id || "not generated";
+    softwareDepotId.textContent = payload.software_depot_id || "";
+    softwareDepotId.classList.toggle("hidden", !payload.software_depot_id);
+    const button = softwareDepotCell?.querySelector("[data-vcf-depot-generate-id] button[type='submit']");
+    if (button instanceof HTMLButtonElement) {
+      if (payload.software_depot_id) {
+        button.textContent = "↻";
+        button.classList.add("icon-button");
+        button.classList.remove("compact-button");
+        button.setAttribute("aria-label", "Refresh software depot ID");
+        button.setAttribute("title", "Refresh software depot ID");
+      } else {
+        button.textContent = "Generate software depot ID";
+        button.classList.remove("icon-button");
+        button.classList.add("compact-button");
+        button.removeAttribute("aria-label");
+        button.removeAttribute("title");
+      }
+    }
   }
   if (softwareDepotMessage instanceof HTMLElement && (payload.software_depot_id_error !== undefined || payload.software_depot_id_generated_at !== undefined)) {
     if (payload.software_depot_id_error) {
@@ -5673,7 +5729,7 @@ function updateVcfDepotSoftwareDepotId(payload = {}) {
       softwareDepotMessage.textContent = `Generated ${new Date(payload.software_depot_id_generated_at).toLocaleString()}.`;
       softwareDepotMessage.classList.remove("error-text");
     } else {
-      softwareDepotMessage.textContent = "Upload VCFDT to generate the Broadcom activation ID.";
+      softwareDepotMessage.textContent = "Upload VCFDT to generate the software depot ID.";
       softwareDepotMessage.classList.remove("error-text");
     }
   }
@@ -5805,9 +5861,8 @@ function initializeVcfDepotSettings() {
     }
     const portInput = form.querySelector('input[name="port"]');
     const hostnameInput = form.querySelector('input[name="hostname"]');
-    const certificateInput = form.querySelector('input[name="server_certificate"]');
     const refresh = () => updateVcfDepotSummary(form);
-    [portInput, hostnameInput, certificateInput].forEach((input) => {
+    [portInput, hostnameInput].forEach((input) => {
       if (input instanceof HTMLElement) {
         input.addEventListener("input", refresh);
         input.addEventListener("change", refresh);
@@ -5835,7 +5890,7 @@ function initializeVcfDepotSoftwareDepotIdGenerator() {
         button.disabled = true;
       }
       if (message instanceof HTMLElement) {
-        message.textContent = "Generating activation ID...";
+        message.textContent = "Generating software depot ID...";
         message.classList.remove("error-text");
       }
       try {
@@ -5847,12 +5902,12 @@ function initializeVcfDepotSoftwareDepotIdGenerator() {
         });
         const payload = await response.json();
         if (!response.ok) {
-          throw new Error(payload.software_depot_id_error || "Activation ID generation failed.");
+          throw new Error(payload.software_depot_id_error || "Software depot ID generation failed.");
         }
         updateVcfDepotSoftwareDepotId(payload);
       } catch (error) {
         if (message instanceof HTMLElement) {
-          message.textContent = error instanceof Error ? error.message : "Activation ID generation failed.";
+          message.textContent = error instanceof Error ? error.message : "Software depot ID generation failed.";
           message.classList.add("error-text");
         }
       } finally {
@@ -5865,18 +5920,42 @@ function initializeVcfDepotSoftwareDepotIdGenerator() {
 }
 
 function initializeVcfDepotTokenPaste() {
+  const modal = document.getElementById("vcf-depot-token-modal");
+  document.querySelectorAll("[data-vcf-depot-token-modal-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.showModal();
+      }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-token-modal-cancel]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.close("cancel");
+      }
+    });
+  });
   document.querySelectorAll("[data-vcf-depot-token-paste]").forEach((form) => {
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
     const button = form.querySelector("button[type='submit']");
     const textarea = form.querySelector('textarea[name="download_token_text"]');
+    const fileInput = form.querySelector('input[name="download_token_file"]');
     const status = form.querySelector("[data-vcf-depot-token-paste-status]");
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!(textarea instanceof HTMLTextAreaElement) || !textarea.value.trim()) {
+      const hasPastedToken = textarea instanceof HTMLTextAreaElement && Boolean(textarea.value.trim());
+      const hasTokenFile = fileInput instanceof HTMLInputElement && Boolean(fileInput.files?.length);
+      if (!hasPastedToken && !hasTokenFile) {
         if (status instanceof HTMLElement) {
-          status.textContent = "Paste the token text before staging the file.";
+          status.textContent = "Choose a token file or paste token text.";
           status.classList.add("error-text");
         }
         return;
@@ -5904,10 +5983,18 @@ function initializeVcfDepotTokenPaste() {
           updateVcfDepotSummary(settingsForm, payload);
         }
         updateVcfDepotValidation(payload);
-        textarea.value = "";
+        if (textarea instanceof HTMLTextAreaElement) {
+          textarea.value = "";
+        }
+        if (fileInput instanceof HTMLInputElement) {
+          fileInput.value = "";
+        }
         if (status instanceof HTMLElement) {
           status.textContent = "Token file staged. Contents are hidden.";
           status.classList.remove("error-text");
+        }
+        if (modal instanceof HTMLDialogElement && modal.open) {
+          modal.close("saved");
         }
       } catch (error) {
         if (status instanceof HTMLElement) {
@@ -6251,16 +6338,17 @@ function initializeTabs() {
   if (storedDomainButton) {
     storedDomainButton.click();
   }
+  const hashTargetId = window.location.hash ? window.location.hash.slice(1) : "";
   document.querySelectorAll("[data-tab-storage-key]").forEach((tabList) => {
     if (!(tabList instanceof HTMLElement)) {
       return;
     }
     const storageKey = tabList.dataset.tabStorageKey || "";
-    let targetId = "";
+    let targetId = hashTargetId;
     try {
-      targetId = window.localStorage.getItem(storageKey) || "";
+      targetId = targetId || window.localStorage.getItem(storageKey) || "";
     } catch {
-      targetId = "";
+      targetId = targetId || "";
     }
     if (!targetId) {
       return;
@@ -6365,6 +6453,7 @@ document.addEventListener("DOMContentLoaded", initializeRoutesWanNatTable);
 document.addEventListener("DOMContentLoaded", initializeRoutesWanPoliciesTable);
 document.addEventListener("DOMContentLoaded", initializePhysicalInterfacesTable);
 document.addEventListener("DOMContentLoaded", initializeVlanInterfacesTable);
+document.addEventListener("DOMContentLoaded", initializeCodeMirrorEditors);
 document.addEventListener("DOMContentLoaded", initializeHostsFileEditor);
 document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);

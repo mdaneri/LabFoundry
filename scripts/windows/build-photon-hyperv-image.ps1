@@ -17,6 +17,8 @@ param(
     [string]$BuilderStaticNetmask = '255.255.255.0',
     [string]$BuilderStaticGateway = '192.168.49.254',
     [string[]]$BuilderStaticDns = @(),
+    [string]$PipGlobalIndex = '',
+    [string]$PipGlobalIndexUrl = '',
     [string]$PackerDirectory = '',
     [string]$PreparedIsoPath = '',
     [ValidateSet('cleanup', 'abort', 'ask', 'run-cleanup-provisioner')]
@@ -347,6 +349,8 @@ $packerVariables = @{
     builder_static_netmask   = $BuilderStaticNetmask
     builder_static_gateway   = $BuilderStaticGateway
     builder_static_dns       = $BuilderStaticDns
+    pip_global_index         = $PipGlobalIndex
+    pip_global_index_url     = $PipGlobalIndexUrl
     dry_run_system_adapters  = -not $EnableRealSystemAdapters
 }
 

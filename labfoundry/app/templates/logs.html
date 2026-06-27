@@ -15,6 +15,7 @@
       {% for source in log_sources %}
         <button class="tab-button {{ 'active' if loop.first else '' }}" type="button" data-tab-target="logs-{{ source.id }}-panel" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ source.label }}</button>
       {% endfor %}
+      <button class="tab-button" type="button" data-tab-target="logs-audit-panel" aria-selected="false">Audit Events</button>
     </div>
 
     <div class="tab-panels">
@@ -33,6 +34,34 @@
           </div>
         </div>
       {% endfor %}
+      <div id="logs-audit-panel" class="tab-panel" role="tabpanel" hidden>
+        <div class="panel-head compact">
+          <div>
+            <h2>Audit Events</h2>
+            <p class="muted">Read-only API and UI history</p>
+          </div>
+          <span class="status-pill muted">{{ audit_events|length }} events</span>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th><th>Success</th><th>Detail</th></tr>
+          </thead>
+          <tbody>
+            {% for event in audit_events %}
+              <tr>
+                <td>{{ event.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+                <td>{{ event.actor }}</td>
+                <td>{{ event.action }}</td>
+                <td>{{ event.resource_type }}{% if event.resource_id %}:{{ event.resource_id }}{% endif %}</td>
+                <td>{{ "yes" if event.success else "no" }}</td>
+                <td>{{ event.detail or "" }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="6">No audit events yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 </section>

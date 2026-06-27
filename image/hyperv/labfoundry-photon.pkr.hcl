@@ -93,6 +93,18 @@ variable "builder_static_dns" {
   description = "DNS servers for builder_static_ip."
 }
 
+variable "pip_global_index" {
+  type        = string
+  default     = ""
+  description = "Optional pip global.index value. Empty keeps default pip behavior."
+}
+
+variable "pip_global_index_url" {
+  type        = string
+  default     = ""
+  description = "Optional pip global.index-url value. Empty keeps default pip behavior."
+}
+
 variable "dry_run_system_adapters" {
   type        = bool
   default     = true
@@ -182,7 +194,9 @@ build {
     environment_vars = [
       "LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD=${local.bootstrap_admin_password}",
       "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}",
-      "LABFOUNDRY_MGMT_DNS=${local.builder_static_dns_text}"
+      "LABFOUNDRY_MGMT_DNS=${local.builder_static_dns_text}",
+      "LABFOUNDRY_PIP_GLOBAL_INDEX=${var.pip_global_index}",
+      "LABFOUNDRY_PIP_GLOBAL_INDEX_URL=${var.pip_global_index_url}"
     ]
     execute_command = "echo '${var.ssh_password}' | sudo -S -E sh -c '{{ .Vars }} {{ .Path }}'"
     script          = "${path.root}/scripts/provision-labfoundry.sh"

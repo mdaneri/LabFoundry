@@ -35,53 +35,12 @@
     </div>
 
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="VCF Offline Depot views" data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab">
-      <button class="tab-button active" type="button" data-tab-target="vcf-depot-tool-panel" aria-selected="true">Tool & Credentials</button>
-      <button class="tab-button" type="button" data-tab-target="vcf-depot-profiles-panel" aria-selected="false">Download Profiles</button>
+      <button class="tab-button active" type="button" data-tab-target="vcf-depot-profiles-panel" aria-selected="true">Download Profiles</button>
       <button class="tab-button" type="button" data-tab-target="vcf-depot-preview-panel" aria-selected="false">Preview</button>
     </div>
 
     <div class="tab-panels">
-      <div id="vcf-depot-tool-panel" class="tab-panel active" role="tabpanel">
-        <section class="info-band">
-          <div>
-            <h2>Staged VCFDT inputs</h2>
-            <p class="muted">The VCF Download Tool is proprietary. Upload the tool and credential files here; LabFoundry stores only sanitized status in rendered output.</p>
-          </div>
-          <div class="settings-list">
-            <div><span>Tool file</span><strong data-vcf-depot-tool-name>{{ vcf_depot_settings_json.tool_archive_name or "not uploaded" }}</strong></div>
-            <div><span>Version</span><strong data-vcf-depot-tool-version>{{ vcf_depot_settings.tool_version or "unknown" }}</strong></div>
-            <div><span>Software depot ID</span><strong data-vcf-depot-software-depot-id>{{ vcf_depot_software_depot_id.id or "not generated" }}</strong></div>
-            <div><span>Download token</span><strong data-vcf-depot-token-status>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "not uploaded" }}</strong></div>
-            <div><span>Activation code</span><strong data-vcf-depot-activation-status>{{ vcf_depot_activation_code.filename if vcf_depot_activation_code.present else "not uploaded" }}</strong></div>
-          </div>
-          <form class="inline-action-form" action="/vcf-offline-depot/software-depot-id/generate" method="post" data-vcf-depot-generate-id>
-            <input type="hidden" name="csrf" value="{{ csrf_token }}">
-            <button class="button secondary compact-button" type="submit" {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Generate activation ID</button>
-            <small class="muted" data-vcf-depot-software-depot-message>
-              {% if vcf_depot_software_depot_id.error %}
-                {{ vcf_depot_software_depot_id.error }}
-              {% elif vcf_depot_software_depot_id.generated_at %}
-                Generated {{ vcf_depot_software_depot_id.generated_at }}
-              {% else %}
-                Upload VCFDT to generate the Broadcom activation ID.
-              {% endif %}
-            </small>
-          </form>
-          <form class="form-stack token-paste-form" action="/vcf-offline-depot/download-token" method="post" data-vcf-depot-token-paste>
-            <input type="hidden" name="csrf" value="{{ csrf_token }}">
-            <label>
-              <span class="field-label"><span>Paste download token</span><button class="help-icon" type="button" data-help="Paste the Broadcom download token when no token file is available. LabFoundry stores it as the staged download-token file used by the VCFDT --depot-download-token-file parameter.">i</button></span>
-              <textarea name="download_token_text" rows="4" autocomplete="off" spellcheck="false" placeholder="Paste token text"></textarea>
-            </label>
-            <div class="inline-action-row">
-              <button class="button secondary compact-button" type="submit">Stage token file</button>
-              <small class="muted" data-vcf-depot-token-paste-status aria-live="polite">The token body is stored as a secret and is not shown after submit.</small>
-            </div>
-          </form>
-        </section>
-      </div>
-
-      <div id="vcf-depot-profiles-panel" class="tab-panel" role="tabpanel" hidden>
+      <div id="vcf-depot-profiles-panel" class="tab-panel active" role="tabpanel">
         <div class="panel-head table-head">
           <div>
             <h2>VCFDT download profiles</h2>
@@ -190,7 +149,7 @@
         </label>
         <input type="hidden" name="listen_interfaces_present" value="1">
         <input type="hidden" name="listen_addresses_present" value="1">
-        <div class="service-bind-editor" data-service-bind>
+        <div class="service-bind-editor stacked-service-bind-editor" data-service-bind>
           <div class="form-field">
             <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more access-mode physical interfaces and VLAN interfaces with configured IP addresses can host the depot. Trunk physical NICs are not direct bind targets.">i</button></span>
             <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
@@ -250,24 +209,11 @@
             </datalist>
           </div>
         </div>
-        <div class="form-grid">
-          <label>
-            <span class="field-label"><span>HTTPS port</span><button class="help-icon" type="button" data-help="TLS port exposed for the offline depot. Port 443 is the default endpoint for VCF clients.">i</button></span>
-            <input type="number" name="port" value="{{ vcf_depot_settings.port }}" min="1" max="65535">
-          </label>
-        </div>
         <label>
-          <span class="field-label"><span>Server certificate</span><button class="help-icon" type="button" data-help="Certificate object/name the appliance helper uses for depot HTTPS. Certificate material is not rendered in previews.">i</button></span>
-          <input name="server_certificate" value="{{ vcf_depot_settings.server_certificate }}">
+          <span class="field-label"><span>HTTPS port</span><button class="help-icon" type="button" data-help="TLS port exposed for the offline depot. Port 443 is the default endpoint for VCF clients.">i</button></span>
+          <input type="number" name="port" value="{{ vcf_depot_settings.port }}" min="1" max="65535">
         </label>
-        <label>
-          <span class="field-label"><span>Telemetry choice</span><button class="help-icon" type="button" data-help="Value staged into the VCF Download Tool telemetry flag before command execution. Applies only when global appliance apply stages VCFDT.">i</button></span>
-          <select name="telemetry_choice">
-            {% for choice in vcf_depot_telemetry_choices %}
-              <option value="{{ choice }}" {{ "selected" if vcf_depot_settings.telemetry_choice == choice else "" }}>{{ choice }}</option>
-            {% endfor %}
-          </select>
-        </label>
+        <label class="switch-field"><span class="field-label"><span>Telemetry</span><button class="help-icon" type="button" data-help="When enabled, LabFoundry stages the VCF Download Tool telemetry flag as ENABLE. When off, it stages DISABLE. Host commands still run only through global appliance apply or manual profile jobs.">i</button></span><input class="switch-input" type="checkbox" name="telemetry_enabled" {{ "checked" if vcf_depot_settings.telemetry_choice == "ENABLE" else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <div class="derived-field fixed-value-field">
           <span class="field-label"><span>Depot store volume</span><button class="help-icon" type="button" data-help="Fixed appliance volume mount used as the VCFDT --depot-store and HTTPS document root. Attach or size this disk separately from the root filesystem.">i</button></span>
           <strong data-vcf-depot-store>{{ vcf_depot_settings.depot_store_path }}</strong>
@@ -279,22 +225,52 @@
             <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose VCFDT tool</strong><small data-file-upload-name>{{ vcf_depot_settings_json.tool_archive_name or vcf_depot_archive_pattern }}</small></span></span>
           </span>
         </label>
-        <label>
-          <span class="field-label"><span>Download token file</span><button class="help-icon" type="button" data-help="Broadcom download-token file for binaries and metadata workflows. Contents are stored as a secret and never shown in previews or API responses.">i</button></span>
-          <span class="file-upload-control">
-            <input class="file-upload-input" type="file" name="download_token_file" accept=".txt,text/plain" data-file-upload-input>
-            <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose token file</strong><small data-file-upload-name>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "not uploaded" }}</small></span></span>
-          </span>
-        </label>
-        <label>
-          <span class="field-label"><span>Activation code file</span><button class="help-icon" type="button" data-help="Broadcom activation-code file. VCFDT 9.1 ESX patch and update workflows require this instead of a download token.">i</button></span>
-          <span class="file-upload-control">
-            <input class="file-upload-input" type="file" name="activation_code_file" accept=".txt,text/plain" data-file-upload-input>
-            <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose activation file</strong><small data-file-upload-name>{{ vcf_depot_activation_code.filename if vcf_depot_activation_code.present else "not uploaded" }}</small></span></span>
-          </span>
-        </label>
         <p id="vcf-depot-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
       </form>
+      <div class="settings-subsection">
+        <div>
+          <h3>Staged VCFDT inputs</h3>
+          <p class="muted">Upload the tool and provide the download token by file or paste. LabFoundry only renders sanitized status.</p>
+        </div>
+        <div class="settings-list">
+          <div><span>Tool file</span><strong data-vcf-depot-tool-name>{{ vcf_depot_settings_json.tool_archive_name or "not uploaded" }}</strong></div>
+          <div><span>Version</span><strong data-vcf-depot-tool-version>{{ vcf_depot_settings.tool_version or "unknown" }}</strong></div>
+          <div class="settings-action-row">
+            <span>Software depot ID</span>
+            <span class="setting-inline-actions" data-vcf-depot-software-depot-cell>
+              {% if vcf_depot_software_depot_id.id %}
+                <strong data-vcf-depot-software-depot-id>{{ vcf_depot_software_depot_id.id }}</strong>
+                <form class="inline-action-form" action="/vcf-offline-depot/software-depot-id/generate" method="post" data-vcf-depot-generate-id>
+                  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                  <button class="button secondary icon-button" type="submit" aria-label="Refresh software depot ID" title="Refresh software depot ID" {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>↻</button>
+                </form>
+              {% else %}
+                <strong class="hidden" data-vcf-depot-software-depot-id></strong>
+                <form class="inline-action-form" action="/vcf-offline-depot/software-depot-id/generate" method="post" data-vcf-depot-generate-id>
+                  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                  <button class="button secondary compact-button" type="submit" {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Generate software depot ID</button>
+                </form>
+              {% endif %}
+            </span>
+          </div>
+          <div class="settings-action-row">
+            <span>Download token</span>
+            <span class="setting-inline-actions">
+              <strong data-vcf-depot-token-status>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "not uploaded" }}</strong>
+              <button class="button secondary compact-button" type="button" data-vcf-depot-token-modal-open>Stage token</button>
+            </span>
+          </div>
+        </div>
+        <small class="muted" data-vcf-depot-software-depot-message>
+          {% if vcf_depot_software_depot_id.error %}
+            {{ vcf_depot_software_depot_id.error }}
+          {% elif vcf_depot_software_depot_id.generated_at %}
+            Generated {{ vcf_depot_software_depot_id.generated_at }}
+          {% else %}
+            Upload VCFDT before generating the software depot ID.
+          {% endif %}
+        </small>
+      </div>
     </div>
 
     {% include "partials/appliance_apply_status.html" %}
@@ -325,4 +301,30 @@
     </div>
   </aside>
 </section>
+<dialog id="vcf-depot-token-modal" class="confirm-modal" aria-labelledby="vcf-depot-token-modal-title">
+  <form class="confirm-modal-panel form-stack" action="/vcf-offline-depot/download-token" method="post" enctype="multipart/form-data" data-vcf-depot-token-paste>
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="confirm-modal-body">
+      <p class="kicker">VCF Offline Depot</p>
+      <h2 id="vcf-depot-token-modal-title">Stage download token</h2>
+      <p class="muted">Upload a token file or paste the token text. Contents are stored as a secret and hidden after submit.</p>
+      <label>
+        <span class="field-label"><span>Token file</span><button class="help-icon" type="button" data-help="Upload a Broadcom download-token text file. This becomes the staged file used by the VCFDT --depot-download-token-file parameter.">i</button></span>
+        <span class="file-upload-control">
+          <input class="file-upload-input" type="file" name="download_token_file" accept=".txt,text/plain" data-file-upload-input>
+          <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose token file</strong><small data-file-upload-name>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "not uploaded" }}</small></span></span>
+        </span>
+      </label>
+      <label>
+        <span class="field-label"><span>Paste token</span><button class="help-icon" type="button" data-help="Paste token text when no token file is available. If both file and pasted text are provided, the uploaded file is used.">i</button></span>
+        <textarea name="download_token_text" rows="5" autocomplete="off" spellcheck="false" placeholder="Paste token text"></textarea>
+      </label>
+      <small class="muted" data-vcf-depot-token-paste-status aria-live="polite">Choose a token file or paste token text.</small>
+    </div>
+    <div class="confirm-modal-actions">
+      <button class="button ghost" value="cancel" type="button" data-vcf-depot-token-modal-cancel>Cancel</button>
+      <button class="button secondary" type="submit">Stage token</button>
+    </div>
+  </form>
+</dialog>
 {% endblock %}

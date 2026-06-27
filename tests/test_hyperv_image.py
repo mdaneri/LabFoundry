@@ -65,6 +65,10 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "PermitRootLogin no" in script
     assert "HTTP/80, proxied to uvicorn on `127.0.0.1:8000`" in docs
     assert "proxying HTTP/80 to" in root_docs
+    assert "-PipGlobalIndex" in root_docs
+    assert "-PipGlobalIndexUrl" in root_docs
+    assert "Leave both options empty to keep" in root_docs
+    assert "standard pip behavior" in root_docs
 
 
 def test_packer_build_uses_labfoundry_management_network_by_default():
@@ -80,10 +84,16 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert 'default     = "192.168.49.254"' in template
     assert 'variable "iso_contains_kickstart"' in template
     assert 'variable "dry_run_system_adapters"' in template
+    assert 'variable "pip_global_index"' in template
+    assert 'description = "Optional pip global.index value. Empty keeps default pip behavior."' in template
+    assert 'variable "pip_global_index_url"' in template
+    assert 'description = "Optional pip global.index-url value. Empty keeps default pip behavior."' in template
     assert 'builder_static_dns_text      = join(" ", var.builder_static_dns)' in template
     assert 'dry_run_system_adapters_text = var.dry_run_system_adapters ? "true" : "false"' in template
     assert '"LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}"' in template
     assert '"LABFOUNDRY_MGMT_DNS=${local.builder_static_dns_text}"' in template
+    assert '"LABFOUNDRY_PIP_GLOBAL_INDEX=${var.pip_global_index}"' in template
+    assert '"LABFOUNDRY_PIP_GLOBAL_INDEX_URL=${var.pip_global_index_url}"' in template
     assert "Iso_contains_kickstart must be true" in template
     assert "secondary_iso_images" not in template
     assert "boot_command" not in template
@@ -99,9 +109,14 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "labfoundry-photon-with-kickstart.iso" in docs
     assert "Using remastered Photon ISO" in docs
     assert "without Packer typing boot commands" in docs
+    assert "-PipGlobalIndex" in docs
+    assert "-PipGlobalIndexUrl" in docs
+    assert "Omit both pip options for standard/default pip behavior." in docs
     assert "[string]$SshPassword = 'VMware01!'" in wrapper
     assert "[string]$BootstrapAdminPassword = 'VMware01!'" in wrapper
     assert "[string[]]$BuilderStaticDns = @()" in wrapper
+    assert "[string]$PipGlobalIndex = ''" in wrapper
+    assert "[string]$PipGlobalIndexUrl = ''" in wrapper
     assert "function Get-HostIpv4DnsServers" in wrapper
     assert "Get-DnsClientServerAddress -AddressFamily IPv4" in wrapper
     assert "Using host IPv4 DNS for Photon builder/appliance" in wrapper
@@ -120,6 +135,8 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert '$packerArgs += "-on-error=$PackerOnError"' in wrapper
     assert "'-var-file', $varFilePath" in wrapper
     assert "builder_static_dns       = $BuilderStaticDns" in wrapper
+    assert "pip_global_index         = $PipGlobalIndex" in wrapper
+    assert "pip_global_index_url     = $PipGlobalIndexUrl" in wrapper
     assert "dry_run_system_adapters  = -not $EnableRealSystemAdapters" in wrapper
     assert "UseHttpKickstartFallback" not in wrapper
     assert "/image/hyperv/build" in gitignore
@@ -137,6 +154,29 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "iso.add_fp" in remaster_helper
     assert "iso.rm_file" in remaster_helper
     assert "Could not embed LabFoundry GRUB config" in remaster_helper
+
+
+def test_photon_image_optional_pip_global_index_configuration():
+    wrapper = Path("scripts/windows/build-photon-hyperv-image.ps1").read_text(encoding="utf-8")
+    template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
+    script = Path("image/hyperv/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+
+    assert "[string[]]$BuilderStaticDns = @(),\n    [string]$PipGlobalIndex = '',\n    [string]$PipGlobalIndexUrl = ''," in wrapper
+    assert "pip_global_index         = $PipGlobalIndex" in wrapper
+    assert "pip_global_index_url     = $PipGlobalIndexUrl" in wrapper
+
+    assert 'variable "pip_global_index" {\n  type        = string\n  default     = ""' in template
+    assert 'variable "pip_global_index_url" {\n  type        = string\n  default     = ""' in template
+    assert '"LABFOUNDRY_PIP_GLOBAL_INDEX=${var.pip_global_index}"' in template
+    assert '"LABFOUNDRY_PIP_GLOBAL_INDEX_URL=${var.pip_global_index_url}"' in template
+
+    assert 'LABFOUNDRY_PIP_GLOBAL_INDEX="${LABFOUNDRY_PIP_GLOBAL_INDEX:-}"' in script
+    assert 'LABFOUNDRY_PIP_GLOBAL_INDEX_URL="${LABFOUNDRY_PIP_GLOBAL_INDEX_URL:-}"' in script
+    assert 'if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX" ]; then\n  python3 -m pip config --site set global.index "$LABFOUNDRY_PIP_GLOBAL_INDEX"\nfi' in script
+    assert 'if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL" ]; then\n  python3 -m pip config --site set global.index-url "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"\nfi' in script
+    assert "packages.vcfd.broadcom.net/artifactory" not in wrapper
+    assert "packages.vcfd.broadcom.net/artifactory" not in template
+    assert "packages.vcfd.broadcom.net/artifactory" not in script
 
 
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():

@@ -8,7 +8,7 @@ import socket
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
-from ipaddress import ip_address, ip_interface, ip_network
+from ipaddress import IPv4Address, IPv4Network, ip_address, ip_interface, ip_network
 from pathlib import Path, PurePosixPath
 from secrets import token_urlsafe
 from typing import Any
@@ -1449,8 +1449,9 @@ def write_vcf_depot_runtime_file(path: Path, value: str) -> None:
 def prepare_vcf_depot_runtime(settings: VcfOfflineDepotSettings, db: Session) -> Path:
     tool_path = resolve_vcf_download_tool(settings)
     tool_home = vcf_download_tool_home(tool_path)
-    VCF_DEPOT_VDT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    VCF_DEPOT_VDT_LOG_PATH.touch(exist_ok=True)
+    vdt_log_path = filesystem_path(VCF_DEPOT_VDT_LOG_PATH)
+    vdt_log_path.parent.mkdir(parents=True, exist_ok=True)
+    vdt_log_path.touch(exist_ok=True)
     token = setting_value(db, VCF_DEPOT_TOKEN_VALUE_KEY)
     if token.strip():
         write_vcf_depot_runtime_file(vcf_depot_runtime_secret_path(VCF_DEPOT_STAGED_TOKEN_FILE), token)
@@ -1466,8 +1467,9 @@ def prepare_vcf_depot_runtime(settings: VcfOfflineDepotSettings, db: Session) ->
 
 
 def append_vcf_depot_log(text: str) -> None:
-    VCF_DEPOT_VDT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with VCF_DEPOT_VDT_LOG_PATH.open("a", encoding="utf-8", errors="replace") as handle:
+    vdt_log_path = filesystem_path(VCF_DEPOT_VDT_LOG_PATH)
+    vdt_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with vdt_log_path.open("a", encoding="utf-8", errors="replace") as handle:
         handle.write(text)
         if not text.endswith("\n"):
             handle.write("\n")
@@ -1946,6 +1948,8 @@ def dnsmasq_context(db: Session) -> dict:
     dns_domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
     dns_warnings = dns_domain_warnings(dns_domains)
     dns_record_groups = dns_records_by_domain(dns_records, dns_domains)
+    for group in dns_record_groups:
+        group["suggested_ipv4"] = dns_record_suggested_ipv4(dns_records, group["domain"], dhcp_scopes, dhcp_reservations)
     reverse_zone_groups = reverse_records_by_zone(dns_reverse_records(dns_records))
     lease_result = SystemAdapter().read_dhcp_leases()
     dhcp_lease_error = lease_result.stderr.strip() if lease_result.returncode != 0 else ""
@@ -2354,6 +2358,85 @@ def dns_records_by_domain(records: list[DnsRecord], domains: list[str]) -> list[
         group["hosts_editor_text"] = render_zone_hosts_records(group["records"])
         group["zone_file_text"] = render_zone_file(group["domain"], group["records"])
     return groups
+
+
+def ipv4_address_or_none(value: str | None) -> IPv4Address | None:
+    try:
+        address = ip_address((value or "").strip())
+    except ValueError:
+        return None
+    return address if isinstance(address, IPv4Address) else None
+
+
+def ipv4_range(start: str | None, end: str | None) -> set[IPv4Address]:
+    start_address = ipv4_address_or_none(start)
+    end_address = ipv4_address_or_none(end)
+    if not start_address or not end_address:
+        return set()
+    start_int = int(start_address)
+    end_int = int(end_address)
+    if end_int < start_int or end_int - start_int > 8192:
+        return set()
+    return {IPv4Address(value) for value in range(start_int, end_int + 1)}
+
+
+def dhcp_scope_network(scope: DhcpScope) -> IPv4Network | None:
+    site_address = ipv4_address_or_none(scope.site_address)
+    if not site_address:
+        return None
+    try:
+        return ip_network(f"{site_address}/{scope.prefix_length}", strict=False)
+    except ValueError:
+        return None
+
+
+def dns_record_suggested_ipv4(records: list[DnsRecord], domain: str, dhcp_scopes: list[DhcpScope], dhcp_reservations: list[DhcpReservation]) -> str:
+    domain_records = [record for record in records if matching_domain(record.hostname, [domain]) == domain]
+    used_addresses = {
+        address
+        for address in [ipv4_address_or_none(record.address) for record in records if record.record_type.strip().upper() == "A"]
+        if address is not None
+    }
+    used_addresses.update(
+        address
+        for address in [ipv4_address_or_none(reservation.ip_address) for reservation in dhcp_reservations]
+        if address is not None
+    )
+
+    excluded_addresses = set(used_addresses)
+    candidate_networks: list[tuple[IPv4Network, set[IPv4Address]]] = []
+    for scope in dhcp_scopes:
+        if not scope.enabled:
+            continue
+        if scope.domain_name.strip().strip(".").lower() != domain:
+            continue
+        network = dhcp_scope_network(scope)
+        if network is None:
+            continue
+        scope_excluded = set(excluded_addresses)
+        site_address = ipv4_address_or_none(scope.site_address)
+        if site_address:
+            scope_excluded.add(site_address)
+        scope_excluded.update(ipv4_range(scope.range_start, scope.range_end))
+        candidate_networks.append((network, scope_excluded))
+
+    inferred_networks: dict[IPv4Network, int] = {}
+    for record in domain_records:
+        if record.record_type.strip().upper() != "A":
+            continue
+        address = ipv4_address_or_none(record.address)
+        if not address:
+            continue
+        network = ip_network(f"{address}/24", strict=False)
+        inferred_networks[network] = inferred_networks.get(network, 0) + 1
+    for network, _count in sorted(inferred_networks.items(), key=lambda item: (-item[1], int(item[0].network_address))):
+        candidate_networks.append((network, set(excluded_addresses)))
+
+    for network, excluded in candidate_networks:
+        for candidate in network.hosts():
+            if candidate not in excluded:
+                return str(candidate)
+    return ""
 
 
 def validate_vlan_form_values(parent_interface: str, vlan_id: str, ip_cidr: str, db: Session) -> tuple[str, int, str] | Response:
@@ -3033,12 +3116,17 @@ def apply_output_excerpt(value: str, *, limit: int = 2400) -> str:
     return f"{redacted[:limit].rstrip()}\n... output truncated ..."
 
 
-def tail_fixed_log_file(path: Path, *, max_bytes: int = 64 * 1024, max_lines: int = 240) -> dict[str, Any]:
+def filesystem_path(path: Path | PurePosixPath) -> Path:
+    return path if isinstance(path, Path) else Path(path)
+
+
+def tail_fixed_log_file(path: Path | PurePosixPath, *, max_bytes: int = 64 * 1024, max_lines: int = 240) -> dict[str, Any]:
+    read_path = filesystem_path(path)
     try:
-        if not path.exists():
+        if not read_path.exists():
             return {"path": str(path), "available": False, "lines": [], "size_bytes": 0, "updated_at": "", "error": ""}
-        size = path.stat().st_size
-        with path.open("rb") as handle:
+        size = read_path.stat().st_size
+        with read_path.open("rb") as handle:
             if size > max_bytes:
                 handle.seek(size - max_bytes)
             raw = handle.read(max_bytes)
@@ -3048,7 +3136,7 @@ def tail_fixed_log_file(path: Path, *, max_bytes: int = 64 * 1024, max_lines: in
     lines = redact_config_preview(text).splitlines()[-max_lines:]
     updated_at = utcnow()
     try:
-        updated_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        updated_at = datetime.fromtimestamp(read_path.stat().st_mtime, tz=timezone.utc)
     except OSError:
         pass
     return {
@@ -3061,12 +3149,13 @@ def tail_fixed_log_file(path: Path, *, max_bytes: int = 64 * 1024, max_lines: in
     }
 
 
-def logs_context() -> dict[str, Any]:
+def logs_context(db: Session) -> dict[str, Any]:
     sources = [
         ("vcfdt", "VCFDT", VCF_DEPOT_VDT_LOG_PATH),
         ("app", "LabFoundry", LABFOUNDRY_APP_LOG_PATH),
         ("kms", "KMS", KMS_SERVER_LOG_PATH),
     ]
+    events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(100)).scalars().all()
     return {
         "log_sources": [
             {
@@ -3075,7 +3164,8 @@ def logs_context() -> dict[str, Any]:
                 **tail_fixed_log_file(path),
             }
             for source_id, label, path in sources
-        ]
+        ],
+        "audit_events": events,
     }
 
 
@@ -3276,6 +3366,27 @@ def initialize_factory_appliance_apply_baseline(db: Session) -> bool:
 @router.get("/favicon.ico", response_model=None)
 def favicon() -> FileResponse:
     return FileResponse(STATIC_DIR / "brand" / "labfoundry-mark.svg", media_type="image/svg+xml")
+
+
+@router.get("/manifest.webmanifest", response_model=None)
+def webmanifest() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "manifest.webmanifest",
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.get("/service-worker.js", response_model=None)
+def service_worker() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "service-worker.js",
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "no-cache",
+            "Service-Worker-Allowed": "/",
+        },
+    )
 
 
 @router.get("/", response_class=HTMLResponse, response_model=None)
@@ -4905,6 +5016,8 @@ def import_dns_zone_from_ui(
                 "identity": identity,
                 **dnsmasq_context(db),
                 "bulk_error": " ".join(errors),
+                "active_zone_import_domain": scoped_domain,
+                "zone_editor_text": zone_text,
             },
             status_code=422,
         )
@@ -4939,6 +5052,8 @@ def import_dns_zone_from_ui(
                 "identity": identity,
                 **dnsmasq_context(db),
                 "bulk_error": "Zone file contains duplicate DNS records.",
+                "active_zone_import_domain": scoped_domain,
+                "zone_editor_text": zone_text,
             },
             status_code=409,
         )
@@ -5989,8 +6104,9 @@ def update_vcf_offline_depot_settings_from_ui(
     listen_interface: str = Form(""),
     listen_address: str = Form(""),
     port: int = Form(443),
-    server_certificate: str = Form(VCF_DEPOT_DEFAULT_HOSTNAME),
-    telemetry_choice: str = Form("DISABLE"),
+    server_certificate: str | None = Form(None),
+    telemetry_choice: str | None = Form(None),
+    telemetry_enabled: str | None = Form(None),
     tool_archive_file: UploadFile | None = File(None),
     download_token_file: UploadFile | None = File(None),
     activation_code_file: UploadFile | None = File(None),
@@ -6016,10 +6132,13 @@ def update_vcf_offline_depot_settings_from_ui(
     settings.listen_interface = selected_interfaces
     settings.listen_address = selected_addresses
     settings.port = port
-    settings.server_certificate = server_certificate.strip() or settings.hostname
+    settings.server_certificate = settings.hostname
     settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
     settings.config_path = VCF_DEPOT_DEFAULT_CONFIG_PATH
-    settings.telemetry_choice = telemetry_choice if telemetry_choice in VCF_DEPOT_TELEMETRY_CHOICES else "DISABLE"
+    if telemetry_choice in VCF_DEPOT_TELEMETRY_CHOICES:
+        settings.telemetry_choice = telemetry_choice
+    else:
+        settings.telemetry_choice = "ENABLE" if telemetry_enabled == "on" else "DISABLE"
     uploaded_archive_name = store_uploaded_vcf_depot_archive(settings, tool_archive_file)
     software_depot_id_result: dict[str, str] | None = None
     if uploaded_archive_name:
@@ -6100,20 +6219,30 @@ def update_vcf_offline_depot_settings_from_ui(
 def paste_vcf_depot_download_token_from_ui(
     request: Request,
     download_token_text: str = Form(""),
+    download_token_file: UploadFile | None = File(None),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
-    display_name = store_pasted_vcf_depot_secret(
+    display_name = store_uploaded_vcf_depot_secret(
         db,
-        download_token_text,
+        download_token_file,
         name_key=VCF_DEPOT_TOKEN_NAME_KEY,
         value_key=VCF_DEPOT_TOKEN_VALUE_KEY,
-        display_name="pasted token",
         actor=identity.username,
-        action="paste_vcf_depot_download_token",
+        action="upload_vcf_depot_download_token",
     )
+    if not display_name:
+        display_name = store_pasted_vcf_depot_secret(
+            db,
+            download_token_text,
+            name_key=VCF_DEPOT_TOKEN_NAME_KEY,
+            value_key=VCF_DEPOT_TOKEN_VALUE_KEY,
+            display_name="pasted token",
+            actor=identity.username,
+            action="paste_vcf_depot_download_token",
+        )
     db.commit()
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         context = vcf_offline_depot_context(db)
@@ -7085,13 +7214,14 @@ def services(
 def logs_page(
     request: Request,
     identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
 ) -> HTMLResponse:
     return render(
         request,
         "logs.html",
         {
             "identity": identity,
-            **logs_context(),
+            **logs_context(db),
         },
     )
 
@@ -7101,9 +7231,8 @@ def audit_log(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
-) -> HTMLResponse:
-    events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(100)).scalars().all()
-    return render(request, "audit.html", {"identity": identity, "events": events})
+) -> RedirectResponse:
+    return RedirectResponse("/logs#logs-audit-panel", status_code=303)
 
 
 @router.get("/backup-restore", response_class=HTMLResponse, response_model=None)

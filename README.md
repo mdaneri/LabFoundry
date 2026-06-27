@@ -83,6 +83,21 @@ when you want Packer to fail instead of replacing an existing output directory.
 Use `-PackerOnError abort` to keep a failed builder VM for debugging, or
 `-PackerOnError ask` to choose the failure action interactively.
 
+The image builder does not configure a custom pip package index by default. If
+your build network requires an internal PyPI mirror, pass `-PipGlobalIndex` or
+`-PipGlobalIndexUrl` to set Photon site-level pip configuration before the
+LabFoundry virtual environment is created. Leave both options empty to keep
+standard pip behavior:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/build-photon-hyperv-image.ps1 `
+  -IsoUrl "<photon-5.0-iso-url>" `
+  -IsoChecksum "<packer-checksum>" `
+  -PipGlobalIndex "https://packages.vcfd.broadcom.net/artifactory/api/pypi/upstream-pypi-virtual/pypi" `
+  -PipGlobalIndexUrl "https://packages.vcfd.broadcom.net/artifactory/api/pypi/upstream-pypi-virtual/simple"
+```
+
 The generated appliance intentionally keeps
 `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true`. Real host mutation is staged per
 apply unit after the helper-backed command path is reviewed. Build disposable

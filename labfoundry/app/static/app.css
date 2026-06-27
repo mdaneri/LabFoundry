@@ -1367,6 +1367,40 @@ textarea {
   grid-template-columns: 160px 1fr;
 }
 
+.settings-list .settings-action-row {
+  align-items: center;
+}
+
+.setting-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.setting-inline-actions strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-subsection {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.settings-subsection h3 {
+  margin: 0 0 3px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
 .form-stack {
   display: grid;
   gap: 12px;
@@ -1377,6 +1411,22 @@ textarea {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.inline-action-form {
+  margin: 0;
+}
+
+.icon-button {
+  display: inline-grid;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  place-items: center;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
 }
 
 .form-field {
@@ -1396,6 +1446,11 @@ textarea {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
   gap: 10px;
+}
+
+.stacked-service-bind-editor {
+  grid-template-columns: 1fr;
+  gap: 8px;
 }
 
 .form-grid > label,
@@ -2652,6 +2707,30 @@ textarea {
 .monospace-textarea {
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
   line-height: 1.45;
+}
+
+.dns-import-controls {
+  grid-template-columns: minmax(260px, 420px) minmax(220px, max-content);
+  justify-content: start;
+  align-items: end;
+}
+
+.dns-import-controls .switch-field {
+  justify-content: start;
+  width: fit-content;
+}
+
+.dns-import-form .cm-editor,
+.dns-import-form .cm-content {
+  min-height: clamp(360px, 50vh, 640px) !important;
+}
+
+.cm-editor {
+  width: 100%;
+}
+
+.cm-editor .cm-content {
+  caret-color: #111827;
 }
 
 .terminal-note {

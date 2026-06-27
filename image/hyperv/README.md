@@ -64,6 +64,22 @@ By default, failed builds still use Packer's normal cleanup behavior. To keep
 the temporary builder VM for debugging, add `-PackerOnError abort`; to choose at
 failure time, use `-PackerOnError ask`.
 
+The wrapper leaves pip's index configuration untouched by default. When the
+builder can reach Python packages only through an internal mirror, add
+`-PipGlobalIndex` or `-PipGlobalIndexUrl`; each option is optional and only
+sets the matching site-level pip key when non-empty:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/build-photon-hyperv-image.ps1 `
+  -IsoUrl "<photon-5.0-iso-url>" `
+  -IsoChecksum "<packer-checksum>" `
+  -PipGlobalIndex "https://packages.vcfd.broadcom.net/artifactory/api/pypi/upstream-pypi-virtual/pypi" `
+  -PipGlobalIndexUrl "https://packages.vcfd.broadcom.net/artifactory/api/pypi/upstream-pypi-virtual/simple"
+```
+
+Omit both pip options for standard/default pip behavior.
+
 The wrapper keeps `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` by default so a
 first-boot image records host-mutation command intent instead of changing
 Photon services. For a disposable demo or lifecycle image that should really

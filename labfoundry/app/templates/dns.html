@@ -67,7 +67,7 @@
           <div class="tab-buttons tool-tabs" role="tablist" aria-label="{{ group.domain }} tools">
             <button class="tab-button active" type="button" data-tab-target="dns-zone-{{ loop.index }}-records" aria-selected="true">Records</button>
             <button class="tab-button" type="button" data-tab-target="dns-zone-{{ loop.index }}-hosts" aria-selected="false">Import Hosts</button>
-            <button class="tab-button" type="button" data-tab-target="dns-zone-{{ loop.index }}-file" aria-selected="false">Zone File</button>
+            <button class="tab-button" type="button" data-tab-target="dns-zone-{{ loop.index }}-file" aria-selected="false">Import Zone File</button>
           </div>
 
           <div class="tab-panels zone-tool-panels">
@@ -77,6 +77,7 @@
                 class="tabulator-shell dns-records-table"
                 data-domain="{{ group.domain }}"
                 data-records='{{ group.records | tojson }}'
+                data-suggested-ipv4="{{ group.suggested_ipv4 }}"
                 data-csrf="{{ csrf_token }}"
                 data-fallback-id="dns-records-fallback-{{ loop.index }}"
               ></div>
@@ -135,10 +136,10 @@
               {% if bulk_error %}
                 <div class="alert error">{{ bulk_error }}</div>
               {% endif %}
-              <form class="form-stack" action="/dns/records/import" method="post">
+              <form class="form-stack dns-import-form" action="/dns/records/import" method="post">
                 <input type="hidden" name="csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="domain" value="{{ group.domain }}">
-                <div class="form-grid">
+                <div class="form-grid dns-import-controls">
                   <label>
                     <span class="field-label"><span>Hosts file</span><button class="help-icon" type="button" data-help="Loads a local hosts-style text file into the editor without uploading it until you import. Relative names are saved in this domain.">i</button></span>
                     <input class="hosts-file-input" type="file" accept=".hosts,.txt" data-editor-id="hosts-editor-{{ loop.index }}">
@@ -150,7 +151,7 @@
                 </div>
                 <label>
                   <span class="field-label"><span>Entries</span><button class="help-icon" type="button" data-help="Hosts-file syntax: IP address followed by one or more hostnames. Relative names are scoped to this domain.">i</button></span>
-                  <textarea id="hosts-editor-{{ loop.index }}" class="monospace-textarea" name="hosts_text" rows="9">{{ group.hosts_editor_text }}</textarea>
+                  <textarea id="hosts-editor-{{ loop.index }}" class="monospace-textarea" name="hosts_text" rows="9" data-codemirror-editor data-codemirror-language="labfoundry-hosts">{{ group.hosts_editor_text }}</textarea>
                 </label>
                 <button class="button primary" type="submit">Import into {{ group.domain }}</button>
               </form>
@@ -160,18 +161,24 @@
               {% if bulk_error %}
                 <div class="alert error">{{ bulk_error }}</div>
               {% endif %}
-              <form class="form-stack zone-editor-form" action="/dns/zones/import" method="post">
+              <form class="form-stack dns-import-form" action="/dns/zones/import" method="post">
                 <input type="hidden" name="csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="domain" value="{{ group.domain }}">
-                <input class="zone-file-input" type="hidden" name="zone_text" value="{{ group.zone_file_text }}">
-                <div class="zone-editor-toolbar">
+                <div class="form-grid dns-import-controls">
+                  <label>
+                    <span class="field-label"><span>Zone file</span><button class="help-icon" type="button" data-help="Loads a local BIND-style zone text file into the editor without importing it until you submit. Paste text directly when you already have the zone contents.">i</button></span>
+                    <input class="hosts-file-input" type="file" accept=".zone,.db,.txt" data-editor-id="zone-file-editor-{{ loop.index }}">
+                  </label>
                   <label class="switch-field inline-switch">
                     <span class="field-label"><span>Replace this domain</span><button class="help-icon" type="button" data-help="When enabled, this zone file becomes the desired record set for this domain only.">i</button></span>
                     <input class="switch-input" type="checkbox" name="replace_existing" checked><span class="switch-track" aria-hidden="true"></span>
                   </label>
-                  <button class="button primary" type="submit">Apply zone file</button>
                 </div>
-                <div class="zone-code-editor" contenteditable="true" spellcheck="false" aria-label="{{ group.domain }} zone file">{{ group.zone_file_text }}</div>
+                <label>
+                  <span class="field-label"><span>Zone contents</span><button class="help-icon" type="button" data-help="Paste BIND-style zone records. LabFoundry imports A, AAAA, and CNAME records into this managed domain.">i</button></span>
+                  <textarea id="zone-file-editor-{{ loop.index }}" class="monospace-textarea" name="zone_text" rows="12" data-codemirror-editor data-codemirror-language="labfoundry-zone">{{ zone_editor_text if active_zone_import_domain == group.domain else group.zone_file_text }}</textarea>
+                </label>
+                <button class="button primary" type="submit">Import zone file into {{ group.domain }}</button>
               </form>
             </div>
           </div>
