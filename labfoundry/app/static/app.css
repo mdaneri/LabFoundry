@@ -602,6 +602,26 @@ textarea {
   margin-bottom: 0;
 }
 
+.esxi-pxe-workspace .left-stack {
+  display: contents;
+}
+
+.esxi-pxe-workspace .esxi-boot-service-panel {
+  grid-column: 2;
+  grid-row: 1;
+  margin-bottom: 0;
+}
+
+.esxi-pxe-workspace > .left-stack > .wide-panel {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+}
+
+.esxi-pxe-workspace > .side-stack {
+  grid-column: 2;
+  grid-row: 2;
+}
+
 .panel-head {
   display: flex;
   justify-content: space-between;
@@ -3061,6 +3081,17 @@ textarea {
 
   .detail-panel {
     position: static;
+  }
+
+  .esxi-pxe-workspace .left-stack {
+    display: grid;
+  }
+
+  .esxi-pxe-workspace .esxi-boot-service-panel,
+  .esxi-pxe-workspace > .left-stack > .wide-panel,
+  .esxi-pxe-workspace > .side-stack {
+    grid-column: auto;
+    grid-row: auto;
   }
 
   .firewall-workspace,

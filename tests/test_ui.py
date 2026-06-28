@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=esxi-pxe-kickstart-20260628-2" in offline.text
+    assert "/static/app.css?v=esxi-pxe-kickstart-20260628-3" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -758,6 +758,10 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "Listen addresses" in page.text
     assert 'class="left-stack"' in page.text
     assert page.text.index("<h2>Boot Service</h2>") < page.text.index("<h2>ESXi Kickstarts</h2>")
+    css = client.get("/static/app.css").text
+    assert ".esxi-pxe-workspace .esxi-boot-service-panel" in css
+    assert ".esxi-pxe-workspace > .side-stack" in css
+    assert "grid-column: 2;" in css
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     response = client.post(
@@ -3672,7 +3676,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "esxi-pxe-kickstart-20260628-2" in page.text
+    assert "esxi-pxe-kickstart-20260628-3" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
