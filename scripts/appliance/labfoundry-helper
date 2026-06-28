@@ -639,6 +639,10 @@ def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
 def _apply_esxi_pxe_manifest(payload: dict) -> int:
     ESXI_PXE_HTTP_ROOT.mkdir(parents=True, exist_ok=True)
     ESXI_INSTALLER_ISO_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.chown(ESXI_INSTALLER_ISO_ROOT, user="labfoundry", group="labfoundry")
+    except (LookupError, PermissionError, OSError):
+        pass
     enabled_ids: set[str] = set()
     generated_files: list[str] = []
     for row in payload.get("kickstarts", []):

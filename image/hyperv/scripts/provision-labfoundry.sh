@@ -77,7 +77,7 @@ install -d -o root -g root -m 0755 /etc/systemd/network
 install -d -o root -g root -m 0755 /usr/local/lib/labfoundry
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-backups
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-registry
-install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-offline-depot
+install -d -o labfoundry -g labfoundry -m 0755 /mnt/labfoundry-vcf-offline-depot
 
 if ! id "$BOOTSTRAP_USERNAME" >/dev/null 2>&1; then
   useradd --home-dir "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME" --create-home --shell "$BOOTSTRAP_SHELL" "$BOOTSTRAP_USERNAME"
