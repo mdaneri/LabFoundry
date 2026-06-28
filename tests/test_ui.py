@@ -1993,9 +1993,10 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert "VCF Backup SFTP desired state is disabled" in page.text
     assert "Listen interfaces" in page.text
     assert "Listen addresses" in page.text
-    assert "service-bind-editor" in page.text
+    assert "service-bind-editor stacked-service-bind-editor" in page.text
     assert 'data-tag-name="listen_interfaces"' in page.text
     assert 'data-tag-name="listen_addresses"' in page.text
+    assert page.text.index('data-tag-name="listen_addresses"') < page.text.index('name="port"')
     assert page.text.count("fixed-value-field") >= 2
     assert "<span>Config path</span>" not in page.text
     assert "eth1 - access / trunk" not in page.text
