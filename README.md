@@ -106,6 +106,23 @@ actually mutate Photon services through the reviewed helper paths.
 Firewall desired state is nftables-backed. The image installs nftables and
 boots with management access to SSH, HTTPS, and the LabFoundry web UI.
 
+Appliance Update is a separate runtime-maintenance workflow from global
+`/appliance-apply`. It can check or run Photon OS package updates, Python
+library updates, and LabFoundry wheel updates through
+`labfoundry-helper appliance-update`. The LabFoundry wheel source defaults to
+`http://localhost:18080/update/manifest.json` for development, but Photon VM
+tests should point it at a URL reachable from the appliance when the update
+server runs on the Windows host. Build a versioned wheel and manifest with:
+
+```bash
+python scripts/build_update_wheel.py
+```
+
+The generated LabFoundry version uses the project version plus git provenance,
+such as `0.1.0+gabcdef123456`; the update manifest records the full git commit,
+build time, wheel name, and SHA256. See
+[`docs/appliance-update.md`](docs/appliance-update.md).
+
 The exported Hyper-V appliance resets to `192.168.49.1/24` on
 `LabFoundry-Mgmt`; the Windows host side should be `192.168.49.254/24`.
 `scripts/windows/create-hyperv-switches.ps1` configures that address and a NAT

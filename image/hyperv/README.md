@@ -212,6 +212,14 @@ Provisioning writes both `LABFOUNDRY_SECRET_KEY` and
 `LABFOUNDRY_SECRETS_KEY`; the latter encrypts CA root and leaf private-key
 material stored in the LabFoundry database and must be preserved for settings
 backup portability.
+Appliance Update is runtime maintenance and stays separate from desired-state
+`/appliance-apply`. It stages
+`/var/lib/labfoundry/apply/appliance-update/labfoundry-update.json` and uses
+`labfoundry-helper appliance-update` for Photon OS, Python library, and
+LabFoundry wheel streams. LabFoundry wheel updates verify the manifest SHA256,
+install with `pip --force-reinstall --no-deps`, restore virtualenv
+permissions, and schedule a delayed `labfoundry.service` restart. V1 records
+Photon reboot guidance but does not auto-reboot.
 Firewall desired state is nftables-backed. Provisioning installs nftables,
 loads `/etc/labfoundry/nftables.d/labfoundry.nft`, and disables the older
 Photon iptables service so LabFoundry has a single firewall owner.

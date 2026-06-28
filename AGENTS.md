@@ -48,6 +48,8 @@
 - Privileged appliance enforcement must go through `labfoundry-helper` and constrained sudoers entries. Do not give the control plane broad shell, root, or package-manager access.
 - Real mutating helper actions run through `systemd-run` from inside `labfoundry-helper` when `LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1` is set. This escapes the `labfoundry.service` read-only `/etc` mount namespace without giving the web control plane broad shell/root access. Keep that environment variable in `labfoundry.service` and preserve it in the LabFoundry sudoers rule.
 - The global `/appliance-apply` workflow remains the only host-mutation workflow. Do not add service-specific apply routes, service-specific apply jobs, or direct helper calls from desired-state edit forms.
+- Appliance Update is runtime maintenance, not desired-state drift. Keep it separate from `/appliance-apply`, stage `/var/lib/labfoundry/apply/appliance-update/labfoundry-update.json`, and run Photon OS, Python library, and LabFoundry wheel work only through `labfoundry-helper appliance-update`.
+- LabFoundry wheel updates must come from an HTTP(S) manifest with version, full git commit, wheel filename, and SHA256. Install wheels with `/opt/labfoundry/.venv/bin/python -m pip install --force-reinstall --no-deps`, restore virtualenv directory/file/bin permissions, and schedule a delayed `labfoundry.service` restart after the job is recorded. Do not auto-reboot for Photon package updates in v1.
 - Packer is a Windows-host prerequisite for the Photon image path; Hyper-V and `qemu-img` may already be available locally but should still be checked in handoff notes.
 
 ## Photon VM Debugging Notes
