@@ -137,7 +137,6 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>Depot Settings</h2>
-        <span class="status-pill warn">dry-run</span>
       </div>
       <form class="form-stack" action="/vcf-offline-depot/settings" method="post" enctype="multipart/form-data" data-autosave-form data-vcf-depot-settings data-autosave-status-id="vcf-depot-settings-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -218,21 +217,22 @@
           <span class="field-label"><span>Depot store volume</span><button class="help-icon" type="button" data-help="Fixed appliance volume mount used as the VCFDT --depot-store and HTTPS document root. Attach or size this disk separately from the root filesystem.">i</button></span>
           <strong data-vcf-depot-store>{{ vcf_depot_settings.depot_store_path }}</strong>
         </div>
-        <label>
-          <span class="field-label"><span>VCF Download Tool</span><button class="help-icon" type="button" data-help="Upload the proprietary VCF Download Tool file. The file stays outside git and global appliance apply stages it through the appliance helper.">i</button></span>
-          <span class="file-upload-control">
-            <input class="file-upload-input" type="file" name="tool_archive_file" accept=".gz,application/gzip,application/x-gzip" data-file-upload-input>
-            <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose VCFDT tool</strong><small data-file-upload-name>{{ vcf_depot_settings_json.tool_archive_name or vcf_depot_archive_pattern }}</small></span></span>
-          </span>
-        </label>
+        <div class="settings-subsection">
+          <div>
+            <h3>VCFDT staging</h3>
+            <p class="muted">Upload the VCF Download Tool before staging the download token or generating the software depot ID.</p>
+          </div>
+          <label>
+            <span class="field-label"><span>VCF Download Tool</span><button class="help-icon" type="button" data-help="Upload the proprietary VCF Download Tool file. The file stays outside git and global appliance apply stages it through the appliance helper.">i</button></span>
+            <span class="file-upload-control">
+              <input class="file-upload-input" type="file" name="tool_archive_file" accept=".gz,application/gzip,application/x-gzip" data-file-upload-input>
+              <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose VCFDT tool</strong><small data-file-upload-name>{{ vcf_depot_settings_json.tool_archive_name or vcf_depot_archive_pattern }}</small></span></span>
+            </span>
+          </label>
+        </div>
         <p id="vcf-depot-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
       </form>
-      <div class="settings-subsection">
-        <div>
-          <h3>Staged VCFDT inputs</h3>
-          <p class="muted">Upload the tool and provide the download token by file or paste. LabFoundry only renders sanitized status.</p>
-        </div>
-        <div class="settings-list">
+      <div class="settings-list">
           <div><span>Tool file</span><strong data-vcf-depot-tool-name>{{ vcf_depot_settings_json.tool_archive_name or "not uploaded" }}</strong></div>
           <div><span>Version</span><strong data-vcf-depot-tool-version>{{ vcf_depot_settings.tool_version or "unknown" }}</strong></div>
           <div class="settings-action-row">
@@ -242,13 +242,13 @@
                 <strong data-vcf-depot-software-depot-id>{{ vcf_depot_software_depot_id.id }}</strong>
                 <form class="inline-action-form" action="/vcf-offline-depot/software-depot-id/generate" method="post" data-vcf-depot-generate-id>
                   <input type="hidden" name="csrf" value="{{ csrf_token }}">
-                  <button class="button secondary icon-button" type="submit" aria-label="Refresh software depot ID" title="Refresh software depot ID" {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>↻</button>
+                  <button class="button secondary icon-button" type="submit" aria-label="Refresh software depot ID" title="Refresh software depot ID" data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>↻</button>
                 </form>
               {% else %}
                 <strong class="hidden" data-vcf-depot-software-depot-id></strong>
                 <form class="inline-action-form" action="/vcf-offline-depot/software-depot-id/generate" method="post" data-vcf-depot-generate-id>
                   <input type="hidden" name="csrf" value="{{ csrf_token }}">
-                  <button class="button secondary compact-button" type="submit" {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Generate software depot ID</button>
+                  <button class="button secondary compact-button" type="submit" data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Generate software depot ID</button>
                 </form>
               {% endif %}
             </span>
@@ -257,10 +257,10 @@
             <span>Download token</span>
             <span class="setting-inline-actions">
               <strong data-vcf-depot-token-status>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "not uploaded" }}</strong>
-              <button class="button secondary compact-button" type="button" data-vcf-depot-token-modal-open>Stage token</button>
+              <button class="button secondary compact-button" type="button" data-vcf-depot-token-modal-open data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Stage token</button>
             </span>
           </div>
-        </div>
+      </div>
         <small class="muted" data-vcf-depot-software-depot-message>
           {% if vcf_depot_software_depot_id.error %}
             {{ vcf_depot_software_depot_id.error }}
@@ -270,7 +270,6 @@
             Upload VCFDT before generating the software depot ID.
           {% endif %}
         </small>
-      </div>
     </div>
 
     {% include "partials/appliance_apply_status.html" %}
@@ -323,7 +322,7 @@
     </div>
     <div class="confirm-modal-actions">
       <button class="button ghost" value="cancel" type="button" data-vcf-depot-token-modal-cancel>Cancel</button>
-      <button class="button secondary" type="submit">Stage token</button>
+      <button class="button secondary" type="submit" data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Stage token</button>
     </div>
   </form>
 </dialog>

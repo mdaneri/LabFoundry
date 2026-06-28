@@ -5658,6 +5658,7 @@ function updateVcfDepotSummary(form, payload = {}) {
         softwareDepotGenerateButton.disabled = !payload.tool_archive_name;
       }
     });
+    setVcfDepotToolDependentActions(Boolean(payload.tool_archive_name));
   }
   if (payload.tool_version !== undefined) {
     toolVersions.forEach((toolVersion) => {
@@ -5695,6 +5696,14 @@ function updateVcfDepotSummary(form, payload = {}) {
     server_certificate: payload.server_certificate || hostname,
   };
   updateVcfDepotHttpsPreview(livePreviewPayload);
+}
+
+function setVcfDepotToolDependentActions(toolAvailable) {
+  document.querySelectorAll("[data-vcf-depot-requires-tool]").forEach((control) => {
+    if (control instanceof HTMLButtonElement) {
+      control.disabled = !toolAvailable;
+    }
+  });
 }
 
 function updateVcfDepotSoftwareDepotId(payload = {}) {
