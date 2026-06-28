@@ -291,10 +291,12 @@ from labfoundry.app.services.vcf_offline_depot import (
 )
 from labfoundry.app.services.esxi_pxe import (
     ESXI_PXE_STAGED_CONFIG_PATH,
+    ESXI_IPXE_HTTP_SCRIPT_PATH,
     assign_kickstart_content,
     canonical_http_path,
     content_hash,
     decode_kickstart_upload,
+    esxi_pxe_boot_settings,
     generated_kickstart_path,
     host_to_dict,
     installer_iso_inventory,
@@ -308,6 +310,7 @@ from labfoundry.app.services.esxi_pxe import (
     normalize_installer_iso_path,
     render_esxi_pxe_manifest,
     render_esxi_pxe_preview,
+    save_esxi_pxe_boot_settings,
     store_installer_iso_upload,
     strict_validation_enabled,
 )
@@ -1940,6 +1943,7 @@ def dnsmasq_context(db: Session) -> dict:
     dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
     dhcp_options = db.execute(select(DhcpOption).order_by(DhcpOption.scope_id, DhcpOption.option_code)).scalars().all()
     dhcp_reservations = db.execute(select(DhcpReservation).order_by(DhcpReservation.hostname)).scalars().all()
+    esxi_boot = esxi_pxe_boot_settings(db)
     available_interfaces = service_bind_options(db)
     vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
     config_preview = render_dnsmasq_config(
@@ -1950,6 +1954,7 @@ def dnsmasq_context(db: Session) -> dict:
         dhcp_scopes=dhcp_scopes,
         dhcp_options=dhcp_options,
         conditional_forwarders=conditional_forwarders,
+        esxi_pxe_boot=esxi_boot,
     )
     validation_errors = (
         validate_dns_settings(dns_settings, dns_records, conditional_forwarders)
@@ -1969,6 +1974,8 @@ def dnsmasq_context(db: Session) -> dict:
             dhcp_options,
         )
     )
+    if (esxi_boot.get("enabled") or esxi_boot.get("native_uefi_http_enabled")) and not dhcp_settings.enabled:
+        validation_errors.append("ESXi PXE boot services require DHCP to be enabled so clients receive boot files.")
     dns_domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
     dns_warnings = dns_domain_warnings(dns_domains)
     dns_record_groups = dns_records_by_domain(dns_records, dns_domains)
@@ -2603,12 +2610,13 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "vcf_private_registry",
 }
 SECRET_LINE_PATTERN = re.compile(
-    r"(rootpw|password|passwd|token|secret|credential|private[_-]?key|robot[_-]?account|ca[_-]?bundle[_-]?pem|activation[_-]?code|license)",
+    r"(rootpw|password|passwd|token|secret|credential|private[_-]?key|robot[_-]?account|ca[_-]?bundle[_-]?pem|activation[_-]?code|license|ipxe[_-]?script)",
     re.IGNORECASE,
 )
 PRIVATE_KEY_BEGIN_PATTERN = re.compile(r"-----BEGIN .*PRIVATE KEY-----")
 PRIVATE_KEY_END_PATTERN = re.compile(r"-----END .*PRIVATE KEY-----")
 JWT_PATH_SEGMENT_PATTERN = re.compile(r"(?<=/)[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}(?=/|$)")
+JSON_SECRET_FIELD_PATTERN = re.compile(r'^(\s*"[^"]+"\s*:\s*)(.*?)(,?)\s*$')
 
 
 def redact_config_preview(config_preview: str) -> str:
@@ -2624,6 +2632,10 @@ def redact_config_preview(config_preview: str) -> str:
                 in_private_key = False
             continue
         if SECRET_LINE_PATTERN.search(line):
+            json_match = JSON_SECRET_FIELD_PATTERN.match(line)
+            if json_match:
+                lines.append(f'{json_match.group(1)}"[redacted]"{json_match.group(3)}')
+                continue
             separator = "=" if "=" in line else ":" if ":" in line else None
             if separator:
                 prefix = line.split(separator, 1)[0].rstrip()
@@ -2926,6 +2938,9 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
             validation_warnings.append(f"{host.hostname}: selected installer ISO is missing from the ESX_HOST depot folder.")
     if iso_error:
         validation_warnings.append(iso_error)
+    boot_settings = esxi_pxe_boot_settings(db)
+    if boot_settings["native_uefi_http_enabled"] and not boot_settings["native_uefi_http_url"]:
+        validation_warnings.append("Native UEFI HTTP boot is enabled, but no native UEFI HTTP boot URL is configured.")
     return {
         "esxi_kickstarts": kickstarts,
         "esxi_kickstart_rows": [kickstart_to_dict(row, include_content=True) for row in kickstarts],
@@ -2934,11 +2949,12 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
         "esxi_installer_iso_root": installer_iso_root_path(),
         "esxi_installer_isos": installer_isos,
         "esxi_installer_iso_error": iso_error,
+        "esxi_pxe_boot": boot_settings,
         "esxi_pxe_validation_errors": validation_errors,
         "esxi_pxe_validation_warnings": list(dict.fromkeys(validation_warnings)),
         "esxi_pxe_validation_by_id": validation_by_id,
-        "esxi_pxe_manifest": render_esxi_pxe_manifest(kickstarts, hosts),
-        "esxi_pxe_preview": render_esxi_pxe_preview(kickstarts, hosts),
+        "esxi_pxe_manifest": render_esxi_pxe_manifest(kickstarts, hosts, boot_settings),
+        "esxi_pxe_preview": render_esxi_pxe_preview(kickstarts, hosts, boot_settings),
         "esxi_pxe_config_path": ESXI_PXE_STAGED_CONFIG_PATH,
         "esxi_pxe_strict_validation": strict,
     }
@@ -3083,6 +3099,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
                 f"{len(esxi_pxe['esxi_kickstarts'])} Kickstarts",
                 f"{len([row for row in esxi_pxe['esxi_kickstarts'] if row.enabled])} enabled",
                 f"{len(esxi_pxe['esxi_pxe_hosts'])} host definitions",
+                "boot services enabled" if esxi_pxe["esxi_pxe_boot"]["enabled"] else "boot services disabled",
             ],
             validation_errors=esxi_pxe["esxi_pxe_validation_errors"],
             validation_warnings=esxi_pxe["esxi_pxe_validation_warnings"],
@@ -7391,6 +7408,13 @@ def serve_esxi_kickstart_file(kickstart_file: str, db: Session = Depends(get_db)
     return FileResponse(path, media_type="text/plain; charset=utf-8")
 
 
+@router.get("/pxe/esxi/boot.ipxe", response_model=None)
+def serve_esxi_http_ipxe_script() -> FileResponse:
+    if not ESXI_IPXE_HTTP_SCRIPT_PATH.is_file():
+        raise HTTPException(status_code=404, detail="ESXi iPXE boot script is not enabled")
+    return FileResponse(ESXI_IPXE_HTTP_SCRIPT_PATH, media_type="text/plain; charset=utf-8")
+
+
 @router.get("/esxi-pxe", response_class=HTMLResponse, response_model=None)
 def esxi_pxe_page(
     request: Request,
@@ -7407,6 +7431,58 @@ def esxi_pxe_page(
             "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
         },
     )
+
+
+@router.post("/esxi-pxe/boot-settings", response_model=None)
+def update_esxi_pxe_boot_settings_from_ui(
+    request: Request,
+    enabled: bool = Form(False),
+    tftp_root: str = Form(...),
+    bios_bootfile: str = Form(...),
+    uefi_bootfile: str = Form(...),
+    native_uefi_http_enabled: bool = Form(False),
+    native_uefi_http_url: str = Form(""),
+    ipxe_script: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    try:
+        boot = save_esxi_pxe_boot_settings(
+            db,
+            enabled=enabled,
+            tftp_root=tftp_root,
+            bios_bootfile=bios_bootfile,
+            uefi_bootfile=uefi_bootfile,
+            native_uefi_http_enabled=native_uefi_http_enabled,
+            native_uefi_http_url=native_uefi_http_url,
+            ipxe_script=ipxe_script,
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        return render(
+            request,
+            "esxi_pxe.html",
+            {
+                "identity": identity,
+                **esxi_pxe_page_context(db, identity, error=str(exc)),
+                "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+            },
+            status_code=400,
+        )
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_esxi_pxe_boot_settings",
+        resource_type="esxi_pxe_boot",
+        resource_id="default",
+        detail=f"enabled={boot['enabled']} native_uefi_http_enabled={boot['native_uefi_http_enabled']} tftp_root={boot['tftp_root']}",
+        request_id=request.state.request_id,
+    )
+    return RedirectResponse("/esxi-pxe#esxi-pxe-boot-panel", status_code=303)
 
 
 @router.post("/esxi-pxe/kickstarts", response_model=None)

@@ -35,7 +35,7 @@ log_step "applying Photon OS updates"
 tdnf -y update
 
 log_step "installing Photon appliance packages"
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables dnsmasq nginx powershell
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables dnsmasq ipxe nginx powershell
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update

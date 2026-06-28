@@ -51,8 +51,17 @@ DNSMASQ_CONFIG_PATH = DNSMASQ_CONFIG_DIR / "labfoundry.conf"
 DNSMASQ_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/dnsmasq.service.d")
 DNSMASQ_SERVICE_DROPIN_PATH = DNSMASQ_SERVICE_DROPIN_DIR / "labfoundry.conf"
 ESXI_PXE_APPLY_DIR = Path("/var/lib/labfoundry/apply/esxi-pxe")
+ESXI_PXE_HTTP_BASE = Path("/var/lib/labfoundry/pxe/http/esxi")
 ESXI_PXE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/ks")
+ESXI_IPXE_HTTP_SCRIPT_PATH = ESXI_PXE_HTTP_BASE / "boot.ipxe"
+ESXI_TFTP_ROOT = Path("/var/lib/labfoundry/pxe/tftp")
 ESXI_INSTALLER_ISO_ROOT = Path("/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST")
+IPXE_BOOT_BINARY_DIRS = [
+    Path("/usr/share/ipxe"),
+    Path("/usr/lib/ipxe"),
+    Path("/usr/share/ipxe/boot"),
+    Path("/boot/ipxe"),
+]
 KMS_APPLY_DIR = Path("/var/lib/labfoundry/apply/kms")
 KMS_STATE_DIR = Path("/var/lib/labfoundry/kms")
 KMS_LOG_DIR = Path("/var/log/labfoundry/kms")
@@ -587,10 +596,63 @@ def _load_esxi_pxe_manifest(path: Path) -> dict:
     return payload
 
 
+def _simple_pxe_filename(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._-]+", value or "")) and "/" not in value and "\\" not in value and not value.startswith(".")
+
+
+def _find_ipxe_boot_binary(filename: str) -> Path | None:
+    for directory in IPXE_BOOT_BINARY_DIRS:
+        candidate = directory / filename
+        if candidate.is_file():
+            return candidate
+    for directory in IPXE_BOOT_BINARY_DIRS:
+        if not directory.is_dir():
+            continue
+        for candidate in directory.rglob(filename):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _esxi_pxe_boot_errors(boot: dict) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(boot, dict):
+        return ["ESXi PXE boot settings must be an object."]
+    enabled = bool(boot.get("enabled"))
+    native_uefi_http_enabled = bool(boot.get("native_uefi_http_enabled"))
+    if enabled:
+        tftp_root = Path(str(boot.get("tftp_root") or "")).resolve()
+        if tftp_root != ESXI_TFTP_ROOT.resolve():
+            errors.append(f"ESXi PXE TFTP root must be {ESXI_TFTP_ROOT}.")
+        for key, label in (("bios_bootfile", "BIOS bootfile"), ("uefi_bootfile", "UEFI bootfile"), ("ipxe_script_name", "iPXE script name")):
+            filename = str(boot.get(key) or "")
+            if not _simple_pxe_filename(filename):
+                errors.append(f"{label} must be a simple filename.")
+        for key, label in (("bios_bootfile", "BIOS iPXE bootfile"), ("uefi_bootfile", "UEFI iPXE bootfile")):
+            filename = str(boot.get(key) or "")
+            if _simple_pxe_filename(filename) and _find_ipxe_boot_binary(filename) is None:
+                errors.append(f"{label} {filename} was not found. Install the Photon ipxe package.")
+        tftp_script = str(boot.get("tftp_ipxe_script") or "")
+        if not tftp_script.startswith("#!ipxe"):
+            errors.append("TFTP iPXE chain script must start with #!ipxe.")
+        http_script = str(boot.get("ipxe_script") or "")
+        if not http_script.startswith("#!ipxe"):
+            errors.append("HTTP iPXE script must start with #!ipxe.")
+        generated_path = Path(str(boot.get("http_ipxe_generated_path") or ESXI_IPXE_HTTP_SCRIPT_PATH)).resolve()
+        if generated_path != ESXI_IPXE_HTTP_SCRIPT_PATH.resolve():
+            errors.append(f"HTTP iPXE generated path must be {ESXI_IPXE_HTTP_SCRIPT_PATH}.")
+    if native_uefi_http_enabled:
+        url = str(boot.get("native_uefi_http_url") or "").strip()
+        if not re.fullmatch(r"https?://[^\s\"'<>]+", url):
+            errors.append("Native UEFI HTTP URL must be an absolute HTTP or HTTPS URL.")
+    return errors
+
+
 def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
     errors: list[str] = []
     seen_ids: set[int] = set()
     iso_root = ESXI_INSTALLER_ISO_ROOT.resolve()
+    errors.extend(_esxi_pxe_boot_errors(payload.get("boot") or {"enabled": False}))
     for row in payload.get("kickstarts", []):
         if not isinstance(row, dict):
             errors.append("Kickstart entry must be an object.")
@@ -645,6 +707,8 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
         pass
     enabled_ids: set[str] = set()
     generated_files: list[str] = []
+    generated_tftp_files: list[str] = []
+    boot = payload.get("boot") or {}
     for row in payload.get("kickstarts", []):
         kickstart_id = str(int(row["id"]))
         generated_path = ESXI_PXE_HTTP_ROOT / f"{kickstart_id}.cfg"
@@ -656,11 +720,44 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
     for path in ESXI_PXE_HTTP_ROOT.glob("*.cfg"):
         if path.stem.isdigit() and path.stem not in enabled_ids:
             path.unlink(missing_ok=True)
+    if boot.get("enabled"):
+        ESXI_TFTP_ROOT.mkdir(parents=True, exist_ok=True)
+        ESXI_PXE_HTTP_BASE.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.chown(ESXI_TFTP_ROOT, user="labfoundry", group="labfoundry")
+        except (LookupError, PermissionError, OSError):
+            pass
+        for key in ("bios_bootfile", "uefi_bootfile"):
+            filename = str(boot.get(key) or "")
+            source = _find_ipxe_boot_binary(filename)
+            if source is None:
+                raise RuntimeError(f"iPXE boot binary is missing: {filename}")
+            target = ESXI_TFTP_ROOT / filename
+            shutil.copy2(source, target)
+            target.chmod(0o644)
+            generated_tftp_files.append(str(target))
+        tftp_script_path = ESXI_TFTP_ROOT / str(boot.get("ipxe_script_name") or "esxi.ipxe")
+        tftp_script_path.write_text(str(boot.get("tftp_ipxe_script") or ""), encoding="utf-8")
+        tftp_script_path.chmod(0o644)
+        generated_tftp_files.append(str(tftp_script_path))
+        ESXI_IPXE_HTTP_SCRIPT_PATH.write_text(str(boot.get("ipxe_script") or ""), encoding="utf-8")
+        ESXI_IPXE_HTTP_SCRIPT_PATH.chmod(0o644)
+        generated_files.append(str(ESXI_IPXE_HTTP_SCRIPT_PATH))
+    else:
+        for filename in (
+            str(boot.get("bios_bootfile") or "undionly.kpxe"),
+            str(boot.get("uefi_bootfile") or "snponly.efi"),
+            str(boot.get("ipxe_script_name") or "esxi.ipxe"),
+        ):
+            if _simple_pxe_filename(filename):
+                (ESXI_TFTP_ROOT / filename).unlink(missing_ok=True)
+        ESXI_IPXE_HTTP_SCRIPT_PATH.unlink(missing_ok=True)
     print(
         json.dumps(
             {
                 "esxi_pxe": "apply complete",
                 "generated_files": generated_files,
+                "generated_tftp_files": generated_tftp_files,
                 "enabled_kickstarts": len(enabled_ids),
             },
             sort_keys=True,

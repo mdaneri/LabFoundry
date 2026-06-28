@@ -21,6 +21,7 @@
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="ESXi PXE views" data-tab-storage-key="labfoundry:esxi-pxe:active-tab">
       <button class="tab-button active" type="button" data-tab-target="esxi-pxe-editor-panel" aria-selected="true">Kickstart Editor</button>
       <button class="tab-button" type="button" data-tab-target="esxi-pxe-hosts-panel" aria-selected="false">Host References</button>
+      <button class="tab-button" type="button" data-tab-target="esxi-pxe-boot-panel" aria-selected="false">Boot Services</button>
       <button class="tab-button" type="button" data-tab-target="esxi-pxe-preview-panel" aria-selected="false">Preview</button>
     </div>
 
@@ -203,6 +204,49 @@ reboot
             </form>
           {% endif %}
         </div>
+      </div>
+
+      <div id="esxi-pxe-boot-panel" class="tab-panel" role="tabpanel" hidden>
+        <form class="form-stack" action="/esxi-pxe/boot-settings" method="post">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <div class="form-grid">
+            <label class="switch-field">
+              <span class="field-label"><span>iPXE/TFTP bootstrap</span><button class="help-icon" type="button" data-help="Enables dnsmasq TFTP and DHCP bootfile options for legacy BIOS and UEFI ESXi clients. Files are generated only during global appliance apply.">i</button></span>
+              <input class="switch-input" type="checkbox" name="enabled" {{ "checked" if esxi_pxe_boot.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}><span class="switch-track" aria-hidden="true"></span>
+            </label>
+            <label>
+              <span class="field-label"><span>TFTP root</span><button class="help-icon" type="button" data-help="Generated TFTP root used by dnsmasq. LabFoundry writes only managed boot files here during ESXi PXE appliance apply.">i</button></span>
+              <input name="tftp_root" value="{{ esxi_pxe_boot.tftp_root }}" {{ "disabled" if not esxi_can_write else "" }}>
+            </label>
+            <label>
+              <span class="field-label"><span>BIOS bootfile</span><button class="help-icon" type="button" data-help="Legacy BIOS PXE clients receive this TFTP filename. The default is the iPXE undionly.kpxe binary from the Photon ipxe package.">i</button></span>
+              <input name="bios_bootfile" value="{{ esxi_pxe_boot.bios_bootfile }}" {{ "disabled" if not esxi_can_write else "" }}>
+            </label>
+            <label>
+              <span class="field-label"><span>UEFI bootfile</span><button class="help-icon" type="button" data-help="UEFI PXE clients receive this TFTP filename. The default is snponly.efi from the Photon ipxe package.">i</button></span>
+              <input name="uefi_bootfile" value="{{ esxi_pxe_boot.uefi_bootfile }}" {{ "disabled" if not esxi_can_write else "" }}>
+            </label>
+            <label class="switch-field">
+              <span class="field-label"><span>Native UEFI HTTP</span><button class="help-icon" type="button" data-help="Adds DHCP matching for UEFI HTTPClient firmware and returns the configured absolute HTTP boot URL. This is separate from iPXE script chaining.">i</button></span>
+              <input class="switch-input" type="checkbox" name="native_uefi_http_enabled" {{ "checked" if esxi_pxe_boot.native_uefi_http_enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}><span class="switch-track" aria-hidden="true"></span>
+            </label>
+            <label>
+              <span class="field-label"><span>UEFI HTTP URL</span><button class="help-icon" type="button" data-help="Absolute bootloader URL returned only to native UEFI HTTP clients, such as an ESXi UEFI HTTP bootloader staged under the PXE HTTP root.">i</button></span>
+              <input name="native_uefi_http_url" value="{{ esxi_pxe_boot.native_uefi_http_url }}" placeholder="http://192.168.49.1/pxe/esxi/uefi/bootx64.efi" {{ "disabled" if not esxi_can_write else "" }}>
+            </label>
+          </div>
+          <label>
+            <span class="field-label"><span>HTTP iPXE script</span><button class="help-icon" type="button" data-help="Script served at /pxe/esxi/boot.ipxe after BIOS or UEFI iPXE clients chain from TFTP. Edit this to boot staged ESXi installer files over HTTP.">i</button></span>
+            <textarea class="monospace-textarea" name="ipxe_script" rows="12" data-codemirror-editor data-codemirror-language="shell" {{ "disabled" if not esxi_can_write else "" }}>{{ esxi_pxe_boot.ipxe_script }}</textarea>
+          </label>
+          <div class="settings-list compact-settings-list">
+            <div><span>HTTP iPXE path</span><strong>{{ esxi_pxe_boot.http_ipxe_path }}</strong></div>
+            <div><span>TFTP chain script</span><strong>{{ esxi_pxe_boot.ipxe_script_name }}</strong></div>
+          </div>
+          {% if esxi_can_write %}
+            <button class="button secondary" type="submit">Save boot settings</button>
+          {% endif %}
+        </form>
       </div>
 
       <div id="esxi-pxe-preview-panel" class="tab-panel" role="tabpanel" hidden>

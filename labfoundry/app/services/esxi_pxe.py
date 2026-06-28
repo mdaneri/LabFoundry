@@ -15,10 +15,23 @@ from labfoundry.app.models import EsxiKickstart, EsxiPxeHost, Setting, utcnow
 
 ESXI_PXE_UNIT_ID = "esxi_pxe"
 ESXI_PXE_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/esxi-pxe/labfoundry-esxi-pxe.json"
+ESXI_PXE_HTTP_BASE = Path("/var/lib/labfoundry/pxe/http/esxi")
 ESXI_KICKSTART_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/ks")
 ESXI_KICKSTART_HTTP_PREFIX = "/pxe/esxi/ks"
+ESXI_IPXE_HTTP_SCRIPT_PATH = ESXI_PXE_HTTP_BASE / "boot.ipxe"
+ESXI_TFTP_ROOT = Path("/var/lib/labfoundry/pxe/tftp")
 ESXI_INSTALLER_ISO_ROOT = Path("/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST")
 ESXI_PXE_STRICT_VALIDATION_KEY = "esxi_pxe.strict_kickstart_validation"
+ESXI_PXE_BOOT_ENABLED_KEY = "esxi_pxe.boot.enabled"
+ESXI_PXE_TFTP_ROOT_KEY = "esxi_pxe.boot.tftp_root"
+ESXI_PXE_BIOS_BOOTFILE_KEY = "esxi_pxe.boot.bios_bootfile"
+ESXI_PXE_UEFI_BOOTFILE_KEY = "esxi_pxe.boot.uefi_bootfile"
+ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY = "esxi_pxe.boot.native_uefi_http_enabled"
+ESXI_PXE_NATIVE_UEFI_HTTP_URL_KEY = "esxi_pxe.boot.native_uefi_http_url"
+ESXI_PXE_IPXE_SCRIPT_KEY = "esxi_pxe.boot.ipxe_script"
+ESXI_PXE_IPXE_SCRIPT_NAME = "esxi.ipxe"
+ESXI_PXE_BIOS_BOOTFILE = "undionly.kpxe"
+ESXI_PXE_UEFI_BOOTFILE = "snponly.efi"
 SECRET_KEYWORD_PATTERN = re.compile(r"(rootpw|password|passwd|token|secret|key|license|activation|credential)", re.IGNORECASE)
 TEMPLATE_PATTERN = re.compile(r"({[{%#].*?[}%]}|\$\{[^}]+\})")
 SAFE_ISO_UPLOAD_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*\.iso$", re.IGNORECASE)
@@ -76,6 +89,114 @@ def ensure_installer_iso_root() -> Path:
 
 def installer_iso_root_path() -> str:
     return str(ESXI_INSTALLER_ISO_ROOT)
+
+
+def default_ipxe_script() -> str:
+    return "\n".join(
+        [
+            "#!ipxe",
+            "echo LabFoundry ESXi HTTP boot script",
+            "echo Stage or extract ESXi installer boot files under the PXE HTTP root, then edit this script.",
+            "echo Example: kernel http://${next-server}/pxe/esxi/installer/mboot.c32 -c http://${next-server}/pxe/esxi/installer/boot.cfg",
+            "shell",
+            "",
+        ]
+    )
+
+
+def tftp_ipxe_chain_script() -> str:
+    return "\n".join(
+        [
+            "#!ipxe",
+            "dhcp",
+            "chain http://${next-server}/pxe/esxi/boot.ipxe || shell",
+            "",
+        ]
+    )
+
+
+def esxi_pxe_boot_settings(db: Session) -> dict[str, Any]:
+    rows = {row.key: row.value for row in db.execute(select(Setting).where(Setting.key.like("esxi_pxe.boot.%"))).scalars().all()}
+    enabled = rows.get(ESXI_PXE_BOOT_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"}
+    native_uefi_http_enabled = rows.get(ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"}
+    return {
+        "enabled": enabled,
+        "tftp_root": rows.get(ESXI_PXE_TFTP_ROOT_KEY, ESXI_TFTP_ROOT.as_posix()).strip() or ESXI_TFTP_ROOT.as_posix(),
+        "bios_bootfile": rows.get(ESXI_PXE_BIOS_BOOTFILE_KEY, ESXI_PXE_BIOS_BOOTFILE).strip() or ESXI_PXE_BIOS_BOOTFILE,
+        "uefi_bootfile": rows.get(ESXI_PXE_UEFI_BOOTFILE_KEY, ESXI_PXE_UEFI_BOOTFILE).strip() or ESXI_PXE_UEFI_BOOTFILE,
+        "native_uefi_http_enabled": native_uefi_http_enabled,
+        "native_uefi_http_url": rows.get(ESXI_PXE_NATIVE_UEFI_HTTP_URL_KEY, "").strip(),
+        "ipxe_script_name": ESXI_PXE_IPXE_SCRIPT_NAME,
+        "ipxe_script": rows.get(ESXI_PXE_IPXE_SCRIPT_KEY, default_ipxe_script()),
+        "tftp_ipxe_script": tftp_ipxe_chain_script(),
+        "http_ipxe_path": "/pxe/esxi/boot.ipxe",
+        "http_ipxe_generated_path": ESXI_IPXE_HTTP_SCRIPT_PATH.as_posix(),
+    }
+
+
+def save_esxi_pxe_boot_settings(
+    db: Session,
+    *,
+    enabled: bool,
+    tftp_root: str,
+    bios_bootfile: str,
+    uefi_bootfile: str,
+    ipxe_script: str,
+    native_uefi_http_enabled: bool = False,
+    native_uefi_http_url: str = "",
+) -> dict[str, Any]:
+    settings = {
+        ESXI_PXE_BOOT_ENABLED_KEY: "true" if enabled else "false",
+        ESXI_PXE_TFTP_ROOT_KEY: _normalize_tftp_root(tftp_root),
+        ESXI_PXE_BIOS_BOOTFILE_KEY: _normalize_bootfile(bios_bootfile, default=ESXI_PXE_BIOS_BOOTFILE),
+        ESXI_PXE_UEFI_BOOTFILE_KEY: _normalize_bootfile(uefi_bootfile, default=ESXI_PXE_UEFI_BOOTFILE),
+        ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY: "true" if native_uefi_http_enabled else "false",
+        ESXI_PXE_NATIVE_UEFI_HTTP_URL_KEY: _normalize_native_uefi_http_url(native_uefi_http_url),
+        ESXI_PXE_IPXE_SCRIPT_KEY: _normalize_ipxe_script(ipxe_script),
+    }
+    existing = {row.key: row for row in db.execute(select(Setting).where(Setting.key.in_(settings))).scalars().all()}
+    for key, value in settings.items():
+        row = existing.get(key)
+        if row is None:
+            db.add(Setting(key=key, value=value))
+        else:
+            row.value = value
+    db.flush()
+    return esxi_pxe_boot_settings(db)
+
+
+def _normalize_tftp_root(value: str) -> str:
+    root = ((value or "").strip() or ESXI_TFTP_ROOT.as_posix()).replace("\\", "/")
+    if not root.startswith("/"):
+        raise ValueError("TFTP root must be an absolute path.")
+    return root
+
+
+def _normalize_bootfile(value: str, *, default: str) -> str:
+    name = (value or "").strip() or default
+    if "/" in name or "\\" in name or name.startswith(".") or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise ValueError("PXE boot filenames must be simple filenames.")
+    return name
+
+
+def _normalize_native_uefi_http_url(value: str) -> str:
+    url = (value or "").strip()
+    if not url:
+        return ""
+    if not re.fullmatch(r"https?://[^\s\"'<>]+", url):
+        raise ValueError("Native UEFI HTTP boot URL must be an absolute HTTP or HTTPS URL.")
+    return url
+
+
+def _normalize_ipxe_script(value: str) -> str:
+    script = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not script.strip():
+        script = default_ipxe_script()
+    if not script.startswith("#!ipxe"):
+        raise ValueError("iPXE script must start with #!ipxe.")
+    if not script.endswith("\n"):
+        script += "\n"
+    return script
 
 
 def safe_installer_iso_name(filename: str) -> str:
@@ -283,7 +404,7 @@ def host_to_dict(host: EsxiPxeHost) -> dict[str, Any]:
     }
 
 
-def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPxeHost]) -> str:
+def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPxeHost], boot_settings: dict[str, Any] | None = None) -> str:
     iso_error = ""
     try:
         installer_isos = installer_iso_inventory()
@@ -297,6 +418,19 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
         "installer_iso_root": str(ESXI_INSTALLER_ISO_ROOT),
         "installer_isos": installer_isos,
         "installer_iso_error": iso_error,
+        "boot": boot_settings or {
+            "enabled": False,
+            "tftp_root": ESXI_TFTP_ROOT.as_posix(),
+            "bios_bootfile": ESXI_PXE_BIOS_BOOTFILE,
+            "uefi_bootfile": ESXI_PXE_UEFI_BOOTFILE,
+            "native_uefi_http_enabled": False,
+            "native_uefi_http_url": "",
+            "ipxe_script_name": ESXI_PXE_IPXE_SCRIPT_NAME,
+            "ipxe_script": default_ipxe_script(),
+            "tftp_ipxe_script": tftp_ipxe_chain_script(),
+            "http_ipxe_path": "/pxe/esxi/boot.ipxe",
+            "http_ipxe_generated_path": ESXI_IPXE_HTTP_SCRIPT_PATH.as_posix(),
+        },
         "kickstarts": [
             {
                 "id": row.id,
@@ -325,10 +459,12 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
-def render_esxi_pxe_preview(kickstarts: list[EsxiKickstart], hosts: list[EsxiPxeHost]) -> str:
-    payload = json.loads(render_esxi_pxe_manifest(kickstarts, hosts))
+def render_esxi_pxe_preview(kickstarts: list[EsxiKickstart], hosts: list[EsxiPxeHost], boot_settings: dict[str, Any] | None = None) -> str:
+    payload = json.loads(render_esxi_pxe_manifest(kickstarts, hosts, boot_settings))
     for row in payload["kickstarts"]:
         row["content"] = redacted_kickstart_preview(str(row["content"]))
+    if isinstance(payload.get("boot"), dict):
+        payload["boot"]["ipxe_script"] = redacted_kickstart_preview(str(payload["boot"].get("ipxe_script") or ""))
     return json.dumps(payload, indent=2, sort_keys=True)
 
 

@@ -291,19 +291,42 @@ def test_wan_helper_allows_nat_on_non_wan_role_target(tmp_path):
 def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, tmp_path):
     helper = load_helper_module()
     http_root = tmp_path / "pxe" / "http" / "esxi" / "ks"
+    http_base = http_root.parent
+    tftp_root = tmp_path / "pxe" / "tftp"
+    ipxe_binary_dir = tmp_path / "usr" / "share" / "ipxe"
     iso_root = tmp_path / "vcf-depot" / "PROD" / "COMP" / "ESX_HOST"
     apply_dir = tmp_path / "apply" / "esxi-pxe"
     apply_dir.mkdir(parents=True)
     http_root.mkdir(parents=True)
+    ipxe_binary_dir.mkdir(parents=True)
     iso_root.mkdir(parents=True)
     (iso_root / "VMware-VMvisor-Installer-8.0U3.iso").write_bytes(b"iso bytes")
+    (ipxe_binary_dir / "undionly.kpxe").write_bytes(b"bios ipxe")
+    (ipxe_binary_dir / "snponly.efi").write_bytes(b"uefi ipxe")
     stale = http_root / "99.cfg"
     stale.write_text("old", encoding="utf-8")
     manifest = esxi_pxe_manifest(http_root, iso_root=iso_root)
+    manifest["boot"] = {
+        "enabled": True,
+        "tftp_root": str(tftp_root),
+        "bios_bootfile": "undionly.kpxe",
+        "uefi_bootfile": "snponly.efi",
+        "native_uefi_http_enabled": True,
+        "native_uefi_http_url": "http://192.168.50.1/pxe/esxi/uefi/bootx64.efi",
+        "ipxe_script_name": "esxi.ipxe",
+        "tftp_ipxe_script": "#!ipxe\ndhcp\nchain http://${next-server}/pxe/esxi/boot.ipxe || shell\n",
+        "ipxe_script": "#!ipxe\necho boot\nshell\n",
+        "http_ipxe_path": "/pxe/esxi/boot.ipxe",
+        "http_ipxe_generated_path": str(http_base / "boot.ipxe"),
+    }
     config_path = apply_dir / "labfoundry-esxi-pxe.json"
     config_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     monkeypatch.setattr(helper, "ESXI_PXE_HTTP_ROOT", http_root)
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_BASE", http_base)
+    monkeypatch.setattr(helper, "ESXI_IPXE_HTTP_SCRIPT_PATH", http_base / "boot.ipxe")
+    monkeypatch.setattr(helper, "ESXI_TFTP_ROOT", tftp_root)
+    monkeypatch.setattr(helper, "IPXE_BOOT_BINARY_DIRS", [ipxe_binary_dir])
     monkeypatch.setattr(helper, "ESXI_PXE_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "ESXI_INSTALLER_ISO_ROOT", iso_root)
 
@@ -311,6 +334,10 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert helper._esxi_pxe_manifest_errors(payload) == []
     assert helper._apply_esxi_pxe_manifest(payload) == 0
     assert (http_root / "7.cfg").read_text(encoding="utf-8") == manifest["kickstarts"][0]["content"]
+    assert (tftp_root / "undionly.kpxe").read_bytes() == b"bios ipxe"
+    assert (tftp_root / "snponly.efi").read_bytes() == b"uefi ipxe"
+    assert (tftp_root / "esxi.ipxe").read_text(encoding="utf-8").startswith("#!ipxe")
+    assert (http_base / "boot.ipxe").read_text(encoding="utf-8") == "#!ipxe\necho boot\nshell\n"
     assert not stale.exists()
 
     manifest["hosts"][0]["installer_iso_path"] = str(tmp_path / "escape.iso")

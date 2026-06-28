@@ -187,6 +187,7 @@ from labfoundry.app.services.esxi_pxe import (
     canonical_http_path,
     content_hash,
     decode_kickstart_upload,
+    esxi_pxe_boot_settings,
     installer_iso_inventory,
     kickstart_to_dict,
     kickstart_validation,
@@ -1135,6 +1136,7 @@ def get_dnsmasq_state(db: Session) -> tuple[DnsSettings, list[DnsRecord], DhcpSe
         dhcp_scopes=dhcp_scopes,
         dhcp_options=dhcp_options,
         conditional_forwarders=conditional_forwarders,
+        esxi_pxe_boot=esxi_pxe_boot_settings(db),
     )
     return dns_settings, dns_records, dhcp_settings, dhcp_scopes, dhcp_options, dhcp_reservations, config_preview
 

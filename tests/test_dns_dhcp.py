@@ -117,6 +117,43 @@ def test_dnsmasq_renderer_only_marks_dhcp_authoritative_when_dhcp_enabled():
     assert "dhcp-range=" not in config
 
 
+def test_dnsmasq_renderer_adds_esxi_pxe_boot_options():
+    config = render_dnsmasq_config(
+        dns_settings=DnsSettings(domain="labfoundry.internal", listen_interface="eth1"),
+        dns_records=[],
+        dhcp_settings=DhcpSettings(
+            enabled=True,
+            interface_name="eth1",
+            site_address="192.168.50.1",
+            prefix_length=24,
+            range_start="192.168.50.100",
+            range_end="192.168.50.200",
+            dns_server="192.168.50.1",
+        ),
+        dhcp_reservations=[],
+        esxi_pxe_boot={
+            "enabled": True,
+            "tftp_root": "/var/lib/labfoundry/pxe/tftp",
+            "bios_bootfile": "undionly.kpxe",
+            "uefi_bootfile": "snponly.efi",
+            "ipxe_script_name": "esxi.ipxe",
+            "native_uefi_http_enabled": True,
+            "native_uefi_http_url": "http://192.168.50.1/pxe/esxi/uefi/bootx64.efi",
+        },
+    )
+
+    assert "enable-tftp" in config
+    assert "tftp-root=/var/lib/labfoundry/pxe/tftp" in config
+    assert "dhcp-match=set:ipxe,175" in config
+    assert "dhcp-match=set:efi-x86_64,option:client-arch,7" in config
+    assert "dhcp-match=set:efi-x86_64,option:client-arch,9" in config
+    assert "dhcp-match=set:uefi-http,option:user-class,HTTPClient" in config
+    assert "dhcp-boot=tag:uefi-http,http://192.168.50.1/pxe/esxi/uefi/bootx64.efi" in config
+    assert "dhcp-boot=tag:ipxe,esxi.ipxe" in config
+    assert "dhcp-boot=tag:efi-x86_64,snponly.efi" in config
+    assert "dhcp-boot=tag:!efi-x86_64,undionly.kpxe" in config
+
+
 def test_dnsmasq_lease_parser_tracks_active_and_expired_leases():
     leases = parse_dnsmasq_leases(
         "1893456000 02:15:5d:00:20:30 192.168.50.130 api-client.labfoundry.internal 01:02:15:5d:00:20:30\n"

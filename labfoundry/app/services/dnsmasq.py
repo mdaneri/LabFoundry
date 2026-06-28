@@ -522,6 +522,7 @@ def render_dnsmasq_config(
     dhcp_scopes: list[DhcpScope] | None = None,
     dhcp_options: list[DhcpOption] | None = None,
     conditional_forwarders: str | None = None,
+    esxi_pxe_boot: dict | None = None,
 ) -> str:
     domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
     scopes = dhcp_scopes if dhcp_scopes else [_legacy_scope(dhcp_settings)]
@@ -559,6 +560,31 @@ def render_dnsmasq_config(
         elif record.record_type.upper() == "CNAME":
             lines.append(f"cname={record.hostname},{record.address.strip().strip('.').lower()}")
     if dhcp_settings.enabled:
+        if esxi_pxe_boot and (esxi_pxe_boot.get("enabled") or esxi_pxe_boot.get("native_uefi_http_enabled")):
+            if esxi_pxe_boot.get("native_uefi_http_enabled") and esxi_pxe_boot.get("native_uefi_http_url"):
+                lines.extend(
+                    [
+                        "dhcp-match=set:uefi-http,option:user-class,HTTPClient",
+                        f"dhcp-boot=tag:uefi-http,{esxi_pxe_boot.get('native_uefi_http_url')}",
+                    ]
+                )
+        if esxi_pxe_boot and esxi_pxe_boot.get("enabled"):
+            lines.extend(
+                [
+                    "enable-tftp",
+                    f"tftp-root={esxi_pxe_boot.get('tftp_root')}",
+                    "dhcp-match=set:ipxe,175",
+                    "dhcp-match=set:efi-x86_64,option:client-arch,7",
+                    "dhcp-match=set:efi-x86_64,option:client-arch,9",
+                ]
+            )
+            lines.extend(
+                [
+                    f"dhcp-boot=tag:ipxe,{esxi_pxe_boot.get('ipxe_script_name')}",
+                    f"dhcp-boot=tag:efi-x86_64,{esxi_pxe_boot.get('uefi_bootfile')}",
+                    f"dhcp-boot=tag:!efi-x86_64,{esxi_pxe_boot.get('bios_bootfile')}",
+                ]
+            )
         scope_tags = {scope.id: _dnsmasq_tag(scope.name) for scope in scopes}
         for scope in scopes:
             if scope.enabled is False:

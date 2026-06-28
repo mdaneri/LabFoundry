@@ -200,6 +200,8 @@ it to Packer.
 - `/etc/systemd/system/labfoundry-firewall.service` loading the nftables
   management firewall.
 - `dnsmasq` for the shared DNS/DHCP appliance service.
+- `ipxe` for ESXi BIOS and UEFI PXE bootstrap binaries served by dnsmasq
+  TFTP.
 - `/opt/labfoundry/bin/labfoundry-helper` constrained appliance helper.
 - `/etc/sudoers.d/labfoundry-helper` permitting the service user to run only
   the constrained helper binary as root.
@@ -222,6 +224,9 @@ The rendered config uses `/var/lib/labfoundry/dnsmasq/dhcp.leases` for DHCP
 leases, and the helper exposes only that allowlisted lease readback path.
 DHCP scopes should bind to access physical interfaces with IP CIDR or enabled
 VLAN interfaces with IP CIDR, not trunk or addressless physical interfaces.
+ESXi PXE boot settings add dnsmasq TFTP and DHCP bootfile options for legacy
+BIOS iPXE, UEFI iPXE, and optional native UEFI HTTP boot URLs. The generated
+TFTP and HTTP boot files are written only by global appliance apply.
 
 Certificate Authority desired state is LabFoundry CA-backed. Real
 `/appliance-apply` stages `/var/lib/labfoundry/apply/ca/labfoundry-ca.json`,
