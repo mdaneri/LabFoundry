@@ -326,7 +326,7 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     monkeypatch.setattr(helper, "ESXI_PXE_HTTP_BASE", http_base)
     monkeypatch.setattr(helper, "ESXI_IPXE_HTTP_SCRIPT_PATH", http_base / "boot.ipxe")
     monkeypatch.setattr(helper, "ESXI_TFTP_ROOT", tftp_root)
-    monkeypatch.setattr(helper, "IPXE_BOOT_BINARY_DIRS", [ipxe_binary_dir])
+    monkeypatch.setattr(helper, "PXE_BOOT_BINARY_DIRS", [ipxe_binary_dir])
     monkeypatch.setattr(helper, "ESXI_PXE_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "ESXI_INSTALLER_ISO_ROOT", iso_root)
 

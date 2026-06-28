@@ -200,7 +200,7 @@ it to Packer.
 - `/etc/systemd/system/labfoundry-firewall.service` loading the nftables
   management firewall.
 - `dnsmasq` for the shared DNS/DHCP appliance service.
-- `ipxe` for ESXi BIOS and UEFI PXE bootstrap binaries served by dnsmasq
+- `ipxe` and `syslinux` for ESXi PXE bootstrap artifacts served by dnsmasq
   TFTP.
 - `/opt/labfoundry/bin/labfoundry-helper` constrained appliance helper.
 - `/etc/sudoers.d/labfoundry-helper` permitting the service user to run only

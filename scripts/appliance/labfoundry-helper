@@ -56,10 +56,12 @@ ESXI_PXE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/ks")
 ESXI_IPXE_HTTP_SCRIPT_PATH = ESXI_PXE_HTTP_BASE / "boot.ipxe"
 ESXI_TFTP_ROOT = Path("/var/lib/labfoundry/pxe/tftp")
 ESXI_INSTALLER_ISO_ROOT = Path("/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST")
-IPXE_BOOT_BINARY_DIRS = [
+PXE_BOOT_BINARY_DIRS = [
     Path("/usr/share/ipxe"),
     Path("/usr/lib/ipxe"),
     Path("/usr/share/ipxe/boot"),
+    Path("/usr/share/syslinux"),
+    Path("/boot/efi/EFI/BOOT"),
     Path("/boot/ipxe"),
 ]
 KMS_APPLY_DIR = Path("/var/lib/labfoundry/apply/kms")
@@ -600,12 +602,12 @@ def _simple_pxe_filename(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9._-]+", value or "")) and "/" not in value and "\\" not in value and not value.startswith(".")
 
 
-def _find_ipxe_boot_binary(filename: str) -> Path | None:
-    for directory in IPXE_BOOT_BINARY_DIRS:
+def _find_pxe_boot_binary(filename: str) -> Path | None:
+    for directory in PXE_BOOT_BINARY_DIRS:
         candidate = directory / filename
         if candidate.is_file():
             return candidate
-    for directory in IPXE_BOOT_BINARY_DIRS:
+    for directory in PXE_BOOT_BINARY_DIRS:
         if not directory.is_dir():
             continue
         for candidate in directory.rglob(filename):
@@ -628,10 +630,10 @@ def _esxi_pxe_boot_errors(boot: dict) -> list[str]:
             filename = str(boot.get(key) or "")
             if not _simple_pxe_filename(filename):
                 errors.append(f"{label} must be a simple filename.")
-        for key, label in (("bios_bootfile", "BIOS iPXE bootfile"), ("uefi_bootfile", "UEFI iPXE bootfile")):
+        for key, label in (("bios_bootfile", "BIOS PXE bootfile"), ("uefi_bootfile", "UEFI PXE bootfile")):
             filename = str(boot.get(key) or "")
-            if _simple_pxe_filename(filename) and _find_ipxe_boot_binary(filename) is None:
-                errors.append(f"{label} {filename} was not found. Install the Photon ipxe package.")
+            if _simple_pxe_filename(filename) and _find_pxe_boot_binary(filename) is None:
+                errors.append(f"{label} {filename} was not found. Install the Photon syslinux/ipxe boot packages or stage the expected bootloader package.")
         tftp_script = str(boot.get("tftp_ipxe_script") or "")
         if not tftp_script.startswith("#!ipxe"):
             errors.append("TFTP iPXE chain script must start with #!ipxe.")
@@ -729,9 +731,9 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             pass
         for key in ("bios_bootfile", "uefi_bootfile"):
             filename = str(boot.get(key) or "")
-            source = _find_ipxe_boot_binary(filename)
+            source = _find_pxe_boot_binary(filename)
             if source is None:
-                raise RuntimeError(f"iPXE boot binary is missing: {filename}")
+                raise RuntimeError(f"PXE boot binary is missing: {filename}")
             target = ESXI_TFTP_ROOT / filename
             shutil.copy2(source, target)
             target.chmod(0o644)

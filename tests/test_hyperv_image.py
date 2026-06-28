@@ -37,6 +37,7 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "tdnf -y install" in script and "nginx" in script
     assert "tdnf -y install" in script and "powershell" in script
     assert "tdnf -y install" in script and "ipxe" in script
+    assert "tdnf -y install" in script and "syslinux" in script
     assert 'BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/usr/bin/pwsh}"' in script
     assert '--shell "$BOOTSTRAP_SHELL"' in script
     assert "touch /etc/shells" in script
