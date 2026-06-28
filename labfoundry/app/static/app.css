@@ -592,6 +592,16 @@ textarea {
   align-self: start;
 }
 
+.left-stack {
+  display: grid;
+  gap: 14px;
+  align-self: start;
+}
+
+.left-stack > .panel {
+  margin-bottom: 0;
+}
+
 .panel-head {
   display: flex;
   justify-content: space-between;

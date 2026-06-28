@@ -2,29 +2,15 @@
 {% block page_title %}ESXi PXE{% endblock %}
 {% block content %}
 <section class="split-workspace esxi-pxe-workspace">
-  <div class="panel wide-panel">
+  <div class="left-stack">
+  <div class="panel esxi-boot-service-panel">
     <div class="panel-head">
-      <div>
-        <h2>ESXi Kickstarts</h2>
-        <p class="muted">Database-owned Kickstart source files for generated PXE HTTP boot copies.</p>
-      </div>
-      <span class="status-pill {{ 'warn' if esxi_pxe_validation_errors else 'good' }}">{{ esxi_kickstarts|length }} Kickstarts / {{ esxi_installer_isos|length }} ISOs</span>
-    </div>
-
-    {% if esxi_pxe_error %}
-      <div class="alert error">{{ esxi_pxe_error }}</div>
-    {% endif %}
-    {% if esxi_pxe_result %}
-      <div class="alert success"><strong>{{ esxi_pxe_result.title }}</strong><p>{{ esxi_pxe_result.message }}</p></div>
-    {% endif %}
-
-    <section class="info-band">
       <div>
         <h2>Boot Service</h2>
         <p class="muted">{{ esxi_pxe_boot.hostname }}{% if esxi_pxe_primary_listen_address %} / {{ esxi_pxe_primary_listen_address }}{% else %} / no listen address{% endif %}</p>
       </div>
       <span class="status-pill {{ 'good' if esxi_pxe_boot.enabled else 'muted' }}">{{ "enabled" if esxi_pxe_boot.enabled else "disabled" }}</span>
-    </section>
+    </div>
 
     <form class="form-stack boot-service-form" action="/esxi-pxe/boot-settings" method="post" data-autosave-form data-autosave-status-id="esxi-pxe-boot-settings-status">
       <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -135,6 +121,23 @@
         <p id="esxi-pxe-boot-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
       {% endif %}
     </form>
+  </div>
+
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>ESXi Kickstarts</h2>
+        <p class="muted">Database-owned Kickstart source files for generated PXE HTTP boot copies.</p>
+      </div>
+      <span class="status-pill {{ 'warn' if esxi_pxe_validation_errors else 'good' }}">{{ esxi_kickstarts|length }} Kickstarts / {{ esxi_installer_isos|length }} ISOs</span>
+    </div>
+
+    {% if esxi_pxe_error %}
+      <div class="alert error">{{ esxi_pxe_error }}</div>
+    {% endif %}
+    {% if esxi_pxe_result %}
+      <div class="alert success"><strong>{{ esxi_pxe_result.title }}</strong><p>{{ esxi_pxe_result.message }}</p></div>
+    {% endif %}
 
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="ESXi PXE views" data-tab-storage-key="labfoundry:esxi-pxe:active-tab">
       <button class="tab-button active" type="button" data-tab-target="esxi-pxe-editor-panel" aria-selected="true">Kickstart Editor</button>
@@ -330,6 +333,7 @@ reboot
         </div>
       </div>
     </div>
+  </div>
   </div>
 
   <aside class="side-stack">
