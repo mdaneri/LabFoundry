@@ -58,6 +58,8 @@ ALL_SCOPES = [
     "write:kms",
     "read:repository",
     "write:repository",
+    "read:esxi-pxe",
+    "write:esxi-pxe",
     "read:vcf-registry",
     "write:vcf-registry",
     "read:vcf-backups",
@@ -113,6 +115,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--client-ca-request-interface", default="eth3")
     parser.add_argument("--client-ca-request-cidr", default="192.168.49.20/24")
     parser.add_argument("--client-ca-request-url", default="")
+    parser.add_argument("--pxe-test-mode", choices=["linux", "esxi"], default="linux")
+    parser.add_argument("--pxe-client-mac", default="")
+    parser.add_argument("--pxe-installer-iso-path", default="")
     parser.add_argument("--ssh-user", default="", help="Compatibility override for both appliance and client SSH users.")
     parser.add_argument("--appliance-ssh-user", default="admin")
     parser.add_argument("--client-ssh-user", default="alpine")
@@ -405,7 +410,13 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "url": args.client_ca_request_url or args.appliance_url,
             },
         },
-        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "ca", "kms", "appliance_settings", "vcf_backups"],
+        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "ca", "kms", "appliance_settings", "vcf_backups"],
+        "pxe_boot": {
+            "enabled": bool(args.pxe_client_mac),
+            "mode": args.pxe_test_mode,
+            "client_mac": args.pxe_client_mac,
+            "installer_iso_path": args.pxe_installer_iso_path if args.pxe_test_mode == "esxi" else "",
+        },
         "checks": [
             "appliance health",
             "interface and VLAN desired state",
@@ -414,6 +425,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification",
             "KMS desired state, DNS/firewall apply, PyKMIP service, and TLS client-certificate probe",
             "VCF Backup desired state, local user sync, SFTP listener, and client probe",
+            "ESXi PXE desired state, DHCP boot options, TFTP artifacts, and Hyper-V PXE VM smoke",
             "client DNS/DHCP/routing probes",
         ],
         "client_checks_enabled": not args.skip_client_checks,
@@ -583,6 +595,70 @@ def configure_dns_dhcp(client: HttpClient, args: argparse.Namespace) -> dict[str
     else:
         scope = client.json_request("POST", "/api/v1/dhcp/scopes", json_body=scope_payload)
     return {"record": record, "scope": scope}
+
+
+def configure_esxi_pxe(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    if not args.pxe_client_mac:
+        return {"enabled": False, "reason": "No PXE client MAC was supplied."}
+
+    site_ip = str(ip_interface(args.site_cidr).ip)
+    hostname = f"esxi-pxe.{args.domain}".strip(".").lower()
+    status, body, _headers = client.request("GET", "/esxi-pxe")
+    if status >= 400:
+        raise LifecycleError(f"GET /esxi-pxe failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    form: list[tuple[str, Any]] = [
+        ("enabled", "on"),
+        ("hostname", hostname),
+        ("listen_interfaces_present", "1"),
+        ("listen_interfaces", args.site_interface),
+        ("listen_addresses_present", "1"),
+        ("listen_addresses", site_ip),
+        ("tftp_root", "/var/lib/labfoundry/pxe/tftp"),
+        ("bios_bootfile", "pxelinux.0"),
+        ("uefi_bootfile", "bootx64.efi"),
+        ("native_uefi_http_enabled", "on"),
+        ("native_uefi_http_url", f"http://{site_ip}/pxe/esxi/uefi/bootx64.efi"),
+        ("ipxe_script", "#!ipxe\necho LabFoundry PXE lifecycle smoke\nshell\n"),
+        ("csrf", csrf),
+    ]
+    status, response_body, _headers = client.request(
+        "POST",
+        "/esxi-pxe/boot-settings",
+        form=form,
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    if status >= 400:
+        raise LifecycleError(f"ESXi PXE boot settings update failed with HTTP {status}: {response_body[:500]}")
+    settings_payload = json.loads(response_body)
+    if not settings_payload.get("valid"):
+        raise LifecycleError(f"ESXi PXE desired state is invalid: {settings_payload.get('validation_errors')}")
+
+    host_payload = {
+        "hostname": f"pxe-client.{args.domain}",
+        "mac_address": args.pxe_client_mac.strip().lower(),
+        "kickstart_id": None,
+        "installer_iso_path": args.pxe_installer_iso_path if args.pxe_test_mode == "esxi" else "",
+        "enabled": True,
+    }
+    existing_hosts = client.json_request("GET", "/api/v1/esxi-pxe/hosts")
+    existing_host = next((row for row in existing_hosts if row.get("mac_address", "").lower() == host_payload["mac_address"]), None)
+    if existing_host:
+        host = client.json_request("PUT", f"/api/v1/esxi-pxe/hosts/{existing_host['id']}", json_body=host_payload)
+    else:
+        host = client.json_request("POST", "/api/v1/esxi-pxe/hosts", json_body=host_payload)
+
+    return {
+        "enabled": True,
+        "mode": args.pxe_test_mode,
+        "hostname": hostname,
+        "listen_interface": args.site_interface,
+        "listen_address": site_ip,
+        "client_mac": host_payload["mac_address"],
+        "installer_iso_path": host_payload["installer_iso_path"],
+        "host_id": host.get("id"),
+        "dns_record_action": settings_payload.get("dns_record_action"),
+    }
 
 
 def configure_firewall_wan(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
@@ -1528,6 +1604,7 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "appliance-health", appliance_health, client, args)
     run_step(results, "configure-network", configure_network, client, args)
     run_step(results, "configure-dns-dhcp", configure_dns_dhcp, client, args)
+    run_step(results, "configure-esxi-pxe", configure_esxi_pxe, client, args)
     run_step(results, "configure-firewall-wan", configure_firewall_wan, client, args)
     run_step(results, "configure-ca", configure_ca, client, args)
     run_step(results, "configure-vcf-backups", configure_vcf_backups, client, args)
@@ -1537,7 +1614,7 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
         "apply-connectivity-units",
         apply_units,
         client,
-        ["local_users", "network", "firewall", "wan", "dnsmasq", "vcf_backups"],
+        ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "vcf_backups"],
         args,
     )
     run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
@@ -1566,7 +1643,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
         "apply-connectivity-units",
         apply_units,
         client,
-        ["local_users", "network", "firewall", "wan", "dnsmasq", "vcf_backups"],
+        ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "vcf_backups"],
         args,
     )
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)

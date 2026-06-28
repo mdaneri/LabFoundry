@@ -18,10 +18,127 @@
       <div class="alert success"><strong>{{ esxi_pxe_result.title }}</strong><p>{{ esxi_pxe_result.message }}</p></div>
     {% endif %}
 
+    <section class="info-band">
+      <div>
+        <h2>Boot Service</h2>
+        <p class="muted">{{ esxi_pxe_boot.hostname }}{% if esxi_pxe_primary_listen_address %} / {{ esxi_pxe_primary_listen_address }}{% else %} / no listen address{% endif %}</p>
+      </div>
+      <span class="status-pill {{ 'good' if esxi_pxe_boot.enabled else 'muted' }}">{{ "enabled" if esxi_pxe_boot.enabled else "disabled" }}</span>
+    </section>
+
+    <form class="form-stack boot-service-form" action="/esxi-pxe/boot-settings" method="post" data-autosave-form data-autosave-status-id="esxi-pxe-boot-settings-status">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <div class="form-grid">
+        <label class="switch-field">
+          <span class="field-label"><span>PXE/TFTP bootstrap</span><button class="help-icon" type="button" data-help="Enables dnsmasq TFTP and DHCP bootfile options for legacy BIOS, UEFI PXE, and already-iPXE ESXi clients. Files are generated only during global appliance apply.">i</button></span>
+          <input class="switch-input" type="checkbox" name="enabled" {{ "checked" if esxi_pxe_boot.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}><span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <label>
+          <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="FQDN used as the ESXi PXE/TFTP service name. When enabled, LabFoundry creates or updates the matching managed DNS A/AAAA record for the selected listen address.">i</button></span>
+          <input name="hostname" value="{{ esxi_pxe_boot.hostname }}" {{ "disabled" if not esxi_can_write else "" }}>
+        </label>
+      </div>
+      <input type="hidden" name="listen_interfaces_present" value="1">
+      <input type="hidden" name="listen_addresses_present" value="1">
+      <div class="service-bind-editor stacked-service-bind-editor" data-service-bind>
+        <div class="form-field">
+          <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="Access-mode physical interfaces and enabled VLAN interfaces with configured IP addresses can serve PXE DHCP/TFTP. Trunk physical NICs are not direct bind targets.">i</button></span>
+          <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
+            <div class="tag-editor-tags" data-tag-list>
+              {% for interface_name in esxi_pxe_selected_interfaces %}
+                <span class="tag-token" data-value="{{ interface_name }}">
+                  <span>{{ interface_name }}</span>
+                  <button type="button" data-tag-remove aria-label="Remove {{ interface_name }}">×</button>
+                  <input type="hidden" name="listen_interfaces" value="{{ interface_name }}">
+                </span>
+              {% endfor %}
+            </div>
+            <input class="tag-editor-input" type="text" placeholder="Add interface..." list="esxi-pxe-interface-options" data-tag-entry autocomplete="off" {{ "disabled" if not esxi_can_write else "" }}>
+            <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface" {{ "disabled" if not esxi_can_write else "" }}>+</button>
+            <div class="tag-suggestions" data-tag-menu hidden>
+              {% for interface in esxi_pxe_available_interfaces %}
+                <button type="button" data-tag-option="{{ interface.name }}" data-service-bind-address="{{ interface.address }}">
+                  <strong>{{ interface.name }}</strong>
+                  <small>{{ interface.label }}</small>
+                </button>
+              {% endfor %}
+            </div>
+          </div>
+          <datalist id="esxi-pxe-interface-options">
+            {% for interface in esxi_pxe_available_interfaces %}
+              <option value="{{ interface.name }}">{{ interface.label }}</option>
+            {% endfor %}
+          </datalist>
+        </div>
+        <div class="form-field">
+          <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="Appliance IP addresses advertised to PXE clients. The first address becomes the DNS target and TFTP server address recorded in DHCP.">i</button></span>
+          <div class="tag-editor" data-tag-editor data-tag-name="listen_addresses" data-service-bind-address>
+            <div class="tag-editor-tags" data-tag-list>
+              {% for address in esxi_pxe_selected_addresses %}
+                <span class="tag-token" data-value="{{ address }}">
+                  <span>{{ address }}</span>
+                  <button type="button" data-tag-remove aria-label="Remove {{ address }}">×</button>
+                  <input type="hidden" name="listen_addresses" value="{{ address }}">
+                </span>
+              {% endfor %}
+            </div>
+            <input class="tag-editor-input" type="text" placeholder="Add listen address..." list="esxi-pxe-address-options" data-tag-entry autocomplete="off" {{ "disabled" if not esxi_can_write else "" }}>
+            <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing listen address" {{ "disabled" if not esxi_can_write else "" }}>+</button>
+            <div class="tag-suggestions" data-tag-menu hidden>
+              {% for item in esxi_pxe_available_addresses %}
+                <button type="button" data-tag-option="{{ item.address }}">
+                  <strong>{{ item.address }}</strong>
+                  <small>{{ item.source }}</small>
+                </button>
+              {% endfor %}
+            </div>
+          </div>
+          <datalist id="esxi-pxe-address-options">
+            {% for item in esxi_pxe_available_addresses %}
+              <option value="{{ item.address }}">{{ item.source }}</option>
+            {% endfor %}
+          </datalist>
+        </div>
+      </div>
+      <div class="form-grid">
+        <label>
+          <span class="field-label"><span>TFTP root</span><button class="help-icon" type="button" data-help="Generated TFTP root used by dnsmasq. LabFoundry writes only managed boot files here during ESXi PXE appliance apply.">i</button></span>
+          <input name="tftp_root" value="{{ esxi_pxe_boot.tftp_root }}" {{ "disabled" if not esxi_can_write else "" }}>
+        </label>
+        <label>
+          <span class="field-label"><span>BIOS bootfile</span><button class="help-icon" type="button" data-help="Legacy BIOS PXE clients receive this TFTP filename. The default is pxelinux.0 from the Photon syslinux package.">i</button></span>
+          <input name="bios_bootfile" value="{{ esxi_pxe_boot.bios_bootfile }}" {{ "disabled" if not esxi_can_write else "" }}>
+        </label>
+        <label>
+          <span class="field-label"><span>UEFI bootfile</span><button class="help-icon" type="button" data-help="UEFI PXE clients receive this TFTP filename. The default is bootx64.efi from the installed Photon EFI boot image.">i</button></span>
+          <input name="uefi_bootfile" value="{{ esxi_pxe_boot.uefi_bootfile }}" {{ "disabled" if not esxi_can_write else "" }}>
+        </label>
+        <label class="switch-field">
+          <span class="field-label"><span>Native UEFI HTTP</span><button class="help-icon" type="button" data-help="Adds DHCP matching for UEFI HTTPClient firmware and returns the configured absolute HTTP boot URL. This is separate from iPXE script chaining.">i</button></span>
+          <input class="switch-input" type="checkbox" name="native_uefi_http_enabled" {{ "checked" if esxi_pxe_boot.native_uefi_http_enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}><span class="switch-track" aria-hidden="true"></span>
+        </label>
+      </div>
+      <label>
+        <span class="field-label"><span>UEFI HTTP URL</span><button class="help-icon" type="button" data-help="Absolute bootloader URL returned only to native UEFI HTTP clients, such as an ESXi UEFI HTTP bootloader staged under the PXE HTTP root.">i</button></span>
+        <input name="native_uefi_http_url" value="{{ esxi_pxe_boot.native_uefi_http_url }}" placeholder="http://{{ esxi_pxe_primary_listen_address or '192.168.49.1' }}/pxe/esxi/uefi/bootx64.efi" {{ "disabled" if not esxi_can_write else "" }}>
+      </label>
+      <label>
+        <span class="field-label"><span>HTTP iPXE script</span><button class="help-icon" type="button" data-help="Script served at /pxe/esxi/boot.ipxe after BIOS or UEFI iPXE clients chain from TFTP. Edit this to boot staged ESXi installer files over HTTP.">i</button></span>
+        <textarea class="monospace-textarea" name="ipxe_script" rows="8" data-codemirror-editor data-codemirror-language="shell" {{ "disabled" if not esxi_can_write else "" }}>{{ esxi_pxe_boot.ipxe_script }}</textarea>
+      </label>
+      <div class="settings-list compact-settings-list">
+        <div><span>HTTP iPXE path</span><strong>{{ esxi_pxe_boot.http_ipxe_path }}</strong></div>
+        <div><span>TFTP chain script</span><strong>{{ esxi_pxe_boot.ipxe_script_name }}</strong></div>
+        <div><span>Bind target</span><strong>{{ esxi_pxe_bind_label }}</strong></div>
+      </div>
+      {% if esxi_can_write %}
+        <p id="esxi-pxe-boot-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
+      {% endif %}
+    </form>
+
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="ESXi PXE views" data-tab-storage-key="labfoundry:esxi-pxe:active-tab">
       <button class="tab-button active" type="button" data-tab-target="esxi-pxe-editor-panel" aria-selected="true">Kickstart Editor</button>
       <button class="tab-button" type="button" data-tab-target="esxi-pxe-hosts-panel" aria-selected="false">Host References</button>
-      <button class="tab-button" type="button" data-tab-target="esxi-pxe-boot-panel" aria-selected="false">Boot Services</button>
       <button class="tab-button" type="button" data-tab-target="esxi-pxe-preview-panel" aria-selected="false">Preview</button>
     </div>
 
@@ -204,49 +321,6 @@ reboot
             </form>
           {% endif %}
         </div>
-      </div>
-
-      <div id="esxi-pxe-boot-panel" class="tab-panel" role="tabpanel" hidden>
-        <form class="form-stack" action="/esxi-pxe/boot-settings" method="post">
-          <input type="hidden" name="csrf" value="{{ csrf_token }}">
-          <div class="form-grid">
-            <label class="switch-field">
-              <span class="field-label"><span>PXE/TFTP bootstrap</span><button class="help-icon" type="button" data-help="Enables dnsmasq TFTP and DHCP bootfile options for legacy BIOS, UEFI PXE, and already-iPXE ESXi clients. Files are generated only during global appliance apply.">i</button></span>
-              <input class="switch-input" type="checkbox" name="enabled" {{ "checked" if esxi_pxe_boot.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}><span class="switch-track" aria-hidden="true"></span>
-            </label>
-            <label>
-              <span class="field-label"><span>TFTP root</span><button class="help-icon" type="button" data-help="Generated TFTP root used by dnsmasq. LabFoundry writes only managed boot files here during ESXi PXE appliance apply.">i</button></span>
-              <input name="tftp_root" value="{{ esxi_pxe_boot.tftp_root }}" {{ "disabled" if not esxi_can_write else "" }}>
-            </label>
-            <label>
-              <span class="field-label"><span>BIOS bootfile</span><button class="help-icon" type="button" data-help="Legacy BIOS PXE clients receive this TFTP filename. The default is pxelinux.0 from the Photon syslinux package.">i</button></span>
-              <input name="bios_bootfile" value="{{ esxi_pxe_boot.bios_bootfile }}" {{ "disabled" if not esxi_can_write else "" }}>
-            </label>
-            <label>
-              <span class="field-label"><span>UEFI bootfile</span><button class="help-icon" type="button" data-help="UEFI PXE clients receive this TFTP filename. The default is bootx64.efi from the installed Photon EFI boot image.">i</button></span>
-              <input name="uefi_bootfile" value="{{ esxi_pxe_boot.uefi_bootfile }}" {{ "disabled" if not esxi_can_write else "" }}>
-            </label>
-            <label class="switch-field">
-              <span class="field-label"><span>Native UEFI HTTP</span><button class="help-icon" type="button" data-help="Adds DHCP matching for UEFI HTTPClient firmware and returns the configured absolute HTTP boot URL. This is separate from iPXE script chaining.">i</button></span>
-              <input class="switch-input" type="checkbox" name="native_uefi_http_enabled" {{ "checked" if esxi_pxe_boot.native_uefi_http_enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}><span class="switch-track" aria-hidden="true"></span>
-            </label>
-            <label>
-              <span class="field-label"><span>UEFI HTTP URL</span><button class="help-icon" type="button" data-help="Absolute bootloader URL returned only to native UEFI HTTP clients, such as an ESXi UEFI HTTP bootloader staged under the PXE HTTP root.">i</button></span>
-              <input name="native_uefi_http_url" value="{{ esxi_pxe_boot.native_uefi_http_url }}" placeholder="http://192.168.49.1/pxe/esxi/uefi/bootx64.efi" {{ "disabled" if not esxi_can_write else "" }}>
-            </label>
-          </div>
-          <label>
-            <span class="field-label"><span>HTTP iPXE script</span><button class="help-icon" type="button" data-help="Script served at /pxe/esxi/boot.ipxe after BIOS or UEFI iPXE clients chain from TFTP. Edit this to boot staged ESXi installer files over HTTP.">i</button></span>
-            <textarea class="monospace-textarea" name="ipxe_script" rows="12" data-codemirror-editor data-codemirror-language="shell" {{ "disabled" if not esxi_can_write else "" }}>{{ esxi_pxe_boot.ipxe_script }}</textarea>
-          </label>
-          <div class="settings-list compact-settings-list">
-            <div><span>HTTP iPXE path</span><strong>{{ esxi_pxe_boot.http_ipxe_path }}</strong></div>
-            <div><span>TFTP chain script</span><strong>{{ esxi_pxe_boot.ipxe_script_name }}</strong></div>
-          </div>
-          {% if esxi_can_write %}
-            <button class="button secondary" type="submit">Save boot settings</button>
-          {% endif %}
-        </form>
       </div>
 
       <div id="esxi-pxe-preview-panel" class="tab-panel" role="tabpanel" hidden>

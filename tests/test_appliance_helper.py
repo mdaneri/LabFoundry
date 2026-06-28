@@ -308,6 +308,9 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     manifest = esxi_pxe_manifest(http_root, iso_root=iso_root)
     manifest["boot"] = {
         "enabled": True,
+        "hostname": "esxi-pxe.labfoundry.internal",
+        "listen_interface": "eth1",
+        "listen_address": "192.168.50.1",
         "tftp_root": str(tftp_root),
         "bios_bootfile": "undionly.kpxe",
         "uefi_bootfile": "snponly.efi",

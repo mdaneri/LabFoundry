@@ -16,6 +16,10 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
+    [string]$EsxIsoPath = '',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
     [string]$ClientManagementSwitch = 'Default Switch',
 
     [Parameter(ParameterSetName = 'Run')]
@@ -171,6 +175,12 @@ if (-not $ApplianceVhdxPath) {
 if (-not $ClientVhdxPath) {
     $ClientVhdxPath = Join-Path $repoRoot 'image\hyperv\clients\alpine-cloud\labfoundry-tiny-linux-client.vhdx'
 }
+if ($EsxIsoPath) {
+    $EsxIsoPath = (Resolve-Path -LiteralPath $EsxIsoPath).Path
+    if ([System.IO.Path]::GetExtension($EsxIsoPath).ToLowerInvariant() -ne '.iso') {
+        throw "-EsxIsoPath must point to an .iso file."
+    }
+}
 $effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "http://${ApplianceIPAddress}" }
 
 if (-not $SkipClientPrepare -and -not $PlanOnly) {
@@ -202,6 +212,9 @@ $arguments = @(
     '-TaggedVlanCidr', $TaggedVlanCidr,
     '-WanCidr', $WanCidr
 )
+if ($EsxIsoPath) {
+    $arguments += @('-EsxIsoPath', $EsxIsoPath)
+}
 
 if (-not $KeepVms) {
     $arguments += '-CleanupCreatedLab'

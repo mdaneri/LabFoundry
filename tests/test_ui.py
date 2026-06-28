@@ -745,14 +745,17 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import DhcpSettings
+    from labfoundry.app.models import DhcpSettings, DnsRecord
     from labfoundry.app.services.esxi_pxe import esxi_pxe_boot_settings
     from labfoundry.app.ui import dnsmasq_context, esxi_pxe_context
 
     login(client)
     page = client.get("/esxi-pxe")
     assert page.status_code == 200
-    assert "Boot Services" in page.text
+    assert "Boot Service" in page.text
+    assert "Hostname" in page.text
+    assert "Listen interfaces" in page.text
+    assert "Listen addresses" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     response = client.post(
@@ -760,9 +763,13 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         data={
             "csrf": csrf,
             "enabled": "on",
+            "hostname": "esxi-pxe.labfoundry.internal",
+            "listen_addresses": "192.168.50.1",
+            "listen_addresses_present": "1",
+            "listen_interfaces_present": "1",
             "tftp_root": "/var/lib/labfoundry/pxe/tftp",
-            "bios_bootfile": "undionly.kpxe",
-            "uefi_bootfile": "snponly.efi",
+            "bios_bootfile": "pxelinux.0",
+            "uefi_bootfile": "bootx64.efi",
             "native_uefi_http_enabled": "on",
             "native_uefi_http_url": "http://192.168.50.1/pxe/esxi/uefi/bootx64.efi",
             "ipxe_script": "#!ipxe\necho LabFoundry test\nshell\n",
@@ -774,18 +781,24 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     with SessionLocal() as db:
         boot = esxi_pxe_boot_settings(db)
         assert boot["enabled"] is True
+        assert boot["hostname"] == "esxi-pxe.labfoundry.internal"
+        assert boot["listen_address"] == "192.168.50.1"
         assert boot["native_uefi_http_enabled"] is True
+        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe.labfoundry.internal")).scalar_one()
+        assert record.address == "192.168.50.1"
         dhcp = db.execute(select(DhcpSettings)).scalar_one()
         dhcp.enabled = True
         db.add(dhcp)
         db.commit()
         dns_preview = dnsmasq_context(db)["config_preview"]
         assert "enable-tftp" in dns_preview
-        assert "dhcp-boot=tag:efi-x86_64,snponly.efi" in dns_preview
-        assert "dhcp-boot=tag:!efi-x86_64,undionly.kpxe" in dns_preview
+        assert "dhcp-option=option:66,esxi-pxe.labfoundry.internal" in dns_preview
+        assert "dhcp-boot=tag:efi-x86_64,bootx64.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
         assert "dhcp-boot=tag:uefi-http,http://192.168.50.1/pxe/esxi/uefi/bootx64.efi" in dns_preview
         manifest = json.loads(esxi_pxe_context(db)["esxi_pxe_manifest"])
         assert manifest["boot"]["enabled"] is True
+        assert manifest["boot"]["hostname"] == "esxi-pxe.labfoundry.internal"
         assert manifest["boot"]["ipxe_script"].startswith("#!ipxe")
 
 

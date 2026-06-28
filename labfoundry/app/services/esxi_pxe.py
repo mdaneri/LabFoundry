@@ -23,6 +23,9 @@ ESXI_TFTP_ROOT = Path("/var/lib/labfoundry/pxe/tftp")
 ESXI_INSTALLER_ISO_ROOT = Path("/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST")
 ESXI_PXE_STRICT_VALIDATION_KEY = "esxi_pxe.strict_kickstart_validation"
 ESXI_PXE_BOOT_ENABLED_KEY = "esxi_pxe.boot.enabled"
+ESXI_PXE_HOSTNAME_KEY = "esxi_pxe.boot.hostname"
+ESXI_PXE_LISTEN_INTERFACE_KEY = "esxi_pxe.boot.listen_interface"
+ESXI_PXE_LISTEN_ADDRESS_KEY = "esxi_pxe.boot.listen_address"
 ESXI_PXE_TFTP_ROOT_KEY = "esxi_pxe.boot.tftp_root"
 ESXI_PXE_BIOS_BOOTFILE_KEY = "esxi_pxe.boot.bios_bootfile"
 ESXI_PXE_UEFI_BOOTFILE_KEY = "esxi_pxe.boot.uefi_bootfile"
@@ -30,8 +33,10 @@ ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY = "esxi_pxe.boot.native_uefi_http_enabled"
 ESXI_PXE_NATIVE_UEFI_HTTP_URL_KEY = "esxi_pxe.boot.native_uefi_http_url"
 ESXI_PXE_IPXE_SCRIPT_KEY = "esxi_pxe.boot.ipxe_script"
 ESXI_PXE_IPXE_SCRIPT_NAME = "esxi.ipxe"
+ESXI_PXE_DEFAULT_HOSTNAME = "esxi-pxe.labfoundry.internal"
 ESXI_PXE_BIOS_BOOTFILE = "pxelinux.0"
 ESXI_PXE_UEFI_BOOTFILE = "bootx64.efi"
+ESXI_PXE_DNS_RECORD_DESCRIPTION = "Created from ESXi PXE boot endpoint."
 SECRET_KEYWORD_PATTERN = re.compile(r"(rootpw|password|passwd|token|secret|key|license|activation|credential)", re.IGNORECASE)
 TEMPLATE_PATTERN = re.compile(r"({[{%#].*?[}%]}|\$\{[^}]+\})")
 SAFE_ISO_UPLOAD_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*\.iso$", re.IGNORECASE)
@@ -121,6 +126,9 @@ def esxi_pxe_boot_settings(db: Session) -> dict[str, Any]:
     native_uefi_http_enabled = rows.get(ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"}
     return {
         "enabled": enabled,
+        "hostname": rows.get(ESXI_PXE_HOSTNAME_KEY, ESXI_PXE_DEFAULT_HOSTNAME).strip() or ESXI_PXE_DEFAULT_HOSTNAME,
+        "listen_interface": rows.get(ESXI_PXE_LISTEN_INTERFACE_KEY, "").strip(),
+        "listen_address": rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, "").strip(),
         "tftp_root": rows.get(ESXI_PXE_TFTP_ROOT_KEY, ESXI_TFTP_ROOT.as_posix()).strip() or ESXI_TFTP_ROOT.as_posix(),
         "bios_bootfile": rows.get(ESXI_PXE_BIOS_BOOTFILE_KEY, ESXI_PXE_BIOS_BOOTFILE).strip() or ESXI_PXE_BIOS_BOOTFILE,
         "uefi_bootfile": rows.get(ESXI_PXE_UEFI_BOOTFILE_KEY, ESXI_PXE_UEFI_BOOTFILE).strip() or ESXI_PXE_UEFI_BOOTFILE,
@@ -138,6 +146,9 @@ def save_esxi_pxe_boot_settings(
     db: Session,
     *,
     enabled: bool,
+    hostname: str,
+    listen_interface: str,
+    listen_address: str,
     tftp_root: str,
     bios_bootfile: str,
     uefi_bootfile: str,
@@ -147,6 +158,9 @@ def save_esxi_pxe_boot_settings(
 ) -> dict[str, Any]:
     settings = {
         ESXI_PXE_BOOT_ENABLED_KEY: "true" if enabled else "false",
+        ESXI_PXE_HOSTNAME_KEY: _normalize_hostname(hostname),
+        ESXI_PXE_LISTEN_INTERFACE_KEY: _normalize_multiline_values(listen_interface),
+        ESXI_PXE_LISTEN_ADDRESS_KEY: _normalize_multiline_values(listen_address),
         ESXI_PXE_TFTP_ROOT_KEY: _normalize_tftp_root(tftp_root),
         ESXI_PXE_BIOS_BOOTFILE_KEY: _normalize_bootfile(bios_bootfile, default=ESXI_PXE_BIOS_BOOTFILE),
         ESXI_PXE_UEFI_BOOTFILE_KEY: _normalize_bootfile(uefi_bootfile, default=ESXI_PXE_UEFI_BOOTFILE),
@@ -163,6 +177,24 @@ def save_esxi_pxe_boot_settings(
             row.value = value
     db.flush()
     return esxi_pxe_boot_settings(db)
+
+
+def _normalize_hostname(value: str) -> str:
+    hostname = (value or "").strip().strip(".").lower() or ESXI_PXE_DEFAULT_HOSTNAME
+    if len(hostname) > 253 or "." not in hostname:
+        raise ValueError("ESXi PXE hostname must be a fully qualified DNS name.")
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+", hostname):
+        raise ValueError("ESXi PXE hostname must be a valid DNS name.")
+    return hostname
+
+
+def _normalize_multiline_values(value: str) -> str:
+    values = []
+    for item in (value or "").replace(",", "\n").splitlines():
+        normalized = item.strip()
+        if normalized and normalized not in values:
+            values.append(normalized)
+    return "\n".join(values)
 
 
 def _normalize_tftp_root(value: str) -> str:
@@ -420,6 +452,9 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
         "installer_iso_error": iso_error,
         "boot": boot_settings or {
             "enabled": False,
+            "hostname": ESXI_PXE_DEFAULT_HOSTNAME,
+            "listen_interface": "",
+            "listen_address": "",
             "tftp_root": ESXI_TFTP_ROOT.as_posix(),
             "bios_bootfile": ESXI_PXE_BIOS_BOOTFILE,
             "uefi_bootfile": ESXI_PXE_UEFI_BOOTFILE,

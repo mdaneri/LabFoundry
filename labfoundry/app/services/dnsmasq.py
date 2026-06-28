@@ -561,6 +561,8 @@ def render_dnsmasq_config(
             lines.append(f"cname={record.hostname},{record.address.strip().strip('.').lower()}")
     if dhcp_settings.enabled:
         if esxi_pxe_boot and (esxi_pxe_boot.get("enabled") or esxi_pxe_boot.get("native_uefi_http_enabled")):
+            tftp_hostname = str(esxi_pxe_boot.get("hostname") or "").strip()
+            tftp_address = str(esxi_pxe_boot.get("listen_address") or "").splitlines()[0].strip()
             if esxi_pxe_boot.get("native_uefi_http_enabled") and esxi_pxe_boot.get("native_uefi_http_url"):
                 lines.extend(
                     [
@@ -569,6 +571,10 @@ def render_dnsmasq_config(
                     ]
                 )
         if esxi_pxe_boot and esxi_pxe_boot.get("enabled"):
+            boot_server = ""
+            if tftp_hostname and tftp_address:
+                lines.append(f"dhcp-option=option:66,{tftp_hostname}")
+                boot_server = f",{tftp_hostname},{tftp_address}"
             lines.extend(
                 [
                     "enable-tftp",
@@ -580,9 +586,9 @@ def render_dnsmasq_config(
             )
             lines.extend(
                 [
-                    f"dhcp-boot=tag:ipxe,{esxi_pxe_boot.get('ipxe_script_name')}",
-                    f"dhcp-boot=tag:efi-x86_64,{esxi_pxe_boot.get('uefi_bootfile')}",
-                    f"dhcp-boot=tag:!efi-x86_64,{esxi_pxe_boot.get('bios_bootfile')}",
+                    f"dhcp-boot=tag:ipxe,{esxi_pxe_boot.get('ipxe_script_name')}{boot_server}",
+                    f"dhcp-boot=tag:efi-x86_64,{esxi_pxe_boot.get('uefi_bootfile')}{boot_server}",
+                    f"dhcp-boot=tag:!efi-x86_64,{esxi_pxe_boot.get('bios_bootfile')}{boot_server}",
                 ]
             )
         scope_tags = {scope.id: _dnsmasq_tag(scope.name) for scope in scopes}

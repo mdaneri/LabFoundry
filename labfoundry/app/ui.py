@@ -290,6 +290,8 @@ from labfoundry.app.services.vcf_offline_depot import (
     _safe_extract_tar_gz,
 )
 from labfoundry.app.services.esxi_pxe import (
+    ESXI_PXE_DEFAULT_HOSTNAME,
+    ESXI_PXE_DNS_RECORD_DESCRIPTION,
     ESXI_PXE_STAGED_CONFIG_PATH,
     ESXI_IPXE_HTTP_SCRIPT_PATH,
     assign_kickstart_content,
@@ -2334,6 +2336,108 @@ def remove_dns_for_vcf_offline_depot_hostname(db: Session, hostname: str, actor:
     return None
 
 
+def esxi_pxe_dns_record_conflict(db: Session, hostname: str) -> bool:
+    normalized = normalize_dns_hostname(hostname)
+    if not normalized:
+        return False
+    records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == normalized,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+        )
+    ).scalars().all()
+    return any(record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION for record in records)
+
+
+def remove_dns_for_esxi_pxe_hostname(db: Session, hostname: str, actor: str | None) -> str | None:
+    normalized_hostname = normalize_dns_hostname(hostname)
+    if not normalized_hostname:
+        return None
+    records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == normalized_hostname,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+        )
+    ).scalars().all()
+    removed = 0
+    for record in records:
+        if record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
+            continue
+        db.delete(record)
+        removed += 1
+        if actor:
+            record_audit(db, actor=actor, action="delete_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type}")
+    if removed:
+        db.flush()
+        return "removed"
+    return None
+
+
+def ensure_dns_for_esxi_pxe(db: Session, boot: dict[str, Any], actor: str | None, *, previous_hostname: str | None = None) -> str | None:
+    hostname = normalize_dns_hostname(str(boot.get("hostname") or ESXI_PXE_DEFAULT_HOSTNAME))
+    selected_address = primary_listen_address(str(boot.get("listen_address") or ""))
+    if not bool(boot.get("enabled")):
+        return remove_dns_for_esxi_pxe_hostname(db, previous_hostname or hostname, actor)
+    if not hostname or not selected_address:
+        return None
+    try:
+        parsed_address = ip_address(selected_address)
+    except ValueError:
+        return None
+    record_type = "AAAA" if parsed_address.version == 6 else "A"
+    address = str(parsed_address)
+    if validate_dns_record(hostname, record_type, address):
+        return None
+    actions: list[str] = []
+    existing = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == hostname,
+            DnsRecord.record_type == record_type,
+        )
+    ).scalar_one_or_none()
+    if existing and existing.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
+        actions.append("conflict")
+    elif existing:
+        if existing.address != address or not existing.enabled:
+            existing.address = address
+            existing.enabled = True
+            existing.description = ESXI_PXE_DNS_RECORD_DESCRIPTION
+            db.flush()
+            if actor:
+                record_audit(db, actor=actor, action="update_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(existing.id), detail=f"{hostname} {record_type} -> {address}")
+            actions.append("updated")
+        else:
+            actions.append("unchanged")
+    else:
+        record = DnsRecord(hostname=hostname, record_type=record_type, address=address, description=ESXI_PXE_DNS_RECORD_DESCRIPTION, enabled=True)
+        db.add(record)
+        db.flush()
+        if actor:
+            record_audit(db, actor=actor, action="create_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(record.id), detail=f"{hostname} {record_type} -> {address}")
+        actions.append("created")
+    for record in db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == hostname,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+            DnsRecord.record_type != record_type,
+        )
+    ).scalars().all():
+        if record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
+            continue
+        db.delete(record)
+        if actor:
+            record_audit(db, actor=actor, action="delete_dns_record_from_esxi_pxe_ip_family_change", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type}")
+        actions.append("removed-stale")
+    previous = normalize_dns_hostname(previous_hostname or "")
+    if previous and previous != hostname:
+        removed = remove_dns_for_esxi_pxe_hostname(db, previous, actor)
+        if removed:
+            actions.append("removed-old")
+    if actions:
+        db.flush()
+    return "+".join(actions) if actions else None
+
+
 def available_dns_listen_addresses(
     dns_settings: DnsSettings,
     dhcp_settings: DhcpSettings,
@@ -2910,6 +3014,7 @@ def local_users_apply_context(db: Session, baseline: dict[str, Any] | None = Non
 def esxi_pxe_context(db: Session) -> dict[str, Any]:
     kickstarts = db.execute(select(EsxiKickstart).order_by(EsxiKickstart.name)).scalars().all()
     hosts = db.execute(select(EsxiPxeHost).options(selectinload(EsxiPxeHost.kickstart)).order_by(EsxiPxeHost.hostname)).scalars().all()
+    available_interfaces = service_bind_options(db)
     iso_error = ""
     try:
         installer_isos = installer_iso_inventory()
@@ -2939,8 +3044,20 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
     if iso_error:
         validation_warnings.append(iso_error)
     boot_settings = esxi_pxe_boot_settings(db)
+    selected_boot_interfaces = split_interfaces(boot_settings.get("listen_interface"))
+    selected_boot_addresses = split_addresses(boot_settings.get("listen_address"))
+    available_boot_addresses = available_service_listen_addresses(boot_settings.get("listen_address"), available_interfaces)
     if boot_settings["native_uefi_http_enabled"] and not boot_settings["native_uefi_http_url"]:
         validation_warnings.append("Native UEFI HTTP boot is enabled, but no native UEFI HTTP boot URL is configured.")
+    if boot_settings["enabled"]:
+        if not boot_settings["hostname"]:
+            validation_errors.append("ESXi PXE hostname is required when PXE/TFTP bootstrap is enabled.")
+        if not selected_boot_addresses:
+            validation_errors.append("ESXi PXE boot service requires at least one listen address.")
+        if esxi_pxe_dns_record_conflict(db, boot_settings["hostname"]):
+            validation_errors.append("ESXi PXE hostname conflicts with an existing non-ESXi PXE DNS record.")
+        elif boot_settings["hostname"].lower() not in managed_dns_fqdns(db):
+            validation_warnings.append(f"ESXi PXE hostname {boot_settings['hostname']} is not present in managed DNS records.")
     return {
         "esxi_kickstarts": kickstarts,
         "esxi_kickstart_rows": [kickstart_to_dict(row, include_content=True) for row in kickstarts],
@@ -2950,6 +3067,12 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
         "esxi_installer_isos": installer_isos,
         "esxi_installer_iso_error": iso_error,
         "esxi_pxe_boot": boot_settings,
+        "esxi_pxe_available_interfaces": available_interfaces,
+        "esxi_pxe_selected_interfaces": selected_boot_interfaces,
+        "esxi_pxe_selected_addresses": selected_boot_addresses,
+        "esxi_pxe_available_addresses": available_boot_addresses,
+        "esxi_pxe_bind_label": service_bind_label(boot_settings.get("listen_interface"), boot_settings.get("listen_address")),
+        "esxi_pxe_primary_listen_address": primary_listen_address(boot_settings.get("listen_address")),
         "esxi_pxe_validation_errors": validation_errors,
         "esxi_pxe_validation_warnings": list(dict.fromkeys(validation_warnings)),
         "esxi_pxe_validation_by_id": validation_by_id,
@@ -3526,7 +3649,7 @@ def login(
     password: str = Form(...),
     csrf: str = Form(...),
     db: Session = Depends(get_db),
-) -> RedirectResponse | HTMLResponse:
+) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
     user = authenticate_user(db, username, password)
     if not user:
@@ -4629,7 +4752,7 @@ def create_vlan_interface_from_ui(
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
-) -> RedirectResponse | HTMLResponse:
+) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
     parsed = validate_vlan_form_values(parent_interface, vlan_id, ip_cidr, db)
     if isinstance(parsed, Response):
@@ -7437,6 +7560,13 @@ def esxi_pxe_page(
 def update_esxi_pxe_boot_settings_from_ui(
     request: Request,
     enabled: bool = Form(False),
+    hostname: str = Form(ESXI_PXE_DEFAULT_HOSTNAME),
+    listen_interfaces: list[str] = Form(default=[]),
+    listen_addresses: list[str] = Form(default=[]),
+    listen_interfaces_present: str | None = Form(None),
+    listen_addresses_present: str | None = Form(None),
+    listen_interface: str = Form(""),
+    listen_address: str = Form(""),
     tftp_root: str = Form(...),
     bios_bootfile: str = Form(...),
     uefi_bootfile: str = Form(...),
@@ -7449,10 +7579,23 @@ def update_esxi_pxe_boot_settings_from_ui(
 ) -> RedirectResponse | HTMLResponse:
     require_esxi_pxe_write(identity)
     verify_csrf(request, csrf)
+    previous_boot = esxi_pxe_boot_settings(db)
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        [*listen_interfaces, listen_interface],
+        [*listen_addresses, listen_address],
+        current_interface=str(previous_boot.get("listen_interface") or ""),
+        current_address=str(previous_boot.get("listen_address") or ""),
+        listen_interfaces_present=listen_interfaces_present,
+        listen_addresses_present=listen_addresses_present,
+    )
     try:
         boot = save_esxi_pxe_boot_settings(
             db,
             enabled=enabled,
+            hostname=hostname,
+            listen_interface=selected_interfaces,
+            listen_address=selected_addresses,
             tftp_root=tftp_root,
             bios_bootfile=bios_bootfile,
             uefi_bootfile=uefi_bootfile,
@@ -7460,6 +7603,7 @@ def update_esxi_pxe_boot_settings_from_ui(
             native_uefi_http_url=native_uefi_http_url,
             ipxe_script=ipxe_script,
         )
+        dns_record_action = ensure_dns_for_esxi_pxe(db, boot, identity.username, previous_hostname=str(previous_boot.get("hostname") or ""))
         db.commit()
     except ValueError as exc:
         db.rollback()
@@ -7482,7 +7626,21 @@ def update_esxi_pxe_boot_settings_from_ui(
         detail=f"enabled={boot['enabled']} native_uefi_http_enabled={boot['native_uefi_http_enabled']} tftp_root={boot['tftp_root']}",
         request_id=request.state.request_id,
     )
-    return RedirectResponse("/esxi-pxe#esxi-pxe-boot-panel", status_code=303)
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = esxi_pxe_context(db)
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": utcnow().isoformat(),
+                "hostname": context["esxi_pxe_boot"]["hostname"],
+                "listen_address": context["esxi_pxe_primary_listen_address"],
+                "bind_label": context["esxi_pxe_bind_label"],
+                "dns_record_action": dns_record_action,
+                "validation_errors": context["esxi_pxe_validation_errors"],
+                "validation_warnings": context["esxi_pxe_validation_warnings"],
+            }
+        )
+    return RedirectResponse("/esxi-pxe", status_code=303)
 
 
 @router.post("/esxi-pxe/kickstarts", response_model=None)

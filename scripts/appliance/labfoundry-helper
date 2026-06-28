@@ -623,6 +623,14 @@ def _esxi_pxe_boot_errors(boot: dict) -> list[str]:
     enabled = bool(boot.get("enabled"))
     native_uefi_http_enabled = bool(boot.get("native_uefi_http_enabled"))
     if enabled:
+        hostname = str(boot.get("hostname") or "").strip()
+        listen_address = str(boot.get("listen_address") or "").splitlines()[0].strip()
+        if not hostname or "." not in hostname:
+            errors.append("ESXi PXE hostname must be a fully qualified DNS name.")
+        try:
+            ip_address(listen_address)
+        except ValueError:
+            errors.append("ESXi PXE listen_address must include at least one IP address.")
         tftp_root = Path(str(boot.get("tftp_root") or "")).resolve()
         if tftp_root != ESXI_TFTP_ROOT.resolve():
             errors.append(f"ESXi PXE TFTP root must be {ESXI_TFTP_ROOT}.")
