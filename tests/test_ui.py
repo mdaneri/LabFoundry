@@ -73,7 +73,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v6" in service_worker.text
+    assert "labfoundry-pwa-v7" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-depot-staging-20260628-1" in offline.text
+    assert "/static/app.css?v=esxi-pxe-kickstart-20260628-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -673,6 +673,72 @@ def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
         assert "SuperSecret!" not in (event.detail or "")
 
 
+def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
+    import json
+
+    from sqlalchemy import select
+
+    import labfoundry.app.services.esxi_pxe as esxi_pxe
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiPxeHost, Job
+
+    iso_root = tmp_path / "vcf-depot" / "PROD" / "COMP" / "ESX_HOST"
+    monkeypatch.setattr(esxi_pxe, "ESXI_INSTALLER_ISO_ROOT", iso_root)
+
+    login(client)
+    page = client.get("/esxi-pxe")
+    assert page.status_code == 200
+    assert str(iso_root) in page.text
+    assert iso_root.is_dir()
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    uploaded = client.post(
+        "/esxi-pxe/isos/upload",
+        data={"csrf": csrf},
+        files={"iso_file": ("VMware-VMvisor-Installer-8.0U3.iso", b"iso bytes", "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert uploaded.status_code == 303
+    iso_path = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
+    assert iso_path.read_bytes() == b"iso bytes"
+
+    refreshed = client.get("/esxi-pxe")
+    assert "VMware-VMvisor-Installer-8.0U3.iso" in refreshed.text
+    csrf = refreshed.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    host_response = client.post(
+        "/esxi-pxe/hosts",
+        data={
+            "csrf": csrf,
+            "hostname": "esxi-iso",
+            "mac_address": "00:50:56:11:22:33",
+            "installer_iso_path": str(iso_path),
+            "enabled": "on",
+        },
+        follow_redirects=False,
+    )
+    assert host_response.status_code == 303
+    with SessionLocal() as db:
+        host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.hostname == "esxi-iso")).scalar_one()
+        assert host.installer_iso_path == str(iso_path)
+
+    api_token = create_api_token(client, ["read:esxi-pxe"])
+    api_isos = client.get("/api/v1/esxi-pxe/isos", headers={"Authorization": f"Bearer {api_token}"})
+    assert api_isos.status_code == 200
+    assert api_isos.json()[0]["relative_path"] == "VMware-VMvisor-Installer-8.0U3.iso"
+
+    apply_page = client.get("/appliance-apply")
+    apply_csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    applied = client.post("/appliance-apply", data={"csrf": apply_csrf, "selected_units": "esxi_pxe"})
+    assert applied.status_code == 200
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply").order_by(Job.created_at.desc())).scalars().first()
+        payload = json.loads(job.result or "{}")
+        manifest = payload["units"][0]["config_preview"]
+        manifest_payload = json.loads(manifest)
+        assert "VMware-VMvisor-Installer-8.0U3.iso" in manifest
+        assert manifest_payload["hosts"][0]["installer_iso_path"] == str(iso_path)
+
+
 def test_esxi_kickstarts_round_trip_in_settings_archive(client):
     import json
 
@@ -696,7 +762,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
 
         assign_kickstart_content(kickstart, kickstart.content, max_bytes=262_144)
         kickstart.http_path = canonical_http_path(kickstart.id)
-        db.add(EsxiPxeHost(hostname="esxi-archive", mac_address="00:50:56:aa:bb:cc", kickstart_id=kickstart.id, enabled=True))
+        db.add(EsxiPxeHost(hostname="esxi-archive", mac_address="00:50:56:aa:bb:cc", kickstart_id=kickstart.id, installer_iso_path="/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST/archive.iso", enabled=True))
         db.commit()
 
     page = client.get("/backup-restore")
@@ -706,6 +772,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
 
     assert payload["data"]["esxi_kickstarts"][0]["name"] == "Archive ESXi"
     assert payload["data"]["esxi_pxe_hosts"][0]["kickstart_name"] == "Archive ESXi"
+    assert payload["data"]["esxi_pxe_hosts"][0]["installer_iso_path"].endswith("/archive.iso")
 
     with SessionLocal() as db:
         db.query(EsxiPxeHost).delete()
@@ -723,6 +790,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
         restored_kickstart = db.execute(select(EsxiKickstart).where(EsxiKickstart.name == "Archive ESXi")).scalar_one()
         restored_host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.hostname == "esxi-archive")).scalar_one()
         assert restored_host.kickstart_id == restored_kickstart.id
+        assert restored_host.installer_iso_path.endswith("/archive.iso")
 
 
 def test_esxi_pxe_drift_detection_uses_generated_filesystem_copy(client, monkeypatch, tmp_path):
@@ -3539,7 +3607,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "vcf-depot-staging-20260628-1" in page.text
+    assert "esxi-pxe-kickstart-20260628-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

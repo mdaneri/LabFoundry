@@ -59,7 +59,9 @@ DHCP IP zones can bind only to valid service targets: access physical interfaces
 
 The ESXi PXE apply unit owns generated Kickstart runtime copies. Operators edit Kickstart source in the database through the built-in CodeMirror editor; filesystem copies are derived artifacts, not desired state. Saving a Kickstart updates the database source hash and marks `esxi_pxe` changed, but does not write `/var/lib/labfoundry/pxe/http/esxi/ks/<id>.cfg`.
 
-The real apply path stages `/var/lib/labfoundry/apply/esxi-pxe/labfoundry-esxi-pxe.json`. Through `labfoundry-helper esxi-pxe validate|apply`, the helper validates the manifest, writes enabled Kickstarts to the PXE HTTP root, removes stale generated numeric `.cfg` files, and reports generated paths without raw Kickstart content. LabFoundry redacts Kickstart secrets from previews, diffs, job output, logs, and audit events. Drift detection compares the generated filesystem copy to the database source hash and never imports filesystem changes without an explicit admin action.
+The ESXi PXE page also discovers installer ISOs under `/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST`, the VCFDT ESX host component folder, and creates that folder when needed. Operators can upload additional `.iso` files into the same folder and select an installer ISO on each host reference.
+
+The real apply path stages `/var/lib/labfoundry/apply/esxi-pxe/labfoundry-esxi-pxe.json`. Through `labfoundry-helper esxi-pxe validate|apply`, the helper validates the manifest, writes enabled Kickstarts to the PXE HTTP root, removes stale generated numeric `.cfg` files, validates selected installer ISO paths remain under the ESX_HOST folder, and reports generated paths without raw Kickstart content. LabFoundry redacts Kickstart secrets from previews, diffs, job output, logs, and audit events. Drift detection compares the generated filesystem copy to the database source hash and never imports filesystem changes without an explicit admin action.
 
 ## Firewall Apply
 

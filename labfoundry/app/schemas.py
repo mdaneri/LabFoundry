@@ -215,14 +215,24 @@ class EsxiPxeHostCreate(BaseModel):
     hostname: str = Field(min_length=1, max_length=120)
     mac_address: str = Field(min_length=1, max_length=32)
     kickstart_id: int | None = None
+    installer_iso_path: str = ""
     enabled: bool = True
 
 
 class EsxiPxeHostResponse(EsxiPxeHostCreate):
     id: int
     kickstart_name: str = ""
+    installer_iso_name: str = ""
     created_at: datetime
     updated_at: datetime
+
+
+class EsxiInstallerIsoResponse(BaseModel):
+    name: str
+    path: str
+    relative_path: str
+    size_bytes: int
+    updated_at: str
 
 
 class PhysicalInterfaceResponse(BaseModel):

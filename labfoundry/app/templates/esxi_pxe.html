@@ -8,7 +8,7 @@
         <h2>ESXi Kickstarts</h2>
         <p class="muted">Database-owned Kickstart source files for generated PXE HTTP boot copies.</p>
       </div>
-      <span class="status-pill {{ 'warn' if esxi_pxe_validation_errors else 'good' }}">{{ esxi_kickstarts|length }} files</span>
+      <span class="status-pill {{ 'warn' if esxi_pxe_validation_errors else 'good' }}">{{ esxi_kickstarts|length }} Kickstarts / {{ esxi_installer_isos|length }} ISOs</span>
     </div>
 
     {% if esxi_pxe_error %}
@@ -138,8 +138,29 @@ reboot
 
       <div id="esxi-pxe-hosts-panel" class="tab-panel" role="tabpanel" hidden>
         <div id="esxi-pxe-hosts">
+          <div class="panel-subsection">
+            <div class="settings-list compact-settings-list">
+              <div><span>Installer ISO folder</span><strong>{{ esxi_installer_iso_root }}</strong></div>
+            </div>
+          </div>
+          {% if esxi_can_write %}
+            <details class="create-kickstart-panel">
+              <summary>Upload installer ISO</summary>
+              <form class="form-stack" action="/esxi-pxe/isos/upload" method="post" enctype="multipart/form-data">
+                <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                <label>
+                  <span class="field-label"><span>ESXi installer ISO</span><button class="help-icon" type="button" data-help="Uploads an additional ESXi installer ISO into the VCF Offline Depot ESX_HOST folder used for PXE planning.">i</button></span>
+                  <span class="file-upload-control">
+                    <input class="file-upload-input" type="file" name="iso_file" accept=".iso,application/x-iso9660-image" data-file-upload-input>
+                    <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose ISO file</strong><small data-file-upload-name>VMware-VMvisor-Installer.iso</small></span></span>
+                  </span>
+                </label>
+                <button class="button secondary" type="submit">Upload installer ISO</button>
+              </form>
+            </details>
+          {% endif %}
           <table class="data-table compact">
-            <thead><tr><th>Host</th><th>MAC</th><th>Kickstart</th><th>Enabled</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Host</th><th>MAC</th><th>Kickstart</th><th>Installer ISO</th><th>Enabled</th><th>Actions</th></tr></thead>
             <tbody>
               {% for host in esxi_pxe_hosts %}
                 <tr>
@@ -152,6 +173,14 @@ reboot
                         <option value="">No Kickstart</option>
                         {% for kickstart in esxi_kickstarts %}
                           <option value="{{ kickstart.id }}" {{ "selected" if host.kickstart_id == kickstart.id else "" }}>{{ kickstart.name }}</option>
+                        {% endfor %}
+                      </select>
+                    </td>
+                    <td>
+                      <select name="installer_iso_path" {{ "disabled" if not esxi_can_write else "" }}>
+                        <option value="">No ISO selected</option>
+                        {% for iso in esxi_installer_isos %}
+                          <option value="{{ iso.path }}" {{ "selected" if host.installer_iso_path == iso.path else "" }}>{{ iso.relative_path }}</option>
                         {% endfor %}
                       </select>
                     </td>
@@ -168,6 +197,7 @@ reboot
               <label><span class="field-label"><span>Host</span><button class="help-icon" type="button" data-help="ESXi host definition name used for PXE planning.">i</button></span><input name="hostname" placeholder="esxi-01"></label>
               <label><span class="field-label"><span>MAC address</span><button class="help-icon" type="button" data-help="PXE client MAC address for matching this host definition.">i</button></span><input name="mac_address" placeholder="00:50:56:aa:bb:cc"></label>
               <label><span class="field-label"><span>Kickstart</span><button class="help-icon" type="button" data-help="Database Kickstart ID referenced by this host definition.">i</button></span><select name="kickstart_id"><option value="">No Kickstart</option>{% for kickstart in esxi_kickstarts %}<option value="{{ kickstart.id }}">{{ kickstart.name }}</option>{% endfor %}</select></label>
+              <label><span class="field-label"><span>Installer ISO</span><button class="help-icon" type="button" data-help="ESXi installer ISO from the VCF Offline Depot ESX_HOST folder. VCFDT downloads appear here, and uploaded ISOs are stored in the same folder.">i</button></span><select name="installer_iso_path"><option value="">No ISO selected</option>{% for iso in esxi_installer_isos %}<option value="{{ iso.path }}">{{ iso.relative_path }}</option>{% endfor %}</select></label>
               <label class="switch-field"><span class="field-label"><span>Enabled</span><button class="help-icon" type="button" data-help="Enabled host definitions are included in the ESXi PXE apply manifest.">i</button></span><input class="switch-input" type="checkbox" name="enabled" checked><span class="switch-track" aria-hidden="true"></span></label>
               <button class="button secondary" type="submit">Add host reference</button>
             </form>

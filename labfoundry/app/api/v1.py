@@ -79,6 +79,7 @@ from labfoundry.app.schemas import (
     EsxiKickstartResponse,
     EsxiKickstartUpdate,
     EsxiKickstartValidationResponse,
+    EsxiInstallerIsoResponse,
     EsxiPxeHostCreate,
     EsxiPxeHostResponse,
     FirewallRuleCreate,
@@ -186,10 +187,13 @@ from labfoundry.app.services.esxi_pxe import (
     canonical_http_path,
     content_hash,
     decode_kickstart_upload,
+    installer_iso_inventory,
     kickstart_to_dict,
     kickstart_validation,
+    normalize_installer_iso_path,
     normalize_kickstart_name,
     redacted_kickstart_preview,
+    store_installer_iso_upload,
     strict_validation_enabled,
     host_to_dict,
 )
@@ -2357,6 +2361,39 @@ async def upload_esxi_kickstart(
 
 
 @router.get(
+    "/esxi-pxe/isos",
+    response_model=list[EsxiInstallerIsoResponse],
+    tags=["ESXi PXE"],
+    operation_id="listEsxiInstallerIsos",
+)
+def list_esxi_installer_isos(
+    identity: Annotated[Identity, Depends(require_scope("read:esxi-pxe"))],
+) -> list[EsxiInstallerIsoResponse]:
+    return [EsxiInstallerIsoResponse(**row) for row in installer_iso_inventory()]
+
+
+@router.post(
+    "/esxi-pxe/isos/upload",
+    response_model=EsxiInstallerIsoResponse,
+    status_code=201,
+    tags=["ESXi PXE"],
+    operation_id="uploadEsxiInstallerIso",
+)
+async def upload_esxi_installer_iso(
+    identity: Annotated[Identity, Depends(require_scope("write:esxi-pxe"))],
+    upload_file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> EsxiInstallerIsoResponse:
+    try:
+        iso = await store_installer_iso_upload(upload_file, max_bytes=settings.esxi_installer_iso_max_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_audit(db, actor=identity.username, action="upload_esxi_installer_iso", resource_type="esxi_installer_iso", resource_id=iso["relative_path"], detail=f"path={iso['path']} size={iso['size_bytes']}")
+    return EsxiInstallerIsoResponse(**iso)
+
+
+@router.get(
     "/esxi-pxe/hosts",
     response_model=list[EsxiPxeHostResponse],
     tags=["ESXi PXE"],
@@ -2384,7 +2421,11 @@ def create_esxi_pxe_host(
 ) -> EsxiPxeHostResponse:
     if payload.kickstart_id and not db.get(EsxiKickstart, payload.kickstart_id):
         raise HTTPException(status_code=404, detail="Kickstart not found")
-    host = EsxiPxeHost(hostname=payload.hostname.strip(), mac_address=payload.mac_address.strip().lower(), kickstart_id=payload.kickstart_id, enabled=payload.enabled)
+    try:
+        installer_iso_path = normalize_installer_iso_path(payload.installer_iso_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    host = EsxiPxeHost(hostname=payload.hostname.strip(), mac_address=payload.mac_address.strip().lower(), kickstart_id=payload.kickstart_id, installer_iso_path=installer_iso_path, enabled=payload.enabled)
     db.add(host)
     try:
         db.commit()
@@ -2392,7 +2433,7 @@ def create_esxi_pxe_host(
         db.rollback()
         raise HTTPException(status_code=409, detail=f"ESXi PXE host for {payload.mac_address} already exists.") from exc
     db.refresh(host)
-    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id}")
+    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id} installer_iso={host.installer_iso_path}")
     return EsxiPxeHostResponse(**host_to_dict(host))
 
 
@@ -2413,9 +2454,14 @@ def update_esxi_pxe_host(
         raise HTTPException(status_code=404, detail="ESXi PXE host not found")
     if payload.kickstart_id and not db.get(EsxiKickstart, payload.kickstart_id):
         raise HTTPException(status_code=404, detail="Kickstart not found")
+    try:
+        installer_iso_path = normalize_installer_iso_path(payload.installer_iso_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     host.hostname = payload.hostname.strip()
     host.mac_address = payload.mac_address.strip().lower()
     host.kickstart_id = payload.kickstart_id
+    host.installer_iso_path = installer_iso_path
     host.enabled = payload.enabled
     host.updated_at = utcnow()
     db.add(host)
@@ -2425,7 +2471,7 @@ def update_esxi_pxe_host(
         db.rollback()
         raise HTTPException(status_code=409, detail=f"ESXi PXE host for {payload.mac_address} already exists.") from exc
     db.refresh(host)
-    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id}")
+    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id} installer_iso={host.installer_iso_path}")
     return EsxiPxeHostResponse(**host_to_dict(host))
 
 

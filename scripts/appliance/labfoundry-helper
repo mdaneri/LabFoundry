@@ -52,6 +52,7 @@ DNSMASQ_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/dnsmasq.service.d")
 DNSMASQ_SERVICE_DROPIN_PATH = DNSMASQ_SERVICE_DROPIN_DIR / "labfoundry.conf"
 ESXI_PXE_APPLY_DIR = Path("/var/lib/labfoundry/apply/esxi-pxe")
 ESXI_PXE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/ks")
+ESXI_INSTALLER_ISO_ROOT = Path("/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST")
 KMS_APPLY_DIR = Path("/var/lib/labfoundry/apply/kms")
 KMS_STATE_DIR = Path("/var/lib/labfoundry/kms")
 KMS_LOG_DIR = Path("/var/log/labfoundry/kms")
@@ -577,6 +578,8 @@ def _load_esxi_pxe_manifest(path: Path) -> dict:
         raise ValueError("ESXi PXE manifest schema version is not supported")
     if Path(str(payload.get("http_root") or "")).resolve() != ESXI_PXE_HTTP_ROOT:
         raise ValueError(f"ESXi PXE http_root must be {ESXI_PXE_HTTP_ROOT}")
+    if Path(str(payload.get("installer_iso_root") or ESXI_INSTALLER_ISO_ROOT)).resolve() != ESXI_INSTALLER_ISO_ROOT.resolve():
+        raise ValueError(f"ESXi PXE installer_iso_root must be {ESXI_INSTALLER_ISO_ROOT}")
     if not isinstance(payload.get("kickstarts"), list):
         raise ValueError("ESXi PXE manifest kickstarts must be a list")
     if not isinstance(payload.get("hosts"), list):
@@ -587,6 +590,7 @@ def _load_esxi_pxe_manifest(path: Path) -> dict:
 def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
     errors: list[str] = []
     seen_ids: set[int] = set()
+    iso_root = ESXI_INSTALLER_ISO_ROOT.resolve()
     for row in payload.get("kickstarts", []):
         if not isinstance(row, dict):
             errors.append("Kickstart entry must be an object.")
@@ -617,11 +621,24 @@ def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
         kickstart_id = host.get("kickstart_id")
         if host.get("enabled") and kickstart_id is not None and int(kickstart_id) not in seen_ids:
             errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} references missing Kickstart {kickstart_id}.")
+        installer_iso_path = str(host.get("installer_iso_path") or "").strip()
+        if installer_iso_path:
+            selected_iso = Path(installer_iso_path)
+            if not selected_iso.is_absolute():
+                selected_iso = iso_root / installer_iso_path
+            selected_iso = selected_iso.resolve()
+            if selected_iso != iso_root and iso_root not in selected_iso.parents:
+                errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} installer ISO must be under {iso_root}.")
+            elif selected_iso.suffix.lower() != ".iso":
+                errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} installer ISO must be a .iso file.")
+            elif not selected_iso.is_file():
+                errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} installer ISO is missing: {selected_iso}.")
     return errors
 
 
 def _apply_esxi_pxe_manifest(payload: dict) -> int:
     ESXI_PXE_HTTP_ROOT.mkdir(parents=True, exist_ok=True)
+    ESXI_INSTALLER_ISO_ROOT.mkdir(parents=True, exist_ok=True)
     enabled_ids: set[str] = set()
     generated_files: list[str] = []
     for row in payload.get("kickstarts", []):

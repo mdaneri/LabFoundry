@@ -144,12 +144,24 @@ def wan_config_text(
     )
 
 
-def esxi_pxe_manifest(http_root: Path, *, enabled: bool = True, stale_id: int = 99) -> dict:
+def esxi_pxe_manifest(http_root: Path, *, enabled: bool = True, stale_id: int = 99, iso_root: Path | None = None) -> dict:
     content = "install\nnetwork --bootproto=dhcp\nrootpw VMware01!\nreboot\n%firstboot\n%end\n"
+    iso_root = iso_root or http_root.parent / "iso"
+    iso_path = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
     return {
         "kind": "labfoundry-esxi-pxe",
         "schema_version": 1,
         "http_root": str(http_root),
+        "installer_iso_root": str(iso_root),
+        "installer_isos": [
+            {
+                "name": iso_path.name,
+                "path": str(iso_path),
+                "relative_path": iso_path.name,
+                "size_bytes": 12,
+                "updated_at": "2026-06-28T00:00:00+00:00",
+            }
+        ],
         "kickstarts": [
             {
                 "id": 7,
@@ -167,6 +179,8 @@ def esxi_pxe_manifest(http_root: Path, *, enabled: bool = True, stale_id: int = 
                 "hostname": "esxi-01",
                 "mac_address": "00:50:56:aa:bb:cc",
                 "kickstart_id": 7 if enabled else None,
+                "installer_iso_path": str(iso_path),
+                "installer_iso_name": iso_path.name,
                 "enabled": True,
             }
         ],
@@ -277,23 +291,30 @@ def test_wan_helper_allows_nat_on_non_wan_role_target(tmp_path):
 def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, tmp_path):
     helper = load_helper_module()
     http_root = tmp_path / "pxe" / "http" / "esxi" / "ks"
+    iso_root = tmp_path / "vcf-depot" / "PROD" / "COMP" / "ESX_HOST"
     apply_dir = tmp_path / "apply" / "esxi-pxe"
     apply_dir.mkdir(parents=True)
     http_root.mkdir(parents=True)
+    iso_root.mkdir(parents=True)
+    (iso_root / "VMware-VMvisor-Installer-8.0U3.iso").write_bytes(b"iso bytes")
     stale = http_root / "99.cfg"
     stale.write_text("old", encoding="utf-8")
-    manifest = esxi_pxe_manifest(http_root)
+    manifest = esxi_pxe_manifest(http_root, iso_root=iso_root)
     config_path = apply_dir / "labfoundry-esxi-pxe.json"
     config_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     monkeypatch.setattr(helper, "ESXI_PXE_HTTP_ROOT", http_root)
     monkeypatch.setattr(helper, "ESXI_PXE_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "ESXI_INSTALLER_ISO_ROOT", iso_root)
 
     payload = helper._load_esxi_pxe_manifest(helper._validate_esxi_pxe_config_path(str(config_path)))
     assert helper._esxi_pxe_manifest_errors(payload) == []
     assert helper._apply_esxi_pxe_manifest(payload) == 0
     assert (http_root / "7.cfg").read_text(encoding="utf-8") == manifest["kickstarts"][0]["content"]
     assert not stale.exists()
+
+    manifest["hosts"][0]["installer_iso_path"] = str(tmp_path / "escape.iso")
+    assert any("installer ISO must be under" in error for error in helper._esxi_pxe_manifest_errors(manifest))
 
 
 def test_ca_helper_rejects_config_outside_apply_dir(tmp_path):

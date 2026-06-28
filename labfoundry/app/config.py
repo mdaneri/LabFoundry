@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     repository_path: Path = Path("/mnt/labfoundry-vcf-offline-depot")
     vcf_backup_path: Path = Path("/mnt/labfoundry-vcf-backups")
     esxi_kickstart_max_bytes: int = 262_144
+    esxi_installer_iso_max_bytes: int = 16 * 1024 * 1024 * 1024
 
     model_config = SettingsConfigDict(
         env_prefix="LABFOUNDRY_",

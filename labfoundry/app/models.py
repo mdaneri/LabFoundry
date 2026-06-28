@@ -578,6 +578,7 @@ class EsxiPxeHost(Base):
     hostname: Mapped[str] = mapped_column(String(120), index=True)
     mac_address: Mapped[str] = mapped_column(String(32), index=True)
     kickstart_id: Mapped[int | None] = mapped_column(ForeignKey("esxi_kickstarts.id"), nullable=True, index=True)
+    installer_iso_path: Mapped[str] = mapped_column(String(500), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
