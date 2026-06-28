@@ -144,6 +144,36 @@ def wan_config_text(
     )
 
 
+def esxi_pxe_manifest(http_root: Path, *, enabled: bool = True, stale_id: int = 99) -> dict:
+    content = "install\nnetwork --bootproto=dhcp\nrootpw VMware01!\nreboot\n%firstboot\n%end\n"
+    return {
+        "kind": "labfoundry-esxi-pxe",
+        "schema_version": 1,
+        "http_root": str(http_root),
+        "kickstarts": [
+            {
+                "id": 7,
+                "name": "ESXi install",
+                "enabled": enabled,
+                "content": content,
+                "content_hash": __import__("hashlib").sha256(content.encode("utf-8")).hexdigest(),
+                "http_path": "/pxe/esxi/ks/7.cfg",
+                "generated_path": str(http_root / "7.cfg"),
+            }
+        ],
+        "hosts": [
+            {
+                "id": 1,
+                "hostname": "esxi-01",
+                "mac_address": "00:50:56:aa:bb:cc",
+                "kickstart_id": 7 if enabled else None,
+                "enabled": True,
+            }
+        ],
+        "stale_id": stale_id,
+    }
+
+
 def ca_payload_text(root_dir: Path) -> str:
     root_cert = "-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----\n"
     cert = "-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n"
@@ -242,6 +272,28 @@ def test_wan_helper_allows_nat_on_non_wan_role_target(tmp_path):
     config_path.write_text(wan_config_text(target_role="access", target_wan=False), encoding="utf-8")
 
     assert helper._wan_config_errors(config_path) == []
+
+
+def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    http_root = tmp_path / "pxe" / "http" / "esxi" / "ks"
+    apply_dir = tmp_path / "apply" / "esxi-pxe"
+    apply_dir.mkdir(parents=True)
+    http_root.mkdir(parents=True)
+    stale = http_root / "99.cfg"
+    stale.write_text("old", encoding="utf-8")
+    manifest = esxi_pxe_manifest(http_root)
+    config_path = apply_dir / "labfoundry-esxi-pxe.json"
+    config_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_ROOT", http_root)
+    monkeypatch.setattr(helper, "ESXI_PXE_APPLY_DIR", apply_dir)
+
+    payload = helper._load_esxi_pxe_manifest(helper._validate_esxi_pxe_config_path(str(config_path)))
+    assert helper._esxi_pxe_manifest_errors(payload) == []
+    assert helper._apply_esxi_pxe_manifest(payload) == 0
+    assert (http_root / "7.cfg").read_text(encoding="utf-8") == manifest["kickstarts"][0]["content"]
+    assert not stale.exists()
 
 
 def test_ca_helper_rejects_config_outside_apply_dir(tmp_path):

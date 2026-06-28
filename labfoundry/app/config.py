@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     dry_run_system_adapters: bool = True
     repository_path: Path = Path("/mnt/labfoundry-vcf-offline-depot")
     vcf_backup_path: Path = Path("/mnt/labfoundry-vcf-backups")
+    esxi_kickstart_max_bytes: int = 262_144
 
     model_config = SettingsConfigDict(
         env_prefix="LABFOUNDRY_",

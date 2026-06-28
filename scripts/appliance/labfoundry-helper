@@ -17,6 +17,7 @@ import sys
 import tarfile
 import tempfile
 import configparser
+import hashlib
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
@@ -33,6 +34,7 @@ COMMANDS: dict[str, set[str]] = {
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
     "vcf-offline-depot": {"validate", "stage-tool", "sync", "apply-https"},
+    "esxi-pxe": {"validate", "apply"},
     "wan": {"validate", "apply"},
 }
 SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "sync", "apply-https", "relocate-bundles"}
@@ -48,6 +50,8 @@ DNSMASQ_CONFIG_DIR = Path("/etc/labfoundry/dnsmasq.d")
 DNSMASQ_CONFIG_PATH = DNSMASQ_CONFIG_DIR / "labfoundry.conf"
 DNSMASQ_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/dnsmasq.service.d")
 DNSMASQ_SERVICE_DROPIN_PATH = DNSMASQ_SERVICE_DROPIN_DIR / "labfoundry.conf"
+ESXI_PXE_APPLY_DIR = Path("/var/lib/labfoundry/apply/esxi-pxe")
+ESXI_PXE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/ks")
 KMS_APPLY_DIR = Path("/var/lib/labfoundry/apply/kms")
 KMS_STATE_DIR = Path("/var/lib/labfoundry/kms")
 KMS_LOG_DIR = Path("/var/log/labfoundry/kms")
@@ -548,6 +552,132 @@ def _handle_dnsmasq(action: str, args: list[str]) -> int:
         return restart.returncode
 
     print(f"unsupported dnsmasq action: {action}", file=sys.stderr)
+    return 2
+
+
+def _validate_esxi_pxe_config_path(path_value: str) -> Path:
+    path = Path(path_value).resolve()
+    if path.suffix != ".json":
+        raise ValueError("ESXi PXE manifest path must end with .json")
+    if not path.is_relative_to(ESXI_PXE_APPLY_DIR):
+        raise ValueError(f"ESXi PXE manifest must be staged under {ESXI_PXE_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"ESXi PXE manifest does not exist: {path}")
+    return path
+
+
+def _load_esxi_pxe_manifest(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"ESXi PXE manifest is not valid JSON: {exc}") from exc
+    if payload.get("kind") != "labfoundry-esxi-pxe":
+        raise ValueError("ESXi PXE manifest kind is invalid")
+    if payload.get("schema_version") != 1:
+        raise ValueError("ESXi PXE manifest schema version is not supported")
+    if Path(str(payload.get("http_root") or "")).resolve() != ESXI_PXE_HTTP_ROOT:
+        raise ValueError(f"ESXi PXE http_root must be {ESXI_PXE_HTTP_ROOT}")
+    if not isinstance(payload.get("kickstarts"), list):
+        raise ValueError("ESXi PXE manifest kickstarts must be a list")
+    if not isinstance(payload.get("hosts"), list):
+        raise ValueError("ESXi PXE manifest hosts must be a list")
+    return payload
+
+
+def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
+    errors: list[str] = []
+    seen_ids: set[int] = set()
+    for row in payload.get("kickstarts", []):
+        if not isinstance(row, dict):
+            errors.append("Kickstart entry must be an object.")
+            continue
+        try:
+            kickstart_id = int(row.get("id"))
+        except (TypeError, ValueError):
+            errors.append("Kickstart id must be an integer.")
+            continue
+        if kickstart_id in seen_ids:
+            errors.append(f"Kickstart {kickstart_id} is duplicated.")
+        seen_ids.add(kickstart_id)
+        generated_path = Path(str(row.get("generated_path") or "")).resolve()
+        expected_path = (ESXI_PXE_HTTP_ROOT / f"{kickstart_id}.cfg").resolve()
+        if generated_path != expected_path:
+            errors.append(f"Kickstart {kickstart_id} generated_path must be {expected_path}.")
+        content = str(row.get("content") or "")
+        if row.get("enabled") and not content.strip():
+            errors.append(f"Kickstart {kickstart_id} content is empty.")
+        expected_hash = str(row.get("content_hash") or "")
+        actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if expected_hash and expected_hash != actual_hash:
+            errors.append(f"Kickstart {kickstart_id} content hash does not match manifest content.")
+    for host in payload.get("hosts", []):
+        if not isinstance(host, dict):
+            errors.append("ESXi PXE host entry must be an object.")
+            continue
+        kickstart_id = host.get("kickstart_id")
+        if host.get("enabled") and kickstart_id is not None and int(kickstart_id) not in seen_ids:
+            errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} references missing Kickstart {kickstart_id}.")
+    return errors
+
+
+def _apply_esxi_pxe_manifest(payload: dict) -> int:
+    ESXI_PXE_HTTP_ROOT.mkdir(parents=True, exist_ok=True)
+    enabled_ids: set[str] = set()
+    generated_files: list[str] = []
+    for row in payload.get("kickstarts", []):
+        kickstart_id = str(int(row["id"]))
+        generated_path = ESXI_PXE_HTTP_ROOT / f"{kickstart_id}.cfg"
+        if row.get("enabled"):
+            generated_path.write_text(str(row.get("content") or ""), encoding="utf-8")
+            generated_path.chmod(0o644)
+            enabled_ids.add(kickstart_id)
+            generated_files.append(str(generated_path))
+    for path in ESXI_PXE_HTTP_ROOT.glob("*.cfg"):
+        if path.stem.isdigit() and path.stem not in enabled_ids:
+            path.unlink(missing_ok=True)
+    print(
+        json.dumps(
+            {
+                "esxi_pxe": "apply complete",
+                "generated_files": generated_files,
+                "enabled_kickstarts": len(enabled_ids),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _handle_esxi_pxe(action: str, args: list[str]) -> int:
+    if len(args) != 1:
+        print(f"esxi-pxe {action} requires exactly one staged manifest path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _validate_esxi_pxe_config_path(args[0])
+        payload = _load_esxi_pxe_manifest(config_path)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    errors = _esxi_pxe_manifest_errors(payload)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    if action == "validate":
+        print(
+            json.dumps(
+                {
+                    "esxi_pxe": "validation ok",
+                    "kickstarts": len(payload.get("kickstarts", [])),
+                    "hosts": len(payload.get("hosts", [])),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if action == "apply":
+        return _apply_esxi_pxe_manifest(payload)
+    print(f"unsupported esxi-pxe action: {action}", file=sys.stderr)
     return 2
 
 
@@ -3185,6 +3315,8 @@ def main(argv: list[str]) -> int:
         return _handle_wan(action, normalized_args)
     if group == "dnsmasq":
         return _handle_dnsmasq(action, normalized_args)
+    if group == "esxi-pxe":
+        return _handle_esxi_pxe(action, normalized_args)
     if group == "appliance-settings":
         return _handle_appliance_settings(action, normalized_args)
     if group == "local-users":

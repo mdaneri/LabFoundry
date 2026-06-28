@@ -1,11 +1,12 @@
 from datetime import datetime
 from ipaddress import ip_interface
 from pathlib import Path
+import re
 import socket
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -26,6 +27,8 @@ from labfoundry.app.models import (
     DhcpSettings,
     DnsRecord,
     DnsSettings,
+    EsxiKickstart,
+    EsxiPxeHost,
     FirewallRule,
     FirewallSettings,
     Job,
@@ -70,6 +73,14 @@ from labfoundry.app.schemas import (
     DnsSettingsResponse,
     DnsSettingsUpdate,
     DnsStatusResponse,
+    EsxiKickstartCreate,
+    EsxiKickstartDuplicateRequest,
+    EsxiKickstartPreviewResponse,
+    EsxiKickstartResponse,
+    EsxiKickstartUpdate,
+    EsxiKickstartValidationResponse,
+    EsxiPxeHostCreate,
+    EsxiPxeHostResponse,
     FirewallRuleCreate,
     FirewallRuleResponse,
     FirewallSettingsResponse,
@@ -170,6 +181,18 @@ from labfoundry.app.services.vcf_offline_depot import (
     validate_vcf_depot_state,
     vcf_depot_settings_to_dict,
 )
+from labfoundry.app.services.esxi_pxe import (
+    assign_kickstart_content,
+    canonical_http_path,
+    content_hash,
+    decode_kickstart_upload,
+    kickstart_to_dict,
+    kickstart_validation,
+    normalize_kickstart_name,
+    redacted_kickstart_preview,
+    strict_validation_enabled,
+    host_to_dict,
+)
 from labfoundry.app.token_service import create_token_for_user, token_to_response
 
 router = APIRouter(prefix="/api/v1")
@@ -182,6 +205,7 @@ APPROVED_SERVICES = {
     "dhcp",
     "kms",
     "repository",
+    "esxi-pxe",
     "vcf-offline-depot",
     "vcf-private-registry",
     "vcf-backups",
@@ -2071,6 +2095,338 @@ def get_vcf_private_registry_status(
         valid=not validation_errors,
         dry_run=get_settings().dry_run_system_adapters,
     )
+
+
+def _kickstart_response(kickstart: EsxiKickstart, identity: Identity) -> EsxiKickstartResponse:
+    include_content = identity.can("write:esxi-pxe")
+    return EsxiKickstartResponse(**kickstart_to_dict(kickstart, include_content=include_content))
+
+
+def _assign_kickstart_payload(kickstart: EsxiKickstart, payload: EsxiKickstartCreate | EsxiKickstartUpdate, max_bytes: int) -> None:
+    kickstart.name = normalize_kickstart_name(payload.name)
+    kickstart.description = payload.description or None
+    kickstart.enabled = payload.enabled
+    assign_kickstart_content(kickstart, payload.content, max_bytes=max_bytes)
+
+
+@router.get(
+    "/esxi-pxe/kickstarts",
+    response_model=list[EsxiKickstartResponse],
+    tags=["ESXi PXE"],
+    operation_id="listEsxiKickstarts",
+)
+def list_esxi_kickstarts(
+    identity: Annotated[Identity, Depends(require_scope("read:esxi-pxe"))],
+    db: Session = Depends(get_db),
+) -> list[EsxiKickstartResponse]:
+    rows = db.execute(select(EsxiKickstart).order_by(EsxiKickstart.name)).scalars().all()
+    return [_kickstart_response(row, identity) for row in rows]
+
+
+@router.post(
+    "/esxi-pxe/kickstarts",
+    response_model=EsxiKickstartResponse,
+    status_code=201,
+    tags=["ESXi PXE"],
+    operation_id="createEsxiKickstart",
+)
+def create_esxi_kickstart(
+    payload: EsxiKickstartCreate,
+    identity: Annotated[Identity, Depends(require_scope("write:esxi-pxe"))],
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> EsxiKickstartResponse:
+    kickstart = EsxiKickstart(name=normalize_kickstart_name(payload.name), content="", content_hash="", enabled=payload.enabled)
+    db.add(kickstart)
+    db.flush()
+    _assign_kickstart_payload(kickstart, payload, settings.esxi_kickstart_max_bytes)
+    kickstart.http_path = canonical_http_path(kickstart.id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Kickstart {payload.name} already exists.") from exc
+    db.refresh(kickstart)
+    record_audit(db, actor=identity.username, action="create_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"name={kickstart.name} hash={kickstart.content_hash}")
+    return _kickstart_response(kickstart, identity)
+
+
+@router.get(
+    "/esxi-pxe/kickstarts/{kickstart_id}",
+    response_model=EsxiKickstartResponse,
+    tags=["ESXi PXE"],
+    operation_id="getEsxiKickstart",
+)
+def get_esxi_kickstart(
+    kickstart_id: int,
+    identity: Annotated[Identity, Depends(require_scope("read:esxi-pxe"))],
+    db: Session = Depends(get_db),
+) -> EsxiKickstartResponse:
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    return _kickstart_response(kickstart, identity)
+
+
+@router.put(
+    "/esxi-pxe/kickstarts/{kickstart_id}",
+    response_model=EsxiKickstartResponse,
+    tags=["ESXi PXE"],
+    operation_id="updateEsxiKickstart",
+)
+def update_esxi_kickstart(
+    kickstart_id: int,
+    payload: EsxiKickstartUpdate,
+    identity: Annotated[Identity, Depends(require_scope("write:esxi-pxe"))],
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> EsxiKickstartResponse:
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    _assign_kickstart_payload(kickstart, payload, settings.esxi_kickstart_max_bytes)
+    kickstart.http_path = canonical_http_path(kickstart.id)
+    db.add(kickstart)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Kickstart {payload.name} already exists.") from exc
+    db.refresh(kickstart)
+    record_audit(db, actor=identity.username, action="update_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"name={kickstart.name} hash={kickstart.content_hash}")
+    return _kickstart_response(kickstart, identity)
+
+
+@router.delete(
+    "/esxi-pxe/kickstarts/{kickstart_id}",
+    response_model=dict,
+    tags=["ESXi PXE"],
+    operation_id="deleteEsxiKickstart",
+)
+def delete_esxi_kickstart(
+    kickstart_id: int,
+    identity: Annotated[Identity, Depends(require_scope("write:esxi-pxe"))],
+    db: Session = Depends(get_db),
+) -> dict:
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    for host in db.execute(select(EsxiPxeHost).where(EsxiPxeHost.kickstart_id == kickstart.id)).scalars().all():
+        host.kickstart_id = None
+        host.updated_at = utcnow()
+        db.add(host)
+    db.delete(kickstart)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart_id))
+    return {"deleted": True}
+
+
+@router.post(
+    "/esxi-pxe/kickstarts/{kickstart_id}/duplicate",
+    response_model=EsxiKickstartResponse,
+    status_code=201,
+    tags=["ESXi PXE"],
+    operation_id="duplicateEsxiKickstart",
+)
+def duplicate_esxi_kickstart(
+    kickstart_id: int,
+    identity: Annotated[Identity, Depends(require_scope("write:esxi-pxe"))],
+    payload: EsxiKickstartDuplicateRequest | None = None,
+    db: Session = Depends(get_db),
+) -> EsxiKickstartResponse:
+    source = db.get(EsxiKickstart, kickstart_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    name = normalize_kickstart_name(payload.name if payload and payload.name else f"{source.name} Copy")
+    duplicate = EsxiKickstart(
+        name=name,
+        description=source.description,
+        content=source.content,
+        content_hash=source.content_hash,
+        rendered_content=source.rendered_content,
+        enabled=source.enabled,
+    )
+    db.add(duplicate)
+    db.flush()
+    duplicate.http_path = canonical_http_path(duplicate.id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Kickstart {name} already exists.") from exc
+    db.refresh(duplicate)
+    record_audit(db, actor=identity.username, action="duplicate_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(duplicate.id), detail=f"source_id={source.id} name={duplicate.name}")
+    return _kickstart_response(duplicate, identity)
+
+
+@router.post(
+    "/esxi-pxe/kickstarts/{kickstart_id}/validate",
+    response_model=EsxiKickstartValidationResponse,
+    tags=["ESXi PXE"],
+    operation_id="validateEsxiKickstart",
+)
+def validate_esxi_kickstart(
+    kickstart_id: int,
+    identity: Annotated[Identity, Depends(require_scope("read:esxi-pxe"))],
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> EsxiKickstartValidationResponse:
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    errors, warnings = kickstart_validation(
+        kickstart.content,
+        strict=strict_validation_enabled(db),
+        max_bytes=settings.esxi_kickstart_max_bytes,
+    )
+    record_audit(db, actor=identity.username, action="validate_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"errors={len(errors)} warnings={len(warnings)}")
+    return EsxiKickstartValidationResponse(valid=not errors, errors=errors, warnings=warnings, redacted_preview=redacted_kickstart_preview(kickstart.content))
+
+
+@router.get(
+    "/esxi-pxe/kickstarts/{kickstart_id}/preview",
+    response_model=EsxiKickstartPreviewResponse,
+    tags=["ESXi PXE"],
+    operation_id="previewEsxiKickstart",
+)
+def preview_esxi_kickstart(
+    kickstart_id: int,
+    identity: Annotated[Identity, Depends(require_scope("read:esxi-pxe"))],
+    db: Session = Depends(get_db),
+) -> EsxiKickstartPreviewResponse:
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    payload = kickstart_to_dict(kickstart)
+    return EsxiKickstartPreviewResponse(id=kickstart.id, redacted_preview=payload["redacted_preview"], content_hash=kickstart.content_hash, drift_state=payload["drift_state"])
+
+
+@router.get(
+    "/esxi-pxe/kickstarts/{kickstart_id}/download",
+    response_model=None,
+    tags=["ESXi PXE"],
+    operation_id="downloadEsxiKickstart",
+)
+def download_esxi_kickstart(
+    kickstart_id: int,
+    identity: Annotated[Identity, Depends(require_scope("write:esxi-pxe"))],
+    db: Session = Depends(get_db),
+) -> Response:
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", kickstart.name).strip("-") or f"kickstart-{kickstart.id}"
+    return Response(
+        kickstart.content,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.cfg"'},
+    )
+
+
+@router.post(
+    "/esxi-pxe/kickstarts/upload",
+    response_model=EsxiKickstartResponse,
+    status_code=201,
+    tags=["ESXi PXE"],
+    operation_id="uploadEsxiKickstart",
+)
+async def upload_esxi_kickstart(
+    identity: Annotated[Identity, Depends(require_scope("write:esxi-pxe"))],
+    upload_file: UploadFile = File(...),
+    name: str = Form(""),
+    description: str = Form(""),
+    enabled: bool = Form(True),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> EsxiKickstartResponse:
+    raw = await upload_file.read()
+    content = decode_kickstart_upload(raw, max_bytes=settings.esxi_kickstart_max_bytes)
+    candidate_name = name or Path(upload_file.filename or "uploaded-kickstart").stem
+    kickstart = EsxiKickstart(name=normalize_kickstart_name(candidate_name), description=description or None, content=content, content_hash=content_hash(content), rendered_content=content, enabled=enabled)
+    db.add(kickstart)
+    db.flush()
+    kickstart.http_path = canonical_http_path(kickstart.id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Kickstart {candidate_name} already exists.") from exc
+    db.refresh(kickstart)
+    record_audit(db, actor=identity.username, action="upload_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"name={kickstart.name} hash={kickstart.content_hash}")
+    return _kickstart_response(kickstart, identity)
+
+
+@router.get(
+    "/esxi-pxe/hosts",
+    response_model=list[EsxiPxeHostResponse],
+    tags=["ESXi PXE"],
+    operation_id="listEsxiPxeHosts",
+)
+def list_esxi_pxe_hosts(
+    identity: Annotated[Identity, Depends(require_scope("read:esxi-pxe"))],
+    db: Session = Depends(get_db),
+) -> list[EsxiPxeHostResponse]:
+    rows = db.execute(select(EsxiPxeHost).options(selectinload(EsxiPxeHost.kickstart)).order_by(EsxiPxeHost.hostname)).scalars().all()
+    return [EsxiPxeHostResponse(**host_to_dict(row)) for row in rows]
+
+
+@router.post(
+    "/esxi-pxe/hosts",
+    response_model=EsxiPxeHostResponse,
+    status_code=201,
+    tags=["ESXi PXE"],
+    operation_id="createEsxiPxeHost",
+)
+def create_esxi_pxe_host(
+    payload: EsxiPxeHostCreate,
+    identity: Annotated[Identity, Depends(require_scope("write:esxi-pxe"))],
+    db: Session = Depends(get_db),
+) -> EsxiPxeHostResponse:
+    if payload.kickstart_id and not db.get(EsxiKickstart, payload.kickstart_id):
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    host = EsxiPxeHost(hostname=payload.hostname.strip(), mac_address=payload.mac_address.strip().lower(), kickstart_id=payload.kickstart_id, enabled=payload.enabled)
+    db.add(host)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"ESXi PXE host for {payload.mac_address} already exists.") from exc
+    db.refresh(host)
+    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id}")
+    return EsxiPxeHostResponse(**host_to_dict(host))
+
+
+@router.put(
+    "/esxi-pxe/hosts/{host_id}",
+    response_model=EsxiPxeHostResponse,
+    tags=["ESXi PXE"],
+    operation_id="updateEsxiPxeHost",
+)
+def update_esxi_pxe_host(
+    host_id: int,
+    payload: EsxiPxeHostCreate,
+    identity: Annotated[Identity, Depends(require_scope("write:esxi-pxe"))],
+    db: Session = Depends(get_db),
+) -> EsxiPxeHostResponse:
+    host = db.get(EsxiPxeHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="ESXi PXE host not found")
+    if payload.kickstart_id and not db.get(EsxiKickstart, payload.kickstart_id):
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    host.hostname = payload.hostname.strip()
+    host.mac_address = payload.mac_address.strip().lower()
+    host.kickstart_id = payload.kickstart_id
+    host.enabled = payload.enabled
+    host.updated_at = utcnow()
+    db.add(host)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"ESXi PXE host for {payload.mac_address} already exists.") from exc
+    db.refresh(host)
+    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id}")
+    return EsxiPxeHostResponse(**host_to_dict(host))
 
 
 def add_placeholder_resource_routes() -> None:

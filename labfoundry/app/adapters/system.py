@@ -58,6 +58,12 @@ class SystemAdapter:
     def reload_dnsmasq(self) -> AdapterResult:
         return self._helper_result("dnsmasq", "reload", dry_run_message="dry-run: dnsmasq reload command recorded")
 
+    def validate_esxi_pxe_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("esxi-pxe", "validate", config_path, dry_run_message="dry-run: ESXi PXE validation command recorded")
+
+    def apply_esxi_pxe_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("esxi-pxe", "apply", config_path, dry_run_message="dry-run: ESXi PXE apply command recorded")
+
     def read_dhcp_leases(self) -> AdapterResult:
         if self.dry_run:
             return self._record_only_result(

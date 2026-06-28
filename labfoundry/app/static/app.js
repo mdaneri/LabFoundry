@@ -161,6 +161,7 @@ function highlightConfigPreviews(root = document) {
         "[data-vcf-registry-relocation-preview]",
         "[data-vcf-depot-command-preview]",
         "[data-vcf-depot-https-preview]",
+        "[data-esxi-pxe-preview]",
       ].join(", "),
     )
     .forEach((element) => highlightConfigPreviewElement(element));
@@ -4048,6 +4049,31 @@ function initializeCodeMirrorEditors() {
   });
 }
 
+function initializeKickstartEditorDirtyState() {
+  document.querySelectorAll("[data-kickstart-editor-form]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const status = form.querySelector("[data-kickstart-dirty-state]");
+    const editor = form.querySelector("textarea[name='content']");
+    if (!(status instanceof HTMLElement) || !(editor instanceof HTMLTextAreaElement)) {
+      return;
+    }
+    let initialValue = editor.value;
+    const refresh = () => {
+      const dirty = editor.value !== initialValue;
+      status.textContent = dirty ? "Unsaved changes" : "Saved";
+      status.classList.toggle("dirty", dirty);
+    };
+    editor.addEventListener("input", refresh);
+    form.addEventListener("submit", () => {
+      initialValue = editor.value;
+      refresh();
+    });
+    refresh();
+  });
+}
+
 function initializeZoneEditors() {
   document.querySelectorAll(".zone-editor-form").forEach((form) => {
     const editor = form.querySelector(".zone-code-editor");
@@ -6463,6 +6489,7 @@ document.addEventListener("DOMContentLoaded", initializeRoutesWanPoliciesTable);
 document.addEventListener("DOMContentLoaded", initializePhysicalInterfacesTable);
 document.addEventListener("DOMContentLoaded", initializeVlanInterfacesTable);
 document.addEventListener("DOMContentLoaded", initializeCodeMirrorEditors);
+document.addEventListener("DOMContentLoaded", initializeKickstartEditorDirtyState);
 document.addEventListener("DOMContentLoaded", initializeHostsFileEditor);
 document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);

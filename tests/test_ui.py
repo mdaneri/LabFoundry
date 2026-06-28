@@ -10,6 +10,15 @@ def login(client):
     assert response.status_code == 303
 
 
+def create_api_token(client, scopes):
+    response = client.post(
+        "/api/v1/auth/login?username=admin&password=labfoundry-admin",
+        json={"name": "test token", "scopes": scopes},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["raw_token"]
+
+
 def test_login_and_dashboard_render(client):
     login(client)
     root = client.get("/", follow_redirects=False)
@@ -569,6 +578,177 @@ def test_backup_restore_page_exports_settings_archive(client):
     with SessionLocal() as db:
         event = db.execute(select(AuditEvent).where(AuditEvent.action == "export_settings_backup")).scalar_one()
         assert event.resource_type == "settings_backup"
+
+
+def test_esxi_kickstart_api_hides_raw_content_from_read_only_tokens(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart
+
+    write_token = create_api_token(client, ["read:esxi-pxe", "write:esxi-pxe"])
+    created = client.post(
+        "/api/v1/esxi-pxe/kickstarts",
+        headers={"Authorization": f"Bearer {write_token}"},
+        json={
+            "name": "Secure ESXi",
+            "description": "secret-bearing ks",
+            "content": "install --firstdisk\nnetwork --bootproto=dhcp\nrootpw MySecretPassword\nreboot\n%firstboot\n%end\n",
+            "enabled": True,
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    kickstart_id = created.json()["id"]
+    assert created.json()["content"] and "MySecretPassword" in created.json()["content"]
+    with SessionLocal() as db:
+        row = db.execute(select(EsxiKickstart).where(EsxiKickstart.id == kickstart_id)).scalar_one()
+        assert "MySecretPassword" in row.content
+        assert row.content_hash
+
+    read_token = create_api_token(client, ["read:esxi-pxe"])
+    fetched = client.get(f"/api/v1/esxi-pxe/kickstarts/{kickstart_id}", headers={"Authorization": f"Bearer {read_token}"})
+    preview = client.get(f"/api/v1/esxi-pxe/kickstarts/{kickstart_id}/preview", headers={"Authorization": f"Bearer {read_token}"})
+    download = client.get(f"/api/v1/esxi-pxe/kickstarts/{kickstart_id}/download", headers={"Authorization": f"Bearer {read_token}"})
+
+    assert fetched.status_code == 200
+    assert fetched.json()["content"] is None
+    assert "MySecretPassword" not in fetched.text
+    assert "rootpw ********" in fetched.json()["redacted_preview"]
+    assert preview.status_code == 200
+    assert "MySecretPassword" not in preview.text
+    assert download.status_code == 403
+
+
+def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import AuditEvent, EsxiKickstart, Job
+
+    login(client)
+    page = client.get("/esxi-pxe")
+    assert page.status_code == 200
+    assert "ESXi Kickstarts" in page.text
+    assert 'data-codemirror-language="labfoundry-kickstart"' in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    created = client.post(
+        "/esxi-pxe/kickstarts",
+        data={
+            "csrf": csrf,
+            "name": "Lab ESXi",
+            "description": "install",
+            "content": "install --firstdisk\nnetwork --bootproto=dhcp\nrootpw SuperSecret!\nreboot\n%firstboot\n%end\n",
+            "enabled": "on",
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    kickstart_id = int(created.headers["location"].rsplit("=", 1)[1])
+    with SessionLocal() as db:
+        kickstart = db.execute(select(EsxiKickstart).where(EsxiKickstart.id == kickstart_id)).scalar_one()
+        assert "SuperSecret!" in kickstart.content
+        assert kickstart.http_path == f"/pxe/esxi/ks/{kickstart_id}.cfg"
+
+    apply_page = client.get("/appliance-apply")
+    assert 'value="esxi_pxe"' in apply_page.text
+    apply_csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    applied = client.post("/appliance-apply", data={"csrf": apply_csrf, "selected_units": "esxi_pxe"})
+
+    assert applied.status_code == 200
+    assert "ESXi PXE" in applied.text
+    assert "SuperSecret!" not in applied.text
+    assert "[redacted]" in applied.text
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply").order_by(Job.created_at.desc())).scalars().first()
+        assert job is not None
+        payload = json.loads(job.result or "{}")
+        assert payload["selected_units"] == ["esxi_pxe"]
+        assert "SuperSecret!" not in (job.result or "")
+        assert "labfoundry-helper esxi-pxe apply" in (job.result or "")
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "create_esxi_kickstart")).scalar_one()
+        assert "SuperSecret!" not in (event.detail or "")
+
+
+def test_esxi_kickstarts_round_trip_in_settings_archive(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart, EsxiPxeHost
+
+    login(client)
+    with SessionLocal() as db:
+        kickstart = EsxiKickstart(
+            name="Archive ESXi",
+            content="install\nnetwork --bootproto=dhcp\nrootpw ArchiveSecret\nreboot\n%firstboot\n%end\n",
+            content_hash="",
+            rendered_content="install\nnetwork --bootproto=dhcp\nrootpw ArchiveSecret\nreboot\n%firstboot\n%end\n",
+            enabled=True,
+        )
+        db.add(kickstart)
+        db.flush()
+        from labfoundry.app.services.esxi_pxe import assign_kickstart_content, canonical_http_path
+
+        assign_kickstart_content(kickstart, kickstart.content, max_bytes=262_144)
+        kickstart.http_path = canonical_http_path(kickstart.id)
+        db.add(EsxiPxeHost(hostname="esxi-archive", mac_address="00:50:56:aa:bb:cc", kickstart_id=kickstart.id, enabled=True))
+        db.commit()
+
+    page = client.get("/backup-restore")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    exported = client.post("/backup-restore/export", data={"csrf": csrf})
+    payload = json.loads(exported.content)
+
+    assert payload["data"]["esxi_kickstarts"][0]["name"] == "Archive ESXi"
+    assert payload["data"]["esxi_pxe_hosts"][0]["kickstart_name"] == "Archive ESXi"
+
+    with SessionLocal() as db:
+        db.query(EsxiPxeHost).delete()
+        db.query(EsxiKickstart).delete()
+        db.commit()
+
+    restored = client.post(
+        "/backup-restore/restore",
+        data={"csrf": csrf},
+        files={"archive_file": ("labfoundry-settings.json", exported.content, "application/json")},
+    )
+
+    assert restored.status_code == 200
+    with SessionLocal() as db:
+        restored_kickstart = db.execute(select(EsxiKickstart).where(EsxiKickstart.name == "Archive ESXi")).scalar_one()
+        restored_host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.hostname == "esxi-archive")).scalar_one()
+        assert restored_host.kickstart_id == restored_kickstart.id
+
+
+def test_esxi_pxe_drift_detection_uses_generated_filesystem_copy(client, monkeypatch, tmp_path):
+    from sqlalchemy import select
+
+    import labfoundry.app.services.esxi_pxe as esxi_pxe
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart
+
+    monkeypatch.setattr(esxi_pxe, "ESXI_KICKSTART_HTTP_ROOT", tmp_path)
+    login(client)
+    content = "install\nnetwork --bootproto=dhcp\nrootpw DriftSecret\nreboot\n%firstboot\n%end\n"
+    with SessionLocal() as db:
+        kickstart = EsxiKickstart(name="Drift ESXi", content=content, content_hash=esxi_pxe.content_hash(content), rendered_content=content, rendered_hash=esxi_pxe.content_hash(content), enabled=True)
+        db.add(kickstart)
+        db.flush()
+        kickstart.http_path = esxi_pxe.canonical_http_path(kickstart.id)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / f"{kickstart.id}.cfg").write_text(content.replace("DriftSecret", "ChangedOnDisk"), encoding="utf-8")
+        db.commit()
+        kickstart_id = kickstart.id
+
+    page = client.get(f"/esxi-pxe?kickstart_id={kickstart_id}")
+    assert page.status_code == 200
+    assert "filesystem modified" in page.text
+    assert "Filesystem copy differs from database source. The next ESXi PXE apply will overwrite the filesystem copy from the database." in page.text
 
 
 def test_backup_restore_restore_replaces_settings_and_stops_services(client):

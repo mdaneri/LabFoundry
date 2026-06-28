@@ -18,6 +18,7 @@ Current apply units are:
 - Routes & WAN Simulation
 - Firewall
 - DNS/DHCP (dnsmasq)
+- ESXi PXE
 - Certificate Authority
 - KMS / KMIP
 - VCF Backups
@@ -53,6 +54,14 @@ Through `labfoundry-helper wan validate|apply`, the helper validates staged rout
 The real DNS/DHCP apply path is dnsmasq-backed. The `dnsmasq` apply unit stages LabFoundry's rendered dnsmasq config at `/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf`, validates it with `dnsmasq --test`, installs `/etc/labfoundry/dnsmasq.d/labfoundry.conf`, enables `dnsmasq`, and reloads or restarts the service through `labfoundry-helper`. DNS and DHCP remain one global apply unit because they share one dnsmasq config and service reload boundary.
 
 DHCP IP zones can bind only to valid service targets: access physical interfaces with an IP CIDR or enabled VLAN interfaces with an IP CIDR. Trunk physical interfaces and addressless interfaces are rejected before apply. The rendered dnsmasq config owns DHCP ranges, options, reservations, and the lease file at `/var/lib/labfoundry/dnsmasq/dhcp.leases`; live lease readback goes through the allowlisted `labfoundry-helper dnsmasq leases --real` path.
+
+## ESXi PXE Apply
+
+The ESXi PXE apply unit owns generated Kickstart runtime copies. Operators edit Kickstart source in the database through the built-in CodeMirror editor; filesystem copies are derived artifacts, not desired state. Saving a Kickstart updates the database source hash and marks `esxi_pxe` changed, but does not write `/var/lib/labfoundry/pxe/http/esxi/ks/<id>.cfg`.
+
+The real apply path stages `/var/lib/labfoundry/apply/esxi-pxe/labfoundry-esxi-pxe.json`. Through `labfoundry-helper esxi-pxe validate|apply`, the helper validates the manifest, writes enabled Kickstarts to the PXE HTTP root, removes stale generated numeric `.cfg` files, and reports generated paths without raw Kickstart content. LabFoundry redacts Kickstart secrets from previews, diffs, job output, logs, and audit events. Drift detection compares the generated filesystem copy to the database source hash and never imports filesystem changes without an explicit admin action.
+
+## Firewall Apply
 
 The Firewall apply unit derives LabFoundry-managed service allow rules from enabled service listener desired state. Management, DNS, DHCP, KMS, VCF Backup, VCF Offline Depot, and VCF Private Registry listeners appear in the managed service rules grid on the Firewall page, while custom firewall rules remain editable in the main grid. Managed DNS and service listener rules default to the built-in `Any` group. Operators can create, rename, remove, and assign firewall groups containing `any`, CIDRs, addresses, or other groups when rule sources or destinations need narrower access than the default. DHCP bootstrap rules are the exception: they remain interface-bound UDP/67 input rules without group filtering because clients and relay paths may arrive before a client address is assigned. If a DHCP zone or service listener moves from a physical interface to a VLAN such as `eth2.50`, the firewall preview and apply diff should move the generated rule to that same interface. Apply the changed Firewall unit with the service unit that changed when the global apply page shows both as pending.
 

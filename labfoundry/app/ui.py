@@ -38,6 +38,8 @@ from labfoundry.app.models import (
     DhcpSettings,
     DnsRecord,
     DnsSettings,
+    EsxiKickstart,
+    EsxiPxeHost,
     FirewallRule,
     FirewallSettings,
     Job,
@@ -286,6 +288,24 @@ from labfoundry.app.services.vcf_offline_depot import (
     vcfdt_commands_for_profile,
     _find_vcf_download_tool_binary,
     _safe_extract_tar_gz,
+)
+from labfoundry.app.services.esxi_pxe import (
+    ESXI_PXE_STAGED_CONFIG_PATH,
+    assign_kickstart_content,
+    canonical_http_path,
+    content_hash,
+    decode_kickstart_upload,
+    generated_kickstart_path,
+    host_to_dict,
+    kickstart_drift_state,
+    kickstart_to_dict,
+    kickstart_validation,
+    mark_kickstarts_applied,
+    normalize_kickstart_content,
+    normalize_kickstart_name,
+    render_esxi_pxe_manifest,
+    render_esxi_pxe_preview,
+    strict_validation_enabled,
 )
 from labfoundry.app.token_service import create_token_for_user
 
@@ -2571,6 +2591,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "wan",
     "firewall",
     "dnsmasq",
+    "esxi_pxe",
     "ca",
     "kms",
     "vcf_backups",
@@ -2578,7 +2599,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "vcf_private_registry",
 }
 SECRET_LINE_PATTERN = re.compile(
-    r"(password|token|secret|credential|private[_-]?key|robot[_-]?account|ca[_-]?bundle[_-]?pem|activation[_-]?code)",
+    r"(rootpw|password|passwd|token|secret|credential|private[_-]?key|robot[_-]?account|ca[_-]?bundle[_-]?pem|activation[_-]?code|license)",
     re.IGNORECASE,
 )
 PRIVATE_KEY_BEGIN_PATTERN = re.compile(r"-----BEGIN .*PRIVATE KEY-----")
@@ -2870,6 +2891,38 @@ def local_users_apply_context(db: Session, baseline: dict[str, Any] | None = Non
     }
 
 
+def esxi_pxe_context(db: Session) -> dict[str, Any]:
+    kickstarts = db.execute(select(EsxiKickstart).order_by(EsxiKickstart.name)).scalars().all()
+    hosts = db.execute(select(EsxiPxeHost).options(selectinload(EsxiPxeHost.kickstart)).order_by(EsxiPxeHost.hostname)).scalars().all()
+    strict = strict_validation_enabled(db)
+    max_bytes = get_settings().esxi_kickstart_max_bytes
+    validation_errors: list[str] = []
+    validation_warnings: list[str] = []
+    validation_by_id: dict[int, dict[str, list[str] | bool]] = {}
+    for row in kickstarts:
+        errors, warnings = kickstart_validation(row.content, strict=strict, max_bytes=max_bytes)
+        validation_by_id[row.id] = {"valid": not errors, "errors": errors, "warnings": warnings}
+        validation_errors.extend(f"{row.name}: {error}" for error in errors)
+        validation_warnings.extend(f"{row.name}: {warning}" for warning in warnings)
+        if kickstart_drift_state(row) == "filesystem_modified":
+            validation_warnings.append(
+                f"{row.name}: Filesystem copy differs from database source. The next ESXi PXE apply will overwrite the filesystem copy from the database."
+            )
+    return {
+        "esxi_kickstarts": kickstarts,
+        "esxi_kickstart_rows": [kickstart_to_dict(row, include_content=True) for row in kickstarts],
+        "esxi_pxe_hosts": hosts,
+        "esxi_pxe_host_rows": [host_to_dict(row) for row in hosts],
+        "esxi_pxe_validation_errors": validation_errors,
+        "esxi_pxe_validation_warnings": list(dict.fromkeys(validation_warnings)),
+        "esxi_pxe_validation_by_id": validation_by_id,
+        "esxi_pxe_manifest": render_esxi_pxe_manifest(kickstarts, hosts),
+        "esxi_pxe_preview": render_esxi_pxe_preview(kickstarts, hosts),
+        "esxi_pxe_config_path": ESXI_PXE_STAGED_CONFIG_PATH,
+        "esxi_pxe_strict_validation": strict,
+    }
+
+
 def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     baselines = load_appliance_apply_baselines(db)
     local_users = local_users_apply_context(db, baselines.get("local_users"))
@@ -2878,6 +2931,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     wan = routes_wan_context(db)
     firewall = firewall_context(db)
     dnsmasq = dnsmasq_context(db)
+    esxi_pxe = esxi_pxe_context(db)
     ca = ca_context(db)
     kms = kms_context(db)
     vcf_backup = vcf_backup_context(db)
@@ -2998,6 +3052,22 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             config_path=dnsmasq["dns_settings"].config_path,
             config_preview=dnsmasq["config_preview"],
             baseline=baselines.get("dnsmasq"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="esxi_pxe",
+            label="ESXi PXE",
+            page_url="/esxi-pxe",
+            context=esxi_pxe,
+            summary=[
+                f"{len(esxi_pxe['esxi_kickstarts'])} Kickstarts",
+                f"{len([row for row in esxi_pxe['esxi_kickstarts'] if row.enabled])} enabled",
+                f"{len(esxi_pxe['esxi_pxe_hosts'])} host definitions",
+            ],
+            validation_errors=esxi_pxe["esxi_pxe_validation_errors"],
+            validation_warnings=esxi_pxe["esxi_pxe_validation_warnings"],
+            config_path=esxi_pxe["esxi_pxe_config_path"],
+            config_preview=esxi_pxe["esxi_pxe_manifest"],
+            baseline=baselines.get("esxi_pxe"),
         ),
         make_appliance_apply_unit(
             unit_id="ca",
@@ -3240,6 +3310,11 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(DNSMASQ_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = [adapter.validate_dnsmasq_config(config_path), adapter.apply_dnsmasq_config(config_path), adapter.reload_dnsmasq()]
+    elif unit_id == "esxi_pxe":
+        config_path = context["esxi_pxe_config_path"]
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(ESXI_PXE_STAGED_CONFIG_PATH, context["esxi_pxe_manifest"])
+        results = [adapter.validate_esxi_pxe_config(config_path), adapter.apply_esxi_pxe_config(config_path)]
     elif unit_id == "ca":
         config_path = CA_STAGED_CONFIG_PATH
         if not adapter.dry_run:
@@ -3286,6 +3361,8 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         else:
             error = "\n".join(result.stderr for result in results if result.stderr).strip() or "Local user OS sync failed."
             mark_local_users_failed(users, error)
+    if unit_id == "esxi_pxe" and succeeded and not any(result.dry_run for result in results):
+        mark_kickstarts_applied(list(context["esxi_kickstarts"]))
     return {
         "unit_id": unit_id,
         "label": unit["label"],
@@ -3297,6 +3374,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         "validation_errors": unit["validation_errors"],
         "validation_warnings": unit["validation_warnings"],
         "removed_vlan_interfaces": unit.get("removed_vlan_interfaces", []),
+        "generated_files": [str(generated_kickstart_path(row.id)) for row in context.get("esxi_kickstarts", []) if row.enabled],
         "config_path": unit["config_path"],
         "config_preview": unit["config_preview"],
         "config_diff": unit["config_diff"],
@@ -7128,6 +7206,49 @@ def backup_restore_context(db: Session, result: dict[str, Any] | None = None, er
     }
 
 
+def require_esxi_pxe_write(identity: Identity) -> None:
+    if not identity.can("write:esxi-pxe"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ESXi PXE write permission required")
+
+
+def next_kickstart_copy_name(db: Session, base_name: str) -> str:
+    names = {row.name.lower() for row in db.execute(select(EsxiKickstart)).scalars().all()}
+    candidate = f"{base_name} Copy"
+    if candidate.lower() not in names:
+        return candidate
+    index = 2
+    while True:
+        candidate = f"{base_name} Copy {index}"
+        if candidate.lower() not in names:
+            return candidate
+        index += 1
+
+
+def esxi_pxe_page_context(
+    db: Session,
+    identity: Identity,
+    *,
+    selected_id: int | None = None,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    context = esxi_pxe_context(db)
+    kickstarts = context["esxi_kickstarts"]
+    selected = next((row for row in kickstarts if row.id == selected_id), None) or (kickstarts[0] if kickstarts else None)
+    selected_validation = {"valid": True, "errors": [], "warnings": []}
+    if selected is not None:
+        selected_validation = context["esxi_pxe_validation_by_id"].get(selected.id, selected_validation)
+    return {
+        **context,
+        "esxi_selected_kickstart": selected,
+        "esxi_selected_kickstart_json": kickstart_to_dict(selected, include_content=identity.can("write:esxi-pxe")) if selected else None,
+        "esxi_selected_validation": selected_validation,
+        "esxi_can_write": identity.can("write:esxi-pxe"),
+        "esxi_pxe_result": result,
+        "esxi_pxe_error": error,
+    }
+
+
 @router.post("/services/{service}/{action}", response_model=None)
 def service_action_from_ui(
     service: str,
@@ -7233,6 +7354,325 @@ def audit_log(
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
     return RedirectResponse("/logs#logs-audit-panel", status_code=303)
+
+
+@router.get("/pxe/esxi/ks/{kickstart_file}", response_model=None)
+def serve_esxi_kickstart_file(kickstart_file: str, db: Session = Depends(get_db)) -> FileResponse:
+    if not kickstart_file.endswith(".cfg"):
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    raw_id = kickstart_file.removesuffix(".cfg")
+    if not raw_id.isdigit():
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    kickstart = db.get(EsxiKickstart, int(raw_id))
+    path = generated_kickstart_path(int(raw_id))
+    if not kickstart or not kickstart.enabled or not path.is_file():
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    return FileResponse(path, media_type="text/plain; charset=utf-8")
+
+
+@router.get("/esxi-pxe", response_class=HTMLResponse, response_model=None)
+def esxi_pxe_page(
+    request: Request,
+    kickstart_id: int | None = None,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(
+        request,
+        "esxi_pxe.html",
+        {
+            "identity": identity,
+            **esxi_pxe_page_context(db, identity, selected_id=kickstart_id),
+            "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+        },
+    )
+
+
+@router.post("/esxi-pxe/kickstarts", response_model=None)
+def create_esxi_kickstart_from_ui(
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(""),
+    content: str = Form(...),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    try:
+        kickstart = EsxiKickstart(name=normalize_kickstart_name(name), description=description or None, content="", content_hash="", enabled=enabled)
+        db.add(kickstart)
+        db.flush()
+        assign_kickstart_content(kickstart, content, max_bytes=get_settings().esxi_kickstart_max_bytes)
+        kickstart.http_path = canonical_http_path(kickstart.id)
+        db.commit()
+    except (ValueError, IntegrityError) as exc:
+        db.rollback()
+        return render(
+            request,
+            "esxi_pxe.html",
+            {
+                "identity": identity,
+                **esxi_pxe_page_context(db, identity, error=str(exc)),
+                "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+            },
+            status_code=400,
+        )
+    record_audit(db, actor=identity.username, action="create_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"name={kickstart.name} hash={kickstart.content_hash}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={kickstart.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}", response_model=None)
+def update_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(""),
+    content: str = Form(...),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    try:
+        kickstart.name = normalize_kickstart_name(name)
+        kickstart.description = description or None
+        kickstart.enabled = enabled
+        assign_kickstart_content(kickstart, content, max_bytes=get_settings().esxi_kickstart_max_bytes)
+        kickstart.http_path = canonical_http_path(kickstart.id)
+        db.add(kickstart)
+        db.commit()
+    except (ValueError, IntegrityError) as exc:
+        db.rollback()
+        return render(
+            request,
+            "esxi_pxe.html",
+            {
+                "identity": identity,
+                **esxi_pxe_page_context(db, identity, selected_id=kickstart_id, error=str(exc)),
+                "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+            },
+            status_code=400,
+        )
+    record_audit(db, actor=identity.username, action="update_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"name={kickstart.name} hash={kickstart.content_hash}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={kickstart.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}/duplicate", response_model=None)
+def duplicate_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    source = db.get(EsxiKickstart, kickstart_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    duplicate = EsxiKickstart(
+        name=next_kickstart_copy_name(db, source.name),
+        description=source.description,
+        content=source.content,
+        content_hash=source.content_hash,
+        rendered_content=source.rendered_content,
+        enabled=source.enabled,
+    )
+    db.add(duplicate)
+    db.flush()
+    duplicate.http_path = canonical_http_path(duplicate.id)
+    db.commit()
+    record_audit(db, actor=identity.username, action="duplicate_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(duplicate.id), detail=f"source_id={source.id} name={duplicate.name}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={duplicate.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}/delete", response_model=None)
+def delete_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    for host in db.execute(select(EsxiPxeHost).where(EsxiPxeHost.kickstart_id == kickstart.id)).scalars().all():
+        host.kickstart_id = None
+        host.updated_at = utcnow()
+        db.add(host)
+    db.delete(kickstart)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart_id), request_id=request.state.request_id)
+    return RedirectResponse("/esxi-pxe", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}/validate", response_class=HTMLResponse, response_model=None)
+def validate_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    verify_csrf(request, csrf)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    errors, warnings = kickstart_validation(kickstart.content, strict=strict_validation_enabled(db), max_bytes=get_settings().esxi_kickstart_max_bytes)
+    record_audit(db, actor=identity.username, action="validate_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"errors={len(errors)} warnings={len(warnings)}", request_id=request.state.request_id)
+    return render(
+        request,
+        "esxi_pxe.html",
+        {
+            "identity": identity,
+            **esxi_pxe_page_context(
+                db,
+                identity,
+                selected_id=kickstart_id,
+                result={"title": "Validation complete", "message": f"{len(errors)} errors, {len(warnings)} warnings."},
+            ),
+            "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+        },
+    )
+
+
+@router.get("/esxi-pxe/kickstarts/{kickstart_id}/download", response_model=None)
+def download_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    require_esxi_pxe_write(identity)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", kickstart.name).strip("-") or f"kickstart-{kickstart.id}"
+    return Response(kickstart.content, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}.cfg"'})
+
+
+@router.post("/esxi-pxe/kickstarts/upload", response_model=None)
+async def upload_esxi_kickstart_from_ui(
+    request: Request,
+    kickstart_file: UploadFile = File(...),
+    name: str = Form(""),
+    description: str = Form(""),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    try:
+        content = decode_kickstart_upload(await kickstart_file.read(), max_bytes=get_settings().esxi_kickstart_max_bytes)
+        kickstart = EsxiKickstart(
+            name=normalize_kickstart_name(name or Path(kickstart_file.filename or "uploaded-kickstart").stem),
+            description=description or None,
+            content=content,
+            content_hash=content_hash(content),
+            rendered_content=content,
+            enabled=enabled,
+        )
+        db.add(kickstart)
+        db.flush()
+        kickstart.http_path = canonical_http_path(kickstart.id)
+        db.commit()
+    except (ValueError, IntegrityError) as exc:
+        db.rollback()
+        return render(
+            request,
+            "esxi_pxe.html",
+            {
+                "identity": identity,
+                **esxi_pxe_page_context(db, identity, error=str(exc)),
+                "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+            },
+            status_code=400,
+        )
+    record_audit(db, actor=identity.username, action="upload_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"name={kickstart.name} hash={kickstart.content_hash}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={kickstart.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}/import-filesystem", response_model=None)
+def import_esxi_kickstart_filesystem_copy(
+    kickstart_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    path = generated_kickstart_path(kickstart.id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Generated Kickstart file not found")
+    assign_kickstart_content(kickstart, normalize_kickstart_content(path.read_text(encoding="utf-8"), max_bytes=get_settings().esxi_kickstart_max_bytes), max_bytes=get_settings().esxi_kickstart_max_bytes)
+    db.add(kickstart)
+    db.commit()
+    record_audit(db, actor=identity.username, action="import_esxi_kickstart_from_filesystem", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"path={path} hash={kickstart.content_hash}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={kickstart.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/hosts", response_model=None)
+def create_esxi_pxe_host_from_ui(
+    request: Request,
+    hostname: str = Form(...),
+    mac_address: str = Form(...),
+    kickstart_id: str = Form(""),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    host = EsxiPxeHost(hostname=hostname.strip(), mac_address=mac_address.strip().lower(), kickstart_id=int(kickstart_id) if kickstart_id else None, enabled=enabled)
+    db.add(host)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id}", request_id=request.state.request_id)
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
+
+
+@router.post("/esxi-pxe/hosts/{host_id}", response_model=None)
+def update_esxi_pxe_host_from_ui(
+    host_id: int,
+    request: Request,
+    hostname: str = Form(...),
+    mac_address: str = Form(...),
+    kickstart_id: str = Form(""),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    host = db.get(EsxiPxeHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="ESXi PXE host not found")
+    host.hostname = hostname.strip()
+    host.mac_address = mac_address.strip().lower()
+    host.kickstart_id = int(kickstart_id) if kickstart_id else None
+    host.enabled = enabled
+    host.updated_at = utcnow()
+    db.add(host)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id}", request_id=request.state.request_id)
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
 
 
 @router.get("/backup-restore", response_class=HTMLResponse, response_model=None)

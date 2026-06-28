@@ -551,6 +551,40 @@ class VcfRegistryBundle(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class EsxiKickstart(Base):
+    __tablename__ = "esxi_kickstarts"
+    __table_args__ = (UniqueConstraint("name", name="uq_esxi_kickstart_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    rendered_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rendered_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    http_path: Mapped[str] = mapped_column(String(240), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_rendered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class EsxiPxeHost(Base):
+    __tablename__ = "esxi_pxe_hosts"
+    __table_args__ = (UniqueConstraint("mac_address", name="uq_esxi_pxe_host_mac"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(120), index=True)
+    mac_address: Mapped[str] = mapped_column(String(32), index=True)
+    kickstart_id: Mapped[int | None] = mapped_column(ForeignKey("esxi_kickstarts.id"), nullable=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    kickstart: Mapped[EsxiKickstart | None] = relationship()
+
+
 class Job(Base):
     __tablename__ = "jobs"
 

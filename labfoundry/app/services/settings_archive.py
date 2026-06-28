@@ -19,6 +19,8 @@ from labfoundry.app.models import (
     DhcpSettings,
     DnsRecord,
     DnsSettings,
+    EsxiKickstart,
+    EsxiPxeHost,
     FirewallRule,
     FirewallSettings,
     KmsClient,
@@ -73,9 +75,12 @@ SCALAR_TABLES = {
     "vcf_registry_bundles": VcfRegistryBundle,
     "vcf_offline_depot_settings": VcfOfflineDepotSettings,
     "vcf_depot_download_profiles": VcfDepotDownloadProfile,
+    "esxi_kickstarts": EsxiKickstart,
 }
 
 RESTORE_DELETE_MODELS = [
+    EsxiPxeHost,
+    EsxiKickstart,
     VcfRegistryBundle,
     VcfDepotDownloadProfile,
     VcfOfflineDepotSettings,
@@ -150,6 +155,7 @@ def export_settings_archive(db: Session, *, actor: str) -> dict[str, Any]:
     data["ca_certificates"] = _ca_certificates_to_archive(db)
     data["kms_keys"] = _kms_keys_to_archive(db)
     data["vcf_backup_settings"] = _vcf_backup_settings_to_archive(db)
+    data["esxi_pxe_hosts"] = _esxi_pxe_hosts_to_archive(db)
     data["settings"] = _settings_rows(db)
     return payload
 
@@ -204,6 +210,16 @@ def _vcf_backup_settings_to_archive(db: Session) -> list[dict[str, Any]]:
     return rows
 
 
+def _esxi_pxe_hosts_to_archive(db: Session) -> list[dict[str, Any]]:
+    kickstarts = {row.id: row.name for row in db.execute(select(EsxiKickstart)).scalars().all()}
+    rows = []
+    for host in db.execute(select(EsxiPxeHost)).scalars().all():
+        payload = _row_to_dict(host, exclude={"kickstart_id"})
+        payload["kickstart_name"] = kickstarts.get(host.kickstart_id) if host.kickstart_id else ""
+        rows.append(payload)
+    return rows
+
+
 def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, int]:
     _validate_archive(archive)
     data = archive["data"]
@@ -249,8 +265,11 @@ def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, 
         "vcf_registry_bundles",
         "vcf_offline_depot_settings",
         "vcf_depot_download_profiles",
+        "esxi_kickstarts",
     ]:
         counts[key] = _insert_rows(db, SCALAR_TABLES[key], data.get(key, []))
+    db.flush()
+    counts["esxi_pxe_hosts"] = _restore_esxi_pxe_hosts(db, data.get("esxi_pxe_hosts", []))
     counts["settings"] = _insert_rows(db, Setting, [row for row in data.get("settings", []) if row.get("key") in SAFE_SETTING_KEYS])
     _disable_startup_example_seed(db)
     db.commit()
@@ -273,6 +292,7 @@ def desired_state_counts(db: Session) -> dict[str, int]:
     counts["ca_certificates"] = len(db.execute(select(CaCertificate)).scalars().all())
     counts["kms_keys"] = len(db.execute(select(KmsKey)).scalars().all())
     counts["vcf_backup_settings"] = len(db.execute(select(VcfBackupSettings)).scalars().all())
+    counts["esxi_pxe_hosts"] = len(db.execute(select(EsxiPxeHost)).scalars().all())
     counts["settings"] = len(db.execute(select(Setting).where(Setting.key.in_(SAFE_SETTING_KEYS))).scalars().all())
     return counts
 
@@ -389,5 +409,16 @@ def _restore_vcf_backup_settings(db: Session, rows: list[dict[str, Any]]) -> int
         username = str(row.get("sftp_username") or "")
         payload["sftp_user_id"] = users.get(username) if username else None
         db.add(VcfBackupSettings(**payload))
+    db.flush()
+    return len(rows)
+
+
+def _restore_esxi_pxe_hosts(db: Session, rows: list[dict[str, Any]]) -> int:
+    kickstarts = {row.name: row.id for row in db.execute(select(EsxiKickstart)).scalars().all()}
+    for row in rows:
+        payload = _model_kwargs(EsxiPxeHost, row, exclude={"kickstart_id"})
+        kickstart_name = str(row.get("kickstart_name") or "")
+        payload["kickstart_id"] = kickstarts.get(kickstart_name) if kickstart_name else None
+        db.add(EsxiPxeHost(**payload))
     db.flush()
     return len(rows)
