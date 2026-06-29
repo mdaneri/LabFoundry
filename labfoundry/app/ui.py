@@ -89,6 +89,7 @@ from labfoundry.app.services.dnsmasq import (
     dns_reverse_records,
     dhcp_option_to_dict,
     dhcp_scope_to_dict,
+    dnsmasq_tag,
     join_conditional_forwarders,
     join_addresses,
     join_domains,
@@ -2003,7 +2004,7 @@ def dnsmasq_context(db: Session) -> dict:
         "dhcp_options": dhcp_options,
         "dhcp_option_rows": [dhcp_option_to_dict(option) for option in dhcp_options],
         "dhcp_option_scope_choices": dhcp_option_scope_choices(dhcp_scopes),
-        "dhcp_generated_pxe_options": generated_esxi_pxe_dhcp_options(esxi_boot),
+        "dhcp_generated_pxe_options": generated_esxi_pxe_dhcp_options(esxi_boot, dhcp_scopes),
         "dhcp_reservations": dhcp_reservations,
         "dhcp_reservation_rows": [dhcp_reservation_payload(item) for item in dhcp_reservations],
         "dhcp_leases": dhcp_leases,
@@ -2026,10 +2027,13 @@ def dnsmasq_context(db: Session) -> dict:
     }
 
 
-def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any]) -> list[dict[str, str]]:
+def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any], scopes: list[DhcpScope]) -> list[dict[str, str]]:
     if not esxi_boot or not (esxi_boot.get("enabled") or esxi_boot.get("native_uefi_http_enabled")):
         return []
     rows: list[dict[str, str]] = []
+    scope = next((item for item in scopes if item.id == esxi_boot.get("dhcp_scope_id")), None)
+    applies_to = scope.name if scope is not None else "All DHCP zones"
+    scope_prefix = f"tag:{dnsmasq_tag(scope.name)}," if scope is not None else ""
     tftp_hostname = str(esxi_boot.get("hostname") or "").strip()
     tftp_address = next(
         (line.strip() for line in str(esxi_boot.get("listen_address") or "").replace(",", "\n").splitlines() if line.strip()),
@@ -2039,26 +2043,26 @@ def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any]) -> list[dict[str,
     native_http_url = str(esxi_boot.get("effective_native_uefi_http_url") or esxi_boot.get("native_uefi_http_url") or "").strip()
 
     def add(flow: str, line: str, note: str) -> None:
-        rows.append({"flow": flow, "line": line, "note": note})
+        rows.append({"applies_to": applies_to, "flow": flow, "line": line, "note": note})
 
     if esxi_boot.get("native_uefi_http_enabled") and native_http_url:
         add("Native UEFI HTTP", "dhcp-vendorclass=set:uefi-http,HTTPClient", "Detect HTTPClient firmware")
         add("Native UEFI HTTP", "dhcp-match=set:uefi-http-x64,option:client-arch,16", "Match x64 HTTP boot")
-        add("Native UEFI HTTP", f"dhcp-boot=tag:uefi-http,tag:uefi-http-x64,{native_http_url}", "Return mboot.efi HTTP URL")
+        add("Native UEFI HTTP", f"dhcp-boot={scope_prefix}tag:uefi-http,tag:uefi-http-x64,{native_http_url}", "Return mboot.efi HTTP URL")
 
     if esxi_boot.get("enabled"):
         if tftp_hostname:
-            add("PXE TFTP", f"dhcp-option=66,{tftp_hostname}", "Advertise TFTP server name")
+            add("PXE TFTP", f"dhcp-option={scope_prefix}66,{tftp_hostname}", "Advertise TFTP server name")
         add("PXE TFTP", "enable-tftp", "Enable dnsmasq TFTP")
         add("PXE TFTP", f"tftp-root={esxi_boot.get('tftp_root')}", "Serve generated boot files")
         add("iPXE detection", "dhcp-userclass=set:ipxe,iPXE", "Detect iPXE second request")
         add("iPXE detection", "dhcp-match=set:ipxe,175", "Compatibility iPXE marker")
         add("UEFI PXE detection", "dhcp-match=set:efi-x86_64,option:client-arch,7", "Match x64 UEFI PXE")
         add("UEFI PXE detection", "dhcp-match=set:efi-x86_64,option:client-arch,9", "Match x64 UEFI PXE")
-        add("iPXE second stage", f"dhcp-boot=tag:ipxe,tag:efi-x86_64,{esxi_boot.get('uefi_second_stage_bootfile')}{boot_server}", "UEFI iPXE loads ESXi mboot")
-        add("iPXE second stage", f"dhcp-boot=tag:ipxe,tag:!efi-x86_64,{esxi_boot.get('bios_second_stage_bootfile')}{boot_server}", "BIOS iPXE loads PXELINUX")
-        add("PXE first stage", f"dhcp-boot=tag:efi-x86_64,{esxi_boot.get('uefi_bootfile')}{boot_server}", "UEFI PXE first-stage iPXE")
-        add("PXE first stage", f"dhcp-boot=tag:!efi-x86_64,{esxi_boot.get('bios_bootfile')}{boot_server}", "BIOS PXE first-stage iPXE")
+        add("iPXE second stage", f"dhcp-boot={scope_prefix}tag:ipxe,tag:efi-x86_64,{esxi_boot.get('uefi_second_stage_bootfile')}{boot_server}", "UEFI iPXE loads ESXi mboot")
+        add("iPXE second stage", f"dhcp-boot={scope_prefix}tag:ipxe,tag:!efi-x86_64,{esxi_boot.get('bios_second_stage_bootfile')}{boot_server}", "BIOS iPXE loads PXELINUX")
+        add("PXE first stage", f"dhcp-boot={scope_prefix}tag:efi-x86_64,{esxi_boot.get('uefi_bootfile')}{boot_server}", "UEFI PXE first-stage iPXE")
+        add("PXE first stage", f"dhcp-boot={scope_prefix}tag:!efi-x86_64,{esxi_boot.get('bios_bootfile')}{boot_server}", "BIOS PXE first-stage iPXE")
     return rows
 
 
@@ -3056,6 +3060,7 @@ def local_users_apply_context(db: Session, baseline: dict[str, Any] | None = Non
 def esxi_pxe_context(db: Session) -> dict[str, Any]:
     kickstarts = db.execute(select(EsxiKickstart).order_by(EsxiKickstart.name)).scalars().all()
     hosts = db.execute(select(EsxiPxeHost).options(selectinload(EsxiPxeHost.kickstart)).order_by(EsxiPxeHost.hostname)).scalars().all()
+    dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
     available_interfaces = service_bind_options(db)
     iso_error = ""
     try:
@@ -3097,6 +3102,8 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
     if boot_settings["enabled"]:
         if not boot_settings["hostname"]:
             validation_errors.append("ESXi PXE hostname is required when PXE/TFTP bootstrap is enabled.")
+        if not boot_settings.get("dhcp_scope_id"):
+            validation_errors.append("ESXi PXE boot service requires a DHCP IP zone.")
         if not selected_boot_addresses:
             validation_errors.append("ESXi PXE boot service requires at least one listen address.")
         if esxi_pxe_dns_record_conflict(db, boot_settings["hostname"]):
@@ -3114,6 +3121,17 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
         "esxi_installer_isos": installer_isos,
         "esxi_installer_iso_error": iso_error,
         "esxi_pxe_boot": boot_settings,
+        "esxi_pxe_dhcp_scope_options": [
+            {
+                "id": scope.id,
+                "name": scope.name,
+                "interface_name": scope.interface_name,
+                "site_address": scope.site_address,
+                "label": f"{scope.name} - {scope.interface_name} / {scope.site_address}/{scope.prefix_length}",
+            }
+            for scope in dhcp_scopes
+            if scope.enabled is not False
+        ],
         "esxi_pxe_available_interfaces": available_interfaces,
         "esxi_pxe_selected_interfaces": selected_boot_interfaces,
         "esxi_pxe_selected_addresses": selected_boot_addresses,
@@ -7641,6 +7659,7 @@ def update_esxi_pxe_boot_settings_from_ui(
     request: Request,
     enabled: bool = Form(False),
     hostname: str = Form(ESXI_PXE_DEFAULT_HOSTNAME),
+    dhcp_scope_id: str = Form(""),
     listen_interfaces: list[str] = Form(default=[]),
     listen_addresses: list[str] = Form(default=[]),
     listen_interfaces_present: str | None = Form(None),
@@ -7676,6 +7695,7 @@ def update_esxi_pxe_boot_settings_from_ui(
             hostname=hostname,
             listen_interface=selected_interfaces,
             listen_address=selected_addresses,
+            dhcp_scope_id=dhcp_scope_id,
             tftp_root=tftp_root,
             http_port=http_port,
             bios_bootfile=bios_bootfile,

@@ -15,6 +15,7 @@
     {% endif %}
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="DHCP views">
       <button class="tab-button active" type="button" data-tab-target="dhcp-desired-state" aria-selected="true">Desired State</button>
+      <button class="tab-button" type="button" data-tab-target="dhcp-generated-pxe" aria-selected="false">Generated PXE</button>
       <button class="tab-button" type="button" data-tab-target="dhcp-actual-leases" aria-selected="false">Actual Leases</button>
     </div>
     <div class="tab-panels">
@@ -77,31 +78,6 @@
       </div>
       <span class="status-pill muted">{{ dhcp_options|length }} options</span>
     </div>
-    {% if dhcp_generated_pxe_options %}
-      <div class="generated-options-panel">
-        <div class="section-head compact">
-          <div>
-            <h3>Generated PXE Boot Options</h3>
-            <p class="muted">Owned by ESXi PXE settings and rendered into dnsmasq during global appliance apply.</p>
-          </div>
-          <span class="status-pill good">{{ dhcp_generated_pxe_options|length }} generated</span>
-        </div>
-        <table class="data-table compact generated-options-table">
-          <thead>
-            <tr><th>Flow</th><th>Rendered line</th><th>Purpose</th></tr>
-          </thead>
-          <tbody>
-            {% for option in dhcp_generated_pxe_options %}
-              <tr>
-                <td>{{ option.flow }}</td>
-                <td><code>{{ option.line }}</code></td>
-                <td>{{ option.note }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    {% endif %}
     <div id="dhcp-option-error" class="alert error hidden"></div>
     <div
       id="dhcp-options-table"
@@ -185,6 +161,38 @@
         {% endfor %}
       </tbody>
     </table>
+      </div>
+      <div id="dhcp-generated-pxe" class="tab-panel" role="tabpanel" hidden>
+        <div class="generated-options-panel">
+        <div class="section-head compact">
+          <div>
+            <h3>Generated PXE Boot Options</h3>
+            <p class="muted">Owned by ESXi PXE settings and rendered into dnsmasq during global appliance apply.</p>
+          </div>
+          <span class="status-pill {{ 'good' if dhcp_generated_pxe_options else 'muted' }}">{{ dhcp_generated_pxe_options|length }} generated</span>
+        </div>
+        {% if dhcp_generated_pxe_options %}
+        <table class="data-table compact generated-options-table">
+          <thead>
+            <tr><th>Applies to</th><th>Flow</th><th>Rendered line</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            {% for option in dhcp_generated_pxe_options %}
+              <tr>
+                <td>{{ option.applies_to }}</td>
+                <td>{{ option.flow }}</td>
+                <td><code>{{ option.line }}</code></td>
+                <td>{{ option.note }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+          <div class="empty-state compact">
+            <p class="muted">No generated PXE boot options. Enable ESXi PXE and select a DHCP IP zone to render scoped boot options here.</p>
+          </div>
+        {% endif %}
+      </div>
       </div>
       <div id="dhcp-actual-leases" class="tab-panel" role="tabpanel" hidden>
         <div class="section-head">

@@ -26,66 +26,21 @@
       </div>
       <input type="hidden" name="listen_interfaces_present" value="1">
       <input type="hidden" name="listen_addresses_present" value="1">
-      <div class="service-bind-editor stacked-service-bind-editor" data-service-bind>
-        <div class="form-field">
-          <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="Access-mode physical interfaces and enabled VLAN interfaces with configured IP addresses can serve PXE DHCP/TFTP. Trunk physical NICs are not direct bind targets.">i</button></span>
-          <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
-            <div class="tag-editor-tags" data-tag-list>
-              {% for interface_name in esxi_pxe_selected_interfaces %}
-                <span class="tag-token" data-value="{{ interface_name }}">
-                  <span>{{ interface_name }}</span>
-                  <button type="button" data-tag-remove aria-label="Remove {{ interface_name }}">×</button>
-                  <input type="hidden" name="listen_interfaces" value="{{ interface_name }}">
-                </span>
-              {% endfor %}
-            </div>
-            <input class="tag-editor-input" type="text" placeholder="Add interface..." list="esxi-pxe-interface-options" data-tag-entry autocomplete="off" {{ "disabled" if not esxi_can_write else "" }}>
-            <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface" {{ "disabled" if not esxi_can_write else "" }}>+</button>
-            <div class="tag-suggestions" data-tag-menu hidden>
-              {% for interface in esxi_pxe_available_interfaces %}
-                <button type="button" data-tag-option="{{ interface.name }}" data-service-bind-address="{{ interface.address }}">
-                  <strong>{{ interface.name }}</strong>
-                  <small>{{ interface.label }}</small>
-                </button>
-              {% endfor %}
-            </div>
-          </div>
-          <datalist id="esxi-pxe-interface-options">
-            {% for interface in esxi_pxe_available_interfaces %}
-              <option value="{{ interface.name }}">{{ interface.label }}</option>
-            {% endfor %}
-          </datalist>
-        </div>
-        <div class="form-field">
-          <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="Appliance IP addresses advertised to PXE clients. The first address becomes the DNS target and TFTP server address recorded in DHCP.">i</button></span>
-          <div class="tag-editor" data-tag-editor data-tag-name="listen_addresses" data-service-bind-address>
-            <div class="tag-editor-tags" data-tag-list>
-              {% for address in esxi_pxe_selected_addresses %}
-                <span class="tag-token" data-value="{{ address }}">
-                  <span>{{ address }}</span>
-                  <button type="button" data-tag-remove aria-label="Remove {{ address }}">×</button>
-                  <input type="hidden" name="listen_addresses" value="{{ address }}">
-                </span>
-              {% endfor %}
-            </div>
-            <input class="tag-editor-input" type="text" placeholder="Add listen address..." list="esxi-pxe-address-options" data-tag-entry autocomplete="off" {{ "disabled" if not esxi_can_write else "" }}>
-            <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing listen address" {{ "disabled" if not esxi_can_write else "" }}>+</button>
-            <div class="tag-suggestions" data-tag-menu hidden>
-              {% for item in esxi_pxe_available_addresses %}
-                <button type="button" data-tag-option="{{ item.address }}">
-                  <strong>{{ item.address }}</strong>
-                  <small>{{ item.source }}</small>
-                </button>
-              {% endfor %}
-            </div>
-          </div>
-          <datalist id="esxi-pxe-address-options">
-            {% for item in esxi_pxe_available_addresses %}
-              <option value="{{ item.address }}">{{ item.source }}</option>
-            {% endfor %}
-          </datalist>
-        </div>
-      </div>
+      {% for interface_name in esxi_pxe_selected_interfaces %}
+        <input type="hidden" name="listen_interfaces" value="{{ interface_name }}">
+      {% endfor %}
+      {% for address in esxi_pxe_selected_addresses %}
+        <input type="hidden" name="listen_addresses" value="{{ address }}">
+      {% endfor %}
+      <label>
+        <span class="field-label"><span>DHCP IP Zone</span><button class="help-icon" type="button" data-help="Selects the DHCP IP zone that receives ESXi PXE boot options. LabFoundry derives the PXE interface, TFTP server address, DNS record, firewall rules, and generated dnsmasq tags from this zone.">i</button></span>
+        <select name="dhcp_scope_id" {{ "disabled" if not esxi_can_write else "" }}>
+          <option value="">Select a DHCP IP zone...</option>
+          {% for scope in esxi_pxe_dhcp_scope_options %}
+            <option value="{{ scope.id }}" {{ "selected" if esxi_pxe_boot.dhcp_scope_id == scope.id else "" }}>{{ scope.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
       <input type="hidden" name="tftp_root" value="{{ esxi_pxe_boot.tftp_root }}">
       <input type="hidden" name="bios_bootfile" value="{{ esxi_pxe_boot.bios_bootfile }}">
       <input type="hidden" name="uefi_bootfile" value="{{ esxi_pxe_boot.uefi_bootfile }}">
@@ -110,6 +65,7 @@
         <div><span>UEFI bootfile</span><strong>{{ esxi_pxe_boot.uefi_bootfile }}</strong></div>
         <div><span>BIOS second stage</span><strong>{{ esxi_pxe_boot.bios_second_stage_bootfile }}</strong></div>
         <div><span>UEFI second stage</span><strong>{{ esxi_pxe_boot.uefi_second_stage_bootfile }}</strong></div>
+        <div><span>DHCP zone</span><strong>{{ esxi_pxe_boot.dhcp_scope_name or "not selected" }}</strong></div>
         <div><span>Bind target</span><strong>{{ esxi_pxe_bind_label }}</strong></div>
       </div>
       {% if esxi_can_write %}

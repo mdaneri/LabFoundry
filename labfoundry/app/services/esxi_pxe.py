@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from labfoundry.app.models import EsxiKickstart, EsxiPxeHost, Setting, utcnow
+from labfoundry.app.models import DhcpScope, EsxiKickstart, EsxiPxeHost, Setting, utcnow
 
 ESXI_PXE_UNIT_ID = "esxi_pxe"
 ESXI_PXE_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/esxi-pxe/labfoundry-esxi-pxe.json"
@@ -27,6 +27,7 @@ ESXI_INSTALLER_ISO_ROOT = Path("/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_
 ESXI_PXE_STRICT_VALIDATION_KEY = "esxi_pxe.strict_kickstart_validation"
 ESXI_PXE_BOOT_ENABLED_KEY = "esxi_pxe.boot.enabled"
 ESXI_PXE_HOSTNAME_KEY = "esxi_pxe.boot.hostname"
+ESXI_PXE_DHCP_SCOPE_ID_KEY = "esxi_pxe.boot.dhcp_scope_id"
 ESXI_PXE_LISTEN_INTERFACE_KEY = "esxi_pxe.boot.listen_interface"
 ESXI_PXE_LISTEN_ADDRESS_KEY = "esxi_pxe.boot.listen_address"
 ESXI_PXE_TFTP_ROOT_KEY = "esxi_pxe.boot.tftp_root"
@@ -154,11 +155,19 @@ def esxi_pxe_boot_settings(db: Session) -> dict[str, Any]:
     rows = {row.key: row.value for row in db.execute(select(Setting).where(Setting.key.like("esxi_pxe.boot.%"))).scalars().all()}
     enabled = rows.get(ESXI_PXE_BOOT_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"}
     native_uefi_http_enabled = rows.get(ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"}
+    dhcp_scope = _selected_dhcp_scope(db, rows.get(ESXI_PXE_DHCP_SCOPE_ID_KEY), rows.get(ESXI_PXE_LISTEN_INTERFACE_KEY, ""), rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, ""))
+    listen_interface = rows.get(ESXI_PXE_LISTEN_INTERFACE_KEY, "").strip()
+    listen_address = rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, "").strip()
+    if dhcp_scope is not None:
+        listen_interface = dhcp_scope.interface_name.strip()
+        listen_address = dhcp_scope.site_address.strip()
     settings = {
         "enabled": enabled,
         "hostname": rows.get(ESXI_PXE_HOSTNAME_KEY, ESXI_PXE_DEFAULT_HOSTNAME).strip() or ESXI_PXE_DEFAULT_HOSTNAME,
-        "listen_interface": rows.get(ESXI_PXE_LISTEN_INTERFACE_KEY, "").strip(),
-        "listen_address": rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, "").strip(),
+        "dhcp_scope_id": dhcp_scope.id if dhcp_scope is not None else None,
+        "dhcp_scope_name": dhcp_scope.name if dhcp_scope is not None else "",
+        "listen_interface": listen_interface,
+        "listen_address": listen_address,
         "tftp_root": rows.get(ESXI_PXE_TFTP_ROOT_KEY, ESXI_TFTP_ROOT.as_posix()).strip() or ESXI_TFTP_ROOT.as_posix(),
         "http_port": _normalize_http_port(rows.get(ESXI_PXE_HTTP_PORT_KEY, str(ESXI_PXE_HTTP_PORT))),
         "bios_bootfile": _bootfile_setting(rows.get(ESXI_PXE_BIOS_BOOTFILE_KEY), default=ESXI_PXE_BIOS_BOOTFILE, legacy_defaults={"pxelinux.0"}),
@@ -189,14 +198,20 @@ def save_esxi_pxe_boot_settings(
     tftp_root: str,
     bios_bootfile: str,
     uefi_bootfile: str,
+    dhcp_scope_id: int | str | None = None,
     http_port: int | str = ESXI_PXE_HTTP_PORT,
     ipxe_script: str | None = None,
     native_uefi_http_enabled: bool = False,
     native_uefi_http_url: str = "",
 ) -> dict[str, Any]:
+    normalized_scope_id, scope_interface, scope_address = _normalize_dhcp_scope_selection(db, dhcp_scope_id)
+    if normalized_scope_id is not None:
+        listen_interface = scope_interface
+        listen_address = scope_address
     settings = {
         ESXI_PXE_BOOT_ENABLED_KEY: "true" if enabled else "false",
         ESXI_PXE_HOSTNAME_KEY: _normalize_hostname(hostname),
+        ESXI_PXE_DHCP_SCOPE_ID_KEY: str(normalized_scope_id or ""),
         ESXI_PXE_LISTEN_INTERFACE_KEY: _normalize_multiline_values(listen_interface),
         ESXI_PXE_LISTEN_ADDRESS_KEY: _normalize_multiline_values(listen_address),
         ESXI_PXE_TFTP_ROOT_KEY: _normalize_tftp_root(tftp_root),
@@ -217,6 +232,40 @@ def save_esxi_pxe_boot_settings(
             row.value = value
     db.flush()
     return esxi_pxe_boot_settings(db)
+
+
+def _selected_dhcp_scope(db: Session, raw_scope_id: str | None, listen_interface: str, listen_address: str) -> DhcpScope | None:
+    scope_id = (raw_scope_id or "").strip()
+    if scope_id.isdigit():
+        scope = db.get(DhcpScope, int(scope_id))
+        if scope is not None and scope.enabled is not False:
+            return scope
+    interface = next((item.strip() for item in (listen_interface or "").splitlines() if item.strip()), "")
+    address = next((item.strip() for item in (listen_address or "").splitlines() if item.strip()), "")
+    if not interface and not address:
+        return None
+    query = select(DhcpScope).order_by(DhcpScope.name)
+    for scope in db.execute(query).scalars().all():
+        if scope.enabled is False:
+            continue
+        if address and scope.site_address.strip() != address:
+            continue
+        if interface and scope.interface_name.strip() != interface:
+            continue
+        return scope
+    return None
+
+
+def _normalize_dhcp_scope_selection(db: Session, raw_scope_id: int | str | None) -> tuple[int | None, str, str]:
+    value = str(raw_scope_id or "").strip()
+    if not value:
+        return None, "", ""
+    if not value.isdigit():
+        raise ValueError("ESXi PXE DHCP zone must be a valid DHCP IP zone.")
+    scope = db.get(DhcpScope, int(value))
+    if scope is None or scope.enabled is False:
+        raise ValueError("ESXi PXE DHCP zone must be an enabled DHCP IP zone.")
+    return scope.id, scope.interface_name.strip(), scope.site_address.strip()
 
 
 def _normalize_hostname(value: str) -> str:
@@ -557,6 +606,8 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
     boot = boot_settings or {
         "enabled": False,
         "hostname": ESXI_PXE_DEFAULT_HOSTNAME,
+        "dhcp_scope_id": None,
+        "dhcp_scope_name": "",
         "listen_interface": "",
         "listen_address": "",
         "tftp_root": ESXI_TFTP_ROOT.as_posix(),
@@ -580,6 +631,8 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
     boot_manifest_keys = {
         "enabled",
         "hostname",
+        "dhcp_scope_id",
+        "dhcp_scope_name",
         "listen_interface",
         "listen_address",
         "tftp_root",

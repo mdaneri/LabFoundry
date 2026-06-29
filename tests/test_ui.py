@@ -774,7 +774,7 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import DhcpSettings, DnsRecord
+    from labfoundry.app.models import DhcpScope, DhcpSettings, DnsRecord
     from labfoundry.app.services.esxi_pxe import esxi_pxe_boot_settings
     from labfoundry.app.ui import dnsmasq_context, esxi_pxe_context
 
@@ -783,8 +783,9 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert page.status_code == 200
     assert "Boot Service" in page.text
     assert "Hostname" in page.text
-    assert "Listen interfaces" in page.text
-    assert "Listen addresses" in page.text
+    assert "DHCP IP Zone" in page.text
+    assert "Listen interfaces" not in page.text
+    assert "Listen addresses" not in page.text
     assert 'type="hidden" name="tftp_root"' in page.text
     assert 'type="hidden" name="bios_bootfile"' in page.text
     assert 'type="hidden" name="uefi_bootfile"' in page.text
@@ -803,6 +804,9 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "grid-column: 2;" in css
     assert ".generated-options-panel" in css
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    with SessionLocal() as db:
+        pxe_scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        pxe_scope_id = str(pxe_scope.id)
 
     response = client.post(
         "/esxi-pxe/boot-settings",
@@ -810,7 +814,7 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
             "csrf": csrf,
             "enabled": "on",
             "hostname": "esxi-pxe.labfoundry.internal",
-            "listen_addresses": "192.168.50.1",
+            "dhcp_scope_id": pxe_scope_id,
             "listen_addresses_present": "1",
             "listen_interfaces_present": "1",
             "tftp_root": "/var/lib/labfoundry/pxe/tftp",
@@ -828,6 +832,9 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         boot = esxi_pxe_boot_settings(db)
         assert boot["enabled"] is True
         assert boot["hostname"] == "esxi-pxe.labfoundry.internal"
+        assert boot["dhcp_scope_id"] == int(pxe_scope_id)
+        assert boot["dhcp_scope_name"] == "SiteA"
+        assert boot["listen_interface"] == "eth2"
         assert boot["listen_address"] == "192.168.50.1"
         assert boot["http_port"] == 8080
         assert boot["effective_native_uefi_http_url"] == "http://192.168.50.1:8080/pxe/esxi/mboot.efi"
@@ -840,25 +847,29 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         db.commit()
         dns_preview = dnsmasq_context(db)["config_preview"]
         assert "enable-tftp" in dns_preview
-        assert "dhcp-option=66,esxi-pxe.labfoundry.internal" in dns_preview
-        assert "dhcp-boot=tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
-        assert "dhcp-boot=tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
-        assert "dhcp-boot=tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
-        assert "dhcp-boot=tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
-        assert "dhcp-boot=tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dns_preview
+        assert "dhcp-option=tag:sitea,66,esxi-pxe.labfoundry.internal" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dns_preview
         manifest = json.loads(esxi_pxe_context(db)["esxi_pxe_manifest"])
         assert manifest["schema_version"] == 2
         assert manifest["boot"]["enabled"] is True
         assert manifest["boot"]["hostname"] == "esxi-pxe.labfoundry.internal"
+        assert manifest["boot"]["dhcp_scope_id"] == int(pxe_scope_id)
         assert manifest["boot"]["http_port"] == 8080
         assert manifest["boot"]["bios_second_stage_bootfile"] == "pxelinux.0"
     dhcp_page = client.get("/dhcp")
     assert dhcp_page.status_code == 200
+    assert dhcp_page.text.index("Desired State") < dhcp_page.text.index("Generated PXE") < dhcp_page.text.index("Actual Leases")
+    assert 'id="dhcp-generated-pxe" class="tab-panel" role="tabpanel" hidden' in dhcp_page.text
     assert "Generated PXE Boot Options" in dhcp_page.text
+    assert "SiteA" in dhcp_page.text
     assert "dhcp-userclass=set:ipxe,iPXE" in dhcp_page.text
     assert "dhcp-match=set:ipxe,175" in dhcp_page.text
-    assert "dhcp-boot=tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
-    assert "dhcp-boot=tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dhcp_page.text
+    assert "dhcp-boot=tag:sitea,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
+    assert "dhcp-boot=tag:sitea,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dhcp_page.text
 
 
 def test_esxi_pxe_boot_settings_migrate_legacy_first_stage_defaults(client):
@@ -1788,7 +1799,9 @@ def test_dns_and_dhcp_pages_render(client):
     assert dhcp.status_code == 200
     assert "DHCP IP Zones" in dhcp.text
     assert "Desired State" in dhcp.text
+    assert "Generated PXE" in dhcp.text
     assert "Actual Leases" in dhcp.text
+    assert 'id="dhcp-generated-pxe"' in dhcp.text
     assert 'id="dhcp-actual-leases"' in dhcp.text
     assert "api-client.labfoundry.internal" in dhcp.text
     assert "labfoundry-helper dnsmasq leases" in dhcp.text

@@ -559,6 +559,7 @@ def render_dnsmasq_config(
             lines.append(f"host-record={record.hostname},{record.address}")
         elif record.record_type.upper() == "CNAME":
             lines.append(f"cname={record.hostname},{record.address.strip().strip('.').lower()}")
+    scope_tags = {scope.id: dnsmasq_tag(scope.name) for scope in scopes}
     if dhcp_settings.enabled:
         if esxi_pxe_boot and (esxi_pxe_boot.get("enabled") or esxi_pxe_boot.get("native_uefi_http_enabled")):
             tftp_hostname = str(esxi_pxe_boot.get("hostname") or "").strip()
@@ -567,18 +568,25 @@ def render_dnsmasq_config(
                 "",
             )
             native_http_url = str(esxi_pxe_boot.get("effective_native_uefi_http_url") or esxi_pxe_boot.get("native_uefi_http_url") or "").strip()
+            pxe_scope_id = esxi_pxe_boot.get("dhcp_scope_id")
+            pxe_scope_tag = ""
+            if isinstance(pxe_scope_id, int):
+                pxe_scope_tag = scope_tags.get(pxe_scope_id, "")
+            elif str(pxe_scope_id or "").isdigit():
+                pxe_scope_tag = scope_tags.get(int(pxe_scope_id), "")
+            pxe_scope_prefix = f"tag:{pxe_scope_tag}," if pxe_scope_tag else ""
             if esxi_pxe_boot.get("native_uefi_http_enabled") and native_http_url:
                 lines.extend(
                     [
                         "dhcp-vendorclass=set:uefi-http,HTTPClient",
                         "dhcp-match=set:uefi-http-x64,option:client-arch,16",
-                        f"dhcp-boot=tag:uefi-http,tag:uefi-http-x64,{native_http_url}",
+                        f"dhcp-boot={pxe_scope_prefix}tag:uefi-http,tag:uefi-http-x64,{native_http_url}",
                     ]
                 )
         if esxi_pxe_boot and esxi_pxe_boot.get("enabled"):
             boot_server = ""
             if tftp_hostname and tftp_address:
-                lines.append(f"dhcp-option=66,{tftp_hostname}")
+                lines.append(f"dhcp-option={pxe_scope_prefix}66,{tftp_hostname}")
                 boot_server = f",{tftp_hostname},{tftp_address}"
             lines.extend(
                 [
@@ -592,17 +600,16 @@ def render_dnsmasq_config(
             )
             lines.extend(
                 [
-                    f"dhcp-boot=tag:ipxe,tag:efi-x86_64,{esxi_pxe_boot.get('uefi_second_stage_bootfile')}{boot_server}",
-                    f"dhcp-boot=tag:ipxe,tag:!efi-x86_64,{esxi_pxe_boot.get('bios_second_stage_bootfile')}{boot_server}",
-                    f"dhcp-boot=tag:efi-x86_64,{esxi_pxe_boot.get('uefi_bootfile')}{boot_server}",
-                    f"dhcp-boot=tag:!efi-x86_64,{esxi_pxe_boot.get('bios_bootfile')}{boot_server}",
+                    f"dhcp-boot={pxe_scope_prefix}tag:ipxe,tag:efi-x86_64,{esxi_pxe_boot.get('uefi_second_stage_bootfile')}{boot_server}",
+                    f"dhcp-boot={pxe_scope_prefix}tag:ipxe,tag:!efi-x86_64,{esxi_pxe_boot.get('bios_second_stage_bootfile')}{boot_server}",
+                    f"dhcp-boot={pxe_scope_prefix}tag:efi-x86_64,{esxi_pxe_boot.get('uefi_bootfile')}{boot_server}",
+                    f"dhcp-boot={pxe_scope_prefix}tag:!efi-x86_64,{esxi_pxe_boot.get('bios_bootfile')}{boot_server}",
                 ]
             )
-        scope_tags = {scope.id: _dnsmasq_tag(scope.name) for scope in scopes}
         for scope in scopes:
             if scope.enabled is False:
                 continue
-            tag = _dnsmasq_tag(scope.name)
+            tag = dnsmasq_tag(scope.name)
             lines.extend(
                 [
                     f"dhcp-range=set:{tag},{scope.range_start},{scope.range_end},{scope.lease_time or '12h'}",
@@ -722,7 +729,7 @@ def _legacy_scope(settings: DhcpSettings) -> DhcpScope:
     )
 
 
-def _dnsmasq_tag(value: str) -> str:
+def dnsmasq_tag(value: str) -> str:
     normalized = "".join(character.lower() if character.isalnum() else "-" for character in value.strip())
     return normalized.strip("-") or "scope"
 
