@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=esxi-pxe-kickstart-20260628-8" in offline.text
+    assert "/static/app.css?v=esxi-pxe-kickstart-20260628-9" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -2185,6 +2185,12 @@ def test_kms_page_renders(client):
     assert "Listen interfaces" in kms.text
     assert "Listen addresses" in kms.text
     assert "service-bind-editor" in kms.text
+    assert "service-bind-editor stacked-service-bind-editor" in kms.text
+    assert '<select name="backend"' not in kms.text
+    assert 'type="hidden" name="backend" value="pykmip"' in kms.text
+    assert kms.text.index('name="hostname"') < kms.text.index('data-tag-name="listen_interfaces"')
+    assert kms.text.index('data-tag-name="listen_interfaces"') < kms.text.index('data-tag-name="listen_addresses"')
+    assert kms.text.index('data-tag-name="listen_addresses"') < kms.text.index('name="port"')
     assert 'name="listen_interfaces_present"' in kms.text
     assert 'name="listen_addresses_present"' in kms.text
     assert 'data-tag-name="listen_interfaces"' in kms.text
@@ -2202,6 +2208,7 @@ def test_kms_page_renders(client):
     assert "<span>Config path</span>" not in kms.text
     assert "<span>Client CA path</span>" in kms.text
     assert "fixed-value-field" in kms.text
+    assert 'name="server_certificate"' not in kms.text
     assert 'name="ca_certificate_path"' not in kms.text
     assert 'name="database_path"' not in kms.text
     assert 'name="config_path"' not in kms.text
@@ -2236,7 +2243,7 @@ def test_kms_settings_autosave_returns_json(client):
             "listen_address": "10.0.0.99",
             "port": "5696",
             "hostname": "kms.labfoundry.internal",
-            "server_certificate": "kms.labfoundry.internal",
+            "server_certificate": "rogue-kms.labfoundry.internal",
             "ca_certificate_path": "/tmp/rogue-client-ca.crt",
             "database_path": "/tmp/rogue-kms.db",
             "config_path": "/tmp/rogue-kms.conf",
@@ -2252,6 +2259,7 @@ def test_kms_settings_autosave_returns_json(client):
     assert payload["status"] == "saved"
     assert payload["listen_address"] == "192.168.50.1"
     assert payload["listen_addresses"] == ["192.168.50.1", "10.0.0.99"]
+    assert payload["server_certificate"] == "kms.labfoundry.internal"
     assert "KMS requires Certificate Authority to be enabled before activation." in payload["validation_errors"]
     refreshed = client.get("/kms")
     assert "enabled" in refreshed.text
@@ -3749,7 +3757,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "esxi-pxe-kickstart-20260628-8" in page.text
+    assert "esxi-pxe-kickstart-20260628-9" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

@@ -1582,6 +1582,12 @@ textarea {
   gap: 5px;
 }
 
+.compact-service-field {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+}
+
 .derived-field strong {
   display: flex;
   align-items: center;

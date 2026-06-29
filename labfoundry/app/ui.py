@@ -6088,7 +6088,7 @@ def update_kms_settings_from_ui(
     listen_address: str = Form(""),
     port: int = Form(5696),
     hostname: str = Form("kms.labfoundry.internal"),
-    server_certificate: str = Form("kms.labfoundry.internal"),
+    server_certificate: str | None = Form(None),
     require_client_cert: str | None = Form(None),
     allow_register: str | None = Form(None),
     allow_destroy: str | None = Form(None),
@@ -6114,7 +6114,7 @@ def update_kms_settings_from_ui(
     settings.listen_address = selected_addresses
     settings.port = port
     settings.hostname = normalize_dns_hostname(hostname.strip() or "kms.labfoundry.internal")
-    settings.server_certificate = normalize_dns_hostname(server_certificate.strip() or settings.hostname)
+    settings.server_certificate = settings.hostname
     settings.ca_certificate_path = settings.ca_certificate_path.strip() or "/etc/labfoundry/ca/root.crt"
     settings.database_path = KMS_DEFAULT_DATABASE_PATH
     settings.config_path = KMS_DEFAULT_CONFIG_PATH
