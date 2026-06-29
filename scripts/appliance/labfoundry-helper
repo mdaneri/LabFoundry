@@ -1344,7 +1344,7 @@ def _remove_nginx_site(site_path: Path) -> int:
 
 def _management_proxy_location(upstream_host: str, upstream_port: int, forwarded_proto: str) -> list[str]:
     return [
-        "  client_max_body_size 512m;",
+        "  client_max_body_size 1g;",
         "  location / {",
         f"    proxy_pass http://{upstream_host}:{upstream_port};",
         "    proxy_http_version 1.1;",

@@ -1598,6 +1598,8 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     assert "listen 80 default_server;" in management_site
     assert "return 308 https://$host$request_uri;" in management_site
     assert "listen 443 ssl default_server;" in management_site
+    assert "client_max_body_size 1g;" in management_site
+    assert "client_max_body_size 512m;" not in management_site
     assert f"ssl_certificate {cert_path};" in management_site
     assert f"ssl_certificate_key {key_path};" in management_site
     assert "proxy_pass http://127.0.0.1:8000;" in management_site

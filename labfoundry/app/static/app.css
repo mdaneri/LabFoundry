@@ -610,6 +610,8 @@ textarea {
   grid-column: 2;
   grid-row: 1;
   margin-bottom: 0;
+  min-width: 0;
+  overflow: visible;
 }
 
 .esxi-pxe-workspace > .left-stack > .wide-panel {
@@ -620,6 +622,96 @@ textarea {
 .esxi-pxe-workspace > .side-stack {
   grid-column: 2;
   grid-row: 2;
+}
+
+.esxi-boot-service-panel .boot-service-form {
+  gap: 9px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.esxi-boot-service-panel .boot-service-form,
+.esxi-boot-service-panel .form-grid,
+.esxi-boot-service-panel .form-field,
+.esxi-boot-service-panel label,
+.esxi-boot-service-panel .service-bind-editor,
+.esxi-boot-service-panel .tag-editor,
+.esxi-boot-service-panel .cm-editor,
+.esxi-boot-service-panel .settings-list {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.esxi-boot-service-panel input,
+.esxi-boot-service-panel textarea {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.esxi-boot-service-panel .form-grid {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.esxi-boot-service-panel .switch-field {
+  grid-template-columns: minmax(0, 1fr) 38px;
+}
+
+.esxi-boot-service-panel .form-grid > label > .field-label {
+  min-height: 0;
+}
+
+.esxi-boot-service-panel .field-label,
+.esxi-boot-service-panel label > span {
+  margin-bottom: 3px;
+}
+
+.esxi-boot-service-panel .tag-editor {
+  flex-wrap: nowrap;
+  overflow: visible;
+}
+
+.esxi-boot-service-panel .tag-editor-input {
+  flex: 1 1 56px;
+  min-width: 0;
+}
+
+.esxi-boot-service-panel .tag-token {
+  flex: 0 1 auto;
+  max-width: 145px;
+}
+
+.esxi-boot-service-panel .tag-token span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.esxi-boot-service-panel .cm-editor {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+.esxi-boot-service-panel .cm-scroller {
+  overflow: auto;
+}
+
+.esxi-boot-service-panel .compact-settings-list {
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: 10px;
+  overflow-x: hidden;
+}
+
+.esxi-boot-service-panel .compact-settings-list div {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.esxi-boot-service-panel .compact-settings-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .panel-head {
@@ -1731,6 +1823,16 @@ input[type="checkbox"] {
 .file-upload-control {
   position: relative;
   display: block;
+}
+
+.upload-progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--accent);
+}
+
+.upload-progress[hidden] {
+  display: none;
 }
 
 .file-upload-input {

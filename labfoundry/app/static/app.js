@@ -2584,8 +2584,8 @@ function initializeCaSettings() {
 }
 
 function serviceBindSelection(form, payload = {}) {
-  const interfaceEditor = form.querySelector("[data-service-bind-interface]");
-  const addressEditor = form.querySelector("[data-service-bind-address]");
+  const interfaceEditor = form.querySelector(".tag-editor[data-service-bind-interface]");
+  const addressEditor = form.querySelector(".tag-editor[data-service-bind-address]");
   const interfaces = Array.isArray(payload.listen_interfaces) ? payload.listen_interfaces : tagEditorValues(interfaceEditor);
   const addresses = Array.isArray(payload.listen_addresses) ? payload.listen_addresses : tagEditorValues(addressEditor);
   const interfaceName = payload.listen_interface || interfaces[0] || "";
@@ -6060,8 +6060,100 @@ function initializeFileUploadControls() {
   });
 }
 
+function initializeEsxiIsoUploadForms() {
+  document.querySelectorAll("[data-esxi-iso-upload]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement) || form.dataset.esxiIsoUploadInitialized === "1") {
+      return;
+    }
+    form.dataset.esxiIsoUploadInitialized = "1";
+    const fileInput = form.querySelector('input[type="file"][name="iso_file"]');
+    const button = form.querySelector("[data-esxi-iso-upload-button]");
+    const progress = form.querySelector("[data-esxi-iso-upload-progress]");
+    const status = form.querySelector("[data-esxi-iso-upload-status]");
+    const setStatus = (message, state = "idle") => {
+      if (status instanceof HTMLElement) {
+        status.textContent = message;
+        status.dataset.state = state;
+      }
+    };
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!(fileInput instanceof HTMLInputElement) || !fileInput.files || fileInput.files.length < 1) {
+        setStatus("Choose an ESXi installer ISO before uploading.", "error");
+        return;
+      }
+      const file = fileInput.files[0];
+      if (!file.name.toLowerCase().endsWith(".iso")) {
+        setStatus("Choose a .iso installer file.", "error");
+        return;
+      }
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", form.action);
+      xhr.setRequestHeader("X-LabFoundry-Upload", "1");
+      xhr.upload.addEventListener("loadstart", () => {
+        if (progress instanceof HTMLProgressElement) {
+          progress.hidden = false;
+          progress.value = 0;
+        }
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = true;
+        }
+        setStatus(`Uploading ${file.name}...`, "saving");
+      });
+      xhr.upload.addEventListener("progress", (progressEvent) => {
+        if (progress instanceof HTMLProgressElement && progressEvent.lengthComputable) {
+          const percent = Math.max(0, Math.min(100, Math.round((progressEvent.loaded / progressEvent.total) * 100)));
+          progress.value = percent;
+          setStatus(`Uploading ${file.name}: ${percent}%`, "saving");
+        }
+      });
+      xhr.addEventListener("load", () => {
+        let payload = {};
+        try {
+          payload = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+        } catch (_error) {
+          payload = {};
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const uploadedName = payload.name || file.name;
+          setStatus(`${uploadedName} uploaded. Refreshing ISO choices...`, "saved");
+          rememberActiveTab("labfoundry:esxi-pxe:active-tab", "esxi-pxe-hosts-panel");
+          if (window.location.pathname === "/esxi-pxe") {
+            window.location.hash = "esxi-pxe-hosts-panel";
+            window.location.reload();
+          } else {
+            window.location.href = "/esxi-pxe#esxi-pxe-hosts-panel";
+          }
+          return;
+        }
+        const message =
+          payload.detail ||
+          (xhr.status === 413
+            ? "Upload is too large. ESXi installer ISO uploads are limited to 1 GB."
+            : `Upload failed with HTTP ${xhr.status}.`);
+        setStatus(message, "error");
+      });
+      xhr.addEventListener("error", () => {
+        setStatus("Upload failed before LabFoundry received the file. Check appliance connectivity and upload size.", "error");
+      });
+      xhr.addEventListener("abort", () => {
+        setStatus("Upload canceled.", "error");
+      });
+      xhr.addEventListener("loadend", () => {
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = false;
+        }
+      });
+      xhr.send(new FormData(form));
+    });
+  });
+}
+
 function initializeTagEditors() {
   document.querySelectorAll("[data-tag-editor]").forEach((editor) => {
+    if (editor instanceof HTMLElement && editor.dataset.tagEditorInitialized === "1") {
+      return;
+    }
     const input = editor.querySelector("[data-tag-entry]");
     const list = editor.querySelector("[data-tag-list]");
     const toggle = editor.querySelector("[data-tag-menu-toggle]");
@@ -6071,6 +6163,7 @@ function initializeTagEditors() {
     if (!(editor instanceof HTMLElement) || !(input instanceof HTMLInputElement) || !(list instanceof HTMLElement) || !name) {
       return;
     }
+    editor.dataset.tagEditorInitialized = "1";
 
     const currentValues = () =>
       Array.from(list.querySelectorAll(".tag-token")).map((item) => item.getAttribute("data-value") || "");
@@ -6173,6 +6266,7 @@ function initializeTagEditors() {
     input.addEventListener("blur", addInputValues);
     if (toggle instanceof HTMLButtonElement && menu instanceof HTMLElement) {
       toggle.addEventListener("click", (event) => {
+        event.preventDefault();
         event.stopPropagation();
         refreshMenu();
         menu.toggleAttribute("hidden");
@@ -6284,8 +6378,8 @@ function initializeServiceBindEditors() {
     if (!(container instanceof HTMLElement)) {
       return;
     }
-    const interfaceEditor = container.querySelector("[data-service-bind-interface]");
-    const addressEditor = container.querySelector("[data-service-bind-address]");
+    const interfaceEditor = container.querySelector(".tag-editor[data-service-bind-interface]");
+    const addressEditor = container.querySelector(".tag-editor[data-service-bind-address]");
     if (!(interfaceEditor instanceof HTMLElement) || !(addressEditor instanceof HTMLElement)) {
       return;
     }
@@ -6374,12 +6468,13 @@ function initializeTabs() {
     storedDomainButton.click();
   }
   const hashTargetId = window.location.hash ? window.location.hash.slice(1) : "";
+  const hashTargetPanel = hashTargetId ? document.getElementById(hashTargetId)?.closest(".tab-panel") : null;
   document.querySelectorAll("[data-tab-storage-key]").forEach((tabList) => {
     if (!(tabList instanceof HTMLElement)) {
       return;
     }
     const storageKey = tabList.dataset.tabStorageKey || "";
-    let targetId = hashTargetId;
+    let targetId = hashTargetPanel instanceof HTMLElement ? hashTargetPanel.id : hashTargetId;
     try {
       targetId = targetId || window.localStorage.getItem(storageKey) || "";
     } catch {
@@ -6506,6 +6601,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSoftwareDepotIdGenerator);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTokenPaste);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
+document.addEventListener("DOMContentLoaded", initializeEsxiIsoUploadForms);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);

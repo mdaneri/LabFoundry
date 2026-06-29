@@ -55,6 +55,8 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "/etc/labfoundry/nginx/sites.d/management.conf" in script
     assert "rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf" in script
     assert "listen 80 default_server;" in script
+    assert "client_max_body_size 1g;" in script
+    assert "client_max_body_size 512m;" not in script
     assert "proxy_pass http://127.0.0.1:8000;" in script
     assert "nginx -t" in script
     assert "systemctl enable --now nginx" in script

@@ -1,6 +1,7 @@
 import difflib
 import hashlib
 import json
+import logging
 import re
 import shlex
 import shutil
@@ -322,8 +323,9 @@ APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 TEMPLATES_DIR = APP_DIR / "templates"
 VCF_DEPOT_VDT_LOG_PATH = PurePosixPath("/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log")
-LABFOUNDRY_APP_LOG_PATH = Path("/var/log/labfoundry/labfoundry.log")
+LABFOUNDRY_APP_LOG_PATH = get_settings().app_log_path
 KMS_SERVER_LOG_PATH = Path("/var/log/labfoundry/kms/server.log")
+APPLY_LOGGER = logging.getLogger("labfoundry.appliance_apply")
 NETWORK_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/network/labfoundry-network.conf"
 DNSMASQ_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf"
 
@@ -3383,7 +3385,7 @@ def tail_fixed_log_file(path: Path | PurePosixPath, *, max_bytes: int = 64 * 102
 def logs_context(db: Session) -> dict[str, Any]:
     sources = [
         ("vcfdt", "VCFDT", VCF_DEPOT_VDT_LOG_PATH),
-        ("app", "LabFoundry", LABFOUNDRY_APP_LOG_PATH),
+        ("app", "LabFoundry App", LABFOUNDRY_APP_LOG_PATH),
         ("kms", "KMS", KMS_SERVER_LOG_PATH),
     ]
     events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(100)).scalars().all()
@@ -3424,6 +3426,20 @@ def appliance_apply_failure_summaries(unit_results: list[dict[str, Any]]) -> lis
                 }
             )
     return summaries
+
+
+def log_appliance_apply_failures(job_id: str, unit_results: list[dict[str, Any]]) -> None:
+    for failure in appliance_apply_failure_summaries(unit_results):
+        for command in failure["commands"]:
+            APPLY_LOGGER.error(
+                "Appliance apply task %s failed unit=%s command=%s returncode=%s stderr=%s stdout=%s",
+                job_id,
+                failure["label"],
+                command["command_line"],
+                command["returncode"],
+                command["stderr"] or "",
+                command["stdout"] or "",
+            )
 
 
 def stage_appliance_apply_config(config_path: str, config_preview: str) -> str:
@@ -3479,7 +3495,10 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
     elif unit_id == "ca":
         config_path = CA_STAGED_CONFIG_PATH
         if not adapter.dry_run:
-            config_path = stage_appliance_apply_config(CA_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+            config_path = stage_appliance_apply_config(
+                CA_STAGED_CONFIG_PATH,
+                render_ca_apply_payload(context["ca_settings"], context["ca_certificates"], include_private_keys=True),
+            )
         results = [adapter.validate_ca_config(config_path), adapter.apply_ca_config(config_path)]
     elif unit_id == "kms":
         config_path = KMS_STAGED_CONFIG_PATH
@@ -3769,8 +3788,9 @@ def submit_appliance_apply(
         "units": unit_results,
         "dry_run": any(result["dry_run"] for result in unit_results),
     }
+    job_id = f"job_{uuid4().hex[:12]}"
     job = Job(
-        id=f"job_{uuid4().hex[:12]}",
+        id=job_id,
         type="appliance-apply",
         status=JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
         created_by=identity.username,
@@ -3783,6 +3803,8 @@ def submit_appliance_apply(
     db.add(job)
     if succeeded:
         update_appliance_apply_baselines(db, appliance_apply_units(db), selected_ids)
+    else:
+        log_appliance_apply_failures(job_id, unit_results)
     db.commit()
     detail = " ; ".join(
         " ".join(command["command"])
@@ -4795,7 +4817,7 @@ def edit_vlan_interface_from_ui(
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
-) -> RedirectResponse | HTMLResponse:
+) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
     vlan = db.get(VlanInterface, vlan_id)
     if not vlan:
@@ -7869,9 +7891,13 @@ async def upload_esxi_installer_iso_from_ui(
 ) -> RedirectResponse | HTMLResponse:
     require_esxi_pxe_write(identity)
     verify_csrf(request, csrf)
+    wants_json = request.headers.get("X-LabFoundry-Upload") == "1"
     try:
         iso = await store_installer_iso_upload(iso_file, max_bytes=get_settings().esxi_installer_iso_max_bytes)
     except ValueError as exc:
+        status_code = 413 if "too large" in str(exc).lower() else 400
+        if wants_json:
+            return JSONResponse({"status": "error", "detail": str(exc)}, status_code=status_code)
         return render(
             request,
             "esxi_pxe.html",
@@ -7880,10 +7906,12 @@ async def upload_esxi_installer_iso_from_ui(
                 **esxi_pxe_page_context(db, identity, error=str(exc)),
                 "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
             },
-            status_code=400,
+            status_code=status_code,
         )
     record_audit(db, actor=identity.username, action="upload_esxi_installer_iso", resource_type="esxi_installer_iso", resource_id=iso["relative_path"], detail=f"path={iso['path']} size={iso['size_bytes']}", request_id=request.state.request_id)
-    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
+    if wants_json:
+        return JSONResponse({"status": "uploaded", **iso})
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts-panel", status_code=303)
 
 
 @router.post("/esxi-pxe/kickstarts/{kickstart_id}/import-filesystem", response_model=None)

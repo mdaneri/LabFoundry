@@ -207,7 +207,7 @@ cat >/etc/labfoundry/nginx/sites.d/management.conf <<'EOF'
 server {
   listen 80 default_server;
   server_name labfoundry.internal _;
-  client_max_body_size 512m;
+  client_max_body_size 1g;
   location / {
     proxy_pass http://127.0.0.1:8000;
     proxy_http_version 1.1;

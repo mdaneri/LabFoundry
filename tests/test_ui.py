@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=esxi-pxe-kickstart-20260628-3" in offline.text
+    assert "/static/app.css?v=esxi-pxe-kickstart-20260628-8" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -675,10 +675,12 @@ def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
 
 def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
     import json
+    from types import SimpleNamespace
 
     from sqlalchemy import select
 
     import labfoundry.app.services.esxi_pxe as esxi_pxe
+    import labfoundry.app.ui as ui_module
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import EsxiPxeHost, Job
 
@@ -690,6 +692,9 @@ def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
     assert page.status_code == 200
     assert str(iso_root) in page.text
     assert iso_root.is_dir()
+    assert 'data-esxi-iso-upload' in page.text
+    assert 'data-esxi-iso-upload-progress' in page.text
+    assert "Choose an ISO to upload." in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     uploaded = client.post(
@@ -699,8 +704,32 @@ def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
         follow_redirects=False,
     )
     assert uploaded.status_code == 303
+    assert uploaded.headers["location"] == "/esxi-pxe#esxi-pxe-hosts-panel"
     iso_path = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
     assert iso_path.read_bytes() == b"iso bytes"
+
+    ajax_upload = client.post(
+        "/esxi-pxe/isos/upload",
+        data={"csrf": csrf},
+        files={"iso_file": ("Nested-ESXi.iso", b"ajax iso bytes", "application/octet-stream")},
+        headers={"X-LabFoundry-Upload": "1"},
+    )
+    assert ajax_upload.status_code == 200
+    assert ajax_upload.json()["status"] == "uploaded"
+    assert ajax_upload.json()["relative_path"] == "Nested-ESXi.iso"
+
+    original_get_settings = ui_module.get_settings
+    monkeypatch.setattr(ui_module, "get_settings", lambda: SimpleNamespace(esxi_installer_iso_max_bytes=3))
+    too_large = client.post(
+        "/esxi-pxe/isos/upload",
+        data={"csrf": csrf},
+        files={"iso_file": ("Too-Large.iso", b"too large", "application/octet-stream")},
+        headers={"X-LabFoundry-Upload": "1"},
+    )
+    assert too_large.status_code == 413
+    assert too_large.json()["status"] == "error"
+    assert "too large" in too_large.json()["detail"].lower()
+    monkeypatch.setattr(ui_module, "get_settings", original_get_settings)
 
     refreshed = client.get("/esxi-pxe")
     assert "VMware-VMvisor-Installer-8.0U3.iso" in refreshed.text
@@ -724,7 +753,7 @@ def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
     api_token = create_api_token(client, ["read:esxi-pxe"])
     api_isos = client.get("/api/v1/esxi-pxe/isos", headers={"Authorization": f"Bearer {api_token}"})
     assert api_isos.status_code == 200
-    assert api_isos.json()[0]["relative_path"] == "VMware-VMvisor-Installer-8.0U3.iso"
+    assert {row["relative_path"] for row in api_isos.json()} >= {"VMware-VMvisor-Installer-8.0U3.iso", "Nested-ESXi.iso"}
 
     apply_page = client.get("/appliance-apply")
     apply_csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -756,6 +785,14 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "Hostname" in page.text
     assert "Listen interfaces" in page.text
     assert "Listen addresses" in page.text
+    assert 'type="hidden" name="tftp_root"' in page.text
+    assert 'type="hidden" name="bios_bootfile"' in page.text
+    assert 'type="hidden" name="uefi_bootfile"' in page.text
+    assert 'field-label"><span>TFTP root' not in page.text
+    assert 'field-label"><span>BIOS bootfile' not in page.text
+    assert 'field-label"><span>UEFI bootfile' not in page.text
+    assert "<span>BIOS bootfile</span><strong>pxelinux.0</strong>" in page.text
+    assert "<span>UEFI bootfile</span><strong>bootx64.efi</strong>" in page.text
     assert 'class="left-stack"' in page.text
     assert page.text.index("<h2>Boot Service</h2>") < page.text.index("<h2>ESXi Kickstarts</h2>")
     css = client.get("/static/app.css").text
@@ -1499,7 +1536,7 @@ def test_logs_page_renders_fixed_source_tabs_and_redacts_vcfdt_log(client, tmp_p
     assert "Logs" in response.text
     assert 'data-tab-storage-key="labfoundry:logs:active-tab"' in response.text
     assert "VCFDT" in response.text
-    assert "LabFoundry" in response.text
+    assert "LabFoundry App" in response.text
     assert "KMS" in response.text
     assert "Audit Events" in response.text
     assert "logs-audit-panel" in response.text
@@ -1510,6 +1547,31 @@ def test_logs_page_renders_fixed_source_tabs_and_redacts_vcfdt_log(client, tmp_p
     assert "secret-download-token" not in response.text
     assert jwt_segment not in response.text
     assert "Log file has not been written yet." in response.text
+
+
+def test_configure_logging_writes_main_app_log(tmp_path, monkeypatch):
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.main import configure_logging
+
+    log_path = tmp_path / "labfoundry.log"
+    monkeypatch.setenv("LABFOUNDRY_APP_LOG_PATH", str(log_path))
+    get_settings.cache_clear()
+
+    configure_logging()
+    logging.getLogger("labfoundry.appliance_apply").error("apply failure visible in main log")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    assert "apply failure visible in main log" in log_path.read_text(encoding="utf-8")
+
+    for handler in list(logging.getLogger().handlers):
+        if isinstance(handler, RotatingFileHandler) and handler.baseFilename == str(log_path):
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+    get_settings.cache_clear()
 
 
 def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
@@ -1524,6 +1586,7 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
 
     assert response.status_code == 200
     assert "VCFDT" in response.text
+    assert "LabFoundry App" in response.text
     assert "Audit Events" in response.text
     assert "/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log" in response.text
     assert "Log file has not been written yet." in response.text
@@ -1608,6 +1671,14 @@ def test_dns_and_dhcp_pages_render(client):
     assert "rememberDnsActiveZone(data.domain)" in app_js.text
     assert "dnsZoneTabButtonForDomain(storedDomain)" in app_js.text
     assert "initializeTagEditors" in app_js.text
+    assert "initializeEsxiIsoUploadForms" in app_js.text
+    assert "XMLHttpRequest" in app_js.text
+    assert "X-LabFoundry-Upload" in app_js.text
+    assert 'rememberActiveTab("labfoundry:esxi-pxe:active-tab", "esxi-pxe-hosts-panel")' in app_js.text
+    assert 'window.location.hash = "esxi-pxe-hosts-panel"' in app_js.text
+    assert 'document.getElementById(hashTargetId)?.closest(".tab-panel")' in app_js.text
+    assert 'querySelector(".tag-editor[data-service-bind-interface]")' in app_js.text
+    assert 'querySelector(".tag-editor[data-service-bind-address]")' in app_js.text
     assert "initializeConfirmationModals" in app_js.text
     assert "requestConfirmation" in app_js.text
     assert "form[data-confirm-modal]" in app_js.text
@@ -2066,6 +2137,8 @@ def test_certificate_authority_issues_encrypted_managed_certs_and_exports(client
     with SessionLocal() as db:
         settings = db.execute(select(CaSettings)).scalar_one()
         settings.enabled = True
+        settings.listen_interface = "eth0"
+        settings.listen_address = "192.168.49.1"
         db.commit()
 
     login(client)
@@ -3676,7 +3749,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "esxi-pxe-kickstart-20260628-3" in page.text
+    assert "esxi-pxe-kickstart-20260628-8" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -4196,6 +4269,56 @@ def test_ca_apply_task_captures_current_desired_state(client):
         assert job.status == "succeeded"
         assert "labfoundry-helper" in (job.result or "")
         assert "LabFoundry Internal Root CA" in (job.result or "")
+
+
+def test_ca_live_apply_stages_decrypted_private_keys_without_leaking_job_output(client, monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings, Job
+
+    staged_path = tmp_path / "labfoundry-ca.json"
+    captured: dict[str, str] = {}
+
+    def fake_validate_ca_config(self, config_path: str):
+        captured["validate_payload"] = Path(config_path).read_text(encoding="utf-8")
+        return AdapterResult(command=["labfoundry-helper", "ca", "validate", config_path], dry_run=False, stdout="validated")
+
+    def fake_apply_ca_config(self, config_path: str):
+        captured["apply_payload"] = Path(config_path).read_text(encoding="utf-8")
+        return AdapterResult(command=["labfoundry-helper", "ca", "apply", config_path], dry_run=False, stdout="applied")
+
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr("labfoundry.app.ui.CA_STAGED_CONFIG_PATH", str(staged_path))
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.validate_ca_config", fake_validate_ca_config)
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.apply_ca_config", fake_apply_ca_config)
+
+    with SessionLocal() as db:
+        settings = db.execute(select(CaSettings)).scalar_one()
+        settings.enabled = True
+        settings.listen_interface = "eth0"
+        settings.listen_address = "192.168.49.1"
+        db.commit()
+
+    login(client)
+    page = client.get("/certificate-authority")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "ca"})
+
+    assert response.status_code == 200
+    assert captured["validate_payload"] == captured["apply_payload"]
+    assert "BEGIN PRIVATE KEY" in captured["apply_payload"]
+    assert "[redacted]" not in captured["apply_payload"]
+
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
+        assert job.status == "succeeded"
+        assert "BEGIN PRIVATE KEY" not in (job.result or "")
 
 
 def test_appliance_apply_status_redacts_undecryptable_ca_private_key(client):
