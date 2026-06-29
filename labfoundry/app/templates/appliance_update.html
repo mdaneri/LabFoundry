@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block page_title %}Appliance Update{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Update Sources</h2>
+      </div>
+      <span class="status-pill {{ 'warn' if system_adapter_dry_run else 'good' }}">{{ "dry-run" if system_adapter_dry_run else "real" }}</span>
+    </div>
+
+    <form class="form-stack" action="/appliance-update/settings" method="post" data-autosave-form data-autosave-status-id="appliance-update-autosave-status">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <label>
+        <span class="field-label"><span>Photon OS source</span><button class="help-icon" type="button" data-help="Describes the Photon package repositories used by tdnf. The updater uses the appliance's configured Photon repos; editing this label does not rewrite repo files.">i</button></span>
+        <input name="photon_source" value="{{ update_settings.photon_source }}" autocomplete="off">
+      </label>
+      <label>
+        <span class="field-label"><span>Python index URL</span><button class="help-icon" type="button" data-help="Optional pip index URL for Python library updates. Leave blank for standard pip behavior; applies only when the Python Libraries stream is selected.">i</button></span>
+        <input name="python_index_url" value="{{ update_settings.python_index_url }}" placeholder="standard pip behavior" autocomplete="off">
+      </label>
+      <label>
+        <span class="field-label"><span>LabFoundry manifest URL</span><button class="help-icon" type="button" data-help="HTTP(S) manifest for the LabFoundry wheel update. The default works only when the update server runs on the appliance; use a reachable dev-host URL for Photon VM testing.">i</button></span>
+        <input name="labfoundry_manifest_url" value="{{ update_settings.labfoundry_manifest_url }}" autocomplete="off">
+      </label>
+      <p id="appliance-update-autosave-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
+    </form>
+
+    {% if update_error %}
+      <div class="alert error">{{ update_error }}</div>
+    {% endif %}
+    {% if update_settings_errors %}
+      <div class="alert error">
+        {% for error in update_settings_errors %}
+          <div>{{ error }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <form class="form-stack" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <div class="panel-head compact">
+        <div>
+          <h2>Update Streams</h2>
+        </div>
+        <div class="apply-change-set-actions">
+          <button class="button secondary" type="submit" formaction="/appliance-update/check">Check selected</button>
+          <button class="button primary" type="submit" formaction="/appliance-update/run">Run selected</button>
+        </div>
+      </div>
+      <div class="apply-unit-list compact-list">
+        {% for stream in update_streams %}
+          <label class="apply-unit-card update-stream-card">
+            <span class="apply-unit-select">
+              <input
+                type="checkbox"
+                name="selected_streams"
+                value="{{ stream.id }}"
+                {% if selected_update_stream_ids is not defined or stream.id in selected_update_stream_ids %}checked{% endif %}
+              >
+              <span>
+                <strong>{{ stream.label }}</strong>
+                <small>
+                  {% if stream.id == "photon_os" %}tdnf makecache, check-update, update{% endif %}
+                  {% if stream.id == "python_libraries" %}pip upgrade of LabFoundry direct dependencies{% endif %}
+                  {% if stream.id == "labfoundry_wheel" %}manifest SHA256 verification, wheel install, delayed service restart{% endif %}
+                </small>
+              </span>
+            </span>
+          </label>
+        {% endfor %}
+      </div>
+    </form>
+
+    {% if appliance_update_task %}
+      <div class="alert {{ 'success' if appliance_update_task.status == 'succeeded' else 'error' }}">
+        <strong>Appliance update {{ appliance_update_task.status }}</strong>
+        <p>{{ appliance_update_task.id }}{% if appliance_update_task_result.dry_run %} recorded as dry-run.{% endif %}</p>
+      </div>
+      {% if appliance_update_failures %}
+        <div class="apply-failure-list">
+          {% for failure in appliance_update_failures %}
+            <div class="apply-failure-item">
+              <strong>{{ failure.label }} failed</strong>
+              {% for command in failure.commands %}
+                <details class="apply-failure-command">
+                  <summary>{{ command.command_line }} exited {{ command.returncode }}</summary>
+                  {% if command.stderr %}<code>{{ command.stderr }}</code>{% endif %}
+                  {% if command.stdout %}<code>{{ command.stdout }}</code>{% endif %}
+                </details>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endif %}
+
+    <div class="config-preview">
+      <div class="preview-head">
+        <span>Staged update manifest</span>
+      </div>
+      <code class="language-json">{{ appliance_update_manifest_preview }}</code>
+    </div>
+  </div>
+
+  <aside class="detail-rail">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>Version</h2>
+        <span class="status-pill good">{{ current_version_info.version }}</span>
+      </div>
+      <div class="settings-list">
+        <div><span>Git commit</span><strong>{{ current_version_info.git_short or "not packaged" }}</strong></div>
+        <div><span>Build time</span><strong>{{ current_version_info.built_at or "source checkout" }}</strong></div>
+        <div><span>Python</span><strong>{{ current_version_info.python }}</strong></div>
+        <div><span>Config path</span><strong>{{ appliance_update_staged_config_path }}</strong></div>
+      </div>
+    </div>
+
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>Last Update</h2>
+        <span class="status-pill {{ 'good' if latest_update_job and latest_update_job.status == 'succeeded' else 'warn' }}">{{ latest_update_job.status if latest_update_job else "none" }}</span>
+      </div>
+      {% if latest_update_job %}
+        <div class="settings-list">
+          <div><span>Job</span><strong>{{ latest_update_job.id }}</strong></div>
+          <div><span>Created by</span><strong>{{ latest_update_job.created_by }}</strong></div>
+          <div><span>Finished</span><strong>{{ latest_update_job.finished_at }}</strong></div>
+        </div>
+        {% if latest_update_result %}
+          <details class="config-diff">
+            <summary>Job result</summary>
+            <pre><code class="language-json">{{ latest_update_result | tojson(indent=2) }}</code></pre>
+          </details>
+        {% endif %}
+      {% else %}
+        <p class="muted">No appliance update job has been recorded.</p>
+      {% endif %}
+    </div>
+
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>Update Info</h2>
+        <span class="status-pill {{ 'good' if update_info_file.available else 'warn' }}">{{ "available" if update_info_file.available else "missing" }}</span>
+      </div>
+      {% if update_info_file.available %}
+        <pre><code class="language-json">{{ update_info_file.content }}</code></pre>
+      {% else %}
+        <p class="muted">{{ update_info_file.error }}</p>
+      {% endif %}
+    </div>
+  </aside>
+</section>
+{% endblock %}

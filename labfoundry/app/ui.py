@@ -76,6 +76,22 @@ from labfoundry.app.services.appliance_settings import (
     render_appliance_settings_config,
     validate_appliance_settings,
 )
+from labfoundry.app.services.appliance_update import (
+    APPLIANCE_UPDATE_INFO_PATH,
+    APPLIANCE_UPDATE_SETTINGS_KEY,
+    APPLIANCE_UPDATE_STAGED_CONFIG_PATH,
+    DEFAULT_LABFOUNDRY_MANIFEST_URL,
+    UPDATE_STREAM_LABELS,
+    UPDATE_STREAMS,
+    current_version_info,
+    parse_latest_update_result,
+    read_appliance_file,
+    render_update_manifest,
+    selected_update_streams,
+    update_settings_from_json,
+    update_settings_to_json,
+    validate_update_settings,
+)
 from labfoundry.app.security import (
     Identity,
     authenticate_user,
@@ -3480,6 +3496,115 @@ def appliance_apply_context(db: Session) -> dict[str, Any]:
     }
 
 
+def appliance_update_settings(db: Session) -> dict[str, str]:
+    return update_settings_from_json(setting_value(db, APPLIANCE_UPDATE_SETTINGS_KEY))
+
+
+def latest_appliance_update_job(db: Session) -> Job | None:
+    return db.execute(select(Job).where(Job.type == "appliance-update").order_by(desc(Job.created_at))).scalars().first()
+
+
+def appliance_update_context(db: Session) -> dict[str, Any]:
+    settings = appliance_update_settings(db)
+    latest_job = latest_appliance_update_job(db)
+    selected = list(UPDATE_STREAMS)
+    manifest_preview = render_update_manifest(selected_streams=selected, settings=settings, actor="preview")
+    return {
+        "update_settings": settings,
+        "update_streams": [{"id": stream, "label": UPDATE_STREAM_LABELS[stream]} for stream in UPDATE_STREAMS],
+        "default_labfoundry_manifest_url": DEFAULT_LABFOUNDRY_MANIFEST_URL,
+        "current_version_info": current_version_info(),
+        "appliance_update_manifest_preview": manifest_preview,
+        "appliance_update_staged_config_path": APPLIANCE_UPDATE_STAGED_CONFIG_PATH,
+        "latest_update_job": latest_job,
+        "latest_update_result": parse_latest_update_result(latest_job),
+        "update_info_file": read_appliance_file(APPLIANCE_UPDATE_INFO_PATH),
+        "update_settings_errors": validate_update_settings(settings),
+        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
+    }
+
+
+def execute_appliance_update_job(
+    *,
+    selected_stream_ids: list[str],
+    settings: dict[str, str],
+    identity: Identity,
+    mode: str,
+) -> dict[str, Any]:
+    adapter = SystemAdapter()
+    manifest_preview = render_update_manifest(selected_streams=selected_stream_ids, settings=settings, actor=identity.username)
+    config_path = APPLIANCE_UPDATE_STAGED_CONFIG_PATH
+    if not adapter.dry_run:
+        config_path = stage_appliance_apply_config(APPLIANCE_UPDATE_STAGED_CONFIG_PATH, manifest_preview)
+
+    results = [adapter.check_appliance_update_config(config_path)]
+    if mode == "run" and results[-1].returncode == 0:
+        results.append(adapter.apply_appliance_update_config(config_path))
+
+    succeeded = all(result.returncode == 0 for result in results)
+    return {
+        "unit_id": "appliance_update",
+        "label": "Appliance Update",
+        "mode": mode,
+        "selected_streams": selected_stream_ids,
+        "selected_labels": [UPDATE_STREAM_LABELS[stream] for stream in selected_stream_ids],
+        "status": JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
+        "success": succeeded,
+        "dry_run": any(result.dry_run for result in results),
+        "restart_after_commit": mode == "run" and succeeded and "labfoundry_wheel" in selected_stream_ids,
+        "commands": [adapter_result_to_payload(result) for result in results],
+        "config_path": config_path,
+        "config_preview": manifest_preview,
+    }
+
+
+def create_appliance_update_task(db: Session, *, identity: Identity, update_result: dict[str, Any]) -> Job:
+    now = utcnow()
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="appliance-update",
+        status=update_result["status"],
+        created_by=identity.username,
+        started_at=now,
+        finished_at=now,
+        progress_percent=100,
+        result=json.dumps(update_result, indent=2),
+        error=None if update_result["success"] else "One or more appliance update steps reported a failure.",
+    )
+    db.add(job)
+    db.commit()
+    detail = " ; ".join(" ".join(command["command"]) for command in update_result["commands"])
+    record_audit(
+        db,
+        actor=identity.username,
+        action=f"{update_result['mode']}_appliance_update",
+        resource_type="job",
+        resource_id=job.id,
+        detail=detail,
+        success=update_result["success"],
+    )
+    if update_result.get("restart_after_commit"):
+        restart_result = SystemAdapter().restart_appliance_after_update(str(update_result["config_path"]))
+        update_result["commands"].append(adapter_result_to_payload(restart_result))
+        update_result["success"] = bool(update_result["success"]) and restart_result.returncode == 0
+        update_result["status"] = JobStatus.SUCCEEDED.value if update_result["success"] else JobStatus.FAILED.value
+        job.status = update_result["status"]
+        job.result = json.dumps(update_result, indent=2)
+        job.error = None if update_result["success"] else "LabFoundry service restart scheduling failed."
+        db.add(job)
+        db.commit()
+        record_audit(
+            db,
+            actor=identity.username,
+            action="schedule_appliance_update_restart",
+            resource_type="job",
+            resource_id=job.id,
+            detail=" ".join(restart_result.command),
+            success=restart_result.returncode == 0,
+        )
+    return job
+
+
 def adapter_result_to_payload(result: Any) -> dict[str, Any]:
     return {
         "command": result.command,
@@ -3855,6 +3980,136 @@ def dashboard(
             "routes": routes,
             "audit_events": audit_events,
         },
+    )
+
+
+@router.get("/appliance-update", response_class=HTMLResponse, response_model=None)
+def appliance_update_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(request, "appliance_update.html", {"identity": identity, **appliance_update_context(db)})
+
+
+@router.post("/appliance-update/settings", response_model=None)
+def update_appliance_update_settings(
+    request: Request,
+    photon_source: str = Form("configured Photon repositories"),
+    python_index_url: str = Form(""),
+    labfoundry_manifest_url: str = Form(DEFAULT_LABFOUNDRY_MANIFEST_URL),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    settings = {
+        "photon_source": photon_source.strip() or "configured Photon repositories",
+        "python_index_url": python_index_url.strip(),
+        "labfoundry_manifest_url": labfoundry_manifest_url.strip() or DEFAULT_LABFOUNDRY_MANIFEST_URL,
+    }
+    errors = validate_update_settings(settings)
+    if errors:
+        if request.headers.get("X-LabFoundry-Autosave") == "1":
+            return JSONResponse({"status": "error", "errors": errors}, status_code=422)
+        return render(
+            request,
+            "appliance_update.html",
+            {"identity": identity, **appliance_update_context(db), "update_error": " ".join(errors)},
+            status_code=422,
+        )
+    set_setting_value(db, APPLIANCE_UPDATE_SETTINGS_KEY, update_settings_to_json(settings))
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_appliance_update_settings", resource_type="appliance_update")
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        return JSONResponse(
+            {
+                "status": "saved",
+                "saved_at": utcnow().isoformat(),
+                "manifest_preview": render_update_manifest(selected_streams=list(UPDATE_STREAMS), settings=settings, actor=identity.username),
+            }
+        )
+    return RedirectResponse("/appliance-update", status_code=303)
+
+
+def submit_appliance_update(
+    *,
+    request: Request,
+    selected_streams: list[str],
+    csrf: str,
+    identity: Identity,
+    db: Session,
+    mode: str,
+) -> HTMLResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    selected = selected_update_streams(selected_streams)
+    settings = appliance_update_settings(db)
+    errors = validate_update_settings(settings)
+    if not selected:
+        errors.append("Select at least one update stream.")
+    if errors:
+        return render(
+            request,
+            "appliance_update.html",
+            {
+                "identity": identity,
+                **appliance_update_context(db),
+                "selected_update_stream_ids": selected,
+                "update_error": " ".join(errors),
+            },
+            status_code=422,
+        )
+    update_result = execute_appliance_update_job(selected_stream_ids=selected, settings=settings, identity=identity, mode=mode)
+    job = create_appliance_update_task(db, identity=identity, update_result=update_result)
+    return render(
+        request,
+        "appliance_update.html",
+        {
+            "identity": identity,
+            **appliance_update_context(db),
+            "selected_update_stream_ids": selected,
+            "appliance_update_task": job,
+            "appliance_update_task_result": update_result,
+            "appliance_update_failures": appliance_apply_failure_summaries([update_result]),
+        },
+    )
+
+
+@router.post("/appliance-update/check", response_class=HTMLResponse, response_model=None)
+def check_appliance_update(
+    request: Request,
+    selected_streams: list[str] = Form(default=[]),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return submit_appliance_update(
+        request=request,
+        selected_streams=selected_streams,
+        csrf=csrf,
+        identity=identity,
+        db=db,
+        mode="check",
+    )
+
+
+@router.post("/appliance-update/run", response_class=HTMLResponse, response_model=None)
+def run_appliance_update(
+    request: Request,
+    selected_streams: list[str] = Form(default=[]),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return submit_appliance_update(
+        request=request,
+        selected_streams=selected_streams,
+        csrf=csrf,
+        identity=identity,
+        db=db,
+        mode="run",
     )
 
 

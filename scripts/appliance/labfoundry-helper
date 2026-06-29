@@ -21,6 +21,8 @@ import hashlib
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
+from urllib.request import urlopen
 
 
 COMMANDS: dict[str, set[str]] = {
@@ -35,9 +37,10 @@ COMMANDS: dict[str, set[str]] = {
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
     "vcf-offline-depot": {"validate", "stage-tool", "sync", "apply-https"},
     "esxi-pxe": {"validate", "apply"},
+    "appliance-update": {"check", "apply", "restart-service"},
     "wan": {"validate", "apply"},
 }
-SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "sync", "apply-https", "relocate-bundles"}
+SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "sync", "apply-https", "relocate-bundles", "restart-service"}
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
 FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
@@ -84,6 +87,8 @@ LABFOUNDRY_VENV_PYTHON_PATH = Path("/opt/labfoundry/.venv/bin/python")
 PYKMIP_COMPAT_SCRIPT_PATH = Path("/opt/labfoundry/labfoundry/app/services/pykmip_compat_server.py")
 NETWORK_APPLY_DIR = Path("/var/lib/labfoundry/apply/network")
 WAN_APPLY_DIR = Path("/var/lib/labfoundry/apply/wan")
+APPLIANCE_UPDATE_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-update")
+APPLIANCE_UPDATE_INFO_PATH = Path("/etc/labfoundry/update-info")
 WAN_NAT_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
 WAN_NAT_CONFIG_PATH = WAN_NAT_CONFIG_DIR / "labfoundry-nat.nft"
 WAN_NAT_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-nat.service")
@@ -278,6 +283,17 @@ def _validate_ca_config_path(path_value: str) -> Path:
         raise ValueError(f"CA config must be staged under {CA_APPLY_DIR}")
     if not path.is_file():
         raise ValueError(f"CA config does not exist: {path}")
+    return path
+
+
+def _validate_appliance_update_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".json":
+        raise ValueError("appliance update config path must end with .json")
+    if not path.is_relative_to(APPLIANCE_UPDATE_APPLY_DIR):
+        raise ValueError(f"appliance update config must be staged under {APPLIANCE_UPDATE_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"appliance update config does not exist: {path}")
     return path
 
 
@@ -3744,6 +3760,278 @@ def _handle_vcf_offline_depot(action: str, args: list[str]) -> int:
     return 2
 
 
+def _load_appliance_update_config(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("appliance update config must be a JSON object")
+    return payload
+
+
+def _appliance_update_config_errors(payload: dict) -> list[str]:
+    errors: list[str] = []
+    selected = payload.get("selected_streams")
+    if not isinstance(selected, list) or not selected:
+        errors.append("selected_streams must include at least one update stream.")
+    else:
+        allowed = {"photon_os", "python_libraries", "labfoundry_wheel"}
+        for stream in selected:
+            if stream not in allowed:
+                errors.append(f"unsupported update stream {stream}.")
+    sources = payload.get("sources")
+    if not isinstance(sources, dict):
+        errors.append("sources must be an object.")
+        return errors
+    manifest_url = str(sources.get("labfoundry_manifest_url") or "").strip()
+    if "labfoundry_wheel" in (selected or []):
+        parsed = urlparse(manifest_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            errors.append("labfoundry_manifest_url must be an http or https URL when LabFoundry Wheel is selected.")
+        if parsed.username or parsed.password:
+            errors.append("labfoundry_manifest_url must not include embedded credentials.")
+    python_index_url = str(sources.get("python_index_url") or "").strip()
+    if python_index_url:
+        parsed = urlparse(python_index_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            errors.append("python_index_url must be an http or https URL.")
+        if parsed.username or parsed.password:
+            errors.append("python_index_url must not include embedded credentials.")
+    requirements = payload.get("python_requirements", [])
+    if requirements and (not isinstance(requirements, list) or not all(isinstance(item, str) and item.strip() for item in requirements)):
+        errors.append("python_requirements must be a list of requirement strings.")
+    return errors
+
+
+def _appliance_update_python() -> str:
+    return str(LABFOUNDRY_VENV_PYTHON_PATH if LABFOUNDRY_VENV_PYTHON_PATH.exists() else sys.executable)
+
+
+def _command_payload(command: list[str], *, success_codes: set[int] | None = None) -> dict:
+    result = _run(command)
+    success_codes = success_codes or {0}
+    return {
+        "command": command,
+        "returncode": result.returncode,
+        "success": result.returncode in success_codes,
+        "stdout": result.stdout[-4000:],
+        "stderr": result.stderr[-4000:],
+    }
+
+
+def _fetch_http_bytes(url: str) -> bytes:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"unsupported update URL: {url}")
+    with urlopen(url, timeout=60) as response:
+        return response.read()
+
+
+def _download_labfoundry_update_manifest(manifest_url: str) -> dict:
+    raw = _fetch_http_bytes(manifest_url)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"LabFoundry manifest is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("LabFoundry manifest must be a JSON object")
+    for key in ("version", "git_commit", "wheel", "sha256"):
+        if not str(payload.get(key) or "").strip():
+            raise ValueError(f"LabFoundry manifest missing {key}")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(payload["sha256"])):
+        raise ValueError("LabFoundry manifest sha256 must be a 64-character hex digest")
+    return payload
+
+
+def _restore_labfoundry_venv_permissions() -> None:
+    venv = LABFOUNDRY_VENV_PYTHON_PATH.parents[1]
+    if not venv.exists():
+        return
+    for root, dirs, files in os.walk(venv):
+        for dirname in dirs:
+            try:
+                Path(root, dirname).chmod(0o755)
+            except OSError:
+                pass
+        for filename in files:
+            path = Path(root, filename)
+            mode = 0o755 if path.parent.name == "bin" else 0o644
+            try:
+                path.chmod(mode)
+            except OSError:
+                pass
+
+
+def _write_update_info(info: dict) -> None:
+    APPLIANCE_UPDATE_INFO_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = APPLIANCE_UPDATE_INFO_PATH.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(info, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.chmod(0o644)
+    tmp_path.replace(APPLIANCE_UPDATE_INFO_PATH)
+
+
+def _check_appliance_update(payload: dict) -> dict:
+    selected = set(payload.get("selected_streams") or [])
+    sources = payload.get("sources") or {}
+    commands: list[dict] = []
+    checks: dict[str, object] = {}
+    if "photon_os" in selected:
+        tdnf = _command_path("tdnf") or "tdnf"
+        commands.append(_command_payload([tdnf, "makecache"], success_codes={0}))
+        commands.append(_command_payload([tdnf, "check-update"], success_codes={0, 100}))
+        checks["photon_os"] = "tdnf check-update completed; exit 100 means updates are available."
+    if "python_libraries" in selected:
+        command = [_appliance_update_python(), "-m", "pip", "list", "--outdated", "--format=json"]
+        python_index_url = str(sources.get("python_index_url") or "").strip()
+        if python_index_url:
+            command.extend(["--index-url", python_index_url])
+        commands.append(_command_payload(command, success_codes={0}))
+        checks["python_libraries"] = "pip outdated check completed."
+    if "labfoundry_wheel" in selected:
+        manifest = _download_labfoundry_update_manifest(str(sources.get("labfoundry_manifest_url") or ""))
+        checks["labfoundry_wheel"] = {
+            "version": manifest.get("version"),
+            "git_commit": manifest.get("git_commit"),
+            "wheel": manifest.get("wheel"),
+            "sha256": manifest.get("sha256"),
+        }
+    return {"checks": checks, "commands": commands}
+
+
+def _apply_python_libraries(payload: dict) -> list[dict]:
+    sources = payload.get("sources") or {}
+    requirements = [str(item).strip() for item in payload.get("python_requirements", []) if str(item).strip()]
+    python = _appliance_update_python()
+    commands = [_command_payload([python, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])]
+    if requirements:
+        command = [python, "-m", "pip", "install", "--upgrade"]
+        python_index_url = str(sources.get("python_index_url") or "").strip()
+        if python_index_url:
+            command.extend(["--index-url", python_index_url])
+        command.extend(requirements)
+        commands.append(_command_payload(command))
+    _restore_labfoundry_venv_permissions()
+    return commands
+
+
+def _apply_labfoundry_wheel(payload: dict) -> tuple[dict, list[dict]]:
+    sources = payload.get("sources") or {}
+    manifest_url = str(sources.get("labfoundry_manifest_url") or "")
+    manifest = _download_labfoundry_update_manifest(manifest_url)
+    wheel_url = urljoin(manifest_url, str(manifest["wheel"]))
+    wheel_bytes = _fetch_http_bytes(wheel_url)
+    digest = hashlib.sha256(wheel_bytes).hexdigest()
+    if digest.lower() != str(manifest["sha256"]).lower():
+        raise ValueError(f"LabFoundry wheel sha256 mismatch: expected {manifest['sha256']} got {digest}")
+    with tempfile.TemporaryDirectory(prefix="labfoundry-update-") as temp_root:
+        wheel_path = Path(temp_root) / Path(str(manifest["wheel"])).name
+        wheel_path.write_bytes(wheel_bytes)
+        command = [_appliance_update_python(), "-m", "pip", "install", "--force-reinstall", "--no-deps", str(wheel_path)]
+        commands = [_command_payload(command)]
+    _restore_labfoundry_venv_permissions()
+    return manifest, commands
+
+
+def _apply_appliance_update(payload: dict) -> dict:
+    selected = set(payload.get("selected_streams") or [])
+    commands: list[dict] = []
+    attempted: dict[str, object] = {}
+    reboot_recommended = False
+    if "photon_os" in selected:
+        tdnf = _command_path("tdnf") or "tdnf"
+        commands.append(_command_payload([tdnf, "-y", "makecache"]))
+        commands.append(_command_payload([tdnf, "-y", "update"]))
+        attempted["photon_os"] = "Photon OS packages updated from configured repositories."
+        reboot_recommended = True
+    if "python_libraries" in selected:
+        python_commands = _apply_python_libraries(payload)
+        commands.extend(python_commands)
+        attempted["python_libraries"] = "LabFoundry virtualenv Python libraries updated."
+    if "labfoundry_wheel" in selected:
+        manifest, wheel_commands = _apply_labfoundry_wheel(payload)
+        commands.extend(wheel_commands)
+        attempted["labfoundry_wheel"] = manifest
+    succeeded = all(command.get("success") for command in commands)
+    result = {
+        "status": "succeeded" if succeeded else "failed",
+        "applied": attempted if succeeded else {},
+        "attempted": attempted,
+        "commands": commands,
+        "reboot_recommended": reboot_recommended if succeeded else False,
+        "restart_required": "labfoundry_wheel" in selected and succeeded,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if not succeeded:
+        failed = [" ".join(command.get("command") or []) for command in commands if not command.get("success")]
+        result["error"] = f"One or more appliance update commands failed: {' ; '.join(failed)}"
+    _write_update_info(result)
+    return result
+
+
+def _restart_labfoundry_service_after_update() -> int:
+    systemctl = _command_path("systemctl")
+    if systemctl is None:
+        print("systemctl command not found", file=sys.stderr)
+        return 127
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run is not None:
+        result = _run(
+            [
+                systemd_run,
+                "--quiet",
+                "--on-active=2",
+                "--unit=labfoundry-update-restart",
+                systemctl,
+                "restart",
+                "labfoundry.service",
+            ]
+        )
+    else:
+        result = _run([systemctl, "restart", "labfoundry.service"])
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _handle_appliance_update(action: str, args: list[str]) -> int:
+    try:
+        config_path = _validate_appliance_update_config_path(args[0])
+        payload = _load_appliance_update_config(config_path)
+        errors = _appliance_update_config_errors(payload)
+    except (IndexError, OSError, ValueError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+
+    if action == "check":
+        try:
+            result = _check_appliance_update(payload)
+        except Exception as exc:  # noqa: BLE001 - helper reports validation/check failures as stderr.
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(result, indent=2, sort_keys=True))
+        if any(not command.get("success") for command in result.get("commands", [])):
+            return 1
+        return 0
+    if action == "apply":
+        try:
+            result = _apply_appliance_update(payload)
+        except Exception as exc:  # noqa: BLE001 - helper reports update failures without tracebacks.
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(result, indent=2, sort_keys=True))
+        if any(not command.get("success") for command in result.get("commands", [])):
+            return 1
+        return 0
+    if action == "restart-service":
+        return _restart_labfoundry_service_after_update()
+
+    print(f"unsupported appliance-update action: {action}", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         return _usage()
@@ -3808,6 +4096,8 @@ def main(argv: list[str]) -> int:
         return _handle_vcf_backups(action, normalized_args)
     if group == "vcf-offline-depot":
         return _handle_vcf_offline_depot(action, normalized_args)
+    if group == "appliance-update":
+        return _handle_appliance_update(action, normalized_args)
 
     print("real helper execution is not implemented for this apply unit", file=sys.stderr)
     return 78

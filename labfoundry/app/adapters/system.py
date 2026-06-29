@@ -148,6 +148,15 @@ class SystemAdapter:
     def apply_vcf_offline_depot_https_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("vcf-offline-depot", "apply-https", config_path, dry_run_message="dry-run: VCF Offline Depot HTTPS apply command recorded")
 
+    def check_appliance_update_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("appliance-update", "check", config_path, dry_run_message="dry-run: appliance update check command recorded")
+
+    def apply_appliance_update_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("appliance-update", "apply", config_path, dry_run_message="dry-run: appliance update apply command recorded")
+
+    def restart_appliance_after_update(self, config_path: str) -> AdapterResult:
+        return self._helper_result("appliance-update", "restart-service", config_path, dry_run_message="dry-run: LabFoundry service restart command recorded")
+
     def _record_only_result(self, command: list[str], stdout: str) -> AdapterResult:
         return AdapterResult(command=command, dry_run=True, stdout=stdout)
 
