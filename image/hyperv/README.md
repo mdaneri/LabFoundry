@@ -83,6 +83,10 @@ powershell.exe -ExecutionPolicy Bypass `
 ```
 
 Omit both pip options for standard/default pip behavior.
+Image provisioning uses Photon's installed pip inside the LabFoundry virtual
+environment and does not upgrade pip as a separate bootstrap step, so transient
+public PyPI release downloads do not block the appliance build before the actual
+LabFoundry package install begins.
 
 The wrapper keeps `LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=true` by default so a
 first-boot image records host-mutation command intent instead of changing

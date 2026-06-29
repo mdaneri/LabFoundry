@@ -86,8 +86,11 @@ Use `-PackerOnError abort` to keep a failed builder VM for debugging, or
 The image builder does not configure a custom pip package index by default. If
 your build network requires an internal PyPI mirror, pass `-PipGlobalIndex` or
 `-PipGlobalIndexUrl` to set Photon site-level pip configuration before the
-LabFoundry virtual environment is created. Leave both options empty to keep
-standard pip behavior:
+LabFoundry virtual environment is created. The provisioner does not upgrade pip
+as a separate bootstrap step; it uses the Photon-packaged pip to install
+LabFoundry so a transient public PyPI pip release download cannot fail the image
+before the application install starts. Leave both options empty to keep standard
+pip behavior:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `

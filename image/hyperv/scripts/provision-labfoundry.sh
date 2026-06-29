@@ -144,14 +144,15 @@ install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME/bin"
 log_step "installing LabFoundry Python environment"
 install -d -o root -g root -m 0755 "$PIP_CACHE_DIR"
 write_pip_config /etc/pip.conf
+export HOME=/root
 export PIP_CACHE_DIR
+export PIP_DISABLE_PIP_VERSION_CHECK=1
 if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL" ]; then
   export PIP_INDEX_URL="$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"
 fi
 
 python3 -m venv "$LABFOUNDRY_HOME/.venv"
 write_pip_config "$LABFOUNDRY_HOME/.venv/pip.conf"
-"$LABFOUNDRY_HOME/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 "$LABFOUNDRY_HOME/.venv/bin/python" -m pip install "$LABFOUNDRY_HOME"
 
 SECRET_KEY="$("$LABFOUNDRY_HOME/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(48))')"
