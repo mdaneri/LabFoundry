@@ -174,6 +174,7 @@ chown root:labfoundry /etc/labfoundry/labfoundry.env
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/hyperv/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
 install -o root -g root -m 0440 "$LABFOUNDRY_HOME/image/hyperv/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
+sed -i 's/\r$//' /etc/sudoers.d/labfoundry-helper
 visudo -cf /etc/sudoers.d/labfoundry-helper
 
 chown -R root:root "$LABFOUNDRY_HOME"
