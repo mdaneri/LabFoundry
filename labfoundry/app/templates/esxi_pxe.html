@@ -9,7 +9,7 @@
         <h2>Boot Service</h2>
         <p class="muted">{{ esxi_pxe_boot.hostname }}{% if esxi_pxe_primary_listen_address %} / {{ esxi_pxe_primary_listen_address }}{% else %} / no listen address{% endif %}</p>
       </div>
-      <span class="status-pill {{ 'good' if esxi_pxe_boot.enabled else 'muted' }}">{{ "enabled" if esxi_pxe_boot.enabled else "disabled" }}</span>
+      <span class="status-pill {{ esxi_pxe_service_status.pill }}">{{ esxi_pxe_service_status.label }}</span>
     </div>
 
     <form class="form-stack boot-service-form" action="/esxi-pxe/boot-settings" method="post" data-autosave-form data-autosave-status-id="esxi-pxe-boot-settings-status">

@@ -866,7 +866,7 @@ def vcf_backup_context(db: Session) -> dict:
         "vcf_backup_remote_directory": vcf_backup_remote_directory(settings),
         "vcf_backup_config_preview": config_preview,
         "vcf_backup_validation_errors": validation_errors,
-        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
+        "vcf_backup_service_status": service_runtime_status(db, "vcf-backups"),
     }
 
 
@@ -1330,6 +1330,7 @@ def vcf_private_registry_context(db: Session) -> dict:
     return {
         "vcf_registry_settings": settings,
         "vcf_registry_settings_json": vcf_registry_settings_to_dict(settings),
+        "vcf_registry_service_status": service_runtime_status(db, "vcf-private-registry"),
         "vcf_registry_bundles": bundles,
         "vcf_registry_bundle_rows": [vcf_registry_bundle_to_dict(bundle) for bundle in bundles],
         "vcf_registry_available_interfaces": available_interfaces,
@@ -1380,6 +1381,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         "vcf_depot_primary_listen_address": primary_listen_address(settings.listen_address),
         "vcf_depot_bind_label": service_bind_label(settings.listen_interface, settings.listen_address),
         "vcf_depot_endpoint": vcf_depot_endpoint(settings),
+        "vcf_depot_service_status": service_runtime_status(db, "repository"),
         "vcf_depot_https_config_preview": https_config_preview,
         "vcf_depot_https_cert_path": depot_cert_path,
         "vcf_depot_https_key_path": depot_key_path,
@@ -1651,6 +1653,7 @@ def firewall_context(db: Session) -> dict:
         "firewall_source_group_assignments": source_group_state["assignments"],
         "firewall_config_preview": config_preview,
         "firewall_validation_errors": validation_errors,
+        "firewall_service_status": service_runtime_status(db, "firewall"),
         "firewall_directions": FIREWALL_DIRECTIONS,
         "firewall_actions": FIREWALL_ACTIONS,
         "firewall_protocols": FIREWALL_PROTOCOLS,
@@ -1757,6 +1760,7 @@ def ca_context(db: Session) -> dict:
         "ca_apply_payload": apply_payload,
         "ca_apply_config_path": CA_STAGED_CONFIG_PATH,
         "ca_validation_errors": validation_errors,
+        "ca_service_status": service_runtime_status(db, "ca"),
         "ca_status_summary": {
             "root_present": bool(settings.root_certificate_pem),
             "bundle_present": bool(settings.root_certificate_pem),
@@ -1838,7 +1842,7 @@ def kms_context(db: Session) -> dict:
         "available_kms_addresses": available_service_listen_addresses(settings.listen_address, available_interfaces),
         "kms_config_preview": config_preview,
         "kms_validation_errors": validation_errors,
-        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
+        "kms_service_status": service_runtime_status(db, "kms"),
         "kms_lab_notice": (
             "PyKMIP is useful for KMIP lab and compatibility testing. Treat this backend as a lab KMS, "
             "not a production HSM or hardened enterprise key manager."
@@ -2026,7 +2030,8 @@ def dnsmasq_context(db: Session) -> dict:
         "upstream_servers": "\n".join(split_servers(dns_settings.upstream_servers)),
         "conditional_forwarders": join_conditional_forwarders(split_conditional_forwarders(conditional_forwarders)),
         "dns_domain_options": dns_domains,
-        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
+        "dns_service_status": service_runtime_status(db, "dns"),
+        "dhcp_service_status": service_runtime_status(db, "dhcp"),
     }
 
 
@@ -3151,6 +3156,7 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
         "esxi_pxe_available_addresses": available_boot_addresses,
         "esxi_pxe_bind_label": service_bind_label(boot_settings.get("listen_interface"), boot_settings.get("listen_address")),
         "esxi_pxe_primary_listen_address": primary_listen_address(boot_settings.get("listen_address")),
+        "esxi_pxe_service_status": service_runtime_status(db, "esxi-pxe"),
         "esxi_pxe_artifacts": esxi_pxe_host_artifacts(hosts, boot_settings, default_host),
         "esxi_pxe_validation_errors": validation_errors,
         "esxi_pxe_validation_warnings": list(dict.fromkeys(validation_warnings)),
@@ -3435,6 +3441,32 @@ def appliance_apply_status(db: Session, unit_id: str) -> dict[str, Any]:
                 pill = "good"
             return {"state": state, "pill": pill, "sidebar_pending_apply_count": sidebar_count, **unit}
     return {"state": "unknown", "pill": "muted", "changed": False, "validation_errors": [], "sidebar_pending_apply_count": sidebar_count}
+
+
+def service_runtime_status(db: Session, service_id: str) -> dict[str, Any]:
+    row = db.execute(select(ServiceState).where(ServiceState.service == service_id)).scalar_one_or_none()
+    if row is None:
+        return {"label": "unknown", "pill": "muted", "running": False, "enabled": False, "health": "unknown", "detail": ""}
+    if row.running and row.enabled:
+        label = "live"
+        pill = "good"
+    elif row.running:
+        label = "running"
+        pill = "warn"
+    elif row.enabled:
+        label = "stopped"
+        pill = "warn"
+    else:
+        label = "disabled"
+        pill = "muted"
+    return {
+        "label": label,
+        "pill": pill,
+        "running": row.running,
+        "enabled": row.enabled,
+        "health": row.health,
+        "detail": row.detail or "",
+    }
 
 
 def appliance_apply_context(db: Session) -> dict[str, Any]:

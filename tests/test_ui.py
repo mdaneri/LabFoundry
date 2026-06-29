@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=esxi-pxe-grid-20260629-1" in offline.text
+    assert "/static/app.css?v=service-preview-tools-20260629-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -1919,12 +1919,19 @@ def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
     assert dns_record_suggested_ipv4(records, "labfoundry.internal", scopes, reservations) == "192.168.50.3"
 
 
-def test_dns_settings_badge_reflects_live_adapter_mode(client, monkeypatch):
-    from labfoundry.app.config import get_settings
+def test_dns_settings_badge_reflects_runtime_service_state(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ServiceState
 
     login(client)
-    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
-    get_settings.cache_clear()
+    with SessionLocal() as db:
+        service = db.execute(select(ServiceState).where(ServiceState.service == "dns")).scalar_one()
+        service.enabled = True
+        service.running = True
+        service.health = "healthy"
+        db.commit()
 
     page = client.get("/dns")
 
@@ -2268,7 +2275,19 @@ def test_certificate_authority_issues_encrypted_managed_certs_and_exports(client
 
 
 def test_kms_page_renders(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ServiceState
+
     login(client)
+    with SessionLocal() as db:
+        service = db.execute(select(ServiceState).where(ServiceState.service == "kms")).scalar_one()
+        service.enabled = True
+        service.running = True
+        service.health = "healthy"
+        db.commit()
+
     kms = client.get("/kms")
     assert kms.status_code == 200
     assert "KMS / KMIP" in kms.text
@@ -2320,6 +2339,10 @@ def test_kms_page_renders(client):
     assert "+ Add client here" in app_js.text
     assert "deleteKmsKeyFromMenu" in app_js.text
     assert "deleteKmsClientFromMenu" in app_js.text
+    assert '<span class="status-pill good">live</span>' in kms.text
+    assert "preview-modal" in kms.text
+    assert "data-preview-modal-code" in kms.text
+    assert "initializeTerminalNoteActions" in app_js.text
 
 
 def test_kms_settings_autosave_returns_json(client):
@@ -2777,11 +2800,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "depot-port-telemetry-row" not in page.text
     assert 'data-vcf-depot-software-depot-cell' in page.text
     assert 'data-vcf-depot-software-depot-id' in page.text
+    assert 'data-autosave-upload-progress' in page.text
     assert "not generated" not in page.text
-    tool_metric = page.text.split("<span>VCF Download Tool</span>", 1)[1].split("</div>", 1)[0]
-    assert 'data-vcf-depot-tool-version' in tool_metric
-    assert 'data-vcf-depot-tool-status' in tool_metric
-    assert 'data-vcf-depot-tool-name' not in tool_metric
+    assert "<span>Tool file</span>" not in page.text
+    assert 'data-vcf-depot-tool-name' not in page.text
     assert 'data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab"' in page.text
     assert "/mnt/labfoundry-vcf-offline-depot" in page.text
     assert "Depot store volume" in page.text
@@ -2821,6 +2843,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "updateVcfDepotValidation" in app_js.text
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
     assert "initializeVcfDepotTokenPaste" in app_js.text
+    assert "initializeCopyValueButtons" in app_js.text
+    assert "Copy software depot ID" in app_js.text
     assert "setVcfDepotToolDependentActions" in app_js.text
     assert "startVcfDepotProfileDownload" in app_js.text
     assert 'label: "Start download"' in app_js.text
@@ -3854,7 +3878,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "esxi-pxe-grid-20260629-1" in page.text
+    assert "service-preview-tools-20260629-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

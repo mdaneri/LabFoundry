@@ -189,6 +189,7 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>CA Settings</h2>
+        <span class="status-pill {{ ca_service_status.pill }}">{{ ca_service_status.label }}</span>
       </div>
       <form class="form-stack" action="/certificate-authority/settings" method="post" data-autosave-form data-ca-settings data-service-bind data-autosave-status-id="ca-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">

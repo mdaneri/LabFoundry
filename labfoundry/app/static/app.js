@@ -145,6 +145,7 @@ function highlightConfigPreviews(root = document) {
   if (!(root instanceof Document || root instanceof HTMLElement)) {
     return;
   }
+  initializeTerminalNoteActions(root);
   root
     .querySelectorAll(
       [
@@ -165,6 +166,103 @@ function highlightConfigPreviews(root = document) {
       ].join(", "),
     )
     .forEach((element) => highlightConfigPreviewElement(element));
+}
+
+function terminalNoteTitle(note) {
+  const titleElement = note.querySelector("strong") || note.querySelector("summary");
+  return titleElement?.textContent?.trim() || "Preview";
+}
+
+function openPreviewModal(title, text, sourceCode) {
+  const modal = document.getElementById("preview-modal");
+  const titleElement = document.getElementById("preview-modal-title");
+  const code = modal?.querySelector("[data-preview-modal-code]");
+  if (!(modal instanceof HTMLDialogElement) || !(titleElement instanceof HTMLElement) || !(code instanceof HTMLElement)) {
+    return;
+  }
+  titleElement.textContent = title || "Preview";
+  code.textContent = text || "";
+  code.className = "";
+  if (sourceCode instanceof HTMLElement) {
+    sourceCode.classList.forEach((className) => {
+      if (className.startsWith("language-")) {
+        code.classList.add(className);
+      }
+    });
+  }
+  highlightConfigPreviewElement(code);
+  if (typeof modal.showModal === "function") {
+    modal.showModal();
+  } else {
+    modal.setAttribute("open", "");
+  }
+}
+
+function initializePreviewModalControls() {
+  const modal = document.getElementById("preview-modal");
+  if (!(modal instanceof HTMLDialogElement) || modal.dataset.previewModalInitialized === "1") {
+    return;
+  }
+  modal.dataset.previewModalInitialized = "1";
+  const copyButton = modal.querySelector("[data-preview-modal-copy]");
+  const closeButton = modal.querySelector("[data-preview-modal-close]");
+  const code = modal.querySelector("[data-preview-modal-code]");
+  copyButton?.addEventListener("click", async () => {
+    try {
+      await copyTextToClipboard(code?.textContent || "");
+    } catch {
+      showTransientGridStatus("Copy failed");
+    }
+  });
+  closeButton?.addEventListener("click", () => {
+    modal.close();
+  });
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      modal.close();
+    }
+  });
+}
+
+function initializeTerminalNoteActions(root = document) {
+  if (!(root instanceof Document || root instanceof HTMLElement)) {
+    return;
+  }
+  root.querySelectorAll(".terminal-note").forEach((note) => {
+    if (!(note instanceof HTMLElement) || note.dataset.terminalNoteActions === "1") {
+      return;
+    }
+    const code = note.querySelector("code");
+    if (!(code instanceof HTMLElement)) {
+      return;
+    }
+    note.dataset.terminalNoteActions = "1";
+    note.classList.add("has-actions");
+    const actions = document.createElement("div");
+    actions.className = "terminal-note-actions";
+    const copyButton = document.createElement("button");
+    copyButton.className = "button secondary icon-button";
+    copyButton.type = "button";
+    copyButton.textContent = "⧉";
+    copyButton.setAttribute("aria-label", "Copy preview");
+    copyButton.setAttribute("title", "Copy preview");
+    const openButton = document.createElement("button");
+    openButton.className = "button secondary icon-button";
+    openButton.type = "button";
+    openButton.textContent = "↗";
+    openButton.setAttribute("aria-label", "Open preview");
+    openButton.setAttribute("title", "Open preview");
+    actions.append(copyButton, openButton);
+    note.prepend(actions);
+    copyButton.addEventListener("click", async () => {
+      try {
+        await copyTextToClipboard(code.textContent || "");
+      } catch {
+        showTransientGridStatus("Copy failed");
+      }
+    });
+    openButton.addEventListener("click", () => openPreviewModal(terminalNoteTitle(note), code.textContent || "", code));
+  });
 }
 
 function rememberDnsActiveZone(domain) {
@@ -496,6 +594,47 @@ function showTransientGridStatus(message) {
   showTransientGridStatus.timeoutId = window.setTimeout(() => {
     toast.classList.remove("visible");
   }, 1400);
+}
+
+async function copyTextToClipboard(text, successMessage = "Copied") {
+  const value = String(text || "");
+  if (!value) {
+    return;
+  }
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    await navigator.clipboard.writeText(value);
+  } else {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+  showTransientGridStatus(successMessage);
+}
+
+function initializeCopyValueButtons(root = document) {
+  if (!(root instanceof Document || root instanceof HTMLElement)) {
+    return;
+  }
+  root.querySelectorAll("[data-copy-value]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.copyInitialized === "1") {
+      return;
+    }
+    button.dataset.copyInitialized = "1";
+    button.addEventListener("click", async () => {
+      try {
+        await copyTextToClipboard(button.dataset.copyValue || button.textContent || "");
+      } catch {
+        showTransientGridStatus("Copy failed");
+      }
+    });
+  });
 }
 
 function showDhcpReservationError(message) {
@@ -4448,41 +4587,119 @@ function initializeAutosaveForms() {
     const statusElement = document.getElementById(form.dataset.autosaveStatusId || "");
     const inputAutosave = form.dataset.autosaveTrigger !== "change";
     let timer = 0;
-    let inFlightController = null;
+    let inFlightRequest = null;
+
+    const selectedFiles = () =>
+      Array.from(form.querySelectorAll('input[type="file"]')).flatMap((input) =>
+        input instanceof HTMLInputElement && input.files ? Array.from(input.files) : [],
+      );
+
+    const uploadProgress = () => form.querySelector("[data-autosave-upload-progress]");
+
+    const resetUploadProgress = () => {
+      const progress = uploadProgress();
+      if (progress instanceof HTMLProgressElement) {
+        progress.hidden = true;
+        progress.value = 0;
+        progress.max = 100;
+      }
+    };
+
+    const postWithFetch = async (actionUrl, formData) => {
+      const controller = new AbortController();
+      const request = { abort: () => controller.abort() };
+      inFlightRequest = request;
+      const response = await fetch(new URL(actionUrl, window.location.href), {
+        method: form.method || "POST",
+        body: formData,
+        credentials: "same-origin",
+        headers: { "X-LabFoundry-Autosave": "1" },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error("Settings could not be saved.");
+      }
+      return { payload: await response.json(), request };
+    };
+
+    const postWithUploadProgress = (actionUrl, formData, files) =>
+      new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const request = { abort: () => xhr.abort() };
+        inFlightRequest = request;
+        const progress = uploadProgress();
+        if (progress instanceof HTMLProgressElement) {
+          progress.hidden = false;
+          progress.value = 0;
+          progress.max = 100;
+        }
+        xhr.open((form.method || "POST").toUpperCase(), new URL(actionUrl, window.location.href).toString());
+        xhr.withCredentials = true;
+        xhr.setRequestHeader("X-LabFoundry-Autosave", "1");
+        xhr.upload.addEventListener("progress", (event) => {
+          if (!(progress instanceof HTMLProgressElement)) {
+            return;
+          }
+          if (event.lengthComputable && event.total > 0) {
+            const percent = Math.max(1, Math.min(100, Math.round((event.loaded / event.total) * 100)));
+            progress.value = percent;
+            setAutosaveStatus(statusElement, `Uploading ${files[0]?.name || "file"} (${percent}%)...`, "saving");
+          } else {
+            progress.removeAttribute("value");
+            setAutosaveStatus(statusElement, `Uploading ${files[0]?.name || "file"}...`, "saving");
+          }
+        });
+        xhr.addEventListener("load", () => {
+          if (xhr.status < 200 || xhr.status >= 300) {
+            reject(new Error("Settings could not be saved."));
+            return;
+          }
+          try {
+            resolve({ payload: JSON.parse(xhr.responseText || "{}"), request });
+          } catch {
+            reject(new Error("Settings could not be saved."));
+          }
+        });
+        xhr.addEventListener("error", () => reject(new Error("Settings could not be saved.")));
+        xhr.addEventListener("abort", () => reject(new DOMException("Request aborted.", "AbortError")));
+        xhr.send(formData);
+      });
 
     const save = async () => {
       window.clearTimeout(timer);
-      if (inFlightController) {
-        inFlightController.abort();
+      if (inFlightRequest) {
+        inFlightRequest.abort();
       }
-      inFlightController = new AbortController();
-      setAutosaveStatus(statusElement, "Saving changes...", "saving");
+      const files = selectedFiles();
+      const hasFiles = files.length > 0;
+      setAutosaveStatus(statusElement, hasFiles ? `Uploading ${files[0]?.name || "file"}...` : "Saving changes...", "saving");
       try {
         const actionUrl = form.getAttribute("action") || window.location.href;
-        const response = await fetch(new URL(actionUrl, window.location.href), {
-          method: form.method || "POST",
-          body: new FormData(form),
-          credentials: "same-origin",
-          headers: { "X-LabFoundry-Autosave": "1" },
-          signal: inFlightController.signal,
-        });
-        if (!response.ok) {
-          throw new Error("Settings could not be saved.");
-        }
-        const payload = await response.json();
+        const formData = new FormData(form);
+        const { payload, request } = hasFiles
+          ? await postWithUploadProgress(actionUrl, formData, files)
+          : await postWithFetch(actionUrl, formData);
         form.dispatchEvent(new CustomEvent("labfoundry:autosave-success", { detail: payload }));
         setAutosaveStatus(
           statusElement,
           payload.updated_at ? `Saved automatically at ${new Date(payload.updated_at).toLocaleTimeString()}.` : "Saved automatically.",
           "saved",
         );
+        if (inFlightRequest === request) {
+          inFlightRequest = null;
+        }
+        resetUploadProgress();
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
+        inFlightRequest = null;
+        resetUploadProgress();
         setAutosaveStatus(statusElement, error instanceof Error ? error.message : "Settings could not be saved.", "error");
       } finally {
-        inFlightController = null;
+        if (!hasFiles) {
+          resetUploadProgress();
+        }
       }
     };
 
@@ -5903,7 +6120,6 @@ function updateVcfDepotSummary(form, payload = {}) {
   const endpoint = document.querySelector("[data-vcf-depot-endpoint]");
   const interfaceLabel = document.querySelector("[data-vcf-depot-interface]");
   const storePaths = document.querySelectorAll("[data-vcf-depot-store]");
-  const toolNames = document.querySelectorAll("[data-vcf-depot-tool-name]");
   const toolVersions = document.querySelectorAll("[data-vcf-depot-tool-version]");
   const toolStatuses = document.querySelectorAll("[data-vcf-depot-tool-status]");
   const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
@@ -5924,11 +6140,6 @@ function updateVcfDepotSummary(form, payload = {}) {
     });
   }
   if (payload.tool_archive_name !== undefined) {
-    toolNames.forEach((toolName) => {
-      if (toolName instanceof HTMLElement) {
-        toolName.textContent = payload.tool_archive_name || "not uploaded";
-      }
-    });
     toolStatuses.forEach((toolStatus) => {
       if (toolStatus instanceof HTMLElement) {
         toolStatus.textContent = payload.tool_archive_name ? "tool staged" : "upload required";
@@ -5994,6 +6205,22 @@ function updateVcfDepotSoftwareDepotId(payload = {}) {
   if (softwareDepotId instanceof HTMLElement && payload.software_depot_id !== undefined) {
     softwareDepotId.textContent = payload.software_depot_id || "";
     softwareDepotId.classList.toggle("hidden", !payload.software_depot_id);
+    let copyButton = softwareDepotCell?.querySelector("[data-copy-value]");
+    if (payload.software_depot_id) {
+      if (!(copyButton instanceof HTMLButtonElement)) {
+        copyButton = document.createElement("button");
+        copyButton.className = "button secondary icon-button";
+        copyButton.type = "button";
+        copyButton.textContent = "⧉";
+        copyButton.setAttribute("aria-label", "Copy software depot ID");
+        copyButton.setAttribute("title", "Copy software depot ID");
+        softwareDepotId.insertAdjacentElement("afterend", copyButton);
+      }
+      copyButton.dataset.copyValue = payload.software_depot_id;
+      initializeCopyValueButtons(softwareDepotCell || document);
+    } else if (copyButton instanceof HTMLButtonElement) {
+      copyButton.remove();
+    }
     const button = softwareDepotCell?.querySelector("[data-vcf-depot-generate-id] button[type='submit']");
     if (button instanceof HTMLButtonElement) {
       if (payload.software_depot_id) {
@@ -6844,6 +7071,8 @@ document.addEventListener("DOMContentLoaded", initializeKickstartEditorDirtyStat
 document.addEventListener("DOMContentLoaded", initializeHostsFileEditor);
 document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
+document.addEventListener("DOMContentLoaded", initializePreviewModalControls);
+document.addEventListener("DOMContentLoaded", initializeCopyValueButtons);
 document.addEventListener("DOMContentLoaded", initializeNonTabbableHelperControls);
 document.addEventListener("DOMContentLoaded", initializeSecretToggles);
 document.addEventListener("DOMContentLoaded", initializeSwitchFields);

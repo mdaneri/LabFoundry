@@ -2817,6 +2817,69 @@ textarea {
   gap: 8px;
 }
 
+.preview-modal {
+  width: min(1040px, calc(100vw - 32px));
+  max-height: min(840px, calc(100vh - 32px));
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  background: transparent;
+}
+
+.preview-modal::backdrop {
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.preview-modal-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: min(580px, calc(100vh - 48px));
+  max-height: min(840px, calc(100vh - 32px));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.preview-modal-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  padding: 14px 16px;
+}
+
+.preview-modal-head h2,
+.preview-modal-head p {
+  margin: 0;
+}
+
+.preview-modal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.preview-modal pre {
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  background: #0f172a;
+}
+
+.preview-modal code {
+  display: block;
+  min-width: max-content;
+  padding: 16px;
+  color: #dbeafe;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  tab-size: 2;
+}
+
 .password-input-wrap {
   position: relative;
   display: block;
@@ -2950,6 +3013,7 @@ textarea {
 }
 
 .terminal-note {
+  position: relative;
   display: grid;
   gap: 8px;
   margin-top: 14px;
@@ -2958,6 +3022,38 @@ textarea {
   background: #111827;
   color: #e5e7eb;
   font-size: 12px;
+}
+
+.terminal-note.has-actions {
+  padding-top: 42px;
+}
+
+.terminal-note-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  display: flex;
+  gap: 6px;
+}
+
+.terminal-note-actions .icon-button {
+  width: 26px;
+  height: 26px;
+  border-color: rgba(148, 163, 184, 0.35);
+  color: #dbeafe;
+  background: rgba(15, 23, 42, 0.7);
+}
+
+.terminal-note-actions .icon-button:hover,
+.terminal-note-actions .icon-button:focus-visible {
+  border-color: #93c5fd;
+  color: white;
+  background: #1d4ed8;
+}
+
+.terminal-note summary {
+  cursor: pointer;
 }
 
 .terminal-note code {
@@ -3009,19 +3105,22 @@ textarea {
 
 .config-preview .token.property,
 .config-diff .token.property,
-.terminal-note .token.property {
+.terminal-note .token.property,
+.preview-modal .token.property {
   color: #93c5fd;
 }
 
 .config-preview .token.string,
 .config-diff .token.string,
-.terminal-note .token.string {
+.terminal-note .token.string,
+.preview-modal .token.string {
   color: #86efac;
 }
 
 .config-preview .token.number,
 .config-diff .token.number,
-.terminal-note .token.number {
+.terminal-note .token.number,
+.preview-modal .token.number {
   color: #fbbf24;
 }
 
@@ -3030,7 +3129,9 @@ textarea {
 .config-diff .token.boolean,
 .config-diff .token.keyword,
 .terminal-note .token.boolean,
-.terminal-note .token.keyword {
+.terminal-note .token.keyword,
+.preview-modal .token.boolean,
+.preview-modal .token.keyword {
   color: #c4b5fd;
 }
 
@@ -3039,20 +3140,24 @@ textarea {
 .config-diff .token.operator,
 .config-diff .token.punctuation,
 .terminal-note .token.operator,
-.terminal-note .token.punctuation {
+.terminal-note .token.punctuation,
+.preview-modal .token.operator,
+.preview-modal .token.punctuation {
   color: #bfdbfe;
 }
 
 .config-preview .token.comment,
 .config-diff .token.comment,
-.terminal-note .token.comment {
+.terminal-note .token.comment,
+.preview-modal .token.comment {
   color: #94a3b8;
   font-style: italic;
 }
 
 .config-preview .token.section,
 .config-diff .token.section,
-.terminal-note .token.section {
+.terminal-note .token.section,
+.preview-modal .token.section {
   color: #f9a8d4;
   font-weight: 750;
 }
