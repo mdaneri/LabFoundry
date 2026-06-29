@@ -64,7 +64,7 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'log_step "system adapter dry-run mode: $LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS"' in script
     assert "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=$LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS" in script
     assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/image/hyperv/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
-    assert "sed -i 's/\\r$//' /etc/sudoers.d/labfoundry-helper" in script
+    assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
     assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
     assert "labfoundry-root-login.conf" in script
     assert "PermitRootLogin no" in script
