@@ -145,6 +145,7 @@ function highlightConfigPreviews(root = document) {
   if (!(root instanceof Document || root instanceof HTMLElement)) {
     return;
   }
+  initializeTerminalNoteActions(root);
   root
     .querySelectorAll(
       [
@@ -161,9 +162,107 @@ function highlightConfigPreviews(root = document) {
         "[data-vcf-registry-relocation-preview]",
         "[data-vcf-depot-command-preview]",
         "[data-vcf-depot-https-preview]",
+        "[data-esxi-pxe-preview]",
       ].join(", "),
     )
     .forEach((element) => highlightConfigPreviewElement(element));
+}
+
+function terminalNoteTitle(note) {
+  const titleElement = note.querySelector("strong") || note.querySelector("summary");
+  return titleElement?.textContent?.trim() || "Preview";
+}
+
+function openPreviewModal(title, text, sourceCode) {
+  const modal = document.getElementById("preview-modal");
+  const titleElement = document.getElementById("preview-modal-title");
+  const code = modal?.querySelector("[data-preview-modal-code]");
+  if (!(modal instanceof HTMLDialogElement) || !(titleElement instanceof HTMLElement) || !(code instanceof HTMLElement)) {
+    return;
+  }
+  titleElement.textContent = title || "Preview";
+  code.textContent = text || "";
+  code.className = "";
+  if (sourceCode instanceof HTMLElement) {
+    sourceCode.classList.forEach((className) => {
+      if (className.startsWith("language-")) {
+        code.classList.add(className);
+      }
+    });
+  }
+  highlightConfigPreviewElement(code);
+  if (typeof modal.showModal === "function") {
+    modal.showModal();
+  } else {
+    modal.setAttribute("open", "");
+  }
+}
+
+function initializePreviewModalControls() {
+  const modal = document.getElementById("preview-modal");
+  if (!(modal instanceof HTMLDialogElement) || modal.dataset.previewModalInitialized === "1") {
+    return;
+  }
+  modal.dataset.previewModalInitialized = "1";
+  const copyButton = modal.querySelector("[data-preview-modal-copy]");
+  const closeButton = modal.querySelector("[data-preview-modal-close]");
+  const code = modal.querySelector("[data-preview-modal-code]");
+  copyButton?.addEventListener("click", async () => {
+    try {
+      await copyTextToClipboard(code?.textContent || "");
+    } catch {
+      showTransientGridStatus("Copy failed");
+    }
+  });
+  closeButton?.addEventListener("click", () => {
+    modal.close();
+  });
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      modal.close();
+    }
+  });
+}
+
+function initializeTerminalNoteActions(root = document) {
+  if (!(root instanceof Document || root instanceof HTMLElement)) {
+    return;
+  }
+  root.querySelectorAll(".terminal-note").forEach((note) => {
+    if (!(note instanceof HTMLElement) || note.dataset.terminalNoteActions === "1") {
+      return;
+    }
+    const code = note.querySelector("code");
+    if (!(code instanceof HTMLElement)) {
+      return;
+    }
+    note.dataset.terminalNoteActions = "1";
+    note.classList.add("has-actions");
+    const actions = document.createElement("div");
+    actions.className = "terminal-note-actions";
+    const copyButton = document.createElement("button");
+    copyButton.className = "button secondary icon-button";
+    copyButton.type = "button";
+    copyButton.textContent = "⧉";
+    copyButton.setAttribute("aria-label", "Copy preview");
+    copyButton.setAttribute("title", "Copy preview");
+    const openButton = document.createElement("button");
+    openButton.className = "button secondary icon-button";
+    openButton.type = "button";
+    openButton.textContent = "↗";
+    openButton.setAttribute("aria-label", "Open preview");
+    openButton.setAttribute("title", "Open preview");
+    actions.append(copyButton, openButton);
+    note.prepend(actions);
+    copyButton.addEventListener("click", async () => {
+      try {
+        await copyTextToClipboard(code.textContent || "");
+      } catch {
+        showTransientGridStatus("Copy failed");
+      }
+    });
+    openButton.addEventListener("click", () => openPreviewModal(terminalNoteTitle(note), code.textContent || "", code));
+  });
 }
 
 function rememberDnsActiveZone(domain) {
@@ -495,6 +594,47 @@ function showTransientGridStatus(message) {
   showTransientGridStatus.timeoutId = window.setTimeout(() => {
     toast.classList.remove("visible");
   }, 1400);
+}
+
+async function copyTextToClipboard(text, successMessage = "Copied") {
+  const value = String(text || "");
+  if (!value) {
+    return;
+  }
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    await navigator.clipboard.writeText(value);
+  } else {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+  showTransientGridStatus(successMessage);
+}
+
+function initializeCopyValueButtons(root = document) {
+  if (!(root instanceof Document || root instanceof HTMLElement)) {
+    return;
+  }
+  root.querySelectorAll("[data-copy-value]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.copyInitialized === "1") {
+      return;
+    }
+    button.dataset.copyInitialized = "1";
+    button.addEventListener("click", async () => {
+      try {
+        await copyTextToClipboard(button.dataset.copyValue || button.textContent || "");
+      } catch {
+        showTransientGridStatus("Copy failed");
+      }
+    });
+  });
 }
 
 function showDhcpReservationError(message) {
@@ -880,6 +1020,146 @@ async function deleteDhcpReservationFromMenu(row, csrf) {
     await postDhcpReservationAction(`/dhcp/reservations/${data.id}/delete`, {}, csrf);
   } catch (error) {
     showDhcpReservationError(error instanceof Error ? error.message : "The DHCP reservation could not be deleted.");
+  }
+}
+
+function showEsxiHostMessage(message, type = "error") {
+  const element = document.getElementById("esxi-pxe-host-error");
+  if (!element) {
+    return;
+  }
+  element.textContent = message;
+  element.classList.toggle("error", type === "error");
+  element.classList.toggle("success", type === "success");
+  element.classList.remove("hidden");
+}
+
+function showEsxiHostError(message) {
+  showEsxiHostMessage(message, "error");
+}
+
+function showEsxiHostSuccess(message) {
+  showTransientGridStatus(message);
+}
+
+function clearEsxiHostError() {
+  const element = document.getElementById("esxi-pxe-host-error");
+  if (!element) {
+    return;
+  }
+  element.textContent = "";
+  element.classList.add("hidden");
+}
+
+async function postEsxiHostAction(url, data, csrf, options = {}) {
+  const reload = options.reload ?? true;
+  const body = new FormData();
+  body.set("csrf", csrf);
+  for (const [key, value] of Object.entries(data)) {
+    if (key === "id" || key === "is_new" || key === "is_default" || key.endsWith("_name")) {
+      continue;
+    }
+    if (key === "enabled") {
+      if (value) {
+        body.set("enabled", "on");
+      }
+      continue;
+    }
+    body.set(key, value ?? "");
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    body,
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text.match(/ESXi PXE host[^<]*/)?.[0] || text.match(/Default ESXi PXE[^<]*/)?.[0] || "The ESXi PXE host reference could not be saved.");
+  }
+  if (reload) {
+    window.location.reload();
+  }
+}
+
+function newEsxiHostRow(defaultIsoPath = "") {
+  return {
+    id: "new",
+    hostname: "",
+    mac_address: "",
+    kickstart_id: "",
+    kickstart_name: "",
+    installer_iso_path: defaultIsoPath,
+    installer_iso_name: "",
+    enabled: true,
+    is_new: true,
+    is_default: false,
+  };
+}
+
+function hasRequiredEsxiHostFields(data) {
+  return Boolean((data.hostname || "").trim() && (data.mac_address || "").trim());
+}
+
+async function autoSaveEsxiHost(cell, csrf) {
+  clearEsxiHostError();
+  const row = cell.getRow();
+  const data = row.getData();
+  if (data.is_default) {
+    try {
+      await postEsxiHostAction("/esxi-pxe/default-host", data, csrf, { reload: false });
+      showEsxiHostSuccess("Saved");
+    } catch (error) {
+      showEsxiHostError(error instanceof Error ? error.message : "The default ESXi PXE host profile could not be saved.");
+      if (typeof cell.restoreOldValue === "function") {
+        cell.restoreOldValue();
+      }
+    }
+    return;
+  }
+  if (data.is_new) {
+    if (!hasRequiredEsxiHostFields(data)) {
+      return;
+    }
+    try {
+      await postEsxiHostAction("/esxi-pxe/hosts", data, csrf);
+      showEsxiHostSuccess("Added");
+    } catch (error) {
+      showEsxiHostError(error instanceof Error ? error.message : "The ESXi PXE host reference could not be added.");
+      if (typeof cell.restoreOldValue === "function") {
+        cell.restoreOldValue();
+      }
+    }
+    return;
+  }
+  try {
+    await postEsxiHostAction(`/esxi-pxe/hosts/${data.id}`, data, csrf, { reload: false });
+    showEsxiHostSuccess("Saved");
+  } catch (error) {
+    showEsxiHostError(error instanceof Error ? error.message : "The ESXi PXE host reference could not be saved.");
+    if (typeof cell.restoreOldValue === "function") {
+      cell.restoreOldValue();
+    }
+  }
+}
+
+async function deleteEsxiHost(row, csrf) {
+  clearEsxiHostError();
+  const data = row.getData();
+  if (data.is_new || data.is_default) {
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `Delete ${data.hostname} host reference?`,
+    message: `This removes the ESXi PXE host reference for ${data.mac_address} from desired state. It will not touch generated PXE files until global appliance apply runs.`,
+    label: "Delete host reference",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await postEsxiHostAction(`/esxi-pxe/hosts/${data.id}/delete`, {}, csrf);
+  } catch (error) {
+    showEsxiHostError(error instanceof Error ? error.message : "The ESXi PXE host reference could not be deleted.");
   }
 }
 
@@ -2583,8 +2863,8 @@ function initializeCaSettings() {
 }
 
 function serviceBindSelection(form, payload = {}) {
-  const interfaceEditor = form.querySelector("[data-service-bind-interface]");
-  const addressEditor = form.querySelector("[data-service-bind-address]");
+  const interfaceEditor = form.querySelector(".tag-editor[data-service-bind-interface]");
+  const addressEditor = form.querySelector(".tag-editor[data-service-bind-address]");
   const interfaces = Array.isArray(payload.listen_interfaces) ? payload.listen_interfaces : tagEditorValues(interfaceEditor);
   const addresses = Array.isArray(payload.listen_addresses) ? payload.listen_addresses : tagEditorValues(addressEditor);
   const interfaceName = payload.listen_interface || interfaces[0] || "";
@@ -4007,6 +4287,121 @@ function initializeDhcpReservationsTable() {
   }
 }
 
+function initializeEsxiPxeHostsTable() {
+  const tableElement = document.getElementById("esxi-pxe-hosts-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  if (typeof Tabulator === "undefined") {
+    showEsxiHostError("Tabulator did not load. Showing the fallback table.");
+    return;
+  }
+  const csrf = tableElement.dataset.csrf || "";
+  const canWrite = tableElement.dataset.canWrite === "true";
+  const kickstartOptions = JSON.parse(tableElement.dataset.kickstartOptions || "[]");
+  const isoOptions = JSON.parse(tableElement.dataset.isoOptions || "[]");
+  const kickstartValues = Object.fromEntries(kickstartOptions.map((item) => [item.id, item.label]));
+  const isoValues = Object.fromEntries(isoOptions.map((item) => [item.id, item.label]));
+  const defaultIsoPath = isoOptions.find((item) => item.id)?.id || "";
+  const rows = [...JSON.parse(tableElement.dataset.hosts || "[]"), newEsxiHostRow(defaultIsoPath)];
+  try {
+    new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "360px",
+      rowHeight: 30,
+      placeholder: "No ESXi PXE host references configured.",
+      reactiveData: false,
+      columns: [
+        {
+          title: "Host",
+          field: "hostname",
+          editor: canWrite ? "input" : false,
+          editable: (cell) => !cell.getRow().getData().is_default,
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.is_default) {
+              return "Default / undefined MACs";
+            }
+            return dnsAddRowHintFormatter(cell, "+ Add host reference here");
+          },
+          minWidth: 200,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "MAC address",
+          field: "mac_address",
+          editor: canWrite ? "input" : false,
+          editable: (cell) => !cell.getRow().getData().is_default,
+          formatter: (cell) => {
+            if (cell.getRow().getData().is_default) {
+              return "*";
+            }
+            return dnsAddRowHintFormatter(cell, "00:50:56:aa:bb:cc");
+          },
+          minWidth: 170,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "Kickstart",
+          field: "kickstart_id",
+          editor: canWrite ? "list" : false,
+          editorParams: { values: kickstartValues },
+          formatter: (cell) => kickstartValues[cell.getValue()] || "No Kickstart",
+          minWidth: 180,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "Installer ISO",
+          field: "installer_iso_path",
+          editor: canWrite ? "list" : false,
+          editorParams: { values: isoValues, autocomplete: true },
+          formatter: (cell) => isoValues[cell.getValue()] || "No ISO selected",
+          minWidth: 320,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "Enabled",
+          field: "enabled",
+          formatter: "tickCross",
+          editor: canWrite ? "tickCross" : false,
+          hozAlign: "center",
+          width: 100,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "",
+          field: "actions",
+          headerSort: false,
+          hozAlign: "center",
+          width: 90,
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (!canWrite || data.is_new || data.is_default) {
+              return "";
+            }
+            return '<button class="button tiny danger" type="button">Delete</button>';
+          },
+          cellClick: (event, cell) => deleteEsxiHost(cell.getRow(), csrf),
+        },
+      ],
+      rowFormatter: (row) => {
+        const data = row.getData();
+        row.getElement().classList.toggle("new-record-row", Boolean(data.is_new));
+        row.getElement().classList.toggle("managed-record-row", Boolean(data.is_default));
+      },
+    });
+    if (fallback) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    showEsxiHostError(error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
+  }
+}
+
 function initializeHostsFileEditor() {
   document.querySelectorAll(".hosts-file-input").forEach((input) => {
     if (!(input instanceof HTMLInputElement)) {
@@ -4045,6 +4440,31 @@ function initializeCodeMirrorEditors() {
     window.LabFoundryCodeMirror.enhanceTextarea(textarea, {
       language: textarea.dataset.codemirrorLanguage || "labfoundry-hosts",
     });
+  });
+}
+
+function initializeKickstartEditorDirtyState() {
+  document.querySelectorAll("[data-kickstart-editor-form]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const status = form.querySelector("[data-kickstart-dirty-state]");
+    const editor = form.querySelector("textarea[name='content']");
+    if (!(status instanceof HTMLElement) || !(editor instanceof HTMLTextAreaElement)) {
+      return;
+    }
+    let initialValue = editor.value;
+    const refresh = () => {
+      const dirty = editor.value !== initialValue;
+      status.textContent = dirty ? "Unsaved changes" : "Saved";
+      status.classList.toggle("dirty", dirty);
+    };
+    editor.addEventListener("input", refresh);
+    form.addEventListener("submit", () => {
+      initialValue = editor.value;
+      refresh();
+    });
+    refresh();
   });
 }
 
@@ -4167,41 +4587,119 @@ function initializeAutosaveForms() {
     const statusElement = document.getElementById(form.dataset.autosaveStatusId || "");
     const inputAutosave = form.dataset.autosaveTrigger !== "change";
     let timer = 0;
-    let inFlightController = null;
+    let inFlightRequest = null;
+
+    const selectedFiles = () =>
+      Array.from(form.querySelectorAll('input[type="file"]')).flatMap((input) =>
+        input instanceof HTMLInputElement && input.files ? Array.from(input.files) : [],
+      );
+
+    const uploadProgress = () => form.querySelector("[data-autosave-upload-progress]");
+
+    const resetUploadProgress = () => {
+      const progress = uploadProgress();
+      if (progress instanceof HTMLProgressElement) {
+        progress.hidden = true;
+        progress.value = 0;
+        progress.max = 100;
+      }
+    };
+
+    const postWithFetch = async (actionUrl, formData) => {
+      const controller = new AbortController();
+      const request = { abort: () => controller.abort() };
+      inFlightRequest = request;
+      const response = await fetch(new URL(actionUrl, window.location.href), {
+        method: form.method || "POST",
+        body: formData,
+        credentials: "same-origin",
+        headers: { "X-LabFoundry-Autosave": "1" },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error("Settings could not be saved.");
+      }
+      return { payload: await response.json(), request };
+    };
+
+    const postWithUploadProgress = (actionUrl, formData, files) =>
+      new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const request = { abort: () => xhr.abort() };
+        inFlightRequest = request;
+        const progress = uploadProgress();
+        if (progress instanceof HTMLProgressElement) {
+          progress.hidden = false;
+          progress.value = 0;
+          progress.max = 100;
+        }
+        xhr.open((form.method || "POST").toUpperCase(), new URL(actionUrl, window.location.href).toString());
+        xhr.withCredentials = true;
+        xhr.setRequestHeader("X-LabFoundry-Autosave", "1");
+        xhr.upload.addEventListener("progress", (event) => {
+          if (!(progress instanceof HTMLProgressElement)) {
+            return;
+          }
+          if (event.lengthComputable && event.total > 0) {
+            const percent = Math.max(1, Math.min(100, Math.round((event.loaded / event.total) * 100)));
+            progress.value = percent;
+            setAutosaveStatus(statusElement, `Uploading ${files[0]?.name || "file"} (${percent}%)...`, "saving");
+          } else {
+            progress.removeAttribute("value");
+            setAutosaveStatus(statusElement, `Uploading ${files[0]?.name || "file"}...`, "saving");
+          }
+        });
+        xhr.addEventListener("load", () => {
+          if (xhr.status < 200 || xhr.status >= 300) {
+            reject(new Error("Settings could not be saved."));
+            return;
+          }
+          try {
+            resolve({ payload: JSON.parse(xhr.responseText || "{}"), request });
+          } catch {
+            reject(new Error("Settings could not be saved."));
+          }
+        });
+        xhr.addEventListener("error", () => reject(new Error("Settings could not be saved.")));
+        xhr.addEventListener("abort", () => reject(new DOMException("Request aborted.", "AbortError")));
+        xhr.send(formData);
+      });
 
     const save = async () => {
       window.clearTimeout(timer);
-      if (inFlightController) {
-        inFlightController.abort();
+      if (inFlightRequest) {
+        inFlightRequest.abort();
       }
-      inFlightController = new AbortController();
-      setAutosaveStatus(statusElement, "Saving changes...", "saving");
+      const files = selectedFiles();
+      const hasFiles = files.length > 0;
+      setAutosaveStatus(statusElement, hasFiles ? `Uploading ${files[0]?.name || "file"}...` : "Saving changes...", "saving");
       try {
         const actionUrl = form.getAttribute("action") || window.location.href;
-        const response = await fetch(new URL(actionUrl, window.location.href), {
-          method: form.method || "POST",
-          body: new FormData(form),
-          credentials: "same-origin",
-          headers: { "X-LabFoundry-Autosave": "1" },
-          signal: inFlightController.signal,
-        });
-        if (!response.ok) {
-          throw new Error("Settings could not be saved.");
-        }
-        const payload = await response.json();
+        const formData = new FormData(form);
+        const { payload, request } = hasFiles
+          ? await postWithUploadProgress(actionUrl, formData, files)
+          : await postWithFetch(actionUrl, formData);
         form.dispatchEvent(new CustomEvent("labfoundry:autosave-success", { detail: payload }));
         setAutosaveStatus(
           statusElement,
           payload.updated_at ? `Saved automatically at ${new Date(payload.updated_at).toLocaleTimeString()}.` : "Saved automatically.",
           "saved",
         );
+        if (inFlightRequest === request) {
+          inFlightRequest = null;
+        }
+        resetUploadProgress();
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
+        inFlightRequest = null;
+        resetUploadProgress();
         setAutosaveStatus(statusElement, error instanceof Error ? error.message : "Settings could not be saved.", "error");
       } finally {
-        inFlightController = null;
+        if (!hasFiles) {
+          resetUploadProgress();
+        }
       }
     };
 
@@ -5622,7 +6120,6 @@ function updateVcfDepotSummary(form, payload = {}) {
   const endpoint = document.querySelector("[data-vcf-depot-endpoint]");
   const interfaceLabel = document.querySelector("[data-vcf-depot-interface]");
   const storePaths = document.querySelectorAll("[data-vcf-depot-store]");
-  const toolNames = document.querySelectorAll("[data-vcf-depot-tool-name]");
   const toolVersions = document.querySelectorAll("[data-vcf-depot-tool-version]");
   const toolStatuses = document.querySelectorAll("[data-vcf-depot-tool-status]");
   const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
@@ -5643,11 +6140,6 @@ function updateVcfDepotSummary(form, payload = {}) {
     });
   }
   if (payload.tool_archive_name !== undefined) {
-    toolNames.forEach((toolName) => {
-      if (toolName instanceof HTMLElement) {
-        toolName.textContent = payload.tool_archive_name || "not uploaded";
-      }
-    });
     toolStatuses.forEach((toolStatus) => {
       if (toolStatus instanceof HTMLElement) {
         toolStatus.textContent = payload.tool_archive_name ? "tool staged" : "upload required";
@@ -5713,6 +6205,22 @@ function updateVcfDepotSoftwareDepotId(payload = {}) {
   if (softwareDepotId instanceof HTMLElement && payload.software_depot_id !== undefined) {
     softwareDepotId.textContent = payload.software_depot_id || "";
     softwareDepotId.classList.toggle("hidden", !payload.software_depot_id);
+    let copyButton = softwareDepotCell?.querySelector("[data-copy-value]");
+    if (payload.software_depot_id) {
+      if (!(copyButton instanceof HTMLButtonElement)) {
+        copyButton = document.createElement("button");
+        copyButton.className = "button secondary icon-button";
+        copyButton.type = "button";
+        copyButton.textContent = "⧉";
+        copyButton.setAttribute("aria-label", "Copy software depot ID");
+        copyButton.setAttribute("title", "Copy software depot ID");
+        softwareDepotId.insertAdjacentElement("afterend", copyButton);
+      }
+      copyButton.dataset.copyValue = payload.software_depot_id;
+      initializeCopyValueButtons(softwareDepotCell || document);
+    } else if (copyButton instanceof HTMLButtonElement) {
+      copyButton.remove();
+    }
     const button = softwareDepotCell?.querySelector("[data-vcf-depot-generate-id] button[type='submit']");
     if (button instanceof HTMLButtonElement) {
       if (payload.software_depot_id) {
@@ -6034,8 +6542,100 @@ function initializeFileUploadControls() {
   });
 }
 
+function initializeEsxiIsoUploadForms() {
+  document.querySelectorAll("[data-esxi-iso-upload]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement) || form.dataset.esxiIsoUploadInitialized === "1") {
+      return;
+    }
+    form.dataset.esxiIsoUploadInitialized = "1";
+    const fileInput = form.querySelector('input[type="file"][name="iso_file"]');
+    const button = form.querySelector("[data-esxi-iso-upload-button]");
+    const progress = form.querySelector("[data-esxi-iso-upload-progress]");
+    const status = form.querySelector("[data-esxi-iso-upload-status]");
+    const setStatus = (message, state = "idle") => {
+      if (status instanceof HTMLElement) {
+        status.textContent = message;
+        status.dataset.state = state;
+      }
+    };
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!(fileInput instanceof HTMLInputElement) || !fileInput.files || fileInput.files.length < 1) {
+        setStatus("Choose an ESXi installer ISO before uploading.", "error");
+        return;
+      }
+      const file = fileInput.files[0];
+      if (!file.name.toLowerCase().endsWith(".iso")) {
+        setStatus("Choose a .iso installer file.", "error");
+        return;
+      }
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", form.action);
+      xhr.setRequestHeader("X-LabFoundry-Upload", "1");
+      xhr.upload.addEventListener("loadstart", () => {
+        if (progress instanceof HTMLProgressElement) {
+          progress.hidden = false;
+          progress.value = 0;
+        }
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = true;
+        }
+        setStatus(`Uploading ${file.name}...`, "saving");
+      });
+      xhr.upload.addEventListener("progress", (progressEvent) => {
+        if (progress instanceof HTMLProgressElement && progressEvent.lengthComputable) {
+          const percent = Math.max(0, Math.min(100, Math.round((progressEvent.loaded / progressEvent.total) * 100)));
+          progress.value = percent;
+          setStatus(`Uploading ${file.name}: ${percent}%`, "saving");
+        }
+      });
+      xhr.addEventListener("load", () => {
+        let payload = {};
+        try {
+          payload = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+        } catch (_error) {
+          payload = {};
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const uploadedName = payload.name || file.name;
+          setStatus(`${uploadedName} uploaded. Refreshing ISO choices...`, "saved");
+          rememberActiveTab("labfoundry:esxi-pxe:active-tab", "esxi-pxe-isos-panel");
+          if (window.location.pathname === "/esxi-pxe") {
+            window.location.hash = "esxi-pxe-isos-panel";
+            window.location.reload();
+          } else {
+            window.location.href = "/esxi-pxe#esxi-pxe-isos-panel";
+          }
+          return;
+        }
+        const message =
+          payload.detail ||
+          (xhr.status === 413
+            ? "Upload is too large. ESXi installer ISO uploads are limited to 1 GB."
+            : `Upload failed with HTTP ${xhr.status}.`);
+        setStatus(message, "error");
+      });
+      xhr.addEventListener("error", () => {
+        setStatus("Upload failed before LabFoundry received the file. Check appliance connectivity and upload size.", "error");
+      });
+      xhr.addEventListener("abort", () => {
+        setStatus("Upload canceled.", "error");
+      });
+      xhr.addEventListener("loadend", () => {
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = false;
+        }
+      });
+      xhr.send(new FormData(form));
+    });
+  });
+}
+
 function initializeTagEditors() {
   document.querySelectorAll("[data-tag-editor]").forEach((editor) => {
+    if (editor instanceof HTMLElement && editor.dataset.tagEditorInitialized === "1") {
+      return;
+    }
     const input = editor.querySelector("[data-tag-entry]");
     const list = editor.querySelector("[data-tag-list]");
     const toggle = editor.querySelector("[data-tag-menu-toggle]");
@@ -6045,6 +6645,7 @@ function initializeTagEditors() {
     if (!(editor instanceof HTMLElement) || !(input instanceof HTMLInputElement) || !(list instanceof HTMLElement) || !name) {
       return;
     }
+    editor.dataset.tagEditorInitialized = "1";
 
     const currentValues = () =>
       Array.from(list.querySelectorAll(".tag-token")).map((item) => item.getAttribute("data-value") || "");
@@ -6147,6 +6748,7 @@ function initializeTagEditors() {
     input.addEventListener("blur", addInputValues);
     if (toggle instanceof HTMLButtonElement && menu instanceof HTMLElement) {
       toggle.addEventListener("click", (event) => {
+        event.preventDefault();
         event.stopPropagation();
         refreshMenu();
         menu.toggleAttribute("hidden");
@@ -6258,8 +6860,8 @@ function initializeServiceBindEditors() {
     if (!(container instanceof HTMLElement)) {
       return;
     }
-    const interfaceEditor = container.querySelector("[data-service-bind-interface]");
-    const addressEditor = container.querySelector("[data-service-bind-address]");
+    const interfaceEditor = container.querySelector(".tag-editor[data-service-bind-interface]");
+    const addressEditor = container.querySelector(".tag-editor[data-service-bind-address]");
     if (!(interfaceEditor instanceof HTMLElement) || !(addressEditor instanceof HTMLElement)) {
       return;
     }
@@ -6348,12 +6950,13 @@ function initializeTabs() {
     storedDomainButton.click();
   }
   const hashTargetId = window.location.hash ? window.location.hash.slice(1) : "";
+  const hashTargetPanel = hashTargetId ? document.getElementById(hashTargetId)?.closest(".tab-panel") : null;
   document.querySelectorAll("[data-tab-storage-key]").forEach((tabList) => {
     if (!(tabList instanceof HTMLElement)) {
       return;
     }
     const storageKey = tabList.dataset.tabStorageKey || "";
-    let targetId = hashTargetId;
+    let targetId = hashTargetPanel instanceof HTMLElement ? hashTargetPanel.id : hashTargetId;
     try {
       targetId = targetId || window.localStorage.getItem(storageKey) || "";
     } catch {
@@ -6443,6 +7046,7 @@ document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpReservationsTable);
+document.addEventListener("DOMContentLoaded", initializeEsxiPxeHostsTable);
 document.addEventListener("DOMContentLoaded", initializeCaProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeCaCertificatesTable);
 document.addEventListener("DOMContentLoaded", initializeCaSettings);
@@ -6463,9 +7067,12 @@ document.addEventListener("DOMContentLoaded", initializeRoutesWanPoliciesTable);
 document.addEventListener("DOMContentLoaded", initializePhysicalInterfacesTable);
 document.addEventListener("DOMContentLoaded", initializeVlanInterfacesTable);
 document.addEventListener("DOMContentLoaded", initializeCodeMirrorEditors);
+document.addEventListener("DOMContentLoaded", initializeKickstartEditorDirtyState);
 document.addEventListener("DOMContentLoaded", initializeHostsFileEditor);
 document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
+document.addEventListener("DOMContentLoaded", initializePreviewModalControls);
+document.addEventListener("DOMContentLoaded", initializeCopyValueButtons);
 document.addEventListener("DOMContentLoaded", initializeNonTabbableHelperControls);
 document.addEventListener("DOMContentLoaded", initializeSecretToggles);
 document.addEventListener("DOMContentLoaded", initializeSwitchFields);
@@ -6479,6 +7086,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSoftwareDepotIdGenerator);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTokenPaste);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
+document.addEventListener("DOMContentLoaded", initializeEsxiIsoUploadForms);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);

@@ -200,6 +200,8 @@ it to Packer.
 - `/etc/systemd/system/labfoundry-firewall.service` loading the nftables
   management firewall.
 - `dnsmasq` for the shared DNS/DHCP appliance service.
+- `ipxe` and `syslinux` for ESXi PXE bootstrap artifacts served by dnsmasq. If the Photon package stream does not ship `undionly.kpxe` or `snponly.efi`, stage those first-stage iPXE files under `/var/lib/labfoundry/pxe/bootloaders` before applying ESXi PXE.
+  TFTP.
 - `/opt/labfoundry/bin/labfoundry-helper` constrained appliance helper.
 - `/etc/sudoers.d/labfoundry-helper` permitting the service user to run only
   the constrained helper binary as root.
@@ -222,6 +224,14 @@ The rendered config uses `/var/lib/labfoundry/dnsmasq/dhcp.leases` for DHCP
 leases, and the helper exposes only that allowlisted lease readback path.
 DHCP scopes should bind to access physical interfaces with IP CIDR or enabled
 VLAN interfaces with IP CIDR, not trunk or addressless physical interfaces.
+ESXi PXE boot settings add dnsmasq TFTP and DHCP bootfile options for the
+guide-aligned flow: first-stage `undionly.kpxe` or `snponly.efi`, then
+second-stage `pxelinux.0` or `mboot.efi` when DHCP detects iPXE. Optional
+native UEFI HTTP clients receive the generated absolute `mboot.efi` URL. The
+generated TFTP files, extracted ESXi installer HTTP tree, per-host `boot.cfg`
+files, and dedicated static PXE HTTP listener are written only by global
+appliance apply. Apply DNS/DHCP, ESXi PXE, and Firewall together when boot
+settings change.
 
 Certificate Authority desired state is LabFoundry CA-backed. Real
 `/appliance-apply` stages `/var/lib/labfoundry/apply/ca/labfoundry-ca.json`,

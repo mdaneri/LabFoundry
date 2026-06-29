@@ -137,6 +137,7 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>Depot Settings</h2>
+        <span class="status-pill {{ vcf_depot_service_status.pill }}">{{ vcf_depot_service_status.label }}</span>
       </div>
       <form class="form-stack" action="/vcf-offline-depot/settings" method="post" enctype="multipart/form-data" data-autosave-form data-vcf-depot-settings data-autosave-status-id="vcf-depot-settings-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -228,18 +229,19 @@
               <input class="file-upload-input" type="file" name="tool_archive_file" accept=".gz,application/gzip,application/x-gzip" data-file-upload-input>
               <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose VCFDT tool</strong><small data-file-upload-name>{{ vcf_depot_settings_json.tool_archive_name or vcf_depot_archive_pattern }}</small></span></span>
             </span>
+            <progress class="upload-progress" value="0" max="100" data-autosave-upload-progress hidden></progress>
           </label>
         </div>
         <p id="vcf-depot-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
       </form>
       <div class="settings-list">
-          <div><span>Tool file</span><strong data-vcf-depot-tool-name>{{ vcf_depot_settings_json.tool_archive_name or "not uploaded" }}</strong></div>
           <div><span>Version</span><strong data-vcf-depot-tool-version>{{ vcf_depot_settings.tool_version or "unknown" }}</strong></div>
           <div class="settings-action-row">
             <span>Software depot ID</span>
             <span class="setting-inline-actions" data-vcf-depot-software-depot-cell>
               {% if vcf_depot_software_depot_id.id %}
                 <strong data-vcf-depot-software-depot-id>{{ vcf_depot_software_depot_id.id }}</strong>
+                <button class="button secondary icon-button" type="button" data-copy-value="{{ vcf_depot_software_depot_id.id }}" aria-label="Copy software depot ID" title="Copy software depot ID">⧉</button>
                 <form class="inline-action-form" action="/vcf-offline-depot/software-depot-id/generate" method="post" data-vcf-depot-generate-id>
                   <input type="hidden" name="csrf" value="{{ csrf_token }}">
                   <button class="button secondary icon-button" type="submit" aria-label="Refresh software depot ID" title="Refresh software depot ID" data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>↻</button>

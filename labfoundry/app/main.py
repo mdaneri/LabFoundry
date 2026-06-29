@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,6 +23,24 @@ APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 
 
+def configure_logging() -> None:
+    settings = get_settings()
+    log_path = settings.app_log_path
+    root_logger = logging.getLogger()
+    if any(isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename) == log_path for handler in root_logger.handlers):
+        return
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(log_path, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    except OSError:
+        logging.getLogger("labfoundry").exception("Unable to initialize LabFoundry app log at %s", log_path)
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
+    logging.getLogger("labfoundry").info("LabFoundry app log initialized at %s", log_path)
+
+
 def refresh_startup_host_inventory(db: Session, *, environment: str) -> None:
     if environment == "appliance":
         sync_host_physical_interfaces(db)
@@ -29,6 +49,7 @@ def refresh_startup_host_inventory(db: Session, *, environment: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    configure_logging()
     init_db()
     with SessionLocal() as db:
         seed_initial_data(db, include_examples=settings.environment != "appliance")

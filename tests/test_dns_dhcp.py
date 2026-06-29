@@ -117,6 +117,65 @@ def test_dnsmasq_renderer_only_marks_dhcp_authoritative_when_dhcp_enabled():
     assert "dhcp-range=" not in config
 
 
+def test_dnsmasq_renderer_adds_esxi_pxe_boot_options():
+    pxe_scope = DhcpScope(
+        id=50,
+        name="PXE",
+        interface_name="eth1",
+        site_address="192.168.50.1",
+        prefix_length=24,
+        range_start="192.168.50.100",
+        range_end="192.168.50.200",
+        lease_time="12h",
+        domain_name="labfoundry.internal",
+        dns_server="192.168.50.1",
+        ntp_server="192.168.50.1",
+    )
+    config = render_dnsmasq_config(
+        dns_settings=DnsSettings(domain="labfoundry.internal", listen_interface="eth1"),
+        dns_records=[],
+        dhcp_settings=DhcpSettings(
+            enabled=True,
+            interface_name="eth1",
+            site_address="192.168.50.1",
+            prefix_length=24,
+            range_start="192.168.50.100",
+            range_end="192.168.50.200",
+            dns_server="192.168.50.1",
+        ),
+        dhcp_scopes=[pxe_scope],
+        dhcp_reservations=[],
+        esxi_pxe_boot={
+            "enabled": True,
+            "dhcp_scope_id": pxe_scope.id,
+            "hostname": "esxi-pxe.labfoundry.internal",
+            "listen_address": "192.168.50.1",
+            "tftp_root": "/var/lib/labfoundry/pxe/tftp",
+            "bios_bootfile": "undionly.kpxe",
+            "uefi_bootfile": "snponly.efi",
+            "bios_second_stage_bootfile": "pxelinux.0",
+            "uefi_second_stage_bootfile": "mboot.efi",
+            "native_uefi_http_enabled": True,
+            "effective_native_uefi_http_url": "http://192.168.50.1:8080/pxe/esxi/mboot.efi",
+        },
+    )
+
+    assert "enable-tftp" in config
+    assert "tftp-root=/var/lib/labfoundry/pxe/tftp" in config
+    assert "dhcp-userclass=set:ipxe,iPXE" in config
+    assert "dhcp-match=set:ipxe,175" in config
+    assert "dhcp-match=set:efi-x86_64,option:client-arch,7" in config
+    assert "dhcp-match=set:efi-x86_64,option:client-arch,9" in config
+    assert "dhcp-vendorclass=set:uefi-http,HTTPClient" in config
+    assert "dhcp-match=set:uefi-http-x64,option:client-arch,16" in config
+    assert "dhcp-boot=tag:pxe,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in config
+    assert "dhcp-option=tag:pxe,66,esxi-pxe.labfoundry.internal" in config
+    assert "dhcp-boot=tag:pxe,tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in config
+    assert "dhcp-boot=tag:pxe,tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in config
+    assert "dhcp-boot=tag:pxe,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in config
+    assert "dhcp-boot=tag:pxe,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in config
+
+
 def test_dnsmasq_lease_parser_tracks_active_and_expired_leases():
     leases = parse_dnsmasq_leases(
         "1893456000 02:15:5d:00:20:30 192.168.50.130 api-client.labfoundry.internal 01:02:15:5d:00:20:30\n"

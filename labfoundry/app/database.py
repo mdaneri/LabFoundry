@@ -36,6 +36,7 @@ def init_db() -> None:
     _ensure_sqlite_appliance_settings_columns()
     _ensure_sqlite_ca_columns()
     _ensure_sqlite_vcf_depot_columns()
+    _ensure_sqlite_esxi_pxe_columns()
 
 
 def _ensure_sqlite_user_sync_columns() -> None:
@@ -129,6 +130,22 @@ def _ensure_sqlite_vcf_depot_columns() -> None:
         for name, definition in columns.items():
             if name not in existing:
                 connection.execute(text(f"ALTER TABLE vcf_depot_download_profiles ADD COLUMN {name} {definition}"))
+
+
+def _ensure_sqlite_esxi_pxe_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "esxi_pxe_hosts" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("esxi_pxe_hosts")}
+    columns = {
+        "installer_iso_path": "VARCHAR(500) DEFAULT ''",
+    }
+    with engine.begin() as connection:
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE esxi_pxe_hosts ADD COLUMN {name} {definition}"))
 
 
 def get_db() -> Generator[Session, None, None]:

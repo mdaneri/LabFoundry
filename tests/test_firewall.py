@@ -84,6 +84,7 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
         vcf_backup_settings=VcfBackupSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=22),
         vcf_depot_settings=VcfOfflineDepotSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=8443),
         vcf_registry_settings=VcfPrivateRegistrySettings(enabled=True, listen_interface="eth2.50\neth3.60", port=9443),
+        esxi_pxe_boot={"enabled": True, "listen_interface": "eth2.50\neth3.60", "http_port": 8080},
         interface_networks={"eth0": "192.168.49.0/24", "eth2.50": "192.168.50.0/24", "eth3.60": "192.168.60.0/24"},
     )
 
@@ -105,6 +106,10 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     assert by_name["vcf-offline-depot-eth3.60"].interface_name == "eth3.60"
     assert by_name["vcf-private-registry-eth2.50"].destination_port == "9443"
     assert by_name["vcf-private-registry-eth3.60"].interface_name == "eth3.60"
+    assert by_name["esxi-pxe-tftp-eth2.50"].protocol == "udp"
+    assert by_name["esxi-pxe-tftp-eth2.50"].destination_port == "69"
+    assert by_name["esxi-pxe-http-eth2.50"].protocol == "tcp"
+    assert by_name["esxi-pxe-http-eth2.50"].destination_port == "8080"
 
 
 def test_managed_service_firewall_rules_use_assigned_source_group():

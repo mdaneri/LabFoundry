@@ -592,6 +592,128 @@ textarea {
   align-self: start;
 }
 
+.left-stack {
+  display: grid;
+  gap: 14px;
+  align-self: start;
+}
+
+.left-stack > .panel {
+  margin-bottom: 0;
+}
+
+.esxi-pxe-workspace .left-stack {
+  display: contents;
+}
+
+.esxi-pxe-workspace .esxi-boot-service-panel {
+  grid-column: 2;
+  grid-row: 1;
+  margin-bottom: 0;
+  min-width: 0;
+  overflow: visible;
+}
+
+.esxi-pxe-workspace > .left-stack > .wide-panel {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+}
+
+.esxi-pxe-workspace > .side-stack {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.esxi-boot-service-panel .boot-service-form {
+  gap: 9px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.esxi-boot-service-panel .boot-service-form,
+.esxi-boot-service-panel .form-grid,
+.esxi-boot-service-panel .form-field,
+.esxi-boot-service-panel label,
+.esxi-boot-service-panel .service-bind-editor,
+.esxi-boot-service-panel .tag-editor,
+.esxi-boot-service-panel .cm-editor,
+.esxi-boot-service-panel .settings-list {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.esxi-boot-service-panel input,
+.esxi-boot-service-panel textarea {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.esxi-boot-service-panel .form-grid {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.esxi-boot-service-panel .switch-field {
+  grid-template-columns: minmax(0, 1fr) 38px;
+}
+
+.esxi-boot-service-panel .form-grid > label > .field-label {
+  min-height: 0;
+}
+
+.esxi-boot-service-panel .field-label,
+.esxi-boot-service-panel label > span {
+  margin-bottom: 3px;
+}
+
+.esxi-boot-service-panel .tag-editor {
+  flex-wrap: nowrap;
+  overflow: visible;
+}
+
+.esxi-boot-service-panel .tag-editor-input {
+  flex: 1 1 56px;
+  min-width: 0;
+}
+
+.esxi-boot-service-panel .tag-token {
+  flex: 0 1 auto;
+  max-width: 145px;
+}
+
+.esxi-boot-service-panel .tag-token span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.esxi-boot-service-panel .cm-editor {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+.esxi-boot-service-panel .cm-scroller {
+  overflow: auto;
+}
+
+.esxi-boot-service-panel .compact-settings-list {
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: 10px;
+  overflow-x: hidden;
+}
+
+.esxi-boot-service-panel .compact-settings-list div {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.esxi-boot-service-panel .compact-settings-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .panel-head {
   display: flex;
   justify-content: space-between;
@@ -611,6 +733,22 @@ textarea {
 
 .subsection {
   margin-top: 16px;
+}
+
+.generated-options-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+}
+
+.generated-options-table {
+  margin-bottom: 0;
+}
+
+.generated-options-table code {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .firewall-workspace {
@@ -1460,6 +1598,12 @@ textarea {
   gap: 5px;
 }
 
+.compact-service-field {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+}
+
 .derived-field strong {
   display: flex;
   align-items: center;
@@ -1701,6 +1845,16 @@ input[type="checkbox"] {
 .file-upload-control {
   position: relative;
   display: block;
+}
+
+.upload-progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--accent);
+}
+
+.upload-progress[hidden] {
+  display: none;
 }
 
 .file-upload-input {
@@ -2663,6 +2817,69 @@ textarea {
   gap: 8px;
 }
 
+.preview-modal {
+  width: min(1040px, calc(100vw - 32px));
+  max-height: min(840px, calc(100vh - 32px));
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  background: transparent;
+}
+
+.preview-modal::backdrop {
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.preview-modal-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: min(580px, calc(100vh - 48px));
+  max-height: min(840px, calc(100vh - 32px));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.preview-modal-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  padding: 14px 16px;
+}
+
+.preview-modal-head h2,
+.preview-modal-head p {
+  margin: 0;
+}
+
+.preview-modal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.preview-modal pre {
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  background: #0f172a;
+}
+
+.preview-modal code {
+  display: block;
+  min-width: max-content;
+  padding: 16px;
+  color: #dbeafe;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  tab-size: 2;
+}
+
 .password-input-wrap {
   position: relative;
   display: block;
@@ -2709,6 +2926,68 @@ textarea {
   line-height: 1.45;
 }
 
+.kickstart-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.kickstart-list {
+  display: grid;
+  gap: 8px;
+}
+
+.kickstart-list-item {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #dbe3ef;
+  border-radius: 6px;
+  color: inherit;
+  text-decoration: none;
+  background: #f8fafc;
+}
+
+.kickstart-list-item.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14);
+}
+
+.kickstart-editor-pane,
+.kickstart-editor-form {
+  min-width: 0;
+}
+
+.editor-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.dirty-state-indicator {
+  color: #64748b;
+  font-size: 12px;
+  margin-right: auto;
+}
+
+.dirty-state-indicator.dirty {
+  color: #b45309;
+  font-weight: 700;
+}
+
+.create-kickstart-panel,
+.host-create-form {
+  margin-top: 16px;
+}
+
+@media (max-width: 960px) {
+  .kickstart-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
 .dns-import-controls {
   grid-template-columns: minmax(260px, 420px) minmax(220px, max-content);
   justify-content: start;
@@ -2734,6 +3013,7 @@ textarea {
 }
 
 .terminal-note {
+  position: relative;
   display: grid;
   gap: 8px;
   margin-top: 14px;
@@ -2742,6 +3022,38 @@ textarea {
   background: #111827;
   color: #e5e7eb;
   font-size: 12px;
+}
+
+.terminal-note.has-actions {
+  padding-top: 42px;
+}
+
+.terminal-note-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  display: flex;
+  gap: 6px;
+}
+
+.terminal-note-actions .icon-button {
+  width: 26px;
+  height: 26px;
+  border-color: rgba(148, 163, 184, 0.35);
+  color: #dbeafe;
+  background: rgba(15, 23, 42, 0.7);
+}
+
+.terminal-note-actions .icon-button:hover,
+.terminal-note-actions .icon-button:focus-visible {
+  border-color: #93c5fd;
+  color: white;
+  background: #1d4ed8;
+}
+
+.terminal-note summary {
+  cursor: pointer;
 }
 
 .terminal-note code {
@@ -2793,19 +3105,22 @@ textarea {
 
 .config-preview .token.property,
 .config-diff .token.property,
-.terminal-note .token.property {
+.terminal-note .token.property,
+.preview-modal .token.property {
   color: #93c5fd;
 }
 
 .config-preview .token.string,
 .config-diff .token.string,
-.terminal-note .token.string {
+.terminal-note .token.string,
+.preview-modal .token.string {
   color: #86efac;
 }
 
 .config-preview .token.number,
 .config-diff .token.number,
-.terminal-note .token.number {
+.terminal-note .token.number,
+.preview-modal .token.number {
   color: #fbbf24;
 }
 
@@ -2814,7 +3129,9 @@ textarea {
 .config-diff .token.boolean,
 .config-diff .token.keyword,
 .terminal-note .token.boolean,
-.terminal-note .token.keyword {
+.terminal-note .token.keyword,
+.preview-modal .token.boolean,
+.preview-modal .token.keyword {
   color: #c4b5fd;
 }
 
@@ -2823,20 +3140,24 @@ textarea {
 .config-diff .token.operator,
 .config-diff .token.punctuation,
 .terminal-note .token.operator,
-.terminal-note .token.punctuation {
+.terminal-note .token.punctuation,
+.preview-modal .token.operator,
+.preview-modal .token.punctuation {
   color: #bfdbfe;
 }
 
 .config-preview .token.comment,
 .config-diff .token.comment,
-.terminal-note .token.comment {
+.terminal-note .token.comment,
+.preview-modal .token.comment {
   color: #94a3b8;
   font-style: italic;
 }
 
 .config-preview .token.section,
 .config-diff .token.section,
-.terminal-note .token.section {
+.terminal-note .token.section,
+.preview-modal .token.section {
   color: #f9a8d4;
   font-weight: 750;
 }
@@ -2989,6 +3310,17 @@ textarea {
 
   .detail-panel {
     position: static;
+  }
+
+  .esxi-pxe-workspace .left-stack {
+    display: grid;
+  }
+
+  .esxi-pxe-workspace .esxi-boot-service-panel,
+  .esxi-pxe-workspace > .left-stack > .wide-panel,
+  .esxi-pxe-workspace > .side-stack {
+    grid-column: auto;
+    grid-row: auto;
   }
 
   .firewall-workspace,

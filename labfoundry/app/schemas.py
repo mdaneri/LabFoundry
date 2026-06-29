@@ -165,6 +165,76 @@ class VcfOfflineDepotStatusResponse(BaseModel):
     dry_run: bool
 
 
+class EsxiKickstartCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = None
+    content: str = Field(min_length=1)
+    enabled: bool = True
+
+
+class EsxiKickstartUpdate(EsxiKickstartCreate):
+    pass
+
+
+class EsxiKickstartResponse(BaseModel):
+    id: int
+    name: str
+    description: str
+    content_hash: str
+    rendered_hash: str
+    http_path: str
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+    last_rendered_at: datetime | None
+    last_applied_at: datetime | None
+    redacted_preview: str
+    drift_state: str
+    content: str | None = None
+
+
+class EsxiKickstartValidationResponse(BaseModel):
+    valid: bool
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    redacted_preview: str
+
+
+class EsxiKickstartPreviewResponse(BaseModel):
+    id: int
+    redacted_preview: str
+    content_hash: str
+    drift_state: str
+
+
+class EsxiKickstartDuplicateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+
+
+class EsxiPxeHostCreate(BaseModel):
+    hostname: str = Field(min_length=1, max_length=120)
+    mac_address: str = Field(min_length=1, max_length=32)
+    kickstart_id: int | None = None
+    installer_iso_path: str = ""
+    enabled: bool = True
+
+
+class EsxiPxeHostResponse(EsxiPxeHostCreate):
+    id: int
+    kickstart_name: str = ""
+    installer_iso_name: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class EsxiInstallerIsoResponse(BaseModel):
+    name: str
+    path: str
+    relative_path: str
+    size_bytes: int
+    updated_at: str
+
+
 class PhysicalInterfaceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

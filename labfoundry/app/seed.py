@@ -65,6 +65,14 @@ SERVICE_STATE_DEFAULTS = [
         "detail": "/mnt/labfoundry-vcf-offline-depot",
     },
     {
+        "service": "esxi-pxe",
+        "display_name": "ESXi PXE",
+        "running": False,
+        "enabled": False,
+        "health": "planned",
+        "detail": "/var/lib/labfoundry/pxe/http/esxi/ks",
+    },
+    {
         "service": "vcf-private-registry",
         "display_name": "VCF Private Registry",
         "running": False,

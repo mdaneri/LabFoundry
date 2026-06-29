@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ApplianceVhdxPath,
     [string]$ClientVhdxPath = '',
+    [string]$EsxIsoPath = '',
     [string]$ClientManagementSwitch = 'Default Switch',
     [string]$ApplianceIPAddress = '192.168.49.1',
     [string]$ApplianceUrl = '',
@@ -242,6 +243,7 @@ function Set-LifecycleNetworkTopology {
     Ensure-NetworkAdapter -VMName $clientAName -Name 'VLAN-Test' -SwitchName 'LabFoundry-Trunk'
     Ensure-NetworkAdapter -VMName $clientAName -Name 'Appliance-Mgmt-Test' -SwitchName 'LabFoundry-Mgmt'
     Ensure-NetworkAdapter -VMName $clientBName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'
+    Ensure-NetworkAdapter -VMName $pxeClientName -Name 'PXE-SiteA' -SwitchName 'LabFoundry-SiteA'
 
     if ($PSCmdlet.ShouldProcess("$applianceName/Trunk", "Enable trunk VLAN $VlanId")) {
         Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'Trunk' -Trunk -AllowedVlanIdList "$VlanId" -NativeVlanId 0
@@ -260,6 +262,9 @@ function Set-LifecycleNetworkTopology {
         if ($PSCmdlet.ShouldProcess("$clientAName/SiteA-Test", "Enable access VLAN $SiteVlanId")) {
             Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'SiteA-Test' -Access -VlanId $SiteVlanId
         }
+        if ($PSCmdlet.ShouldProcess("$pxeClientName/PXE-SiteA", "Enable access VLAN $SiteVlanId")) {
+            Set-VMNetworkAdapterVlan -VMName $pxeClientName -VMNetworkAdapterName 'PXE-SiteA' -Access -VlanId $SiteVlanId
+        }
     }
     else {
         if ($PSCmdlet.ShouldProcess("$applianceName/SiteA", 'Use untagged SiteA traffic')) {
@@ -267,6 +272,9 @@ function Set-LifecycleNetworkTopology {
         }
         if ($PSCmdlet.ShouldProcess("$clientAName/SiteA-Test", 'Use untagged SiteA traffic')) {
             Set-VMNetworkAdapterVlan -VMName $clientAName -VMNetworkAdapterName 'SiteA-Test' -Untagged
+        }
+        if ($PSCmdlet.ShouldProcess("$pxeClientName/PXE-SiteA", 'Use untagged SiteA traffic')) {
+            Set-VMNetworkAdapterVlan -VMName $pxeClientName -VMNetworkAdapterName 'PXE-SiteA' -Untagged
         }
     }
 }
@@ -306,6 +314,151 @@ function ConvertTo-HyphenMac {
     }
     $pairs = for ($index = 0; $index -lt 12; $index += 2) { $clean.Substring($index, 2) }
     return ($pairs -join '-')
+}
+
+function ConvertTo-ColonMac {
+    param([string]$MacAddress)
+
+    $clean = ($MacAddress -replace '[^0-9A-Fa-f]', '').ToLowerInvariant()
+    if ($clean.Length -ne 12) {
+        return $MacAddress.ToLowerInvariant()
+    }
+    $pairs = for ($index = 0; $index -lt 12; $index += 2) { $clean.Substring($index, 2) }
+    return ($pairs -join ':')
+}
+
+function ConvertTo-ShellSingleQuoted {
+    param([string]$Value)
+
+    $safe = $Value.Replace("'", "")
+    return "'$safe'"
+}
+
+function New-LifecyclePxeVm {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [string]$Name,
+        [string]$SwitchName
+    )
+
+    Assert-SafeLifecycleName -Name $Name
+    $existing = Get-VM -Name $Name -ErrorAction SilentlyContinue
+    if ($existing -and -not $AllowExistingLifecycleLab) {
+        throw "Lifecycle PXE VM already exists: $Name. Use a new -LabName or pass -AllowExistingLifecycleLab to reuse it."
+    }
+    if ($existing) {
+        Write-Host "Reusing lifecycle PXE VM: $Name"
+    }
+    elseif ($PSCmdlet.ShouldProcess($Name, 'Create lifecycle PXE-only Hyper-V VM')) {
+        New-VM -Name $Name -Generation 2 -MemoryStartupBytes 1GB -SwitchName $SwitchName | Out-Null
+        Set-VMProcessor -VMName $Name -Count 1
+        Set-VMFirmware -VMName $Name -EnableSecureBoot Off
+        if (-not $createdVms.Contains($Name)) {
+            $createdVms.Add($Name)
+        }
+        Write-Host "Created lifecycle PXE VM: $Name"
+    }
+
+    $adapter = Get-VMNetworkAdapter -VMName $Name | Select-Object -First 1
+    if ($adapter -and $adapter.Name -ne 'PXE-SiteA' -and -not (Get-VMNetworkAdapter -VMName $Name -Name 'PXE-SiteA' -ErrorAction SilentlyContinue)) {
+        Rename-VMNetworkAdapter -VMName $Name -Name $adapter.Name -NewName 'PXE-SiteA'
+        $adapter = Get-VMNetworkAdapter -VMName $Name -Name 'PXE-SiteA'
+    }
+    if ($adapter -and $PSCmdlet.ShouldProcess($Name, 'Prefer network adapter for PXE boot')) {
+        Set-VMFirmware -VMName $Name -FirstBootDevice $adapter -EnableSecureBoot Off
+    }
+}
+
+function Get-PxeClientMac {
+    param([string]$Name)
+
+    $adapter = Get-VMNetworkAdapter -VMName $Name | Select-Object -First 1
+    if (-not $adapter) {
+        throw "PXE VM has no network adapter: $Name"
+    }
+    return ConvertTo-ColonMac -MacAddress $adapter.MacAddress
+}
+
+function Copy-EsxIsoToAppliance {
+    param([string]$Path)
+
+    if (-not $Path) {
+        return ''
+    }
+    if (-not (Get-Command plink -ErrorAction SilentlyContinue) -or -not (Get-Command pscp -ErrorAction SilentlyContinue)) {
+        throw "Staging -EsxIsoPath requires plink and pscp in PATH."
+    }
+    $fileName = [System.IO.Path]::GetFileName($Path)
+    $remoteRoot = '/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST'
+    $remoteTmp = "/tmp/$fileName"
+    $remotePath = "$remoteRoot/$fileName"
+    $quotedRoot = ConvertTo-ShellSingleQuoted -Value $remoteRoot
+    $quotedTmp = ConvertTo-ShellSingleQuoted -Value $remoteTmp
+    $quotedPath = ConvertTo-ShellSingleQuoted -Value $remotePath
+    $quotedPassword = ConvertTo-ShellSingleQuoted -Value $SshPassword
+
+    & plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" "printf '%s\n' $quotedPassword | sudo -S mkdir -p $quotedRoot"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create remote ESX ISO directory on the appliance."
+    }
+    & pscp -batch -pw $SshPassword $Path "$ApplianceSshUser@${ApplianceIPAddress}:$remoteTmp"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to copy ESX ISO to appliance staging path."
+    }
+    & plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" "printf '%s\n' $quotedPassword | sudo -S mv $quotedTmp $quotedPath"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install ESX ISO under $remoteRoot on the appliance."
+    }
+    & plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" "printf '%s\n' $quotedPassword | sudo -S chmod 0644 $quotedPath"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to chmod ESX ISO under $remoteRoot on the appliance."
+    }
+    & plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" "printf '%s\n' $quotedPassword | sudo -S chown labfoundry:labfoundry $quotedPath"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to chown ESX ISO under $remoteRoot on the appliance."
+    }
+    return $remotePath
+}
+
+function Invoke-PxeBootSmoke {
+    param(
+        [string]$Name,
+        [string]$MacAddress,
+        [string]$OutputPath
+    )
+
+    $leaseSeen = $false
+    $leaseOutput = ''
+    if ((Get-VM -Name $Name).State -ne 'Off') {
+        Stop-VM -Name $Name -Force -TurnOff -ErrorAction SilentlyContinue
+    }
+    if ($PSCmdlet.ShouldProcess($Name, 'Start PXE boot smoke VM')) {
+        Start-VM -Name $Name
+    }
+    Wait-VMRunning -Name $Name
+    Start-Sleep -Seconds 45
+
+    if ((Get-Command plink -ErrorAction SilentlyContinue) -and $SshPassword) {
+        $quotedPassword = ConvertTo-ShellSingleQuoted -Value $SshPassword
+        $quotedMac = ConvertTo-ShellSingleQuoted -Value $MacAddress
+        $leaseCommand = "printf '%s\n' $quotedPassword | sudo -S grep -i $quotedMac /var/lib/labfoundry/dnsmasq/dhcp.leases 2>/dev/null || true"
+        $leaseOutput = (& plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" $leaseCommand 2>&1 | Out-String).Trim()
+        $leaseSeen = $leaseOutput -match [regex]::Escape($MacAddress)
+    }
+
+    $adapter = Get-VMNetworkAdapter -VMName $Name | Select-Object -First 1
+    [pscustomobject]@{
+        vm_name          = $Name
+        started          = ((Get-VM -Name $Name).State -eq 'Running')
+        mac_address      = $MacAddress
+        switch_name      = $adapter.SwitchName
+        appliance_ip     = $ApplianceIPAddress
+        lease_seen       = $leaseSeen
+        lease_observation = if ($leaseSeen) { 'dnsmasq lease file contains the PXE VM MAC.' } else { 'PXE VM started; lease observation was not available.' }
+        lease_output     = $leaseOutput
+        observed_at      = (Get-Date).ToUniversalTime().ToString('o')
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $OutputPath -Encoding UTF8
+    Write-Host "PXE boot smoke result: $OutputPath"
 }
 
 function Get-NeighborIPv4ForAdapter {
@@ -465,8 +618,9 @@ function Reset-LifecycleApplianceVm {
 $applianceName = "$LabName-Appliance"
 $clientAName = "$LabName-ClientA"
 $clientBName = "$LabName-ClientB"
+$pxeClientName = "$LabName-PxeBoot"
 
-foreach ($name in @($applianceName, $clientAName, $clientBName)) {
+foreach ($name in @($applianceName, $clientAName, $clientBName, $pxeClientName)) {
     Assert-SafeLifecycleName -Name $name
     if ((Get-VM -Name $name -ErrorAction SilentlyContinue) -and -not $AllowExistingLifecycleLab) {
         throw "Lifecycle VM already exists: $name. Use a new -LabName or pass -AllowExistingLifecycleLab to reuse it."
@@ -475,14 +629,17 @@ foreach ($name in @($applianceName, $clientAName, $clientBName)) {
 
 Assert-InputVhdx -Path $ApplianceVhdxPath -Label 'Appliance'
 Assert-InputVhdx -Path $ClientVhdxPath -Label 'Client'
+if ($EsxIsoPath) {
+    if (-not (Test-Path -LiteralPath $EsxIsoPath)) {
+        throw "ESX ISO not found: $EsxIsoPath"
+    }
+    if ([System.IO.Path]::GetExtension($EsxIsoPath).ToLowerInvariant() -ne '.iso') {
+        throw "-EsxIsoPath must point to an .iso file."
+    }
+}
 
 if (-not $VcfBackupPassword) {
     $VcfBackupPassword = 'VMware01!Test'
-}
-
-$existingPrimary = Get-VM -Name 'LabFoundry' -ErrorAction SilentlyContinue
-if ($existingPrimary -and $existingPrimary.State -eq 'Running' -and $ApplianceIPAddress -eq '192.168.49.1') {
-    throw "Existing VM 'LabFoundry' is running and may already own $ApplianceIPAddress. Stop it or choose a different lifecycle management topology. This script will not modify that VM."
 }
 
 if ($PlanOnly) {
@@ -491,8 +648,12 @@ if ($PlanOnly) {
         appliance_vm             = $applianceName
         client_a_vm              = $clientAName
         client_b_vm              = $clientBName
+        pxe_boot_vm              = $pxeClientName
         appliance_vhdx           = (Resolve-Path -LiteralPath $ApplianceVhdxPath).Path
         client_vhdx              = (Resolve-Path -LiteralPath $ClientVhdxPath).Path
+        pxe_boot_test            = $true
+        pxe_boot_mode            = if ($EsxIsoPath) { 'esxi' } else { 'linux' }
+        esx_iso_path             = if ($EsxIsoPath) { (Resolve-Path -LiteralPath $EsxIsoPath).Path } else { '' }
         site_interface           = $SiteInterface
         site_cidr                = $SiteCidr
         site_vlan_id             = $SiteVlanId
@@ -506,6 +667,11 @@ if ($PlanOnly) {
         reserved_vms_not_touched = @('LabFoundry', 'LabFoundry-Photon-Builder')
     } | ConvertTo-Json -Depth 5
     return
+}
+
+$existingPrimary = Get-VM -Name 'LabFoundry' -ErrorAction SilentlyContinue
+if ($existingPrimary -and $existingPrimary.State -eq 'Running' -and $ApplianceIPAddress -eq '192.168.49.1') {
+    throw "Existing VM 'LabFoundry' is running and may already own $ApplianceIPAddress. Stop it or choose a different lifecycle management topology. This script will not modify that VM."
 }
 
 $runningLifecycleAppliances = Get-VM -ErrorAction SilentlyContinue |
@@ -550,6 +716,7 @@ try {
     New-LifecycleVm -Name $applianceName -VhdxPath $applianceDisk -SwitchName 'LabFoundry-Mgmt' -MemoryStartupBytes $ApplianceMemoryStartupBytes -ProcessorCount $ApplianceProcessorCount
     New-LifecycleVm -Name $clientAName -VhdxPath $clientADisk -SwitchName $ClientManagementSwitch -MemoryStartupBytes $ClientMemoryStartupBytes -ProcessorCount $ClientProcessorCount
     New-LifecycleVm -Name $clientBName -VhdxPath $clientBDisk -SwitchName $ClientManagementSwitch -MemoryStartupBytes $ClientMemoryStartupBytes -ProcessorCount $ClientProcessorCount
+    New-LifecyclePxeVm -Name $pxeClientName -SwitchName 'LabFoundry-SiteA'
 
     Ensure-DvdDrive -VMName $clientAName -Path $clientASeedIso
     Ensure-DvdDrive -VMName $clientBName -Path $clientBSeedIso
@@ -571,6 +738,8 @@ try {
     $clientBHost = Wait-GuestIPv4 -Name $clientBName
     $clientAHostKey = Get-PlinkHostKey -HostName $clientAHost -UserName $ClientSshUser -Password $SshPassword
     $clientBHostKey = Get-PlinkHostKey -HostName $clientBHost -UserName $ClientSshUser -Password $SshPassword
+    $pxeClientMac = Get-PxeClientMac -Name $pxeClientName
+    $remoteEsxIsoPath = Copy-EsxIsoToAppliance -Path $EsxIsoPath
 
     $basePythonArgs = @(
         (Join-Path $repoRoot 'scripts\interop\lifecycle_test.py'),
@@ -585,8 +754,11 @@ try {
         '--site-cidr', $SiteCidr,
         '--vlan-id', "$VlanId",
         '--vlan-cidr', $TaggedVlanCidr,
-        '--wan-cidr', $WanCidr
+        '--wan-cidr', $WanCidr,
+        '--pxe-test-mode', $(if ($EsxIsoPath) { 'esxi' } else { 'linux' }),
+        '--pxe-client-mac', $pxeClientMac
     )
+    if ($remoteEsxIsoPath) { $basePythonArgs += @('--pxe-installer-iso-path', $remoteEsxIsoPath) }
     if ($SshUser) { $basePythonArgs += @('--ssh-user', $SshUser) }
     if ($SshKeyPath) { $basePythonArgs += @('--ssh-key', $SshKeyPath) }
     if ($SshPassword) { $basePythonArgs += @('--ssh-password', $SshPassword) }
@@ -633,6 +805,7 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "Lifecycle interop runner failed with exit code $LASTEXITCODE"
         }
+        Invoke-PxeBootSmoke -Name $pxeClientName -MacAddress $pxeClientMac -OutputPath (Join-Path $resultRoot 'pxe-boot-smoke.json')
         if (-not $SkipBackupRestoreTest) {
             if (-not (Test-Path -LiteralPath $backupArchivePath)) {
                 throw "Lifecycle backup archive was not created: $backupArchivePath"

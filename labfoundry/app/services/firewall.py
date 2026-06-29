@@ -143,6 +143,7 @@ def managed_service_firewall_rules(
     vcf_backup_settings: VcfBackupSettings,
     vcf_depot_settings: VcfOfflineDepotSettings,
     vcf_registry_settings: VcfPrivateRegistrySettings,
+    esxi_pxe_boot: dict | None = None,
     interface_networks: dict[str, str],
     source_groups: list[dict] | None = None,
     source_group_assignments: dict[str, str] | None = None,
@@ -212,6 +213,31 @@ def managed_service_firewall_rules(
                     protocol="tcp",
                     ports=str(vcf_registry_settings.port),
                     priority=90 + index,
+                )
+            )
+    if esxi_pxe_boot and esxi_pxe_boot.get("enabled"):
+        http_port = str(esxi_pxe_boot.get("http_port") or 8080)
+        for index, interface_name in enumerate(split_interfaces(str(esxi_pxe_boot.get("listen_interface") or "")), start=1):
+            rules.append(
+                _service_firewall_rule(
+                    name=f"esxi-pxe-tftp-{interface_name}",
+                    service="ESXi PXE TFTP",
+                    interface_name=interface_name,
+                    source=_managed_rule_source("esxi-pxe-tftp", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                    protocol="udp",
+                    ports="69",
+                    priority=100 + index,
+                )
+            )
+            rules.append(
+                _service_firewall_rule(
+                    name=f"esxi-pxe-http-{interface_name}",
+                    service="ESXi PXE HTTP",
+                    interface_name=interface_name,
+                    source=_managed_rule_source("esxi-pxe-http", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                    protocol="tcp",
+                    ports=http_port,
+                    priority=110 + index,
                 )
             )
     return rules

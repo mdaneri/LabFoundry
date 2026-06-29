@@ -11,7 +11,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=vcf-depot-staging-20260628-1">
+    <link rel="stylesheet" href="/static/app.css?v=service-preview-tools-20260629-1">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -37,6 +37,7 @@
             ("Users", "/users"),
             ("Certificate Authority", "/certificate-authority"),
             ("KMS / KMIP", "/kms"),
+            ("ESXi PXE", "/esxi-pxe"),
             ("VCF Offline Depot", "/vcf-offline-depot"),
             ("VCF Private Registry", "/vcf-private-registry"),
             ("VCF Backups", "/vcf-backups"),
@@ -107,6 +108,21 @@
         </div>
       </form>
     </dialog>
+    <dialog id="preview-modal" class="preview-modal" aria-labelledby="preview-modal-title">
+      <div class="preview-modal-panel">
+        <div class="preview-modal-head">
+          <div>
+            <p class="kicker">Config preview</p>
+            <h2 id="preview-modal-title">Preview</h2>
+          </div>
+          <div class="preview-modal-actions">
+            <button class="button secondary icon-button" type="button" data-preview-modal-copy aria-label="Copy preview" title="Copy preview">⧉</button>
+            <button class="button ghost icon-button" type="button" data-preview-modal-close aria-label="Close preview" title="Close preview">×</button>
+          </div>
+        </div>
+        <pre><code data-preview-modal-code></code></pre>
+      </div>
+    </dialog>
     <script src="/static/vendor/tabulator/tabulator.min.js"></script>
     <script>
       window.Prism = window.Prism || {};
@@ -115,7 +131,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=vcf-depot-staging-20260628-1"></script>
+    <script src="/static/app.js?v=service-preview-tools-20260629-1"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

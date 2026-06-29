@@ -129,22 +129,19 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>KMS Settings</h2>
-        <span class="status-pill {{ 'warn' if system_adapter_dry_run else 'good' }}">{{ "dry-run" if system_adapter_dry_run else "live" }}</span>
+        <span class="status-pill {{ kms_service_status.pill }}">{{ kms_service_status.label }}</span>
       </div>
       <form class="form-stack" action="/kms/settings" method="post" data-autosave-form data-kms-settings data-autosave-status-id="kms-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the KMIP service as enabled desired state. It does not start PyKMIP until global appliance apply runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if kms_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-        <label>
-          <span class="field-label"><span>Backend</span><button class="help-icon" type="button" data-help="KMS implementation LabFoundry will configure. The MVP uses PyKMIP as an open-source lab KMIP server.">i</button></span>
-          <select name="backend">
-            {% for backend in kms_backend_options %}
-              <option value="{{ backend }}" {{ "selected" if kms_settings.backend == backend else "" }}>{{ backend }}</option>
-            {% endfor %}
-          </select>
+        <input type="hidden" name="backend" value="{{ kms_settings.backend }}">
+        <label class="compact-service-field">
+          <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="DNS name clients should use for the KMIP endpoint. LabFoundry uses this same name for the CA-issued server certificate.">i</button></span>
+          <input name="hostname" value="{{ kms_settings.hostname }}">
         </label>
         <input type="hidden" name="listen_interfaces_present" value="1">
         <input type="hidden" name="listen_addresses_present" value="1">
-        <div class="service-bind-editor" data-service-bind>
+        <div class="service-bind-editor stacked-service-bind-editor" data-service-bind>
           <div class="form-field">
             <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more access or VLAN interfaces where KMIP should be reachable. Firewall review uses every selected interface; PyKMIP binds to the first selected address.">i</button></span>
             <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
@@ -204,19 +201,9 @@
             </datalist>
           </div>
         </div>
-        <div class="form-grid">
-          <label>
-            <span class="field-label"><span>Port</span><button class="help-icon" type="button" data-help="KMIP commonly uses TCP 5696. Change only if a lab client expects a different port.">i</button></span>
-            <input type="number" name="port" value="{{ kms_settings.port }}" min="1" max="65535">
-          </label>
-        </div>
-        <label>
-          <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="DNS name clients should use for the KMIP endpoint. Pair this with a CA-issued server certificate.">i</button></span>
-          <input name="hostname" value="{{ kms_settings.hostname }}">
-        </label>
-        <label>
-          <span class="field-label"><span>Server certificate</span><button class="help-icon" type="button" data-help="Certificate common name or request name LabFoundry should use for the KMIP TLS endpoint.">i</button></span>
-          <input name="server_certificate" value="{{ kms_settings.server_certificate }}">
+        <label class="compact-service-field">
+          <span class="field-label"><span>Port</span><button class="help-icon" type="button" data-help="KMIP commonly uses TCP 5696. Change only if a lab client expects a different port.">i</button></span>
+          <input type="number" name="port" value="{{ kms_settings.port }}" min="1" max="65535">
         </label>
         <div class="derived-field fixed-value-field">
           <span class="field-label"><span>Client CA path</span><button class="help-icon" type="button" data-help="Appliance-owned path to the CA certificate used to verify KMIP client certificates. This path is informational in the web UI.">i</button></span>

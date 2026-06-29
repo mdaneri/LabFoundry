@@ -36,6 +36,8 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
 
     assert "tdnf -y install" in script and "nginx" in script
     assert "tdnf -y install" in script and "powershell" in script
+    assert "tdnf -y install" in script and "ipxe" in script
+    assert "tdnf -y install" in script and "syslinux" in script
     assert 'BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/usr/bin/pwsh}"' in script
     assert '--shell "$BOOTSTRAP_SHELL"' in script
     assert "touch /etc/shells" in script
@@ -53,6 +55,8 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "/etc/labfoundry/nginx/sites.d/management.conf" in script
     assert "rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf" in script
     assert "listen 80 default_server;" in script
+    assert "client_max_body_size 1g;" in script
+    assert "client_max_body_size 512m;" not in script
     assert "proxy_pass http://127.0.0.1:8000;" in script
     assert "nginx -t" in script
     assert "systemctl enable --now nginx" in script
@@ -200,6 +204,17 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
     assert "$applianceName = \"$LabName-Appliance\"" in script
     assert "$clientAName = \"$LabName-ClientA\"" in script
     assert "$clientBName = \"$LabName-ClientB\"" in script
+    assert "$pxeClientName = \"$LabName-PxeBoot\"" in script
+    assert "New-LifecyclePxeVm -Name $pxeClientName -SwitchName 'LabFoundry-SiteA'" in script
+    assert "Invoke-PxeBootSmoke -Name $pxeClientName -MacAddress $pxeClientMac" in script
+    assert "[string]$EsxIsoPath = ''" in script
+    assert "[string]$EsxIsoPath = ''" in wrapper
+    assert "'-EsxIsoPath', $EsxIsoPath" in wrapper
+    assert "--pxe-test-mode" in runner
+    assert "--pxe-client-mac" in runner
+    assert "--pxe-installer-iso-path" in runner
+    assert '"esxi_pxe"' in runner
+    assert "configure-esxi-pxe" in runner
     assert "Refusing to use reserved VM name" in script
     assert "@('LabFoundry', 'LabFoundry-Photon-Builder')" in script
     assert "image\\hyperv\\clients\\alpine-cloud\\labfoundry-tiny-linux-client.vhdx" in script
@@ -381,6 +396,7 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
         "firewall",
         "wan",
         "dnsmasq",
+        "esxi_pxe",
         "ca",
         "kms",
         "appliance_settings",
@@ -391,6 +407,8 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
     assert plan["interfaces"]["client_ca_request"]["ip_cidr"] == "192.168.49.20/24"
     assert "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification" in plan["checks"]
     assert "VCF Backup desired state, local user sync, SFTP listener, and client probe" in plan["checks"]
+    assert plan["pxe_boot"]["enabled"] is False
+    assert plan["pxe_boot"]["mode"] == "linux"
 
 
 def test_lifecycle_runner_uses_supported_network_roles():
@@ -446,7 +464,7 @@ def test_lifecycle_runner_covers_ca_vcf_backups_wan_noise_and_console_summary():
     assert "vcf-backup-client-check" in script
     assert "sshpass -p" in script
     assert "redact_text" in script
-    assert '"local_users", "network", "firewall", "wan", "dnsmasq", "ca", "kms", "appliance_settings", "vcf_backups"' in script
+    assert '"local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "vcf_backups"' in script
     assert "certificate_summary" in script
     assert "root_ca" in script
     assert "ca-client-certificate-request" in script

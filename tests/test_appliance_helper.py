@@ -5,6 +5,8 @@ import json
 import os
 import subprocess
 import tarfile
+import hashlib
+import re
 from pathlib import Path
 
 
@@ -144,6 +146,77 @@ def wan_config_text(
     )
 
 
+def esxi_pxe_manifest(http_root: Path, *, enabled: bool = True, stale_id: int = 99, iso_root: Path | None = None) -> dict:
+    content = "install\nnetwork --bootproto=dhcp\nrootpw VMware01!\nreboot\n%firstboot\n%end\n"
+    iso_root = iso_root or http_root.parent / "iso"
+    iso_path = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", iso_path.stem).strip("-._").lower()
+    image_key = f"{slug}-{hashlib.sha1(str(iso_path).encode('utf-8')).hexdigest()[:10]}"
+    http_base = http_root.parent
+    image_path = http_base / "images" / image_key
+    mac_key = "01-00-50-56-aa-bb-cc"
+    return {
+        "kind": "labfoundry-esxi-pxe",
+        "schema_version": 2,
+        "http_root": str(http_root),
+        "http_base": str(http_base),
+        "image_http_root": str(http_base / "images"),
+        "installer_iso_root": str(iso_root),
+        "installer_isos": [
+            {
+                "name": iso_path.name,
+                "path": str(iso_path),
+                "relative_path": iso_path.name,
+                "size_bytes": 12,
+                "updated_at": "2026-06-28T00:00:00+00:00",
+            }
+        ],
+        "kickstarts": [
+            {
+                "id": 7,
+                "name": "ESXi install",
+                "enabled": enabled,
+                "content": content,
+                "content_hash": __import__("hashlib").sha256(content.encode("utf-8")).hexdigest(),
+                "http_path": "/pxe/esxi/ks/7.cfg",
+                "generated_path": str(http_root / "7.cfg"),
+            }
+        ],
+        "hosts": [
+            {
+                "id": 1,
+                "hostname": "esxi-01",
+                "mac_address": "00:50:56:aa:bb:cc",
+                "kickstart_id": 7 if enabled else None,
+                "installer_iso_path": str(iso_path),
+                "installer_iso_name": iso_path.name,
+                "enabled": True,
+            }
+        ],
+        "artifacts": [
+            {
+                "host_id": 1,
+                "hostname": "esxi-01",
+                "mac_address": "00:50:56:aa:bb:cc",
+                "mac_key": mac_key,
+                "image_key": image_key,
+                "installer_iso_path": str(iso_path),
+                "installer_iso_name": iso_path.name,
+                "image_http_path": f"/pxe/esxi/images/{image_key}",
+                "image_http_url": f"http://192.168.50.1:8080/pxe/esxi/images/{image_key}",
+                "image_generated_path": str(image_path),
+                "kickstart_id": 7 if enabled else None,
+                "kickstart_http_path": "/pxe/esxi/ks/7.cfg" if enabled else "",
+                "kickstart_url": "http://192.168.50.1:8080/pxe/esxi/ks/7.cfg" if enabled else "",
+                "pxelinux_config_path": str(http_root.parents[2] / "tftp" / "pxelinux.cfg" / mac_key),
+                "uefi_tftp_boot_cfg_path": str(http_root.parents[2] / "tftp" / mac_key / "boot.cfg"),
+                "http_boot_cfg_path": str(http_base / mac_key / "boot.cfg"),
+            }
+        ],
+        "stale_id": stale_id,
+    }
+
+
 def ca_payload_text(root_dir: Path) -> str:
     root_cert = "-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----\n"
     cert = "-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n"
@@ -242,6 +315,123 @@ def test_wan_helper_allows_nat_on_non_wan_role_target(tmp_path):
     config_path.write_text(wan_config_text(target_role="access", target_wan=False), encoding="utf-8")
 
     assert helper._wan_config_errors(config_path) == []
+
+
+def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    http_root = tmp_path / "pxe" / "http" / "esxi" / "ks"
+    http_base = http_root.parent
+    tftp_root = tmp_path / "pxe" / "tftp"
+    ipxe_binary_dir = tmp_path / "usr" / "share" / "ipxe"
+    iso_root = tmp_path / "vcf-depot" / "PROD" / "COMP" / "ESX_HOST"
+    apply_dir = tmp_path / "apply" / "esxi-pxe"
+    apply_dir.mkdir(parents=True)
+    http_root.mkdir(parents=True)
+    ipxe_binary_dir.mkdir(parents=True)
+    iso_root.mkdir(parents=True)
+    iso_tree = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
+    (iso_tree / "efi" / "boot").mkdir(parents=True)
+    (iso_tree / "boot.cfg").write_text(
+        "title=ESXi\n"
+        "kernel=/b.b00\n"
+        "kernelopt=cdromBoot runweasel\n"
+        "modules=/jumpstrt.gz---/useropts.gz\n",
+        encoding="utf-8",
+    )
+    (iso_tree / "mboot.c32").write_bytes(b"mboot c32")
+    (iso_tree / "efi" / "boot" / "bootx64.efi").write_bytes(b"mboot efi")
+    (iso_tree / "efi" / "boot" / "crypto64.efi").write_bytes(b"crypto")
+    (ipxe_binary_dir / "undionly.kpxe").write_bytes(b"bios ipxe")
+    (ipxe_binary_dir / "snponly.efi").write_bytes(b"uefi ipxe")
+    (ipxe_binary_dir / "pxelinux.0").write_bytes(b"pxelinux")
+    (http_base / "boot.ipxe").write_text("old ipxe script", encoding="utf-8")
+    (tftp_root / "bootx64.efi").parent.mkdir(parents=True, exist_ok=True)
+    (tftp_root / "bootx64.efi").write_bytes(b"old uefi first stage")
+    (tftp_root / "esxi.ipxe").write_text("old tftp script", encoding="utf-8")
+    stale = http_root / "99.cfg"
+    stale.write_text("old", encoding="utf-8")
+    manifest = esxi_pxe_manifest(http_root, iso_root=iso_root)
+    manifest["boot"] = {
+        "enabled": True,
+        "hostname": "esxi-pxe.labfoundry.internal",
+        "listen_interface": "eth1",
+        "listen_address": "192.168.50.1",
+        "tftp_root": str(tftp_root),
+        "bios_bootfile": "undionly.kpxe",
+        "uefi_bootfile": "snponly.efi",
+        "bios_second_stage_bootfile": "pxelinux.0",
+        "uefi_second_stage_bootfile": "mboot.efi",
+        "native_uefi_bootfile": "mboot.efi",
+        "http_port": 8080,
+        "http_base_url": "http://192.168.50.1:8080/pxe/esxi",
+        "native_uefi_http_enabled": True,
+        "effective_native_uefi_http_url": "http://192.168.50.1:8080/pxe/esxi/mboot.efi",
+    }
+    config_path = apply_dir / "labfoundry-esxi-pxe.json"
+    config_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_ROOT", http_root)
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_BASE", http_base)
+    monkeypatch.setattr(helper, "ESXI_PXE_IMAGE_HTTP_ROOT", http_base / "images")
+    monkeypatch.setattr(helper, "ESXI_IPXE_HTTP_SCRIPT_PATH", http_base / "boot.ipxe")
+    monkeypatch.setattr(helper, "ESXI_TFTP_ROOT", tftp_root)
+    monkeypatch.setattr(helper, "PXE_BOOT_BINARY_DIRS", [ipxe_binary_dir])
+    monkeypatch.setattr(helper, "ESXI_PXE_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "ESXI_INSTALLER_ISO_ROOT", iso_root)
+    monkeypatch.setattr(helper, "ESXI_PXE_NGINX_SITE_PATH", tmp_path / "nginx" / "sites.d" / "esxi-pxe.conf")
+    monkeypatch.setattr(helper, "_install_nginx_site", lambda path, text: (path.parent.mkdir(parents=True, exist_ok=True), path.write_text(text, encoding="utf-8"), 0)[2])
+
+    payload = helper._load_esxi_pxe_manifest(helper._validate_esxi_pxe_config_path(str(config_path)))
+    assert helper._esxi_pxe_manifest_errors(payload) == []
+    assert helper._apply_esxi_pxe_manifest(payload) == 0
+    assert (http_root / "7.cfg").read_text(encoding="utf-8") == manifest["kickstarts"][0]["content"]
+    assert (tftp_root / "undionly.kpxe").read_bytes() == b"bios ipxe"
+    assert (tftp_root / "snponly.efi").read_bytes() == b"uefi ipxe"
+    assert (tftp_root / "pxelinux.0").read_bytes() == b"pxelinux"
+    assert (tftp_root / "mboot.efi").read_bytes() == b"mboot efi"
+    assert (http_base / "mboot.efi").read_bytes() == b"mboot efi"
+    assert not (http_base / "boot.ipxe").exists()
+    assert not (tftp_root / "bootx64.efi").exists()
+    assert not (tftp_root / "esxi.ipxe").exists()
+    assert (tftp_root / "images" / manifest["artifacts"][0]["image_key"] / "mboot.c32").read_bytes() == b"mboot c32"
+    boot_cfg = (tftp_root / "01-00-50-56-aa-bb-cc" / "boot.cfg").read_text(encoding="utf-8")
+    assert f"prefix={manifest['artifacts'][0]['image_http_url']}" in boot_cfg
+    assert "kernel=b.b00" in boot_cfg
+    assert "kernelopt=runweasel ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg" in boot_cfg
+    assert "modules=jumpstrt.gz---useropts.gz" in boot_cfg
+    pxelinux = (tftp_root / "pxelinux.cfg" / "01-00-50-56-aa-bb-cc").read_text(encoding="utf-8")
+    assert "KERNEL images/" in pxelinux
+    assert "IPAPPEND 2" in pxelinux
+    assert (tmp_path / "nginx" / "sites.d" / "esxi-pxe.conf").read_text(encoding="utf-8").count("listen 8080;") == 1
+    assert not stale.exists()
+
+    manifest["hosts"][0]["installer_iso_path"] = str(tmp_path / "escape.iso")
+    assert any("installer ISO must be under" in error for error in helper._esxi_pxe_manifest_errors(manifest))
+
+
+def test_esxi_boot_cfg_rewrite_uses_http_prefix_and_kickstart():
+    helper = load_helper_module()
+    source = "\n".join(
+        [
+            "title=ESXi",
+            "kernel=/b.b00",
+            "kernelopt=cdromBoot runweasel systemMediaSize=max",
+            "modules=/jumpstrt.gz---/useropts.gz",
+            "",
+        ]
+    )
+
+    rendered = helper._render_esxi_boot_cfg(
+        source,
+        prefix_url="http://192.168.50.1:8080/pxe/esxi/images/esx-9",
+        kickstart_url="http://192.168.50.1:8080/pxe/esxi/ks/7.cfg",
+    )
+
+    assert "prefix=http://192.168.50.1:8080/pxe/esxi/images/esx-9" in rendered
+    assert "kernel=b.b00" in rendered
+    assert "cdromBoot" not in rendered
+    assert "kernelopt=runweasel systemMediaSize=max ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg" in rendered
+    assert "modules=jumpstrt.gz---useropts.gz" in rendered
 
 
 def test_ca_helper_rejects_config_outside_apply_dir(tmp_path):
@@ -1495,6 +1685,8 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     assert "listen 80 default_server;" in management_site
     assert "return 308 https://$host$request_uri;" in management_site
     assert "listen 443 ssl default_server;" in management_site
+    assert "client_max_body_size 1g;" in management_site
+    assert "client_max_body_size 512m;" not in management_site
     assert f"ssl_certificate {cert_path};" in management_site
     assert f"ssl_certificate_key {key_path};" in management_site
     assert "proxy_pass http://127.0.0.1:8000;" in management_site

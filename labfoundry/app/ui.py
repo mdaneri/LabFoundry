@@ -1,6 +1,7 @@
 import difflib
 import hashlib
 import json
+import logging
 import re
 import shlex
 import shutil
@@ -38,6 +39,8 @@ from labfoundry.app.models import (
     DhcpSettings,
     DnsRecord,
     DnsSettings,
+    EsxiKickstart,
+    EsxiPxeHost,
     FirewallRule,
     FirewallSettings,
     Job,
@@ -86,6 +89,7 @@ from labfoundry.app.services.dnsmasq import (
     dns_reverse_records,
     dhcp_option_to_dict,
     dhcp_scope_to_dict,
+    dnsmasq_tag,
     join_conditional_forwarders,
     join_addresses,
     join_domains,
@@ -287,14 +291,47 @@ from labfoundry.app.services.vcf_offline_depot import (
     _find_vcf_download_tool_binary,
     _safe_extract_tar_gz,
 )
+from labfoundry.app.services.esxi_pxe import (
+    ESXI_PXE_DEFAULT_HOSTNAME,
+    ESXI_PXE_DNS_RECORD_DESCRIPTION,
+    ESXI_PXE_HTTP_PORT,
+    ESXI_PXE_STAGED_CONFIG_PATH,
+    ESXI_IPXE_HTTP_SCRIPT_PATH,
+    assign_kickstart_content,
+    canonical_http_path,
+    content_hash,
+    decode_kickstart_upload,
+    default_host_to_dict,
+    esxi_pxe_boot_settings,
+    esxi_pxe_default_host_settings,
+    esxi_pxe_host_artifacts,
+    generated_kickstart_path,
+    host_to_dict,
+    installer_iso_inventory,
+    installer_iso_root_path,
+    kickstart_drift_state,
+    kickstart_to_dict,
+    kickstart_validation,
+    mark_kickstarts_applied,
+    normalize_kickstart_content,
+    normalize_kickstart_name,
+    normalize_installer_iso_path,
+    render_esxi_pxe_manifest,
+    render_esxi_pxe_preview,
+    save_esxi_pxe_default_host_settings,
+    save_esxi_pxe_boot_settings,
+    store_installer_iso_upload,
+    strict_validation_enabled,
+)
 from labfoundry.app.token_service import create_token_for_user
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 TEMPLATES_DIR = APP_DIR / "templates"
 VCF_DEPOT_VDT_LOG_PATH = PurePosixPath("/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log")
-LABFOUNDRY_APP_LOG_PATH = Path("/var/log/labfoundry/labfoundry.log")
+LABFOUNDRY_APP_LOG_PATH = get_settings().app_log_path
 KMS_SERVER_LOG_PATH = Path("/var/log/labfoundry/kms/server.log")
+APPLY_LOGGER = logging.getLogger("labfoundry.appliance_apply")
 NETWORK_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/network/labfoundry-network.conf"
 DNSMASQ_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf"
 
@@ -829,7 +866,7 @@ def vcf_backup_context(db: Session) -> dict:
         "vcf_backup_remote_directory": vcf_backup_remote_directory(settings),
         "vcf_backup_config_preview": config_preview,
         "vcf_backup_validation_errors": validation_errors,
-        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
+        "vcf_backup_service_status": service_runtime_status(db, "vcf-backups"),
     }
 
 
@@ -1293,6 +1330,7 @@ def vcf_private_registry_context(db: Session) -> dict:
     return {
         "vcf_registry_settings": settings,
         "vcf_registry_settings_json": vcf_registry_settings_to_dict(settings),
+        "vcf_registry_service_status": service_runtime_status(db, "vcf-private-registry"),
         "vcf_registry_bundles": bundles,
         "vcf_registry_bundle_rows": [vcf_registry_bundle_to_dict(bundle) for bundle in bundles],
         "vcf_registry_available_interfaces": available_interfaces,
@@ -1343,6 +1381,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         "vcf_depot_primary_listen_address": primary_listen_address(settings.listen_address),
         "vcf_depot_bind_label": service_bind_label(settings.listen_interface, settings.listen_address),
         "vcf_depot_endpoint": vcf_depot_endpoint(settings),
+        "vcf_depot_service_status": service_runtime_status(db, "repository"),
         "vcf_depot_https_config_preview": https_config_preview,
         "vcf_depot_https_cert_path": depot_cert_path,
         "vcf_depot_https_key_path": depot_key_path,
@@ -1578,6 +1617,7 @@ def firewall_context(db: Session) -> dict:
         vcf_backup_settings=get_vcf_backup_settings_row(db),
         vcf_depot_settings=get_vcf_offline_depot_settings_row(db),
         vcf_registry_settings=get_vcf_private_registry_settings_row(db),
+        esxi_pxe_boot=esxi_pxe_boot_settings(db),
         interface_networks=interface_networks,
         source_groups=source_group_state["groups"],
         source_group_assignments=source_group_state["assignments"],
@@ -1613,6 +1653,7 @@ def firewall_context(db: Session) -> dict:
         "firewall_source_group_assignments": source_group_state["assignments"],
         "firewall_config_preview": config_preview,
         "firewall_validation_errors": validation_errors,
+        "firewall_service_status": service_runtime_status(db, "firewall"),
         "firewall_directions": FIREWALL_DIRECTIONS,
         "firewall_actions": FIREWALL_ACTIONS,
         "firewall_protocols": FIREWALL_PROTOCOLS,
@@ -1719,6 +1760,7 @@ def ca_context(db: Session) -> dict:
         "ca_apply_payload": apply_payload,
         "ca_apply_config_path": CA_STAGED_CONFIG_PATH,
         "ca_validation_errors": validation_errors,
+        "ca_service_status": service_runtime_status(db, "ca"),
         "ca_status_summary": {
             "root_present": bool(settings.root_certificate_pem),
             "bundle_present": bool(settings.root_certificate_pem),
@@ -1800,7 +1842,7 @@ def kms_context(db: Session) -> dict:
         "available_kms_addresses": available_service_listen_addresses(settings.listen_address, available_interfaces),
         "kms_config_preview": config_preview,
         "kms_validation_errors": validation_errors,
-        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
+        "kms_service_status": service_runtime_status(db, "kms"),
         "kms_lab_notice": (
             "PyKMIP is useful for KMIP lab and compatibility testing. Treat this backend as a lab KMS, "
             "not a production HSM or hardened enterprise key manager."
@@ -1916,6 +1958,7 @@ def dnsmasq_context(db: Session) -> dict:
     dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
     dhcp_options = db.execute(select(DhcpOption).order_by(DhcpOption.scope_id, DhcpOption.option_code)).scalars().all()
     dhcp_reservations = db.execute(select(DhcpReservation).order_by(DhcpReservation.hostname)).scalars().all()
+    esxi_boot = esxi_pxe_boot_settings(db)
     available_interfaces = service_bind_options(db)
     vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
     config_preview = render_dnsmasq_config(
@@ -1926,6 +1969,7 @@ def dnsmasq_context(db: Session) -> dict:
         dhcp_scopes=dhcp_scopes,
         dhcp_options=dhcp_options,
         conditional_forwarders=conditional_forwarders,
+        esxi_pxe_boot=esxi_boot,
     )
     validation_errors = (
         validate_dns_settings(dns_settings, dns_records, conditional_forwarders)
@@ -1945,6 +1989,8 @@ def dnsmasq_context(db: Session) -> dict:
             dhcp_options,
         )
     )
+    if (esxi_boot.get("enabled") or esxi_boot.get("native_uefi_http_enabled")) and not dhcp_settings.enabled:
+        validation_errors.append("ESXi PXE boot services require DHCP to be enabled so clients receive boot files.")
     dns_domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
     dns_warnings = dns_domain_warnings(dns_domains)
     dns_record_groups = dns_records_by_domain(dns_records, dns_domains)
@@ -1965,6 +2011,7 @@ def dnsmasq_context(db: Session) -> dict:
         "dhcp_options": dhcp_options,
         "dhcp_option_rows": [dhcp_option_to_dict(option) for option in dhcp_options],
         "dhcp_option_scope_choices": dhcp_option_scope_choices(dhcp_scopes),
+        "dhcp_generated_pxe_options": generated_esxi_pxe_dhcp_options(esxi_boot, dhcp_scopes),
         "dhcp_reservations": dhcp_reservations,
         "dhcp_reservation_rows": [dhcp_reservation_payload(item) for item in dhcp_reservations],
         "dhcp_leases": dhcp_leases,
@@ -1983,8 +2030,48 @@ def dnsmasq_context(db: Session) -> dict:
         "upstream_servers": "\n".join(split_servers(dns_settings.upstream_servers)),
         "conditional_forwarders": join_conditional_forwarders(split_conditional_forwarders(conditional_forwarders)),
         "dns_domain_options": dns_domains,
-        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
+        "dns_service_status": service_runtime_status(db, "dns"),
+        "dhcp_service_status": service_runtime_status(db, "dhcp"),
     }
+
+
+def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any], scopes: list[DhcpScope]) -> list[dict[str, str]]:
+    if not esxi_boot or not (esxi_boot.get("enabled") or esxi_boot.get("native_uefi_http_enabled")):
+        return []
+    rows: list[dict[str, str]] = []
+    scope = next((item for item in scopes if item.id == esxi_boot.get("dhcp_scope_id")), None)
+    applies_to = scope.name if scope is not None else "All DHCP zones"
+    scope_prefix = f"tag:{dnsmasq_tag(scope.name)}," if scope is not None else ""
+    tftp_hostname = str(esxi_boot.get("hostname") or "").strip()
+    tftp_address = next(
+        (line.strip() for line in str(esxi_boot.get("listen_address") or "").replace(",", "\n").splitlines() if line.strip()),
+        "",
+    )
+    boot_server = f",{tftp_hostname},{tftp_address}" if tftp_hostname and tftp_address else ""
+    native_http_url = str(esxi_boot.get("effective_native_uefi_http_url") or esxi_boot.get("native_uefi_http_url") or "").strip()
+
+    def add(flow: str, line: str, note: str) -> None:
+        rows.append({"applies_to": applies_to, "flow": flow, "line": line, "note": note})
+
+    if esxi_boot.get("native_uefi_http_enabled") and native_http_url:
+        add("Native UEFI HTTP", "dhcp-vendorclass=set:uefi-http,HTTPClient", "Detect HTTPClient firmware")
+        add("Native UEFI HTTP", "dhcp-match=set:uefi-http-x64,option:client-arch,16", "Match x64 HTTP boot")
+        add("Native UEFI HTTP", f"dhcp-boot={scope_prefix}tag:uefi-http,tag:uefi-http-x64,{native_http_url}", "Return mboot.efi HTTP URL")
+
+    if esxi_boot.get("enabled"):
+        if tftp_hostname:
+            add("PXE TFTP", f"dhcp-option={scope_prefix}66,{tftp_hostname}", "Advertise TFTP server name")
+        add("PXE TFTP", "enable-tftp", "Enable dnsmasq TFTP")
+        add("PXE TFTP", f"tftp-root={esxi_boot.get('tftp_root')}", "Serve generated boot files")
+        add("iPXE detection", "dhcp-userclass=set:ipxe,iPXE", "Detect iPXE second request")
+        add("iPXE detection", "dhcp-match=set:ipxe,175", "Compatibility iPXE marker")
+        add("UEFI PXE detection", "dhcp-match=set:efi-x86_64,option:client-arch,7", "Match x64 UEFI PXE")
+        add("UEFI PXE detection", "dhcp-match=set:efi-x86_64,option:client-arch,9", "Match x64 UEFI PXE")
+        add("iPXE second stage", f"dhcp-boot={scope_prefix}tag:ipxe,tag:efi-x86_64,{esxi_boot.get('uefi_second_stage_bootfile')}{boot_server}", "UEFI iPXE loads ESXi mboot")
+        add("iPXE second stage", f"dhcp-boot={scope_prefix}tag:ipxe,tag:!efi-x86_64,{esxi_boot.get('bios_second_stage_bootfile')}{boot_server}", "BIOS iPXE loads PXELINUX")
+        add("PXE first stage", f"dhcp-boot={scope_prefix}tag:efi-x86_64,{esxi_boot.get('uefi_bootfile')}{boot_server}", "UEFI PXE first-stage iPXE")
+        add("PXE first stage", f"dhcp-boot={scope_prefix}tag:!efi-x86_64,{esxi_boot.get('bios_bootfile')}{boot_server}", "BIOS PXE first-stage iPXE")
+    return rows
 
 
 def dhcp_reservation_payload(reservation: DhcpReservation) -> dict:
@@ -2303,6 +2390,108 @@ def remove_dns_for_vcf_offline_depot_hostname(db: Session, hostname: str, actor:
     return None
 
 
+def esxi_pxe_dns_record_conflict(db: Session, hostname: str) -> bool:
+    normalized = normalize_dns_hostname(hostname)
+    if not normalized:
+        return False
+    records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == normalized,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+        )
+    ).scalars().all()
+    return any(record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION for record in records)
+
+
+def remove_dns_for_esxi_pxe_hostname(db: Session, hostname: str, actor: str | None) -> str | None:
+    normalized_hostname = normalize_dns_hostname(hostname)
+    if not normalized_hostname:
+        return None
+    records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == normalized_hostname,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+        )
+    ).scalars().all()
+    removed = 0
+    for record in records:
+        if record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
+            continue
+        db.delete(record)
+        removed += 1
+        if actor:
+            record_audit(db, actor=actor, action="delete_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type}")
+    if removed:
+        db.flush()
+        return "removed"
+    return None
+
+
+def ensure_dns_for_esxi_pxe(db: Session, boot: dict[str, Any], actor: str | None, *, previous_hostname: str | None = None) -> str | None:
+    hostname = normalize_dns_hostname(str(boot.get("hostname") or ESXI_PXE_DEFAULT_HOSTNAME))
+    selected_address = primary_listen_address(str(boot.get("listen_address") or ""))
+    if not bool(boot.get("enabled")):
+        return remove_dns_for_esxi_pxe_hostname(db, previous_hostname or hostname, actor)
+    if not hostname or not selected_address:
+        return None
+    try:
+        parsed_address = ip_address(selected_address)
+    except ValueError:
+        return None
+    record_type = "AAAA" if parsed_address.version == 6 else "A"
+    address = str(parsed_address)
+    if validate_dns_record(hostname, record_type, address):
+        return None
+    actions: list[str] = []
+    existing = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == hostname,
+            DnsRecord.record_type == record_type,
+        )
+    ).scalar_one_or_none()
+    if existing and existing.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
+        actions.append("conflict")
+    elif existing:
+        if existing.address != address or not existing.enabled:
+            existing.address = address
+            existing.enabled = True
+            existing.description = ESXI_PXE_DNS_RECORD_DESCRIPTION
+            db.flush()
+            if actor:
+                record_audit(db, actor=actor, action="update_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(existing.id), detail=f"{hostname} {record_type} -> {address}")
+            actions.append("updated")
+        else:
+            actions.append("unchanged")
+    else:
+        record = DnsRecord(hostname=hostname, record_type=record_type, address=address, description=ESXI_PXE_DNS_RECORD_DESCRIPTION, enabled=True)
+        db.add(record)
+        db.flush()
+        if actor:
+            record_audit(db, actor=actor, action="create_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(record.id), detail=f"{hostname} {record_type} -> {address}")
+        actions.append("created")
+    for record in db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == hostname,
+            DnsRecord.record_type.in_(["A", "AAAA"]),
+            DnsRecord.record_type != record_type,
+        )
+    ).scalars().all():
+        if record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
+            continue
+        db.delete(record)
+        if actor:
+            record_audit(db, actor=actor, action="delete_dns_record_from_esxi_pxe_ip_family_change", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type}")
+        actions.append("removed-stale")
+    previous = normalize_dns_hostname(previous_hostname or "")
+    if previous and previous != hostname:
+        removed = remove_dns_for_esxi_pxe_hostname(db, previous, actor)
+        if removed:
+            actions.append("removed-old")
+    if actions:
+        db.flush()
+    return "+".join(actions) if actions else None
+
+
 def available_dns_listen_addresses(
     dns_settings: DnsSettings,
     dhcp_settings: DhcpSettings,
@@ -2571,6 +2760,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "wan",
     "firewall",
     "dnsmasq",
+    "esxi_pxe",
     "ca",
     "kms",
     "vcf_backups",
@@ -2578,12 +2768,13 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "vcf_private_registry",
 }
 SECRET_LINE_PATTERN = re.compile(
-    r"(password|token|secret|credential|private[_-]?key|robot[_-]?account|ca[_-]?bundle[_-]?pem|activation[_-]?code)",
+    r"(rootpw|password|passwd|token|secret|credential|private[_-]?key|robot[_-]?account|ca[_-]?bundle[_-]?pem|activation[_-]?code|license|ipxe[_-]?script)",
     re.IGNORECASE,
 )
 PRIVATE_KEY_BEGIN_PATTERN = re.compile(r"-----BEGIN .*PRIVATE KEY-----")
 PRIVATE_KEY_END_PATTERN = re.compile(r"-----END .*PRIVATE KEY-----")
 JWT_PATH_SEGMENT_PATTERN = re.compile(r"(?<=/)[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}(?=/|$)")
+JSON_SECRET_FIELD_PATTERN = re.compile(r'^(\s*"[^"]+"\s*:\s*)(.*?)(,?)\s*$')
 
 
 def redact_config_preview(config_preview: str) -> str:
@@ -2599,6 +2790,10 @@ def redact_config_preview(config_preview: str) -> str:
                 in_private_key = False
             continue
         if SECRET_LINE_PATTERN.search(line):
+            json_match = JSON_SECRET_FIELD_PATTERN.match(line)
+            if json_match:
+                lines.append(f'{json_match.group(1)}"[redacted]"{json_match.group(3)}')
+                continue
             separator = "=" if "=" in line else ":" if ":" in line else None
             if separator:
                 prefix = line.split(separator, 1)[0].rstrip()
@@ -2870,6 +3065,149 @@ def local_users_apply_context(db: Session, baseline: dict[str, Any] | None = Non
     }
 
 
+def esxi_pxe_context(db: Session) -> dict[str, Any]:
+    kickstarts = db.execute(select(EsxiKickstart).order_by(EsxiKickstart.name)).scalars().all()
+    hosts = db.execute(select(EsxiPxeHost).options(selectinload(EsxiPxeHost.kickstart)).order_by(EsxiPxeHost.hostname)).scalars().all()
+    dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
+    default_host = esxi_pxe_default_host_settings(db)
+    available_interfaces = service_bind_options(db)
+    iso_error = ""
+    try:
+        installer_isos = installer_iso_inventory()
+    except OSError as exc:
+        installer_isos = []
+        iso_error = f"Installer ISO folder could not be prepared: {exc}"
+    installer_isos = annotate_esxi_installer_iso_sources(db, installer_isos)
+    strict = strict_validation_enabled(db)
+    max_bytes = get_settings().esxi_kickstart_max_bytes
+    validation_errors: list[str] = []
+    validation_warnings: list[str] = []
+    validation_by_id: dict[int, dict[str, list[str] | bool]] = {}
+    for row in kickstarts:
+        errors, warnings = kickstart_validation(row.content, strict=strict, max_bytes=max_bytes)
+        validation_by_id[row.id] = {"valid": not errors, "errors": errors, "warnings": warnings}
+        validation_errors.extend(f"{row.name}: {error}" for error in errors)
+        validation_warnings.extend(f"{row.name}: {warning}" for warning in warnings)
+        if kickstart_drift_state(row) == "filesystem_modified":
+            validation_warnings.append(
+                f"{row.name}: Filesystem copy differs from database source. The next ESXi PXE apply will overwrite the filesystem copy from the database."
+            )
+    known_iso_paths = {row["path"] for row in installer_isos}
+    if default_host.get("enabled") and not (default_host.get("installer_iso_path") or "").strip():
+        validation_warnings.append("Default / undefined MACs: no installer ISO selected.")
+    if default_host.get("installer_iso_path") and default_host.get("installer_iso_path") not in known_iso_paths:
+        validation_warnings.append("Default / undefined MACs: selected installer ISO is missing from the ESX_HOST depot folder.")
+    for host in hosts:
+        if host.enabled and not (host.installer_iso_path or "").strip():
+            validation_warnings.append(f"{host.hostname}: no installer ISO selected.")
+        if host.installer_iso_path and host.installer_iso_path not in known_iso_paths:
+            validation_warnings.append(f"{host.hostname}: selected installer ISO is missing from the ESX_HOST depot folder.")
+    if iso_error:
+        validation_warnings.append(iso_error)
+    boot_settings = esxi_pxe_boot_settings(db)
+    selected_boot_interfaces = split_interfaces(boot_settings.get("listen_interface"))
+    selected_boot_addresses = split_addresses(boot_settings.get("listen_address"))
+    available_boot_addresses = available_service_listen_addresses(boot_settings.get("listen_address"), available_interfaces)
+    if boot_settings["native_uefi_http_enabled"] and not boot_settings["native_uefi_http_url"]:
+        if boot_settings.get("effective_native_uefi_http_url"):
+            validation_warnings.append("Native UEFI HTTP boot URL will be generated from the ESXi PXE HTTP endpoint.")
+        else:
+            validation_warnings.append("Native UEFI HTTP boot is enabled, but no listen address is available to generate the boot URL.")
+    if boot_settings["enabled"]:
+        if not boot_settings["hostname"]:
+            validation_errors.append("ESXi PXE hostname is required when PXE/TFTP bootstrap is enabled.")
+        if not boot_settings.get("dhcp_scope_id"):
+            validation_errors.append("ESXi PXE boot service requires a DHCP IP zone.")
+        if not selected_boot_addresses:
+            validation_errors.append("ESXi PXE boot service requires at least one listen address.")
+        if esxi_pxe_dns_record_conflict(db, boot_settings["hostname"]):
+            validation_errors.append("ESXi PXE hostname conflicts with an existing non-ESXi PXE DNS record.")
+        elif boot_settings["hostname"].lower() not in managed_dns_fqdns(db):
+            validation_warnings.append(f"ESXi PXE hostname {boot_settings['hostname']} is not present in managed DNS records.")
+        if not esxi_pxe_host_artifacts(hosts, boot_settings, default_host):
+            validation_warnings.append("ESXi PXE bootstrap is enabled, but no enabled host reference or default profile has an installer ISO selected.")
+    return {
+        "esxi_kickstarts": kickstarts,
+        "esxi_kickstart_rows": [kickstart_to_dict(row, include_content=True) for row in kickstarts],
+        "esxi_pxe_hosts": hosts,
+        "esxi_pxe_host_rows": [default_host_to_dict(default_host), *[host_to_dict(row) for row in hosts]],
+        "esxi_pxe_host_kickstart_options": [{"id": "", "label": "No Kickstart"}, *[{"id": row.id, "label": row.name} for row in kickstarts]],
+        "esxi_pxe_host_iso_options": [{"id": "", "label": "No ISO selected"}, *[{"id": row["path"], "label": f"{row['relative_path']} ({row['source_label']})"} for row in installer_isos]],
+        "esxi_installer_iso_root": installer_iso_root_path(),
+        "esxi_installer_isos": installer_isos,
+        "esxi_installer_iso_error": iso_error,
+        "esxi_pxe_boot": boot_settings,
+        "esxi_pxe_default_host": default_host,
+        "esxi_pxe_default_host_row": default_host_to_dict(default_host),
+        "esxi_pxe_dhcp_scope_options": [
+            {
+                "id": scope.id,
+                "name": scope.name,
+                "interface_name": scope.interface_name,
+                "site_address": scope.site_address,
+                "label": f"{scope.name} - {scope.interface_name} / {scope.site_address}/{scope.prefix_length}",
+            }
+            for scope in dhcp_scopes
+            if scope.enabled is not False
+        ],
+        "esxi_pxe_available_interfaces": available_interfaces,
+        "esxi_pxe_selected_interfaces": selected_boot_interfaces,
+        "esxi_pxe_selected_addresses": selected_boot_addresses,
+        "esxi_pxe_available_addresses": available_boot_addresses,
+        "esxi_pxe_bind_label": service_bind_label(boot_settings.get("listen_interface"), boot_settings.get("listen_address")),
+        "esxi_pxe_primary_listen_address": primary_listen_address(boot_settings.get("listen_address")),
+        "esxi_pxe_service_status": service_runtime_status(db, "esxi-pxe"),
+        "esxi_pxe_artifacts": esxi_pxe_host_artifacts(hosts, boot_settings, default_host),
+        "esxi_pxe_validation_errors": validation_errors,
+        "esxi_pxe_validation_warnings": list(dict.fromkeys(validation_warnings)),
+        "esxi_pxe_validation_by_id": validation_by_id,
+        "esxi_pxe_manifest": render_esxi_pxe_manifest(kickstarts, hosts, boot_settings, default_host),
+        "esxi_pxe_preview": render_esxi_pxe_preview(kickstarts, hosts, boot_settings, default_host),
+        "esxi_pxe_config_path": ESXI_PXE_STAGED_CONFIG_PATH,
+        "esxi_pxe_strict_validation": strict,
+    }
+
+
+def annotate_esxi_installer_iso_sources(db: Session, installer_isos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    upload_events = {
+        row.resource_id: row
+        for row in db.execute(
+            select(AuditEvent)
+            .where(AuditEvent.action == "upload_esxi_installer_iso", AuditEvent.resource_type == "esxi_installer_iso")
+            .order_by(AuditEvent.created_at.desc())
+        )
+        .scalars()
+        .all()
+        if row.resource_id
+    }
+    annotated: list[dict[str, Any]] = []
+    for iso in installer_isos:
+        row = dict(iso)
+        upload_event = upload_events.get(str(row.get("relative_path") or ""))
+        if upload_event is not None:
+            row["source"] = "uploaded"
+            row["source_label"] = "Uploaded by user"
+            row["source_at"] = upload_event.created_at.isoformat()
+        else:
+            row["source"] = "vcfdt"
+            row["source_label"] = "Downloaded by VCFDT"
+            row["source_at"] = row.get("updated_at") or ""
+        annotated.append(row)
+    return annotated
+
+
+def parse_optional_esxi_kickstart_id(db: Session, kickstart_id: str, *, label: str = "Kickstart") -> int | None:
+    value = str(kickstart_id or "").strip()
+    if not value:
+        return None
+    if not value.isdigit():
+        raise HTTPException(status_code=400, detail=f"{label} is invalid.")
+    normalized_id = int(value)
+    if db.get(EsxiKickstart, normalized_id) is None:
+        raise HTTPException(status_code=404, detail=f"{label} not found")
+    return normalized_id
+
+
 def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     baselines = load_appliance_apply_baselines(db)
     local_users = local_users_apply_context(db, baselines.get("local_users"))
@@ -2878,6 +3216,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     wan = routes_wan_context(db)
     firewall = firewall_context(db)
     dnsmasq = dnsmasq_context(db)
+    esxi_pxe = esxi_pxe_context(db)
     ca = ca_context(db)
     kms = kms_context(db)
     vcf_backup = vcf_backup_context(db)
@@ -3000,6 +3339,23 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             baseline=baselines.get("dnsmasq"),
         ),
         make_appliance_apply_unit(
+            unit_id="esxi_pxe",
+            label="ESXi PXE",
+            page_url="/esxi-pxe",
+            context=esxi_pxe,
+            summary=[
+                f"{len(esxi_pxe['esxi_kickstarts'])} Kickstarts",
+                f"{len([row for row in esxi_pxe['esxi_kickstarts'] if row.enabled])} enabled",
+                f"{len(esxi_pxe['esxi_pxe_hosts'])} host definitions",
+                "boot services enabled" if esxi_pxe["esxi_pxe_boot"]["enabled"] else "boot services disabled",
+            ],
+            validation_errors=esxi_pxe["esxi_pxe_validation_errors"],
+            validation_warnings=esxi_pxe["esxi_pxe_validation_warnings"],
+            config_path=esxi_pxe["esxi_pxe_config_path"],
+            config_preview=esxi_pxe["esxi_pxe_manifest"],
+            baseline=baselines.get("esxi_pxe"),
+        ),
+        make_appliance_apply_unit(
             unit_id="ca",
             label="Certificate Authority",
             page_url="/certificate-authority",
@@ -3087,6 +3443,32 @@ def appliance_apply_status(db: Session, unit_id: str) -> dict[str, Any]:
     return {"state": "unknown", "pill": "muted", "changed": False, "validation_errors": [], "sidebar_pending_apply_count": sidebar_count}
 
 
+def service_runtime_status(db: Session, service_id: str) -> dict[str, Any]:
+    row = db.execute(select(ServiceState).where(ServiceState.service == service_id)).scalar_one_or_none()
+    if row is None:
+        return {"label": "unknown", "pill": "muted", "running": False, "enabled": False, "health": "unknown", "detail": ""}
+    if row.running and row.enabled:
+        label = "live"
+        pill = "good"
+    elif row.running:
+        label = "running"
+        pill = "warn"
+    elif row.enabled:
+        label = "stopped"
+        pill = "warn"
+    else:
+        label = "disabled"
+        pill = "muted"
+    return {
+        "label": label,
+        "pill": pill,
+        "running": row.running,
+        "enabled": row.enabled,
+        "health": row.health,
+        "detail": row.detail or "",
+    }
+
+
 def appliance_apply_context(db: Session) -> dict[str, Any]:
     units = appliance_apply_units(db)
     changed_units = [unit for unit in units if unit["changed"]]
@@ -3152,7 +3534,7 @@ def tail_fixed_log_file(path: Path | PurePosixPath, *, max_bytes: int = 64 * 102
 def logs_context(db: Session) -> dict[str, Any]:
     sources = [
         ("vcfdt", "VCFDT", VCF_DEPOT_VDT_LOG_PATH),
-        ("app", "LabFoundry", LABFOUNDRY_APP_LOG_PATH),
+        ("app", "LabFoundry App", LABFOUNDRY_APP_LOG_PATH),
         ("kms", "KMS", KMS_SERVER_LOG_PATH),
     ]
     events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(100)).scalars().all()
@@ -3193,6 +3575,20 @@ def appliance_apply_failure_summaries(unit_results: list[dict[str, Any]]) -> lis
                 }
             )
     return summaries
+
+
+def log_appliance_apply_failures(job_id: str, unit_results: list[dict[str, Any]]) -> None:
+    for failure in appliance_apply_failure_summaries(unit_results):
+        for command in failure["commands"]:
+            APPLY_LOGGER.error(
+                "Appliance apply task %s failed unit=%s command=%s returncode=%s stderr=%s stdout=%s",
+                job_id,
+                failure["label"],
+                command["command_line"],
+                command["returncode"],
+                command["stderr"] or "",
+                command["stdout"] or "",
+            )
 
 
 def stage_appliance_apply_config(config_path: str, config_preview: str) -> str:
@@ -3240,10 +3636,18 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(DNSMASQ_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = [adapter.validate_dnsmasq_config(config_path), adapter.apply_dnsmasq_config(config_path), adapter.reload_dnsmasq()]
+    elif unit_id == "esxi_pxe":
+        config_path = context["esxi_pxe_config_path"]
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(ESXI_PXE_STAGED_CONFIG_PATH, context["esxi_pxe_manifest"])
+        results = [adapter.validate_esxi_pxe_config(config_path), adapter.apply_esxi_pxe_config(config_path)]
     elif unit_id == "ca":
         config_path = CA_STAGED_CONFIG_PATH
         if not adapter.dry_run:
-            config_path = stage_appliance_apply_config(CA_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+            config_path = stage_appliance_apply_config(
+                CA_STAGED_CONFIG_PATH,
+                render_ca_apply_payload(context["ca_settings"], context["ca_certificates"], include_private_keys=True),
+            )
         results = [adapter.validate_ca_config(config_path), adapter.apply_ca_config(config_path)]
     elif unit_id == "kms":
         config_path = KMS_STAGED_CONFIG_PATH
@@ -3286,6 +3690,8 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         else:
             error = "\n".join(result.stderr for result in results if result.stderr).strip() or "Local user OS sync failed."
             mark_local_users_failed(users, error)
+    if unit_id == "esxi_pxe" and succeeded and not any(result.dry_run for result in results):
+        mark_kickstarts_applied(list(context["esxi_kickstarts"]))
     return {
         "unit_id": unit_id,
         "label": unit["label"],
@@ -3297,6 +3703,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         "validation_errors": unit["validation_errors"],
         "validation_warnings": unit["validation_warnings"],
         "removed_vlan_interfaces": unit.get("removed_vlan_interfaces", []),
+        "generated_files": [str(generated_kickstart_path(row.id)) for row in context.get("esxi_kickstarts", []) if row.enabled],
         "config_path": unit["config_path"],
         "config_preview": unit["config_preview"],
         "config_diff": unit["config_diff"],
@@ -3410,7 +3817,7 @@ def login(
     password: str = Form(...),
     csrf: str = Form(...),
     db: Session = Depends(get_db),
-) -> RedirectResponse | HTMLResponse:
+) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
     user = authenticate_user(db, username, password)
     if not user:
@@ -3530,8 +3937,9 @@ def submit_appliance_apply(
         "units": unit_results,
         "dry_run": any(result["dry_run"] for result in unit_results),
     }
+    job_id = f"job_{uuid4().hex[:12]}"
     job = Job(
-        id=f"job_{uuid4().hex[:12]}",
+        id=job_id,
         type="appliance-apply",
         status=JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
         created_by=identity.username,
@@ -3544,6 +3952,8 @@ def submit_appliance_apply(
     db.add(job)
     if succeeded:
         update_appliance_apply_baselines(db, appliance_apply_units(db), selected_ids)
+    else:
+        log_appliance_apply_failures(job_id, unit_results)
     db.commit()
     detail = " ; ".join(
         " ".join(command["command"])
@@ -4513,7 +4923,7 @@ def create_vlan_interface_from_ui(
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
-) -> RedirectResponse | HTMLResponse:
+) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
     parsed = validate_vlan_form_values(parent_interface, vlan_id, ip_cidr, db)
     if isinstance(parsed, Response):
@@ -4556,7 +4966,7 @@ def edit_vlan_interface_from_ui(
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
-) -> RedirectResponse | HTMLResponse:
+) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
     vlan = db.get(VlanInterface, vlan_id)
     if not vlan:
@@ -5081,14 +5491,14 @@ def dhcp_page(
 def update_dhcp_from_ui(
     request: Request,
     enabled: str | None = Form(None),
-    interface_name: str = Form(...),
-    site_address: str = Form(...),
-    prefix_length: int = Form(...),
-    range_start: str = Form(...),
-    range_end: str = Form(...),
-    lease_time: str = Form(...),
-    domain_name: str = Form(...),
-    dns_server: str = Form(...),
+    interface_name: str | None = Form(None),
+    site_address: str | None = Form(None),
+    prefix_length: str | None = Form(None),
+    range_start: str | None = Form(None),
+    range_end: str | None = Form(None),
+    lease_time: str | None = Form(None),
+    domain_name: str | None = Form(None),
+    dns_server: str | None = Form(None),
     authoritative: str | None = Form(None),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -5097,14 +5507,26 @@ def update_dhcp_from_ui(
     verify_csrf(request, csrf)
     settings = get_dhcp_settings_row(db)
     settings.enabled = enabled == "on"
-    settings.interface_name = interface_name
-    settings.site_address = site_address
-    settings.prefix_length = prefix_length
-    settings.range_start = range_start
-    settings.range_end = range_end
-    settings.lease_time = lease_time
-    settings.domain_name = domain_name
-    settings.dns_server = dns_server
+    if interface_name is not None:
+        settings.interface_name = interface_name.strip()
+    if site_address is not None:
+        settings.site_address = site_address.strip()
+    prefix_text = (prefix_length or "").strip()
+    if prefix_text:
+        try:
+            settings.prefix_length = int(prefix_text)
+        except ValueError:
+            return JSONResponse({"status": "error", "error": "DHCP prefix length must be an integer."}, status_code=422)
+    if range_start is not None:
+        settings.range_start = range_start.strip()
+    if range_end is not None:
+        settings.range_end = range_end.strip()
+    if lease_time is not None:
+        settings.lease_time = lease_time.strip() or settings.lease_time
+    if domain_name is not None:
+        settings.domain_name = domain_name.strip() or settings.domain_name
+    if dns_server is not None:
+        settings.dns_server = dns_server.strip()
     settings.authoritative = authoritative == "on"
     settings.updated_at = utcnow()
     db.commit()
@@ -5827,7 +6249,7 @@ def update_kms_settings_from_ui(
     listen_address: str = Form(""),
     port: int = Form(5696),
     hostname: str = Form("kms.labfoundry.internal"),
-    server_certificate: str = Form("kms.labfoundry.internal"),
+    server_certificate: str | None = Form(None),
     require_client_cert: str | None = Form(None),
     allow_register: str | None = Form(None),
     allow_destroy: str | None = Form(None),
@@ -5853,7 +6275,7 @@ def update_kms_settings_from_ui(
     settings.listen_address = selected_addresses
     settings.port = port
     settings.hostname = normalize_dns_hostname(hostname.strip() or "kms.labfoundry.internal")
-    settings.server_certificate = normalize_dns_hostname(server_certificate.strip() or settings.hostname)
+    settings.server_certificate = settings.hostname
     settings.ca_certificate_path = settings.ca_certificate_path.strip() or "/etc/labfoundry/ca/root.crt"
     settings.database_path = KMS_DEFAULT_DATABASE_PATH
     settings.config_path = KMS_DEFAULT_CONFIG_PATH
@@ -7128,6 +7550,49 @@ def backup_restore_context(db: Session, result: dict[str, Any] | None = None, er
     }
 
 
+def require_esxi_pxe_write(identity: Identity) -> None:
+    if not identity.can("write:esxi-pxe"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ESXi PXE write permission required")
+
+
+def next_kickstart_copy_name(db: Session, base_name: str) -> str:
+    names = {row.name.lower() for row in db.execute(select(EsxiKickstart)).scalars().all()}
+    candidate = f"{base_name} Copy"
+    if candidate.lower() not in names:
+        return candidate
+    index = 2
+    while True:
+        candidate = f"{base_name} Copy {index}"
+        if candidate.lower() not in names:
+            return candidate
+        index += 1
+
+
+def esxi_pxe_page_context(
+    db: Session,
+    identity: Identity,
+    *,
+    selected_id: int | None = None,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    context = esxi_pxe_context(db)
+    kickstarts = context["esxi_kickstarts"]
+    selected = next((row for row in kickstarts if row.id == selected_id), None) or (kickstarts[0] if kickstarts else None)
+    selected_validation = {"valid": True, "errors": [], "warnings": []}
+    if selected is not None:
+        selected_validation = context["esxi_pxe_validation_by_id"].get(selected.id, selected_validation)
+    return {
+        **context,
+        "esxi_selected_kickstart": selected,
+        "esxi_selected_kickstart_json": kickstart_to_dict(selected, include_content=identity.can("write:esxi-pxe")) if selected else None,
+        "esxi_selected_validation": selected_validation,
+        "esxi_can_write": identity.can("write:esxi-pxe"),
+        "esxi_pxe_result": result,
+        "esxi_pxe_error": error,
+    }
+
+
 @router.post("/services/{service}/{action}", response_model=None)
 def service_action_from_ui(
     service: str,
@@ -7233,6 +7698,570 @@ def audit_log(
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
     return RedirectResponse("/logs#logs-audit-panel", status_code=303)
+
+
+@router.get("/pxe/esxi/ks/{kickstart_file}", response_model=None)
+def serve_esxi_kickstart_file(kickstart_file: str, db: Session = Depends(get_db)) -> FileResponse:
+    if not kickstart_file.endswith(".cfg"):
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    raw_id = kickstart_file.removesuffix(".cfg")
+    if not raw_id.isdigit():
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    kickstart = db.get(EsxiKickstart, int(raw_id))
+    path = generated_kickstart_path(int(raw_id))
+    if not kickstart or not kickstart.enabled or not path.is_file():
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    return FileResponse(path, media_type="text/plain; charset=utf-8")
+
+
+@router.get("/pxe/esxi/boot.ipxe", response_model=None)
+def serve_esxi_http_ipxe_script() -> FileResponse:
+    if not ESXI_IPXE_HTTP_SCRIPT_PATH.is_file():
+        raise HTTPException(status_code=404, detail="ESXi iPXE boot script is not enabled")
+    return FileResponse(ESXI_IPXE_HTTP_SCRIPT_PATH, media_type="text/plain; charset=utf-8")
+
+
+@router.get("/esxi-pxe", response_class=HTMLResponse, response_model=None)
+def esxi_pxe_page(
+    request: Request,
+    kickstart_id: int | None = None,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(
+        request,
+        "esxi_pxe.html",
+        {
+            "identity": identity,
+            **esxi_pxe_page_context(db, identity, selected_id=kickstart_id),
+            "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+        },
+    )
+
+
+@router.post("/esxi-pxe/boot-settings", response_model=None)
+def update_esxi_pxe_boot_settings_from_ui(
+    request: Request,
+    enabled: bool = Form(False),
+    hostname: str = Form(ESXI_PXE_DEFAULT_HOSTNAME),
+    dhcp_scope_id: str = Form(""),
+    listen_interfaces: list[str] = Form(default=[]),
+    listen_addresses: list[str] = Form(default=[]),
+    listen_interfaces_present: str | None = Form(None),
+    listen_addresses_present: str | None = Form(None),
+    listen_interface: str = Form(""),
+    listen_address: str = Form(""),
+    tftp_root: str = Form(...),
+    http_port: int = Form(ESXI_PXE_HTTP_PORT),
+    bios_bootfile: str = Form(...),
+    uefi_bootfile: str = Form(...),
+    native_uefi_http_enabled: bool = Form(False),
+    native_uefi_http_url: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    previous_boot = esxi_pxe_boot_settings(db)
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        [*listen_interfaces, listen_interface],
+        [*listen_addresses, listen_address],
+        current_interface=str(previous_boot.get("listen_interface") or ""),
+        current_address=str(previous_boot.get("listen_address") or ""),
+        listen_interfaces_present=listen_interfaces_present,
+        listen_addresses_present=listen_addresses_present,
+    )
+    try:
+        boot = save_esxi_pxe_boot_settings(
+            db,
+            enabled=enabled,
+            hostname=hostname,
+            listen_interface=selected_interfaces,
+            listen_address=selected_addresses,
+            dhcp_scope_id=dhcp_scope_id,
+            tftp_root=tftp_root,
+            http_port=http_port,
+            bios_bootfile=bios_bootfile,
+            uefi_bootfile=uefi_bootfile,
+            native_uefi_http_enabled=native_uefi_http_enabled,
+            native_uefi_http_url=native_uefi_http_url,
+        )
+        dns_record_action = ensure_dns_for_esxi_pxe(db, boot, identity.username, previous_hostname=str(previous_boot.get("hostname") or ""))
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        return render(
+            request,
+            "esxi_pxe.html",
+            {
+                "identity": identity,
+                **esxi_pxe_page_context(db, identity, error=str(exc)),
+                "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+            },
+            status_code=400,
+        )
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_esxi_pxe_boot_settings",
+        resource_type="esxi_pxe_boot",
+        resource_id="default",
+        detail=f"enabled={boot['enabled']} native_uefi_http_enabled={boot['native_uefi_http_enabled']} tftp_root={boot['tftp_root']} http_port={boot['http_port']}",
+        request_id=request.state.request_id,
+    )
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = esxi_pxe_context(db)
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": utcnow().isoformat(),
+                "hostname": context["esxi_pxe_boot"]["hostname"],
+                "listen_address": context["esxi_pxe_primary_listen_address"],
+                "bind_label": context["esxi_pxe_bind_label"],
+                "dns_record_action": dns_record_action,
+                "validation_errors": context["esxi_pxe_validation_errors"],
+                "validation_warnings": context["esxi_pxe_validation_warnings"],
+            }
+        )
+    return RedirectResponse("/esxi-pxe", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts", response_model=None)
+def create_esxi_kickstart_from_ui(
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(""),
+    content: str = Form(...),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    try:
+        kickstart = EsxiKickstart(name=normalize_kickstart_name(name), description=description or None, content="", content_hash="", enabled=enabled)
+        db.add(kickstart)
+        db.flush()
+        assign_kickstart_content(kickstart, content, max_bytes=get_settings().esxi_kickstart_max_bytes)
+        kickstart.http_path = canonical_http_path(kickstart.id)
+        db.commit()
+    except (ValueError, IntegrityError) as exc:
+        db.rollback()
+        return render(
+            request,
+            "esxi_pxe.html",
+            {
+                "identity": identity,
+                **esxi_pxe_page_context(db, identity, error=str(exc)),
+                "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+            },
+            status_code=400,
+        )
+    record_audit(db, actor=identity.username, action="create_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"name={kickstart.name} hash={kickstart.content_hash}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={kickstart.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}", response_model=None)
+def update_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(""),
+    content: str = Form(...),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    try:
+        kickstart.name = normalize_kickstart_name(name)
+        kickstart.description = description or None
+        kickstart.enabled = enabled
+        assign_kickstart_content(kickstart, content, max_bytes=get_settings().esxi_kickstart_max_bytes)
+        kickstart.http_path = canonical_http_path(kickstart.id)
+        db.add(kickstart)
+        db.commit()
+    except (ValueError, IntegrityError) as exc:
+        db.rollback()
+        return render(
+            request,
+            "esxi_pxe.html",
+            {
+                "identity": identity,
+                **esxi_pxe_page_context(db, identity, selected_id=kickstart_id, error=str(exc)),
+                "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+            },
+            status_code=400,
+        )
+    record_audit(db, actor=identity.username, action="update_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"name={kickstart.name} hash={kickstart.content_hash}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={kickstart.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}/duplicate", response_model=None)
+def duplicate_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    source = db.get(EsxiKickstart, kickstart_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    duplicate = EsxiKickstart(
+        name=next_kickstart_copy_name(db, source.name),
+        description=source.description,
+        content=source.content,
+        content_hash=source.content_hash,
+        rendered_content=source.rendered_content,
+        enabled=source.enabled,
+    )
+    db.add(duplicate)
+    db.flush()
+    duplicate.http_path = canonical_http_path(duplicate.id)
+    db.commit()
+    record_audit(db, actor=identity.username, action="duplicate_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(duplicate.id), detail=f"source_id={source.id} name={duplicate.name}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={duplicate.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}/delete", response_model=None)
+def delete_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    for host in db.execute(select(EsxiPxeHost).where(EsxiPxeHost.kickstart_id == kickstart.id)).scalars().all():
+        host.kickstart_id = None
+        host.updated_at = utcnow()
+        db.add(host)
+    db.delete(kickstart)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart_id), request_id=request.state.request_id)
+    return RedirectResponse("/esxi-pxe", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}/validate", response_class=HTMLResponse, response_model=None)
+def validate_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    verify_csrf(request, csrf)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    errors, warnings = kickstart_validation(kickstart.content, strict=strict_validation_enabled(db), max_bytes=get_settings().esxi_kickstart_max_bytes)
+    record_audit(db, actor=identity.username, action="validate_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"errors={len(errors)} warnings={len(warnings)}", request_id=request.state.request_id)
+    return render(
+        request,
+        "esxi_pxe.html",
+        {
+            "identity": identity,
+            **esxi_pxe_page_context(
+                db,
+                identity,
+                selected_id=kickstart_id,
+                result={"title": "Validation complete", "message": f"{len(errors)} errors, {len(warnings)} warnings."},
+            ),
+            "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+        },
+    )
+
+
+@router.get("/esxi-pxe/kickstarts/{kickstart_id}/download", response_model=None)
+def download_esxi_kickstart_from_ui(
+    kickstart_id: int,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    require_esxi_pxe_write(identity)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", kickstart.name).strip("-") or f"kickstart-{kickstart.id}"
+    return Response(kickstart.content, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}.cfg"'})
+
+
+@router.post("/esxi-pxe/kickstarts/upload", response_model=None)
+async def upload_esxi_kickstart_from_ui(
+    request: Request,
+    kickstart_file: UploadFile = File(...),
+    name: str = Form(""),
+    description: str = Form(""),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    try:
+        content = decode_kickstart_upload(await kickstart_file.read(), max_bytes=get_settings().esxi_kickstart_max_bytes)
+        kickstart = EsxiKickstart(
+            name=normalize_kickstart_name(name or Path(kickstart_file.filename or "uploaded-kickstart").stem),
+            description=description or None,
+            content=content,
+            content_hash=content_hash(content),
+            rendered_content=content,
+            enabled=enabled,
+        )
+        db.add(kickstart)
+        db.flush()
+        kickstart.http_path = canonical_http_path(kickstart.id)
+        db.commit()
+    except (ValueError, IntegrityError) as exc:
+        db.rollback()
+        return render(
+            request,
+            "esxi_pxe.html",
+            {
+                "identity": identity,
+                **esxi_pxe_page_context(db, identity, error=str(exc)),
+                "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+            },
+            status_code=400,
+        )
+    record_audit(db, actor=identity.username, action="upload_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"name={kickstart.name} hash={kickstart.content_hash}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={kickstart.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/isos/upload", response_model=None)
+async def upload_esxi_installer_iso_from_ui(
+    request: Request,
+    iso_file: UploadFile = File(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    wants_json = request.headers.get("X-LabFoundry-Upload") == "1"
+    try:
+        iso = await store_installer_iso_upload(iso_file, max_bytes=get_settings().esxi_installer_iso_max_bytes)
+    except ValueError as exc:
+        status_code = 413 if "too large" in str(exc).lower() else 400
+        if wants_json:
+            return JSONResponse({"status": "error", "detail": str(exc)}, status_code=status_code)
+        return render(
+            request,
+            "esxi_pxe.html",
+            {
+                "identity": identity,
+                **esxi_pxe_page_context(db, identity, error=str(exc)),
+                "appliance_apply_status": appliance_apply_status(db, "esxi_pxe"),
+            },
+            status_code=status_code,
+        )
+    record_audit(db, actor=identity.username, action="upload_esxi_installer_iso", resource_type="esxi_installer_iso", resource_id=iso["relative_path"], detail=f"path={iso['path']} size={iso['size_bytes']}", request_id=request.state.request_id)
+    if wants_json:
+        return JSONResponse({"status": "uploaded", **iso})
+    return RedirectResponse("/esxi-pxe#esxi-pxe-isos-panel", status_code=303)
+
+
+@router.post("/esxi-pxe/isos/delete", response_model=None)
+def delete_esxi_installer_iso_from_ui(
+    request: Request,
+    installer_iso_path: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    try:
+        normalized_path = normalize_installer_iso_path(installer_iso_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path = Path(normalized_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Installer ISO not found")
+    path.unlink()
+    cleared_hosts = 0
+    for host in db.execute(select(EsxiPxeHost).where(EsxiPxeHost.installer_iso_path == normalized_path)).scalars().all():
+        host.installer_iso_path = ""
+        host.updated_at = utcnow()
+        db.add(host)
+        cleared_hosts += 1
+    default_host = esxi_pxe_default_host_settings(db)
+    cleared_default = default_host.get("installer_iso_path") == normalized_path
+    if cleared_default:
+        save_esxi_pxe_default_host_settings(
+            db,
+            enabled=bool(default_host.get("enabled")),
+            kickstart_id=default_host.get("kickstart_id"),
+            installer_iso_path="",
+        )
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="delete_esxi_installer_iso",
+        resource_type="esxi_installer_iso",
+        resource_id=path.name,
+        detail=f"path={normalized_path} cleared_hosts={cleared_hosts} cleared_default={cleared_default}",
+        request_id=request.state.request_id,
+    )
+    return RedirectResponse("/esxi-pxe#esxi-pxe-isos-panel", status_code=303)
+
+
+@router.post("/esxi-pxe/kickstarts/{kickstart_id}/import-filesystem", response_model=None)
+def import_esxi_kickstart_filesystem_copy(
+    kickstart_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    kickstart = db.get(EsxiKickstart, kickstart_id)
+    if not kickstart:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    path = generated_kickstart_path(kickstart.id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Generated Kickstart file not found")
+    assign_kickstart_content(kickstart, normalize_kickstart_content(path.read_text(encoding="utf-8"), max_bytes=get_settings().esxi_kickstart_max_bytes), max_bytes=get_settings().esxi_kickstart_max_bytes)
+    db.add(kickstart)
+    db.commit()
+    record_audit(db, actor=identity.username, action="import_esxi_kickstart_from_filesystem", resource_type="esxi_kickstart", resource_id=str(kickstart.id), detail=f"path={path} hash={kickstart.content_hash}", request_id=request.state.request_id)
+    return RedirectResponse(f"/esxi-pxe?kickstart_id={kickstart.id}", status_code=303)
+
+
+@router.post("/esxi-pxe/hosts", response_model=None)
+def create_esxi_pxe_host_from_ui(
+    request: Request,
+    hostname: str = Form(...),
+    mac_address: str = Form(...),
+    kickstart_id: str = Form(""),
+    installer_iso_path: str = Form(""),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    normalized_kickstart_id = parse_optional_esxi_kickstart_id(db, kickstart_id)
+    try:
+        normalized_iso_path = normalize_installer_iso_path(installer_iso_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    host = EsxiPxeHost(hostname=hostname.strip(), mac_address=mac_address.strip().lower(), kickstart_id=normalized_kickstart_id, installer_iso_path=normalized_iso_path, enabled=enabled)
+    db.add(host)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"ESXi PXE host for {mac_address} already exists.") from exc
+    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id} installer_iso={host.installer_iso_path}", request_id=request.state.request_id)
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
+
+
+@router.post("/esxi-pxe/hosts/{host_id}", response_model=None)
+def update_esxi_pxe_host_from_ui(
+    host_id: int,
+    request: Request,
+    hostname: str = Form(...),
+    mac_address: str = Form(...),
+    kickstart_id: str = Form(""),
+    installer_iso_path: str = Form(""),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    host = db.get(EsxiPxeHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="ESXi PXE host not found")
+    normalized_kickstart_id = parse_optional_esxi_kickstart_id(db, kickstart_id)
+    try:
+        normalized_iso_path = normalize_installer_iso_path(installer_iso_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    host.hostname = hostname.strip()
+    host.mac_address = mac_address.strip().lower()
+    host.kickstart_id = normalized_kickstart_id
+    host.installer_iso_path = normalized_iso_path
+    host.enabled = enabled
+    host.updated_at = utcnow()
+    db.add(host)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"ESXi PXE host for {mac_address} already exists.") from exc
+    record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id} installer_iso={host.installer_iso_path}", request_id=request.state.request_id)
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
+
+
+@router.post("/esxi-pxe/default-host", response_model=None)
+def update_esxi_pxe_default_host_from_ui(
+    request: Request,
+    kickstart_id: str = Form(""),
+    installer_iso_path: str = Form(""),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    try:
+        default_host = save_esxi_pxe_default_host_settings(db, enabled=enabled, kickstart_id=kickstart_id, installer_iso_path=installer_iso_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_esxi_pxe_default_host",
+        resource_type="esxi_pxe_default_host",
+        resource_id="default",
+        detail=f"enabled={default_host['enabled']} kickstart_id={default_host['kickstart_id']} installer_iso={default_host['installer_iso_path']}",
+        request_id=request.state.request_id,
+    )
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
+
+
+@router.post("/esxi-pxe/hosts/{host_id}/delete", response_model=None)
+def delete_esxi_pxe_host_from_ui(
+    host_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    host = db.get(EsxiPxeHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="ESXi PXE host not found")
+    hostname = host.hostname
+    db.delete(host)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host_id), detail=f"hostname={hostname}", request_id=request.state.request_id)
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
 
 
 @router.get("/backup-restore", response_class=HTMLResponse, response_model=None)

@@ -10,6 +10,15 @@ def login(client):
     assert response.status_code == 303
 
 
+def create_api_token(client, scopes):
+    response = client.post(
+        "/api/v1/auth/login?username=admin&password=labfoundry-admin",
+        json={"name": "test token", "scopes": scopes},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["raw_token"]
+
+
 def test_login_and_dashboard_render(client):
     login(client)
     root = client.get("/", follow_redirects=False)
@@ -64,7 +73,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v6" in service_worker.text
+    assert "labfoundry-pwa-v7" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -77,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-depot-staging-20260628-1" in offline.text
+    assert "/static/app.css?v=service-preview-tools-20260629-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -569,6 +578,445 @@ def test_backup_restore_page_exports_settings_archive(client):
     with SessionLocal() as db:
         event = db.execute(select(AuditEvent).where(AuditEvent.action == "export_settings_backup")).scalar_one()
         assert event.resource_type == "settings_backup"
+
+
+def test_esxi_kickstart_api_hides_raw_content_from_read_only_tokens(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart
+
+    write_token = create_api_token(client, ["read:esxi-pxe", "write:esxi-pxe"])
+    created = client.post(
+        "/api/v1/esxi-pxe/kickstarts",
+        headers={"Authorization": f"Bearer {write_token}"},
+        json={
+            "name": "Secure ESXi",
+            "description": "secret-bearing ks",
+            "content": "install --firstdisk\nnetwork --bootproto=dhcp\nrootpw MySecretPassword\nreboot\n%firstboot\n%end\n",
+            "enabled": True,
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    kickstart_id = created.json()["id"]
+    assert created.json()["content"] and "MySecretPassword" in created.json()["content"]
+    with SessionLocal() as db:
+        row = db.execute(select(EsxiKickstart).where(EsxiKickstart.id == kickstart_id)).scalar_one()
+        assert "MySecretPassword" in row.content
+        assert row.content_hash
+
+    read_token = create_api_token(client, ["read:esxi-pxe"])
+    fetched = client.get(f"/api/v1/esxi-pxe/kickstarts/{kickstart_id}", headers={"Authorization": f"Bearer {read_token}"})
+    preview = client.get(f"/api/v1/esxi-pxe/kickstarts/{kickstart_id}/preview", headers={"Authorization": f"Bearer {read_token}"})
+    download = client.get(f"/api/v1/esxi-pxe/kickstarts/{kickstart_id}/download", headers={"Authorization": f"Bearer {read_token}"})
+
+    assert fetched.status_code == 200
+    assert fetched.json()["content"] is None
+    assert "MySecretPassword" not in fetched.text
+    assert "rootpw ********" in fetched.json()["redacted_preview"]
+    assert preview.status_code == 200
+    assert "MySecretPassword" not in preview.text
+    assert download.status_code == 403
+
+
+def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import AuditEvent, EsxiKickstart, Job
+
+    login(client)
+    page = client.get("/esxi-pxe")
+    assert page.status_code == 200
+    assert "ESXi Kickstarts" in page.text
+    assert 'data-codemirror-language="labfoundry-kickstart"' in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    created = client.post(
+        "/esxi-pxe/kickstarts",
+        data={
+            "csrf": csrf,
+            "name": "Lab ESXi",
+            "description": "install",
+            "content": "install --firstdisk\nnetwork --bootproto=dhcp\nrootpw SuperSecret!\nreboot\n%firstboot\n%end\n",
+            "enabled": "on",
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    kickstart_id = int(created.headers["location"].rsplit("=", 1)[1])
+    with SessionLocal() as db:
+        kickstart = db.execute(select(EsxiKickstart).where(EsxiKickstart.id == kickstart_id)).scalar_one()
+        assert "SuperSecret!" in kickstart.content
+        assert kickstart.http_path == f"/pxe/esxi/ks/{kickstart_id}.cfg"
+
+    apply_page = client.get("/appliance-apply")
+    assert 'value="esxi_pxe"' in apply_page.text
+    apply_csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    applied = client.post("/appliance-apply", data={"csrf": apply_csrf, "selected_units": "esxi_pxe"})
+
+    assert applied.status_code == 200
+    assert "ESXi PXE" in applied.text
+    assert "SuperSecret!" not in applied.text
+    assert "[redacted]" in applied.text
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply").order_by(Job.created_at.desc())).scalars().first()
+        assert job is not None
+        payload = json.loads(job.result or "{}")
+        assert payload["selected_units"] == ["esxi_pxe"]
+        assert "SuperSecret!" not in (job.result or "")
+        assert "labfoundry-helper esxi-pxe apply" in (job.result or "")
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "create_esxi_kickstart")).scalar_one()
+        assert "SuperSecret!" not in (event.detail or "")
+
+
+def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    import labfoundry.app.services.esxi_pxe as esxi_pxe
+    import labfoundry.app.ui as ui_module
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiPxeHost, Job
+
+    iso_root = tmp_path / "vcf-depot" / "PROD" / "COMP" / "ESX_HOST"
+    monkeypatch.setattr(esxi_pxe, "ESXI_INSTALLER_ISO_ROOT", iso_root)
+
+    login(client)
+    page = client.get("/esxi-pxe")
+    assert page.status_code == 200
+    assert str(iso_root) in page.text
+    assert iso_root.is_dir()
+    assert 'data-esxi-iso-upload' in page.text
+    assert 'data-esxi-iso-upload-progress' in page.text
+    assert "Choose an ISO to upload." in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    uploaded = client.post(
+        "/esxi-pxe/isos/upload",
+        data={"csrf": csrf},
+        files={"iso_file": ("VMware-VMvisor-Installer-8.0U3.iso", b"iso bytes", "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert uploaded.status_code == 303
+    assert uploaded.headers["location"] == "/esxi-pxe#esxi-pxe-isos-panel"
+    iso_path = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
+    assert iso_path.read_bytes() == b"iso bytes"
+
+    ajax_upload = client.post(
+        "/esxi-pxe/isos/upload",
+        data={"csrf": csrf},
+        files={"iso_file": ("Nested-ESXi.iso", b"ajax iso bytes", "application/octet-stream")},
+        headers={"X-LabFoundry-Upload": "1"},
+    )
+    assert ajax_upload.status_code == 200
+    assert ajax_upload.json()["status"] == "uploaded"
+    assert ajax_upload.json()["relative_path"] == "Nested-ESXi.iso"
+
+    original_get_settings = ui_module.get_settings
+    monkeypatch.setattr(ui_module, "get_settings", lambda: SimpleNamespace(esxi_installer_iso_max_bytes=3))
+    too_large = client.post(
+        "/esxi-pxe/isos/upload",
+        data={"csrf": csrf},
+        files={"iso_file": ("Too-Large.iso", b"too large", "application/octet-stream")},
+        headers={"X-LabFoundry-Upload": "1"},
+    )
+    assert too_large.status_code == 413
+    assert too_large.json()["status"] == "error"
+    assert "too large" in too_large.json()["detail"].lower()
+    monkeypatch.setattr(ui_module, "get_settings", original_get_settings)
+
+    vcfdt_iso_path = iso_root / "VCFDT-Downloaded.iso"
+    vcfdt_iso_path.write_bytes(b"vcfdt iso bytes")
+    refreshed = client.get("/esxi-pxe")
+    assert "VMware-VMvisor-Installer-8.0U3.iso" in refreshed.text
+    assert "VCFDT-Downloaded.iso" in refreshed.text
+    assert "Installer ISOs" in refreshed.text
+    assert "Uploaded by user" in refreshed.text
+    assert "Downloaded by VCFDT" in refreshed.text
+    assert 'id="esxi-pxe-hosts-table"' in refreshed.text
+    assert "Default / undefined MACs" in refreshed.text
+    assert "host-create-form" not in refreshed.text
+    csrf = refreshed.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    vcfdt_delete = client.post(
+        "/esxi-pxe/isos/delete",
+        data={"csrf": csrf, "installer_iso_path": str(vcfdt_iso_path)},
+        follow_redirects=False,
+    )
+    assert vcfdt_delete.status_code == 303
+    assert vcfdt_delete.headers["location"] == "/esxi-pxe#esxi-pxe-isos-panel"
+    assert not vcfdt_iso_path.exists()
+    host_response = client.post(
+        "/esxi-pxe/hosts",
+        data={
+            "csrf": csrf,
+            "hostname": "esxi-iso",
+            "mac_address": "00:50:56:11:22:33",
+            "installer_iso_path": str(iso_path),
+            "enabled": "on",
+        },
+        follow_redirects=False,
+    )
+    assert host_response.status_code == 303
+    host_page = client.get("/esxi-pxe")
+    assert host_page.status_code == 200
+    assert 'data-hosts=' in host_page.text
+    assert "esxi-iso" in host_page.text
+    with SessionLocal() as db:
+        host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.hostname == "esxi-iso")).scalar_one()
+        assert host.installer_iso_path == str(iso_path)
+        host_id = host.id
+    delete_response = client.post(
+        "/esxi-pxe/isos/delete",
+        data={"csrf": csrf, "installer_iso_path": str(iso_path)},
+        follow_redirects=False,
+    )
+    assert delete_response.status_code == 303
+    assert delete_response.headers["location"] == "/esxi-pxe#esxi-pxe-isos-panel"
+    assert not iso_path.exists()
+    with SessionLocal() as db:
+        host = db.get(EsxiPxeHost, host_id)
+        assert host.installer_iso_path == ""
+    iso_path.write_bytes(b"iso bytes restored")
+    host_response = client.post(
+        "/esxi-pxe/hosts/" + str(host_id),
+        data={
+            "csrf": csrf,
+            "hostname": "esxi-iso",
+            "mac_address": "00:50:56:11:22:33",
+            "installer_iso_path": str(iso_path),
+            "enabled": "on",
+        },
+        follow_redirects=False,
+    )
+    assert host_response.status_code == 303
+
+    api_token = create_api_token(client, ["read:esxi-pxe"])
+    api_isos = client.get("/api/v1/esxi-pxe/isos", headers={"Authorization": f"Bearer {api_token}"})
+    assert api_isos.status_code == 200
+    assert {row["relative_path"] for row in api_isos.json()} >= {"VMware-VMvisor-Installer-8.0U3.iso", "Nested-ESXi.iso"}
+
+    apply_page = client.get("/appliance-apply")
+    apply_csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    applied = client.post("/appliance-apply", data={"csrf": apply_csrf, "selected_units": "esxi_pxe"})
+    assert applied.status_code == 200
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply").order_by(Job.created_at.desc())).scalars().first()
+        payload = json.loads(job.result or "{}")
+        manifest = payload["units"][0]["config_preview"]
+        manifest_payload = json.loads(manifest)
+        assert "VMware-VMvisor-Installer-8.0U3.iso" in manifest
+        assert manifest_payload["hosts"][0]["installer_iso_path"] == str(iso_path)
+
+
+def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope, DhcpSettings, DnsRecord
+    from labfoundry.app.services.esxi_pxe import esxi_pxe_boot_settings
+    from labfoundry.app.ui import dnsmasq_context, esxi_pxe_context
+
+    login(client)
+    page = client.get("/esxi-pxe")
+    assert page.status_code == 200
+    assert "Boot Service" in page.text
+    assert "Hostname" in page.text
+    assert "DHCP IP Zone" in page.text
+    assert "Listen interfaces" not in page.text
+    assert "Listen addresses" not in page.text
+    assert 'type="hidden" name="tftp_root"' in page.text
+    assert 'type="hidden" name="bios_bootfile"' in page.text
+    assert 'type="hidden" name="uefi_bootfile"' in page.text
+    assert 'field-label"><span>TFTP root' not in page.text
+    assert 'field-label"><span>BIOS bootfile' not in page.text
+    assert 'field-label"><span>UEFI bootfile' not in page.text
+    assert "<span>BIOS bootfile</span><strong>undionly.kpxe</strong>" in page.text
+    assert "<span>UEFI bootfile</span><strong>snponly.efi</strong>" in page.text
+    assert "PXE HTTP port" in page.text
+    assert "HTTP endpoint" in page.text
+    assert 'class="left-stack"' in page.text
+    assert page.text.index("<h2>Boot Service</h2>") < page.text.index("<h2>ESXi Kickstarts</h2>")
+    css = client.get("/static/app.css").text
+    assert ".esxi-pxe-workspace .esxi-boot-service-panel" in css
+    assert ".esxi-pxe-workspace > .side-stack" in css
+    assert "grid-column: 2;" in css
+    assert ".generated-options-panel" in css
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    with SessionLocal() as db:
+        pxe_scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        pxe_scope_id = str(pxe_scope.id)
+
+    response = client.post(
+        "/esxi-pxe/boot-settings",
+        data={
+            "csrf": csrf,
+            "enabled": "on",
+            "hostname": "esxi-pxe.labfoundry.internal",
+            "dhcp_scope_id": pxe_scope_id,
+            "listen_addresses_present": "1",
+            "listen_interfaces_present": "1",
+            "tftp_root": "/var/lib/labfoundry/pxe/tftp",
+            "http_port": "8080",
+            "bios_bootfile": "undionly.kpxe",
+            "uefi_bootfile": "snponly.efi",
+            "native_uefi_http_enabled": "on",
+            "native_uefi_http_url": "",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        boot = esxi_pxe_boot_settings(db)
+        assert boot["enabled"] is True
+        assert boot["hostname"] == "esxi-pxe.labfoundry.internal"
+        assert boot["dhcp_scope_id"] == int(pxe_scope_id)
+        assert boot["dhcp_scope_name"] == "SiteA"
+        assert boot["listen_interface"] == "eth2"
+        assert boot["listen_address"] == "192.168.50.1"
+        assert boot["http_port"] == 8080
+        assert boot["effective_native_uefi_http_url"] == "http://192.168.50.1:8080/pxe/esxi/mboot.efi"
+        assert boot["native_uefi_http_enabled"] is True
+        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe.labfoundry.internal")).scalar_one()
+        assert record.address == "192.168.50.1"
+        dhcp = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp.enabled = True
+        db.add(dhcp)
+        db.commit()
+        dns_preview = dnsmasq_context(db)["config_preview"]
+        assert "enable-tftp" in dns_preview
+        assert "dhcp-option=tag:sitea,66,esxi-pxe.labfoundry.internal" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dns_preview
+        manifest = json.loads(esxi_pxe_context(db)["esxi_pxe_manifest"])
+        assert manifest["schema_version"] == 2
+        assert manifest["boot"]["enabled"] is True
+        assert manifest["boot"]["hostname"] == "esxi-pxe.labfoundry.internal"
+        assert manifest["boot"]["dhcp_scope_id"] == int(pxe_scope_id)
+        assert manifest["boot"]["http_port"] == 8080
+        assert manifest["boot"]["bios_second_stage_bootfile"] == "pxelinux.0"
+    dhcp_page = client.get("/dhcp")
+    assert dhcp_page.status_code == 200
+    assert dhcp_page.text.index("Desired State") < dhcp_page.text.index("Generated PXE") < dhcp_page.text.index("Actual Leases")
+    assert 'id="dhcp-generated-pxe" class="tab-panel" role="tabpanel" hidden' in dhcp_page.text
+    assert "Generated PXE Boot Options" in dhcp_page.text
+    assert "SiteA" in dhcp_page.text
+    assert "dhcp-userclass=set:ipxe,iPXE" in dhcp_page.text
+    assert "dhcp-match=set:ipxe,175" in dhcp_page.text
+    assert "dhcp-boot=tag:sitea,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
+    assert "dhcp-boot=tag:sitea,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dhcp_page.text
+
+
+def test_esxi_pxe_boot_settings_migrate_legacy_first_stage_defaults(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting
+    from labfoundry.app.services.esxi_pxe import esxi_pxe_boot_settings
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(Setting(key="esxi_pxe.boot.bios_bootfile", value="pxelinux.0"))
+        db.add(Setting(key="esxi_pxe.boot.uefi_bootfile", value="bootx64.efi"))
+        db.commit()
+
+    with SessionLocal() as db:
+        boot = esxi_pxe_boot_settings(db)
+        assert boot["bios_bootfile"] == "undionly.kpxe"
+        assert boot["uefi_bootfile"] == "snponly.efi"
+        saved_bios = db.execute(select(Setting).where(Setting.key == "esxi_pxe.boot.bios_bootfile")).scalar_one()
+        assert saved_bios.value == "pxelinux.0"
+
+
+def test_esxi_kickstarts_round_trip_in_settings_archive(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart, EsxiPxeHost
+
+    login(client)
+    with SessionLocal() as db:
+        kickstart = EsxiKickstart(
+            name="Archive ESXi",
+            content="install\nnetwork --bootproto=dhcp\nrootpw ArchiveSecret\nreboot\n%firstboot\n%end\n",
+            content_hash="",
+            rendered_content="install\nnetwork --bootproto=dhcp\nrootpw ArchiveSecret\nreboot\n%firstboot\n%end\n",
+            enabled=True,
+        )
+        db.add(kickstart)
+        db.flush()
+        from labfoundry.app.services.esxi_pxe import assign_kickstart_content, canonical_http_path
+
+        assign_kickstart_content(kickstart, kickstart.content, max_bytes=262_144)
+        kickstart.http_path = canonical_http_path(kickstart.id)
+        db.add(EsxiPxeHost(hostname="esxi-archive", mac_address="00:50:56:aa:bb:cc", kickstart_id=kickstart.id, installer_iso_path="/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST/archive.iso", enabled=True))
+        db.commit()
+
+    page = client.get("/backup-restore")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    exported = client.post("/backup-restore/export", data={"csrf": csrf})
+    payload = json.loads(exported.content)
+
+    assert payload["data"]["esxi_kickstarts"][0]["name"] == "Archive ESXi"
+    assert payload["data"]["esxi_pxe_hosts"][0]["kickstart_name"] == "Archive ESXi"
+    assert payload["data"]["esxi_pxe_hosts"][0]["installer_iso_path"].endswith("/archive.iso")
+
+    with SessionLocal() as db:
+        db.query(EsxiPxeHost).delete()
+        db.query(EsxiKickstart).delete()
+        db.commit()
+
+    restored = client.post(
+        "/backup-restore/restore",
+        data={"csrf": csrf},
+        files={"archive_file": ("labfoundry-settings.json", exported.content, "application/json")},
+    )
+
+    assert restored.status_code == 200
+    with SessionLocal() as db:
+        restored_kickstart = db.execute(select(EsxiKickstart).where(EsxiKickstart.name == "Archive ESXi")).scalar_one()
+        restored_host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.hostname == "esxi-archive")).scalar_one()
+        assert restored_host.kickstart_id == restored_kickstart.id
+        assert restored_host.installer_iso_path.endswith("/archive.iso")
+
+
+def test_esxi_pxe_drift_detection_uses_generated_filesystem_copy(client, monkeypatch, tmp_path):
+    from sqlalchemy import select
+
+    import labfoundry.app.services.esxi_pxe as esxi_pxe
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart
+
+    monkeypatch.setattr(esxi_pxe, "ESXI_KICKSTART_HTTP_ROOT", tmp_path)
+    login(client)
+    content = "install\nnetwork --bootproto=dhcp\nrootpw DriftSecret\nreboot\n%firstboot\n%end\n"
+    with SessionLocal() as db:
+        kickstart = EsxiKickstart(name="Drift ESXi", content=content, content_hash=esxi_pxe.content_hash(content), rendered_content=content, rendered_hash=esxi_pxe.content_hash(content), enabled=True)
+        db.add(kickstart)
+        db.flush()
+        kickstart.http_path = esxi_pxe.canonical_http_path(kickstart.id)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / f"{kickstart.id}.cfg").write_text(content.replace("DriftSecret", "ChangedOnDisk"), encoding="utf-8")
+        db.commit()
+        kickstart_id = kickstart.id
+
+    page = client.get(f"/esxi-pxe?kickstart_id={kickstart_id}")
+    assert page.status_code == 200
+    assert "filesystem modified" in page.text
+    assert "Filesystem copy differs from database source. The next ESXi PXE apply will overwrite the filesystem copy from the database." in page.text
 
 
 def test_backup_restore_restore_replaces_settings_and_stops_services(client):
@@ -1182,7 +1630,7 @@ def test_logs_page_renders_fixed_source_tabs_and_redacts_vcfdt_log(client, tmp_p
     assert "Logs" in response.text
     assert 'data-tab-storage-key="labfoundry:logs:active-tab"' in response.text
     assert "VCFDT" in response.text
-    assert "LabFoundry" in response.text
+    assert "LabFoundry App" in response.text
     assert "KMS" in response.text
     assert "Audit Events" in response.text
     assert "logs-audit-panel" in response.text
@@ -1193,6 +1641,31 @@ def test_logs_page_renders_fixed_source_tabs_and_redacts_vcfdt_log(client, tmp_p
     assert "secret-download-token" not in response.text
     assert jwt_segment not in response.text
     assert "Log file has not been written yet." in response.text
+
+
+def test_configure_logging_writes_main_app_log(tmp_path, monkeypatch):
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.main import configure_logging
+
+    log_path = tmp_path / "labfoundry.log"
+    monkeypatch.setenv("LABFOUNDRY_APP_LOG_PATH", str(log_path))
+    get_settings.cache_clear()
+
+    configure_logging()
+    logging.getLogger("labfoundry.appliance_apply").error("apply failure visible in main log")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    assert "apply failure visible in main log" in log_path.read_text(encoding="utf-8")
+
+    for handler in list(logging.getLogger().handlers):
+        if isinstance(handler, RotatingFileHandler) and handler.baseFilename == str(log_path):
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+    get_settings.cache_clear()
 
 
 def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
@@ -1207,6 +1680,7 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
 
     assert response.status_code == 200
     assert "VCFDT" in response.text
+    assert "LabFoundry App" in response.text
     assert "Audit Events" in response.text
     assert "/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log" in response.text
     assert "Log file has not been written yet." in response.text
@@ -1291,6 +1765,15 @@ def test_dns_and_dhcp_pages_render(client):
     assert "rememberDnsActiveZone(data.domain)" in app_js.text
     assert "dnsZoneTabButtonForDomain(storedDomain)" in app_js.text
     assert "initializeTagEditors" in app_js.text
+    assert "initializeEsxiIsoUploadForms" in app_js.text
+    assert "XMLHttpRequest" in app_js.text
+    assert "X-LabFoundry-Upload" in app_js.text
+    assert 'rememberActiveTab("labfoundry:esxi-pxe:active-tab", "esxi-pxe-isos-panel")' in app_js.text
+    assert 'window.location.hash = "esxi-pxe-isos-panel"' in app_js.text
+    assert "initializeEsxiPxeHostsTable" in app_js.text
+    assert 'document.getElementById(hashTargetId)?.closest(".tab-panel")' in app_js.text
+    assert 'querySelector(".tag-editor[data-service-bind-interface]")' in app_js.text
+    assert 'querySelector(".tag-editor[data-service-bind-address]")' in app_js.text
     assert "initializeConfirmationModals" in app_js.text
     assert "requestConfirmation" in app_js.text
     assert "form[data-confirm-modal]" in app_js.text
@@ -1363,7 +1846,9 @@ def test_dns_and_dhcp_pages_render(client):
     assert dhcp.status_code == 200
     assert "DHCP IP Zones" in dhcp.text
     assert "Desired State" in dhcp.text
+    assert "Generated PXE" in dhcp.text
     assert "Actual Leases" in dhcp.text
+    assert 'id="dhcp-generated-pxe"' in dhcp.text
     assert 'id="dhcp-actual-leases"' in dhcp.text
     assert "api-client.labfoundry.internal" in dhcp.text
     assert "labfoundry-helper dnsmasq leases" in dhcp.text
@@ -1434,12 +1919,19 @@ def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
     assert dns_record_suggested_ipv4(records, "labfoundry.internal", scopes, reservations) == "192.168.50.3"
 
 
-def test_dns_settings_badge_reflects_live_adapter_mode(client, monkeypatch):
-    from labfoundry.app.config import get_settings
+def test_dns_settings_badge_reflects_runtime_service_state(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ServiceState
 
     login(client)
-    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
-    get_settings.cache_clear()
+    with SessionLocal() as db:
+        service = db.execute(select(ServiceState).where(ServiceState.service == "dns")).scalar_one()
+        service.enabled = True
+        service.running = True
+        service.health = "healthy"
+        db.commit()
 
     page = client.get("/dns")
 
@@ -1749,6 +2241,8 @@ def test_certificate_authority_issues_encrypted_managed_certs_and_exports(client
     with SessionLocal() as db:
         settings = db.execute(select(CaSettings)).scalar_one()
         settings.enabled = True
+        settings.listen_interface = "eth0"
+        settings.listen_address = "192.168.49.1"
         db.commit()
 
     login(client)
@@ -1781,7 +2275,19 @@ def test_certificate_authority_issues_encrypted_managed_certs_and_exports(client
 
 
 def test_kms_page_renders(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ServiceState
+
     login(client)
+    with SessionLocal() as db:
+        service = db.execute(select(ServiceState).where(ServiceState.service == "kms")).scalar_one()
+        service.enabled = True
+        service.running = True
+        service.health = "healthy"
+        db.commit()
+
     kms = client.get("/kms")
     assert kms.status_code == 200
     assert "KMS / KMIP" in kms.text
@@ -1795,6 +2301,12 @@ def test_kms_page_renders(client):
     assert "Listen interfaces" in kms.text
     assert "Listen addresses" in kms.text
     assert "service-bind-editor" in kms.text
+    assert "service-bind-editor stacked-service-bind-editor" in kms.text
+    assert '<select name="backend"' not in kms.text
+    assert 'type="hidden" name="backend" value="pykmip"' in kms.text
+    assert kms.text.index('name="hostname"') < kms.text.index('data-tag-name="listen_interfaces"')
+    assert kms.text.index('data-tag-name="listen_interfaces"') < kms.text.index('data-tag-name="listen_addresses"')
+    assert kms.text.index('data-tag-name="listen_addresses"') < kms.text.index('name="port"')
     assert 'name="listen_interfaces_present"' in kms.text
     assert 'name="listen_addresses_present"' in kms.text
     assert 'data-tag-name="listen_interfaces"' in kms.text
@@ -1812,6 +2324,7 @@ def test_kms_page_renders(client):
     assert "<span>Config path</span>" not in kms.text
     assert "<span>Client CA path</span>" in kms.text
     assert "fixed-value-field" in kms.text
+    assert 'name="server_certificate"' not in kms.text
     assert 'name="ca_certificate_path"' not in kms.text
     assert 'name="database_path"' not in kms.text
     assert 'name="config_path"' not in kms.text
@@ -1826,6 +2339,10 @@ def test_kms_page_renders(client):
     assert "+ Add client here" in app_js.text
     assert "deleteKmsKeyFromMenu" in app_js.text
     assert "deleteKmsClientFromMenu" in app_js.text
+    assert '<span class="status-pill good">live</span>' in kms.text
+    assert "preview-modal" in kms.text
+    assert "data-preview-modal-code" in kms.text
+    assert "initializeTerminalNoteActions" in app_js.text
 
 
 def test_kms_settings_autosave_returns_json(client):
@@ -1846,7 +2363,7 @@ def test_kms_settings_autosave_returns_json(client):
             "listen_address": "10.0.0.99",
             "port": "5696",
             "hostname": "kms.labfoundry.internal",
-            "server_certificate": "kms.labfoundry.internal",
+            "server_certificate": "rogue-kms.labfoundry.internal",
             "ca_certificate_path": "/tmp/rogue-client-ca.crt",
             "database_path": "/tmp/rogue-kms.db",
             "config_path": "/tmp/rogue-kms.conf",
@@ -1862,6 +2379,7 @@ def test_kms_settings_autosave_returns_json(client):
     assert payload["status"] == "saved"
     assert payload["listen_address"] == "192.168.50.1"
     assert payload["listen_addresses"] == ["192.168.50.1", "10.0.0.99"]
+    assert payload["server_certificate"] == "kms.labfoundry.internal"
     assert "KMS requires Certificate Authority to be enabled before activation." in payload["validation_errors"]
     refreshed = client.get("/kms")
     assert "enabled" in refreshed.text
@@ -2282,11 +2800,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "depot-port-telemetry-row" not in page.text
     assert 'data-vcf-depot-software-depot-cell' in page.text
     assert 'data-vcf-depot-software-depot-id' in page.text
+    assert 'data-autosave-upload-progress' in page.text
     assert "not generated" not in page.text
-    tool_metric = page.text.split("<span>VCF Download Tool</span>", 1)[1].split("</div>", 1)[0]
-    assert 'data-vcf-depot-tool-version' in tool_metric
-    assert 'data-vcf-depot-tool-status' in tool_metric
-    assert 'data-vcf-depot-tool-name' not in tool_metric
+    assert "<span>Tool file</span>" not in page.text
+    assert 'data-vcf-depot-tool-name' not in page.text
     assert 'data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab"' in page.text
     assert "/mnt/labfoundry-vcf-offline-depot" in page.text
     assert "Depot store volume" in page.text
@@ -2326,6 +2843,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "updateVcfDepotValidation" in app_js.text
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
     assert "initializeVcfDepotTokenPaste" in app_js.text
+    assert "initializeCopyValueButtons" in app_js.text
+    assert "Copy software depot ID" in app_js.text
     assert "setVcfDepotToolDependentActions" in app_js.text
     assert "startVcfDepotProfileDownload" in app_js.text
     assert 'label: "Start download"' in app_js.text
@@ -3359,7 +3878,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "vcf-depot-staging-20260628-1" in page.text
+    assert "service-preview-tools-20260629-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -3881,6 +4400,56 @@ def test_ca_apply_task_captures_current_desired_state(client):
         assert "LabFoundry Internal Root CA" in (job.result or "")
 
 
+def test_ca_live_apply_stages_decrypted_private_keys_without_leaking_job_output(client, monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings, Job
+
+    staged_path = tmp_path / "labfoundry-ca.json"
+    captured: dict[str, str] = {}
+
+    def fake_validate_ca_config(self, config_path: str):
+        captured["validate_payload"] = Path(config_path).read_text(encoding="utf-8")
+        return AdapterResult(command=["labfoundry-helper", "ca", "validate", config_path], dry_run=False, stdout="validated")
+
+    def fake_apply_ca_config(self, config_path: str):
+        captured["apply_payload"] = Path(config_path).read_text(encoding="utf-8")
+        return AdapterResult(command=["labfoundry-helper", "ca", "apply", config_path], dry_run=False, stdout="applied")
+
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr("labfoundry.app.ui.CA_STAGED_CONFIG_PATH", str(staged_path))
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.validate_ca_config", fake_validate_ca_config)
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.apply_ca_config", fake_apply_ca_config)
+
+    with SessionLocal() as db:
+        settings = db.execute(select(CaSettings)).scalar_one()
+        settings.enabled = True
+        settings.listen_interface = "eth0"
+        settings.listen_address = "192.168.49.1"
+        db.commit()
+
+    login(client)
+    page = client.get("/certificate-authority")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "ca"})
+
+    assert response.status_code == 200
+    assert captured["validate_payload"] == captured["apply_payload"]
+    assert "BEGIN PRIVATE KEY" in captured["apply_payload"]
+    assert "[redacted]" not in captured["apply_payload"]
+
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
+        assert job.status == "succeeded"
+        assert "BEGIN PRIVATE KEY" not in (job.result or "")
+
+
 def test_appliance_apply_status_redacts_undecryptable_ca_private_key(client):
     from sqlalchemy import select
 
@@ -4036,6 +4605,34 @@ def test_dhcp_settings_autosave_returns_json(client):
 
     assert response.status_code == 200
     assert response.json()["status"] == "saved"
+
+
+def test_dhcp_settings_autosave_allows_service_toggle_only(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpSettings
+
+    login(client)
+    page = client.get("/dhcp")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/dhcp/settings",
+        data={
+            "enabled": "on",
+            "authoritative": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "saved"
+
+    with SessionLocal() as db:
+        settings = db.execute(select(DhcpSettings)).scalar_one()
+        assert settings.enabled is True
+        assert settings.authoritative is True
 
 
 def test_dhcp_scope_edit_form_updates_ip_zone(client):

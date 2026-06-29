@@ -35,7 +35,7 @@ log_step "applying Photon OS updates"
 tdnf -y update
 
 log_step "installing Photon appliance packages"
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables dnsmasq nginx powershell
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables dnsmasq ipxe syslinux nginx powershell
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
@@ -77,7 +77,7 @@ install -d -o root -g root -m 0755 /etc/systemd/network
 install -d -o root -g root -m 0755 /usr/local/lib/labfoundry
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-backups
 install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-registry
-install -d -o root -g root -m 0755 /mnt/labfoundry-vcf-offline-depot
+install -d -o labfoundry -g labfoundry -m 0755 /mnt/labfoundry-vcf-offline-depot
 
 if ! id "$BOOTSTRAP_USERNAME" >/dev/null 2>&1; then
   useradd --home-dir "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME" --create-home --shell "$BOOTSTRAP_SHELL" "$BOOTSTRAP_USERNAME"
@@ -207,7 +207,7 @@ cat >/etc/labfoundry/nginx/sites.d/management.conf <<'EOF'
 server {
   listen 80 default_server;
   server_name labfoundry.internal _;
-  client_max_body_size 512m;
+  client_max_body_size 1g;
   location / {
     proxy_pass http://127.0.0.1:8000;
     proxy_http_version 1.1;
