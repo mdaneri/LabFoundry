@@ -77,6 +77,31 @@
       </div>
       <span class="status-pill muted">{{ dhcp_options|length }} options</span>
     </div>
+    {% if dhcp_generated_pxe_options %}
+      <div class="generated-options-panel">
+        <div class="section-head compact">
+          <div>
+            <h3>Generated PXE Boot Options</h3>
+            <p class="muted">Owned by ESXi PXE settings and rendered into dnsmasq during global appliance apply.</p>
+          </div>
+          <span class="status-pill good">{{ dhcp_generated_pxe_options|length }} generated</span>
+        </div>
+        <table class="data-table compact generated-options-table">
+          <thead>
+            <tr><th>Flow</th><th>Rendered line</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            {% for option in dhcp_generated_pxe_options %}
+              <tr>
+                <td>{{ option.flow }}</td>
+                <td><code>{{ option.line }}</code></td>
+                <td>{{ option.note }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
     <div id="dhcp-option-error" class="alert error hidden"></div>
     <div
       id="dhcp-options-table"

@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=esxi-pxe-kickstart-20260628-9" in offline.text
+    assert "/static/app.css?v=esxi-pxe-dhcp-20260629-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -801,6 +801,7 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert ".esxi-pxe-workspace .esxi-boot-service-panel" in css
     assert ".esxi-pxe-workspace > .side-stack" in css
     assert "grid-column: 2;" in css
+    assert ".generated-options-panel" in css
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     response = client.post(
@@ -839,7 +840,7 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         db.commit()
         dns_preview = dnsmasq_context(db)["config_preview"]
         assert "enable-tftp" in dns_preview
-        assert "dhcp-option=option:66,esxi-pxe.labfoundry.internal" in dns_preview
+        assert "dhcp-option=66,esxi-pxe.labfoundry.internal" in dns_preview
         assert "dhcp-boot=tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
         assert "dhcp-boot=tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
         assert "dhcp-boot=tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
@@ -851,6 +852,34 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         assert manifest["boot"]["hostname"] == "esxi-pxe.labfoundry.internal"
         assert manifest["boot"]["http_port"] == 8080
         assert manifest["boot"]["bios_second_stage_bootfile"] == "pxelinux.0"
+    dhcp_page = client.get("/dhcp")
+    assert dhcp_page.status_code == 200
+    assert "Generated PXE Boot Options" in dhcp_page.text
+    assert "dhcp-userclass=set:ipxe,iPXE" in dhcp_page.text
+    assert "dhcp-match=set:ipxe,175" in dhcp_page.text
+    assert "dhcp-boot=tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
+    assert "dhcp-boot=tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dhcp_page.text
+
+
+def test_esxi_pxe_boot_settings_migrate_legacy_first_stage_defaults(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting
+    from labfoundry.app.services.esxi_pxe import esxi_pxe_boot_settings
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(Setting(key="esxi_pxe.boot.bios_bootfile", value="pxelinux.0"))
+        db.add(Setting(key="esxi_pxe.boot.uefi_bootfile", value="bootx64.efi"))
+        db.commit()
+
+    with SessionLocal() as db:
+        boot = esxi_pxe_boot_settings(db)
+        assert boot["bios_bootfile"] == "undionly.kpxe"
+        assert boot["uefi_bootfile"] == "snponly.efi"
+        saved_bios = db.execute(select(Setting).where(Setting.key == "esxi_pxe.boot.bios_bootfile")).scalar_one()
+        assert saved_bios.value == "pxelinux.0"
 
 
 def test_esxi_kickstarts_round_trip_in_settings_archive(client):
@@ -3765,7 +3794,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "esxi-pxe-kickstart-20260628-9" in page.text
+    assert "esxi-pxe-dhcp-20260629-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -4492,6 +4521,34 @@ def test_dhcp_settings_autosave_returns_json(client):
 
     assert response.status_code == 200
     assert response.json()["status"] == "saved"
+
+
+def test_dhcp_settings_autosave_allows_service_toggle_only(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpSettings
+
+    login(client)
+    page = client.get("/dhcp")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/dhcp/settings",
+        data={
+            "enabled": "on",
+            "authoritative": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "saved"
+
+    with SessionLocal() as db:
+        settings = db.execute(select(DhcpSettings)).scalar_one()
+        assert settings.enabled is True
+        assert settings.authoritative is True
 
 
 def test_dhcp_scope_edit_form_updates_ip_zone(client):

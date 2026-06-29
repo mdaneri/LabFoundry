@@ -161,8 +161,8 @@ def esxi_pxe_boot_settings(db: Session) -> dict[str, Any]:
         "listen_address": rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, "").strip(),
         "tftp_root": rows.get(ESXI_PXE_TFTP_ROOT_KEY, ESXI_TFTP_ROOT.as_posix()).strip() or ESXI_TFTP_ROOT.as_posix(),
         "http_port": _normalize_http_port(rows.get(ESXI_PXE_HTTP_PORT_KEY, str(ESXI_PXE_HTTP_PORT))),
-        "bios_bootfile": rows.get(ESXI_PXE_BIOS_BOOTFILE_KEY, ESXI_PXE_BIOS_BOOTFILE).strip() or ESXI_PXE_BIOS_BOOTFILE,
-        "uefi_bootfile": rows.get(ESXI_PXE_UEFI_BOOTFILE_KEY, ESXI_PXE_UEFI_BOOTFILE).strip() or ESXI_PXE_UEFI_BOOTFILE,
+        "bios_bootfile": _bootfile_setting(rows.get(ESXI_PXE_BIOS_BOOTFILE_KEY), default=ESXI_PXE_BIOS_BOOTFILE, legacy_defaults={"pxelinux.0"}),
+        "uefi_bootfile": _bootfile_setting(rows.get(ESXI_PXE_UEFI_BOOTFILE_KEY), default=ESXI_PXE_UEFI_BOOTFILE, legacy_defaults={"bootx64.efi", "mboot.efi"}),
         "bios_second_stage_bootfile": ESXI_PXE_BIOS_SECOND_STAGE_BOOTFILE,
         "uefi_second_stage_bootfile": ESXI_PXE_UEFI_SECOND_STAGE_BOOTFILE,
         "native_uefi_bootfile": ESXI_PXE_NATIVE_UEFI_BOOTFILE,
@@ -252,6 +252,13 @@ def _normalize_http_port(value: int | str | None) -> int:
     if not 1 <= port <= 65535:
         raise ValueError("ESXi PXE HTTP port must be between 1 and 65535.")
     return port
+
+
+def _bootfile_setting(value: str | None, *, default: str, legacy_defaults: set[str]) -> str:
+    name = (value or "").strip()
+    if not name or name.lower() in {item.lower() for item in legacy_defaults}:
+        return default
+    return name
 
 
 def _normalize_bootfile(value: str, *, default: str) -> str:

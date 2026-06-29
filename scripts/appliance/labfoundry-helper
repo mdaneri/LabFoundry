@@ -56,11 +56,13 @@ ESXI_PXE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/ks")
 ESXI_PXE_IMAGE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/images")
 ESXI_IPXE_HTTP_SCRIPT_PATH = ESXI_PXE_HTTP_BASE / "boot.ipxe"
 ESXI_TFTP_ROOT = Path("/var/lib/labfoundry/pxe/tftp")
+PXE_BOOTLOADER_STAGING_DIR = Path("/var/lib/labfoundry/pxe/bootloaders")
 ESXI_INSTALLER_ISO_ROOT = Path("/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST")
 ESXI_PXE_NGINX_SITE_PATH = Path("/etc/labfoundry/nginx/sites.d/esxi-pxe.conf")
 ESXI_PXE_SCHEMA_VERSION = 2
 ESXI_PXE_DEFAULT_HTTP_PORT = 8080
 PXE_BOOT_BINARY_DIRS = [
+    PXE_BOOTLOADER_STAGING_DIR,
     Path("/usr/share/ipxe"),
     Path("/usr/lib/ipxe"),
     Path("/usr/share/ipxe/boot"),
@@ -667,7 +669,10 @@ def _esxi_pxe_boot_errors(boot: dict) -> list[str]:
         ):
             filename = str(boot.get(key) or "")
             if _simple_pxe_filename(filename) and _find_pxe_boot_binary(filename) is None:
-                errors.append(f"{label} {filename} was not found. Install the Photon syslinux/ipxe boot packages or stage the expected bootloader package.")
+                errors.append(
+                    f"{label} {filename} was not found. Install the Photon syslinux/ipxe boot packages "
+                    f"or stage the expected bootloader under {PXE_BOOTLOADER_STAGING_DIR}."
+                )
     if native_uefi_http_enabled:
         url = str(boot.get("native_uefi_http_url") or boot.get("effective_native_uefi_http_url") or "").strip()
         if not re.fullmatch(r"https?://[^\s\"'<>]+", url):
@@ -888,6 +893,18 @@ def _copy_file(path: Path, target: Path, mode: int = 0o644) -> None:
     target.chmod(mode)
 
 
+def _remove_legacy_esxi_pxe_artifacts(generated_files: list[str], generated_tftp_files: list[str]) -> None:
+    generated = {Path(path).resolve() for path in [*generated_files, *generated_tftp_files]}
+    for path in (
+        ESXI_TFTP_ROOT / "bootx64.efi",
+        ESXI_TFTP_ROOT / "esxi.ipxe",
+        ESXI_TFTP_ROOT / "boot.ipxe",
+        ESXI_PXE_HTTP_BASE / "boot.ipxe",
+    ):
+        if path.resolve() not in generated:
+            path.unlink(missing_ok=True)
+
+
 def _esxi_pxe_nginx_config(port: int) -> str:
     return "\n".join(
         [
@@ -1020,6 +1037,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
                     generated_tftp_files.append(str(target))
                 else:
                     generated_files.append(str(target))
+        _remove_legacy_esxi_pxe_artifacts(generated_files, generated_tftp_files)
         for path in ESXI_PXE_IMAGE_HTTP_ROOT.iterdir():
             if path.is_dir() and path.name not in staged_images:
                 shutil.rmtree(path)

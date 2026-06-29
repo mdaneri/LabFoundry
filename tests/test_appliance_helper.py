@@ -344,6 +344,10 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     (ipxe_binary_dir / "undionly.kpxe").write_bytes(b"bios ipxe")
     (ipxe_binary_dir / "snponly.efi").write_bytes(b"uefi ipxe")
     (ipxe_binary_dir / "pxelinux.0").write_bytes(b"pxelinux")
+    (http_base / "boot.ipxe").write_text("old ipxe script", encoding="utf-8")
+    (tftp_root / "bootx64.efi").parent.mkdir(parents=True, exist_ok=True)
+    (tftp_root / "bootx64.efi").write_bytes(b"old uefi first stage")
+    (tftp_root / "esxi.ipxe").write_text("old tftp script", encoding="utf-8")
     stale = http_root / "99.cfg"
     stale.write_text("old", encoding="utf-8")
     manifest = esxi_pxe_manifest(http_root, iso_root=iso_root)
@@ -386,6 +390,9 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert (tftp_root / "pxelinux.0").read_bytes() == b"pxelinux"
     assert (tftp_root / "mboot.efi").read_bytes() == b"mboot efi"
     assert (http_base / "mboot.efi").read_bytes() == b"mboot efi"
+    assert not (http_base / "boot.ipxe").exists()
+    assert not (tftp_root / "bootx64.efi").exists()
+    assert not (tftp_root / "esxi.ipxe").exists()
     assert (tftp_root / "images" / manifest["artifacts"][0]["image_key"] / "mboot.c32").read_bytes() == b"mboot c32"
     boot_cfg = (tftp_root / "01-00-50-56-aa-bb-cc" / "boot.cfg").read_text(encoding="utf-8")
     assert f"prefix={manifest['artifacts'][0]['image_http_url']}" in boot_cfg

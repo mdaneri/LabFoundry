@@ -735,6 +735,22 @@ textarea {
   margin-top: 16px;
 }
 
+.generated-options-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+}
+
+.generated-options-table {
+  margin-bottom: 0;
+}
+
+.generated-options-table code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .firewall-workspace {
   align-items: stretch;
   min-height: calc(100vh - 104px);

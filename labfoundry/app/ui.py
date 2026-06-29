@@ -2003,6 +2003,7 @@ def dnsmasq_context(db: Session) -> dict:
         "dhcp_options": dhcp_options,
         "dhcp_option_rows": [dhcp_option_to_dict(option) for option in dhcp_options],
         "dhcp_option_scope_choices": dhcp_option_scope_choices(dhcp_scopes),
+        "dhcp_generated_pxe_options": generated_esxi_pxe_dhcp_options(esxi_boot),
         "dhcp_reservations": dhcp_reservations,
         "dhcp_reservation_rows": [dhcp_reservation_payload(item) for item in dhcp_reservations],
         "dhcp_leases": dhcp_leases,
@@ -2023,6 +2024,42 @@ def dnsmasq_context(db: Session) -> dict:
         "dns_domain_options": dns_domains,
         "system_adapter_dry_run": get_settings().dry_run_system_adapters,
     }
+
+
+def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any]) -> list[dict[str, str]]:
+    if not esxi_boot or not (esxi_boot.get("enabled") or esxi_boot.get("native_uefi_http_enabled")):
+        return []
+    rows: list[dict[str, str]] = []
+    tftp_hostname = str(esxi_boot.get("hostname") or "").strip()
+    tftp_address = next(
+        (line.strip() for line in str(esxi_boot.get("listen_address") or "").replace(",", "\n").splitlines() if line.strip()),
+        "",
+    )
+    boot_server = f",{tftp_hostname},{tftp_address}" if tftp_hostname and tftp_address else ""
+    native_http_url = str(esxi_boot.get("effective_native_uefi_http_url") or esxi_boot.get("native_uefi_http_url") or "").strip()
+
+    def add(flow: str, line: str, note: str) -> None:
+        rows.append({"flow": flow, "line": line, "note": note})
+
+    if esxi_boot.get("native_uefi_http_enabled") and native_http_url:
+        add("Native UEFI HTTP", "dhcp-vendorclass=set:uefi-http,HTTPClient", "Detect HTTPClient firmware")
+        add("Native UEFI HTTP", "dhcp-match=set:uefi-http-x64,option:client-arch,16", "Match x64 HTTP boot")
+        add("Native UEFI HTTP", f"dhcp-boot=tag:uefi-http,tag:uefi-http-x64,{native_http_url}", "Return mboot.efi HTTP URL")
+
+    if esxi_boot.get("enabled"):
+        if tftp_hostname:
+            add("PXE TFTP", f"dhcp-option=66,{tftp_hostname}", "Advertise TFTP server name")
+        add("PXE TFTP", "enable-tftp", "Enable dnsmasq TFTP")
+        add("PXE TFTP", f"tftp-root={esxi_boot.get('tftp_root')}", "Serve generated boot files")
+        add("iPXE detection", "dhcp-userclass=set:ipxe,iPXE", "Detect iPXE second request")
+        add("iPXE detection", "dhcp-match=set:ipxe,175", "Compatibility iPXE marker")
+        add("UEFI PXE detection", "dhcp-match=set:efi-x86_64,option:client-arch,7", "Match x64 UEFI PXE")
+        add("UEFI PXE detection", "dhcp-match=set:efi-x86_64,option:client-arch,9", "Match x64 UEFI PXE")
+        add("iPXE second stage", f"dhcp-boot=tag:ipxe,tag:efi-x86_64,{esxi_boot.get('uefi_second_stage_bootfile')}{boot_server}", "UEFI iPXE loads ESXi mboot")
+        add("iPXE second stage", f"dhcp-boot=tag:ipxe,tag:!efi-x86_64,{esxi_boot.get('bios_second_stage_bootfile')}{boot_server}", "BIOS iPXE loads PXELINUX")
+        add("PXE first stage", f"dhcp-boot=tag:efi-x86_64,{esxi_boot.get('uefi_bootfile')}{boot_server}", "UEFI PXE first-stage iPXE")
+        add("PXE first stage", f"dhcp-boot=tag:!efi-x86_64,{esxi_boot.get('bios_bootfile')}{boot_server}", "BIOS PXE first-stage iPXE")
+    return rows
 
 
 def dhcp_reservation_payload(reservation: DhcpReservation) -> dict:
@@ -5351,14 +5388,14 @@ def dhcp_page(
 def update_dhcp_from_ui(
     request: Request,
     enabled: str | None = Form(None),
-    interface_name: str = Form(...),
-    site_address: str = Form(...),
-    prefix_length: int = Form(...),
-    range_start: str = Form(...),
-    range_end: str = Form(...),
-    lease_time: str = Form(...),
-    domain_name: str = Form(...),
-    dns_server: str = Form(...),
+    interface_name: str | None = Form(None),
+    site_address: str | None = Form(None),
+    prefix_length: str | None = Form(None),
+    range_start: str | None = Form(None),
+    range_end: str | None = Form(None),
+    lease_time: str | None = Form(None),
+    domain_name: str | None = Form(None),
+    dns_server: str | None = Form(None),
     authoritative: str | None = Form(None),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -5367,14 +5404,26 @@ def update_dhcp_from_ui(
     verify_csrf(request, csrf)
     settings = get_dhcp_settings_row(db)
     settings.enabled = enabled == "on"
-    settings.interface_name = interface_name
-    settings.site_address = site_address
-    settings.prefix_length = prefix_length
-    settings.range_start = range_start
-    settings.range_end = range_end
-    settings.lease_time = lease_time
-    settings.domain_name = domain_name
-    settings.dns_server = dns_server
+    if interface_name is not None:
+        settings.interface_name = interface_name.strip()
+    if site_address is not None:
+        settings.site_address = site_address.strip()
+    prefix_text = (prefix_length or "").strip()
+    if prefix_text:
+        try:
+            settings.prefix_length = int(prefix_text)
+        except ValueError:
+            return JSONResponse({"status": "error", "error": "DHCP prefix length must be an integer."}, status_code=422)
+    if range_start is not None:
+        settings.range_start = range_start.strip()
+    if range_end is not None:
+        settings.range_end = range_end.strip()
+    if lease_time is not None:
+        settings.lease_time = lease_time.strip() or settings.lease_time
+    if domain_name is not None:
+        settings.domain_name = domain_name.strip() or settings.domain_name
+    if dns_server is not None:
+        settings.dns_server = dns_server.strip()
     settings.authoritative = authoritative == "on"
     settings.updated_at = utcnow()
     db.commit()

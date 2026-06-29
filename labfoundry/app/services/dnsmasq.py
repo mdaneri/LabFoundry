@@ -578,7 +578,7 @@ def render_dnsmasq_config(
         if esxi_pxe_boot and esxi_pxe_boot.get("enabled"):
             boot_server = ""
             if tftp_hostname and tftp_address:
-                lines.append(f"dhcp-option=option:66,{tftp_hostname}")
+                lines.append(f"dhcp-option=66,{tftp_hostname}")
                 boot_server = f",{tftp_hostname},{tftp_address}"
             lines.extend(
                 [
