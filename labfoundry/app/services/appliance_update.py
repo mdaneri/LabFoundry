@@ -111,6 +111,8 @@ def validate_update_url(value: str, label: str) -> list[str]:
     parsed = urlparse(value.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return [f"{label} must be an http or https URL."]
+    if parsed.username or parsed.password:
+        return [f"{label} must not include embedded credentials."]
     return []
 
 
@@ -126,6 +128,16 @@ def selected_update_streams(raw_streams: list[str] | tuple[str, ...]) -> list[st
     return selected
 
 
+def redact_url_userinfo(value: str) -> str:
+    parsed = urlparse(value or "")
+    if not parsed.scheme or not parsed.netloc or not (parsed.username or parsed.password):
+        return value
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return parsed._replace(netloc=f"[redacted]@{host}").geturl()
+
+
 def render_update_manifest(*, selected_streams: list[str], settings: dict[str, str], actor: str) -> str:
     payload = {
         "schema_version": 1,
@@ -134,8 +146,8 @@ def render_update_manifest(*, selected_streams: list[str], settings: dict[str, s
         "selected_streams": selected_streams,
         "sources": {
             "photon_os": settings.get("photon_source") or DEFAULT_UPDATE_SETTINGS["photon_source"],
-            "python_index_url": settings.get("python_index_url", ""),
-            "labfoundry_manifest_url": settings.get("labfoundry_manifest_url") or DEFAULT_LABFOUNDRY_MANIFEST_URL,
+            "python_index_url": redact_url_userinfo(settings.get("python_index_url", "")),
+            "labfoundry_manifest_url": redact_url_userinfo(settings.get("labfoundry_manifest_url") or DEFAULT_LABFOUNDRY_MANIFEST_URL),
         },
         "python_requirements": DIRECT_PYTHON_REQUIREMENTS,
         "current": current_version_info(),

@@ -3787,11 +3787,15 @@ def _appliance_update_config_errors(payload: dict) -> list[str]:
         parsed = urlparse(manifest_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             errors.append("labfoundry_manifest_url must be an http or https URL when LabFoundry Wheel is selected.")
+        if parsed.username or parsed.password:
+            errors.append("labfoundry_manifest_url must not include embedded credentials.")
     python_index_url = str(sources.get("python_index_url") or "").strip()
     if python_index_url:
         parsed = urlparse(python_index_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             errors.append("python_index_url must be an http or https URL.")
+        if parsed.username or parsed.password:
+            errors.append("python_index_url must not include embedded credentials.")
     requirements = payload.get("python_requirements", [])
     if requirements and (not isinstance(requirements, list) or not all(isinstance(item, str) and item.strip() for item in requirements)):
         errors.append("python_requirements must be a list of requirement strings.")
@@ -3930,29 +3934,35 @@ def _apply_labfoundry_wheel(payload: dict) -> tuple[dict, list[dict]]:
 def _apply_appliance_update(payload: dict) -> dict:
     selected = set(payload.get("selected_streams") or [])
     commands: list[dict] = []
-    applied: dict[str, object] = {}
+    attempted: dict[str, object] = {}
     reboot_recommended = False
     if "photon_os" in selected:
         tdnf = _command_path("tdnf") or "tdnf"
         commands.append(_command_payload([tdnf, "-y", "makecache"]))
         commands.append(_command_payload([tdnf, "-y", "update"]))
-        applied["photon_os"] = "Photon OS packages updated from configured repositories."
+        attempted["photon_os"] = "Photon OS packages updated from configured repositories."
         reboot_recommended = True
     if "python_libraries" in selected:
         python_commands = _apply_python_libraries(payload)
         commands.extend(python_commands)
-        applied["python_libraries"] = "LabFoundry virtualenv Python libraries updated."
+        attempted["python_libraries"] = "LabFoundry virtualenv Python libraries updated."
     if "labfoundry_wheel" in selected:
         manifest, wheel_commands = _apply_labfoundry_wheel(payload)
         commands.extend(wheel_commands)
-        applied["labfoundry_wheel"] = manifest
+        attempted["labfoundry_wheel"] = manifest
+    succeeded = all(command.get("success") for command in commands)
     result = {
-        "applied": applied,
+        "status": "succeeded" if succeeded else "failed",
+        "applied": attempted if succeeded else {},
+        "attempted": attempted,
         "commands": commands,
-        "reboot_recommended": reboot_recommended,
-        "restart_required": "labfoundry_wheel" in selected,
+        "reboot_recommended": reboot_recommended if succeeded else False,
+        "restart_required": "labfoundry_wheel" in selected and succeeded,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    if not succeeded:
+        failed = [" ".join(command.get("command") or []) for command in commands if not command.get("success")]
+        result["error"] = f"One or more appliance update commands failed: {' ; '.join(failed)}"
     _write_update_info(result)
     return result
 

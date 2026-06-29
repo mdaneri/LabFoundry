@@ -87,11 +87,30 @@ def test_appliance_update_settings_validate_urls(client):
     assert "Python index URL must be an http or https URL" in response.text
 
 
+def test_appliance_update_settings_reject_embedded_credentials(client):
+    login(client)
+    page = client.get("/appliance-update")
+    csrf = csrf_from_page(page.text)
+    response = client.post(
+        "/appliance-update/settings",
+        data={
+            "csrf": csrf,
+            "photon_source": "configured Photon repositories",
+            "python_index_url": "https://user:token@example.test/simple",
+            "labfoundry_manifest_url": "http://localhost:18080/update/manifest.json",
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert response.status_code == 422
+    assert "must not include embedded credentials" in response.text
+
+
 def test_appliance_update_service_version_helpers():
-    from labfoundry.app.services.appliance_update import version_with_git
+    from labfoundry.app.services.appliance_update import redact_url_userinfo, version_with_git
 
     assert version_with_git("0.1.0", "abcdef1234567890") == "0.1.0+gabcdef123456"
     assert version_with_git("0.1.0+gold", "abcdef") == "0.1.0+gabcdef"
+    assert redact_url_userinfo("https://user:token@example.test/simple") == "https://[redacted]@example.test/simple"
 
 
 def test_build_update_wheel_version_helper():
@@ -150,3 +169,44 @@ def test_helper_rejects_labfoundry_wheel_sha_mismatch(monkeypatch, tmp_path, cap
     assert helper._handle_appliance_update("apply", [str(config_path)]) == 1
     captured = capsys.readouterr()
     assert "sha256 mismatch" in captured.err
+
+
+def test_helper_rejects_credentialed_update_urls(tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "appliance-update"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-update.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "selected_streams": ["labfoundry_wheel"],
+                "sources": {"labfoundry_manifest_url": "https://user:token@example.test/manifest.json"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    helper.APPLIANCE_UPDATE_APPLY_DIR = apply_dir
+
+    assert helper._handle_appliance_update("check", [str(config_path)]) == 2
+    captured = capsys.readouterr()
+    assert "must not include embedded credentials" in captured.err
+
+
+def test_helper_writes_failed_update_info_for_failed_commands(monkeypatch):
+    helper = load_helper_module()
+    written = {}
+
+    def fake_command_payload(command, *, success_codes=None):
+        return {"command": command, "returncode": 1, "success": False, "stdout": "", "stderr": "failed"}
+
+    monkeypatch.setattr(helper, "_command_payload", fake_command_payload)
+    monkeypatch.setattr(helper, "_command_path", lambda command: command)
+    monkeypatch.setattr(helper, "_write_update_info", lambda payload: written.update(payload))
+
+    result = helper._apply_appliance_update({"selected_streams": ["photon_os"], "sources": {}})
+    assert result["status"] == "failed"
+    assert result["applied"] == {}
+    assert result["attempted"]["photon_os"] == "Photon OS packages updated from configured repositories."
+    assert result["reboot_recommended"] is False
+    assert "error" in result
+    assert written["status"] == "failed"

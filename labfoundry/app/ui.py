@@ -3540,8 +3540,6 @@ def execute_appliance_update_job(
     results = [adapter.check_appliance_update_config(config_path)]
     if mode == "run" and results[-1].returncode == 0:
         results.append(adapter.apply_appliance_update_config(config_path))
-        if results[-1].returncode == 0 and "labfoundry_wheel" in selected_stream_ids:
-            results.append(adapter.restart_appliance_after_update(config_path))
 
     succeeded = all(result.returncode == 0 for result in results)
     return {
@@ -3553,6 +3551,7 @@ def execute_appliance_update_job(
         "status": JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
         "success": succeeded,
         "dry_run": any(result.dry_run for result in results),
+        "restart_after_commit": mode == "run" and succeeded and "labfoundry_wheel" in selected_stream_ids,
         "commands": [adapter_result_to_payload(result) for result in results],
         "config_path": config_path,
         "config_preview": manifest_preview,
@@ -3584,6 +3583,25 @@ def create_appliance_update_task(db: Session, *, identity: Identity, update_resu
         detail=detail,
         success=update_result["success"],
     )
+    if update_result.get("restart_after_commit"):
+        restart_result = SystemAdapter().restart_appliance_after_update(str(update_result["config_path"]))
+        update_result["commands"].append(adapter_result_to_payload(restart_result))
+        update_result["success"] = bool(update_result["success"]) and restart_result.returncode == 0
+        update_result["status"] = JobStatus.SUCCEEDED.value if update_result["success"] else JobStatus.FAILED.value
+        job.status = update_result["status"]
+        job.result = json.dumps(update_result, indent=2)
+        job.error = None if update_result["success"] else "LabFoundry service restart scheduling failed."
+        db.add(job)
+        db.commit()
+        record_audit(
+            db,
+            actor=identity.username,
+            action="schedule_appliance_update_restart",
+            resource_type="job",
+            resource_id=job.id,
+            detail=" ".join(restart_result.command),
+            success=restart_result.returncode == 0,
+        )
     return job
 
 
