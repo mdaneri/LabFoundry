@@ -93,6 +93,7 @@
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="ESXi PXE views" data-tab-storage-key="labfoundry:esxi-pxe:active-tab">
       <button class="tab-button active" type="button" data-tab-target="esxi-pxe-editor-panel" aria-selected="true">Kickstart Editor</button>
       <button class="tab-button" type="button" data-tab-target="esxi-pxe-hosts-panel" aria-selected="false">Host References</button>
+      <button class="tab-button" type="button" data-tab-target="esxi-pxe-isos-panel" aria-selected="false">Installer ISOs</button>
       <button class="tab-button" type="button" data-tab-target="esxi-pxe-preview-panel" aria-selected="false">Preview</button>
     </div>
 
@@ -210,32 +211,45 @@ reboot
 
       <div id="esxi-pxe-hosts-panel" class="tab-panel" role="tabpanel" hidden>
         <div id="esxi-pxe-hosts">
-          <div class="panel-subsection">
-            <div class="settings-list compact-settings-list">
-              <div><span>Installer ISO folder</span><strong>{{ esxi_installer_iso_root }}</strong></div>
-            </div>
-          </div>
-          {% if esxi_can_write %}
-            <details class="create-kickstart-panel">
-              <summary>Upload installer ISO</summary>
-              <form class="form-stack" action="/esxi-pxe/isos/upload" method="post" enctype="multipart/form-data" data-esxi-iso-upload>
-                <input type="hidden" name="csrf" value="{{ csrf_token }}">
-                <label>
-                  <span class="field-label"><span>ESXi installer ISO</span><button class="help-icon" type="button" data-help="Uploads an additional ESXi installer ISO into the VCF Offline Depot ESX_HOST folder used for PXE planning.">i</button></span>
-                  <span class="file-upload-control">
-                    <input class="file-upload-input" type="file" name="iso_file" accept=".iso,application/x-iso9660-image" data-file-upload-input>
-                    <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose ISO file</strong><small data-file-upload-name>VMware-VMvisor-Installer.iso</small></span></span>
-                  </span>
-                </label>
-                <button class="button secondary" type="submit" data-esxi-iso-upload-button>Upload installer ISO</button>
-                <progress class="upload-progress" value="0" max="100" data-esxi-iso-upload-progress hidden></progress>
-                <p class="autosave-status" data-state="idle" data-esxi-iso-upload-status aria-live="polite">Choose an ISO to upload.</p>
-              </form>
-            </details>
-          {% endif %}
-          <table class="data-table compact">
+          <div id="esxi-pxe-host-error" class="alert error hidden"></div>
+          <div
+            id="esxi-pxe-hosts-table"
+            class="tabulator-shell esxi-pxe-hosts-table"
+            data-hosts='{{ esxi_pxe_host_rows | tojson }}'
+            data-kickstart-options='{{ esxi_pxe_host_kickstart_options | tojson }}'
+            data-iso-options='{{ esxi_pxe_host_iso_options | tojson }}'
+            data-csrf="{{ csrf_token }}"
+            data-can-write="{{ 'true' if esxi_can_write else 'false' }}"
+            data-fallback-id="esxi-pxe-hosts-fallback"
+          ></div>
+          <table id="esxi-pxe-hosts-fallback" class="data-table compact dns-fallback-table">
             <thead><tr><th>Host</th><th>MAC</th><th>Kickstart</th><th>Installer ISO</th><th>Enabled</th><th>Actions</th></tr></thead>
             <tbody>
+              <tr>
+                <form action="/esxi-pxe/default-host" method="post">
+                  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                  <td>Default / undefined MACs</td>
+                  <td>*</td>
+                  <td>
+                    <select name="kickstart_id" {{ "disabled" if not esxi_can_write else "" }}>
+                      <option value="">No Kickstart</option>
+                      {% for kickstart in esxi_kickstarts %}
+                        <option value="{{ kickstart.id }}" {{ "selected" if esxi_pxe_default_host.kickstart_id == kickstart.id else "" }}>{{ kickstart.name }}</option>
+                      {% endfor %}
+                    </select>
+                  </td>
+                  <td>
+                    <select name="installer_iso_path" {{ "disabled" if not esxi_can_write else "" }}>
+                      <option value="">No ISO selected</option>
+                      {% for iso in esxi_installer_isos %}
+                        <option value="{{ iso.path }}" {{ "selected" if esxi_pxe_default_host.installer_iso_path == iso.path else "" }}>{{ iso.relative_path }}</option>
+                      {% endfor %}
+                    </select>
+                  </td>
+                  <td><input type="checkbox" name="enabled" {{ "checked" if esxi_pxe_default_host.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}></td>
+                  <td><button class="button tiny secondary" type="submit" {{ "disabled" if not esxi_can_write else "" }}>Update</button></td>
+                </form>
+              </tr>
               {% for host in esxi_pxe_hosts %}
                 <tr>
                   <form action="/esxi-pxe/hosts/{{ host.id }}" method="post">
@@ -259,24 +273,69 @@ reboot
                       </select>
                     </td>
                     <td><input type="checkbox" name="enabled" {{ "checked" if host.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}></td>
-                    <td><button class="button tiny secondary" type="submit" {{ "disabled" if not esxi_can_write else "" }}>Update</button></td>
+                    <td>
+                      <button class="button tiny secondary" type="submit" {{ "disabled" if not esxi_can_write else "" }}>Update</button>
+                      {% if esxi_can_write %}
+                        <button class="button tiny danger" type="submit" formaction="/esxi-pxe/hosts/{{ host.id }}/delete" data-confirm-modal data-confirm-title="Delete {{ host.hostname }} host reference?" data-confirm-message="This removes the ESXi PXE host reference for {{ host.mac_address }} from desired state. It will not touch generated PXE files until global appliance apply runs." data-confirm-label="Delete host reference">Delete</button>
+                      {% endif %}
+                    </td>
                   </form>
                 </tr>
               {% endfor %}
             </tbody>
           </table>
-          {% if esxi_can_write %}
-            <form class="form-grid host-create-form" action="/esxi-pxe/hosts" method="post">
-              <input type="hidden" name="csrf" value="{{ csrf_token }}">
-              <label><span class="field-label"><span>Host</span><button class="help-icon" type="button" data-help="ESXi host definition name used for PXE planning.">i</button></span><input name="hostname" placeholder="esxi-01"></label>
-              <label><span class="field-label"><span>MAC address</span><button class="help-icon" type="button" data-help="PXE client MAC address for matching this host definition.">i</button></span><input name="mac_address" placeholder="00:50:56:aa:bb:cc"></label>
-              <label><span class="field-label"><span>Kickstart</span><button class="help-icon" type="button" data-help="Database Kickstart ID referenced by this host definition.">i</button></span><select name="kickstart_id"><option value="">No Kickstart</option>{% for kickstart in esxi_kickstarts %}<option value="{{ kickstart.id }}">{{ kickstart.name }}</option>{% endfor %}</select></label>
-              <label><span class="field-label"><span>Installer ISO</span><button class="help-icon" type="button" data-help="ESXi installer ISO from the VCF Offline Depot ESX_HOST folder. VCFDT downloads appear here, and uploaded ISOs are stored in the same folder.">i</button></span><select name="installer_iso_path"><option value="">No ISO selected</option>{% for iso in esxi_installer_isos %}<option value="{{ iso.path }}">{{ iso.relative_path }}</option>{% endfor %}</select></label>
-              <label class="switch-field"><span class="field-label"><span>Enabled</span><button class="help-icon" type="button" data-help="Enabled host definitions are included in the ESXi PXE apply manifest.">i</button></span><input class="switch-input" type="checkbox" name="enabled" checked><span class="switch-track" aria-hidden="true"></span></label>
-              <button class="button secondary" type="submit">Add host reference</button>
-            </form>
-          {% endif %}
         </div>
+      </div>
+
+      <div id="esxi-pxe-isos-panel" class="tab-panel" role="tabpanel" hidden>
+        <div class="panel-subsection">
+          <div class="settings-list compact-settings-list">
+            <div><span>Installer ISO folder</span><strong>{{ esxi_installer_iso_root }}</strong></div>
+          </div>
+        </div>
+        {% if esxi_can_write %}
+          <details class="create-kickstart-panel">
+            <summary>Upload installer ISO</summary>
+            <form class="form-stack" action="/esxi-pxe/isos/upload" method="post" enctype="multipart/form-data" data-esxi-iso-upload>
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <label>
+                <span class="field-label"><span>ESXi installer ISO</span><button class="help-icon" type="button" data-help="Uploads an additional ESXi installer ISO into the VCF Offline Depot ESX_HOST folder used for PXE planning.">i</button></span>
+                <span class="file-upload-control">
+                  <input class="file-upload-input" type="file" name="iso_file" accept=".iso,application/x-iso9660-image" data-file-upload-input>
+                  <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose ISO file</strong><small data-file-upload-name>VMware-VMvisor-Installer.iso</small></span></span>
+                </span>
+              </label>
+              <button class="button secondary" type="submit" data-esxi-iso-upload-button>Upload installer ISO</button>
+              <progress class="upload-progress" value="0" max="100" data-esxi-iso-upload-progress hidden></progress>
+              <p class="autosave-status" data-state="idle" data-esxi-iso-upload-status aria-live="polite">Choose an ISO to upload.</p>
+            </form>
+          </details>
+        {% endif %}
+        <table class="data-table compact">
+          <thead><tr><th>Name</th><th>Relative path</th><th>Source</th><th>Source date</th><th>Size</th><th>Actions</th></tr></thead>
+          <tbody>
+            {% for iso in esxi_installer_isos %}
+              <tr>
+                <td>{{ iso.name }}</td>
+                <td><code>{{ iso.relative_path }}</code></td>
+                <td><span class="status-pill {{ 'good' if iso.source == 'uploaded' else 'muted' }}">{{ iso.source_label }}</span></td>
+                <td>{{ iso.source_at }}</td>
+                <td>{{ iso.size_bytes }}</td>
+                <td>
+                  {% if esxi_can_write %}
+                    <form action="/esxi-pxe/isos/delete" method="post" data-confirm-modal data-confirm-title="Delete {{ iso.name }}?" data-confirm-message="This removes the installer ISO from the ESX_HOST depot folder and clears ESXi PXE host/default references to it. Generated PXE runtime files are cleaned on the next global ESXi PXE apply." data-confirm-label="Delete ISO">
+                      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                      <input type="hidden" name="installer_iso_path" value="{{ iso.path }}">
+                      <button class="button tiny danger" type="submit">Delete</button>
+                    </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="6" class="muted">No installer ISOs found.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
       </div>
 
       <div id="esxi-pxe-preview-panel" class="tab-panel" role="tabpanel" hidden>
@@ -296,10 +355,6 @@ reboot
             </tbody>
           </table>
         {% endif %}
-        <div class="terminal-note">
-          <strong>{{ esxi_pxe_config_path }}</strong>
-          <code class="language-json" data-esxi-pxe-preview>{{ esxi_pxe_preview }}</code>
-        </div>
       </div>
     </div>
   </div>
@@ -353,6 +408,10 @@ reboot
         <strong>Redacted Kickstart preview</strong>
         <code data-esxi-pxe-preview>{{ esxi_selected_kickstart_json.redacted_preview if esxi_selected_kickstart_json else "" }}</code>
       </div>
+      <details class="terminal-note">
+        <summary>{{ esxi_pxe_config_path }}</summary>
+        <code class="language-json" data-esxi-pxe-preview>{{ esxi_pxe_preview }}</code>
+      </details>
     </div>
   </aside>
 </section>

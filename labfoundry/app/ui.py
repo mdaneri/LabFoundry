@@ -301,7 +301,9 @@ from labfoundry.app.services.esxi_pxe import (
     canonical_http_path,
     content_hash,
     decode_kickstart_upload,
+    default_host_to_dict,
     esxi_pxe_boot_settings,
+    esxi_pxe_default_host_settings,
     esxi_pxe_host_artifacts,
     generated_kickstart_path,
     host_to_dict,
@@ -316,6 +318,7 @@ from labfoundry.app.services.esxi_pxe import (
     normalize_installer_iso_path,
     render_esxi_pxe_manifest,
     render_esxi_pxe_preview,
+    save_esxi_pxe_default_host_settings,
     save_esxi_pxe_boot_settings,
     store_installer_iso_upload,
     strict_validation_enabled,
@@ -3061,6 +3064,7 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
     kickstarts = db.execute(select(EsxiKickstart).order_by(EsxiKickstart.name)).scalars().all()
     hosts = db.execute(select(EsxiPxeHost).options(selectinload(EsxiPxeHost.kickstart)).order_by(EsxiPxeHost.hostname)).scalars().all()
     dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
+    default_host = esxi_pxe_default_host_settings(db)
     available_interfaces = service_bind_options(db)
     iso_error = ""
     try:
@@ -3068,6 +3072,7 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
     except OSError as exc:
         installer_isos = []
         iso_error = f"Installer ISO folder could not be prepared: {exc}"
+    installer_isos = annotate_esxi_installer_iso_sources(db, installer_isos)
     strict = strict_validation_enabled(db)
     max_bytes = get_settings().esxi_kickstart_max_bytes
     validation_errors: list[str] = []
@@ -3083,6 +3088,10 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
                 f"{row.name}: Filesystem copy differs from database source. The next ESXi PXE apply will overwrite the filesystem copy from the database."
             )
     known_iso_paths = {row["path"] for row in installer_isos}
+    if default_host.get("enabled") and not (default_host.get("installer_iso_path") or "").strip():
+        validation_warnings.append("Default / undefined MACs: no installer ISO selected.")
+    if default_host.get("installer_iso_path") and default_host.get("installer_iso_path") not in known_iso_paths:
+        validation_warnings.append("Default / undefined MACs: selected installer ISO is missing from the ESX_HOST depot folder.")
     for host in hosts:
         if host.enabled and not (host.installer_iso_path or "").strip():
             validation_warnings.append(f"{host.hostname}: no installer ISO selected.")
@@ -3110,17 +3119,21 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
             validation_errors.append("ESXi PXE hostname conflicts with an existing non-ESXi PXE DNS record.")
         elif boot_settings["hostname"].lower() not in managed_dns_fqdns(db):
             validation_warnings.append(f"ESXi PXE hostname {boot_settings['hostname']} is not present in managed DNS records.")
-        if not esxi_pxe_host_artifacts(hosts, boot_settings):
-            validation_warnings.append("ESXi PXE bootstrap is enabled, but no enabled host has an installer ISO selected.")
+        if not esxi_pxe_host_artifacts(hosts, boot_settings, default_host):
+            validation_warnings.append("ESXi PXE bootstrap is enabled, but no enabled host reference or default profile has an installer ISO selected.")
     return {
         "esxi_kickstarts": kickstarts,
         "esxi_kickstart_rows": [kickstart_to_dict(row, include_content=True) for row in kickstarts],
         "esxi_pxe_hosts": hosts,
-        "esxi_pxe_host_rows": [host_to_dict(row) for row in hosts],
+        "esxi_pxe_host_rows": [default_host_to_dict(default_host), *[host_to_dict(row) for row in hosts]],
+        "esxi_pxe_host_kickstart_options": [{"id": "", "label": "No Kickstart"}, *[{"id": row.id, "label": row.name} for row in kickstarts]],
+        "esxi_pxe_host_iso_options": [{"id": "", "label": "No ISO selected"}, *[{"id": row["path"], "label": f"{row['relative_path']} ({row['source_label']})"} for row in installer_isos]],
         "esxi_installer_iso_root": installer_iso_root_path(),
         "esxi_installer_isos": installer_isos,
         "esxi_installer_iso_error": iso_error,
         "esxi_pxe_boot": boot_settings,
+        "esxi_pxe_default_host": default_host,
+        "esxi_pxe_default_host_row": default_host_to_dict(default_host),
         "esxi_pxe_dhcp_scope_options": [
             {
                 "id": scope.id,
@@ -3138,15 +3151,55 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
         "esxi_pxe_available_addresses": available_boot_addresses,
         "esxi_pxe_bind_label": service_bind_label(boot_settings.get("listen_interface"), boot_settings.get("listen_address")),
         "esxi_pxe_primary_listen_address": primary_listen_address(boot_settings.get("listen_address")),
-        "esxi_pxe_artifacts": esxi_pxe_host_artifacts(hosts, boot_settings),
+        "esxi_pxe_artifacts": esxi_pxe_host_artifacts(hosts, boot_settings, default_host),
         "esxi_pxe_validation_errors": validation_errors,
         "esxi_pxe_validation_warnings": list(dict.fromkeys(validation_warnings)),
         "esxi_pxe_validation_by_id": validation_by_id,
-        "esxi_pxe_manifest": render_esxi_pxe_manifest(kickstarts, hosts, boot_settings),
-        "esxi_pxe_preview": render_esxi_pxe_preview(kickstarts, hosts, boot_settings),
+        "esxi_pxe_manifest": render_esxi_pxe_manifest(kickstarts, hosts, boot_settings, default_host),
+        "esxi_pxe_preview": render_esxi_pxe_preview(kickstarts, hosts, boot_settings, default_host),
         "esxi_pxe_config_path": ESXI_PXE_STAGED_CONFIG_PATH,
         "esxi_pxe_strict_validation": strict,
     }
+
+
+def annotate_esxi_installer_iso_sources(db: Session, installer_isos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    upload_events = {
+        row.resource_id: row
+        for row in db.execute(
+            select(AuditEvent)
+            .where(AuditEvent.action == "upload_esxi_installer_iso", AuditEvent.resource_type == "esxi_installer_iso")
+            .order_by(AuditEvent.created_at.desc())
+        )
+        .scalars()
+        .all()
+        if row.resource_id
+    }
+    annotated: list[dict[str, Any]] = []
+    for iso in installer_isos:
+        row = dict(iso)
+        upload_event = upload_events.get(str(row.get("relative_path") or ""))
+        if upload_event is not None:
+            row["source"] = "uploaded"
+            row["source_label"] = "Uploaded by user"
+            row["source_at"] = upload_event.created_at.isoformat()
+        else:
+            row["source"] = "vcfdt"
+            row["source_label"] = "Downloaded by VCFDT"
+            row["source_at"] = row.get("updated_at") or ""
+        annotated.append(row)
+    return annotated
+
+
+def parse_optional_esxi_kickstart_id(db: Session, kickstart_id: str, *, label: str = "Kickstart") -> int | None:
+    value = str(kickstart_id or "").strip()
+    if not value:
+        return None
+    if not value.isdigit():
+        raise HTTPException(status_code=400, detail=f"{label} is invalid.")
+    normalized_id = int(value)
+    if db.get(EsxiKickstart, normalized_id) is None:
+        raise HTTPException(status_code=404, detail=f"{label} not found")
+    return normalized_id
 
 
 def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
@@ -7989,7 +8042,53 @@ async def upload_esxi_installer_iso_from_ui(
     record_audit(db, actor=identity.username, action="upload_esxi_installer_iso", resource_type="esxi_installer_iso", resource_id=iso["relative_path"], detail=f"path={iso['path']} size={iso['size_bytes']}", request_id=request.state.request_id)
     if wants_json:
         return JSONResponse({"status": "uploaded", **iso})
-    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts-panel", status_code=303)
+    return RedirectResponse("/esxi-pxe#esxi-pxe-isos-panel", status_code=303)
+
+
+@router.post("/esxi-pxe/isos/delete", response_model=None)
+def delete_esxi_installer_iso_from_ui(
+    request: Request,
+    installer_iso_path: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    try:
+        normalized_path = normalize_installer_iso_path(installer_iso_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path = Path(normalized_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Installer ISO not found")
+    path.unlink()
+    cleared_hosts = 0
+    for host in db.execute(select(EsxiPxeHost).where(EsxiPxeHost.installer_iso_path == normalized_path)).scalars().all():
+        host.installer_iso_path = ""
+        host.updated_at = utcnow()
+        db.add(host)
+        cleared_hosts += 1
+    default_host = esxi_pxe_default_host_settings(db)
+    cleared_default = default_host.get("installer_iso_path") == normalized_path
+    if cleared_default:
+        save_esxi_pxe_default_host_settings(
+            db,
+            enabled=bool(default_host.get("enabled")),
+            kickstart_id=default_host.get("kickstart_id"),
+            installer_iso_path="",
+        )
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="delete_esxi_installer_iso",
+        resource_type="esxi_installer_iso",
+        resource_id=path.name,
+        detail=f"path={normalized_path} cleared_hosts={cleared_hosts} cleared_default={cleared_default}",
+        request_id=request.state.request_id,
+    )
+    return RedirectResponse("/esxi-pxe#esxi-pxe-isos-panel", status_code=303)
 
 
 @router.post("/esxi-pxe/kickstarts/{kickstart_id}/import-filesystem", response_model=None)
@@ -8029,13 +8128,18 @@ def create_esxi_pxe_host_from_ui(
 ) -> RedirectResponse:
     require_esxi_pxe_write(identity)
     verify_csrf(request, csrf)
+    normalized_kickstart_id = parse_optional_esxi_kickstart_id(db, kickstart_id)
     try:
         normalized_iso_path = normalize_installer_iso_path(installer_iso_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    host = EsxiPxeHost(hostname=hostname.strip(), mac_address=mac_address.strip().lower(), kickstart_id=int(kickstart_id) if kickstart_id else None, installer_iso_path=normalized_iso_path, enabled=enabled)
+    host = EsxiPxeHost(hostname=hostname.strip(), mac_address=mac_address.strip().lower(), kickstart_id=normalized_kickstart_id, installer_iso_path=normalized_iso_path, enabled=enabled)
     db.add(host)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"ESXi PXE host for {mac_address} already exists.") from exc
     record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id} installer_iso={host.installer_iso_path}", request_id=request.state.request_id)
     return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
 
@@ -8058,19 +8162,73 @@ def update_esxi_pxe_host_from_ui(
     host = db.get(EsxiPxeHost, host_id)
     if not host:
         raise HTTPException(status_code=404, detail="ESXi PXE host not found")
+    normalized_kickstart_id = parse_optional_esxi_kickstart_id(db, kickstart_id)
     try:
         normalized_iso_path = normalize_installer_iso_path(installer_iso_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     host.hostname = hostname.strip()
     host.mac_address = mac_address.strip().lower()
-    host.kickstart_id = int(kickstart_id) if kickstart_id else None
+    host.kickstart_id = normalized_kickstart_id
     host.installer_iso_path = normalized_iso_path
     host.enabled = enabled
     host.updated_at = utcnow()
     db.add(host)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"ESXi PXE host for {mac_address} already exists.") from exc
     record_audit(db, actor=identity.username, action="update_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host.id), detail=f"kickstart_id={host.kickstart_id} installer_iso={host.installer_iso_path}", request_id=request.state.request_id)
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
+
+
+@router.post("/esxi-pxe/default-host", response_model=None)
+def update_esxi_pxe_default_host_from_ui(
+    request: Request,
+    kickstart_id: str = Form(""),
+    installer_iso_path: str = Form(""),
+    enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    try:
+        default_host = save_esxi_pxe_default_host_settings(db, enabled=enabled, kickstart_id=kickstart_id, installer_iso_path=installer_iso_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_esxi_pxe_default_host",
+        resource_type="esxi_pxe_default_host",
+        resource_id="default",
+        detail=f"enabled={default_host['enabled']} kickstart_id={default_host['kickstart_id']} installer_iso={default_host['installer_iso_path']}",
+        request_id=request.state.request_id,
+    )
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
+
+
+@router.post("/esxi-pxe/hosts/{host_id}/delete", response_model=None)
+def delete_esxi_pxe_host_from_ui(
+    host_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    host = db.get(EsxiPxeHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="ESXi PXE host not found")
+    hostname = host.hostname
+    db.delete(host)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_esxi_pxe_host", resource_type="esxi_pxe_host", resource_id=str(host_id), detail=f"hostname={hostname}", request_id=request.state.request_id)
     return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
 
 

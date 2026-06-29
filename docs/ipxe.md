@@ -1044,9 +1044,9 @@ For an automated ESX deployment system that supports multiple images and multipl
 
 | Object | Fields to track |
 | --- | --- |
-| ESX image | Version, ISO source, extracted HTTP path, TFTP support path, `mboot.efi` version, `mboot.c32`, `boot.cfg` template. |
+| ESX image | Version, ISO source (`uploaded` or VCFDT-discovered), source date, extracted HTTP path, TFTP support path, `mboot.efi` version, `mboot.c32`, `boot.cfg` template. |
 | Kickstart file | Name, revision, database source of truth, rendered filesystem copy path, checksum. |
-| Host definition | Hostname, MAC address, boot mode, image ID, kickstart ID, DHCP reservation, DNS name, optional VLAN, DHCP boot options. |
+| Host definition | Hostname, MAC address or default undefined-MAC profile, boot mode, image ID, kickstart ID, DHCP reservation, DNS name, optional VLAN, DHCP boot options. |
 | Boot profile | DHCP IP zone, Legacy PXELINUX, UEFI PXE/TFTP, iPXE first-stage plus PXELINUX/`mboot.efi` second-stage, or native UEFI HTTP; maps to the zone-scoped DHCP `filename`, `next-server`, or `dhcp6.bootfile-url`. |
 
 Suggested generated artifacts per host:
@@ -1058,6 +1058,8 @@ Suggested generated artifacts per host:
 | Legacy BIOS iPXE | First-stage `undionly.kpxe`, second-stage `pxelinux.0`, then host-specific PXELINUX config pointing to `mboot.c32` and `boot.cfg`. |
 | UEFI iPXE | First-stage `snponly.efi`, second-stage `mboot.efi`, then host-specific `boot.cfg` with HTTP `prefix=`. |
 | Native UEFI HTTP | `http://server/esx/01-aa-bb-cc-dd-ee-ff/boot.cfg` or default `boot.cfg`. |
+
+A default undefined-MAC profile can generate `/tftpboot/pxelinux.cfg/default`, `/tftpboot/boot.cfg`, and the native HTTP default `boot.cfg`. Host-specific MAC artifacts should still override that default when a matching definition exists.
 
 A rendered `boot.cfg` should usually set:
 

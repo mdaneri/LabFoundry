@@ -733,7 +733,7 @@ def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
             continue
         label = str(artifact.get("hostname") or artifact.get("mac_address") or "unknown")
         mac_key = str(artifact.get("mac_key") or "")
-        if not re.fullmatch(r"01(?:-[0-9a-f]{2}){6}", mac_key):
+        if mac_key != "default" and not re.fullmatch(r"01(?:-[0-9a-f]{2}){6}", mac_key):
             errors.append(f"Host {label} MAC key is invalid.")
         image_key = str(artifact.get("image_key") or "")
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,160}", image_key):
@@ -963,9 +963,11 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             generated_tftp_files.append(str(target))
         staged_images: set[str] = set()
         first_host_artifact: dict | None = None
+        explicit_default_artifact = any(bool(artifact.get("is_default")) for artifact in payload.get("artifacts", []))
         first_mboot_efi: Path | None = None
         first_crypto64: Path | None = None
         for artifact in payload.get("artifacts", []):
+            is_default_artifact = bool(artifact.get("is_default"))
             image_key = str(artifact["image_key"])
             image_root = Path(str(artifact["image_generated_path"])).resolve()
             if image_key not in staged_images:
@@ -1014,7 +1016,9 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             )
             _write_text(pxelinux_config, pxelinux_text)
             generated_tftp_files.append(str(pxelinux_config))
-            if first_host_artifact is None:
+            if is_default_artifact:
+                first_host_artifact = artifact
+            elif first_host_artifact is None and not explicit_default_artifact:
                 first_host_artifact = artifact
                 _write_text(ESXI_TFTP_ROOT / "boot.cfg", boot_cfg)
                 _write_text(ESXI_PXE_HTTP_BASE / "boot.cfg", boot_cfg)

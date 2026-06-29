@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=esxi-pxe-dhcp-20260629-1" in offline.text
+    assert "/static/app.css?v=esxi-pxe-grid-20260629-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -704,7 +704,7 @@ def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
         follow_redirects=False,
     )
     assert uploaded.status_code == 303
-    assert uploaded.headers["location"] == "/esxi-pxe#esxi-pxe-hosts-panel"
+    assert uploaded.headers["location"] == "/esxi-pxe#esxi-pxe-isos-panel"
     iso_path = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
     assert iso_path.read_bytes() == b"iso bytes"
 
@@ -731,9 +731,26 @@ def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
     assert "too large" in too_large.json()["detail"].lower()
     monkeypatch.setattr(ui_module, "get_settings", original_get_settings)
 
+    vcfdt_iso_path = iso_root / "VCFDT-Downloaded.iso"
+    vcfdt_iso_path.write_bytes(b"vcfdt iso bytes")
     refreshed = client.get("/esxi-pxe")
     assert "VMware-VMvisor-Installer-8.0U3.iso" in refreshed.text
+    assert "VCFDT-Downloaded.iso" in refreshed.text
+    assert "Installer ISOs" in refreshed.text
+    assert "Uploaded by user" in refreshed.text
+    assert "Downloaded by VCFDT" in refreshed.text
+    assert 'id="esxi-pxe-hosts-table"' in refreshed.text
+    assert "Default / undefined MACs" in refreshed.text
+    assert "host-create-form" not in refreshed.text
     csrf = refreshed.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    vcfdt_delete = client.post(
+        "/esxi-pxe/isos/delete",
+        data={"csrf": csrf, "installer_iso_path": str(vcfdt_iso_path)},
+        follow_redirects=False,
+    )
+    assert vcfdt_delete.status_code == 303
+    assert vcfdt_delete.headers["location"] == "/esxi-pxe#esxi-pxe-isos-panel"
+    assert not vcfdt_iso_path.exists()
     host_response = client.post(
         "/esxi-pxe/hosts",
         data={
@@ -746,9 +763,38 @@ def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
         follow_redirects=False,
     )
     assert host_response.status_code == 303
+    host_page = client.get("/esxi-pxe")
+    assert host_page.status_code == 200
+    assert 'data-hosts=' in host_page.text
+    assert "esxi-iso" in host_page.text
     with SessionLocal() as db:
         host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.hostname == "esxi-iso")).scalar_one()
         assert host.installer_iso_path == str(iso_path)
+        host_id = host.id
+    delete_response = client.post(
+        "/esxi-pxe/isos/delete",
+        data={"csrf": csrf, "installer_iso_path": str(iso_path)},
+        follow_redirects=False,
+    )
+    assert delete_response.status_code == 303
+    assert delete_response.headers["location"] == "/esxi-pxe#esxi-pxe-isos-panel"
+    assert not iso_path.exists()
+    with SessionLocal() as db:
+        host = db.get(EsxiPxeHost, host_id)
+        assert host.installer_iso_path == ""
+    iso_path.write_bytes(b"iso bytes restored")
+    host_response = client.post(
+        "/esxi-pxe/hosts/" + str(host_id),
+        data={
+            "csrf": csrf,
+            "hostname": "esxi-iso",
+            "mac_address": "00:50:56:11:22:33",
+            "installer_iso_path": str(iso_path),
+            "enabled": "on",
+        },
+        follow_redirects=False,
+    )
+    assert host_response.status_code == 303
 
     api_token = create_api_token(client, ["read:esxi-pxe"])
     api_isos = client.get("/api/v1/esxi-pxe/isos", headers={"Authorization": f"Bearer {api_token}"})
@@ -1722,8 +1768,9 @@ def test_dns_and_dhcp_pages_render(client):
     assert "initializeEsxiIsoUploadForms" in app_js.text
     assert "XMLHttpRequest" in app_js.text
     assert "X-LabFoundry-Upload" in app_js.text
-    assert 'rememberActiveTab("labfoundry:esxi-pxe:active-tab", "esxi-pxe-hosts-panel")' in app_js.text
-    assert 'window.location.hash = "esxi-pxe-hosts-panel"' in app_js.text
+    assert 'rememberActiveTab("labfoundry:esxi-pxe:active-tab", "esxi-pxe-isos-panel")' in app_js.text
+    assert 'window.location.hash = "esxi-pxe-isos-panel"' in app_js.text
+    assert "initializeEsxiPxeHostsTable" in app_js.text
     assert 'document.getElementById(hashTargetId)?.closest(".tab-panel")' in app_js.text
     assert 'querySelector(".tag-editor[data-service-bind-interface]")' in app_js.text
     assert 'querySelector(".tag-editor[data-service-bind-address]")' in app_js.text
@@ -3807,7 +3854,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "esxi-pxe-dhcp-20260629-1" in page.text
+    assert "esxi-pxe-grid-20260629-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

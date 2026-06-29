@@ -59,7 +59,9 @@ DHCP IP zones can bind only to valid service targets: access physical interfaces
 
 The ESXi PXE apply unit owns generated installer boot artifacts. Operators edit Kickstart source in the database through the built-in CodeMirror editor; filesystem copies are derived artifacts, not desired state. Saving a Kickstart updates the database source hash and marks `esxi_pxe` changed, but does not write `/var/lib/labfoundry/pxe/http/esxi/ks/<id>.cfg`.
 
-The ESXi PXE page also discovers installer ISOs under `/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST`, the VCFDT ESX host component folder, and creates that folder when needed. Operators can upload additional `.iso` files into the same folder and select an installer ISO on each host reference.
+The ESXi PXE page also discovers installer ISOs under `/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST`, the VCFDT ESX host component folder, and creates that folder when needed. The Installer ISOs tab lists images found there, marks user-uploaded images separately from VCFDT-discovered images with dates, allows uploading additional `.iso` files, and allows deleting either source. Deleting an ISO clears host/default PXE references to that image; generated runtime files are reconciled on the next global `esxi_pxe` apply.
+
+Host references are edited in a Tabulator grid. Each host can select a database Kickstart and installer ISO. The grid also has a default profile for undefined MAC addresses; when enabled with an installer ISO, LabFoundry generates the top-level default `boot.cfg`, HTTP `boot.cfg`, and `pxelinux.cfg/default` artifacts from that profile instead of falling back to the first host reference.
 
 The ESXi PXE boot service selects a DHCP IP zone instead of a freeform interface/IP pair. LabFoundry derives the PXE interface, TFTP server address, DNS record, firewall bind target, and generated dnsmasq scope tag from that zone; the DHCP page shows those generated PXE lines separately from operator-managed DHCP options.
 

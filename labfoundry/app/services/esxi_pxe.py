@@ -37,6 +37,9 @@ ESXI_PXE_UEFI_BOOTFILE_KEY = "esxi_pxe.boot.uefi_bootfile"
 ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY = "esxi_pxe.boot.native_uefi_http_enabled"
 ESXI_PXE_NATIVE_UEFI_HTTP_URL_KEY = "esxi_pxe.boot.native_uefi_http_url"
 ESXI_PXE_IPXE_SCRIPT_KEY = "esxi_pxe.boot.ipxe_script"
+ESXI_PXE_DEFAULT_HOST_ENABLED_KEY = "esxi_pxe.default_host.enabled"
+ESXI_PXE_DEFAULT_HOST_KICKSTART_ID_KEY = "esxi_pxe.default_host.kickstart_id"
+ESXI_PXE_DEFAULT_HOST_INSTALLER_ISO_KEY = "esxi_pxe.default_host.installer_iso_path"
 ESXI_PXE_IPXE_SCRIPT_NAME = "esxi.ipxe"
 ESXI_PXE_DEFAULT_HOSTNAME = "esxi-pxe.labfoundry.internal"
 ESXI_PXE_HTTP_PORT = 8080
@@ -555,14 +558,127 @@ def host_to_dict(host: EsxiPxeHost) -> dict[str, Any]:
         "installer_iso_path": iso_path,
         "installer_iso_name": Path(iso_path).name if iso_path else "",
         "enabled": host.enabled,
-        "created_at": host.created_at,
-        "updated_at": host.updated_at,
+        "created_at": host.created_at.isoformat() if host.created_at else "",
+        "updated_at": host.updated_at.isoformat() if host.updated_at else "",
     }
 
 
-def esxi_pxe_host_artifacts(hosts: list[EsxiPxeHost], boot_settings: dict[str, Any]) -> list[dict[str, Any]]:
+def esxi_pxe_default_host_settings(db: Session) -> dict[str, Any]:
+    rows = {row.key: row.value for row in db.execute(select(Setting).where(Setting.key.like("esxi_pxe.default_host.%"))).scalars().all()}
+    kickstart_id = rows.get(ESXI_PXE_DEFAULT_HOST_KICKSTART_ID_KEY, "").strip()
+    kickstart = db.get(EsxiKickstart, int(kickstart_id)) if kickstart_id.isdigit() else None
+    iso_path = rows.get(ESXI_PXE_DEFAULT_HOST_INSTALLER_ISO_KEY, "").strip()
+    return {
+        "enabled": rows.get(ESXI_PXE_DEFAULT_HOST_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"},
+        "kickstart_id": kickstart.id if kickstart is not None else None,
+        "kickstart_name": kickstart.name if kickstart is not None else "",
+        "installer_iso_path": iso_path,
+        "installer_iso_name": Path(iso_path).name if iso_path else "",
+    }
+
+
+def save_esxi_pxe_default_host_settings(
+    db: Session,
+    *,
+    enabled: bool,
+    kickstart_id: int | str | None = None,
+    installer_iso_path: str = "",
+) -> dict[str, Any]:
+    kickstart_value = str(kickstart_id or "").strip()
+    if kickstart_value and not kickstart_value.isdigit():
+        raise ValueError("Default ESXi PXE Kickstart is invalid.")
+    normalized_kickstart_id = int(kickstart_value) if kickstart_value else None
+    if normalized_kickstart_id and db.get(EsxiKickstart, normalized_kickstart_id) is None:
+        raise ValueError("Default ESXi PXE Kickstart does not exist.")
+    normalized_iso_path = normalize_installer_iso_path(installer_iso_path)
+    settings = {
+        ESXI_PXE_DEFAULT_HOST_ENABLED_KEY: "true" if enabled else "false",
+        ESXI_PXE_DEFAULT_HOST_KICKSTART_ID_KEY: str(normalized_kickstart_id or ""),
+        ESXI_PXE_DEFAULT_HOST_INSTALLER_ISO_KEY: normalized_iso_path,
+    }
+    for key, value in settings.items():
+        row = db.get(Setting, key)
+        if row is None:
+            row = Setting(key=key, value=value)
+        else:
+            row.value = value
+        db.add(row)
+    return esxi_pxe_default_host_settings(db)
+
+
+def default_host_to_dict(default_host: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": "default",
+        "hostname": "Default / undefined MACs",
+        "mac_address": "*",
+        "kickstart_id": default_host.get("kickstart_id"),
+        "kickstart_name": default_host.get("kickstart_name") or "",
+        "installer_iso_path": default_host.get("installer_iso_path") or "",
+        "installer_iso_name": default_host.get("installer_iso_name") or "",
+        "enabled": bool(default_host.get("enabled")),
+        "is_default": True,
+    }
+
+
+def _esxi_pxe_artifact(
+    *,
+    host_id: int | None,
+    hostname: str,
+    mac_address: str,
+    mac_key: str,
+    iso_path: str,
+    kickstart_id: int | None,
+    boot_settings: dict[str, Any],
+    is_default: bool = False,
+) -> dict[str, Any]:
     base_url = esxi_http_base_url(boot_settings)
+    image_key = installer_image_key(iso_path)
+    image_http_path = f"{ESXI_PXE_IMAGE_HTTP_PREFIX}/{image_key}"
+    kickstart_path = canonical_http_path(kickstart_id) if kickstart_id else ""
+    if is_default:
+        pxelinux_config_path = str(ESXI_TFTP_ROOT / "pxelinux.cfg" / "default")
+        uefi_tftp_boot_cfg_path = str(ESXI_TFTP_ROOT / "boot.cfg")
+        http_boot_cfg_path = str(ESXI_PXE_HTTP_BASE / "boot.cfg")
+    else:
+        pxelinux_config_path = str(ESXI_TFTP_ROOT / "pxelinux.cfg" / mac_key) if mac_key else ""
+        uefi_tftp_boot_cfg_path = str(ESXI_TFTP_ROOT / mac_key / "boot.cfg") if mac_key else ""
+        http_boot_cfg_path = str(ESXI_PXE_HTTP_BASE / mac_key / "boot.cfg") if mac_key else ""
+    return {
+        "host_id": host_id,
+        "hostname": hostname,
+        "mac_address": mac_address,
+        "mac_key": mac_key,
+        "is_default": is_default,
+        "image_key": image_key,
+        "installer_iso_path": iso_path,
+        "installer_iso_name": Path(iso_path).name if iso_path else "",
+        "image_http_path": image_http_path,
+        "image_http_url": f"{base_url}/images/{image_key}" if base_url else "",
+        "image_generated_path": str(ESXI_PXE_IMAGE_HTTP_ROOT / image_key),
+        "kickstart_id": kickstart_id,
+        "kickstart_http_path": kickstart_path,
+        "kickstart_url": f"{base_url}/ks/{kickstart_id}.cfg" if base_url and kickstart_id else "",
+        "pxelinux_config_path": pxelinux_config_path,
+        "uefi_tftp_boot_cfg_path": uefi_tftp_boot_cfg_path,
+        "http_boot_cfg_path": http_boot_cfg_path,
+    }
+
+
+def esxi_pxe_host_artifacts(hosts: list[EsxiPxeHost], boot_settings: dict[str, Any], default_host: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
+    if default_host and default_host.get("enabled") and default_host.get("installer_iso_path"):
+        artifacts.append(
+            _esxi_pxe_artifact(
+                host_id=None,
+                hostname="Default / undefined MACs",
+                mac_address="*",
+                mac_key="default",
+                iso_path=str(default_host.get("installer_iso_path") or ""),
+                kickstart_id=default_host.get("kickstart_id"),
+                boot_settings=boot_settings,
+                is_default=True,
+            )
+        )
     for host in hosts:
         if host.enabled is False:
             continue
@@ -570,33 +686,21 @@ def esxi_pxe_host_artifacts(hosts: list[EsxiPxeHost], boot_settings: dict[str, A
         if not iso_path:
             continue
         mac_key = normalize_pxe_mac(host.mac_address)
-        image_key = installer_image_key(iso_path)
-        image_http_path = f"{ESXI_PXE_IMAGE_HTTP_PREFIX}/{image_key}"
-        kickstart_path = canonical_http_path(host.kickstart_id) if host.kickstart_id else ""
         artifacts.append(
-            {
-                "host_id": host.id,
-                "hostname": host.hostname,
-                "mac_address": host.mac_address,
-                "mac_key": mac_key,
-                "image_key": image_key,
-                "installer_iso_path": iso_path,
-                "installer_iso_name": Path(iso_path).name if iso_path else "",
-                "image_http_path": image_http_path,
-                "image_http_url": f"{base_url}/images/{image_key}" if base_url else "",
-                "image_generated_path": str(ESXI_PXE_IMAGE_HTTP_ROOT / image_key),
-                "kickstart_id": host.kickstart_id,
-                "kickstart_http_path": kickstart_path,
-                "kickstart_url": f"{base_url}/ks/{host.kickstart_id}.cfg" if base_url and host.kickstart_id else "",
-                "pxelinux_config_path": str(ESXI_TFTP_ROOT / "pxelinux.cfg" / mac_key) if mac_key else "",
-                "uefi_tftp_boot_cfg_path": str(ESXI_TFTP_ROOT / mac_key / "boot.cfg") if mac_key else "",
-                "http_boot_cfg_path": str(ESXI_PXE_HTTP_BASE / mac_key / "boot.cfg") if mac_key else "",
-            }
+            _esxi_pxe_artifact(
+                host_id=host.id,
+                hostname=host.hostname,
+                mac_address=host.mac_address,
+                mac_key=mac_key,
+                iso_path=iso_path,
+                kickstart_id=host.kickstart_id,
+                boot_settings=boot_settings,
+            )
         )
     return artifacts
 
 
-def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPxeHost], boot_settings: dict[str, Any] | None = None) -> str:
+def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPxeHost], boot_settings: dict[str, Any] | None = None, default_host: dict[str, Any] | None = None) -> str:
     iso_error = ""
     try:
         installer_isos = installer_iso_inventory()
@@ -648,7 +752,7 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
         "effective_native_uefi_http_url",
     }
     boot_manifest = {key: boot.get(key) for key in boot_manifest_keys}
-    artifacts = esxi_pxe_host_artifacts(hosts, boot)
+    artifacts = esxi_pxe_host_artifacts(hosts, boot, default_host)
     payload = {
         "kind": "labfoundry-esxi-pxe",
         "schema_version": ESXI_PXE_SCHEMA_VERSION,
@@ -688,8 +792,8 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
-def render_esxi_pxe_preview(kickstarts: list[EsxiKickstart], hosts: list[EsxiPxeHost], boot_settings: dict[str, Any] | None = None) -> str:
-    payload = json.loads(render_esxi_pxe_manifest(kickstarts, hosts, boot_settings))
+def render_esxi_pxe_preview(kickstarts: list[EsxiKickstart], hosts: list[EsxiPxeHost], boot_settings: dict[str, Any] | None = None, default_host: dict[str, Any] | None = None) -> str:
+    payload = json.loads(render_esxi_pxe_manifest(kickstarts, hosts, boot_settings, default_host))
     for row in payload["kickstarts"]:
         row["content"] = redacted_kickstart_preview(str(row["content"]))
     return json.dumps(payload, indent=2, sort_keys=True)

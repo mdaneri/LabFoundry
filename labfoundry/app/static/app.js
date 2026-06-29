@@ -884,6 +884,146 @@ async function deleteDhcpReservationFromMenu(row, csrf) {
   }
 }
 
+function showEsxiHostMessage(message, type = "error") {
+  const element = document.getElementById("esxi-pxe-host-error");
+  if (!element) {
+    return;
+  }
+  element.textContent = message;
+  element.classList.toggle("error", type === "error");
+  element.classList.toggle("success", type === "success");
+  element.classList.remove("hidden");
+}
+
+function showEsxiHostError(message) {
+  showEsxiHostMessage(message, "error");
+}
+
+function showEsxiHostSuccess(message) {
+  showTransientGridStatus(message);
+}
+
+function clearEsxiHostError() {
+  const element = document.getElementById("esxi-pxe-host-error");
+  if (!element) {
+    return;
+  }
+  element.textContent = "";
+  element.classList.add("hidden");
+}
+
+async function postEsxiHostAction(url, data, csrf, options = {}) {
+  const reload = options.reload ?? true;
+  const body = new FormData();
+  body.set("csrf", csrf);
+  for (const [key, value] of Object.entries(data)) {
+    if (key === "id" || key === "is_new" || key === "is_default" || key.endsWith("_name")) {
+      continue;
+    }
+    if (key === "enabled") {
+      if (value) {
+        body.set("enabled", "on");
+      }
+      continue;
+    }
+    body.set(key, value ?? "");
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    body,
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text.match(/ESXi PXE host[^<]*/)?.[0] || text.match(/Default ESXi PXE[^<]*/)?.[0] || "The ESXi PXE host reference could not be saved.");
+  }
+  if (reload) {
+    window.location.reload();
+  }
+}
+
+function newEsxiHostRow(defaultIsoPath = "") {
+  return {
+    id: "new",
+    hostname: "",
+    mac_address: "",
+    kickstart_id: "",
+    kickstart_name: "",
+    installer_iso_path: defaultIsoPath,
+    installer_iso_name: "",
+    enabled: true,
+    is_new: true,
+    is_default: false,
+  };
+}
+
+function hasRequiredEsxiHostFields(data) {
+  return Boolean((data.hostname || "").trim() && (data.mac_address || "").trim());
+}
+
+async function autoSaveEsxiHost(cell, csrf) {
+  clearEsxiHostError();
+  const row = cell.getRow();
+  const data = row.getData();
+  if (data.is_default) {
+    try {
+      await postEsxiHostAction("/esxi-pxe/default-host", data, csrf, { reload: false });
+      showEsxiHostSuccess("Saved");
+    } catch (error) {
+      showEsxiHostError(error instanceof Error ? error.message : "The default ESXi PXE host profile could not be saved.");
+      if (typeof cell.restoreOldValue === "function") {
+        cell.restoreOldValue();
+      }
+    }
+    return;
+  }
+  if (data.is_new) {
+    if (!hasRequiredEsxiHostFields(data)) {
+      return;
+    }
+    try {
+      await postEsxiHostAction("/esxi-pxe/hosts", data, csrf);
+      showEsxiHostSuccess("Added");
+    } catch (error) {
+      showEsxiHostError(error instanceof Error ? error.message : "The ESXi PXE host reference could not be added.");
+      if (typeof cell.restoreOldValue === "function") {
+        cell.restoreOldValue();
+      }
+    }
+    return;
+  }
+  try {
+    await postEsxiHostAction(`/esxi-pxe/hosts/${data.id}`, data, csrf, { reload: false });
+    showEsxiHostSuccess("Saved");
+  } catch (error) {
+    showEsxiHostError(error instanceof Error ? error.message : "The ESXi PXE host reference could not be saved.");
+    if (typeof cell.restoreOldValue === "function") {
+      cell.restoreOldValue();
+    }
+  }
+}
+
+async function deleteEsxiHost(row, csrf) {
+  clearEsxiHostError();
+  const data = row.getData();
+  if (data.is_new || data.is_default) {
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `Delete ${data.hostname} host reference?`,
+    message: `This removes the ESXi PXE host reference for ${data.mac_address} from desired state. It will not touch generated PXE files until global appliance apply runs.`,
+    label: "Delete host reference",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await postEsxiHostAction(`/esxi-pxe/hosts/${data.id}/delete`, {}, csrf);
+  } catch (error) {
+    showEsxiHostError(error instanceof Error ? error.message : "The ESXi PXE host reference could not be deleted.");
+  }
+}
+
 function showCaMessage(elementId, message, type = "error") {
   const element = document.getElementById(elementId);
   if (!element) {
@@ -4008,6 +4148,121 @@ function initializeDhcpReservationsTable() {
   }
 }
 
+function initializeEsxiPxeHostsTable() {
+  const tableElement = document.getElementById("esxi-pxe-hosts-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  if (typeof Tabulator === "undefined") {
+    showEsxiHostError("Tabulator did not load. Showing the fallback table.");
+    return;
+  }
+  const csrf = tableElement.dataset.csrf || "";
+  const canWrite = tableElement.dataset.canWrite === "true";
+  const kickstartOptions = JSON.parse(tableElement.dataset.kickstartOptions || "[]");
+  const isoOptions = JSON.parse(tableElement.dataset.isoOptions || "[]");
+  const kickstartValues = Object.fromEntries(kickstartOptions.map((item) => [item.id, item.label]));
+  const isoValues = Object.fromEntries(isoOptions.map((item) => [item.id, item.label]));
+  const defaultIsoPath = isoOptions.find((item) => item.id)?.id || "";
+  const rows = [...JSON.parse(tableElement.dataset.hosts || "[]"), newEsxiHostRow(defaultIsoPath)];
+  try {
+    new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "360px",
+      rowHeight: 30,
+      placeholder: "No ESXi PXE host references configured.",
+      reactiveData: false,
+      columns: [
+        {
+          title: "Host",
+          field: "hostname",
+          editor: canWrite ? "input" : false,
+          editable: (cell) => !cell.getRow().getData().is_default,
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.is_default) {
+              return "Default / undefined MACs";
+            }
+            return dnsAddRowHintFormatter(cell, "+ Add host reference here");
+          },
+          minWidth: 200,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "MAC address",
+          field: "mac_address",
+          editor: canWrite ? "input" : false,
+          editable: (cell) => !cell.getRow().getData().is_default,
+          formatter: (cell) => {
+            if (cell.getRow().getData().is_default) {
+              return "*";
+            }
+            return dnsAddRowHintFormatter(cell, "00:50:56:aa:bb:cc");
+          },
+          minWidth: 170,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "Kickstart",
+          field: "kickstart_id",
+          editor: canWrite ? "list" : false,
+          editorParams: { values: kickstartValues },
+          formatter: (cell) => kickstartValues[cell.getValue()] || "No Kickstart",
+          minWidth: 180,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "Installer ISO",
+          field: "installer_iso_path",
+          editor: canWrite ? "list" : false,
+          editorParams: { values: isoValues, autocomplete: true },
+          formatter: (cell) => isoValues[cell.getValue()] || "No ISO selected",
+          minWidth: 320,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "Enabled",
+          field: "enabled",
+          formatter: "tickCross",
+          editor: canWrite ? "tickCross" : false,
+          hozAlign: "center",
+          width: 100,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "",
+          field: "actions",
+          headerSort: false,
+          hozAlign: "center",
+          width: 90,
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (!canWrite || data.is_new || data.is_default) {
+              return "";
+            }
+            return '<button class="button tiny danger" type="button">Delete</button>';
+          },
+          cellClick: (event, cell) => deleteEsxiHost(cell.getRow(), csrf),
+        },
+      ],
+      rowFormatter: (row) => {
+        const data = row.getData();
+        row.getElement().classList.toggle("new-record-row", Boolean(data.is_new));
+        row.getElement().classList.toggle("managed-record-row", Boolean(data.is_default));
+      },
+    });
+    if (fallback) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    showEsxiHostError(error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
+  }
+}
+
 function initializeHostsFileEditor() {
   document.querySelectorAll(".hosts-file-input").forEach((input) => {
     if (!(input instanceof HTMLInputElement)) {
@@ -6117,12 +6372,12 @@ function initializeEsxiIsoUploadForms() {
         if (xhr.status >= 200 && xhr.status < 300) {
           const uploadedName = payload.name || file.name;
           setStatus(`${uploadedName} uploaded. Refreshing ISO choices...`, "saved");
-          rememberActiveTab("labfoundry:esxi-pxe:active-tab", "esxi-pxe-hosts-panel");
+          rememberActiveTab("labfoundry:esxi-pxe:active-tab", "esxi-pxe-isos-panel");
           if (window.location.pathname === "/esxi-pxe") {
-            window.location.hash = "esxi-pxe-hosts-panel";
+            window.location.hash = "esxi-pxe-isos-panel";
             window.location.reload();
           } else {
-            window.location.href = "/esxi-pxe#esxi-pxe-hosts-panel";
+            window.location.href = "/esxi-pxe#esxi-pxe-isos-panel";
           }
           return;
         }
@@ -6564,6 +6819,7 @@ document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpReservationsTable);
+document.addEventListener("DOMContentLoaded", initializeEsxiPxeHostsTable);
 document.addEventListener("DOMContentLoaded", initializeCaProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeCaCertificatesTable);
 document.addEventListener("DOMContentLoaded", initializeCaSettings);
