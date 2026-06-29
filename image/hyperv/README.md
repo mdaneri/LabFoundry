@@ -67,7 +67,11 @@ failure time, use `-PackerOnError ask`.
 The wrapper leaves pip's index configuration untouched by default. When the
 builder can reach Python packages only through an internal mirror, add
 `-PipGlobalIndex` or `-PipGlobalIndexUrl`; each option is optional and only
-sets the matching site-level pip key when non-empty:
+sets the matching pip key when non-empty. Provisioning writes the resulting
+configuration to both `/etc/pip.conf` and the LabFoundry virtual environment's
+`pip.conf`, and exports `PIP_INDEX_URL` for the provisioning process before
+installing or upgrading Python packages. Virtualenv pip commands therefore use
+the same mirror as system pip:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `

@@ -15,9 +15,31 @@ LABFOUNDRY_PIP_GLOBAL_INDEX_URL="${LABFOUNDRY_PIP_GLOBAL_INDEX_URL:-}"
 BOOTSTRAP_USERNAME="${LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME:-admin}"
 BOOTSTRAP_PASSWORD="${LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD:-}"
 BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/usr/bin/pwsh}"
+PIP_CACHE_DIR="${PIP_CACHE_DIR:-/var/cache/labfoundry-pip}"
 
 log_step() {
   printf '\n==> LabFoundry appliance: %s\n' "$1"
+}
+
+write_pip_config() {
+  path="$1"
+
+  if [ -z "$LABFOUNDRY_PIP_GLOBAL_INDEX" ] && [ -z "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL" ]; then
+    return
+  fi
+
+  install -d -o root -g root -m 0755 "$(dirname "$path")"
+  {
+    printf '[global]\n'
+    if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX" ]; then
+      printf 'index = %s\n' "$LABFOUNDRY_PIP_GLOBAL_INDEX"
+    fi
+    if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL" ]; then
+      printf 'index-url = %s\n' "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"
+    fi
+    printf 'cache-dir = %s\n' "$PIP_CACHE_DIR"
+  } >"$path"
+  chmod 0644 "$path"
 }
 
 if [ -z "$BOOTSTRAP_PASSWORD" ]; then
@@ -120,15 +142,15 @@ rsync -a --delete \
 install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME/bin"
 
 log_step "installing LabFoundry Python environment"
-if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX" ]; then
-  python3 -m pip config --site set global.index "$LABFOUNDRY_PIP_GLOBAL_INDEX"
-fi
-
+install -d -o root -g root -m 0755 "$PIP_CACHE_DIR"
+write_pip_config /etc/pip.conf
+export PIP_CACHE_DIR
 if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL" ]; then
-  python3 -m pip config --site set global.index-url "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"
+  export PIP_INDEX_URL="$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"
 fi
 
 python3 -m venv "$LABFOUNDRY_HOME/.venv"
+write_pip_config "$LABFOUNDRY_HOME/.venv/pip.conf"
 "$LABFOUNDRY_HOME/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 "$LABFOUNDRY_HOME/.venv/bin/python" -m pip install "$LABFOUNDRY_HOME"
 
