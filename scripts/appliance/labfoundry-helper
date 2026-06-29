@@ -53,9 +53,13 @@ DNSMASQ_SERVICE_DROPIN_PATH = DNSMASQ_SERVICE_DROPIN_DIR / "labfoundry.conf"
 ESXI_PXE_APPLY_DIR = Path("/var/lib/labfoundry/apply/esxi-pxe")
 ESXI_PXE_HTTP_BASE = Path("/var/lib/labfoundry/pxe/http/esxi")
 ESXI_PXE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/ks")
+ESXI_PXE_IMAGE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/images")
 ESXI_IPXE_HTTP_SCRIPT_PATH = ESXI_PXE_HTTP_BASE / "boot.ipxe"
 ESXI_TFTP_ROOT = Path("/var/lib/labfoundry/pxe/tftp")
 ESXI_INSTALLER_ISO_ROOT = Path("/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST")
+ESXI_PXE_NGINX_SITE_PATH = Path("/etc/labfoundry/nginx/sites.d/esxi-pxe.conf")
+ESXI_PXE_SCHEMA_VERSION = 2
+ESXI_PXE_DEFAULT_HTTP_PORT = 8080
 PXE_BOOT_BINARY_DIRS = [
     Path("/usr/share/ipxe"),
     Path("/usr/lib/ipxe"),
@@ -585,16 +589,22 @@ def _load_esxi_pxe_manifest(path: Path) -> dict:
         raise ValueError(f"ESXi PXE manifest is not valid JSON: {exc}") from exc
     if payload.get("kind") != "labfoundry-esxi-pxe":
         raise ValueError("ESXi PXE manifest kind is invalid")
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") != ESXI_PXE_SCHEMA_VERSION:
         raise ValueError("ESXi PXE manifest schema version is not supported")
     if Path(str(payload.get("http_root") or "")).resolve() != ESXI_PXE_HTTP_ROOT:
         raise ValueError(f"ESXi PXE http_root must be {ESXI_PXE_HTTP_ROOT}")
+    if Path(str(payload.get("http_base") or ESXI_PXE_HTTP_BASE)).resolve() != ESXI_PXE_HTTP_BASE.resolve():
+        raise ValueError(f"ESXi PXE http_base must be {ESXI_PXE_HTTP_BASE}")
+    if Path(str(payload.get("image_http_root") or ESXI_PXE_IMAGE_HTTP_ROOT)).resolve() != ESXI_PXE_IMAGE_HTTP_ROOT.resolve():
+        raise ValueError(f"ESXi PXE image_http_root must be {ESXI_PXE_IMAGE_HTTP_ROOT}")
     if Path(str(payload.get("installer_iso_root") or ESXI_INSTALLER_ISO_ROOT)).resolve() != ESXI_INSTALLER_ISO_ROOT.resolve():
         raise ValueError(f"ESXi PXE installer_iso_root must be {ESXI_INSTALLER_ISO_ROOT}")
     if not isinstance(payload.get("kickstarts"), list):
         raise ValueError("ESXi PXE manifest kickstarts must be a list")
     if not isinstance(payload.get("hosts"), list):
         raise ValueError("ESXi PXE manifest hosts must be a list")
+    if not isinstance(payload.get("artifacts"), list):
+        raise ValueError("ESXi PXE manifest artifacts must be a list")
     return payload
 
 
@@ -631,28 +641,35 @@ def _esxi_pxe_boot_errors(boot: dict) -> list[str]:
             ip_address(listen_address)
         except ValueError:
             errors.append("ESXi PXE listen_address must include at least one IP address.")
+        try:
+            http_port = int(boot.get("http_port") or ESXI_PXE_DEFAULT_HTTP_PORT)
+            if http_port < 1 or http_port > 65535:
+                errors.append("ESXi PXE HTTP port must be between 1 and 65535.")
+        except (TypeError, ValueError):
+            errors.append("ESXi PXE HTTP port must be an integer.")
         tftp_root = Path(str(boot.get("tftp_root") or "")).resolve()
         if tftp_root != ESXI_TFTP_ROOT.resolve():
             errors.append(f"ESXi PXE TFTP root must be {ESXI_TFTP_ROOT}.")
-        for key, label in (("bios_bootfile", "BIOS bootfile"), ("uefi_bootfile", "UEFI bootfile"), ("ipxe_script_name", "iPXE script name")):
+        for key, label in (
+            ("bios_bootfile", "BIOS bootfile"),
+            ("uefi_bootfile", "UEFI bootfile"),
+            ("bios_second_stage_bootfile", "BIOS second-stage bootfile"),
+            ("uefi_second_stage_bootfile", "UEFI second-stage bootfile"),
+            ("native_uefi_bootfile", "native UEFI bootfile"),
+        ):
             filename = str(boot.get(key) or "")
             if not _simple_pxe_filename(filename):
                 errors.append(f"{label} must be a simple filename.")
-        for key, label in (("bios_bootfile", "BIOS PXE bootfile"), ("uefi_bootfile", "UEFI PXE bootfile")):
+        for key, label in (
+            ("bios_bootfile", "BIOS PXE bootfile"),
+            ("uefi_bootfile", "UEFI PXE bootfile"),
+            ("bios_second_stage_bootfile", "BIOS second-stage bootfile"),
+        ):
             filename = str(boot.get(key) or "")
             if _simple_pxe_filename(filename) and _find_pxe_boot_binary(filename) is None:
                 errors.append(f"{label} {filename} was not found. Install the Photon syslinux/ipxe boot packages or stage the expected bootloader package.")
-        tftp_script = str(boot.get("tftp_ipxe_script") or "")
-        if not tftp_script.startswith("#!ipxe"):
-            errors.append("TFTP iPXE chain script must start with #!ipxe.")
-        http_script = str(boot.get("ipxe_script") or "")
-        if not http_script.startswith("#!ipxe"):
-            errors.append("HTTP iPXE script must start with #!ipxe.")
-        generated_path = Path(str(boot.get("http_ipxe_generated_path") or ESXI_IPXE_HTTP_SCRIPT_PATH)).resolve()
-        if generated_path != ESXI_IPXE_HTTP_SCRIPT_PATH.resolve():
-            errors.append(f"HTTP iPXE generated path must be {ESXI_IPXE_HTTP_SCRIPT_PATH}.")
     if native_uefi_http_enabled:
-        url = str(boot.get("native_uefi_http_url") or "").strip()
+        url = str(boot.get("native_uefi_http_url") or boot.get("effective_native_uefi_http_url") or "").strip()
         if not re.fullmatch(r"https?://[^\s\"'<>]+", url):
             errors.append("Native UEFI HTTP URL must be an absolute HTTP or HTTPS URL.")
     return errors
@@ -703,13 +720,195 @@ def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
                 errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} installer ISO must be under {iso_root}.")
             elif selected_iso.suffix.lower() != ".iso":
                 errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} installer ISO must be a .iso file.")
-            elif not selected_iso.is_file():
+            elif not selected_iso.is_file() and not selected_iso.is_dir():
                 errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} installer ISO is missing: {selected_iso}.")
+    for artifact in payload.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            errors.append("ESXi PXE artifact entry must be an object.")
+            continue
+        label = str(artifact.get("hostname") or artifact.get("mac_address") or "unknown")
+        mac_key = str(artifact.get("mac_key") or "")
+        if not re.fullmatch(r"01(?:-[0-9a-f]{2}){6}", mac_key):
+            errors.append(f"Host {label} MAC key is invalid.")
+        image_key = str(artifact.get("image_key") or "")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,160}", image_key):
+            errors.append(f"Host {label} image key is invalid.")
+        installer_iso_path = str(artifact.get("installer_iso_path") or "").strip()
+        if not installer_iso_path:
+            errors.append(f"Host {label} artifact is missing installer ISO path.")
+        else:
+            selected_iso = Path(installer_iso_path)
+            if not selected_iso.is_absolute():
+                selected_iso = iso_root / installer_iso_path
+            selected_iso = selected_iso.resolve()
+            if selected_iso != iso_root and iso_root not in selected_iso.parents:
+                errors.append(f"Host {label} artifact installer ISO must be under {iso_root}.")
+            elif selected_iso.suffix.lower() != ".iso":
+                errors.append(f"Host {label} artifact installer ISO must be a .iso file.")
+            elif not selected_iso.is_file() and not selected_iso.is_dir():
+                errors.append(f"Host {label} artifact installer ISO is missing: {selected_iso}.")
+        for key, base, description in [
+            ("image_generated_path", ESXI_PXE_IMAGE_HTTP_ROOT, "image generated path"),
+            ("pxelinux_config_path", ESXI_TFTP_ROOT / "pxelinux.cfg", "PXELINUX config path"),
+            ("uefi_tftp_boot_cfg_path", ESXI_TFTP_ROOT, "UEFI TFTP boot.cfg path"),
+            ("http_boot_cfg_path", ESXI_PXE_HTTP_BASE, "HTTP boot.cfg path"),
+        ]:
+            value = str(artifact.get(key) or "")
+            if not value:
+                errors.append(f"Host {label} artifact {description} is required.")
+                continue
+            resolved = Path(value).resolve()
+            resolved_base = base.resolve()
+            if resolved != resolved_base and resolved_base not in resolved.parents:
+                errors.append(f"Host {label} artifact {description} must stay under {base}.")
     return errors
+
+
+def _remove_cdromboot(options: str) -> list[str]:
+    return [item for item in options.split() if item != "cdromBoot"]
+
+
+def _render_esxi_boot_cfg(source_text: str, *, prefix_url: str, kickstart_url: str = "") -> str:
+    lines = source_text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    rendered: list[str] = []
+    saw_prefix = False
+    saw_kernelopt = False
+    kernel_index = -1
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            rendered.append(raw_line)
+            continue
+        key, value = stripped.split("=", 1)
+        lower_key = key.lower()
+        if lower_key == "prefix":
+            rendered.append(f"prefix={prefix_url}")
+            saw_prefix = True
+        elif lower_key in {"kernel", "modules"}:
+            separator = "---" if lower_key == "modules" else None
+            if separator:
+                values = [item.lstrip("/") for item in value.split(separator)]
+                rendered.append(f"{key}={separator.join(values)}")
+            else:
+                rendered.append(f"{key}={value.lstrip('/')}")
+            if lower_key == "kernel":
+                kernel_index = len(rendered) - 1
+        elif lower_key == "kernelopt":
+            options = _remove_cdromboot(value)
+            if kickstart_url and not any(item.startswith("ks=") for item in options):
+                options.append(f"ks={kickstart_url}")
+            rendered.append(f"kernelopt={' '.join(options)}".rstrip())
+            saw_kernelopt = True
+        else:
+            rendered.append(raw_line)
+    if not saw_prefix:
+        insert_at = 0
+        rendered.insert(insert_at, f"prefix={prefix_url}")
+        if kernel_index >= insert_at:
+            kernel_index += 1
+    if not saw_kernelopt:
+        line = f"kernelopt=ks={kickstart_url}" if kickstart_url else "kernelopt="
+        if kernel_index >= 0:
+            rendered.insert(kernel_index + 1, line)
+        else:
+            rendered.append(line)
+    return "\n".join(rendered).rstrip() + "\n"
+
+
+def _safe_relative_path(path: Path, base: Path) -> str:
+    return path.resolve().relative_to(base.resolve()).as_posix()
+
+
+def _find_under(root: Path, names: list[str]) -> Path | None:
+    wanted = {name.lower() for name in names}
+    for candidate in root.rglob("*"):
+        if candidate.is_file() and candidate.name.lower() in wanted:
+            return candidate
+    return None
+
+
+def _copy_tree_contents(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for child in source.iterdir():
+        target = destination / child.name
+        if child.is_dir():
+            shutil.copytree(child, target, dirs_exist_ok=True)
+        elif child.is_file():
+            shutil.copy2(child, target)
+
+
+def _copy_installer_iso_contents(source: Path, destination: Path) -> None:
+    if source.is_dir():
+        _copy_tree_contents(source, destination)
+        return
+    mount = shutil.which("mount")
+    umount = shutil.which("umount")
+    if mount is None or umount is None:
+        raise RuntimeError("mount and umount are required to extract ESXi installer ISOs.")
+    with tempfile.TemporaryDirectory(prefix="labfoundry-esxi-iso-") as temp_dir:
+        mount_point = Path(temp_dir)
+        mounted = _run([mount, "-o", "loop,ro", str(source), str(mount_point)])
+        print(mounted.stdout, end="")
+        print(mounted.stderr, end="", file=sys.stderr)
+        if mounted.returncode != 0:
+            raise RuntimeError(f"failed to mount ESXi installer ISO {source}")
+        try:
+            _copy_tree_contents(mount_point, destination)
+        finally:
+            unmounted = _run([umount, str(mount_point)])
+            print(unmounted.stdout, end="")
+            print(unmounted.stderr, end="", file=sys.stderr)
+            if unmounted.returncode != 0:
+                raise RuntimeError(f"failed to unmount ESXi installer ISO {source}")
+
+
+def _render_pxelinux_config(*, kernel_path: str, boot_cfg_path: str) -> str:
+    return "\n".join(
+        [
+            "DEFAULT install",
+            "NOHALT 1",
+            "LABEL install",
+            f"  KERNEL {kernel_path}",
+            f"  APPEND -c {boot_cfg_path}",
+            "  IPAPPEND 2",
+            "",
+        ]
+    )
+
+
+def _write_text(path: Path, text: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(mode)
+
+
+def _copy_file(path: Path, target: Path, mode: int = 0o644) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, target)
+    target.chmod(mode)
+
+
+def _esxi_pxe_nginx_config(port: int) -> str:
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "server {",
+            f"    listen {port};",
+            "    server_name _;",
+            "    location /pxe/esxi/ {",
+            f"        alias {ESXI_PXE_HTTP_BASE}/;",
+            "        autoindex off;",
+            "    }",
+            "}",
+            "",
+        ]
+    )
 
 
 def _apply_esxi_pxe_manifest(payload: dict) -> int:
     ESXI_PXE_HTTP_ROOT.mkdir(parents=True, exist_ok=True)
+    ESXI_PXE_HTTP_BASE.mkdir(parents=True, exist_ok=True)
+    ESXI_PXE_IMAGE_HTTP_ROOT.mkdir(parents=True, exist_ok=True)
     ESXI_INSTALLER_ISO_ROOT.mkdir(parents=True, exist_ok=True)
     try:
         shutil.chown(ESXI_INSTALLER_ISO_ROOT, user="labfoundry", group="labfoundry")
@@ -718,6 +917,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
     enabled_ids: set[str] = set()
     generated_files: list[str] = []
     generated_tftp_files: list[str] = []
+    generated_images: list[str] = []
     boot = payload.get("boot") or {}
     for row in payload.get("kickstarts", []):
         kickstart_id = str(int(row["id"]))
@@ -732,42 +932,121 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             path.unlink(missing_ok=True)
     if boot.get("enabled"):
         ESXI_TFTP_ROOT.mkdir(parents=True, exist_ok=True)
-        ESXI_PXE_HTTP_BASE.mkdir(parents=True, exist_ok=True)
         try:
             shutil.chown(ESXI_TFTP_ROOT, user="labfoundry", group="labfoundry")
         except (LookupError, PermissionError, OSError):
             pass
-        for key in ("bios_bootfile", "uefi_bootfile"):
+        for key in ("bios_bootfile", "uefi_bootfile", "bios_second_stage_bootfile"):
             filename = str(boot.get(key) or "")
             source = _find_pxe_boot_binary(filename)
             if source is None:
                 raise RuntimeError(f"PXE boot binary is missing: {filename}")
             target = ESXI_TFTP_ROOT / filename
-            shutil.copy2(source, target)
-            target.chmod(0o644)
+            _copy_file(source, target)
             generated_tftp_files.append(str(target))
-        tftp_script_path = ESXI_TFTP_ROOT / str(boot.get("ipxe_script_name") or "esxi.ipxe")
-        tftp_script_path.write_text(str(boot.get("tftp_ipxe_script") or ""), encoding="utf-8")
-        tftp_script_path.chmod(0o644)
-        generated_tftp_files.append(str(tftp_script_path))
-        ESXI_IPXE_HTTP_SCRIPT_PATH.write_text(str(boot.get("ipxe_script") or ""), encoding="utf-8")
-        ESXI_IPXE_HTTP_SCRIPT_PATH.chmod(0o644)
-        generated_files.append(str(ESXI_IPXE_HTTP_SCRIPT_PATH))
+        staged_images: set[str] = set()
+        first_host_artifact: dict | None = None
+        first_mboot_efi: Path | None = None
+        first_crypto64: Path | None = None
+        for artifact in payload.get("artifacts", []):
+            image_key = str(artifact["image_key"])
+            image_root = Path(str(artifact["image_generated_path"])).resolve()
+            if image_key not in staged_images:
+                source_iso = Path(str(artifact["installer_iso_path"])).resolve()
+                if image_root.exists():
+                    shutil.rmtree(image_root)
+                image_root.mkdir(parents=True, exist_ok=True)
+                _copy_installer_iso_contents(source_iso, image_root)
+                staged_images.add(image_key)
+                generated_images.append(str(image_root))
+            boot_cfg_source = _find_under(image_root, ["boot.cfg"])
+            mboot_c32 = _find_under(image_root, ["mboot.c32"])
+            mboot_efi = _find_under(image_root, ["bootx64.efi", "mboot.efi"])
+            crypto64 = _find_under(image_root, ["crypto64.efi"])
+            missing = []
+            if boot_cfg_source is None:
+                missing.append("boot.cfg")
+            if mboot_c32 is None:
+                missing.append("mboot.c32")
+            if mboot_efi is None:
+                missing.append("mboot.efi/bootx64.efi")
+            if missing:
+                raise RuntimeError(f"ESXi installer image {image_key} is missing {', '.join(missing)}")
+            tftp_mboot_c32 = ESXI_TFTP_ROOT / "images" / image_key / "mboot.c32"
+            _copy_file(mboot_c32, tftp_mboot_c32)
+            generated_tftp_files.append(str(tftp_mboot_c32))
+            if first_mboot_efi is None:
+                first_mboot_efi = mboot_efi
+            if first_crypto64 is None and crypto64 is not None:
+                first_crypto64 = crypto64
+            boot_cfg = _render_esxi_boot_cfg(
+                boot_cfg_source.read_text(encoding="utf-8"),
+                prefix_url=str(artifact.get("image_http_url") or ""),
+                kickstart_url=str(artifact.get("kickstart_url") or ""),
+            )
+            tftp_boot_cfg = Path(str(artifact["uefi_tftp_boot_cfg_path"]))
+            http_boot_cfg = Path(str(artifact["http_boot_cfg_path"]))
+            _write_text(tftp_boot_cfg, boot_cfg)
+            _write_text(http_boot_cfg, boot_cfg)
+            generated_tftp_files.append(str(tftp_boot_cfg))
+            generated_files.append(str(http_boot_cfg))
+            pxelinux_config = Path(str(artifact["pxelinux_config_path"]))
+            pxelinux_text = _render_pxelinux_config(
+                kernel_path=_safe_relative_path(tftp_mboot_c32, ESXI_TFTP_ROOT),
+                boot_cfg_path=_safe_relative_path(tftp_boot_cfg, ESXI_TFTP_ROOT),
+            )
+            _write_text(pxelinux_config, pxelinux_text)
+            generated_tftp_files.append(str(pxelinux_config))
+            if first_host_artifact is None:
+                first_host_artifact = artifact
+                _write_text(ESXI_TFTP_ROOT / "boot.cfg", boot_cfg)
+                _write_text(ESXI_PXE_HTTP_BASE / "boot.cfg", boot_cfg)
+                _write_text(ESXI_TFTP_ROOT / "pxelinux.cfg" / "default", pxelinux_text)
+                generated_tftp_files.extend([str(ESXI_TFTP_ROOT / "boot.cfg"), str(ESXI_TFTP_ROOT / "pxelinux.cfg" / "default")])
+                generated_files.append(str(ESXI_PXE_HTTP_BASE / "boot.cfg"))
+        if first_mboot_efi is not None:
+            uefi_second_stage = str(boot.get("uefi_second_stage_bootfile") or "mboot.efi")
+            native_bootfile = str(boot.get("native_uefi_bootfile") or "mboot.efi")
+            for target in {ESXI_TFTP_ROOT / uefi_second_stage, ESXI_PXE_HTTP_BASE / native_bootfile}:
+                _copy_file(first_mboot_efi, target)
+                if target.is_relative_to(ESXI_TFTP_ROOT):
+                    generated_tftp_files.append(str(target))
+                else:
+                    generated_files.append(str(target))
+        if first_crypto64 is not None:
+            for target in {ESXI_TFTP_ROOT / "crypto64.efi", ESXI_PXE_HTTP_BASE / "crypto64.efi"}:
+                _copy_file(first_crypto64, target)
+                if target.is_relative_to(ESXI_TFTP_ROOT):
+                    generated_tftp_files.append(str(target))
+                else:
+                    generated_files.append(str(target))
+        for path in ESXI_PXE_IMAGE_HTTP_ROOT.iterdir():
+            if path.is_dir() and path.name not in staged_images:
+                shutil.rmtree(path)
+        http_port = int(boot.get("http_port") or ESXI_PXE_DEFAULT_HTTP_PORT)
+        site_result = _install_nginx_site(ESXI_PXE_NGINX_SITE_PATH, _esxi_pxe_nginx_config(http_port))
+        if site_result != 0:
+            return site_result
     else:
         for filename in (
             str(boot.get("bios_bootfile") or "undionly.kpxe"),
             str(boot.get("uefi_bootfile") or "snponly.efi"),
-            str(boot.get("ipxe_script_name") or "esxi.ipxe"),
+            str(boot.get("bios_second_stage_bootfile") or "pxelinux.0"),
+            str(boot.get("uefi_second_stage_bootfile") or "mboot.efi"),
+            str(boot.get("native_uefi_bootfile") or "mboot.efi"),
+            "crypto64.efi",
         ):
             if _simple_pxe_filename(filename):
                 (ESXI_TFTP_ROOT / filename).unlink(missing_ok=True)
-        ESXI_IPXE_HTTP_SCRIPT_PATH.unlink(missing_ok=True)
+                (ESXI_PXE_HTTP_BASE / filename).unlink(missing_ok=True)
+        _remove_nginx_site(ESXI_PXE_NGINX_SITE_PATH)
     print(
         json.dumps(
             {
                 "esxi_pxe": "apply complete",
                 "generated_files": generated_files,
                 "generated_tftp_files": generated_tftp_files,
+                "generated_images": generated_images,
                 "enabled_kickstarts": len(enabled_ids),
             },
             sort_keys=True,

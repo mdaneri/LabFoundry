@@ -94,21 +94,22 @@
           <span class="field-label"><span>Native UEFI HTTP</span><button class="help-icon" type="button" data-help="Adds DHCP matching for UEFI HTTPClient firmware and returns the configured absolute HTTP boot URL. This is separate from iPXE script chaining.">i</button></span>
           <input class="switch-input" type="checkbox" name="native_uefi_http_enabled" {{ "checked" if esxi_pxe_boot.native_uefi_http_enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}><span class="switch-track" aria-hidden="true"></span>
         </label>
+        <label>
+          <span class="field-label"><span>PXE HTTP port</span><button class="help-icon" type="button" data-help="TCP port for the generated ESXi installer HTTP endpoint. Global ESXi PXE apply installs the static listener and Firewall apply exposes the selected bind targets.">i</button></span>
+          <input type="number" name="http_port" min="1" max="65535" value="{{ esxi_pxe_boot.http_port }}" {{ "disabled" if not esxi_can_write else "" }}>
+        </label>
       </div>
       <label>
         <span class="field-label"><span>UEFI HTTP URL</span><button class="help-icon" type="button" data-help="Absolute bootloader URL returned only to native UEFI HTTP clients, such as an ESXi UEFI HTTP bootloader staged under the PXE HTTP root.">i</button></span>
-        <input name="native_uefi_http_url" value="{{ esxi_pxe_boot.native_uefi_http_url }}" placeholder="http://{{ esxi_pxe_primary_listen_address or '192.168.49.1' }}/pxe/esxi/uefi/bootx64.efi" {{ "disabled" if not esxi_can_write else "" }}>
-      </label>
-      <label>
-        <span class="field-label"><span>HTTP iPXE script</span><button class="help-icon" type="button" data-help="Script served at /pxe/esxi/boot.ipxe after BIOS or UEFI iPXE clients chain from TFTP. Edit this to boot staged ESXi installer files over HTTP.">i</button></span>
-        <textarea class="monospace-textarea" name="ipxe_script" rows="8" data-codemirror-editor data-codemirror-language="shell" {{ "disabled" if not esxi_can_write else "" }}>{{ esxi_pxe_boot.ipxe_script }}</textarea>
+        <input name="native_uefi_http_url" value="{{ esxi_pxe_boot.native_uefi_http_url }}" placeholder="{{ esxi_pxe_boot.effective_native_uefi_http_url or 'http://<pxe-ip>:8080/pxe/esxi/mboot.efi' }}" {{ "disabled" if not esxi_can_write else "" }}>
       </label>
       <div class="settings-list compact-settings-list">
         <div><span>TFTP root</span><strong>{{ esxi_pxe_boot.tftp_root }}</strong></div>
+        <div><span>HTTP endpoint</span><strong>{{ esxi_pxe_boot.http_base_url or "listen address required" }}</strong></div>
         <div><span>BIOS bootfile</span><strong>{{ esxi_pxe_boot.bios_bootfile }}</strong></div>
         <div><span>UEFI bootfile</span><strong>{{ esxi_pxe_boot.uefi_bootfile }}</strong></div>
-        <div><span>HTTP iPXE path</span><strong>{{ esxi_pxe_boot.http_ipxe_path }}</strong></div>
-        <div><span>TFTP chain script</span><strong>{{ esxi_pxe_boot.ipxe_script_name }}</strong></div>
+        <div><span>BIOS second stage</span><strong>{{ esxi_pxe_boot.bios_second_stage_bootfile }}</strong></div>
+        <div><span>UEFI second stage</span><strong>{{ esxi_pxe_boot.uefi_second_stage_bootfile }}</strong></div>
         <div><span>Bind target</span><strong>{{ esxi_pxe_bind_label }}</strong></div>
       </div>
       {% if esxi_can_write %}
@@ -323,6 +324,22 @@ reboot
       </div>
 
       <div id="esxi-pxe-preview-panel" class="tab-panel" role="tabpanel" hidden>
+        {% if esxi_pxe_artifacts %}
+          <table class="data-table compact">
+            <thead><tr><th>Host</th><th>PXELINUX</th><th>UEFI boot.cfg</th><th>Kickstart URL</th><th>Image URL</th></tr></thead>
+            <tbody>
+              {% for artifact in esxi_pxe_artifacts %}
+                <tr>
+                  <td>{{ artifact.hostname }}</td>
+                  <td><code>{{ artifact.pxelinux_config_path }}</code></td>
+                  <td><code>{{ artifact.uefi_tftp_boot_cfg_path }}</code></td>
+                  <td><code>{{ artifact.kickstart_url or "interactive installer" }}</code></td>
+                  <td><code>{{ artifact.image_http_url }}</code></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
         <div class="terminal-note">
           <strong>{{ esxi_pxe_config_path }}</strong>
           <code class="language-json" data-esxi-pxe-preview>{{ esxi_pxe_preview }}</code>

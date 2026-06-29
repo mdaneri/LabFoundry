@@ -791,8 +791,10 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert 'field-label"><span>TFTP root' not in page.text
     assert 'field-label"><span>BIOS bootfile' not in page.text
     assert 'field-label"><span>UEFI bootfile' not in page.text
-    assert "<span>BIOS bootfile</span><strong>pxelinux.0</strong>" in page.text
-    assert "<span>UEFI bootfile</span><strong>bootx64.efi</strong>" in page.text
+    assert "<span>BIOS bootfile</span><strong>undionly.kpxe</strong>" in page.text
+    assert "<span>UEFI bootfile</span><strong>snponly.efi</strong>" in page.text
+    assert "PXE HTTP port" in page.text
+    assert "HTTP endpoint" in page.text
     assert 'class="left-stack"' in page.text
     assert page.text.index("<h2>Boot Service</h2>") < page.text.index("<h2>ESXi Kickstarts</h2>")
     css = client.get("/static/app.css").text
@@ -811,11 +813,11 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
             "listen_addresses_present": "1",
             "listen_interfaces_present": "1",
             "tftp_root": "/var/lib/labfoundry/pxe/tftp",
-            "bios_bootfile": "pxelinux.0",
-            "uefi_bootfile": "bootx64.efi",
+            "http_port": "8080",
+            "bios_bootfile": "undionly.kpxe",
+            "uefi_bootfile": "snponly.efi",
             "native_uefi_http_enabled": "on",
-            "native_uefi_http_url": "http://192.168.50.1/pxe/esxi/uefi/bootx64.efi",
-            "ipxe_script": "#!ipxe\necho LabFoundry test\nshell\n",
+            "native_uefi_http_url": "",
         },
         follow_redirects=False,
     )
@@ -826,6 +828,8 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         assert boot["enabled"] is True
         assert boot["hostname"] == "esxi-pxe.labfoundry.internal"
         assert boot["listen_address"] == "192.168.50.1"
+        assert boot["http_port"] == 8080
+        assert boot["effective_native_uefi_http_url"] == "http://192.168.50.1:8080/pxe/esxi/mboot.efi"
         assert boot["native_uefi_http_enabled"] is True
         record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe.labfoundry.internal")).scalar_one()
         assert record.address == "192.168.50.1"
@@ -836,13 +840,17 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         dns_preview = dnsmasq_context(db)["config_preview"]
         assert "enable-tftp" in dns_preview
         assert "dhcp-option=option:66,esxi-pxe.labfoundry.internal" in dns_preview
-        assert "dhcp-boot=tag:efi-x86_64,bootx64.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
-        assert "dhcp-boot=tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
-        assert "dhcp-boot=tag:uefi-http,http://192.168.50.1/pxe/esxi/uefi/bootx64.efi" in dns_preview
+        assert "dhcp-boot=tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dns_preview
         manifest = json.loads(esxi_pxe_context(db)["esxi_pxe_manifest"])
+        assert manifest["schema_version"] == 2
         assert manifest["boot"]["enabled"] is True
         assert manifest["boot"]["hostname"] == "esxi-pxe.labfoundry.internal"
-        assert manifest["boot"]["ipxe_script"].startswith("#!ipxe")
+        assert manifest["boot"]["http_port"] == 8080
+        assert manifest["boot"]["bios_second_stage_bootfile"] == "pxelinux.0"
 
 
 def test_esxi_kickstarts_round_trip_in_settings_archive(client):

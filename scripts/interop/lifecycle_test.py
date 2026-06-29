@@ -615,11 +615,11 @@ def configure_esxi_pxe(client: HttpClient, args: argparse.Namespace) -> dict[str
         ("listen_addresses_present", "1"),
         ("listen_addresses", site_ip),
         ("tftp_root", "/var/lib/labfoundry/pxe/tftp"),
-        ("bios_bootfile", "pxelinux.0"),
-        ("uefi_bootfile", "bootx64.efi"),
+        ("http_port", "8080"),
+        ("bios_bootfile", "undionly.kpxe"),
+        ("uefi_bootfile", "snponly.efi"),
         ("native_uefi_http_enabled", "on"),
-        ("native_uefi_http_url", f"http://{site_ip}/pxe/esxi/uefi/bootx64.efi"),
-        ("ipxe_script", "#!ipxe\necho LabFoundry PXE lifecycle smoke\nshell\n"),
+        ("native_uefi_http_url", f"http://{site_ip}:8080/pxe/esxi/mboot.efi"),
         ("csrf", csrf),
     ]
     status, response_body, _headers = client.request(

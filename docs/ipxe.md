@@ -1044,10 +1044,10 @@ For an automated ESX deployment system that supports multiple images and multipl
 
 | Object | Fields to track |
 | --- | --- |
-| ESX image | Version, ISO source, extracted HTTP/TFTP path, `mboot.efi` version, `boot.cfg` template. |
+| ESX image | Version, ISO source, extracted HTTP path, TFTP support path, `mboot.efi` version, `mboot.c32`, `boot.cfg` template. |
 | Kickstart file | Name, revision, database source of truth, rendered filesystem copy path, checksum. |
 | Host definition | Hostname, MAC address, boot mode, image ID, kickstart ID, DHCP reservation, DNS name, optional VLAN, DHCP boot options. |
-| Boot profile | Legacy PXELINUX, UEFI PXE/TFTP, iPXE HTTP, or native UEFI HTTP; maps to the correct DHCP `filename`, `next-server`, or `dhcp6.bootfile-url`. |
+| Boot profile | Legacy PXELINUX, UEFI PXE/TFTP, iPXE first-stage plus PXELINUX/`mboot.efi` second-stage, or native UEFI HTTP; maps to the correct DHCP `filename`, `next-server`, or `dhcp6.bootfile-url`. |
 
 Suggested generated artifacts per host:
 
@@ -1055,7 +1055,8 @@ Suggested generated artifacts per host:
 | --- | --- |
 | Legacy BIOS PXELINUX | `/tftpboot/pxelinux.cfg/01-aa-bb-cc-dd-ee-ff` |
 | UEFI PXE/TFTP | `/tftpboot/01-aa-bb-cc-dd-ee-ff/boot.cfg` |
-| iPXE HTTP | iPXE script plus HTTP `boot.cfg` pointing to HTTP `prefix=`. |
+| Legacy BIOS iPXE | First-stage `undionly.kpxe`, second-stage `pxelinux.0`, then host-specific PXELINUX config pointing to `mboot.c32` and `boot.cfg`. |
+| UEFI iPXE | First-stage `snponly.efi`, second-stage `mboot.efi`, then host-specific `boot.cfg` with HTTP `prefix=`. |
 | Native UEFI HTTP | `http://server/esx/01-aa-bb-cc-dd-ee-ff/boot.cfg` or default `boot.cfg`. |
 
 A rendered `boot.cfg` should usually set:

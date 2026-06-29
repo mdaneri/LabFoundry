@@ -224,9 +224,14 @@ The rendered config uses `/var/lib/labfoundry/dnsmasq/dhcp.leases` for DHCP
 leases, and the helper exposes only that allowlisted lease readback path.
 DHCP scopes should bind to access physical interfaces with IP CIDR or enabled
 VLAN interfaces with IP CIDR, not trunk or addressless physical interfaces.
-ESXi PXE boot settings add dnsmasq TFTP and DHCP bootfile options for legacy
-BIOS iPXE, UEFI iPXE, and optional native UEFI HTTP boot URLs. The generated
-TFTP and HTTP boot files are written only by global appliance apply.
+ESXi PXE boot settings add dnsmasq TFTP and DHCP bootfile options for the
+guide-aligned flow: first-stage `undionly.kpxe` or `snponly.efi`, then
+second-stage `pxelinux.0` or `mboot.efi` when DHCP detects iPXE. Optional
+native UEFI HTTP clients receive the generated absolute `mboot.efi` URL. The
+generated TFTP files, extracted ESXi installer HTTP tree, per-host `boot.cfg`
+files, and dedicated static PXE HTTP listener are written only by global
+appliance apply. Apply DNS/DHCP, ESXi PXE, and Firewall together when boot
+settings change.
 
 Certificate Authority desired state is LabFoundry CA-backed. Real
 `/appliance-apply` stages `/var/lib/labfoundry/apply/ca/labfoundry-ca.json`,

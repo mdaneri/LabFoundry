@@ -293,6 +293,7 @@ from labfoundry.app.services.vcf_offline_depot import (
 from labfoundry.app.services.esxi_pxe import (
     ESXI_PXE_DEFAULT_HOSTNAME,
     ESXI_PXE_DNS_RECORD_DESCRIPTION,
+    ESXI_PXE_HTTP_PORT,
     ESXI_PXE_STAGED_CONFIG_PATH,
     ESXI_IPXE_HTTP_SCRIPT_PATH,
     assign_kickstart_content,
@@ -300,6 +301,7 @@ from labfoundry.app.services.esxi_pxe import (
     content_hash,
     decode_kickstart_upload,
     esxi_pxe_boot_settings,
+    esxi_pxe_host_artifacts,
     generated_kickstart_path,
     host_to_dict,
     installer_iso_inventory,
@@ -1609,6 +1611,7 @@ def firewall_context(db: Session) -> dict:
         vcf_backup_settings=get_vcf_backup_settings_row(db),
         vcf_depot_settings=get_vcf_offline_depot_settings_row(db),
         vcf_registry_settings=get_vcf_private_registry_settings_row(db),
+        esxi_pxe_boot=esxi_pxe_boot_settings(db),
         interface_networks=interface_networks,
         source_groups=source_group_state["groups"],
         source_group_assignments=source_group_state["assignments"],
@@ -3050,7 +3053,10 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
     selected_boot_addresses = split_addresses(boot_settings.get("listen_address"))
     available_boot_addresses = available_service_listen_addresses(boot_settings.get("listen_address"), available_interfaces)
     if boot_settings["native_uefi_http_enabled"] and not boot_settings["native_uefi_http_url"]:
-        validation_warnings.append("Native UEFI HTTP boot is enabled, but no native UEFI HTTP boot URL is configured.")
+        if boot_settings.get("effective_native_uefi_http_url"):
+            validation_warnings.append("Native UEFI HTTP boot URL will be generated from the ESXi PXE HTTP endpoint.")
+        else:
+            validation_warnings.append("Native UEFI HTTP boot is enabled, but no listen address is available to generate the boot URL.")
     if boot_settings["enabled"]:
         if not boot_settings["hostname"]:
             validation_errors.append("ESXi PXE hostname is required when PXE/TFTP bootstrap is enabled.")
@@ -3060,6 +3066,8 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
             validation_errors.append("ESXi PXE hostname conflicts with an existing non-ESXi PXE DNS record.")
         elif boot_settings["hostname"].lower() not in managed_dns_fqdns(db):
             validation_warnings.append(f"ESXi PXE hostname {boot_settings['hostname']} is not present in managed DNS records.")
+        if not esxi_pxe_host_artifacts(hosts, boot_settings):
+            validation_warnings.append("ESXi PXE bootstrap is enabled, but no enabled host has an installer ISO selected.")
     return {
         "esxi_kickstarts": kickstarts,
         "esxi_kickstart_rows": [kickstart_to_dict(row, include_content=True) for row in kickstarts],
@@ -3075,6 +3083,7 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
         "esxi_pxe_available_addresses": available_boot_addresses,
         "esxi_pxe_bind_label": service_bind_label(boot_settings.get("listen_interface"), boot_settings.get("listen_address")),
         "esxi_pxe_primary_listen_address": primary_listen_address(boot_settings.get("listen_address")),
+        "esxi_pxe_artifacts": esxi_pxe_host_artifacts(hosts, boot_settings),
         "esxi_pxe_validation_errors": validation_errors,
         "esxi_pxe_validation_warnings": list(dict.fromkeys(validation_warnings)),
         "esxi_pxe_validation_by_id": validation_by_id,
@@ -7590,11 +7599,11 @@ def update_esxi_pxe_boot_settings_from_ui(
     listen_interface: str = Form(""),
     listen_address: str = Form(""),
     tftp_root: str = Form(...),
+    http_port: int = Form(ESXI_PXE_HTTP_PORT),
     bios_bootfile: str = Form(...),
     uefi_bootfile: str = Form(...),
     native_uefi_http_enabled: bool = Form(False),
     native_uefi_http_url: str = Form(""),
-    ipxe_script: str = Form(...),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -7619,11 +7628,11 @@ def update_esxi_pxe_boot_settings_from_ui(
             listen_interface=selected_interfaces,
             listen_address=selected_addresses,
             tftp_root=tftp_root,
+            http_port=http_port,
             bios_bootfile=bios_bootfile,
             uefi_bootfile=uefi_bootfile,
             native_uefi_http_enabled=native_uefi_http_enabled,
             native_uefi_http_url=native_uefi_http_url,
-            ipxe_script=ipxe_script,
         )
         dns_record_action = ensure_dns_for_esxi_pxe(db, boot, identity.username, previous_hostname=str(previous_boot.get("hostname") or ""))
         db.commit()
@@ -7645,7 +7654,7 @@ def update_esxi_pxe_boot_settings_from_ui(
         action="update_esxi_pxe_boot_settings",
         resource_type="esxi_pxe_boot",
         resource_id="default",
-        detail=f"enabled={boot['enabled']} native_uefi_http_enabled={boot['native_uefi_http_enabled']} tftp_root={boot['tftp_root']}",
+        detail=f"enabled={boot['enabled']} native_uefi_http_enabled={boot['native_uefi_http_enabled']} tftp_root={boot['tftp_root']} http_port={boot['http_port']}",
         request_id=request.state.request_id,
     )
     if request.headers.get("X-LabFoundry-Autosave") == "1":

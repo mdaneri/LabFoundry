@@ -423,6 +423,7 @@ def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[Fir
         vcf_backup_settings=get_vcf_backup_settings(db),
         vcf_depot_settings=get_vcf_offline_depot_settings(db),
         vcf_registry_settings=get_vcf_private_registry_settings(db),
+        esxi_pxe_boot=esxi_pxe_boot_settings(db),
         interface_networks=interface_networks,
         source_groups=source_group_state["groups"],
         source_group_assignments=source_group_state["assignments"],

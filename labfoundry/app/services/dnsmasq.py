@@ -562,12 +562,17 @@ def render_dnsmasq_config(
     if dhcp_settings.enabled:
         if esxi_pxe_boot and (esxi_pxe_boot.get("enabled") or esxi_pxe_boot.get("native_uefi_http_enabled")):
             tftp_hostname = str(esxi_pxe_boot.get("hostname") or "").strip()
-            tftp_address = str(esxi_pxe_boot.get("listen_address") or "").splitlines()[0].strip()
-            if esxi_pxe_boot.get("native_uefi_http_enabled") and esxi_pxe_boot.get("native_uefi_http_url"):
+            tftp_address = next(
+                (line.strip() for line in str(esxi_pxe_boot.get("listen_address") or "").replace(",", "\n").splitlines() if line.strip()),
+                "",
+            )
+            native_http_url = str(esxi_pxe_boot.get("effective_native_uefi_http_url") or esxi_pxe_boot.get("native_uefi_http_url") or "").strip()
+            if esxi_pxe_boot.get("native_uefi_http_enabled") and native_http_url:
                 lines.extend(
                     [
-                        "dhcp-match=set:uefi-http,option:user-class,HTTPClient",
-                        f"dhcp-boot=tag:uefi-http,{esxi_pxe_boot.get('native_uefi_http_url')}",
+                        "dhcp-vendorclass=set:uefi-http,HTTPClient",
+                        "dhcp-match=set:uefi-http-x64,option:client-arch,16",
+                        f"dhcp-boot=tag:uefi-http,tag:uefi-http-x64,{native_http_url}",
                     ]
                 )
         if esxi_pxe_boot and esxi_pxe_boot.get("enabled"):
@@ -579,6 +584,7 @@ def render_dnsmasq_config(
                 [
                     "enable-tftp",
                     f"tftp-root={esxi_pxe_boot.get('tftp_root')}",
+                    "dhcp-userclass=set:ipxe,iPXE",
                     "dhcp-match=set:ipxe,175",
                     "dhcp-match=set:efi-x86_64,option:client-arch,7",
                     "dhcp-match=set:efi-x86_64,option:client-arch,9",
@@ -586,7 +592,8 @@ def render_dnsmasq_config(
             )
             lines.extend(
                 [
-                    f"dhcp-boot=tag:ipxe,{esxi_pxe_boot.get('ipxe_script_name')}{boot_server}",
+                    f"dhcp-boot=tag:ipxe,tag:efi-x86_64,{esxi_pxe_boot.get('uefi_second_stage_bootfile')}{boot_server}",
+                    f"dhcp-boot=tag:ipxe,tag:!efi-x86_64,{esxi_pxe_boot.get('bios_second_stage_bootfile')}{boot_server}",
                     f"dhcp-boot=tag:efi-x86_64,{esxi_pxe_boot.get('uefi_bootfile')}{boot_server}",
                     f"dhcp-boot=tag:!efi-x86_64,{esxi_pxe_boot.get('bios_bootfile')}{boot_server}",
                 ]
