@@ -64,7 +64,8 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'log_step "system adapter dry-run mode: $LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS"' in script
     assert "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=$LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS" in script
     assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/image/hyperv/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
-    assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
+    assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper\n" in sudoers
+    assert "/opt/labfoundry/bin/labfoundry-helper *" not in sudoers
     assert "labfoundry-root-login.conf" in script
     assert "PermitRootLogin no" in script
     assert "HTTP/80, proxied to uvicorn on `127.0.0.1:8000`" in docs
@@ -176,8 +177,16 @@ def test_photon_image_optional_pip_global_index_configuration():
 
     assert 'LABFOUNDRY_PIP_GLOBAL_INDEX="${LABFOUNDRY_PIP_GLOBAL_INDEX:-}"' in script
     assert 'LABFOUNDRY_PIP_GLOBAL_INDEX_URL="${LABFOUNDRY_PIP_GLOBAL_INDEX_URL:-}"' in script
-    assert 'if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX" ]; then\n  python3 -m pip config --site set global.index "$LABFOUNDRY_PIP_GLOBAL_INDEX"\nfi' in script
-    assert 'if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL" ]; then\n  python3 -m pip config --site set global.index-url "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"\nfi' in script
+    assert 'PIP_CACHE_DIR="${PIP_CACHE_DIR:-/var/cache/labfoundry-pip}"' in script
+    assert "write_pip_config() {" in script
+    assert 'printf \'index = %s\\n\' "$LABFOUNDRY_PIP_GLOBAL_INDEX"' in script
+    assert 'printf \'index-url = %s\\n\' "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"' in script
+    assert 'printf \'cache-dir = %s\\n\' "$PIP_CACHE_DIR"' in script
+    assert 'write_pip_config /etc/pip.conf' in script
+    assert 'write_pip_config "$LABFOUNDRY_HOME/.venv/pip.conf"' in script
+    assert 'export PIP_DISABLE_PIP_VERSION_CHECK=1' in script
+    assert 'export PIP_INDEX_URL="$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"' in script
+    assert "pip install --upgrade pip setuptools wheel" not in script
     assert "packages.vcfd.broadcom.net/artifactory" not in wrapper
     assert "packages.vcfd.broadcom.net/artifactory" not in template
     assert "packages.vcfd.broadcom.net/artifactory" not in script
