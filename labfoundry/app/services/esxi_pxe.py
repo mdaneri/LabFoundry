@@ -597,12 +597,13 @@ def save_esxi_pxe_default_host_settings(
         ESXI_PXE_DEFAULT_HOST_INSTALLER_ISO_KEY: normalized_iso_path,
     }
     for key, value in settings.items():
-        row = db.get(Setting, key)
+        row = db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none()
         if row is None:
             row = Setting(key=key, value=value)
         else:
             row.value = value
         db.add(row)
+    db.flush()
     return esxi_pxe_default_host_settings(db)
 
 

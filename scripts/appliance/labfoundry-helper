@@ -683,6 +683,7 @@ def _esxi_pxe_boot_errors(boot: dict) -> list[str]:
 def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
     errors: list[str] = []
     seen_ids: set[int] = set()
+    enabled_ids: set[int] = set()
     iso_root = ESXI_INSTALLER_ISO_ROOT.resolve()
     errors.extend(_esxi_pxe_boot_errors(payload.get("boot") or {"enabled": False}))
     for row in payload.get("kickstarts", []):
@@ -697,6 +698,8 @@ def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
         if kickstart_id in seen_ids:
             errors.append(f"Kickstart {kickstart_id} is duplicated.")
         seen_ids.add(kickstart_id)
+        if row.get("enabled"):
+            enabled_ids.add(kickstart_id)
         generated_path = Path(str(row.get("generated_path") or "")).resolve()
         expected_path = (ESXI_PXE_HTTP_ROOT / f"{kickstart_id}.cfg").resolve()
         if generated_path != expected_path:
@@ -713,8 +716,14 @@ def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
             errors.append("ESXi PXE host entry must be an object.")
             continue
         kickstart_id = host.get("kickstart_id")
-        if host.get("enabled") and kickstart_id is not None and int(kickstart_id) not in seen_ids:
-            errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} references missing Kickstart {kickstart_id}.")
+        if host.get("enabled") and kickstart_id is not None:
+            try:
+                normalized_kickstart_id = int(kickstart_id)
+            except (TypeError, ValueError):
+                errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} references invalid Kickstart {kickstart_id}.")
+            else:
+                if normalized_kickstart_id not in enabled_ids:
+                    errors.append(f"Host {host.get('hostname') or host.get('mac_address') or 'unknown'} references disabled or missing Kickstart {kickstart_id}.")
         installer_iso_path = str(host.get("installer_iso_path") or "").strip()
         if installer_iso_path:
             selected_iso = Path(installer_iso_path)
@@ -738,6 +747,15 @@ def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
         image_key = str(artifact.get("image_key") or "")
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,160}", image_key):
             errors.append(f"Host {label} image key is invalid.")
+        kickstart_id = artifact.get("kickstart_id")
+        if kickstart_id is not None:
+            try:
+                normalized_kickstart_id = int(kickstart_id)
+            except (TypeError, ValueError):
+                errors.append(f"Host {label} artifact references invalid Kickstart {kickstart_id}.")
+            else:
+                if normalized_kickstart_id not in enabled_ids:
+                    errors.append(f"Host {label} artifact references disabled or missing Kickstart {kickstart_id}.")
         installer_iso_path = str(artifact.get("installer_iso_path") or "").strip()
         if not installer_iso_path:
             errors.append(f"Host {label} artifact is missing installer ISO path.")
@@ -905,6 +923,37 @@ def _remove_legacy_esxi_pxe_artifacts(generated_files: list[str], generated_tftp
             path.unlink(missing_ok=True)
 
 
+def _managed_pxe_artifact_name(name: str) -> bool:
+    return name == "default" or bool(re.fullmatch(r"01(?:-[0-9a-f]{2}){6}", name))
+
+
+def _remove_stale_esxi_pxe_host_artifacts(generated_files: list[str], generated_tftp_files: list[str]) -> None:
+    generated = {Path(path).resolve() for path in [*generated_files, *generated_tftp_files]}
+    for path in (ESXI_TFTP_ROOT / "boot.cfg", ESXI_PXE_HTTP_BASE / "boot.cfg"):
+        if path.resolve() not in generated:
+            path.unlink(missing_ok=True)
+
+    pxelinux_dir = ESXI_TFTP_ROOT / "pxelinux.cfg"
+    if pxelinux_dir.is_dir():
+        for path in pxelinux_dir.iterdir():
+            if path.is_file() and _managed_pxe_artifact_name(path.name) and path.resolve() not in generated:
+                path.unlink(missing_ok=True)
+
+    for root in (ESXI_TFTP_ROOT, ESXI_PXE_HTTP_BASE):
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            if not child.is_dir() or not _managed_pxe_artifact_name(child.name):
+                continue
+            boot_cfg = child / "boot.cfg"
+            if boot_cfg.resolve() not in generated:
+                boot_cfg.unlink(missing_ok=True)
+            try:
+                child.rmdir()
+            except OSError:
+                pass
+
+
 def _esxi_pxe_nginx_config(port: int) -> str:
     return "\n".join(
         [
@@ -1042,6 +1091,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
                 else:
                     generated_files.append(str(target))
         _remove_legacy_esxi_pxe_artifacts(generated_files, generated_tftp_files)
+        _remove_stale_esxi_pxe_host_artifacts(generated_files, generated_tftp_files)
         for path in ESXI_PXE_IMAGE_HTTP_ROOT.iterdir():
             if path.is_dir() and path.name not in staged_images:
                 shutil.rmtree(path)

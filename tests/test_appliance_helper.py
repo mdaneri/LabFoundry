@@ -348,6 +348,13 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     (tftp_root / "bootx64.efi").parent.mkdir(parents=True, exist_ok=True)
     (tftp_root / "bootx64.efi").write_bytes(b"old uefi first stage")
     (tftp_root / "esxi.ipxe").write_text("old tftp script", encoding="utf-8")
+    stale_mac = "01-aa-bb-cc-dd-ee-ff"
+    (tftp_root / "pxelinux.cfg").mkdir(parents=True, exist_ok=True)
+    (tftp_root / "pxelinux.cfg" / stale_mac).write_text("old pxelinux", encoding="utf-8")
+    (tftp_root / stale_mac).mkdir(parents=True, exist_ok=True)
+    (tftp_root / stale_mac / "boot.cfg").write_text("old tftp boot cfg", encoding="utf-8")
+    (http_base / stale_mac).mkdir(parents=True, exist_ok=True)
+    (http_base / stale_mac / "boot.cfg").write_text("old http boot cfg", encoding="utf-8")
     stale = http_root / "99.cfg"
     stale.write_text("old", encoding="utf-8")
     manifest = esxi_pxe_manifest(http_root, iso_root=iso_root)
@@ -393,6 +400,9 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert not (http_base / "boot.ipxe").exists()
     assert not (tftp_root / "bootx64.efi").exists()
     assert not (tftp_root / "esxi.ipxe").exists()
+    assert not (tftp_root / "pxelinux.cfg" / stale_mac).exists()
+    assert not (tftp_root / stale_mac / "boot.cfg").exists()
+    assert not (http_base / stale_mac / "boot.cfg").exists()
     assert (tftp_root / "images" / manifest["artifacts"][0]["image_key"] / "mboot.c32").read_bytes() == b"mboot c32"
     boot_cfg = (tftp_root / "01-00-50-56-aa-bb-cc" / "boot.cfg").read_text(encoding="utf-8")
     assert f"prefix={manifest['artifacts'][0]['image_http_url']}" in boot_cfg
@@ -407,6 +417,33 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
 
     manifest["hosts"][0]["installer_iso_path"] = str(tmp_path / "escape.iso")
     assert any("installer ISO must be under" in error for error in helper._esxi_pxe_manifest_errors(manifest))
+
+
+def test_esxi_pxe_helper_rejects_disabled_kickstart_references(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    http_root = tmp_path / "pxe" / "http" / "esxi" / "ks"
+    http_base = http_root.parent
+    tftp_root = tmp_path / "pxe" / "tftp"
+    iso_root = tmp_path / "vcf-depot" / "PROD" / "COMP" / "ESX_HOST"
+    http_root.mkdir(parents=True)
+    tftp_root.mkdir(parents=True)
+    iso_root.mkdir(parents=True)
+    iso_tree = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
+    iso_tree.mkdir()
+
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_ROOT", http_root)
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_BASE", http_base)
+    monkeypatch.setattr(helper, "ESXI_PXE_IMAGE_HTTP_ROOT", http_base / "images")
+    monkeypatch.setattr(helper, "ESXI_TFTP_ROOT", tftp_root)
+    monkeypatch.setattr(helper, "ESXI_INSTALLER_ISO_ROOT", iso_root)
+    manifest = esxi_pxe_manifest(http_root, enabled=True, iso_root=iso_root)
+    manifest["kickstarts"][0]["enabled"] = False
+    manifest["hosts"][0]["kickstart_id"] = 7
+    manifest["artifacts"][0]["kickstart_id"] = 7
+
+    errors = helper._esxi_pxe_manifest_errors(manifest)
+
+    assert any("references disabled or missing Kickstart 7" in error for error in errors)
 
 
 def test_esxi_boot_cfg_rewrite_uses_http_prefix_and_kickstart():

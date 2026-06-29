@@ -814,6 +814,59 @@ def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
         assert manifest_payload["hosts"][0]["installer_iso_path"] == str(iso_path)
 
 
+def test_esxi_pxe_default_host_settings_update_existing_rows(client, monkeypatch, tmp_path):
+    from sqlalchemy import select
+
+    import labfoundry.app.services.esxi_pxe as esxi_pxe
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart, Setting
+
+    iso_root = tmp_path / "vcf-depot" / "PROD" / "COMP" / "ESX_HOST"
+    iso_root.mkdir(parents=True)
+    first_iso = iso_root / "First-ESXi.iso"
+    second_iso = iso_root / "Second-ESXi.iso"
+    first_iso.write_bytes(b"first")
+    second_iso.write_bytes(b"second")
+    monkeypatch.setattr(esxi_pxe, "ESXI_INSTALLER_ISO_ROOT", iso_root)
+
+    with SessionLocal() as db:
+        first_kickstart = EsxiKickstart(name="First", content="install", content_hash=esxi_pxe.content_hash("install"))
+        second_kickstart = EsxiKickstart(name="Second", content="install", content_hash=esxi_pxe.content_hash("install"))
+        db.add_all([first_kickstart, second_kickstart])
+        db.flush()
+        first_kickstart_id = first_kickstart.id
+        second_kickstart_id = second_kickstart.id
+
+        first = esxi_pxe.save_esxi_pxe_default_host_settings(
+            db,
+            enabled=True,
+            kickstart_id=first_kickstart_id,
+            installer_iso_path=str(first_iso),
+        )
+        db.flush()
+        second = esxi_pxe.save_esxi_pxe_default_host_settings(
+            db,
+            enabled=False,
+            kickstart_id=second_kickstart_id,
+            installer_iso_path=str(second_iso),
+        )
+        db.flush()
+
+        rows = db.execute(select(Setting).where(Setting.key.like("esxi_pxe.default_host.%"))).scalars().all()
+
+    assert first["enabled"] is True
+    assert first["kickstart_id"] == first_kickstart_id
+    assert second["enabled"] is False
+    assert second["kickstart_id"] == second_kickstart_id
+    assert second["installer_iso_path"] == str(second_iso)
+    assert len(rows) == 3
+    assert {row.key for row in rows} == {
+        esxi_pxe.ESXI_PXE_DEFAULT_HOST_ENABLED_KEY,
+        esxi_pxe.ESXI_PXE_DEFAULT_HOST_KICKSTART_ID_KEY,
+        esxi_pxe.ESXI_PXE_DEFAULT_HOST_INSTALLER_ISO_KEY,
+    }
+
+
 def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     import json
 
