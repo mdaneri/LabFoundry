@@ -756,7 +756,19 @@ textarea {
   min-height: calc(100vh - 104px);
 }
 
+.services-workspace {
+  align-items: stretch;
+  min-height: calc(100vh - 104px);
+}
+
 .firewall-main-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 104px);
+  overflow: hidden;
+}
+
+.services-workspace > .wide-panel {
   display: flex;
   flex-direction: column;
   min-height: calc(100vh - 104px);
@@ -1217,6 +1229,11 @@ textarea {
   font-size: 11px;
   font-weight: 500;
   line-height: 1.15;
+}
+
+.services-table {
+  flex: 1 1 auto;
+  min-height: 640px;
 }
 
 .fallback-actions {
@@ -3324,12 +3341,15 @@ textarea {
   }
 
   .firewall-workspace,
-  .firewall-main-panel {
+  .firewall-main-panel,
+  .services-workspace,
+  .services-workspace > .wide-panel {
     min-height: auto;
   }
 
   .firewall-managed-section,
-  .firewall-managed-section .readonly-tabulator-shell {
+  .firewall-managed-section .readonly-tabulator-shell,
+  .services-table {
     min-height: 320px;
   }
 

@@ -95,8 +95,10 @@ from labfoundry.app.services.appliance_update import (
 from labfoundry.app.security import (
     Identity,
     authenticate_user,
+    ensure_appliance_instance_id,
     get_session_identity,
     require_session_identity,
+    SESSION_APPLIANCE_INSTANCE_SESSION_KEY,
 )
 from labfoundry.app.services.dnsmasq import (
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
@@ -2085,12 +2087,13 @@ def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any], scopes: list[Dhcp
         "",
     )
     boot_server = f",{tftp_hostname},{tftp_address}" if tftp_hostname and tftp_address else ""
+    native_uefi_http_enabled = bool(esxi_boot.get("native_uefi_http_enabled"))
     native_http_url = str(esxi_boot.get("effective_native_uefi_http_url") or esxi_boot.get("native_uefi_http_url") or "").strip()
 
     def add(flow: str, line: str, note: str) -> None:
         rows.append({"applies_to": applies_to, "flow": flow, "line": line, "note": note})
 
-    if esxi_boot.get("native_uefi_http_enabled") and native_http_url:
+    if native_uefi_http_enabled and native_http_url:
         add("Native UEFI HTTP", "dhcp-vendorclass=set:uefi-http,HTTPClient", "Detect HTTPClient firmware")
         add("Native UEFI HTTP", "dhcp-match=set:uefi-http-x64,option:client-arch,16", "Match x64 HTTP boot")
         add("Native UEFI HTTP", f"dhcp-boot={scope_prefix}tag:uefi-http,tag:uefi-http-x64,{native_http_url}", "Return mboot.efi HTTP URL")
@@ -2104,10 +2107,30 @@ def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any], scopes: list[Dhcp
         add("iPXE detection", "dhcp-match=set:ipxe,175", "Compatibility iPXE marker")
         add("UEFI PXE detection", "dhcp-match=set:efi-x86_64,option:client-arch,7", "Match x64 UEFI PXE")
         add("UEFI PXE detection", "dhcp-match=set:efi-x86_64,option:client-arch,9", "Match x64 UEFI PXE")
-        add("iPXE second stage", f"dhcp-boot={scope_prefix}tag:ipxe,tag:efi-x86_64,{esxi_boot.get('uefi_second_stage_bootfile')}{boot_server}", "UEFI iPXE loads ESXi mboot")
+        host_bootfiles = list(esxi_boot.get("host_bootfiles") or [])
+        host_exclusion_tags = [
+            f"tag:!{host_tag}"
+            for host_bootfile in host_bootfiles
+            if (host_tag := str(host_bootfile.get("tag") or "").strip())
+        ]
+        generic_uefi_second_stage_tags = ",".join(["tag:ipxe", "tag:efi-x86_64", *host_exclusion_tags])
+        generic_uefi_second_stage_boot = native_http_url if native_uefi_http_enabled and native_http_url else str(esxi_boot.get("uefi_second_stage_bootfile") or "")
+        generic_uefi_second_stage_server = "" if generic_uefi_second_stage_boot.startswith(("http://", "https://")) else boot_server
+        add("iPXE second stage", f"dhcp-boot={scope_prefix}{generic_uefi_second_stage_tags},{generic_uefi_second_stage_boot}{generic_uefi_second_stage_server}", "UEFI iPXE loads ESXi mboot over HTTP when enabled")
         add("iPXE second stage", f"dhcp-boot={scope_prefix}tag:ipxe,tag:!efi-x86_64,{esxi_boot.get('bios_second_stage_bootfile')}{boot_server}", "BIOS iPXE loads PXELINUX")
-        add("PXE first stage", f"dhcp-boot={scope_prefix}tag:efi-x86_64,{esxi_boot.get('uefi_bootfile')}{boot_server}", "UEFI PXE first-stage iPXE")
-        add("PXE first stage", f"dhcp-boot={scope_prefix}tag:!efi-x86_64,{esxi_boot.get('bios_bootfile')}{boot_server}", "BIOS PXE first-stage iPXE")
+        add("UEFI first stage", f"dhcp-boot={scope_prefix}tag:!ipxe,tag:efi-x86_64,{esxi_boot.get('uefi_bootfile')}{boot_server}", "UEFI PXE loads iPXE by TFTP; iPXE then chains to HTTP")
+        add("PXE first stage", f"dhcp-boot={scope_prefix}tag:!ipxe,tag:!efi-x86_64,{esxi_boot.get('bios_bootfile')}{boot_server}", "BIOS PXE first-stage iPXE")
+        for host_bootfile in host_bootfiles:
+            host_tag = str(host_bootfile.get("tag") or "").strip()
+            mac_address = str(host_bootfile.get("mac_address") or "").strip()
+            uefi_second_stage = str(host_bootfile.get("uefi_second_stage_bootfile") or "").strip()
+            native_host_url = str(host_bootfile.get("native_uefi_http_url") or "").strip()
+            if host_tag and mac_address:
+                add("Host-specific PXE", f"dhcp-mac=set:{host_tag},{mac_address}", "Tag known ESXi host MAC")
+            if host_tag and uefi_second_stage:
+                host_uefi_second_stage_boot = native_host_url if native_uefi_http_enabled and native_host_url else uefi_second_stage
+                host_uefi_second_stage_server = "" if host_uefi_second_stage_boot.startswith(("http://", "https://")) else boot_server
+                add("Host-specific PXE", f"dhcp-boot={scope_prefix}tag:{host_tag},tag:ipxe,tag:efi-x86_64,{host_uefi_second_stage_boot}{host_uefi_second_stage_server}", "UEFI iPXE loads host-specific mboot")
     return rows
 
 
@@ -4043,6 +4066,7 @@ def login(
         record_audit(db, actor=username, action="ui_login_failed", resource_type="auth", success=False)
         return render(request, "login.html", {"error": "Invalid username or password"})
     request.session["user_id"] = user.id
+    request.session[SESSION_APPLIANCE_INSTANCE_SESSION_KEY] = ensure_appliance_instance_id(db)
     record_audit(db, actor=user.username, action="ui_login", resource_type="auth")
     return RedirectResponse("/", status_code=303)
 
@@ -7878,16 +7902,19 @@ def service_state_to_grid_row(service: ServiceState) -> dict[str, object]:
         "display_name": service.display_name,
         "running": service.running,
         "enabled": service.enabled,
-        "health": service.health,
         "detail": service.detail or "native host service",
     }
 
 
 def services_template_context(db: Session) -> dict[str, object]:
     rows = db.execute(select(ServiceState).order_by(ServiceState.display_name)).scalars().all()
+    system_adapter_dry_run = get_settings().dry_run_system_adapters
     return {
         "services": rows,
         "service_rows": [service_state_to_grid_row(row) for row in rows],
+        "system_adapter_dry_run": system_adapter_dry_run,
+        "services_boundary_label": "dry-run" if system_adapter_dry_run else "live",
+        "services_boundary_pill": "warn" if system_adapter_dry_run else "good",
     }
 
 
@@ -7969,10 +7996,11 @@ def service_action_from_ui(
         row.running = False
     db.add(row)
     result = SystemAdapter().service_action(service, action)
+    service_action_name = f"{action}_service_dry_run" if get_settings().dry_run_system_adapters else f"{action}_service_intent"
     record_audit(
         db,
         actor=identity.username,
-        action=f"{action}_service_dry_run",
+        action=service_action_name,
         resource_type="service",
         resource_id=service,
         detail=" ".join(result.command),

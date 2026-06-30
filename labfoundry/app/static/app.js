@@ -2027,12 +2027,6 @@ function serviceRuntimeFormatter(cell) {
   return `<span class="service-state ${running ? "good" : "muted"}">${running ? "running" : "stopped"}</span>`;
 }
 
-function serviceHealthFormatter(cell) {
-  const value = String(cell.getValue() || "unknown");
-  const style = value === "healthy" ? "good" : value === "planned" ? "warn" : "muted";
-  return `<span class="service-state ${style}">${escapeHtml(value)}</span>`;
-}
-
 function serviceNameFormatter(cell) {
   const data = cell.getRow().getData();
   return `<span class="service-name-cell"><strong>${escapeHtml(data.display_name)}</strong><small>${escapeHtml(data.service)}</small></span>`;
@@ -2073,7 +2067,7 @@ function initializeServicesTable() {
       data: rows,
       index: "id",
       layout: "fitColumns",
-      height: "520px",
+      height: "100%",
       rowHeight: 42,
       placeholder: "No allowlisted services configured.",
       reactiveData: false,
@@ -2129,13 +2123,6 @@ function initializeServicesTable() {
           width: 125,
           hozAlign: "center",
           cellEdited: (cell) => autoToggleServiceEnabled(cell, csrf),
-        },
-        {
-          title: "Health",
-          field: "health",
-          formatter: serviceHealthFormatter,
-          width: 125,
-          hozAlign: "center",
         },
         {
           title: "Boundary",

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from labfoundry.app.config import Settings, get_settings
 from labfoundry.app.database import get_db
-from labfoundry.app.models import ApiToken, Role, User, utcnow
+from labfoundry.app.models import ApiToken, Role, Setting, User, utcnow
 
 
 ALL_SCOPES = {
@@ -112,6 +112,8 @@ ROLE_SCOPES = {
 }
 
 bearer_scheme = HTTPBearer(auto_error=False)
+SESSION_APPLIANCE_INSTANCE_SETTING_KEY = "appliance.instance_id.v1"
+SESSION_APPLIANCE_INSTANCE_SESSION_KEY = "appliance_instance_id"
 
 
 class Identity:
@@ -169,6 +171,22 @@ def create_raw_api_token() -> str:
     return f"lf_{token_urlsafe(36)}"
 
 
+def ensure_appliance_instance_id(db: Session) -> str:
+    setting = db.execute(select(Setting).where(Setting.key == SESSION_APPLIANCE_INSTANCE_SETTING_KEY)).scalar_one_or_none()
+    if setting is not None and setting.value.strip():
+        return setting.value.strip()
+
+    instance_id = token_urlsafe(24)
+    if setting is None:
+        setting = Setting(key=SESSION_APPLIANCE_INSTANCE_SETTING_KEY, value=instance_id)
+    else:
+        setting.value = instance_id
+        setting.updated_at = utcnow()
+    db.add(setting)
+    db.flush()
+    return instance_id
+
+
 def role_allows_scopes(role: str, requested_scopes: set[str]) -> bool:
     allowed = ROLE_SCOPES.get(role, set())
     return "admin:all" in allowed or requested_scopes.issubset(allowed)
@@ -196,6 +214,10 @@ def get_session_identity(
 ) -> Identity | None:
     user_id = request.session.get("user_id")
     if not user_id:
+        return None
+    if request.session.get(SESSION_APPLIANCE_INSTANCE_SESSION_KEY) != ensure_appliance_instance_id(db):
+        request.session.clear()
+        db.commit()
         return None
     user = db.get(User, user_id)
     if not user or not user.enabled:

@@ -37,6 +37,7 @@ from labfoundry.app.services.local_users import DEFAULT_LOCAL_USER_SHELL, POWERS
 from labfoundry.app.services.dnsmasq import join_domains, split_domains, validate_dns_record
 from labfoundry.app.services.networking import normalize_interface_mode
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
+from labfoundry.app.security import ensure_appliance_instance_id
 
 
 VCF_BACKUP_USERNAME = VCF_BACKUP_DEFAULT_USERNAME
@@ -95,6 +96,7 @@ SERVICE_STATE_DEFAULTS = [
 
 
 def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
+    ensure_appliance_instance_id(db)
     if include_examples:
         seed_examples_setting = db.execute(select(Setting).where(Setting.key == SEED_EXAMPLES_SETTING_KEY)).scalar_one_or_none()
         if seed_examples_setting is not None and seed_examples_setting.value.strip().lower() in {"0", "false", "no"}:

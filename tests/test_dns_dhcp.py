@@ -157,6 +157,14 @@ def test_dnsmasq_renderer_adds_esxi_pxe_boot_options():
             "uefi_second_stage_bootfile": "mboot.efi",
             "native_uefi_http_enabled": True,
             "effective_native_uefi_http_url": "http://192.168.50.1:8080/pxe/esxi/mboot.efi",
+            "host_bootfiles": [
+                {
+                    "mac_address": "00:50:56:aa:bb:cc",
+                    "tag": "esxi-005056aabbcc",
+                    "uefi_second_stage_bootfile": "01-00-50-56-aa-bb-cc/mboot.efi",
+                    "native_uefi_http_url": "http://192.168.50.1:8080/pxe/esxi/01-00-50-56-aa-bb-cc/mboot.efi",
+                }
+            ],
         },
     )
 
@@ -170,10 +178,12 @@ def test_dnsmasq_renderer_adds_esxi_pxe_boot_options():
     assert "dhcp-match=set:uefi-http-x64,option:client-arch,16" in config
     assert "dhcp-boot=tag:pxe,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in config
     assert "dhcp-option=tag:pxe,66,esxi-pxe.labfoundry.internal" in config
-    assert "dhcp-boot=tag:pxe,tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in config
+    assert "dhcp-boot=tag:pxe,tag:ipxe,tag:efi-x86_64,tag:!esxi-005056aabbcc,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in config
     assert "dhcp-boot=tag:pxe,tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in config
-    assert "dhcp-boot=tag:pxe,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in config
-    assert "dhcp-boot=tag:pxe,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in config
+    assert "dhcp-boot=tag:pxe,tag:!ipxe,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in config
+    assert "dhcp-boot=tag:pxe,tag:!ipxe,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in config
+    assert "dhcp-mac=set:esxi-005056aabbcc,00:50:56:aa:bb:cc" in config
+    assert "dhcp-boot=tag:pxe,tag:esxi-005056aabbcc,tag:ipxe,tag:efi-x86_64,http://192.168.50.1:8080/pxe/esxi/01-00-50-56-aa-bb-cc/mboot.efi" in config
 
 
 def test_dnsmasq_lease_parser_tracks_active_and_expired_leases():

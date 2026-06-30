@@ -457,6 +457,30 @@ def _validate_dnsmasq_config(path: Path) -> subprocess.CompletedProcess[str]:
     return _run([dnsmasq, "--test", f"--conf-file={path}"])
 
 
+def _dnsmasq_tftp_roots(path: Path) -> list[Path]:
+    roots: list[Path] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or not line.startswith("tftp-root="):
+            continue
+        value = line.split("=", 1)[1].strip()
+        if value:
+            roots.append(Path(value))
+    return roots
+
+
+def _prepare_dnsmasq_tftp_roots(path: Path) -> None:
+    allowed_root = ESXI_TFTP_ROOT.resolve()
+    for root in _dnsmasq_tftp_roots(path):
+        if root.resolve() != allowed_root:
+            raise ValueError(f"dnsmasq TFTP root must be {ESXI_TFTP_ROOT}")
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.chown(root, user="labfoundry", group="labfoundry")
+        except LookupError:
+            pass
+
+
 def _install_dnsmasq_service_dropin() -> None:
     dnsmasq = shutil.which("dnsmasq") or "/usr/sbin/dnsmasq"
     DNSMASQ_SERVICE_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -552,6 +576,12 @@ def _handle_dnsmasq(action: str, args: list[str]) -> int:
         print(validation.stderr, end="", file=sys.stderr)
         if action == "validate" or validation.returncode != 0:
             return validation.returncode
+
+        try:
+            _prepare_dnsmasq_tftp_roots(config_path)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
 
         DNSMASQ_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         DNSMASQ_STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -807,12 +837,24 @@ def _remove_cdromboot(options: str) -> list[str]:
     return [item for item in options.split() if item != "cdromBoot"]
 
 
-def _render_esxi_boot_cfg(source_text: str, *, prefix_url: str, kickstart_url: str = "") -> str:
+def _normalize_esxi_boot_path(value: str) -> str:
+    return value.strip().lstrip("/")
+
+
+def _bootif_from_mac_key(mac_key: str) -> str:
+    key = (mac_key or "").strip().lower()
+    if re.fullmatch(r"01(-[0-9a-f]{2}){6}", key):
+        return f"BOOTIF={key}"
+    return ""
+
+
+def _render_esxi_boot_cfg(source_text: str, *, prefix_url: str, kickstart_url: str = "", bootif: str = "") -> str:
     lines = source_text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
     rendered: list[str] = []
     saw_prefix = False
     saw_kernelopt = False
     kernel_index = -1
+    bootif_option = bootif.strip()
     for raw_line in lines:
         stripped = raw_line.strip()
         if stripped.startswith("#") or "=" not in stripped:
@@ -826,16 +868,18 @@ def _render_esxi_boot_cfg(source_text: str, *, prefix_url: str, kickstart_url: s
         elif lower_key in {"kernel", "modules"}:
             separator = "---" if lower_key == "modules" else None
             if separator:
-                values = [item.lstrip("/") for item in value.split(separator)]
+                values = [_normalize_esxi_boot_path(item) for item in value.split(separator)]
                 rendered.append(f"{key}={separator.join(values)}")
             else:
-                rendered.append(f"{key}={value.lstrip('/')}")
+                rendered.append(f"{key}={_normalize_esxi_boot_path(value)}")
             if lower_key == "kernel":
                 kernel_index = len(rendered) - 1
         elif lower_key == "kernelopt":
             options = _remove_cdromboot(value)
             if kickstart_url and not any(item.startswith("ks=") for item in options):
                 options.append(f"ks={kickstart_url}")
+            if bootif_option and not any(item.startswith("BOOTIF=") for item in options):
+                options.append(bootif_option)
             rendered.append(f"kernelopt={' '.join(options)}".rstrip())
             saw_kernelopt = True
         else:
@@ -846,7 +890,12 @@ def _render_esxi_boot_cfg(source_text: str, *, prefix_url: str, kickstart_url: s
         if kernel_index >= insert_at:
             kernel_index += 1
     if not saw_kernelopt:
-        line = f"kernelopt=ks={kickstart_url}" if kickstart_url else "kernelopt="
+        options = []
+        if kickstart_url:
+            options.append(f"ks={kickstart_url}")
+        if bootif_option:
+            options.append(bootif_option)
+        line = f"kernelopt={' '.join(options)}".rstrip()
         if kernel_index >= 0:
             rendered.insert(kernel_index + 1, line)
         else:
@@ -1031,6 +1080,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
         explicit_default_artifact = any(bool(artifact.get("is_default")) for artifact in payload.get("artifacts", []))
         first_mboot_efi: Path | None = None
         first_crypto64: Path | None = None
+        uefi_second_stage = str(boot.get("uefi_second_stage_bootfile") or "mboot.efi")
         for artifact in payload.get("artifacts", []):
             is_default_artifact = bool(artifact.get("is_default"))
             image_key = str(artifact["image_key"])
@@ -1067,6 +1117,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
                 boot_cfg_source.read_text(encoding="utf-8"),
                 prefix_url=str(artifact.get("image_http_url") or ""),
                 kickstart_url=str(artifact.get("kickstart_url") or ""),
+                bootif=_bootif_from_mac_key(str(artifact.get("mac_key") or "")),
             )
             tftp_boot_cfg = Path(str(artifact["uefi_tftp_boot_cfg_path"]))
             http_boot_cfg = Path(str(artifact["http_boot_cfg_path"]))
@@ -1074,6 +1125,19 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             _write_text(http_boot_cfg, boot_cfg)
             generated_tftp_files.append(str(tftp_boot_cfg))
             generated_files.append(str(http_boot_cfg))
+            mac_key = str(artifact.get("mac_key") or "")
+            if not is_default_artifact and _bootif_from_mac_key(mac_key):
+                host_mboot = tftp_boot_cfg.parent / uefi_second_stage
+                _copy_file(mboot_efi, host_mboot)
+                generated_tftp_files.append(str(host_mboot))
+                native_bootfile = str(boot.get("native_uefi_bootfile") or "mboot.efi")
+                host_http_mboot = http_boot_cfg.parent / native_bootfile
+                _copy_file(mboot_efi, host_http_mboot)
+                generated_files.append(str(host_http_mboot))
+                if crypto64 is not None:
+                    host_http_crypto64 = http_boot_cfg.parent / "crypto64.efi"
+                    _copy_file(crypto64, host_http_crypto64)
+                    generated_files.append(str(host_http_crypto64))
             pxelinux_config = Path(str(artifact["pxelinux_config_path"]))
             pxelinux_text = _render_pxelinux_config(
                 kernel_path=_safe_relative_path(tftp_mboot_c32, ESXI_TFTP_ROOT),
@@ -1091,7 +1155,6 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
                 generated_tftp_files.extend([str(ESXI_TFTP_ROOT / "boot.cfg"), str(ESXI_TFTP_ROOT / "pxelinux.cfg" / "default")])
                 generated_files.append(str(ESXI_PXE_HTTP_BASE / "boot.cfg"))
         if first_mboot_efi is not None:
-            uefi_second_stage = str(boot.get("uefi_second_stage_bootfile") or "mboot.efi")
             native_bootfile = str(boot.get("native_uefi_bootfile") or "mboot.efi")
             for target in {ESXI_TFTP_ROOT / uefi_second_stage, ESXI_PXE_HTTP_BASE / native_bootfile}:
                 _copy_file(first_mboot_efi, target)

@@ -157,7 +157,7 @@ def effective_native_uefi_http_url(boot: dict[str, Any]) -> str:
 def esxi_pxe_boot_settings(db: Session) -> dict[str, Any]:
     rows = {row.key: row.value for row in db.execute(select(Setting).where(Setting.key.like("esxi_pxe.boot.%"))).scalars().all()}
     enabled = rows.get(ESXI_PXE_BOOT_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"}
-    native_uefi_http_enabled = rows.get(ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"}
+    native_uefi_http_enabled = rows.get(ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY, "true").strip().lower() in {"1", "true", "yes", "on"}
     dhcp_scope = _selected_dhcp_scope(db, rows.get(ESXI_PXE_DHCP_SCOPE_ID_KEY), rows.get(ESXI_PXE_LISTEN_INTERFACE_KEY, ""), rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, ""))
     listen_interface = rows.get(ESXI_PXE_LISTEN_INTERFACE_KEY, "").strip()
     listen_address = rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, "").strip()
@@ -188,6 +188,16 @@ def esxi_pxe_boot_settings(db: Session) -> dict[str, Any]:
     }
     settings["http_base_url"] = esxi_http_base_url(settings)
     settings["effective_native_uefi_http_url"] = effective_native_uefi_http_url(settings)
+    settings["host_bootfiles"] = [
+        {
+            "mac_address": host.mac_address.strip().lower(),
+            "tag": dnsmasq_host_tag_for_pxe_mac(host.mac_address),
+            "uefi_second_stage_bootfile": f"{normalize_pxe_mac(host.mac_address)}/{settings['uefi_second_stage_bootfile']}",
+            "native_uefi_http_url": f"{settings['http_base_url']}/{normalize_pxe_mac(host.mac_address)}/{settings['native_uefi_bootfile']}" if settings.get("http_base_url") else "",
+        }
+        for host in db.execute(select(EsxiPxeHost).order_by(EsxiPxeHost.hostname)).scalars().all()
+        if host.enabled is not False and host.installer_iso_path and normalize_pxe_mac(host.mac_address)
+    ]
     return settings
 
 
@@ -348,6 +358,13 @@ def normalize_pxe_mac(value: str) -> str:
     if len(octets) != 6:
         return ""
     return "01-" + "-".join(octets)
+
+
+def dnsmasq_host_tag_for_pxe_mac(value: str) -> str:
+    mac_key = normalize_pxe_mac(value)
+    if not mac_key:
+        return ""
+    return "esxi-" + "".join(mac_key.split("-")[1:])
 
 
 def installer_image_key(path: str) -> str:
@@ -722,7 +739,7 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
         "bios_second_stage_bootfile": ESXI_PXE_BIOS_SECOND_STAGE_BOOTFILE,
         "uefi_second_stage_bootfile": ESXI_PXE_UEFI_SECOND_STAGE_BOOTFILE,
         "native_uefi_bootfile": ESXI_PXE_NATIVE_UEFI_BOOTFILE,
-        "native_uefi_http_enabled": False,
+        "native_uefi_http_enabled": True,
         "native_uefi_http_url": "",
         "ipxe_script_name": ESXI_PXE_IPXE_SCRIPT_NAME,
         "ipxe_script": default_ipxe_script(),

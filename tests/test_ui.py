@@ -73,7 +73,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v7" in service_worker.text
+    assert "labfoundry-pwa-v8" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=service-preview-tools-20260629-1" in offline.text
+    assert "/static/app.css?v=session-services-20260630-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -102,6 +102,26 @@ def test_unauthenticated_ui_request_redirects_to_login(client):
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
+
+
+def test_ui_session_is_rejected_after_appliance_instance_changes(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting
+    from labfoundry.app.security import SESSION_APPLIANCE_INSTANCE_SETTING_KEY
+
+    login(client)
+    assert client.get("/dashboard").status_code == 200
+
+    with SessionLocal() as db:
+        setting = db.query(Setting).filter(Setting.key == SESSION_APPLIANCE_INSTANCE_SETTING_KEY).one()
+        setting.value = "redeployed-appliance-instance"
+        db.commit()
+
+    response = client.get("/vlan-interfaces", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+    assert client.get("/", follow_redirects=False).headers["location"] == "/login"
 
 
 def test_sidebar_appliance_apply_uses_bottom_pending_cta(client):
@@ -1005,10 +1025,10 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         dns_preview = dnsmasq_context(db)["config_preview"]
         assert "enable-tftp" in dns_preview
         assert "dhcp-option=tag:sitea,66,esxi-pxe.labfoundry.internal" in dns_preview
-        assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dns_preview
         assert "dhcp-boot=tag:sitea,tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
-        assert "dhcp-boot=tag:sitea,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
-        assert "dhcp-boot=tag:sitea,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:!ipxe,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:!ipxe,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
         assert "dhcp-boot=tag:sitea,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dns_preview
         manifest = json.loads(esxi_pxe_context(db)["esxi_pxe_manifest"])
         assert manifest["schema_version"] == 2
@@ -1025,7 +1045,9 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "SiteA" in dhcp_page.text
     assert "dhcp-userclass=set:ipxe,iPXE" in dhcp_page.text
     assert "dhcp-match=set:ipxe,175" in dhcp_page.text
-    assert "dhcp-boot=tag:sitea,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
+    assert "dhcp-boot=tag:sitea,tag:!ipxe,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
+    assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dhcp_page.text
+    assert "dhcp-boot=tag:sitea,tag:!ipxe,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
     assert "dhcp-boot=tag:sitea,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dhcp_page.text
 
 
@@ -4488,20 +4510,29 @@ def test_services_ui_records_dry_run_action(client):
     assert "services-fallback" in page.text
     assert "data-services=" in page.text
     assert "Service Boundary" in page.text
+    assert "<th>Health</th>" not in page.text
+    assert '<span class="status-pill warn">dry-run</span>' in page.text
     assert "Command shape" in page.text
     assert "systemctl restart dns" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/services/firewall/restart", data={"csrf": csrf})
     assert response.status_code == 200
     assert "Firewall restart recorded" in response.text
+    assert "Firewall restart recorded as dry-run" in response.text
     assert "systemctl restart firewall" in response.text
     disabled = client.post("/services/firewall/disable", data={"csrf": csrf})
     rows = json.loads(html.unescape(disabled.text.split("data-services='", 1)[1].split("'", 1)[0]))
-    assert next(row for row in rows if row["service"] == "firewall")["enabled"] is False
+    firewall_row = next(row for row in rows if row["service"] == "firewall")
+    assert firewall_row["enabled"] is False
+    assert "health" not in firewall_row
     js = client.get("/static/app.js")
     assert js.status_code == 200
     assert "initializeServicesTable" in js.text
     assert "submitServiceAction" in js.text
+    assert 'height: "100%"' in js.text
+    assert 'height: "520px"' not in js.text
+    assert 'title: "Health"' not in js.text
+    assert "serviceHealthFormatter" not in js.text
     assert "openServiceActionMenu" not in js.text
     assert "serviceActionsFormatter" not in js.text
     assert 'title: "Enabled"' in js.text
@@ -4509,6 +4540,24 @@ def test_services_ui_records_dry_run_action(client):
     css = client.get("/static/app.css")
     assert css.status_code == 200
     assert ".service-name-cell" in css.text
+    assert ".services-workspace" in css.text
+    assert ".services-table" in css.text
+
+
+def test_services_ui_hides_dry_run_badge_when_adapters_are_live(client, monkeypatch):
+    from labfoundry.app.config import get_settings
+
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+    login(client)
+
+    page = client.get("/services")
+
+    assert page.status_code == 200
+    assert '<span class="status-pill good">live</span>' in page.text
+    assert '<span class="status-pill warn">dry-run</span>' not in page.text
+    assert "captured as dry-run command intent" not in page.text
+    assert "Open Logs on a service row to capture a log preview." in page.text
 
 
 def test_ca_settings_autosave_returns_json(client):
@@ -4815,6 +4864,30 @@ def test_dhcp_settings_autosave_allows_service_toggle_only(client):
         settings = db.execute(select(DhcpSettings)).scalar_one()
         assert settings.enabled is True
         assert settings.authoritative is True
+
+
+def test_dhcp_settings_badge_reflects_desired_state_not_seeded_service_state(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpSettings, ServiceState
+
+    login(client)
+    with SessionLocal() as db:
+        settings = db.execute(select(DhcpSettings)).scalar_one()
+        settings.enabled = True
+        state = db.execute(select(ServiceState).where(ServiceState.service == "dhcp")).scalar_one()
+        state.enabled = False
+        state.running = False
+        state.health = "disabled"
+        db.commit()
+
+    page = client.get("/dhcp")
+    settings_panel = page.text.split("<h2>DHCP Settings</h2>", 1)[1].split("</form>", 1)[0]
+
+    assert page.status_code == 200
+    assert '<span class="status-pill good">enabled</span>' in settings_panel
+    assert '<span class="status-pill muted">disabled</span>' not in settings_panel
 
 
 def test_dhcp_scope_edit_form_updates_ip_zone(client):

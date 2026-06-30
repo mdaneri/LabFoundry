@@ -404,10 +404,15 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert not (tftp_root / stale_mac / "boot.cfg").exists()
     assert not (http_base / stale_mac / "boot.cfg").exists()
     assert (tftp_root / "images" / manifest["artifacts"][0]["image_key"] / "mboot.c32").read_bytes() == b"mboot c32"
+    assert (tftp_root / "01-00-50-56-aa-bb-cc" / "mboot.efi").read_bytes() == b"mboot efi"
+    assert (http_base / "01-00-50-56-aa-bb-cc" / "mboot.efi").read_bytes() == b"mboot efi"
+    assert (http_base / "01-00-50-56-aa-bb-cc" / "crypto64.efi").read_bytes() == b"crypto"
     boot_cfg = (tftp_root / "01-00-50-56-aa-bb-cc" / "boot.cfg").read_text(encoding="utf-8")
+    http_boot_cfg = (http_base / "01-00-50-56-aa-bb-cc" / "boot.cfg").read_text(encoding="utf-8")
     assert f"prefix={manifest['artifacts'][0]['image_http_url']}" in boot_cfg
+    assert http_boot_cfg == boot_cfg
     assert "kernel=b.b00" in boot_cfg
-    assert "kernelopt=runweasel ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg" in boot_cfg
+    assert "kernelopt=runweasel ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg BOOTIF=01-00-50-56-aa-bb-cc" in boot_cfg
     assert "modules=jumpstrt.gz---useropts.gz" in boot_cfg
     pxelinux = (tftp_root / "pxelinux.cfg" / "01-00-50-56-aa-bb-cc").read_text(encoding="utf-8")
     assert "KERNEL images/" in pxelinux
@@ -453,7 +458,7 @@ def test_esxi_boot_cfg_rewrite_uses_http_prefix_and_kickstart():
             "title=ESXi",
             "kernel=/b.b00",
             "kernelopt=cdromBoot runweasel systemMediaSize=max",
-            "modules=/jumpstrt.gz---/useropts.gz",
+            "modules=jumpstrt.gz --- /useropts.gz --- /features.gz",
             "",
         ]
     )
@@ -462,13 +467,14 @@ def test_esxi_boot_cfg_rewrite_uses_http_prefix_and_kickstart():
         source,
         prefix_url="http://192.168.50.1:8080/pxe/esxi/images/esx-9",
         kickstart_url="http://192.168.50.1:8080/pxe/esxi/ks/7.cfg",
+        bootif="BOOTIF=01-00-50-56-aa-bb-cc",
     )
 
     assert "prefix=http://192.168.50.1:8080/pxe/esxi/images/esx-9" in rendered
     assert "kernel=b.b00" in rendered
     assert "cdromBoot" not in rendered
-    assert "kernelopt=runweasel systemMediaSize=max ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg" in rendered
-    assert "modules=jumpstrt.gz---useropts.gz" in rendered
+    assert "kernelopt=runweasel systemMediaSize=max ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg BOOTIF=01-00-50-56-aa-bb-cc" in rendered
+    assert "modules=jumpstrt.gz---useropts.gz---features.gz" in rendered
 
 
 def test_ca_helper_rejects_config_outside_apply_dir(tmp_path):
@@ -958,6 +964,66 @@ def test_dnsmasq_helper_apply_installs_config_dropin_and_enables_service(monkeyp
     assert "DNS=1.1.1.1" in mgmt_network.read_text(encoding="utf-8")
     assert "DNS=127.0.0.1" not in mgmt_network.read_text(encoding="utf-8")
     assert "Domains=~." not in mgmt_network.read_text(encoding="utf-8")
+
+
+def test_dnsmasq_helper_apply_creates_allowlisted_tftp_root(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "dnsmasq"
+    config_dir = tmp_path / "etc" / "labfoundry" / "dnsmasq.d"
+    dropin_dir = tmp_path / "etc" / "systemd" / "system" / "dnsmasq.service.d"
+    tftp_root = tmp_path / "var" / "lib" / "labfoundry" / "pxe" / "tftp"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry.conf"
+    config_path.write_text(f"enable-tftp\ntftp-root={tftp_root}\n", encoding="utf-8")
+    commands: list[list[str]] = []
+    chowned: list[Path] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_CONFIG_PATH", config_dir / "labfoundry.conf")
+    monkeypatch.setattr(helper, "DNSMASQ_SERVICE_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_SERVICE_DROPIN_PATH", dropin_dir / "labfoundry.conf")
+    monkeypatch.setattr(helper, "ESXI_TFTP_ROOT", tftp_root)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/dnsmasq" if command == "dnsmasq" else None)
+    monkeypatch.setattr(helper.shutil, "chown", lambda path, user, group: chowned.append(Path(path)))
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_dnsmasq("apply", [str(config_path)]) == 0
+
+    assert tftp_root.is_dir()
+    assert chowned == [tftp_root]
+    assert ["systemctl", "reload-or-restart", "dnsmasq"] in commands
+
+
+def test_dnsmasq_helper_apply_rejects_unexpected_tftp_root(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "dnsmasq"
+    allowed_root = tmp_path / "var" / "lib" / "labfoundry" / "pxe" / "tftp"
+    unexpected_root = tmp_path / "tmp" / "not-labfoundry"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry.conf"
+    config_path.write_text(f"enable-tftp\ntftp-root={unexpected_root}\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "ESXI_TFTP_ROOT", allowed_root)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/dnsmasq" if command == "dnsmasq" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_dnsmasq("apply", [str(config_path)]) == 2
+
+    captured = capsys.readouterr()
+    assert f"dnsmasq TFTP root must be {allowed_root}" in captured.err
+    assert not unexpected_root.exists()
+    assert ["systemctl", "reload-or-restart", "dnsmasq"] not in commands
 
 
 def test_dnsmasq_helper_reload_restarts_service(monkeypatch):
