@@ -64,6 +64,12 @@ from labfoundry.app.models import (
     WanPolicy,
     utcnow,
 )
+from labfoundry.app.operational_logging import (
+    configure_operational_logging,
+    logging_preferences_from_db,
+    logging_preferences_to_dict,
+    save_logging_preferences,
+)
 from labfoundry.app.schemas import ApiTokenCreate, WanPolicyCreate
 from labfoundry.app.services.appliance_settings import (
     APPLIANCE_DNS_RECORD_DESCRIPTION,
@@ -1117,6 +1123,7 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "management_https_cert_path": management_https_cert_path,
         "management_https_key_path": management_https_key_path,
         "management_interface": management,
+        "logging_preferences": logging_preferences_to_dict(logging_preferences_from_db(db)),
         "appliance_settings_validation_errors": validation_errors,
         "appliance_settings_validation_warnings": validation_warnings,
         "appliance_settings_config_preview": render_appliance_settings_config(
@@ -3813,6 +3820,45 @@ def log_appliance_apply_failures(job_id: str, unit_results: list[dict[str, Any]]
             )
 
 
+def log_appliance_apply_submission(
+    job_id: str,
+    *,
+    selected_units: list[str],
+    skipped_changed_units: list[dict[str, Any]],
+    unit_results: list[dict[str, Any]],
+    succeeded: bool,
+) -> None:
+    APPLY_LOGGER.info(
+        "Appliance apply task %s completed status=%s selected_units=%s skipped_changed_units=%s dry_run=%s",
+        job_id,
+        "succeeded" if succeeded else "failed",
+        ",".join(selected_units),
+        ",".join(unit["unit_id"] for unit in skipped_changed_units),
+        any(result["dry_run"] for result in unit_results),
+    )
+    for result in unit_results:
+        summary_text = result["summary"] if isinstance(result["summary"], str) else "; ".join(str(item) for item in result["summary"])
+        APPLY_LOGGER.info(
+            "Appliance apply task %s unit=%s status=%s dry_run=%s validation_errors=%s validation_warnings=%s summary=%s",
+            job_id,
+            result["unit_id"],
+            result["status"],
+            result["dry_run"],
+            len(result["validation_errors"]),
+            len(result["validation_warnings"]),
+            apply_output_excerpt(summary_text, limit=600),
+        )
+        for command in result["commands"]:
+            APPLY_LOGGER.info(
+                "Appliance apply task %s unit=%s command=%s returncode=%s dry_run=%s",
+                job_id,
+                result["unit_id"],
+                apply_output_excerpt(command["command_line"], limit=800),
+                command["returncode"],
+                command["dry_run"],
+            )
+
+
 def stage_appliance_apply_config(config_path: str, config_preview: str) -> str:
     path = Path(config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4371,6 +4417,13 @@ def submit_appliance_apply(
         update_appliance_apply_baselines(db, appliance_apply_units(db), selected_ids)
     else:
         log_appliance_apply_failures(job_id, unit_results)
+    log_appliance_apply_submission(
+        job_id,
+        selected_units=[unit["id"] for unit in selected_ordered_units],
+        skipped_changed_units=skipped_changed_units,
+        unit_results=unit_results,
+        succeeded=succeeded,
+    )
     db.commit()
     detail = " ; ".join(
         " ".join(command["command"])
@@ -8914,6 +8967,65 @@ def update_settings_from_ui(
                 "config_preview": context["appliance_settings_config_preview"],
             }
         )
+    return RedirectResponse("/settings", status_code=303)
+
+
+@router.post("/settings/logging", response_model=None)
+def update_logging_settings_from_ui(
+    request: Request,
+    level: str = Form("INFO"),
+    syslog_enabled: bool = Form(False),
+    syslog_host: str = Form(""),
+    syslog_port: str = Form("514"),
+    syslog_protocol: str = Form("udp"),
+    syslog_facility: str = Form("local0"),
+    syslog_level: str = Form("INFO"),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    try:
+        preferences = save_logging_preferences(
+            db,
+            level=level,
+            syslog_enabled=bool(syslog_enabled),
+            syslog_host=syslog_host,
+            syslog_port=syslog_port,
+            syslog_protocol=syslog_protocol,
+            syslog_facility=syslog_facility,
+            syslog_level=syslog_level,
+        )
+    except ValueError as exc:
+        if request.headers.get("X-LabFoundry-Autosave") == "1":
+            return JSONResponse({"status": "error", "message": str(exc)}, status_code=422)
+        return render(
+            request,
+            "settings.html",
+            {
+                "identity": identity,
+                **appliance_settings_context(db),
+                "appliance_apply_status": appliance_apply_status(db, "appliance_settings"),
+                "logging_settings_error": str(exc),
+            },
+            status_code=422,
+        )
+    db.commit()
+    configure_operational_logging(db)
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_operational_logging_settings",
+        resource_type="logging",
+        detail=(
+            f"level={preferences.level} syslog={'enabled' if preferences.syslog_enabled else 'disabled'} "
+            f"syslog_level={preferences.syslog_level} syslog_protocol={preferences.syslog_protocol} "
+            f"syslog_facility={preferences.syslog_facility}"
+        ),
+        request_id=request.state.request_id,
+    )
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        return JSONResponse({"status": "saved", "logging_preferences": logging_preferences_to_dict(preferences)})
     return RedirectResponse("/settings", status_code=303)
 
 

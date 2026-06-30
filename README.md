@@ -34,6 +34,12 @@ one for the VCF Offline Depot at `/mnt/labfoundry-vcf-offline-depot` and one
 for VCF Backups at `/mnt/labfoundry-vcf-backups`. Keep those workloads off the
 OS VHDX.
 
+LabFoundry writes operational events to `/var/log/labfoundry/labfoundry.log`.
+Audit events, desired-state edits, and appliance apply submissions are mirrored
+there with sensitive values redacted. The Settings page controls local file
+verbosity and can also forward the same operational events to an external
+syslog receiver.
+
 Photon OS 5.0 GA shipped with Python 3.11, but the current Photon 5.0 updates
 stream has moved beyond that baseline. On June 21, 2026, live repository
 metadata showed `python3` as `3.14.5-2.ph5`. LabFoundry keeps

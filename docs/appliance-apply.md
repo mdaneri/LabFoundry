@@ -125,6 +125,13 @@ Submitting creates one `appliance-apply` job. The job result records:
 
 In development, adapter commands are dry-run records. They capture command intent without changing host services.
 
+LabFoundry also writes a compact operational breadcrumb for each appliance apply
+submission to `/var/log/labfoundry/labfoundry.log`, including the job id,
+selected units, skipped changed units, dry-run/live status, per-unit result,
+and adapter command return codes. Audit events are mirrored to the same app log
+with sensitive-looking values redacted. Operators can adjust local log
+verbosity and optional external syslog forwarding from Settings.
+
 ## UI Expectations
 
 Service right rails should show:

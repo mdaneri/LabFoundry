@@ -215,11 +215,98 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "labfoundry.labfoundry.internal" in response.text
     assert "Management UI HTTPS" in response.text
     assert "Root SSH login" in response.text
+    assert "Operational Logging" in response.text
+    assert 'action="/settings/logging"' in response.text
+    assert 'select name="level"' in response.text
+    assert 'input class="switch-input" type="checkbox" name="syslog_enabled"' in response.text
+    assert "Syslog host" in response.text
     assert "data-appliance-settings-root-ssh" in response.text
     assert "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json" in response.text
     assert "resolver_mode" in response.text
     assert "root_ssh_enabled" in response.text
     assert 'class="language-json" data-appliance-settings-preview' in response.text
+
+
+def test_logging_settings_autosave_updates_preferences(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import AuditEvent, Setting
+    from labfoundry.app.operational_logging import (
+        LOGGING_LEVEL_KEY,
+        LOGGING_SYSLOG_ENABLED_KEY,
+        LOGGING_SYSLOG_FACILITY_KEY,
+        LOGGING_SYSLOG_HOST_KEY,
+        LOGGING_SYSLOG_LEVEL_KEY,
+        LOGGING_SYSLOG_PORT_KEY,
+        LOGGING_SYSLOG_PROTOCOL_KEY,
+    )
+
+    login(client)
+    page = client.get("/settings")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/settings/logging",
+        data={
+            "level": "DEBUG",
+            "syslog_enabled": "on",
+            "syslog_host": "127.0.0.1",
+            "syslog_port": "5514",
+            "syslog_protocol": "udp",
+            "syslog_facility": "local4",
+            "syslog_level": "WARNING",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "saved"
+    assert payload["logging_preferences"]["level"] == "DEBUG"
+    assert payload["logging_preferences"]["syslog_enabled"] is True
+    assert payload["logging_preferences"]["syslog_host"] == "127.0.0.1"
+    assert payload["logging_preferences"]["syslog_port"] == 5514
+    assert payload["logging_preferences"]["syslog_protocol"] == "udp"
+    assert payload["logging_preferences"]["syslog_facility"] == "local4"
+    assert payload["logging_preferences"]["syslog_level"] == "WARNING"
+
+    with SessionLocal() as db:
+        values = {row.key: row.value for row in db.execute(select(Setting)).scalars().all()}
+        assert values[LOGGING_LEVEL_KEY] == "DEBUG"
+        assert values[LOGGING_SYSLOG_ENABLED_KEY] == "true"
+        assert values[LOGGING_SYSLOG_HOST_KEY] == "127.0.0.1"
+        assert values[LOGGING_SYSLOG_PORT_KEY] == "5514"
+        assert values[LOGGING_SYSLOG_PROTOCOL_KEY] == "udp"
+        assert values[LOGGING_SYSLOG_FACILITY_KEY] == "local4"
+        assert values[LOGGING_SYSLOG_LEVEL_KEY] == "WARNING"
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "update_operational_logging_settings")).scalar_one()
+        assert event.resource_type == "logging"
+
+
+def test_logging_settings_requires_syslog_host_when_enabled(client):
+    login(client)
+    page = client.get("/settings")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/settings/logging",
+        data={
+            "level": "INFO",
+            "syslog_enabled": "on",
+            "syslog_host": "",
+            "syslog_port": "514",
+            "syslog_protocol": "udp",
+            "syslog_facility": "local0",
+            "syslog_level": "INFO",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["message"] == "External syslog host is required when syslog forwarding is enabled."
 
 
 def test_settings_page_shows_external_dns_editor_when_local_dns_is_disabled(client):
@@ -481,7 +568,9 @@ def test_settings_management_https_requires_ca_managed_certificate(client):
         assert settings.management_https_enabled is True
 
 
-def test_appliance_settings_apply_task_records_dry_run_helper_commands(client):
+def test_appliance_settings_apply_task_records_dry_run_helper_commands(client, caplog):
+    import logging
+
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -502,9 +591,13 @@ def test_appliance_settings_apply_task_records_dry_run_helper_commands(client):
     )
     assert saved.status_code == 200
 
-    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
+    with caplog.at_level(logging.INFO, logger="labfoundry.appliance_apply"):
+        apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
     assert apply_response.status_code == 200
     assert "Appliance apply task succeeded" in apply_response.text
+    assert "completed status=succeeded selected_units=appliance_settings" in caplog.text
+    assert "unit=appliance_settings status=succeeded" in caplog.text
+    assert "labfoundry-helper appliance-settings validate" in caplog.text
     assert "Task Steps" in apply_response.text
     assert "Appliance Settings" in apply_response.text
     assert "Done" in apply_response.text
@@ -1942,6 +2035,47 @@ def test_configure_logging_writes_main_app_log(tmp_path, monkeypatch):
         handler.flush()
 
     assert "apply failure visible in main log" in log_path.read_text(encoding="utf-8")
+
+    for handler in list(logging.getLogger().handlers):
+        if isinstance(handler, RotatingFileHandler) and handler.baseFilename == str(log_path):
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+    get_settings.cache_clear()
+
+
+def test_record_audit_writes_redacted_operational_log(client, tmp_path, monkeypatch):
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    from labfoundry.app.audit import record_audit
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.main import configure_logging
+
+    log_path = tmp_path / "labfoundry.log"
+    monkeypatch.setenv("LABFOUNDRY_APP_LOG_PATH", str(log_path))
+    get_settings.cache_clear()
+
+    with SessionLocal() as db:
+        configure_logging(db)
+        record_audit(
+            db,
+            actor="admin",
+            action="update_dns_settings",
+            resource_type="dns",
+            resource_id="1",
+            detail="password=super-secret\nlisten_address=192.168.49.1",
+            request_id="req_test",
+        )
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    text = log_path.read_text(encoding="utf-8")
+    assert "audit actor=admin action=update_dns_settings resource=dns resource_id=1 success=True request_id=req_test" in text
+    assert "password= [redacted]" in text
+    assert "listen_address=192.168.49.1" in text
+    assert "super-secret" not in text
 
     for handler in list(logging.getLogger().handlers):
         if isinstance(handler, RotatingFileHandler) and handler.baseFilename == str(log_path):

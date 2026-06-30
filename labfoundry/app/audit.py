@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from labfoundry.app.models import AuditEvent
+from labfoundry.app.operational_logging import log_audit_event
 
 
 def record_audit(
@@ -26,4 +27,5 @@ def record_audit(
     db.add(event)
     db.commit()
     db.refresh(event)
+    log_audit_event(event)
     return event
