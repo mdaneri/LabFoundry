@@ -405,6 +405,7 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert not (http_base / stale_mac / "boot.cfg").exists()
     assert (tftp_root / "images" / manifest["artifacts"][0]["image_key"] / "mboot.c32").read_bytes() == b"mboot c32"
     assert (tftp_root / "01-00-50-56-aa-bb-cc" / "mboot.efi").read_bytes() == b"mboot efi"
+    assert (tftp_root / "01-00-50-56-aa-bb-cc" / "crypto64.efi").read_bytes() == b"crypto"
     assert (http_base / "01-00-50-56-aa-bb-cc" / "mboot.efi").read_bytes() == b"mboot efi"
     assert (http_base / "01-00-50-56-aa-bb-cc" / "crypto64.efi").read_bytes() == b"crypto"
     boot_cfg = (tftp_root / "01-00-50-56-aa-bb-cc" / "boot.cfg").read_text(encoding="utf-8")
@@ -475,6 +476,21 @@ def test_esxi_boot_cfg_rewrite_uses_http_prefix_and_kickstart():
     assert "cdromBoot" not in rendered
     assert "kernelopt=runweasel systemMediaSize=max ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg BOOTIF=01-00-50-56-aa-bb-cc" in rendered
     assert "modules=jumpstrt.gz---useropts.gz---features.gz" in rendered
+
+
+def test_esxi_uefi_bootloader_must_come_from_iso_efi_boot(tmp_path):
+    helper = load_helper_module()
+    image_root = tmp_path / "image"
+    (image_root / "random").mkdir(parents=True)
+    (image_root / "random" / "mboot.efi").write_bytes(b"wrong")
+
+    assert helper._find_esxi_uefi_bootloader(image_root) is None
+
+    (image_root / "EFI" / "BOOT").mkdir(parents=True)
+    expected = image_root / "EFI" / "BOOT" / "BOOTX64.EFI"
+    expected.write_bytes(b"right")
+
+    assert helper._find_esxi_uefi_bootloader(image_root) == expected
 
 
 def test_ca_helper_rejects_config_outside_apply_dir(tmp_path):

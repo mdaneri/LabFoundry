@@ -1025,7 +1025,7 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         dns_preview = dnsmasq_context(db)["config_preview"]
         assert "enable-tftp" in dns_preview
         assert "dhcp-option=tag:sitea,66,esxi-pxe.labfoundry.internal" in dns_preview
-        assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
         assert "dhcp-boot=tag:sitea,tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
         assert "dhcp-boot=tag:sitea,tag:!ipxe,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
         assert "dhcp-boot=tag:sitea,tag:!ipxe,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dns_preview
@@ -1046,7 +1046,7 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "dhcp-userclass=set:ipxe,iPXE" in dhcp_page.text
     assert "dhcp-match=set:ipxe,175" in dhcp_page.text
     assert "dhcp-boot=tag:sitea,tag:!ipxe,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
-    assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dhcp_page.text
+    assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
     assert "dhcp-boot=tag:sitea,tag:!ipxe,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
     assert "dhcp-boot=tag:sitea,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dhcp_page.text
 

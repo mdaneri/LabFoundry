@@ -176,14 +176,16 @@ def test_dnsmasq_renderer_adds_esxi_pxe_boot_options():
     assert "dhcp-match=set:efi-x86_64,option:client-arch,9" in config
     assert "dhcp-vendorclass=set:uefi-http,HTTPClient" in config
     assert "dhcp-match=set:uefi-http-x64,option:client-arch,16" in config
-    assert "dhcp-boot=tag:pxe,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in config
+    assert "dhcp-boot=tag:pxe,tag:uefi-http,tag:uefi-http-x64,tag:!esxi-005056aabbcc,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in config
+    assert "dhcp-boot=tag:pxe,tag:esxi-005056aabbcc,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/01-00-50-56-aa-bb-cc/mboot.efi" in config
     assert "dhcp-option=tag:pxe,66,esxi-pxe.labfoundry.internal" in config
-    assert "dhcp-boot=tag:pxe,tag:ipxe,tag:efi-x86_64,tag:!esxi-005056aabbcc,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in config
+    assert "dhcp-boot=tag:pxe,tag:ipxe,tag:efi-x86_64,tag:!esxi-005056aabbcc,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in config
     assert "dhcp-boot=tag:pxe,tag:ipxe,tag:!efi-x86_64,pxelinux.0,esxi-pxe.labfoundry.internal,192.168.50.1" in config
     assert "dhcp-boot=tag:pxe,tag:!ipxe,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in config
     assert "dhcp-boot=tag:pxe,tag:!ipxe,tag:!efi-x86_64,undionly.kpxe,esxi-pxe.labfoundry.internal,192.168.50.1" in config
     assert "dhcp-mac=set:esxi-005056aabbcc,00:50:56:aa:bb:cc" in config
-    assert "dhcp-boot=tag:pxe,tag:esxi-005056aabbcc,tag:ipxe,tag:efi-x86_64,http://192.168.50.1:8080/pxe/esxi/01-00-50-56-aa-bb-cc/mboot.efi" in config
+    assert "dhcp-boot=tag:pxe,tag:esxi-005056aabbcc,tag:!ipxe,tag:efi-x86_64,01-00-50-56-aa-bb-cc/mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" not in config
+    assert "dhcp-boot=tag:pxe,tag:esxi-005056aabbcc,tag:ipxe,tag:efi-x86_64,01-00-50-56-aa-bb-cc/mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in config
 
 
 def test_dnsmasq_lease_parser_tracks_active_and_expired_leases():

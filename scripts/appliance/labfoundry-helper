@@ -915,6 +915,19 @@ def _find_under(root: Path, names: list[str]) -> Path | None:
     return None
 
 
+def _find_esxi_uefi_bootloader(root: Path) -> Path | None:
+    for directory in root.rglob("*"):
+        if not directory.is_dir():
+            continue
+        relative = directory.relative_to(root)
+        if [part.lower() for part in relative.parts] != ["efi", "boot"]:
+            continue
+        for candidate in directory.iterdir():
+            if candidate.is_file() and candidate.name.lower() == "bootx64.efi":
+                return candidate
+    return None
+
+
 def _copy_tree_contents(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for child in source.iterdir():
@@ -1095,7 +1108,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
                 generated_images.append(str(image_root))
             boot_cfg_source = _find_under(image_root, ["boot.cfg"])
             mboot_c32 = _find_under(image_root, ["mboot.c32"])
-            mboot_efi = _find_under(image_root, ["bootx64.efi", "mboot.efi"])
+            mboot_efi = _find_esxi_uefi_bootloader(image_root)
             crypto64 = _find_under(image_root, ["crypto64.efi"])
             missing = []
             if boot_cfg_source is None:
@@ -1103,7 +1116,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             if mboot_c32 is None:
                 missing.append("mboot.c32")
             if mboot_efi is None:
-                missing.append("mboot.efi/bootx64.efi")
+                missing.append("EFI/BOOT/BOOTX64.EFI")
             if missing:
                 raise RuntimeError(f"ESXi installer image {image_key} is missing {', '.join(missing)}")
             tftp_mboot_c32 = ESXI_TFTP_ROOT / "images" / image_key / "mboot.c32"
@@ -1130,6 +1143,10 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
                 host_mboot = tftp_boot_cfg.parent / uefi_second_stage
                 _copy_file(mboot_efi, host_mboot)
                 generated_tftp_files.append(str(host_mboot))
+                if crypto64 is not None:
+                    host_tftp_crypto64 = tftp_boot_cfg.parent / "crypto64.efi"
+                    _copy_file(crypto64, host_tftp_crypto64)
+                    generated_tftp_files.append(str(host_tftp_crypto64))
                 native_bootfile = str(boot.get("native_uefi_bootfile") or "mboot.efi")
                 host_http_mboot = http_boot_cfg.parent / native_bootfile
                 _copy_file(mboot_efi, host_http_mboot)
