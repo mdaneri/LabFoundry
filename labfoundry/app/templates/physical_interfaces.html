@@ -17,7 +17,7 @@
       </div>
     </div>
     <div class="inline-help-row">
-      <span class="field-label"><span>Host inventory</span><button class="help-icon" type="button" data-help="Reads current Linux network devices through safe host inventory commands. This updates observed NIC facts and seed desired state only; it does not apply network changes.">i</button></span>
+      <span class="field-label"><span>Host inventory</span><button class="help-icon" type="button" data-help="Reads current Linux network devices through safe host inventory commands, matching NICs by MAC so Linux eth renumbering does not move desired state. Missing NICs are marked for review; refresh does not apply network changes.">i</button></span>
       <span class="field-label"><span>Desired state</span><button class="help-icon" type="button" data-help="Editable access/trunk, IP CIDR, MTU, and admin state values are stored in LabFoundry and enforced only through the global appliance apply workflow.">i</button></span>
     </div>
     {% if form_error %}
@@ -72,8 +72,17 @@
             <div>{{ error }}</div>
           {% endfor %}
         </div>
+      {% endif %}
+      {% if network_inventory_cleanup_warning %}
+        <div class="alert warning">{{ network_inventory_cleanup_warning }}</div>
+      {% endif %}
+      {% if not network_validation_errors %}
+        {% if not network_inventory_cleanup_warning %}
+          <p class="muted">The desired physical interface and VLAN state passes LabFoundry validation.</p>
+        {% else %}
+          <p class="muted">The desired physical interface and VLAN state passes validation after inventory cleanup.</p>
+        {% endif %}
       {% else %}
-        <p class="muted">The desired physical interface and VLAN state passes LabFoundry validation.</p>
       {% endif %}
       <div class="terminal-note">
         <strong>{{ network_config_path }}</strong>

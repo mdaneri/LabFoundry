@@ -37,7 +37,7 @@ Passwords are available for OS sync only when an administrator creates or resets
 
 ## Physical Interface Inventory
 
-Refreshing Physical Interfaces is inventory only. Appliance startup refreshes observed Linux NIC facts automatically, and operators can also run the same refresh manually from the page. Both paths update LabFoundry's observed model, but neither runs the network adapter nor applies desired state to the host.
+Refreshing Physical Interfaces is inventory only. Appliance startup refreshes observed Linux NIC facts automatically, and operators can also run the same refresh manually from the page. Both paths update LabFoundry's observed model, but neither runs the network adapter nor applies desired state to the host. Reconciliation matches observed NICs by MAC address before Linux interface name, so Hyper-V/Linux `ethN` renumbering after a removed adapter does not transfer desired state to a different NIC. Removed host NICs are made inert, dependent VLANs are disabled, service listener interfaces and listener addresses are pruned or disabled when no listener remains, and the cleanup is written to the LabFoundry app log and audit events.
 
 ## Network Apply
 

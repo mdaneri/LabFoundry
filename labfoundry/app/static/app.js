@@ -3506,7 +3506,17 @@ async function postNetworkAction(url, data, csrf, options = {}) {
   const body = new FormData();
   body.set("csrf", csrf);
   for (const [key, value] of Object.entries(data)) {
-    if (key === "id" || key === "is_new" || key === "name" || key === "mac_address" || key === "driver" || key === "speed" || key === "oper_state" || key === "vlan_count") {
+    if (
+      key === "id" ||
+      key === "is_new" ||
+      key === "name" ||
+      key === "mac_address" ||
+      key === "driver" ||
+      key === "speed" ||
+      key === "oper_state" ||
+      key === "vlan_count" ||
+      key === "parent_missing"
+    ) {
       continue;
     }
     if (key === "enabled") {
@@ -3555,6 +3565,14 @@ function physicalLinkTypeFormatter(cell, modeOptions) {
     return `${escapeHtml(label)} <span class="cell-note">locked by ${vlanCount} VLAN${vlanCount === 1 ? "" : "s"}</span>`;
   }
   return escapeHtml(label);
+}
+
+function vlanEnabledFormatter(cell) {
+  const data = cell.getRow().getData();
+  if (data.parent_missing) {
+    return '<span class="muted" title="Parent NIC is missing; this VLAN is disabled until moved to an available trunk parent.">disabled</span>';
+  }
+  return cell.getValue() ? "✓" : "";
 }
 
 function hasRequiredVlanFields(data) {
@@ -3620,6 +3638,14 @@ async function autoSaveVlanInterface(cell, csrf) {
   clearCaMessage("vlan-interface-error");
   const row = cell.getRow();
   const data = row.getData();
+  if (data.parent_missing) {
+    row.update({ enabled: false });
+    showNetworkMessage("vlan-interface-error", `${data.parent_interface} is missing from host inventory. Move this VLAN to an available trunk parent before enabling it.`);
+    if (typeof cell.restoreOldValue === "function") {
+      cell.restoreOldValue();
+    }
+    return;
+  }
   if (data.is_new) {
     if (!hasRequiredVlanFields(data)) {
       return;
@@ -3860,8 +3886,9 @@ function initializeVlanInterfacesTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: vlanEnabledFormatter,
           editor: "tickCross",
+          editable: (cell) => !cell.getRow().getData().parent_missing,
           hozAlign: "center",
           width: 100,
           headerSort: false,
@@ -3870,6 +3897,7 @@ function initializeVlanInterfacesTable() {
       ],
       rowFormatter: (row) => {
         row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        row.getElement().classList.toggle("locked-record-row", Boolean(row.getData().parent_missing));
       },
     });
     if (fallback) {

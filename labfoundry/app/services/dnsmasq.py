@@ -379,6 +379,8 @@ def validate_dns_listen_targets(settings: DnsSettings, available_interface_names
 def dhcp_bind_target_names(physical_interfaces: list[PhysicalInterface], vlan_interfaces: list[VlanInterface]) -> set[str]:
     names: set[str] = set()
     for interface in physical_interfaces:
+        if interface.oper_state == "missing":
+            continue
         mode = (interface.mode or "").strip().lower()
         if mode == "trunk" or not _valid_cidr(interface.ip_cidr):
             continue

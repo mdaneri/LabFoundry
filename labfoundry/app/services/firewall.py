@@ -320,6 +320,8 @@ def source_group_to_rule_source(group: dict | None, source_groups_by_id: dict[st
 def firewall_interface_networks(interfaces: list[PhysicalInterface], vlans: list[VlanInterface]) -> dict[str, str]:
     networks: dict[str, str] = {}
     for interface in interfaces:
+        if interface.oper_state == "missing":
+            continue
         network = _network_from_cidr(interface.ip_cidr)
         if network:
             networks[interface.name] = network

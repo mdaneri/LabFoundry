@@ -3794,6 +3794,77 @@ def test_vlan_page_prefers_real_trunk_parent_when_inventory_has_eth2(client):
     assert "eth1 - access - trunk" not in page.text
 
 
+def test_vlan_page_disables_missing_parent_vlan(client):
+    import html
+    import json
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface, VlanInterface
+
+    login(client)
+    with SessionLocal() as db:
+        db.query(VlanInterface).delete()
+        db.query(PhysicalInterface).delete()
+        db.add_all(
+            [
+                PhysicalInterface(
+                    name="missing_155d011d1d",
+                    mac_address="00:15:5d:01:1d:1d",
+                    role="unused",
+                    mode="unused",
+                    admin_state="down",
+                    oper_state="missing",
+                    inventory_source="host",
+                    desired_state_source="user",
+                ),
+                PhysicalInterface(
+                    name="eth2",
+                    mac_address="00:15:5d:01:1d:1c",
+                    role="access",
+                    mode="trunk",
+                    inventory_source="host",
+                    desired_state_source="user",
+                ),
+                VlanInterface(
+                    parent_interface="missing_155d011d1d",
+                    name="missing_155d011d1d.11",
+                    vlan_id=11,
+                    ip_cidr="192.168.11.1/24",
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    page = client.get("/vlan-interfaces")
+    assert page.status_code == 200
+    vlan_payload = page.text.split("data-vlans='", 1)[1].split("'", 1)[0]
+    rows = json.loads(html.unescape(vlan_payload))
+    row = next(item for item in rows if item["name"] == "missing_155d011d1d.11")
+    assert row["parent_missing"] is True
+    assert row["enabled"] is False
+
+    parent_payload = page.text.split("data-parent-options='", 1)[1].split("'", 1)[0]
+    options = json.loads(html.unescape(parent_payload))
+    assert options == [{"name": "eth2", "label": "eth2 - access - trunk - host NIC - 00:15:5d:01:1d:1c"}]
+
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        f"/vlan-interfaces/{row['id']}/edit",
+        data={
+            "parent_interface": "missing_155d011d1d",
+            "vlan_id": "11",
+            "ip_cidr": "192.168.11.1/24",
+            "mtu": "1500",
+            "role": "access",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+    )
+    assert response.status_code == 409
+    assert "missing from host inventory" in response.text
+
+
 def test_vlan_interface_rejects_non_trunk_parent(client):
     login(client)
     page = client.get("/vlan-interfaces")

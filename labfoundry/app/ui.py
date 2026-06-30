@@ -153,6 +153,7 @@ from labfoundry.app.secrets import decrypt_secret, secret_key_status
 from labfoundry.app.services.networking import (
     INTERFACE_MODES,
     INTERFACE_ROLES,
+    NETWORK_INVENTORY_CLEANUP_WARNING_KEY,
     VLAN_ROLES,
     normalize_interface_mode,
     physical_interface_to_dict,
@@ -765,8 +766,11 @@ def service_bind_options(db: Session) -> list[dict[str, str]]:
     vlan_interfaces = db.execute(
         select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)
     ).scalars().all()
+    interfaces_by_name = {interface.name: interface for interface in physical_interfaces}
     options: list[dict[str, str]] = []
     for interface in physical_interfaces:
+        if interface.oper_state == "missing":
+            continue
         mode = normalize_interface_mode(interface.mode)
         address = address_from_cidr(interface.ip_cidr)
         if mode == "trunk" or not address:
@@ -779,6 +783,9 @@ def service_bind_options(db: Session) -> list[dict[str, str]]:
             }
         )
     for vlan in vlan_interfaces:
+        parent = interfaces_by_name.get(vlan.parent_interface)
+        if parent and parent.oper_state == "missing":
+            continue
         address = address_from_cidr(vlan.ip_cidr)
         if not address:
             continue
@@ -1869,17 +1876,28 @@ def kms_context(db: Session) -> dict:
 def network_context(db: Session) -> dict:
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlans = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    interfaces_by_name = {interface.name: interface for interface in interfaces}
     vlan_counts: dict[str, int] = {}
     for vlan in vlans:
         vlan_counts[vlan.parent_interface] = vlan_counts.get(vlan.parent_interface, 0) + 1
     config_preview = render_network_config(interfaces=interfaces, vlans=vlans)
     validation_errors = validate_network_state(interfaces=interfaces, vlans=vlans)
-    trunk_interfaces = [interface for interface in interfaces if normalize_interface_mode(interface.mode) == "trunk"]
+    trunk_interfaces = [
+        interface
+        for interface in interfaces
+        if normalize_interface_mode(interface.mode) == "trunk" and interface.oper_state != "missing"
+    ]
     return {
         "physical_interfaces": interfaces,
         "physical_interface_rows": [physical_interface_to_dict(interface, vlan_counts.get(interface.name, 0)) for interface in interfaces],
         "vlan_interfaces": vlans,
-        "vlan_interface_rows": [vlan_interface_to_dict(vlan) for vlan in vlans],
+        "vlan_interface_rows": [
+            vlan_interface_to_dict(
+                vlan,
+                parent_missing=bool((parent := interfaces_by_name.get(vlan.parent_interface)) and parent.oper_state == "missing"),
+            )
+            for vlan in vlans
+        ],
         "interface_names": [interface.name for interface in interfaces],
         "trunk_interface_names": [interface.name for interface in trunk_interfaces],
         "trunk_parent_options": [trunk_parent_option(interface) for interface in trunk_interfaces],
@@ -1888,6 +1906,7 @@ def network_context(db: Session) -> dict:
         "vlan_roles": VLAN_ROLES,
         "network_config_preview": config_preview,
         "network_validation_errors": validation_errors,
+        "network_inventory_cleanup_warning": setting_value(db, NETWORK_INVENTORY_CLEANUP_WARNING_KEY),
         "network_config_path": NETWORK_STAGED_CONFIG_PATH,
     }
 
@@ -1897,6 +1916,8 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
     vlans = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     targets: list[dict[str, str]] = []
     for interface in interfaces:
+        if interface.oper_state == "missing":
+            continue
         mode = normalize_interface_mode(interface.mode)
         if mode == "trunk" or not interface.ip_cidr:
             continue
@@ -2644,7 +2665,7 @@ def dns_record_suggested_ipv4(records: list[DnsRecord], domain: str, dhcp_scopes
     return ""
 
 
-def validate_vlan_form_values(parent_interface: str, vlan_id: str, ip_cidr: str, db: Session) -> tuple[str, int, str] | Response:
+def validate_vlan_form_values(parent_interface: str, vlan_id: str, ip_cidr: str, enabled: bool, db: Session) -> tuple[str, int, str, bool] | Response:
     parent_name = parent_interface.strip()
     if not parent_name:
         return Response("VLAN parent interface is required.", status_code=409, media_type="text/plain")
@@ -2665,13 +2686,22 @@ def validate_vlan_form_values(parent_interface: str, vlan_id: str, ip_cidr: str,
     except ValueError:
         return Response("VLAN IP CIDR must be a valid address and prefix, for example 192.168.50.1/24.", status_code=409, media_type="text/plain")
     parent = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == parent_name)).scalar_one_or_none()
+    parent_missing = bool(parent and parent.oper_state == "missing")
+    if parent_missing:
+        if enabled:
+            return Response(
+                f"{parent_name} is missing from host inventory. Move the VLAN to an available trunk parent before enabling it.",
+                status_code=409,
+                media_type="text/plain",
+            )
+        return parent_name, parsed_vlan_id, ip_value, True
     if not parent or normalize_interface_mode(parent.mode) != "trunk":
         return Response(
             f"{parent_name or 'Selected parent'} is not a trunk interface. Mark the physical NIC as trunk before creating VLANs on it.",
             status_code=409,
             media_type="text/plain",
         )
-    return parent_name, parsed_vlan_id, ip_value
+    return parent_name, parsed_vlan_id, ip_value, False
 
 
 def reverse_records_by_zone(records: list[dict[str, str]]) -> list[dict]:
@@ -5180,10 +5210,11 @@ def create_vlan_interface_from_ui(
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
-    parsed = validate_vlan_form_values(parent_interface, vlan_id, ip_cidr, db)
+    requested_enabled = enabled == "on"
+    parsed = validate_vlan_form_values(parent_interface, vlan_id, ip_cidr, requested_enabled, db)
     if isinstance(parsed, Response):
         return parsed
-    parent_name, parsed_vlan_id, ip_value = parsed
+    parent_name, parsed_vlan_id, ip_value, parent_missing = parsed
     vlan = VlanInterface(
         name=f"{parent_name}.{parsed_vlan_id}",
         parent_interface=parent_name,
@@ -5191,7 +5222,7 @@ def create_vlan_interface_from_ui(
         ip_cidr=ip_value,
         mtu=mtu,
         role=role.strip(),
-        enabled=enabled == "on",
+        enabled=requested_enabled and not parent_missing,
     )
     db.add(vlan)
     try:
@@ -5226,17 +5257,18 @@ def edit_vlan_interface_from_ui(
     vlan = db.get(VlanInterface, vlan_id)
     if not vlan:
         raise HTTPException(status_code=404, detail="VLAN interface not found")
-    parsed = validate_vlan_form_values(parent_interface, vlan_id_value, ip_cidr, db)
+    requested_enabled = enabled == "on"
+    parsed = validate_vlan_form_values(parent_interface, vlan_id_value, ip_cidr, requested_enabled, db)
     if isinstance(parsed, Response):
         return parsed
-    parent_name, parsed_vlan_id, ip_value = parsed
+    parent_name, parsed_vlan_id, ip_value, parent_missing = parsed
     vlan.parent_interface = parent_name
     vlan.vlan_id = parsed_vlan_id
     vlan.name = f"{vlan.parent_interface}.{vlan.vlan_id}"
     vlan.ip_cidr = ip_value
     vlan.mtu = mtu
     vlan.role = role.strip()
-    vlan.enabled = enabled == "on"
+    vlan.enabled = requested_enabled and not parent_missing
     try:
         db.commit()
     except IntegrityError:

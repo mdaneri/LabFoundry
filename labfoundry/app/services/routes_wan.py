@@ -140,7 +140,7 @@ def validate_wan_state(
                 ip_address(route.gateway)
             except ValueError:
                 errors.append(f"Gateway {route.gateway} for {route.destination_cidr} is not a valid IP address.")
-        if route.interface_name not in target_names:
+        if route.enabled and route.interface_name not in target_names:
             errors.append(f"Route {route.destination_cidr} uses {route.interface_name}, which is not an access interface or VLAN target.")
         if route.metric < 0:
             errors.append(f"Route {route.destination_cidr} has a negative metric.")
@@ -156,12 +156,13 @@ def validate_wan_state(
         if normalized_name in seen_nat_names:
             errors.append(f"NAT rule {rule.name} is duplicated.")
         seen_nat_names.add(normalized_name)
-        errors.extend(validate_nat_source(rule.source, source_group_ids))
-        if rule.outbound_interface not in wan_target_names:
+        if rule.enabled:
+            errors.extend(validate_nat_source(rule.source, source_group_ids))
+        if rule.enabled and rule.outbound_interface not in wan_target_names:
             errors.append(f"NAT rule {rule.name} must use an access physical interface or enabled VLAN with an IP CIDR.")
         if rule.priority < 0:
             errors.append(f"NAT rule {rule.name} has a negative priority.")
-        if not rule.masquerade:
+        if rule.enabled and not rule.masquerade:
             errors.append(f"NAT rule {rule.name} must use masquerade; destination NAT and port forwarding are not supported in v1.")
 
     for policy in policies:

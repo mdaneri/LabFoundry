@@ -231,6 +231,13 @@ def validate_vlan_api_payload(payload: VlanCreate, db: Session) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="VLAN IP CIDR must be a valid address and prefix, for example 192.168.50.1/24.") from exc
     parent = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == values["parent_interface"])).scalar_one_or_none()
+    if parent and parent.oper_state == "missing":
+        if values.get("enabled", True):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{values['parent_interface']} is missing from host inventory. Move the VLAN to an available trunk parent before enabling it.",
+            )
+        return values
     if not parent or normalize_interface_mode(parent.mode) != "trunk":
         raise HTTPException(
             status_code=409,
@@ -801,6 +808,12 @@ def enable_vlan(vlan_id: int, identity: Annotated[Identity, Depends(require_scop
     vlan = db.get(VlanInterface, vlan_id)
     if not vlan:
         raise HTTPException(status_code=404, detail="VLAN not found")
+    parent = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == vlan.parent_interface)).scalar_one_or_none()
+    if parent and parent.oper_state == "missing":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{vlan.parent_interface} is missing from host inventory. Move the VLAN to an available trunk parent before enabling it.",
+        )
     vlan.enabled = True
     db.commit()
     db.refresh(vlan)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 from ipaddress import ip_interface
 from pathlib import Path
 import subprocess
@@ -9,10 +10,28 @@ import subprocess
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from labfoundry.app.models import PhysicalInterface, Route, VlanInterface
+from labfoundry.app.models import (
+    AuditEvent,
+    CaSettings,
+    DhcpScope,
+    DhcpSettings,
+    DnsSettings,
+    FirewallRule,
+    KmsSettings,
+    NatRule,
+    PhysicalInterface,
+    Route,
+    Setting,
+    VcfBackupSettings,
+    VcfOfflineDepotSettings,
+    VcfPrivateRegistrySettings,
+    VlanInterface,
+)
 from labfoundry.app.models import utcnow
 
 
+LOGGER = logging.getLogger("labfoundry.networking")
+NETWORK_INVENTORY_CLEANUP_WARNING_KEY = "network.inventory_cleanup.warning"
 INTERFACE_ROLES = ["management", "access", "wan", "unused"]
 INTERFACE_MODES = ["access", "trunk", "unused"]
 VLAN_ROLES = ["access", "management", "services", "storage", "wan"]
@@ -63,7 +82,7 @@ def physical_interface_to_dict(interface: PhysicalInterface, vlan_count: int = 0
     }
 
 
-def vlan_interface_to_dict(vlan: VlanInterface) -> dict:
+def vlan_interface_to_dict(vlan: VlanInterface, parent_missing: bool = False) -> dict:
     return {
         "id": vlan.id,
         "name": vlan.name,
@@ -72,7 +91,8 @@ def vlan_interface_to_dict(vlan: VlanInterface) -> dict:
         "ip_cidr": vlan.ip_cidr or "",
         "mtu": vlan.mtu,
         "role": vlan.role,
-        "enabled": vlan.enabled,
+        "enabled": False if parent_missing else vlan.enabled,
+        "parent_missing": parent_missing,
     }
 
 
@@ -140,7 +160,7 @@ def parse_linux_ip_interfaces(payload: str, *, sysfs_base: Path = Path("/sys/cla
         linkinfo = row.get("linkinfo") or {}
         if linkinfo.get("info_kind") == "vlan":
             continue
-        mac_address = str(row.get("address") or "").strip()
+        mac_address = str(row.get("address") or "").strip().lower()
         if not mac_address or mac_address == "00:00:00:00:00:00":
             continue
         sysfs_interface = sysfs_base / name
@@ -175,28 +195,349 @@ def discover_host_physical_interfaces() -> list[HostPhysicalInterface]:
     return parse_linux_ip_interfaces(completed.stdout)
 
 
+def _mac_key(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _missing_interface_name(interface: PhysicalInterface, used_names: set[str]) -> str:
+    mac = "".join(character for character in _mac_key(interface.mac_address) if character.isalnum())
+    suffix = mac[-10:] or str(interface.id or interface.name or "nic")
+    base = f"missing_{suffix}"[:50]
+    candidate = base
+    counter = 2
+    while candidate in used_names:
+        marker = f"_{counter}"
+        candidate = f"{base[: 50 - len(marker)]}{marker}"
+        counter += 1
+    return candidate
+
+
+def _replace_interface_tokens(value: str | None, renames: dict[str, str]) -> str:
+    if not value:
+        return value or ""
+    tokens = [token.strip() for token in value.replace(",", "\n").splitlines() if token.strip()]
+    if not tokens:
+        return ""
+    return "\n".join(renames.get(token, token) for token in tokens)
+
+
+def _address_from_cidr(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return str(ip_interface(value.strip()).ip)
+    except ValueError:
+        return ""
+
+
+def _set_setting_value(db: Session, key: str, value: str) -> Setting:
+    setting = db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none()
+    if setting is None:
+        setting = Setting(key=key, value=value)
+        db.add(setting)
+    else:
+        setting.value = value
+        setting.updated_at = utcnow()
+    return setting
+
+
+def _remove_interface_tokens(value: str | None, targets: set[str]) -> tuple[str, list[str]]:
+    if not value:
+        return "", []
+    kept: list[str] = []
+    removed: list[str] = []
+    seen: set[str] = set()
+    for token in [item.strip() for item in value.replace(",", "\n").splitlines() if item.strip()]:
+        if token in targets:
+            removed.append(token)
+            continue
+        if token not in seen:
+            kept.append(token)
+            seen.add(token)
+    return "\n".join(kept), removed
+
+
+def _disable_service_without_bind(settings: object, label: str, details: list[str]) -> None:
+    if not bool(getattr(settings, "enabled", False)):
+        return
+    if _remove_interface_tokens(getattr(settings, "listen_interface", ""), set())[0]:
+        return
+    if _remove_interface_tokens(getattr(settings, "listen_address", ""), set())[0]:
+        return
+    setattr(settings, "enabled", False)
+    details.append(f"disabled {label}: removed NIC was the only listen target")
+
+
+def _cleanup_missing_interface_references(db: Session, missing_renames: dict[str, str]) -> list[str]:
+    if not missing_renames:
+        return []
+    details: list[str] = []
+    unavailable_targets = set(missing_renames) | set(missing_renames.values())
+    target_replacements = dict(missing_renames)
+    unavailable_addresses: set[str] = set()
+
+    for interface in db.execute(select(PhysicalInterface)).scalars().all():
+        if interface.oper_state == "missing":
+            unavailable_targets.add(interface.name)
+            for address in (_address_from_cidr(interface.ip_cidr), _address_from_cidr(interface.host_ip_cidr)):
+                if address:
+                    unavailable_addresses.add(address)
+            interface.role = "unused"
+            interface.mode = "unused"
+            interface.ip_cidr = None
+            interface.admin_state = "down"
+
+    for vlan in db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all():
+        if vlan.parent_interface not in unavailable_targets:
+            continue
+        old_name = vlan.name
+        old_parent = vlan.parent_interface
+        new_parent = missing_renames.get(vlan.parent_interface, vlan.parent_interface)
+        if address := _address_from_cidr(vlan.ip_cidr):
+            unavailable_addresses.add(address)
+        vlan.parent_interface = new_parent
+        vlan.name = f"{new_parent}.{vlan.vlan_id}"
+        changed = vlan.enabled or vlan.parent_interface != old_parent or vlan.name != old_name
+        vlan.enabled = False
+        target_replacements[old_name] = vlan.name
+        unavailable_targets.update({old_name, vlan.name})
+        if changed:
+            details.append(f"disabled VLAN {old_name}: parent {old_parent} is missing")
+
+    for route in db.execute(select(Route)).scalars().all():
+        if route.interface_name in unavailable_targets:
+            old_interface = route.interface_name
+            route.interface_name = target_replacements.get(route.interface_name, "")
+            if route.enabled:
+                route.enabled = False
+                details.append(f"disabled route {route.destination_cidr}: interface {old_interface} is missing")
+
+    for rule in db.execute(select(NatRule)).scalars().all():
+        if rule.outbound_interface in unavailable_targets:
+            old_interface = rule.outbound_interface
+            rule.outbound_interface = ""
+            if rule.enabled:
+                rule.enabled = False
+                details.append(f"disabled NAT rule {rule.name}: outbound interface {old_interface} is missing")
+
+    for rule in db.execute(select(FirewallRule)).scalars().all():
+        if rule.interface_name in unavailable_targets:
+            old_interface = rule.interface_name
+            rule.interface_name = ""
+            if rule.enabled:
+                rule.enabled = False
+                details.append(f"disabled firewall rule {rule.name}: interface {old_interface} is missing")
+
+    for settings in db.execute(select(DhcpSettings)).scalars().all():
+        if settings.interface_name in unavailable_targets:
+            settings.interface_name = ""
+            if settings.enabled:
+                settings.enabled = False
+                details.append("disabled DHCP: removed NIC was the legacy bind interface")
+
+    dhcp_scopes = db.execute(select(DhcpScope)).scalars().all()
+    for scope in dhcp_scopes:
+        if scope.interface_name in unavailable_targets:
+            old_interface = scope.interface_name
+            scope.interface_name = ""
+            if scope.enabled:
+                scope.enabled = False
+                details.append(f"disabled DHCP IP zone {scope.name}: interface {old_interface} is missing")
+
+    for settings in db.execute(select(DhcpSettings)).scalars().all():
+        if settings.enabled and not any(scope.enabled is not False for scope in dhcp_scopes):
+            settings.enabled = False
+            details.append("disabled DHCP: removed NIC left no enabled DHCP IP zones")
+
+    service_targets = [
+        (DnsSettings, "DNS"),
+        (CaSettings, "Certificate Authority"),
+        (KmsSettings, "KMS / KMIP"),
+        (VcfBackupSettings, "VCF Backups"),
+        (VcfPrivateRegistrySettings, "VCF Private Registry"),
+        (VcfOfflineDepotSettings, "VCF Offline Depot"),
+    ]
+    for model, label in service_targets:
+        for settings in db.execute(select(model)).scalars().all():
+            updated_interfaces, removed_interfaces = _remove_interface_tokens(settings.listen_interface, unavailable_targets)
+            updated_addresses, removed_addresses = _remove_interface_tokens(
+                getattr(settings, "listen_address", ""),
+                unavailable_addresses,
+            )
+            if not removed_interfaces and not removed_addresses:
+                continue
+            settings.listen_interface = updated_interfaces
+            if hasattr(settings, "listen_address"):
+                settings.listen_address = updated_addresses
+            if removed_interfaces:
+                details.append(f"removed {', '.join(removed_interfaces)} from {label} listen interfaces")
+            if removed_addresses:
+                details.append(f"removed {', '.join(removed_addresses)} from {label} listen addresses")
+            _disable_service_without_bind(settings, label, details)
+
+    esxi_listen_interface = db.execute(select(Setting).where(Setting.key == "esxi_pxe.boot.listen_interface")).scalar_one_or_none()
+    if esxi_listen_interface is not None:
+        updated, removed = _remove_interface_tokens(esxi_listen_interface.value, unavailable_targets)
+        if removed:
+            esxi_listen_interface.value = updated
+            details.append(f"removed {', '.join(removed)} from ESXi PXE listen interfaces")
+            if not updated:
+                for key in ("esxi_pxe.boot.enabled", "esxi_pxe.boot.native_uefi_http_enabled"):
+                    _set_setting_value(db, key, "false")
+                details.append("disabled ESXi PXE boot services: removed NIC was the only listen interface")
+    esxi_listen_address = db.execute(select(Setting).where(Setting.key == "esxi_pxe.boot.listen_address")).scalar_one_or_none()
+    if esxi_listen_address is not None:
+        updated, removed = _remove_interface_tokens(esxi_listen_address.value, unavailable_addresses)
+        if removed:
+            esxi_listen_address.value = updated
+            details.append(f"removed {', '.join(removed)} from ESXi PXE listen addresses")
+            if not updated:
+                for key in ("esxi_pxe.boot.enabled", "esxi_pxe.boot.native_uefi_http_enabled"):
+                    _set_setting_value(db, key, "false")
+                details.append("disabled ESXi PXE boot services: removed NIC was the only listen address")
+
+    if details:
+        message = "Missing physical interface cleanup: " + "; ".join(details)
+        LOGGER.warning(message)
+        _set_setting_value(db, NETWORK_INVENTORY_CLEANUP_WARNING_KEY, message)
+        db.add(
+            AuditEvent(
+                actor="system",
+                action="cleanup_missing_physical_interface_bindings",
+                resource_type="network",
+                detail=message,
+            )
+        )
+    return details
+
+
+def _retarget_interface_references(db: Session, renames: dict[str, str]) -> None:
+    if not renames:
+        return
+    expanded_renames = dict(renames)
+    vlans = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    for vlan in vlans:
+        new_parent = renames.get(vlan.parent_interface)
+        if not new_parent:
+            continue
+        old_name = vlan.name
+        vlan.parent_interface = new_parent
+        vlan.name = f"{new_parent}.{vlan.vlan_id}"
+        expanded_renames[old_name] = vlan.name
+
+    scalar_targets = [
+        (Route, "interface_name"),
+        (NatRule, "outbound_interface"),
+        (FirewallRule, "interface_name"),
+        (DhcpSettings, "interface_name"),
+        (DhcpScope, "interface_name"),
+    ]
+    for model, field_name in scalar_targets:
+        for row in db.execute(select(model)).scalars().all():
+            current = getattr(row, field_name)
+            if current in expanded_renames:
+                setattr(row, field_name, expanded_renames[current])
+
+    list_targets = [
+        (DnsSettings, "listen_interface"),
+        (CaSettings, "listen_interface"),
+        (KmsSettings, "listen_interface"),
+        (VcfBackupSettings, "listen_interface"),
+        (VcfPrivateRegistrySettings, "listen_interface"),
+        (VcfOfflineDepotSettings, "listen_interface"),
+    ]
+    for model, field_name in list_targets:
+        for row in db.execute(select(model)).scalars().all():
+            updated = _replace_interface_tokens(getattr(row, field_name), expanded_renames)
+            if updated != getattr(row, field_name):
+                setattr(row, field_name, updated)
+
+    esxi_listen_interface = db.execute(select(Setting).where(Setting.key == "esxi_pxe.boot.listen_interface")).scalar_one_or_none()
+    if esxi_listen_interface is not None:
+        esxi_listen_interface.value = _replace_interface_tokens(esxi_listen_interface.value, expanded_renames)
+
+
+def _rename_interface(
+    interface: PhysicalInterface,
+    new_name: str,
+    *,
+    by_name: dict[str, PhysicalInterface],
+    used_names: set[str],
+    renames: dict[str, str],
+) -> None:
+    old_name = interface.name
+    if old_name == new_name:
+        return
+    by_name.pop(old_name, None)
+    used_names.discard(old_name)
+    interface.name = new_name
+    by_name[new_name] = interface
+    used_names.add(new_name)
+    renames[old_name] = new_name
+
+
 def reconcile_host_physical_interfaces(
     interfaces: list[PhysicalInterface],
     discovered: list[HostPhysicalInterface],
+    *,
+    renames: dict[str, str] | None = None,
 ) -> list[PhysicalInterface]:
     now = utcnow()
     by_name = {interface.name: interface for interface in interfaces}
-    seen_names: set[str] = set()
+    mac_counts: dict[str, int] = {}
+    for interface in interfaces:
+        mac = _mac_key(interface.mac_address)
+        if mac:
+            mac_counts[mac] = mac_counts.get(mac, 0) + 1
+    by_mac = {
+        _mac_key(interface.mac_address): interface
+        for interface in interfaces
+        if _mac_key(interface.mac_address) and mac_counts.get(_mac_key(interface.mac_address)) == 1
+    }
+    used_names = set(by_name)
+    name_changes: dict[str, str] = {}
+    seen_interface_ids: set[int] = set()
     for host in discovered:
-        seen_names.add(host.name)
-        interface = by_name.get(host.name)
+        host_mac = _mac_key(host.mac_address)
+        interface = by_mac.get(host_mac)
+        name_match = by_name.get(host.name)
+        if interface is not None and name_match is not None and name_match is not interface:
+            replacement_name = _missing_interface_name(name_match, used_names)
+            _rename_interface(
+                name_match,
+                replacement_name,
+                by_name=by_name,
+                used_names=used_names,
+                renames=name_changes,
+            )
+        if interface is not None and interface.name != host.name:
+            _rename_interface(interface, host.name, by_name=by_name, used_names=used_names, renames=name_changes)
+        if interface is None:
+            interface = by_name.get(host.name)
+            if interface is not None and interface.desired_state_source != "seed" and _mac_key(interface.mac_address) != host_mac:
+                replacement_name = _missing_interface_name(interface, used_names)
+                _rename_interface(
+                    interface,
+                    replacement_name,
+                    by_name=by_name,
+                    used_names=used_names,
+                    renames=name_changes,
+                )
+                interface = None
         seed_desired = interface is None or interface.desired_state_source == "seed"
         if interface is None:
             interface = PhysicalInterface(
                 name=host.name,
-                mac_address=host.mac_address,
+                mac_address=host_mac,
                 role="unused",
                 mode="access",
                 desired_state_source="seed",
             )
             interfaces.append(interface)
             by_name[host.name] = interface
-        interface.mac_address = host.mac_address
+            used_names.add(host.name)
+        interface.mac_address = host_mac
+        by_mac[host_mac] = interface
         interface.driver = host.driver
         interface.speed = host.speed
         interface.host_ip_cidr = host.host_ip_cidr
@@ -206,21 +547,42 @@ def reconcile_host_physical_interfaces(
         interface.inventory_source = "host"
         interface.last_seen_at = now
         interface.missing_since = None
+        seen_interface_ids.add(id(interface))
         if seed_desired:
             interface.ip_cidr = host.host_ip_cidr if interface.name == "eth0" or interface.role == "management" else None
             interface.mtu = host.host_mtu or interface.mtu
             interface.admin_state = host.host_admin_state if interface.name == "eth0" or interface.role == "management" else "down"
     for interface in interfaces:
-        if interface.inventory_source == "host" and interface.name not in seen_names and interface.missing_since is None:
-            interface.missing_since = now
+        if interface.inventory_source == "host" and id(interface) not in seen_interface_ids:
+            if interface.missing_since is None:
+                interface.missing_since = now
             interface.oper_state = "missing"
+            if not interface.name.startswith("missing_"):
+                replacement_name = _missing_interface_name(interface, used_names)
+                _rename_interface(
+                    interface,
+                    replacement_name,
+                    by_name=by_name,
+                    used_names=used_names,
+                    renames=name_changes,
+                )
+    if renames is not None:
+        renames.update(name_changes)
     return interfaces
 
 
 def sync_host_physical_interfaces(db: Session) -> tuple[list[PhysicalInterface], int]:
     discovered = discover_host_physical_interfaces()
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
-    reconciled = reconcile_host_physical_interfaces(interfaces, discovered)
+    renames: dict[str, str] = {}
+    reconciled = reconcile_host_physical_interfaces(interfaces, discovered, renames=renames)
+    missing_renames = {old: new for old, new in renames.items() if new.startswith("missing_")}
+    for interface in reconciled:
+        if interface.oper_state == "missing":
+            missing_renames.setdefault(interface.name, interface.name)
+    _cleanup_missing_interface_references(db, missing_renames)
+    live_renames = {old: new for old, new in renames.items() if old not in missing_renames and new not in set(missing_renames.values())}
+    _retarget_interface_references(db, live_renames)
     if discovered:
         discovered_names = {interface.name for interface in discovered}
         seed_only_missing = [
@@ -260,6 +622,8 @@ def render_network_config(
         "[physical_interfaces]",
     ]
     for interface in interfaces:
+        if interface.oper_state == "missing":
+            continue
         mode = normalize_interface_mode(interface.mode)
         lines.extend(
             [
@@ -296,6 +660,8 @@ def validate_network_state(
     errors: list[str] = []
     interface_names = {interface.name for interface in interfaces}
     for interface in interfaces:
+        if interface.oper_state == "missing":
+            continue
         if interface.role not in INTERFACE_ROLES:
             errors.append(f"Interface {interface.name} role {interface.role} is not supported.")
         mode = normalize_interface_mode(interface.mode)
@@ -312,9 +678,15 @@ def validate_network_state(
                 errors.append(f"Interface {interface.name} IP CIDR {interface.ip_cidr} is invalid.")
     interface_modes = {interface.name: normalize_interface_mode(interface.mode) for interface in interfaces}
     for vlan in vlans:
+        if vlan.enabled is False:
+            continue
         if vlan.parent_interface not in interface_names:
             errors.append(f"VLAN {vlan.name} parent interface {vlan.parent_interface} does not exist.")
-        elif interface_modes.get(vlan.parent_interface) != "trunk":
+        else:
+            parent = next(interface for interface in interfaces if interface.name == vlan.parent_interface)
+            if parent.inventory_source == "host" and parent.oper_state == "missing":
+                errors.append(f"VLAN {vlan.name} parent interface {vlan.parent_interface} is missing from host inventory.")
+        if vlan.parent_interface in interface_names and interface_modes.get(vlan.parent_interface) != "trunk":
             errors.append(
                 f"VLAN {vlan.name} parent {vlan.parent_interface} has {interface_modes.get(vlan.parent_interface)} link type. "
                 "Tagged VLAN interfaces require a trunk parent; use the physical interface IP CIDR for access-mode networks."
