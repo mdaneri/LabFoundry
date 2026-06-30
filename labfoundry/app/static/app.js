@@ -1086,6 +1086,7 @@ function newEsxiHostRow(defaultIsoPath = "") {
     id: "new",
     hostname: "",
     mac_address: "",
+    ip_address: "",
     kickstart_id: "",
     kickstart_name: "",
     installer_iso_path: defaultIsoPath,
@@ -4329,6 +4330,12 @@ function initializeEsxiPxeHostsTable() {
       rowHeight: 30,
       placeholder: "No ESXi PXE host references configured.",
       reactiveData: false,
+      rowContextMenu: canWrite ? [
+        {
+          label: "Delete host reference",
+          action: (event, row) => deleteEsxiHost(row, csrf),
+        },
+      ] : false,
       columns: [
         {
           title: "Host",
@@ -4360,6 +4367,20 @@ function initializeEsxiPxeHostsTable() {
           cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
         },
         {
+          title: "IP address",
+          field: "ip_address",
+          editor: canWrite ? "input" : false,
+          editable: (cell) => !cell.getRow().getData().is_default,
+          formatter: (cell) => {
+            if (cell.getRow().getData().is_default) {
+              return "DHCP";
+            }
+            return dnsAddRowHintFormatter(cell, "DHCP");
+          },
+          minWidth: 140,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
           title: "Kickstart",
           field: "kickstart_id",
           editor: canWrite ? "list" : false,
@@ -4386,21 +4407,6 @@ function initializeEsxiPxeHostsTable() {
           width: 100,
           headerSort: false,
           cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
-        },
-        {
-          title: "",
-          field: "actions",
-          headerSort: false,
-          hozAlign: "center",
-          width: 90,
-          formatter: (cell) => {
-            const data = cell.getRow().getData();
-            if (!canWrite || data.is_new || data.is_default) {
-              return "";
-            }
-            return '<button class="button tiny danger" type="button">Delete</button>';
-          },
-          cellClick: (event, cell) => deleteEsxiHost(cell.getRow(), csrf),
         },
       ],
       rowFormatter: (row) => {
@@ -6690,6 +6696,18 @@ function initializeTagEditors() {
       });
     };
 
+    const displayLabelForValue = (value) => {
+      if (!(menu instanceof HTMLElement)) {
+        return value;
+      }
+      const escapedValue = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : value.replace(/"/g, '\\"');
+      const option = menu.querySelector(`[data-tag-option="${escapedValue}"]`);
+      if (option instanceof HTMLElement) {
+        return option.getAttribute("data-tag-label") || option.textContent.trim() || value;
+      }
+      return value;
+    };
+
     const addValue = (rawValue) => {
       const value = String(rawValue || "").trim().replace(/,$/, "");
       if (!value || currentValues().some((item) => item.toLowerCase() === value.toLowerCase())) {
@@ -6704,7 +6722,7 @@ function initializeTagEditors() {
       token.setAttribute("data-value", value);
 
       const label = document.createElement("span");
-      label.textContent = value;
+      label.textContent = displayLabelForValue(value);
 
       const remove = document.createElement("button");
       remove.type = "button";

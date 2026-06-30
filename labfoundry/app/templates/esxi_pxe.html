@@ -32,15 +32,38 @@
       {% for address in esxi_pxe_selected_addresses %}
         <input type="hidden" name="listen_addresses" value="{{ address }}">
       {% endfor %}
-      <label>
-        <span class="field-label"><span>DHCP IP Zone</span><button class="help-icon" type="button" data-help="Selects the DHCP IP zone that receives ESXi PXE boot options. LabFoundry derives the PXE interface, TFTP server address, DNS record, firewall rules, and generated dnsmasq tags from this zone.">i</button></span>
-        <select name="dhcp_scope_id" {{ "disabled" if not esxi_can_write else "" }}>
-          <option value="">Select a DHCP IP zone...</option>
+      <input type="hidden" name="dhcp_scope_id" value="{{ esxi_pxe_boot.dhcp_scope_id or '' }}">
+      <div class="form-field">
+        <span class="field-label"><span>DHCP IP Zones</span><button class="help-icon" type="button" data-help="Selects one or more DHCP IP zones that receive scoped ESXi PXE boot options. LabFoundry derives PXE interfaces, TFTP server addresses, DNS records, firewall rules, and dnsmasq tags from the selected zones.">i</button></span>
+        <div class="tag-editor" data-tag-editor data-tag-name="dhcp_scope_ids">
+          <div class="tag-editor-tags" data-tag-list>
+            {% for scope in esxi_pxe_dhcp_scope_options %}
+              {% if scope.id in esxi_pxe_boot.dhcp_scope_ids %}
+                <span class="tag-token" data-value="{{ scope.id }}">
+                  <span>{{ scope.label }}</span>
+                  <button type="button" data-tag-remove aria-label="Remove {{ scope.name }}" {{ "disabled" if not esxi_can_write else "" }}>×</button>
+                  <input type="hidden" name="dhcp_scope_ids" value="{{ scope.id }}">
+                </span>
+              {% endif %}
+            {% endfor %}
+          </div>
+          <input class="tag-editor-input" type="text" placeholder="Add DHCP zone..." list="esxi-pxe-dhcp-zone-options" data-tag-entry autocomplete="off" {{ "disabled" if not esxi_can_write else "" }}>
+          <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing DHCP zone" {{ "disabled" if not esxi_can_write else "" }}>+</button>
+          <div class="tag-suggestions" data-tag-menu hidden>
+            {% for scope in esxi_pxe_dhcp_scope_options %}
+              <button type="button" data-tag-option="{{ scope.id }}" data-tag-label="{{ scope.label }}">
+                <strong>{{ scope.name }}</strong>
+                <small>{{ scope.interface_name }} / {{ scope.site_address }}</small>
+              </button>
+            {% endfor %}
+          </div>
+        </div>
+        <datalist id="esxi-pxe-dhcp-zone-options">
           {% for scope in esxi_pxe_dhcp_scope_options %}
-            <option value="{{ scope.id }}" {{ "selected" if esxi_pxe_boot.dhcp_scope_id == scope.id else "" }}>{{ scope.label }}</option>
+            <option value="{{ scope.id }}">{{ scope.label }}</option>
           {% endfor %}
-        </select>
-      </label>
+        </datalist>
+      </div>
       <input type="hidden" name="tftp_root" value="{{ esxi_pxe_boot.tftp_root }}">
       <input type="hidden" name="bios_bootfile" value="{{ esxi_pxe_boot.bios_bootfile }}">
       <input type="hidden" name="uefi_bootfile" value="{{ esxi_pxe_boot.uefi_bootfile }}">
@@ -60,12 +83,12 @@
       </label>
       <div class="settings-list compact-settings-list">
         <div><span>TFTP root</span><strong>{{ esxi_pxe_boot.tftp_root }}</strong></div>
-        <div><span>HTTP endpoint</span><strong>{{ esxi_pxe_boot.http_base_url or "listen address required" }}</strong></div>
+        <div><span>Primary HTTP endpoint</span><strong>{{ esxi_pxe_boot.http_base_url or "listen address required" }}</strong></div>
         <div><span>BIOS bootfile</span><strong>{{ esxi_pxe_boot.bios_bootfile }}</strong></div>
         <div><span>UEFI bootfile</span><strong>{{ esxi_pxe_boot.uefi_bootfile }}</strong></div>
         <div><span>BIOS second stage</span><strong>{{ esxi_pxe_boot.bios_second_stage_bootfile }}</strong></div>
         <div><span>UEFI second stage</span><strong>{{ esxi_pxe_boot.uefi_second_stage_bootfile }}</strong></div>
-        <div><span>DHCP zone</span><strong>{{ esxi_pxe_boot.dhcp_scope_name or "not selected" }}</strong></div>
+        <div><span>DHCP zones</span><strong>{{ esxi_pxe_boot.dhcp_scope_names | join(", ") if esxi_pxe_boot.dhcp_scope_names else "not selected" }}</strong></div>
         <div><span>Bind target</span><strong>{{ esxi_pxe_bind_label }}</strong></div>
       </div>
       {% if esxi_can_write %}
@@ -223,13 +246,14 @@ reboot
             data-fallback-id="esxi-pxe-hosts-fallback"
           ></div>
           <table id="esxi-pxe-hosts-fallback" class="data-table compact dns-fallback-table">
-            <thead><tr><th>Host</th><th>MAC</th><th>Kickstart</th><th>Installer ISO</th><th>Enabled</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Host</th><th>MAC</th><th>IP address</th><th>Kickstart</th><th>Installer ISO</th><th>Enabled</th><th>Actions</th></tr></thead>
             <tbody>
               <tr>
                 <form action="/esxi-pxe/default-host" method="post">
                   <input type="hidden" name="csrf" value="{{ csrf_token }}">
                   <td>Default / undefined MACs</td>
                   <td>*</td>
+                  <td>DHCP</td>
                   <td>
                     <select name="kickstart_id" {{ "disabled" if not esxi_can_write else "" }}>
                       <option value="">No Kickstart</option>
@@ -256,6 +280,7 @@ reboot
                     <input type="hidden" name="csrf" value="{{ csrf_token }}">
                     <td><input name="hostname" value="{{ host.hostname }}" {{ "disabled" if not esxi_can_write else "" }}></td>
                     <td><input name="mac_address" value="{{ host.mac_address }}" {{ "disabled" if not esxi_can_write else "" }}></td>
+                    <td><input name="ip_address" value="{{ host.ip_address or '' }}" placeholder="DHCP" {{ "disabled" if not esxi_can_write else "" }}></td>
                     <td>
                       <select name="kickstart_id" {{ "disabled" if not esxi_can_write else "" }}>
                         <option value="">No Kickstart</option>

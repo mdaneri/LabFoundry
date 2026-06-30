@@ -141,6 +141,7 @@ def _ensure_sqlite_esxi_pxe_columns() -> None:
     existing = {column["name"] for column in inspector.get_columns("esxi_pxe_hosts")}
     columns = {
         "installer_iso_path": "VARCHAR(500) DEFAULT ''",
+        "ip_address": "VARCHAR(64) DEFAULT ''",
     }
     with engine.begin() as connection:
         for name, definition in columns.items():

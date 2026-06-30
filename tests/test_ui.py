@@ -1049,6 +1049,144 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "dhcp-boot=tag:sitea,tag:ipxe,tag:efi-x86_64,mboot.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
     assert "dhcp-boot=tag:sitea,tag:!ipxe,tag:efi-x86_64,snponly.efi,esxi-pxe.labfoundry.internal,192.168.50.1" in dhcp_page.text
     assert "dhcp-boot=tag:sitea,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dhcp_page.text
+def test_esxi_pxe_multi_zone_host_reservations_and_grid_menu(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpReservation, DhcpScope, DhcpSettings, DnsRecord
+    from labfoundry.app.services.esxi_pxe import esxi_pxe_boot_settings
+    from labfoundry.app.ui import dnsmasq_context, esxi_pxe_context
+
+    login(client)
+    page = client.get("/esxi-pxe")
+    assert page.status_code == 200
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    with SessionLocal() as db:
+        sitea = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        siteb = DhcpScope(
+            name="SiteB",
+            interface_name="eth3",
+            site_address="10.1.1.1",
+            prefix_length=24,
+            range_start="10.1.1.100",
+            range_end="10.1.1.200",
+            lease_time="12h",
+            domain_name="labfoundry.internal",
+            dns_server="10.1.1.1",
+            ntp_server="10.1.1.1",
+            enabled=True,
+        )
+        db.add(siteb)
+        db.commit()
+        sitea_id = sitea.id
+        siteb_id = siteb.id
+
+    response = client.post(
+        "/esxi-pxe/boot-settings",
+        data={
+            "csrf": csrf,
+            "enabled": "on",
+            "hostname": "esxi-pxe.labfoundry.internal",
+            "dhcp_scope_ids": [str(sitea_id), str(siteb_id)],
+            "listen_addresses_present": "1",
+            "listen_interfaces_present": "1",
+            "tftp_root": "/var/lib/labfoundry/pxe/tftp",
+            "http_port": "8080",
+            "bios_bootfile": "undionly.kpxe",
+            "uefi_bootfile": "snponly.efi",
+            "native_uefi_http_enabled": "on",
+            "native_uefi_http_url": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    with SessionLocal() as db:
+        boot = esxi_pxe_boot_settings(db)
+        assert boot["dhcp_scope_id"] == sitea_id
+        assert boot["dhcp_scope_ids"] == [sitea_id, siteb_id]
+        assert boot["dhcp_scope_names"] == ["SiteA", "SiteB"]
+        assert boot["listen_interface"] == "eth2\neth3"
+        assert boot["listen_address"] == "192.168.50.1\n10.1.1.1"
+        assert boot["http_base_url"] == "http://192.168.50.1:8080/pxe/esxi"
+        manifest = json.loads(esxi_pxe_context(db)["esxi_pxe_manifest"])
+        assert manifest["boot"]["dhcp_scope_id"] == sitea_id
+        assert manifest["boot"]["dhcp_scope_ids"] == [sitea_id, siteb_id]
+        dhcp = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp.enabled = True
+        db.add(dhcp)
+        db.commit()
+        dns_preview = dnsmasq_context(db)["config_preview"]
+        assert "dhcp-option=tag:sitea,66,esxi-pxe.labfoundry.internal" in dns_preview
+        assert "dhcp-option=tag:siteb,66,esxi-pxe.labfoundry.internal" in dns_preview
+        assert "dhcp-boot=tag:sitea,tag:uefi-http,tag:uefi-http-x64,http://192.168.50.1:8080/pxe/esxi/mboot.efi" in dns_preview
+        assert "dhcp-boot=tag:siteb,tag:uefi-http,tag:uefi-http-x64,http://10.1.1.1:8080/pxe/esxi/mboot.efi" in dns_preview
+
+    create_host = client.post(
+        "/esxi-pxe/hosts",
+        data={
+            "csrf": csrf,
+            "hostname": "esx02",
+            "mac_address": "00:50:56:aa:bb:cd",
+            "ip_address": "10.1.1.150",
+            "enabled": "on",
+        },
+        follow_redirects=False,
+    )
+    assert create_host.status_code == 303, create_host.text
+
+    with SessionLocal() as db:
+        reservation = db.execute(select(DhcpReservation).where(DhcpReservation.mac_address == "00:50:56:aa:bb:cd")).scalar_one()
+        assert reservation.hostname == "esx02.labfoundry.internal"
+        assert reservation.ip_address == "10.1.1.150"
+        assert reservation.description == "Managed by ESXi PXE host 1."
+        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esx02.labfoundry.internal")).scalar_one()
+        assert record.record_type == "A"
+        assert record.address == "10.1.1.150"
+        assert record.description == "Managed by ESXi PXE host 1."
+
+    out_of_zone = client.post(
+        "/esxi-pxe/hosts/1",
+        data={
+            "csrf": csrf,
+            "hostname": "esx02",
+            "mac_address": "00:50:56:aa:bb:cd",
+            "ip_address": "172.16.1.50",
+            "enabled": "on",
+        },
+        follow_redirects=False,
+    )
+    assert out_of_zone.status_code == 400
+    assert "inside a selected ESXi PXE DHCP zone" in out_of_zone.text
+
+    remove_reservation = client.post(
+        "/esxi-pxe/hosts/1",
+        data={
+            "csrf": csrf,
+            "hostname": "esx02",
+            "mac_address": "00:50:56:aa:bb:cd",
+            "ip_address": "",
+            "enabled": "on",
+        },
+        follow_redirects=False,
+    )
+    assert remove_reservation.status_code == 303
+    with SessionLocal() as db:
+        assert db.execute(select(DhcpReservation).where(DhcpReservation.mac_address == "00:50:56:aa:bb:cd")).scalar_one_or_none() is None
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "esx02.labfoundry.internal")).scalar_one_or_none() is None
+
+    refreshed = client.get("/esxi-pxe")
+    assert 'data-tag-name="dhcp_scope_ids"' in refreshed.text
+    assert "SiteB - eth3 / 10.1.1.1/24" in refreshed.text
+    app_js = client.get("/static/app.js").text
+    host_grid_js = app_js.split("function initializeEsxiPxeHostsTable()", 1)[1].split("function initializeVcfBackupSettings()", 1)[0]
+    assert "rowContextMenu" in host_grid_js
+    assert "Delete host reference" in host_grid_js
+    assert 'field: "ip_address"' in host_grid_js
+    assert "<button" not in host_grid_js
 
 
 def test_esxi_pxe_boot_settings_migrate_legacy_first_stage_defaults(client):
@@ -1095,7 +1233,16 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
 
         assign_kickstart_content(kickstart, kickstart.content, max_bytes=262_144)
         kickstart.http_path = canonical_http_path(kickstart.id)
-        db.add(EsxiPxeHost(hostname="esxi-archive", mac_address="00:50:56:aa:bb:cc", kickstart_id=kickstart.id, installer_iso_path="/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST/archive.iso", enabled=True))
+        db.add(
+            EsxiPxeHost(
+                hostname="esxi-archive",
+                mac_address="00:50:56:aa:bb:cc",
+                ip_address="192.168.50.150",
+                kickstart_id=kickstart.id,
+                installer_iso_path="/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST/archive.iso",
+                enabled=True,
+            )
+        )
         db.commit()
 
     page = client.get("/backup-restore")
@@ -1105,6 +1252,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
 
     assert payload["data"]["esxi_kickstarts"][0]["name"] == "Archive ESXi"
     assert payload["data"]["esxi_pxe_hosts"][0]["kickstart_name"] == "Archive ESXi"
+    assert payload["data"]["esxi_pxe_hosts"][0]["ip_address"] == "192.168.50.150"
     assert payload["data"]["esxi_pxe_hosts"][0]["installer_iso_path"].endswith("/archive.iso")
 
     with SessionLocal() as db:
@@ -1123,6 +1271,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
         restored_kickstart = db.execute(select(EsxiKickstart).where(EsxiKickstart.name == "Archive ESXi")).scalar_one()
         restored_host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.hostname == "esxi-archive")).scalar_one()
         assert restored_host.kickstart_id == restored_kickstart.id
+        assert restored_host.ip_address == "192.168.50.150"
         assert restored_host.installer_iso_path.endswith("/archive.iso")
 
 

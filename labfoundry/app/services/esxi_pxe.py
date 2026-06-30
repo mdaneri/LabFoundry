@@ -5,13 +5,15 @@ import json
 import re
 import shutil
 from datetime import datetime, timezone
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from labfoundry.app.models import DhcpScope, EsxiKickstart, EsxiPxeHost, Setting, utcnow
+from labfoundry.app.models import DhcpReservation, DhcpScope, DnsRecord, EsxiKickstart, EsxiPxeHost, Setting, utcnow
+from labfoundry.app.services.dnsmasq import reservation_dns_record
 
 ESXI_PXE_UNIT_ID = "esxi_pxe"
 ESXI_PXE_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/esxi-pxe/labfoundry-esxi-pxe.json"
@@ -28,6 +30,7 @@ ESXI_PXE_STRICT_VALIDATION_KEY = "esxi_pxe.strict_kickstart_validation"
 ESXI_PXE_BOOT_ENABLED_KEY = "esxi_pxe.boot.enabled"
 ESXI_PXE_HOSTNAME_KEY = "esxi_pxe.boot.hostname"
 ESXI_PXE_DHCP_SCOPE_ID_KEY = "esxi_pxe.boot.dhcp_scope_id"
+ESXI_PXE_DHCP_SCOPE_IDS_KEY = "esxi_pxe.boot.dhcp_scope_ids"
 ESXI_PXE_LISTEN_INTERFACE_KEY = "esxi_pxe.boot.listen_interface"
 ESXI_PXE_LISTEN_ADDRESS_KEY = "esxi_pxe.boot.listen_address"
 ESXI_PXE_TFTP_ROOT_KEY = "esxi_pxe.boot.tftp_root"
@@ -49,6 +52,7 @@ ESXI_PXE_BIOS_SECOND_STAGE_BOOTFILE = "pxelinux.0"
 ESXI_PXE_UEFI_SECOND_STAGE_BOOTFILE = "mboot.efi"
 ESXI_PXE_NATIVE_UEFI_BOOTFILE = "mboot.efi"
 ESXI_PXE_DNS_RECORD_DESCRIPTION = "Created from ESXi PXE boot endpoint."
+ESXI_PXE_HOST_MANAGED_DESCRIPTION_PREFIX = "Managed by ESXi PXE host "
 SECRET_KEYWORD_PATTERN = re.compile(r"(rootpw|password|passwd|token|secret|key|license|activation|credential)", re.IGNORECASE)
 TEMPLATE_PATTERN = re.compile(r"({[{%#].*?[}%]}|\$\{[^}]+\})")
 SAFE_ISO_UPLOAD_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*\.iso$", re.IGNORECASE)
@@ -131,6 +135,14 @@ def tftp_ipxe_chain_script() -> str:
     )
 
 
+def _ordered_unique(values) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
+
+
 def primary_boot_address(boot: dict[str, Any]) -> str:
     for line in str(boot.get("listen_address") or "").replace(",", "\n").splitlines():
         address = line.strip()
@@ -154,21 +166,42 @@ def effective_native_uefi_http_url(boot: dict[str, Any]) -> str:
     return f"{base_url}/{ESXI_PXE_NATIVE_UEFI_BOOTFILE}" if base_url else ""
 
 
+def selected_dhcp_scope_payload(scope: DhcpScope) -> dict[str, Any]:
+    return {
+        "id": scope.id,
+        "name": scope.name,
+        "interface_name": scope.interface_name,
+        "site_address": scope.site_address,
+        "prefix_length": scope.prefix_length,
+        "domain_name": scope.domain_name,
+    }
+
+
 def esxi_pxe_boot_settings(db: Session) -> dict[str, Any]:
     rows = {row.key: row.value for row in db.execute(select(Setting).where(Setting.key.like("esxi_pxe.boot.%"))).scalars().all()}
     enabled = rows.get(ESXI_PXE_BOOT_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"}
     native_uefi_http_enabled = rows.get(ESXI_PXE_NATIVE_UEFI_HTTP_ENABLED_KEY, "true").strip().lower() in {"1", "true", "yes", "on"}
-    dhcp_scope = _selected_dhcp_scope(db, rows.get(ESXI_PXE_DHCP_SCOPE_ID_KEY), rows.get(ESXI_PXE_LISTEN_INTERFACE_KEY, ""), rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, ""))
+    dhcp_scopes = _selected_dhcp_scopes(
+        db,
+        rows.get(ESXI_PXE_DHCP_SCOPE_IDS_KEY),
+        rows.get(ESXI_PXE_DHCP_SCOPE_ID_KEY),
+        rows.get(ESXI_PXE_LISTEN_INTERFACE_KEY, ""),
+        rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, ""),
+    )
+    dhcp_scope = dhcp_scopes[0] if dhcp_scopes else None
     listen_interface = rows.get(ESXI_PXE_LISTEN_INTERFACE_KEY, "").strip()
     listen_address = rows.get(ESXI_PXE_LISTEN_ADDRESS_KEY, "").strip()
-    if dhcp_scope is not None:
-        listen_interface = dhcp_scope.interface_name.strip()
-        listen_address = dhcp_scope.site_address.strip()
+    if dhcp_scopes:
+        listen_interface = "\n".join(_ordered_unique(scope.interface_name.strip() for scope in dhcp_scopes if scope.interface_name.strip()))
+        listen_address = "\n".join(_ordered_unique(scope.site_address.strip() for scope in dhcp_scopes if scope.site_address.strip()))
     settings = {
         "enabled": enabled,
         "hostname": rows.get(ESXI_PXE_HOSTNAME_KEY, ESXI_PXE_DEFAULT_HOSTNAME).strip() or ESXI_PXE_DEFAULT_HOSTNAME,
         "dhcp_scope_id": dhcp_scope.id if dhcp_scope is not None else None,
         "dhcp_scope_name": dhcp_scope.name if dhcp_scope is not None else "",
+        "dhcp_scope_ids": [scope.id for scope in dhcp_scopes],
+        "dhcp_scope_names": [scope.name for scope in dhcp_scopes],
+        "dhcp_scopes": [selected_dhcp_scope_payload(scope) for scope in dhcp_scopes],
         "listen_interface": listen_interface,
         "listen_address": listen_address,
         "tftp_root": rows.get(ESXI_PXE_TFTP_ROOT_KEY, ESXI_TFTP_ROOT.as_posix()).strip() or ESXI_TFTP_ROOT.as_posix(),
@@ -191,6 +224,7 @@ def esxi_pxe_boot_settings(db: Session) -> dict[str, Any]:
     settings["host_bootfiles"] = [
         {
             "mac_address": host.mac_address.strip().lower(),
+            "mac_key": normalize_pxe_mac(host.mac_address),
             "tag": dnsmasq_host_tag_for_pxe_mac(host.mac_address),
             "uefi_second_stage_bootfile": f"{normalize_pxe_mac(host.mac_address)}/{settings['uefi_second_stage_bootfile']}",
             "native_uefi_http_url": f"{settings['http_base_url']}/{normalize_pxe_mac(host.mac_address)}/{settings['native_uefi_bootfile']}" if settings.get("http_base_url") else "",
@@ -212,19 +246,22 @@ def save_esxi_pxe_boot_settings(
     bios_bootfile: str,
     uefi_bootfile: str,
     dhcp_scope_id: int | str | None = None,
+    dhcp_scope_ids: list[int | str] | tuple[int | str, ...] | None = None,
     http_port: int | str = ESXI_PXE_HTTP_PORT,
     ipxe_script: str | None = None,
     native_uefi_http_enabled: bool = False,
     native_uefi_http_url: str = "",
 ) -> dict[str, Any]:
-    normalized_scope_id, scope_interface, scope_address = _normalize_dhcp_scope_selection(db, dhcp_scope_id)
-    if normalized_scope_id is not None:
-        listen_interface = scope_interface
-        listen_address = scope_address
+    normalized_scopes = _normalize_dhcp_scope_selections(db, dhcp_scope_ids if dhcp_scope_ids is not None else [dhcp_scope_id] if dhcp_scope_id else [])
+    if normalized_scopes:
+        listen_interface = "\n".join(_ordered_unique(scope.interface_name.strip() for scope in normalized_scopes if scope.interface_name.strip()))
+        listen_address = "\n".join(_ordered_unique(scope.site_address.strip() for scope in normalized_scopes if scope.site_address.strip()))
+    normalized_scope_id = normalized_scopes[0].id if normalized_scopes else None
     settings = {
         ESXI_PXE_BOOT_ENABLED_KEY: "true" if enabled else "false",
         ESXI_PXE_HOSTNAME_KEY: _normalize_hostname(hostname),
         ESXI_PXE_DHCP_SCOPE_ID_KEY: str(normalized_scope_id or ""),
+        ESXI_PXE_DHCP_SCOPE_IDS_KEY: "\n".join(str(scope.id) for scope in normalized_scopes),
         ESXI_PXE_LISTEN_INTERFACE_KEY: _normalize_multiline_values(listen_interface),
         ESXI_PXE_LISTEN_ADDRESS_KEY: _normalize_multiline_values(listen_address),
         ESXI_PXE_TFTP_ROOT_KEY: _normalize_tftp_root(tftp_root),
@@ -269,6 +306,20 @@ def _selected_dhcp_scope(db: Session, raw_scope_id: str | None, listen_interface
     return None
 
 
+def _selected_dhcp_scopes(
+    db: Session,
+    raw_scope_ids: str | None,
+    raw_scope_id: str | None,
+    listen_interface: str,
+    listen_address: str,
+) -> list[DhcpScope]:
+    scopes = _normalize_dhcp_scope_selections(db, (raw_scope_ids or "").replace(",", "\n").splitlines(), allow_empty=True)
+    if scopes:
+        return scopes
+    legacy_scope = _selected_dhcp_scope(db, raw_scope_id, listen_interface, listen_address)
+    return [legacy_scope] if legacy_scope is not None else []
+
+
 def _normalize_dhcp_scope_selection(db: Session, raw_scope_id: int | str | None) -> tuple[int | None, str, str]:
     value = str(raw_scope_id or "").strip()
     if not value:
@@ -279,6 +330,26 @@ def _normalize_dhcp_scope_selection(db: Session, raw_scope_id: int | str | None)
     if scope is None or scope.enabled is False:
         raise ValueError("ESXi PXE DHCP zone must be an enabled DHCP IP zone.")
     return scope.id, scope.interface_name.strip(), scope.site_address.strip()
+
+
+def _normalize_dhcp_scope_selections(db: Session, raw_scope_ids: list[int | str] | tuple[int | str, ...], *, allow_empty: bool = False) -> list[DhcpScope]:
+    scopes: list[DhcpScope] = []
+    seen: set[int] = set()
+    for raw_scope_id in raw_scope_ids:
+        value = str(raw_scope_id or "").strip()
+        if not value:
+            continue
+        if not value.isdigit():
+            raise ValueError("ESXi PXE DHCP zones must be valid DHCP IP zones.")
+        scope = db.get(DhcpScope, int(value))
+        if scope is None or scope.enabled is False:
+            raise ValueError("ESXi PXE DHCP zones must be enabled DHCP IP zones.")
+        if scope.id not in seen:
+            scopes.append(scope)
+            seen.add(scope.id)
+    if not scopes and not allow_empty:
+        return []
+    return scopes
 
 
 def _normalize_hostname(value: str) -> str:
@@ -337,6 +408,103 @@ def _normalize_native_uefi_http_url(value: str) -> str:
     if not re.fullmatch(r"https?://[^\s\"'<>]+", url):
         raise ValueError("Native UEFI HTTP boot URL must be an absolute HTTP or HTTPS URL.")
     return url
+
+
+def _managed_host_description(host_id: int) -> str:
+    return f"{ESXI_PXE_HOST_MANAGED_DESCRIPTION_PREFIX}{host_id}."
+
+
+def _is_managed_by_esxi_host(row: DhcpReservation | DnsRecord, host_id: int) -> bool:
+    return (row.description or "").strip() == _managed_host_description(host_id)
+
+
+def _remove_managed_esxi_host_network_records(db: Session, host_id: int) -> None:
+    marker = _managed_host_description(host_id)
+    for reservation in db.execute(select(DhcpReservation).where(DhcpReservation.description == marker)).scalars().all():
+        db.delete(reservation)
+    for record in db.execute(select(DnsRecord).where(DnsRecord.description == marker)).scalars().all():
+        db.delete(record)
+
+
+def sync_esxi_pxe_host_network_records(db: Session, host: EsxiPxeHost, boot_settings: dict[str, Any]) -> None:
+    if host.id is None:
+        db.flush()
+    if host.id is None:
+        raise ValueError("ESXi PXE host must be saved before creating DHCP reservations.")
+
+    marker = _managed_host_description(host.id)
+    ip_value = (host.ip_address or "").strip()
+    if host.enabled is False or not ip_value:
+        _remove_managed_esxi_host_network_records(db, host.id)
+        return
+
+    mac_address = host.mac_address.strip().lower()
+    if not normalize_pxe_mac(mac_address):
+        raise ValueError("ESXi PXE host IP reservations require a concrete MAC address.")
+
+    try:
+        reserved_ip = ip_address(ip_value)
+    except ValueError as exc:
+        raise ValueError("ESXi PXE host IP address must be a valid IP address.") from exc
+
+    selected_scopes = [
+        scope
+        for scope in db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
+        if scope.enabled is not False and scope.id in set(boot_settings.get("dhcp_scope_ids") or [])
+    ]
+    if not selected_scopes:
+        raise ValueError("ESXi PXE host IP reservations require at least one selected ESXi PXE DHCP zone.")
+    if not any(reserved_ip in ip_network(f"{scope.site_address}/{scope.prefix_length}", strict=False) for scope in selected_scopes):
+        raise ValueError("ESXi PXE host IP address must be inside a selected ESXi PXE DHCP zone.")
+
+    for reservation in db.execute(select(DhcpReservation)).scalars().all():
+        if reservation.mac_address.strip().lower() == mac_address and not _is_managed_by_esxi_host(reservation, host.id):
+            raise ValueError(f"DHCP reservation already exists for MAC address {host.mac_address}.")
+
+    stale_reservations = [
+        reservation
+        for reservation in db.execute(select(DhcpReservation).where(DhcpReservation.description == marker)).scalars().all()
+        if reservation.mac_address.strip().lower() != mac_address
+    ]
+    for reservation in stale_reservations:
+        db.delete(reservation)
+    db.flush()
+
+    reservation = db.execute(select(DhcpReservation).where(DhcpReservation.description == marker)).scalar_one_or_none()
+    if reservation is None:
+        reservation = DhcpReservation(description=marker)
+    reservation.hostname = host.hostname.strip()
+    reservation.mac_address = mac_address
+    reservation.ip_address = str(reserved_ip)
+    reservation.enabled = bool(host.enabled)
+    reservation.description = marker
+    db.add(reservation)
+    db.flush()
+
+    record_values = reservation_dns_record(reservation, selected_scopes)
+    if record_values is None:
+        raise ValueError("ESXi PXE host IP address must map to a selected DHCP zone DNS domain.")
+    hostname, record_type, address = record_values
+    reservation.hostname = hostname
+
+    for record in db.execute(select(DnsRecord).where(DnsRecord.hostname == hostname, DnsRecord.record_type == record_type)).scalars().all():
+        if not _is_managed_by_esxi_host(record, host.id):
+            raise ValueError(f"DNS record already exists for {hostname} {record_type}.")
+
+    for record in db.execute(select(DnsRecord).where(DnsRecord.description == marker)).scalars().all():
+        if record.hostname != hostname or record.record_type != record_type:
+            db.delete(record)
+    db.flush()
+
+    record = db.execute(select(DnsRecord).where(DnsRecord.description == marker, DnsRecord.hostname == hostname, DnsRecord.record_type == record_type)).scalar_one_or_none()
+    if record is None:
+        record = DnsRecord(description=marker)
+    record.hostname = hostname
+    record.record_type = record_type
+    record.address = address
+    record.enabled = True
+    record.description = marker
+    db.add(record)
 
 
 def _normalize_ipxe_script(value: str) -> str:
@@ -570,6 +738,7 @@ def host_to_dict(host: EsxiPxeHost) -> dict[str, Any]:
         "id": host.id,
         "hostname": host.hostname,
         "mac_address": host.mac_address,
+        "ip_address": host.ip_address or "",
         "kickstart_id": host.kickstart_id,
         "kickstart_name": host.kickstart.name if host.kickstart else "",
         "installer_iso_path": iso_path,
@@ -629,6 +798,7 @@ def default_host_to_dict(default_host: dict[str, Any]) -> dict[str, Any]:
         "id": "default",
         "hostname": "Default / undefined MACs",
         "mac_address": "*",
+        "ip_address": "",
         "kickstart_id": default_host.get("kickstart_id"),
         "kickstart_name": default_host.get("kickstart_name") or "",
         "installer_iso_path": default_host.get("installer_iso_path") or "",
@@ -643,6 +813,7 @@ def _esxi_pxe_artifact(
     host_id: int | None,
     hostname: str,
     mac_address: str,
+    ip_address: str = "",
     mac_key: str,
     iso_path: str,
     kickstart_id: int | None,
@@ -665,6 +836,7 @@ def _esxi_pxe_artifact(
         "host_id": host_id,
         "hostname": hostname,
         "mac_address": mac_address,
+        "ip_address": ip_address,
         "mac_key": mac_key,
         "is_default": is_default,
         "image_key": image_key,
@@ -690,6 +862,7 @@ def esxi_pxe_host_artifacts(hosts: list[EsxiPxeHost], boot_settings: dict[str, A
                 host_id=None,
                 hostname="Default / undefined MACs",
                 mac_address="*",
+                ip_address="",
                 mac_key="default",
                 iso_path=str(default_host.get("installer_iso_path") or ""),
                 kickstart_id=default_host.get("kickstart_id"),
@@ -709,6 +882,7 @@ def esxi_pxe_host_artifacts(hosts: list[EsxiPxeHost], boot_settings: dict[str, A
                 host_id=host.id,
                 hostname=host.hostname,
                 mac_address=host.mac_address,
+                ip_address=host.ip_address or "",
                 mac_key=mac_key,
                 iso_path=iso_path,
                 kickstart_id=host.kickstart_id,
@@ -730,6 +904,9 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
         "hostname": ESXI_PXE_DEFAULT_HOSTNAME,
         "dhcp_scope_id": None,
         "dhcp_scope_name": "",
+        "dhcp_scope_ids": [],
+        "dhcp_scope_names": [],
+        "dhcp_scopes": [],
         "listen_interface": "",
         "listen_address": "",
         "tftp_root": ESXI_TFTP_ROOT.as_posix(),
@@ -755,6 +932,9 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
         "hostname",
         "dhcp_scope_id",
         "dhcp_scope_name",
+        "dhcp_scope_ids",
+        "dhcp_scope_names",
+        "dhcp_scopes",
         "listen_interface",
         "listen_address",
         "tftp_root",
@@ -798,6 +978,7 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
                 "id": host.id,
                 "hostname": host.hostname,
                 "mac_address": host.mac_address,
+                "ip_address": host.ip_address or "",
                 "kickstart_id": host.kickstart_id,
                 "installer_iso_path": host.installer_iso_path or "",
                 "installer_iso_name": Path(host.installer_iso_path).name if host.installer_iso_path else "",

@@ -577,6 +577,7 @@ class EsxiPxeHost(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     hostname: Mapped[str] = mapped_column(String(120), index=True)
     mac_address: Mapped[str] = mapped_column(String(32), index=True)
+    ip_address: Mapped[str] = mapped_column(String(64), default="")
     kickstart_id: Mapped[int | None] = mapped_column(ForeignKey("esxi_kickstarts.id"), nullable=True, index=True)
     installer_iso_path: Mapped[str] = mapped_column(String(500), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

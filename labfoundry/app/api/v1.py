@@ -197,6 +197,7 @@ from labfoundry.app.services.esxi_pxe import (
     store_installer_iso_upload,
     strict_validation_enabled,
     host_to_dict,
+    sync_esxi_pxe_host_network_records,
 )
 from labfoundry.app.token_service import create_token_for_user, token_to_response
 
@@ -2442,10 +2443,22 @@ def create_esxi_pxe_host(
         installer_iso_path = normalize_installer_iso_path(payload.installer_iso_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    host = EsxiPxeHost(hostname=payload.hostname.strip(), mac_address=payload.mac_address.strip().lower(), kickstart_id=payload.kickstart_id, installer_iso_path=installer_iso_path, enabled=payload.enabled)
+    host = EsxiPxeHost(
+        hostname=payload.hostname.strip(),
+        mac_address=payload.mac_address.strip().lower(),
+        ip_address=payload.ip_address.strip(),
+        kickstart_id=payload.kickstart_id,
+        installer_iso_path=installer_iso_path,
+        enabled=payload.enabled,
+    )
     db.add(host)
     try:
+        db.flush()
+        sync_esxi_pxe_host_network_records(db, host, esxi_pxe_boot_settings(db))
         db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=f"ESXi PXE host for {payload.mac_address} already exists.") from exc
@@ -2477,13 +2490,19 @@ def update_esxi_pxe_host(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     host.hostname = payload.hostname.strip()
     host.mac_address = payload.mac_address.strip().lower()
+    host.ip_address = payload.ip_address.strip()
     host.kickstart_id = payload.kickstart_id
     host.installer_iso_path = installer_iso_path
     host.enabled = payload.enabled
     host.updated_at = utcnow()
     db.add(host)
     try:
+        db.flush()
+        sync_esxi_pxe_host_network_records(db, host, esxi_pxe_boot_settings(db))
         db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=f"ESXi PXE host for {payload.mac_address} already exists.") from exc

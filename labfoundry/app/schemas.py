@@ -214,6 +214,7 @@ class EsxiKickstartDuplicateRequest(BaseModel):
 class EsxiPxeHostCreate(BaseModel):
     hostname: str = Field(min_length=1, max_length=120)
     mac_address: str = Field(min_length=1, max_length=32)
+    ip_address: str = Field(default="", max_length=64)
     kickstart_id: int | None = None
     installer_iso_path: str = ""
     enabled: bool = True

@@ -1046,8 +1046,8 @@ For an automated ESX deployment system that supports multiple images and multipl
 | --- | --- |
 | ESX image | Version, ISO source (`uploaded` or VCFDT-discovered), source date, extracted HTTP path, TFTP support path, `mboot.efi` version, `mboot.c32`, `boot.cfg` template. |
 | Kickstart file | Name, revision, database source of truth, rendered filesystem copy path, checksum. |
-| Host definition | Hostname, MAC address or default undefined-MAC profile, boot mode, image ID, kickstart ID, DHCP reservation, DNS name, optional VLAN, DHCP boot options. |
-| Boot profile | DHCP IP zone, Legacy PXELINUX, UEFI PXE/TFTP, iPXE first-stage plus PXELINUX/`mboot.efi` second-stage, or native UEFI HTTP; maps to the zone-scoped DHCP `filename`, `next-server`, or `dhcp6.bootfile-url`. |
+| Host definition | Hostname, MAC address or default undefined-MAC profile, optional static reservation IP, boot mode, image ID, kickstart ID, DHCP reservation, DNS name, optional VLAN, DHCP boot options. |
+| Boot profile | One or more DHCP IP zones, Legacy PXELINUX, UEFI PXE/TFTP, iPXE first-stage plus PXELINUX/`mboot.efi` second-stage, or native UEFI HTTP; maps to zone-scoped DHCP `filename`, `next-server`, or `dhcp6.bootfile-url` values. |
 
 Suggested generated artifacts per host:
 
