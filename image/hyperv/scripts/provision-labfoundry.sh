@@ -14,7 +14,7 @@ LABFOUNDRY_PIP_GLOBAL_INDEX="${LABFOUNDRY_PIP_GLOBAL_INDEX:-}"
 LABFOUNDRY_PIP_GLOBAL_INDEX_URL="${LABFOUNDRY_PIP_GLOBAL_INDEX_URL:-}"
 BOOTSTRAP_USERNAME="${LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME:-admin}"
 BOOTSTRAP_PASSWORD="${LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD:-}"
-BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/usr/bin/pwsh}"
+BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/bin/bash}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-/var/cache/labfoundry-pip}"
 
 log_step() {
@@ -148,6 +148,10 @@ if [ -f "$IPXE_BOOTLOADER_SOURCE_DIR/undionly.kpxe" ] && [ -f "$IPXE_BOOTLOADER_
   install -d -o root -g root -m 0755 "$IPXE_BOOTLOADER_TARGET_DIR"
   install -o root -g root -m 0644 "$IPXE_BOOTLOADER_SOURCE_DIR/undionly.kpxe" "$IPXE_BOOTLOADER_TARGET_DIR/undionly.kpxe"
   install -o root -g root -m 0644 "$IPXE_BOOTLOADER_SOURCE_DIR/snponly.efi" "$IPXE_BOOTLOADER_TARGET_DIR/snponly.efi"
+else
+  echo "Bundled iPXE bootloaders are missing from $IPXE_BOOTLOADER_SOURCE_DIR" >&2
+  echo "Expected undionly.kpxe and snponly.efi so ESXi PXE apply can validate on first boot." >&2
+  exit 2
 fi
 
 log_step "installing LabFoundry Python environment"

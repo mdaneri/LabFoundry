@@ -151,7 +151,7 @@ build {
 
   provisioner "shell" {
     inline = [
-      "mkdir -p /tmp/labfoundry-src/scripts /tmp/labfoundry-src/image/hyperv"
+      "mkdir -p /tmp/labfoundry-src/scripts /tmp/labfoundry-src/image/hyperv /tmp/labfoundry-src/third_party"
     ]
   }
 
@@ -178,6 +178,11 @@ build {
   provisioner "file" {
     source      = "../../scripts/check_photon_compatibility.py"
     destination = "/tmp/labfoundry-src/scripts/check_photon_compatibility.py"
+  }
+
+  provisioner "file" {
+    source      = "../../third_party/ipxe"
+    destination = "/tmp/labfoundry-src/third_party/ipxe"
   }
 
   provisioner "file" {
