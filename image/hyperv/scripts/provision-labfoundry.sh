@@ -141,6 +141,15 @@ rsync -a --delete \
 
 install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME/bin"
 
+IPXE_BOOTLOADER_SOURCE_DIR="$LABFOUNDRY_HOME/third_party/ipxe/bootloaders"
+IPXE_BOOTLOADER_TARGET_DIR="$LABFOUNDRY_STATE/pxe/bootloaders"
+if [ -f "$IPXE_BOOTLOADER_SOURCE_DIR/undionly.kpxe" ] && [ -f "$IPXE_BOOTLOADER_SOURCE_DIR/snponly.efi" ]; then
+  log_step "staging bundled iPXE bootloaders"
+  install -d -o root -g root -m 0755 "$IPXE_BOOTLOADER_TARGET_DIR"
+  install -o root -g root -m 0644 "$IPXE_BOOTLOADER_SOURCE_DIR/undionly.kpxe" "$IPXE_BOOTLOADER_TARGET_DIR/undionly.kpxe"
+  install -o root -g root -m 0644 "$IPXE_BOOTLOADER_SOURCE_DIR/snponly.efi" "$IPXE_BOOTLOADER_TARGET_DIR/snponly.efi"
+fi
+
 log_step "installing LabFoundry Python environment"
 install -d -o root -g root -m 0755 "$PIP_CACHE_DIR"
 write_pip_config /etc/pip.conf

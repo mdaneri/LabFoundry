@@ -208,7 +208,7 @@ it to Packer.
 - `/etc/systemd/system/labfoundry-firewall.service` loading the nftables
   management firewall.
 - `dnsmasq` for the shared DNS/DHCP appliance service.
-- `ipxe` and `syslinux` for ESXi PXE bootstrap artifacts served by dnsmasq. If the Photon package stream does not ship `undionly.kpxe` or `snponly.efi`, stage those first-stage iPXE files under `/var/lib/labfoundry/pxe/bootloaders` before applying ESXi PXE.
+- `ipxe` and `syslinux` for ESXi PXE bootstrap support. Provisioning also stages LabFoundry's bundled iPXE first-stage files, `undionly.kpxe` and `snponly.efi`, under `/var/lib/labfoundry/pxe/bootloaders` because the Photon package stream may not ship those filenames.
   TFTP.
 - `/opt/labfoundry/bin/labfoundry-helper` constrained appliance helper.
 - `/etc/sudoers.d/labfoundry-helper` permitting the service user to run only

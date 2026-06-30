@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import hashlib
 import importlib.util
 import sys
 
@@ -12,6 +13,10 @@ def load_lifecycle_runner():
     sys.modules["lifecycle_test"] = module
     spec.loader.exec_module(module)
     return module
+
+
+def sha256(path: str) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def test_photon_provisioning_management_network_matches_eth0_only():
@@ -38,6 +43,11 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "tdnf -y install" in script and "powershell" in script
     assert "tdnf -y install" in script and "ipxe" in script
     assert "tdnf -y install" in script and "syslinux" in script
+    assert "IPXE_BOOTLOADER_SOURCE_DIR=\"$LABFOUNDRY_HOME/third_party/ipxe/bootloaders\"" in script
+    assert "IPXE_BOOTLOADER_TARGET_DIR=\"$LABFOUNDRY_STATE/pxe/bootloaders\"" in script
+    assert "staging bundled iPXE bootloaders" in script
+    assert '"$IPXE_BOOTLOADER_TARGET_DIR/undionly.kpxe"' in script
+    assert '"$IPXE_BOOTLOADER_TARGET_DIR/snponly.efi"' in script
     assert 'BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/usr/bin/pwsh}"' in script
     assert '--shell "$BOOTSTRAP_SHELL"' in script
     assert "touch /etc/shells" in script
@@ -74,6 +84,25 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "-PipGlobalIndexUrl" in root_docs
     assert "Leave both options empty to keep" in root_docs
     assert "standard pip behavior" in root_docs
+
+
+def test_bundled_ipxe_bootloaders_have_provenance_and_expected_hashes():
+    readme = Path("third_party/ipxe/README.md").read_text(encoding="utf-8")
+    copying = Path("third_party/ipxe/COPYING").read_text(encoding="utf-8")
+    gpl = Path("third_party/ipxe/COPYING.GPLv2").read_text(encoding="utf-8")
+    undionly_licence = Path("third_party/ipxe/bootloaders/undionly.kpxe.licence").read_text(encoding="utf-8")
+    snponly_licence = Path("third_party/ipxe/bootloaders/snponly.efi.licence").read_text(encoding="utf-8")
+
+    assert Path("third_party/ipxe/bootloaders/source-commit.txt").read_text(encoding="utf-8").strip() == "bbd7821bd42da5456ee068a471ef73d525ea26a1"
+    assert sha256("third_party/ipxe/bootloaders/undionly.kpxe") == "b2ff1718908401bd71d5f84d433ec5c2e73fe563866ad904d0c3fa3d9ce67c0b"
+    assert sha256("third_party/ipxe/bootloaders/snponly.efi") == "a3fec333e4ae52c33b3ef8b140422a16019c4d7aa63a13f8ac3c95079fad0715"
+    assert sha256("third_party/ipxe/bootloaders/undionly.kpxe.licence") == "4c06a9f1384900fa50c68042795e11d1939bbee3b76f4b692f7655c99d3026d8"
+    assert sha256("third_party/ipxe/bootloaders/snponly.efi.licence") == "04369e5a91dc2cfb5c86ca6a1db031897ceb349c46f8f5c06c4a8e7bdc6ab5f8"
+    assert "make -j2 bin/undionly.kpxe bin-x86_64-efi/snponly.efi" in readme
+    assert "GPL version 2 (or, at your option, any later version)" in undionly_licence
+    assert "GPL version 2 (or, at your option, any later version)" in snponly_licence
+    assert "make bin/xxxxxxx.yyy.licence" in copying
+    assert "GNU GENERAL PUBLIC LICENSE" in gpl
 
 
 def test_packer_build_uses_labfoundry_management_network_by_default():

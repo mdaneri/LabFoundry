@@ -1,0 +1,16 @@
+  [LICENCE] bin-x86_64-efi/snponly.efi.licence
+perl ./util/licence.pl 	bsd2 bsd2_patent bsd3 gpl2_or_later gpl2_or_later_or_ubdl public_domain
+The following licences appear within this file:
+  GPL version 2 (or, at your option, any later version)
+  BSD Licence (without advertising or endorsement clauses, with patent clause)
+  BSD Licence (without advertising or endorsement clauses)
+  GPL version 2 (or, at your option, any later version) or Unmodified Binary Distribution Licence
+  Public Domain
+  BSD Licence (without advertising clause)
+GPL version 2 (or, at your option, any later version) subsumes BSD Licence (without advertising clause)
+GPL version 2 (or, at your option, any later version) subsumes BSD Licence (without advertising or endorsement clauses, with patent clause)
+GPL version 2 (or, at your option, any later version) subsumes Public Domain
+GPL version 2 (or, at your option, any later version) subsumes GPL version 2 (or, at your option, any later version) or Unmodified Binary Distribution Licence
+GPL version 2 (or, at your option, any later version) subsumes BSD Licence (without advertising or endorsement clauses)
+The overall licence for this file is:
+  GPL version 2 (or, at your option, any later version)

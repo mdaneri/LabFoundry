@@ -542,6 +542,64 @@ def test_appliance_apply_failure_renders_command_details(client, monkeypatch):
     assert "super-secret" not in response.text
 
 
+def test_appliance_apply_stops_unit_after_validation_failure(client, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job
+    import labfoundry.app.ui as ui_module
+
+    class ValidationFailingApplianceSettingsAdapter:
+        dry_run = False
+
+        def read_dhcp_leases(self) -> AdapterResult:
+            return AdapterResult(command=["labfoundry-helper", "dnsmasq", "leases"], dry_run=True, stdout="")
+
+        def validate_appliance_settings_config(self, config_path: str) -> AdapterResult:
+            return AdapterResult(
+                command=["labfoundry-helper", "appliance-settings", "validate", config_path],
+                dry_run=False,
+                stderr="hostname validation failed",
+                returncode=2,
+            )
+
+        def apply_appliance_settings_config(self, config_path: str) -> AdapterResult:
+            raise AssertionError("apply should not run after validation failure")
+
+    monkeypatch.setattr(ui_module, "SystemAdapter", ValidationFailingApplianceSettingsAdapter)
+
+    login(client)
+    page = client.get("/settings")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    saved = client.post(
+        "/settings",
+        data={
+            "fqdn": "validate-fail.labfoundry.internal",
+            "external_dns_servers": "1.1.1.1",
+            "ntp_servers": "time1.google.com",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert saved.status_code == 200
+
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
+
+    assert response.status_code == 200
+    assert "Appliance apply task failed" in response.text
+    assert "labfoundry-helper appliance-settings validate" in response.text
+    assert "labfoundry-helper appliance-settings apply" not in response.text
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
+        payload = json.loads(job.result or "{}")
+        commands = payload["units"][0]["commands"]
+        assert [command["command"][2] for command in commands] == ["validate"]
+        assert "labfoundry-helper appliance-settings apply" not in (job.result or "")
+
+
 def test_backup_restore_page_exports_settings_archive(client):
     import json
 

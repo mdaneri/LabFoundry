@@ -3758,44 +3758,90 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
     context = unit["context"]
     adapter = SystemAdapter()
     unit_id = unit["id"]
+
+    def run_adapter_steps(steps: list[Any]) -> list[Any]:
+        results = []
+        for step in steps:
+            result = step()
+            results.append(result)
+            if result.returncode != 0:
+                break
+        return results
+
     if unit_id == "local_users":
         config_path = LOCAL_USERS_STAGED_CONFIG_PATH
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(LOCAL_USERS_STAGED_CONFIG_PATH, unit["raw_config_preview"])
-        results = [adapter.validate_local_users_config(config_path), adapter.apply_local_users_config(config_path)]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_local_users_config(config_path),
+                lambda: adapter.apply_local_users_config(config_path),
+            ]
+        )
     elif unit_id == "appliance_settings":
         settings = context["appliance_settings"]
         config_path = settings.config_path
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(APPLIANCE_SETTINGS_STAGED_CONFIG_PATH, unit["raw_config_preview"])
-        results = [adapter.validate_appliance_settings_config(config_path), adapter.apply_appliance_settings_config(config_path)]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_appliance_settings_config(config_path),
+                lambda: adapter.apply_appliance_settings_config(config_path),
+            ]
+        )
     elif unit_id == "network":
         config_path = context["network_config_path"]
         if not adapter.dry_run:
             config_preview = network_config_with_removed_vlans(unit["raw_config_preview"], unit.get("removed_vlan_interfaces", []))
             config_path = stage_appliance_apply_config(NETWORK_STAGED_CONFIG_PATH, config_preview)
-        results = [adapter.validate_network_config(config_path), adapter.apply_network_config(config_path)]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_network_config(config_path),
+                lambda: adapter.apply_network_config(config_path),
+            ]
+        )
     elif unit_id == "wan":
         config_path = context["wan_config_path"]
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(WAN_CONFIG_PATH, unit["raw_config_preview"])
-        results = [adapter.validate_wan_config(config_path), adapter.apply_wan_config(config_path)]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_wan_config(config_path),
+                lambda: adapter.apply_wan_config(config_path),
+            ]
+        )
     elif unit_id == "firewall":
         settings = context["firewall_settings"]
         config_path = settings.config_path
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(FIREWALL_STAGED_CONFIG_PATH, unit["raw_config_preview"])
-        results = [adapter.validate_firewall_config(config_path), adapter.apply_firewall_config(config_path)]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_firewall_config(config_path),
+                lambda: adapter.apply_firewall_config(config_path),
+            ]
+        )
     elif unit_id == "dnsmasq":
         config_path = context["dns_settings"].config_path
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(DNSMASQ_STAGED_CONFIG_PATH, unit["raw_config_preview"])
-        results = [adapter.validate_dnsmasq_config(config_path), adapter.apply_dnsmasq_config(config_path), adapter.reload_dnsmasq()]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_dnsmasq_config(config_path),
+                lambda: adapter.apply_dnsmasq_config(config_path),
+                adapter.reload_dnsmasq,
+            ]
+        )
     elif unit_id == "esxi_pxe":
         config_path = context["esxi_pxe_config_path"]
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(ESXI_PXE_STAGED_CONFIG_PATH, context["esxi_pxe_manifest"])
-        results = [adapter.validate_esxi_pxe_config(config_path), adapter.apply_esxi_pxe_config(config_path)]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_esxi_pxe_config(config_path),
+                lambda: adapter.apply_esxi_pxe_config(config_path),
+            ]
+        )
     elif unit_id == "ca":
         config_path = CA_STAGED_CONFIG_PATH
         if not adapter.dry_run:
@@ -3803,37 +3849,55 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
                 CA_STAGED_CONFIG_PATH,
                 render_ca_apply_payload(context["ca_settings"], context["ca_certificates"], include_private_keys=True),
             )
-        results = [adapter.validate_ca_config(config_path), adapter.apply_ca_config(config_path)]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_ca_config(config_path),
+                lambda: adapter.apply_ca_config(config_path),
+            ]
+        )
     elif unit_id == "kms":
         config_path = KMS_STAGED_CONFIG_PATH
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(KMS_STAGED_CONFIG_PATH, unit["raw_config_preview"])
-        results = [adapter.validate_kms_config(config_path), adapter.apply_kms_config(config_path)]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_kms_config(config_path),
+                lambda: adapter.apply_kms_config(config_path),
+            ]
+        )
     elif unit_id == "vcf_backups":
         settings = context["vcf_backup_settings"]
         config_path = settings.config_path
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(VCF_BACKUP_STAGED_CONFIG_PATH, unit["raw_config_preview"])
-        results = [adapter.validate_vcf_backup_config(config_path), adapter.apply_vcf_backup_config(config_path)]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_vcf_backup_config(config_path),
+                lambda: adapter.apply_vcf_backup_config(config_path),
+            ]
+        )
     elif unit_id == "vcf_offline_depot":
         settings = context["vcf_depot_settings"]
         config_path = settings.config_path
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(VCF_DEPOT_STAGED_CONFIG_PATH, context["vcf_depot_https_config_preview"])
-        results = [
-            adapter.validate_vcf_offline_depot_config(config_path),
-            adapter.sync_vcf_offline_depot(config_path),
-            adapter.apply_vcf_offline_depot_https_config(config_path),
+        steps = [
+            lambda: adapter.validate_vcf_offline_depot_config(config_path),
+            lambda: adapter.sync_vcf_offline_depot(config_path),
+            lambda: adapter.apply_vcf_offline_depot_https_config(config_path),
         ]
         if settings.tool_archive_path:
-            results.insert(1, adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path))
+            steps.insert(1, lambda: adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path))
+        results = run_adapter_steps(steps)
     elif unit_id == "vcf_private_registry":
         settings = context["vcf_registry_settings"]
-        results = [
-            adapter.validate_vcf_private_registry_config(settings.config_path),
-            adapter.apply_vcf_private_registry_config(settings.config_path),
-            adapter.relocate_vcf_private_registry_bundles(settings.config_path),
-        ]
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_vcf_private_registry_config(settings.config_path),
+                lambda: adapter.apply_vcf_private_registry_config(settings.config_path),
+                lambda: adapter.relocate_vcf_private_registry_bundles(settings.config_path),
+            ]
+        )
     else:
         raise HTTPException(status_code=400, detail=f"Unknown apply unit {unit_id}.")
 
