@@ -1727,6 +1727,69 @@ def test_routes_wan_rejects_route_wan_mode(client):
     assert "planned but not supported in v1" in response.text
 
 
+def test_routes_wan_allows_ipv6_only_route_targets_but_not_nat_targets(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import NatRule, PhysicalInterface, Route
+
+    with SessionLocal() as db:
+        db.add(
+            PhysicalInterface(
+                name="eth6",
+                mac_address="00:50:56:aa:bb:66",
+                mode="access",
+                role="services",
+                ip_cidr="",
+                ipv6_cidr="fd00:66::1/64",
+                admin_state="up",
+                oper_state="up",
+            )
+        )
+        db.commit()
+
+    login(client)
+    page = client.get("/routes-wan")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    route_response = client.post(
+        "/routes-wan/routes",
+        data={
+            "destination_cidr": "2001:db8:66::/64",
+            "gateway": "",
+            "interface_name": "eth6",
+            "metric": "120",
+            "wan_policy_id": "",
+            "wan_mode": "interface",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    nat_response = client.post(
+        "/routes-wan/nat-rules",
+        data={
+            "name": "IPv6-only outbound",
+            "source": "192.168.50.0/24",
+            "outbound_interface": "eth6",
+            "masquerade": "on",
+            "priority": "110",
+            "description": "",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+
+    assert route_response.status_code == 303
+    assert nat_response.status_code == 422
+    assert "Choose an access physical interface" in nat_response.text
+    with SessionLocal() as db:
+        route = db.execute(select(Route).where(Route.interface_name == "eth6")).scalar_one()
+        assert route.destination_cidr == "2001:db8:66::/64"
+        assert db.execute(select(NatRule).where(NatRule.outbound_interface == "eth6")).scalar_one_or_none() is None
+
+
 def test_routes_wan_autosave_endpoints_and_apply_task(client):
     from sqlalchemy import select
 

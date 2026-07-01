@@ -4585,7 +4585,7 @@ def validate_route_form_values(
             return Response(f"{gateway_value} is not a valid gateway IP address.", status_code=422, media_type="text/plain")
         if gateway_address.version != destination_network.version:
             return Response("Route gateway family must match the destination CIDR family.", status_code=422, media_type="text/plain")
-    target_names = {target["name"] for target in wan_nat_targets_from_route_targets(wan_route_targets(db))}
+    target_names = {target["name"] for target in wan_route_targets(db)}
     interface_value = interface_name.strip()
     if interface_value not in target_names:
         return Response("Choose an access physical interface or enabled VLAN interface with an IP CIDR.", status_code=422, media_type="text/plain")
@@ -4649,7 +4649,7 @@ def validate_nat_rule_form_values(
     source_errors = validate_nat_source(source_value, {str(group.get("id", "")) for group in source_groups}, source_groups)
     if source_errors:
         return Response(source_errors[0], status_code=422, media_type="text/plain")
-    target_names = {target["name"] for target in wan_route_targets(db)}
+    target_names = {target["name"] for target in wan_nat_targets_from_route_targets(wan_route_targets(db))}
     outbound_value = outbound_interface.strip()
     if outbound_value not in target_names:
         return Response("Choose an access physical interface or enabled VLAN interface with an IP CIDR.", status_code=422, media_type="text/plain")
