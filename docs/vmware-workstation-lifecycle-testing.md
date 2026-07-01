@@ -18,7 +18,8 @@ Hyper-V lifecycle client.
 
 Default vmnets:
 
-- `vmnet8` for management, defaulting to `192.168.167.0/24`
+- `vmnet8` for management, with appliance addresses derived from the selected
+  vmnet subnet by default
 - `vmnet2` for SiteA
 - `vmnet3` for WAN/SiteB
 - `vmnet4` for trunk-like validation
@@ -31,13 +32,16 @@ powershell.exe -ExecutionPolicy Bypass `
   -PlanOnly
 ```
 
-If vmnets are missing or the management subnet does not match the appliance
-address plan, adjust them in VMware Virtual Network Editor before running the
-interop test.
+If vmnets are missing, adjust them in VMware Virtual Network Editor before
+running the interop test. The image build wrapper reads the selected management
+vmnet before rendering Packer variables; for bridged `vmnet0`, it uses the
+active Windows IPv4 interface or the interface named by
+`-BridgedInterfaceAlias`.
 
 The Workstation management subnet must remain separate from the Hyper-V
-management subnet. The default appliance address is `192.168.167.10`, with
-`192.168.167.2` as the VMware NAT gateway.
+management subnet. Unless overridden, the build wrapper chooses `.30` in that
+subnet for temporary builder SSH, `.10` for final appliance management, and the
+VMware/host gateway for routing.
 
 ## Build The Appliance
 
@@ -73,6 +77,9 @@ needed, creates a unique `LabFoundryWorkstationLifecycle-*` lab, runs the
 initial lifecycle scenario, and by default runs the restored backup/restore
 pass. Pass `-SkipBackupRestoreTest` only when the older single-pass behavior is
 intended.
+Unless `-ApplianceIPAddress` is passed, the wrapper derives the appliance URL
+from the selected management vmnet using the same `.10` host offset as the image
+build.
 
 Useful commands:
 

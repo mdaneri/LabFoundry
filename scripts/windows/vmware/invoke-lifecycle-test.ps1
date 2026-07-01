@@ -16,22 +16,32 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
+    [Parameter(ParameterSetName = 'PrepareNetworks')]
     [string]$VmrunPath = '',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
+    [Parameter(ParameterSetName = 'PrepareNetworks')]
     [string]$ManagementNetwork = 'vmnet8',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
+    [Parameter(ParameterSetName = 'PrepareNetworks')]
+    [string]$BridgedInterfaceAlias = '',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [Parameter(ParameterSetName = 'PrepareNetworks')]
     [string]$SiteANetwork = 'vmnet2',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
+    [Parameter(ParameterSetName = 'PrepareNetworks')]
     [string]$SiteBNetwork = 'vmnet3',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
+    [Parameter(ParameterSetName = 'PrepareNetworks')]
     [string]$TrunkNetwork = 'vmnet4',
 
     [Parameter(ParameterSetName = 'Run')]
@@ -114,6 +124,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')
+$applianceIpWasPassed = $PSBoundParameters.ContainsKey('ApplianceIPAddress')
 
 function Find-LatestApplianceVmx {
     $outputRoot = Join-Path $repoRoot 'image\vmware-workstation\output'
@@ -129,6 +140,52 @@ function Find-LatestApplianceVmx {
     return $selected.FullName
 }
 
+function Get-Ipv4AddressFromSubnetOffset {
+    param(
+        [Parameter(Mandatory = $true)][string]$Subnet,
+        [Parameter(Mandatory = $true)][uint32]$HostOffset
+    )
+
+    $bytes = [System.Net.IPAddress]::Parse($Subnet).GetAddressBytes()
+    if ($bytes.Count -ne 4) {
+        throw "Expected an IPv4 subnet, got: $Subnet"
+    }
+    $address = (([uint32]$bytes[0] -shl 24) -bor ([uint32]$bytes[1] -shl 16) -bor ([uint32]$bytes[2] -shl 8) -bor [uint32]$bytes[3]) + $HostOffset
+    $next = [byte[]]@(
+        (($address -shr 24) -band 0xff),
+        (($address -shr 16) -band 0xff),
+        (($address -shr 8) -band 0xff),
+        ($address -band 0xff)
+    )
+    return ([System.Net.IPAddress]::new($next)).ToString()
+}
+
+function Get-ManagementNetworkPlan {
+    param(
+        [Parameter(Mandatory = $true)][string]$NetworkName,
+        [string]$Vmrun,
+        [string]$BridgeAlias
+    )
+
+    $networkArgs = @{
+        ManagementNetwork = $NetworkName
+        ManagementOnly    = $true
+        PlanOnly          = $true
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Vmrun)) {
+        $networkArgs['VmrunPath'] = $Vmrun
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BridgeAlias)) {
+        $networkArgs['BridgedInterfaceAlias'] = $BridgeAlias
+    }
+
+    $planText = (& (Join-Path $PSScriptRoot 'prepare-networks.ps1') @networkArgs | Out-String).Trim()
+    if (-not $?) {
+        throw "VMware Workstation network discovery failed."
+    }
+    return $planText | ConvertFrom-Json
+}
+
 if (-not $LabName) {
     if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {
         $LabName = 'LabFoundryWorkstationLifecycle'
@@ -141,6 +198,7 @@ if ($PSCmdlet.ParameterSetName -eq 'PrepareNetworks') {
     & (Join-Path $PSScriptRoot 'prepare-networks.ps1') `
         -VmrunPath $VmrunPath `
         -ManagementNetwork $ManagementNetwork `
+        -BridgedInterfaceAlias $BridgedInterfaceAlias `
         -SiteANetwork $SiteANetwork `
         -SiteBNetwork $SiteBNetwork `
         -TrunkNetwork $TrunkNetwork
@@ -161,6 +219,13 @@ if (-not $ApplianceVmxPath) {
 }
 if (-not $ClientVmdkPath) {
     $ClientVmdkPath = Join-Path $repoRoot 'image\vmware-workstation\clients\alpine-cloud\labfoundry-tiny-linux-client.vmdk'
+}
+if (-not $applianceIpWasPassed) {
+    $networkPlan = Get-ManagementNetworkPlan -NetworkName $ManagementNetwork -Vmrun $VmrunPath -BridgeAlias $BridgedInterfaceAlias
+    if ($networkPlan.missing_networks.Count -gt 0) {
+        throw "Missing VMware Workstation networks: $($networkPlan.missing_networks -join ', ')."
+    }
+    $ApplianceIPAddress = Get-Ipv4AddressFromSubnetOffset -Subnet $networkPlan.management_subnet -HostOffset 10
 }
 $effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "http://${ApplianceIPAddress}" }
 

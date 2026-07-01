@@ -50,8 +50,8 @@ powershell.exe -ExecutionPolicy Bypass `
 
 The default Workstation builder and lifecycle scripts expect:
 
-- management: `vmnet8`, with the LabFoundry appliance reachable at
-  `192.168.167.10`
+- management: `vmnet8`, with the LabFoundry appliance address derived from the
+  selected vmnet subnet by default
 - SiteA: `vmnet2`
 - WAN/SiteB: `vmnet3`
 - trunk-like validation segment: `vmnet4`
@@ -65,9 +65,15 @@ powershell.exe -ExecutionPolicy Bypass `
 ```
 
 The Workstation management subnet intentionally stays separate from the Hyper-V
-lab subnet. The default uses VMware's NAT network on `192.168.167.0/24`; pass
-`-BuilderStaticIp`, `-BuilderStaticGateway`, `-FinalMgmtAddress`, and
-`-FinalMgmtGateway` together when using a different Workstation vmnet.
+lab subnet. The build wrapper reads the selected VMware network before
+rendering Packer variables. For NAT/host-only vmnets it uses
+`vmrun -T ws listHostNetworks`; for bridged `vmnet0` it falls back to the active
+Windows IPv4 interface, or the interface named by `-BridgedInterfaceAlias`.
+Unless overridden, it chooses host offsets `.30` for the temporary Photon
+builder SSH address, `.10` for the final appliance management address, and the
+VMware/host gateway for routing. Pass `-BuilderStaticIp`,
+`-BuilderStaticGateway`, `-FinalMgmtAddress`, and `-FinalMgmtGateway` together
+only when a different address plan is intentional.
 
 Create or adjust missing lifecycle vmnets in VMware Virtual Network Editor. The
 scripts intentionally do not rewrite global Workstation vmnet configuration
