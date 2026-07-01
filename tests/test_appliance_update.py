@@ -1,9 +1,12 @@
 import importlib.machinery
 import importlib.util
 import json
+import logging
 from pathlib import Path
 
 from sqlalchemy import select
+
+from labfoundry.app.adapters.system import AdapterResult
 
 
 def login(client):
@@ -103,6 +106,77 @@ def test_appliance_update_settings_reject_embedded_credentials(client):
     )
     assert response.status_code == 422
     assert "must not include embedded credentials" in response.text
+
+
+def test_appliance_update_real_helper_failure_is_logged(client, monkeypatch, caplog):
+    import labfoundry.app.ui as ui
+
+    class FailingUpdateAdapter:
+        dry_run = False
+
+        def check_appliance_update_config(self, config_path: str) -> AdapterResult:
+            return AdapterResult(
+                command=["labfoundry-helper", "appliance-update", "check", config_path],
+                dry_run=False,
+                stdout="",
+                stderr="manifest refused connection",
+                returncode=1,
+            )
+
+    monkeypatch.setattr(ui, "SystemAdapter", lambda: FailingUpdateAdapter())
+    monkeypatch.setattr(ui, "stage_appliance_apply_config", lambda _path, _preview: "/var/lib/labfoundry/apply/appliance-update/labfoundry-update.json")
+
+    login(client)
+    page = client.get("/appliance-update")
+    csrf = csrf_from_page(page.text)
+    with caplog.at_level(logging.INFO, logger="labfoundry.appliance_update"):
+        response = client.post(
+            "/appliance-update/check",
+            data={"csrf": csrf, "selected_streams": ["labfoundry_wheel"]},
+        )
+
+    assert response.status_code == 200
+    assert "Appliance update failed" in response.text
+    assert "manifest refused connection" in caplog.text
+    assert "completed status=failed mode=check streams=labfoundry_wheel" in caplog.text
+
+
+def test_appliance_update_staging_exception_records_failed_job_and_logs(client, monkeypatch, caplog):
+    import labfoundry.app.ui as ui
+
+    class RealUpdateAdapter:
+        dry_run = False
+
+    monkeypatch.setattr(ui, "SystemAdapter", lambda: RealUpdateAdapter())
+
+    def fail_stage(_path: str, _preview: str) -> str:
+        raise PermissionError("staging ownership repair failed")
+
+    monkeypatch.setattr(ui, "stage_appliance_apply_config", fail_stage)
+
+    login(client)
+    page = client.get("/appliance-update")
+    csrf = csrf_from_page(page.text)
+    with caplog.at_level(logging.INFO, logger="labfoundry.appliance_update"):
+        response = client.post(
+            "/appliance-update/run",
+            data={"csrf": csrf, "selected_streams": ["photon_os"]},
+        )
+
+    assert response.status_code == 200
+    assert "Appliance update failed" in response.text
+    assert "failed before helper execution mode=run streams=photon_os" in caplog.text
+    assert "staging ownership repair failed" in caplog.text
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job
+
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-update")).scalar_one()
+        payload = json.loads(job.result or "{}")
+    assert job.status == "failed"
+    assert payload["commands"][0]["command_line"] == "stage-appliance-update /var/lib/labfoundry/apply/appliance-update/labfoundry-update.json"
+    assert "staging ownership repair failed" in payload["commands"][0]["stderr"]
 
 
 def test_appliance_update_service_version_helpers():

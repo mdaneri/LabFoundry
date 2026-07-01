@@ -358,6 +358,7 @@ VCF_DEPOT_VDT_LOG_PATH = PurePosixPath("/var/lib/labfoundry/vcfDownloadTool/acti
 LABFOUNDRY_APP_LOG_PATH = get_settings().app_log_path
 KMS_SERVER_LOG_PATH = Path("/var/log/labfoundry/kms/server.log")
 APPLY_LOGGER = logging.getLogger("labfoundry.appliance_apply")
+APPLIANCE_UPDATE_LOGGER = logging.getLogger("labfoundry.appliance_update")
 NETWORK_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/network/labfoundry-network.conf"
 DNSMASQ_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf"
 
@@ -3725,6 +3726,11 @@ def create_appliance_update_task(db: Session, *, identity: Identity, update_resu
     )
     db.add(job)
     db.commit()
+    should_log_final_result = not update_result.get("restart_after_commit")
+    if should_log_final_result:
+        if not update_result["success"]:
+            log_appliance_update_failures(job.id, update_result)
+        log_appliance_update_submission(job.id, update_result)
     detail = " ; ".join(" ".join(command["command"]) for command in update_result["commands"])
     record_audit(
         db,
@@ -3745,6 +3751,7 @@ def create_appliance_update_task(db: Session, *, identity: Identity, update_resu
         job.error = None if update_result["success"] else "LabFoundry service restart scheduling failed."
         db.add(job)
         db.commit()
+        should_log_final_result = True
         record_audit(
             db,
             actor=identity.username,
@@ -3754,7 +3761,47 @@ def create_appliance_update_task(db: Session, *, identity: Identity, update_resu
             detail=" ".join(restart_result.command),
             success=restart_result.returncode == 0,
         )
+    if should_log_final_result and update_result.get("restart_after_commit"):
+        if not update_result["success"]:
+            log_appliance_update_failures(job.id, update_result)
+        log_appliance_update_submission(job.id, update_result)
     return job
+
+
+def appliance_update_exception_result(
+    *,
+    selected_stream_ids: list[str],
+    settings: dict[str, str],
+    identity: Identity,
+    mode: str,
+    exc: Exception,
+) -> dict[str, Any]:
+    manifest_preview = render_update_manifest(selected_streams=selected_stream_ids, settings=settings, actor=identity.username)
+    command = ["stage-appliance-update", APPLIANCE_UPDATE_STAGED_CONFIG_PATH]
+    return {
+        "unit_id": "appliance_update",
+        "label": "Appliance Update",
+        "mode": mode,
+        "selected_streams": selected_stream_ids,
+        "selected_labels": [UPDATE_STREAM_LABELS[stream] for stream in selected_stream_ids],
+        "status": JobStatus.FAILED.value,
+        "success": False,
+        "dry_run": get_settings().dry_run_system_adapters,
+        "restart_after_commit": False,
+        "commands": [
+            {
+                "command": command,
+                "command_line": " ".join(command),
+                "dry_run": get_settings().dry_run_system_adapters,
+                "stdout": "",
+                "stderr": str(exc),
+                "returncode": 1,
+            }
+        ],
+        "config_path": APPLIANCE_UPDATE_STAGED_CONFIG_PATH,
+        "config_preview": manifest_preview,
+        "error": str(exc),
+    }
 
 
 def adapter_result_to_payload(result: Any) -> dict[str, Any]:
@@ -3773,6 +3820,42 @@ def apply_output_excerpt(value: str, *, limit: int = 2400) -> str:
     if len(redacted) <= limit:
         return redacted
     return f"{redacted[:limit].rstrip()}\n... output truncated ..."
+
+
+def log_appliance_update_failures(job_id: str, update_result: dict[str, Any]) -> None:
+    for command in update_result.get("commands", []):
+        if int(command.get("returncode") or 0) == 0:
+            continue
+        APPLIANCE_UPDATE_LOGGER.error(
+            "Appliance update task %s failed mode=%s streams=%s command=%s returncode=%s stderr=%s stdout=%s",
+            job_id,
+            update_result.get("mode") or "",
+            ",".join(str(stream) for stream in update_result.get("selected_streams", [])),
+            apply_output_excerpt(str(command.get("command_line") or " ".join(command.get("command") or [])), limit=800),
+            command.get("returncode"),
+            apply_output_excerpt(str(command.get("stderr") or "")),
+            apply_output_excerpt(str(command.get("stdout") or "")),
+        )
+
+
+def log_appliance_update_submission(job_id: str, update_result: dict[str, Any]) -> None:
+    APPLIANCE_UPDATE_LOGGER.info(
+        "Appliance update task %s completed status=%s mode=%s streams=%s dry_run=%s config_path=%s",
+        job_id,
+        update_result.get("status") or "",
+        update_result.get("mode") or "",
+        ",".join(str(stream) for stream in update_result.get("selected_streams", [])),
+        bool(update_result.get("dry_run")),
+        update_result.get("config_path") or "",
+    )
+    for command in update_result.get("commands", []):
+        APPLIANCE_UPDATE_LOGGER.info(
+            "Appliance update task %s command=%s returncode=%s dry_run=%s",
+            job_id,
+            apply_output_excerpt(str(command.get("command_line") or " ".join(command.get("command") or [])), limit=800),
+            command.get("returncode"),
+            bool(command.get("dry_run")),
+        )
 
 
 def filesystem_path(path: Path | PurePosixPath) -> Path:
@@ -4334,7 +4417,21 @@ def submit_appliance_update(
             },
             status_code=422,
         )
-    update_result = execute_appliance_update_job(selected_stream_ids=selected, settings=settings, identity=identity, mode=mode)
+    try:
+        update_result = execute_appliance_update_job(selected_stream_ids=selected, settings=settings, identity=identity, mode=mode)
+    except Exception as exc:  # noqa: BLE001 - surface update infrastructure failures as recorded jobs.
+        APPLIANCE_UPDATE_LOGGER.exception(
+            "Appliance update task failed before helper execution mode=%s streams=%s",
+            mode,
+            ",".join(selected),
+        )
+        update_result = appliance_update_exception_result(
+            selected_stream_ids=selected,
+            settings=settings,
+            identity=identity,
+            mode=mode,
+            exc=exc,
+        )
     job = create_appliance_update_task(db, identity=identity, update_result=update_result)
     return render(
         request,

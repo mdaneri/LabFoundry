@@ -48,8 +48,14 @@ Real update execution stages:
 /var/lib/labfoundry/apply/appliance-update/labfoundry-update.json
 ```
 
-After a successful update, helper output is captured in the `appliance-update`
-job result and the appliance writes:
+Each check or run records an `appliance-update` job. Helper command return
+codes and redacted stdout/stderr excerpts are stored in the job result and
+mirrored to the LabFoundry app log under the `labfoundry.appliance_update`
+logger, including failures that happen while staging the update manifest before
+the helper runs. Inspect `/var/log/labfoundry/labfoundry.log` when the UI says
+an update failed but the rendered helper output is not enough.
+
+After a successful update, the appliance also writes:
 
 ```text
 /etc/labfoundry/update-info
