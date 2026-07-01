@@ -31,7 +31,7 @@ is visible; pass `-Headless` for unattended runs.
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/build-photon-vmware-image.ps1 `
+  -File scripts/windows/vmware/build-photon-image.ps1 `
   -IsoUrl "https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
   -IsoChecksum "sha512:<checksum>"
 ```
@@ -40,7 +40,7 @@ For lifecycle/demo images that should use real appliance adapters:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/build-photon-vmware-image.ps1 `
+  -File scripts/windows/vmware/build-photon-image.ps1 `
   -IsoUrl "<photon-iso-url-or-path>" `
   -IsoChecksum "<packer-checksum>" `
   -EnableRealSystemAdapters
@@ -60,7 +60,7 @@ Validate the current Workstation network inventory with:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/prepare-vmware-networks.ps1 `
+  -File scripts/windows/vmware/prepare-networks.ps1 `
   -PlanOnly
 ```
 
@@ -80,7 +80,7 @@ Run the Workstation lifecycle wrapper after building an appliance VM:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-vmware-lifecycle-test.ps1
+  -File scripts/windows/vmware/invoke-lifecycle-test.ps1
 ```
 
 The wrapper writes evidence under
@@ -96,7 +96,7 @@ Create and start a normal Workstation test appliance from the latest built VMX:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/create-labfoundry-vmware-test-vm.ps1 `
+  -File scripts/windows/vmware/create-labfoundry-test-vm.ps1 `
   -Redeploy `
   -ResetDataDisks `
   -WaitForIp

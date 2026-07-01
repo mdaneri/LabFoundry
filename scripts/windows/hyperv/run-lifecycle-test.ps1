@@ -37,7 +37,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')
+$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')
 if (-not $ApplianceUrl) {
     $ApplianceUrl = "http://${ApplianceIPAddress}"
 }
@@ -682,13 +682,13 @@ Where-Object {
 }
 if ($runningLifecycleAppliances -and $ApplianceIPAddress -eq '192.168.49.1') {
     $names = ($runningLifecycleAppliances | Select-Object -ExpandProperty Name) -join ', '
-    throw "Running lifecycle appliance VM(s) may already own ${ApplianceIPAddress}: $names. Run invoke-hyperv-lifecycle-test.ps1 -CleanupVmsOnly or stop those VMs before starting a new lifecycle lab."
+    throw "Running lifecycle appliance VM(s) may already own ${ApplianceIPAddress}: $names. Run scripts/windows/hyperv/invoke-lifecycle-test.ps1 -CleanupVmsOnly or stop those VMs before starting a new lifecycle lab."
 }
 
 New-Item -ItemType Directory -Path $diskRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $seedRoot -Force | Out-Null
 
-& (Join-Path $PSScriptRoot 'create-hyperv-switches.ps1')
+& (Join-Path $PSScriptRoot 'create-switches.ps1')
 
 $clientPublicKey = Ensure-ClientSshKey
 

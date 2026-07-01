@@ -117,8 +117,8 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
     root_docs = Path("README.md").read_text(encoding="utf-8")
-    wrapper = Path("scripts/windows/build-photon-hyperv-image.ps1").read_text(encoding="utf-8")
-    build_module = Path("scripts/windows/LabFoundry.PhotonImage.psm1").read_text(encoding="utf-8")
+    wrapper = Path("scripts/windows/hyperv/build-photon-image.ps1").read_text(encoding="utf-8")
+    build_module = Path("scripts/windows/common/LabFoundry.PhotonImage.psm1").read_text(encoding="utf-8")
     gitignore = Path(".gitignore").read_text(encoding="utf-8")
 
     assert 'default = "LabFoundry-Mgmt"' in template
@@ -145,8 +145,8 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "http_content" not in template
     assert "http_port_min" not in template
     assert 'default = "Default Switch"' not in template
-    assert "build-photon-hyperv-image.ps1" in root_docs
-    assert "create-hyperv-switches.ps1" in docs
+    assert "build-photon-image.ps1" in root_docs
+    assert "create-switches.ps1" in docs
     assert "builder_static_ip=192.168.49.30/24" in docs
     assert "discovers the host's active IPv4 DNS" in docs
     assert "labfoundry-photon-with-kickstart.iso" in docs
@@ -160,6 +160,8 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "[string[]]$BuilderStaticDns = @()" in wrapper
     assert "[string]$PipGlobalIndex = ''" in wrapper
     assert "[string]$PipGlobalIndexUrl = ''" in wrapper
+    assert "Join-Path $PSScriptRoot '..\\common\\LabFoundry.PhotonImage.psm1'" in wrapper
+    assert "Join-Path $PSScriptRoot '..\\..\\..\\image\\hyperv'" in wrapper
     assert "function Get-LabFoundryHostIpv4DnsServers" in build_module
     assert "Get-DnsClientServerAddress -AddressFamily IPv4" in build_module
     assert "Using host IPv4 DNS for Photon builder/appliance" in build_module
@@ -200,14 +202,15 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
 
 
 def test_photon_image_optional_pip_global_index_configuration():
-    wrapper = Path("scripts/windows/build-photon-hyperv-image.ps1").read_text(encoding="utf-8")
-    build_module = Path("scripts/windows/LabFoundry.PhotonImage.psm1").read_text(encoding="utf-8")
+    wrapper = Path("scripts/windows/hyperv/build-photon-image.ps1").read_text(encoding="utf-8")
+    build_module = Path("scripts/windows/common/LabFoundry.PhotonImage.psm1").read_text(encoding="utf-8")
     template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
     script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
 
     assert "[string[]]$BuilderStaticDns = @()" in wrapper
     assert "[string]$PipGlobalIndex = ''" in wrapper
     assert "[string]$PipGlobalIndexUrl = ''" in wrapper
+    assert "Join-Path $PSScriptRoot '..\\common\\LabFoundry.PhotonImage.psm1'" in wrapper
     assert "pip_global_index         = $PipGlobalIndex" in build_module
     assert "pip_global_index_url     = $PipGlobalIndexUrl" in build_module
 
@@ -234,8 +237,8 @@ def test_photon_image_optional_pip_global_index_configuration():
 
 
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
-    script = Path("scripts/windows/run-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
-    wrapper = Path("scripts/windows/invoke-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/hyperv/run-lifecycle-test.ps1").read_text(encoding="utf-8")
+    wrapper = Path("scripts/windows/hyperv/invoke-lifecycle-test.ps1").read_text(encoding="utf-8")
     runner = Path("scripts/interop/lifecycle_test.py").read_text(encoding="utf-8")
 
     assert "[string]$LabName = 'LabFoundryLifecycle'" in script
@@ -273,8 +276,8 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
 
 
 def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
-    script = Path("scripts/windows/create-labfoundry-hyperv-test-vm.ps1").read_text(encoding="utf-8")
-    vm_script = Path("scripts/windows/create-labfoundry-hyperv-vm.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/hyperv/create-labfoundry-test-vm.ps1").read_text(encoding="utf-8")
+    vm_script = Path("scripts/windows/hyperv/create-labfoundry-vm.ps1").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
 
     assert "[string]$Name = 'LabFoundry'" in script
@@ -289,17 +292,17 @@ def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
     assert "LabFoundry-Depot.vhdx" in script
     assert "LabFoundry-Backups.vhdx" in script
     assert "Refusing to remove OS disk as a data disk" in script
-    assert "create-hyperv-switches.ps1" in script
-    assert "create-labfoundry-hyperv-vm.ps1" in script
+    assert "create-switches.ps1" in script
+    assert "create-labfoundry-vm.ps1" in script
     assert "-SkipLabNetworkAdapters:$SkipLabNetworkAdapters" in script
     assert "-SiteVlanId $SiteVlanId" in script
     assert "-TaggedVlanId $TaggedVlanId" in script
-    assert "start-labfoundry-hyperv-vm.ps1" in script
-    assert "get-labfoundry-hyperv-vm-ip.ps1" in script
+    assert "start-labfoundry-vm.ps1" in script
+    assert "get-labfoundry-vm-ip.ps1" in script
     assert "VM already exists: $Name. Pass -Redeploy" in script
     assert "Remove-VM -Name $Name -Force" in script
     assert "Run this script from an elevated PowerShell session." not in script
-    assert "create-labfoundry-hyperv-test-vm.ps1 -WaitForIp" in docs
+    assert "create-labfoundry-test-vm.ps1 -WaitForIp" in docs
     assert "pass `-Redeploy` to remove and recreate only that VM" in docs
     assert "same appliance-side lab NIC layout as the lifecycle" in docs
     assert "SiteA` on `LabFoundry-SiteA` as trunk VLAN 12" in docs
@@ -319,7 +322,11 @@ def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
 
 
 def test_windows_script_names_use_provider_tokens():
-    script_names = {path.name for path in Path("scripts/windows").glob("*.ps1")}
+    script_paths = {
+        path.relative_to("scripts/windows").as_posix()
+        for path in Path("scripts/windows").rglob("*.ps1")
+    }
+    root_scripts = {path.name for path in Path("scripts/windows").glob("*.ps1")}
 
     old_vmware_token = "vmware-" + "workstation"
     old_names = {
@@ -332,33 +339,38 @@ def test_windows_script_names_use_provider_tokens():
         "start-labfoundry-" + "vm.ps1",
         "stop-labfoundry-" + "vm.ps1",
     }
-    assert script_names.isdisjoint(old_names)
+    assert root_scripts == set()
+    assert script_paths.isdisjoint(old_names)
 
-    assert "build-photon-vmware-image.ps1" in script_names
-    assert "create-labfoundry-vmware-test-vm.ps1" in script_names
-    assert "create-labfoundry-vmware-vm.ps1" in script_names
-    assert "invoke-vmware-lifecycle-test.ps1" in script_names
-    assert "prepare-vmware-networks.ps1" in script_names
-    assert "prepare-vmware-tiny-linux-client.ps1" in script_names
-    assert "get-labfoundry-vmware-vm-ip.ps1" in script_names
-    assert "start-labfoundry-vmware-vm.ps1" in script_names
-    assert "stop-labfoundry-vmware-vm.ps1" in script_names
-    assert "remove-labfoundry-vmware-vm.ps1" in script_names
-    assert "remove-vmware-lifecycle-vms.ps1" in script_names
-    assert "reset-labfoundry-vmware-vm.ps1" in script_names
-    assert "set-labfoundry-vmware-test-nics.ps1" in script_names
-    assert "create-labfoundry-hyperv-test-vm.ps1" in script_names
-    assert "create-labfoundry-hyperv-vm.ps1" in script_names
-    assert "prepare-hyperv-tiny-linux-client.ps1" in script_names
-    assert "get-labfoundry-hyperv-vm-ip.ps1" in script_names
-    assert "start-labfoundry-hyperv-vm.ps1" in script_names
-    assert "stop-labfoundry-hyperv-vm.ps1" in script_names
+    assert "common/LabFoundry.PhotonImage.psm1" not in script_paths
+    assert "hyperv/build-photon-image.ps1" in script_paths
+    assert "hyperv/create-labfoundry-test-vm.ps1" in script_paths
+    assert "hyperv/create-labfoundry-vm.ps1" in script_paths
+    assert "hyperv/invoke-lifecycle-test.ps1" in script_paths
+    assert "hyperv/prepare-tiny-linux-client.ps1" in script_paths
+    assert "hyperv/get-labfoundry-vm-ip.ps1" in script_paths
+    assert "hyperv/start-labfoundry-vm.ps1" in script_paths
+    assert "hyperv/stop-labfoundry-vm.ps1" in script_paths
+    assert "vmware/build-photon-image.ps1" in script_paths
+    assert "vmware/create-labfoundry-test-vm.ps1" in script_paths
+    assert "vmware/create-labfoundry-vm.ps1" in script_paths
+    assert "vmware/invoke-lifecycle-test.ps1" in script_paths
+    assert "vmware/prepare-networks.ps1" in script_paths
+    assert "vmware/prepare-tiny-linux-client.ps1" in script_paths
+    assert "vmware/get-labfoundry-vm-ip.ps1" in script_paths
+    assert "vmware/start-labfoundry-vm.ps1" in script_paths
+    assert "vmware/stop-labfoundry-vm.ps1" in script_paths
+    assert "vmware/remove-labfoundry-vm.ps1" in script_paths
+    assert "vmware/remove-lifecycle-vms.ps1" in script_paths
+    assert "vmware/reset-labfoundry-vm.ps1" in script_paths
+    assert "vmware/set-test-nics.ps1" in script_paths
 
 
 def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
-    script = Path("scripts/windows/create-labfoundry-vmware-test-vm.ps1").read_text(encoding="utf-8")
-    vm_script = Path("scripts/windows/create-labfoundry-vmware-vm.ps1").read_text(encoding="utf-8")
-    nics_script = Path("scripts/windows/set-labfoundry-vmware-test-nics.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/vmware/create-labfoundry-test-vm.ps1").read_text(encoding="utf-8")
+    vm_script = Path("scripts/windows/vmware/create-labfoundry-vm.ps1").read_text(encoding="utf-8")
+    nics_script = Path("scripts/windows/vmware/set-test-nics.ps1").read_text(encoding="utf-8")
+    build_script = Path("scripts/windows/vmware/build-photon-image.ps1").read_text(encoding="utf-8")
 
     assert "[string]$Name = 'LabFoundry-VMware'" in script
     assert "[switch]$Redeploy" in script
@@ -366,11 +378,11 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "[switch]$IncludeLabNetworkAdapters" in script
     assert "[switch]$ResetDataDisks" in script
     assert "[switch]$WaitForIp" in script
-    assert "prepare-vmware-networks.ps1" in script
-    assert "create-labfoundry-vmware-vm.ps1" in script
-    assert "start-labfoundry-vmware-vm.ps1" in script
-    assert "get-labfoundry-vmware-vm-ip.ps1" in script
-    assert "remove-labfoundry-vmware-vm.ps1" in script
+    assert "prepare-networks.ps1" in script
+    assert "create-labfoundry-vm.ps1" in script
+    assert "start-labfoundry-vm.ps1" in script
+    assert "get-labfoundry-vm-ip.ps1" in script
+    assert "remove-labfoundry-vm.ps1" in script
     assert "Find-LatestApplianceVmx" in script
     assert "image\\vmware-workstation\\output" in script
     assert "image\\vmware-workstation\\test-vms\\$Name" in script
@@ -384,14 +396,17 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "New-DataVmdk" in vm_script
     assert "Set-VmxScsiDisk" in vm_script
     assert "scsi0:$Unit" in vm_script
-    assert "set-labfoundry-vmware-test-nics.ps1" in vm_script
+    assert "set-test-nics.ps1" in vm_script
     assert '"$prefix.vnet"' in nics_script
     assert "$prefix.virtualDev" in nics_script
     assert "vmxnet3" in nics_script
+    assert "Join-Path $PSScriptRoot '..\\common\\LabFoundry.PhotonImage.psm1'" in build_script
+    assert "Join-Path $PSScriptRoot '..\\..\\..\\image\\vmware-workstation'" in build_script
+    assert "prepare-networks.ps1" in build_script
 
 
 def test_lifecycle_hyperv_script_does_not_cleanup_without_explicit_flag():
-    script = Path("scripts/windows/run-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/hyperv/run-lifecycle-test.ps1").read_text(encoding="utf-8")
 
     assert "[switch]$CleanupCreatedLab" in script
     assert "if ($CleanupCreatedLab)" in script
@@ -401,7 +416,7 @@ def test_lifecycle_hyperv_script_does_not_cleanup_without_explicit_flag():
 
 
 def test_lifecycle_single_command_wrapper_prepares_runs_and_cleans_up_by_default():
-    script = Path("scripts/windows/invoke-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/hyperv/invoke-lifecycle-test.ps1").read_text(encoding="utf-8")
 
     assert "DefaultParameterSetName = 'Run'" in script
     assert "ParameterSetName = 'PrepareNetworks'" in script
@@ -415,23 +430,23 @@ def test_lifecycle_single_command_wrapper_prepares_runs_and_cleans_up_by_default
     assert "[string]$SiteInterface = 'eth1.12'" in script
     assert "[string]$SiteCidr = '192.168.12.1/24'" in script
     assert "[int]$SiteVlanId = 12" in script
-    assert "prepare-hyperv-tiny-linux-client.ps1" in script
+    assert "prepare-tiny-linux-client.ps1" in script
     assert "Find-LatestApplianceVhdx" in script
-    assert "run-hyperv-lifecycle-test.ps1" in script
+    assert "run-lifecycle-test.ps1" in script
     assert "$arguments += '-CleanupCreatedLab'" in script
     assert "[switch]$KeepVms" in script
     assert "[switch]$PrepareNetworksOnly" in script
     assert "[switch]$CleanupNetworksOnly" in script
     assert "[switch]$CleanupVmsOnly" in script
-    assert "remove-hyperv-lifecycle-networks.ps1" in script
-    assert "remove-hyperv-lifecycle-vms.ps1" in script
+    assert "remove-lifecycle-networks.ps1" in script
+    assert "remove-lifecycle-vms.ps1" in script
     assert "LabFoundryLifecycle-$(Get-Date -Format 'yyyyMMddHHmmss')" in script
     assert "$singlePurposeActions" not in script
 
 
 def test_lifecycle_cleanup_scripts_are_scoped_to_labfoundry_assets():
-    network_script = Path("scripts/windows/remove-hyperv-lifecycle-networks.ps1").read_text(encoding="utf-8")
-    vm_script = Path("scripts/windows/remove-hyperv-lifecycle-vms.ps1").read_text(encoding="utf-8")
+    network_script = Path("scripts/windows/hyperv/remove-lifecycle-networks.ps1").read_text(encoding="utf-8")
+    vm_script = Path("scripts/windows/hyperv/remove-lifecycle-vms.ps1").read_text(encoding="utf-8")
 
     assert "LabFoundry-Mgmt-NAT" in network_script
     assert "LabFoundry-Mgmt" in network_script
@@ -445,16 +460,16 @@ def test_lifecycle_cleanup_scripts_are_scoped_to_labfoundry_assets():
 
 
 def test_vmware_lifecycle_cleanup_only_removes_existing_lifecycle_vms():
-    wrapper = Path("scripts/windows/invoke-vmware-lifecycle-test.ps1").read_text(encoding="utf-8")
-    cleanup_script = Path("scripts/windows/remove-vmware-lifecycle-vms.ps1").read_text(encoding="utf-8")
+    wrapper = Path("scripts/windows/vmware/invoke-lifecycle-test.ps1").read_text(encoding="utf-8")
+    cleanup_script = Path("scripts/windows/vmware/remove-lifecycle-vms.ps1").read_text(encoding="utf-8")
     docs = Path("docs/vmware-workstation-lifecycle-testing.md").read_text(encoding="utf-8")
 
     assert "ParameterSetName = 'CleanupVms'" in wrapper
-    assert "remove-vmware-lifecycle-vms.ps1" in wrapper
-    assert "run-vmware-lifecycle-test.ps1" in wrapper
+    assert "remove-lifecycle-vms.ps1" in wrapper
+    assert "run-lifecycle-test.ps1" in wrapper
     cleanup_block = wrapper.split("if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {\n    &", 1)[1].split("return", 1)[0]
-    assert "remove-vmware-lifecycle-vms.ps1" in cleanup_block
-    assert "run-vmware-lifecycle-test.ps1" not in cleanup_block
+    assert "remove-lifecycle-vms.ps1" in cleanup_block
+    assert "run-lifecycle-test.ps1" not in cleanup_block
     assert "ApplianceVmxPath" not in cleanup_block
     assert "ClientVmdkPath" not in cleanup_block
     assert "CleanupCreatedLab" not in cleanup_block
@@ -469,7 +484,7 @@ def test_vmware_lifecycle_cleanup_only_removes_existing_lifecycle_vms():
 
 
 def test_lifecycle_hyperv_script_finds_alpine_ips_and_pins_plink_hostkeys():
-    script = Path("scripts/windows/run-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/hyperv/run-lifecycle-test.ps1").read_text(encoding="utf-8")
 
     assert "[string]$ApplianceSshUser = 'admin'" in script
     assert "Get-NetNeighbor -AddressFamily IPv4" in script
@@ -490,7 +505,7 @@ def test_lifecycle_hyperv_script_finds_alpine_ips_and_pins_plink_hostkeys():
 
 
 def test_lifecycle_hyperv_script_seeds_alpine_clients_for_ssh():
-    script = Path("scripts/windows/run-hyperv-lifecycle-test.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/hyperv/run-lifecycle-test.ps1").read_text(encoding="utf-8")
 
     assert "[string]$ClientSshUser = 'alpine'" in script
     assert "New-CloudInitSeedIso" in script
@@ -515,7 +530,7 @@ def test_nocloud_seed_helper_writes_client_cloud_init_contract():
 
 
 def test_prepare_tiny_linux_client_downloads_verifies_and_converts_alpine():
-    script = Path("scripts/windows/prepare-hyperv-tiny-linux-client.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/hyperv/prepare-tiny-linux-client.ps1").read_text(encoding="utf-8")
 
     assert "dl-cdn.alpinelinux.org/alpine/latest-stable/releases/cloud" in script
     assert "generic_alpine-3.24.1-x86_64-uefi-cloudinit-r0.qcow2" in script

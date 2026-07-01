@@ -24,7 +24,7 @@ function Resolve-VmrunPath {
 
 $resolvedVmxPath = (Resolve-Path -LiteralPath $VmxPath).Path
 $vmDirectory = Split-Path -Parent $resolvedVmxPath
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $imageOutputRoot = Join-Path $repoRoot 'image\vmware-workstation\output'
 
 if (-not $AllowImageOutputRemoval -and (Test-Path -LiteralPath $imageOutputRoot)) {

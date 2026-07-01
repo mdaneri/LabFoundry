@@ -15,7 +15,7 @@ move the public management listener to HTTPS.
 - LabFoundry Hyper-V lab switches created before the build:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switches.ps1
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/hyperv/create-switches.ps1
 ```
 
 The Packer builder uses `LabFoundry-Mgmt` by default. The script assigns the
@@ -30,7 +30,7 @@ current LabFoundry build target uses the Photon OS 5.0 GA full ISO:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/build-photon-hyperv-image.ps1 `
+  -File scripts/windows/hyperv/build-photon-image.ps1 `
   -IsoUrl "https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
   -IsoChecksum "sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
   -SshPassword "<one-time-build-root-password>" `
@@ -75,7 +75,7 @@ the same mirror as system pip:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/build-photon-hyperv-image.ps1 `
+  -File scripts/windows/hyperv/build-photon-image.ps1 `
   -IsoUrl "<photon-5.0-iso-url>" `
   -IsoChecksum "<packer-checksum>" `
   -PipGlobalIndex "https://packages.vcfd.broadcom.net/artifactory/api/pypi/upstream-pypi-virtual/pypi" `
@@ -135,7 +135,7 @@ package set.
 
 If the VM stops at the Photon license agreement or disk selection screen, the
 builder did not load the kickstart file. Stop the build, make sure this
-directory is current, and rerun `scripts/windows/build-photon-hyperv-image.ps1`.
+directory is current, and rerun `scripts/windows/hyperv/build-photon-image.ps1`.
 The wrapper should print `Using remastered Photon ISO`, and the Packer log
 should wait for SSH without printing `Typing the boot command...`. If Photon
 shows the EULA, the ISO did not include the LabFoundry GRUB auto-install entry,
@@ -147,7 +147,7 @@ If Photon installs and SSH works from the Windows host but Packer remains at
 `Waiting for SSH to become available`, query the IPv4 reported by Hyper-V:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-hyperv-vm-ip.ps1 `
+powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\hyperv\get-labfoundry-vm-ip.ps1 `
   -Name LabFoundry-Photon-Builder `
   -SwitchName "LabFoundry-Mgmt"
 ```
@@ -163,12 +163,12 @@ If you override networking and SSH is reachable but Packer still does not
 detect the guest IP, stop the build and rerun with a queried `ssh_host`:
 
 ```powershell
-$photonVmIp = powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-hyperv-vm-ip.ps1 `
+$photonVmIp = powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\hyperv\get-labfoundry-vm-ip.ps1 `
   -Name LabFoundry-Photon-Builder `
   -SwitchName "LabFoundry-Mgmt"
 
 powershell.exe -ExecutionPolicy Bypass `
-  -File ..\..\scripts\windows\build-photon-hyperv-image.ps1 `
+  -File ..\..\scripts\windows\hyperv\build-photon-image.ps1 `
   -SshHost "$photonVmIp" `
   -IsoUrl "https://packages.vmware.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
   -IsoChecksum "sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
@@ -345,7 +345,7 @@ New-NetIPAddress -InterfaceAlias "vEthernet (LabFoundry-Mgmt)" -IPAddress 192.16
 New-NetNat -Name LabFoundry-Mgmt-NAT -InternalIPInterfaceAddressPrefix 192.168.49.0/24
 ```
 
-Use `scripts/windows/create-hyperv-switches.ps1` instead of running those by
+Use `scripts/windows/hyperv/create-switches.ps1` instead of running those by
 hand; it creates or repairs the address/NAT and prints the resulting summary.
 
 Packer uploads only the files required for appliance installation: the
@@ -359,7 +359,7 @@ into the builder VM.
 After Packer completes, create and start the test appliance VM with the wrapper:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-hyperv-test-vm.ps1 -WaitForIp
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/hyperv/create-labfoundry-test-vm.ps1 -WaitForIp
 ```
 
 The wrapper finds the latest appliance VHDX under `image/hyperv/output`,
@@ -377,10 +377,10 @@ management-only VM.
 
 For a clean appliance data start, also pass `-ResetDataDisks`. The wrapper
 removes the default Depot and Backups data VHDX files next to the selected OS
-disk, then lets `create-labfoundry-hyperv-vm.ps1` create fresh empty data disks:
+disk, then lets `create-labfoundry-vm.ps1` create fresh empty data disks:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-hyperv-test-vm.ps1 -Redeploy -ResetDataDisks -WaitForIp
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/hyperv/create-labfoundry-test-vm.ps1 -Redeploy -ResetDataDisks -WaitForIp
 ```
 
 The finished appliance VM gets two additional dynamic VHDX data disks by
@@ -389,8 +389,8 @@ default:
 - `LabFoundry-Depot.vhdx`, intended for `/mnt/labfoundry-vcf-offline-depot`;
 - `LabFoundry-Backups.vhdx`, intended for `/mnt/labfoundry-vcf-backups`.
 
-Use `create-hyperv-switches.ps1`, `create-labfoundry-hyperv-vm.ps1`, and
-`start-labfoundry-hyperv-vm.ps1` directly only when you need to control each step by
+Use `create-switches.ps1`, `create-labfoundry-vm.ps1`, and
+`start-labfoundry-vm.ps1` directly only when you need to control each step by
 hand.
 
 The default data disks are dynamic 500 GB VHDX files stored next to the OS

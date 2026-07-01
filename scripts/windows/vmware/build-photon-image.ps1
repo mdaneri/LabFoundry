@@ -39,10 +39,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-Import-Module (Join-Path $PSScriptRoot 'LabFoundry.PhotonImage.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot '..\common\LabFoundry.PhotonImage.psm1') -Force
 
 if ([string]::IsNullOrWhiteSpace($PackerDirectory)) {
-    $PackerDirectory = Join-Path $PSScriptRoot '..\..\image\vmware-workstation'
+    $PackerDirectory = Join-Path $PSScriptRoot '..\..\..\image\vmware-workstation'
 }
 
 if (-not $ValidateOnly -and -not $PrepareIsoOnly -and -not $SkipNetworkCheck) {
@@ -56,7 +56,7 @@ if (-not $ValidateOnly -and -not $PrepareIsoOnly -and -not $SkipNetworkCheck) {
     if ($AllowExistingManagementSubnet) {
         $networkArgs['AllowExistingManagementSubnet'] = $true
     }
-    & (Join-Path $PSScriptRoot 'prepare-vmware-networks.ps1') @networkArgs | Out-Host
+    & (Join-Path $PSScriptRoot 'prepare-networks.ps1') @networkArgs | Out-Host
     if (-not $?) {
         throw 'VMware Workstation network validation failed.'
     }

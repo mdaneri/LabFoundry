@@ -39,7 +39,7 @@ Prepare or refresh that image with:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/prepare-hyperv-tiny-linux-client.ps1
+  -File scripts/windows/hyperv/prepare-tiny-linux-client.ps1
 ```
 
 The preparation script downloads Alpine's official UEFI cloud-init QCOW2 image,
@@ -53,7 +53,7 @@ Run from an elevated PowerShell session:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1
+  -File scripts/windows/hyperv/invoke-lifecycle-test.ps1
 ```
 
 The wrapper prepares the Alpine client VHDX if needed, selects the newest
@@ -89,17 +89,17 @@ Useful single-purpose commands:
 ```powershell
 # Create or repair the LabFoundry Hyper-V switches and management NAT only.
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1 `
+  -File scripts/windows/hyperv/invoke-lifecycle-test.ps1 `
   -PrepareNetworksOnly
 
 # Remove only LabFoundryLifecycle* VMs; keep Hyper-V switches and NAT.
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1 `
+  -File scripts/windows/hyperv/invoke-lifecycle-test.ps1 `
   -CleanupVmsOnly
 
 # Remove LabFoundry switches and management NAT; refuses if VMs are attached.
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1 `
+  -File scripts/windows/hyperv/invoke-lifecycle-test.ps1 `
   -CleanupNetworksOnly
 ```
 
@@ -113,13 +113,13 @@ specific appliance image instead of the newest discovered VHDX.
 
 ## Low-Level Run
 
-The wrapper delegates to `scripts/windows/run-hyperv-lifecycle-test.ps1`. That
+The wrapper delegates to `scripts/windows/hyperv/run-lifecycle-test.ps1`. That
 lower-level script is still available when you need explicit control over every
 input:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/run-hyperv-lifecycle-test.ps1 `
+  -File scripts/windows/hyperv/run-lifecycle-test.ps1 `
   -ApplianceVhdxPath image/hyperv/output/labfoundry-photon-hyperv/"Virtual Hard Disks"/LabFoundry-Photon-Builder.vhdx `
   -AdminPassword '<bootstrap-admin-password>' `
   -SshPassword '<bootstrap-admin-password>' `

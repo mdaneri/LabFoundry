@@ -48,7 +48,7 @@ function Get-VmxDisplayName {
     return [System.IO.Path]::GetFileNameWithoutExtension($Path)
 }
 
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $lifecycleRoot = Join-Path $repoRoot 'test-results\vmware-workstation-lifecycle'
 
 if (-not (Test-Path -LiteralPath $lifecycleRoot)) {

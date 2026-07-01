@@ -61,11 +61,11 @@ variable "ssh_host" {
 variable "iso_contains_kickstart" {
   type        = bool
   default     = false
-  description = "Set true only for a Photon ISO remastered by scripts/windows/build-photon-hyperv-image.ps1 with photon-ks.json and the LabFoundry GRUB auto-install entry embedded."
+  description = "Set true only for a Photon ISO remastered by scripts/windows/hyperv/build-photon-image.ps1 with photon-ks.json and the LabFoundry GRUB auto-install entry embedded."
 
   validation {
     condition     = var.iso_contains_kickstart
-    error_message = "Iso_contains_kickstart must be true. Run scripts/windows/build-photon-hyperv-image.ps1 so it creates and passes the remastered Photon ISO."
+    error_message = "Iso_contains_kickstart must be true. Run scripts/windows/hyperv/build-photon-image.ps1 so it creates and passes the remastered Photon ISO."
   }
 }
 

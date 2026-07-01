@@ -220,7 +220,7 @@ function New-LabFoundryRemasteredPhotonIso {
         [Parameter(Mandatory = $true)][string]$OutputIso
     )
 
-    $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')
+    $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')
     $script = Join-Path $repoRoot 'scripts\interop\create_photon_kickstart_iso.py'
     if (-not (Test-Path -LiteralPath $script)) {
         throw "Photon ISO remaster helper not found: $script"
@@ -338,7 +338,7 @@ function Invoke-LabFoundryPhotonImageBuild {
 
     $packerDir = Resolve-LabFoundryRepoPath -Path $PackerDirectory
     if ([string]::IsNullOrWhiteSpace($SharedSourceDirectory)) {
-        $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')
+        $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')
         $SharedSourceDirectory = Join-Path $repoRoot 'image\common\source'
     }
     $sharedSourceDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SharedSourceDirectory)

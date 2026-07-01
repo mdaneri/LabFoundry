@@ -36,10 +36,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-Import-Module (Join-Path $PSScriptRoot 'LabFoundry.PhotonImage.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot '..\common\LabFoundry.PhotonImage.psm1') -Force
 
 if ([string]::IsNullOrWhiteSpace($PackerDirectory)) {
-    $PackerDirectory = Join-Path $PSScriptRoot '..\..\image\hyperv'
+    $PackerDirectory = Join-Path $PSScriptRoot '..\..\..\image\hyperv'
 }
 
 $packerVariables = @{
