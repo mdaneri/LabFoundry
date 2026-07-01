@@ -47,6 +47,7 @@ class HostPhysicalInterface:
     host_mtu: int | None
     host_admin_state: str
     oper_state: str
+    host_ipv6_cidr: str | None = None
 
 
 def normalize_interface_mode(mode: str | None) -> str:
@@ -66,11 +67,14 @@ def physical_interface_to_dict(interface: PhysicalInterface, vlan_count: int = 0
         "driver": interface.driver or "",
         "speed": interface.speed or "",
         "host_ip_cidr": interface.host_ip_cidr or "",
+        "host_ipv6_cidr": interface.host_ipv6_cidr or "",
         "host_mtu": interface.host_mtu,
         "host_admin_state": interface.host_admin_state or "",
         "ip_cidr": interface.ip_cidr or "",
+        "ipv6_cidr": interface.ipv6_cidr or "",
         "mtu": interface.mtu,
         "admin_state": interface.admin_state,
+        "admin_up": interface.admin_state == "up",
         "oper_state": interface.oper_state,
         "role": interface.role,
         "mode": normalize_interface_mode(interface.mode),
@@ -89,6 +93,7 @@ def vlan_interface_to_dict(vlan: VlanInterface, parent_missing: bool = False) ->
         "parent_interface": vlan.parent_interface,
         "vlan_id": vlan.vlan_id,
         "ip_cidr": vlan.ip_cidr or "",
+        "ipv6_cidr": vlan.ipv6_cidr or "",
         "mtu": vlan.mtu,
         "role": vlan.role,
         "enabled": False if parent_missing else vlan.enabled,
@@ -130,18 +135,17 @@ def _interface_speed(sysfs_interface: Path) -> str | None:
     return f"{speed} Mbps"
 
 
-def _host_ip_cidr(row: dict) -> str | None:
+def _host_ip_cidr(row: dict, family: str) -> str | None:
     candidates = row.get("addr_info") or []
-    for family in ("inet", "inet6"):
-        for address in candidates:
-            if address.get("family") != family:
-                continue
-            if address.get("scope") in {"host", "link"}:
-                continue
-            local = address.get("local")
-            prefixlen = address.get("prefixlen")
-            if local and prefixlen is not None:
-                return f"{local}/{prefixlen}"
+    for address in candidates:
+        if address.get("family") != family:
+            continue
+        if address.get("scope") in {"host", "link"}:
+            continue
+        local = address.get("local")
+        prefixlen = address.get("prefixlen")
+        if local and prefixlen is not None:
+            return f"{local}/{prefixlen}"
     return None
 
 
@@ -171,7 +175,8 @@ def parse_linux_ip_interfaces(payload: str, *, sysfs_base: Path = Path("/sys/cla
                 mac_address=mac_address,
                 driver=_interface_driver(sysfs_interface),
                 speed=_interface_speed(sysfs_interface),
-                host_ip_cidr=_host_ip_cidr(row),
+                host_ip_cidr=_host_ip_cidr(row, "inet"),
+                host_ipv6_cidr=_host_ip_cidr(row, "inet6"),
                 host_mtu=int(row["mtu"]) if row.get("mtu") is not None else None,
                 host_admin_state="up" if "UP" in flags else "down",
                 oper_state=str(row.get("operstate") or "unknown").lower(),
@@ -230,6 +235,19 @@ def _address_from_cidr(value: str | None) -> str:
         return ""
 
 
+def _cidr_validation_error(label: str, value: str | None, version: int) -> str | None:
+    if not value:
+        return None
+    family = "IPv4" if version == 4 else "IPv6"
+    try:
+        parsed = ip_interface(value.strip())
+    except ValueError:
+        return f"{label} {family} CIDR {value} is invalid."
+    if parsed.version != version:
+        return f"{label} {family} CIDR {value} must be an {family} address and prefix."
+    return None
+
+
 def _set_setting_value(db: Session, key: str, value: str) -> Setting:
     setting = db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none()
     if setting is None:
@@ -279,12 +297,18 @@ def _cleanup_missing_interface_references(db: Session, missing_renames: dict[str
     for interface in db.execute(select(PhysicalInterface)).scalars().all():
         if interface.oper_state == "missing":
             unavailable_targets.add(interface.name)
-            for address in (_address_from_cidr(interface.ip_cidr), _address_from_cidr(interface.host_ip_cidr)):
+            for address in (
+                _address_from_cidr(interface.ip_cidr),
+                _address_from_cidr(interface.ipv6_cidr),
+                _address_from_cidr(interface.host_ip_cidr),
+                _address_from_cidr(interface.host_ipv6_cidr),
+            ):
                 if address:
                     unavailable_addresses.add(address)
             interface.role = "unused"
             interface.mode = "unused"
             interface.ip_cidr = None
+            interface.ipv6_cidr = None
             interface.admin_state = "down"
 
     for vlan in db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all():
@@ -293,8 +317,9 @@ def _cleanup_missing_interface_references(db: Session, missing_renames: dict[str
         old_name = vlan.name
         old_parent = vlan.parent_interface
         new_parent = missing_renames.get(vlan.parent_interface, vlan.parent_interface)
-        if address := _address_from_cidr(vlan.ip_cidr):
-            unavailable_addresses.add(address)
+        for address in (_address_from_cidr(vlan.ip_cidr), _address_from_cidr(vlan.ipv6_cidr)):
+            if address:
+                unavailable_addresses.add(address)
         vlan.parent_interface = new_parent
         vlan.name = f"{new_parent}.{vlan.vlan_id}"
         changed = vlan.enabled or vlan.parent_interface != old_parent or vlan.name != old_name
@@ -541,6 +566,7 @@ def reconcile_host_physical_interfaces(
         interface.driver = host.driver
         interface.speed = host.speed
         interface.host_ip_cidr = host.host_ip_cidr
+        interface.host_ipv6_cidr = host.host_ipv6_cidr
         interface.host_mtu = host.host_mtu
         interface.host_admin_state = host.host_admin_state
         interface.oper_state = host.oper_state
@@ -550,6 +576,7 @@ def reconcile_host_physical_interfaces(
         seen_interface_ids.add(id(interface))
         if seed_desired:
             interface.ip_cidr = host.host_ip_cidr if interface.name == "eth0" or interface.role == "management" else None
+            interface.ipv6_cidr = host.host_ipv6_cidr if interface.name == "eth0" or interface.role == "management" else None
             interface.mtu = host.host_mtu or interface.mtu
             interface.admin_state = host.host_admin_state if interface.name == "eth0" or interface.role == "management" else "down"
     for interface in interfaces:
@@ -631,6 +658,7 @@ def render_network_config(
                 f"  role={interface.role}",
                 f"  mode={mode}",
                 f"  ip_cidr={interface.ip_cidr or ''}",
+                f"  ipv6_cidr={interface.ipv6_cidr or ''}",
                 f"  admin_state={interface.admin_state}",
                 f"  mtu={interface.mtu}",
             ]
@@ -645,6 +673,7 @@ def render_network_config(
                 f"  parent={vlan.parent_interface}",
                 f"  vlan_id={vlan.vlan_id}",
                 f"  ip_cidr={vlan.ip_cidr or ''}",
+                f"  ipv6_cidr={vlan.ipv6_cidr or ''}",
                 f"  mtu={vlan.mtu}",
                 f"  role={vlan.role}",
             ]
@@ -671,11 +700,10 @@ def validate_network_state(
             errors.append(f"Interface {interface.name} MTU must be between 576 and 9000.")
         if interface.admin_state not in {"up", "down"}:
             errors.append(f"Interface {interface.name} admin state must be up or down.")
-        if interface.ip_cidr:
-            try:
-                ip_interface(interface.ip_cidr)
-            except ValueError:
-                errors.append(f"Interface {interface.name} IP CIDR {interface.ip_cidr} is invalid.")
+        if error := _cidr_validation_error(f"Interface {interface.name}", interface.ip_cidr, 4):
+            errors.append(error)
+        if error := _cidr_validation_error(f"Interface {interface.name}", interface.ipv6_cidr, 6):
+            errors.append(error)
     interface_modes = {interface.name: normalize_interface_mode(interface.mode) for interface in interfaces}
     for vlan in vlans:
         if vlan.enabled is False:
@@ -689,7 +717,7 @@ def validate_network_state(
         if vlan.parent_interface in interface_names and interface_modes.get(vlan.parent_interface) != "trunk":
             errors.append(
                 f"VLAN {vlan.name} parent {vlan.parent_interface} has {interface_modes.get(vlan.parent_interface)} link type. "
-                "Tagged VLAN interfaces require a trunk parent; use the physical interface IP CIDR for access-mode networks."
+                "Tagged VLAN interfaces require a trunk parent; use physical interface CIDRs for access-mode networks."
             )
         if vlan.vlan_id < 1 or vlan.vlan_id > 4094:
             errors.append(f"VLAN {vlan.name} ID must be between 1 and 4094.")
@@ -697,9 +725,10 @@ def validate_network_state(
             errors.append(f"VLAN {vlan.name} MTU must be between 576 and 9000.")
         if vlan.role not in VLAN_ROLES:
             errors.append(f"VLAN {vlan.name} role {vlan.role} is not supported.")
-        if vlan.ip_cidr:
-            try:
-                ip_interface(vlan.ip_cidr)
-            except ValueError:
-                errors.append(f"VLAN {vlan.name} IP CIDR {vlan.ip_cidr} is invalid.")
+        if not vlan.ip_cidr and not vlan.ipv6_cidr:
+            errors.append(f"VLAN {vlan.name} must include IPv4 CIDR, IPv6 CIDR, or both.")
+        if error := _cidr_validation_error(f"VLAN {vlan.name}", vlan.ip_cidr, 4):
+            errors.append(error)
+        if error := _cidr_validation_error(f"VLAN {vlan.name}", vlan.ipv6_cidr, 6):
+            errors.append(error)
     return errors

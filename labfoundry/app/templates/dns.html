@@ -254,7 +254,6 @@
       <form class="form-stack" action="/dns/settings" method="post" data-autosave-form data-autosave-status-id="dns-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <input type="hidden" name="listen_interfaces_present" value="1">
-        <input type="hidden" name="listen_addresses_present" value="1">
         <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry renders DNS as enabled desired state for dnsmasq.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if dns_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <div class="form-field">
           <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more available network interfaces dnsmasq should bind to for this lab DNS service. DHCP remains bound to its own selected lab interface.">i</button></span>
@@ -286,33 +285,10 @@
           </datalist>
         </div>
         <div class="form-field">
-          <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="Optional appliance IP addresses dnsmasq should listen on. Select one or more known addresses, or leave unchanged to bind by interface only.">i</button></span>
-          <div class="tag-editor" data-tag-editor data-tag-name="listen_addresses">
-            <div class="tag-editor-tags" data-tag-list>
-              {% for address in selected_dns_addresses %}
-                <span class="tag-token" data-value="{{ address }}">
-                  <span>{{ address }}</span>
-                  <button type="button" data-tag-remove aria-label="Remove {{ address }}">×</button>
-                  <input type="hidden" name="listen_addresses" value="{{ address }}">
-                </span>
-              {% endfor %}
-            </div>
-            <input class="tag-editor-input" type="text" placeholder="Add listen address..." list="dns-address-options" data-tag-entry autocomplete="off">
-            <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing listen address">+</button>
-            <div class="tag-suggestions" data-tag-menu hidden>
-              {% for item in available_dns_addresses %}
-                <button type="button" data-tag-option="{{ item.address }}">
-                  <strong>{{ item.address }}</strong>
-                  <small>{{ item.source }}</small>
-                </button>
-              {% endfor %}
-            </div>
+          <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="Read-only addresses resolved from the selected interface IPv4 and IPv6 CIDRs. Change the interface CIDRs on Physical Interfaces or VLAN Interfaces.">i</button></span>
+          <div class="derived-field fixed-value-field">
+            <strong data-derived-listen-addresses>{{ selected_dns_addresses|join(", ") if selected_dns_addresses else "No interface address selected" }}</strong>
           </div>
-          <datalist id="dns-address-options">
-            {% for item in available_dns_addresses %}
-              <option value="{{ item.address }}">{{ item.source }}</option>
-            {% endfor %}
-          </datalist>
         </div>
         <label><span class="field-label"><span>Upstream servers</span><button class="help-icon" type="button" data-help="External DNS resolvers used when a name is not served by LabFoundry records. Enter one server per line.">i</button></span><textarea name="upstream_servers" rows="3">{{ upstream_servers }}</textarea></label>
         <label><span class="field-label"><span>Conditional forwarders</span><button class="help-icon" type="button" data-help="Routes a DNS domain and its subdomains to specific upstream resolvers. Use one domain=server1,server2 entry per line; global upstream servers still handle everything else.">i</button></span><textarea name="conditional_forwarders" rows="3" placeholder="sddc.internal=192.168.10.10,192.168.10.11">{{ conditional_forwarders }}</textarea></label>

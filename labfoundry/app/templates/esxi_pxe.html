@@ -25,12 +25,8 @@
         </label>
       </div>
       <input type="hidden" name="listen_interfaces_present" value="1">
-      <input type="hidden" name="listen_addresses_present" value="1">
       {% for interface_name in esxi_pxe_selected_interfaces %}
         <input type="hidden" name="listen_interfaces" value="{{ interface_name }}">
-      {% endfor %}
-      {% for address in esxi_pxe_selected_addresses %}
-        <input type="hidden" name="listen_addresses" value="{{ address }}">
       {% endfor %}
       <input type="hidden" name="dhcp_scope_id" value="{{ esxi_pxe_boot.dhcp_scope_id or '' }}">
       <div class="form-field">

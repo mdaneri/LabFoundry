@@ -245,9 +245,11 @@ class PhysicalInterfaceResponse(BaseModel):
     driver: str | None
     speed: str | None
     host_ip_cidr: str | None
+    host_ipv6_cidr: str | None
     host_mtu: int | None
     host_admin_state: str | None
     ip_cidr: str | None
+    ipv6_cidr: str | None
     mtu: int
     admin_state: str
     oper_state: str
@@ -262,7 +264,8 @@ class PhysicalInterfaceResponse(BaseModel):
 class VlanCreate(BaseModel):
     parent_interface: str
     vlan_id: int = Field(ge=1, le=4094)
-    ip_cidr: str = Field(min_length=1)
+    ip_cidr: str = ""
+    ipv6_cidr: str = ""
     mtu: int = Field(default=1500, ge=576, le=9000)
     role: str = "access"
     enabled: bool = True

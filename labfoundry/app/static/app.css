@@ -1437,6 +1437,64 @@ textarea {
   color: #94a3b8;
 }
 
+.network-state-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 58px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.network-state-icon .state-symbol {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 900;
+  color: #ffffff;
+  background: #8a9ab5;
+}
+
+.network-state-icon.up {
+  color: #15803d;
+}
+
+.network-state-icon.up .state-symbol {
+  background: #16a34a;
+}
+
+.network-state-icon.down {
+  color: #b42318;
+}
+
+.network-state-icon.down .state-symbol {
+  background: #dc2626;
+}
+
+.network-state-icon.missing {
+  color: #9a6700;
+}
+
+.network-state-icon.missing .state-symbol {
+  background: #d97706;
+}
+
+.network-state-icon.unknown .state-symbol {
+  background: #64748b;
+}
+
+.tabulator .tabulator-cell input.invalid-cidr-input {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 1px rgba(220, 38, 38, 0.18);
+  background: #fff7f7;
+}
+
 .tabulator .tabulator-row.tabulator-selectable:hover,
 .tabulator .tabulator-row.tabulator-row-even.tabulator-selectable:hover {
   background: #eff6ff;

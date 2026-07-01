@@ -92,7 +92,7 @@ def netem_args(policy: WanPolicy) -> list[str]:
     return args
 
 
-def validate_nat_source(value: str, source_group_ids: set[str] | None = None) -> list[str]:
+def validate_nat_source(value: str, source_group_ids: set[str] | None = None, source_groups: list[dict] | None = None) -> list[str]:
     source_group_ids = source_group_ids or set()
     raw_value = value.strip()
     if not raw_value:
@@ -102,6 +102,10 @@ def validate_nat_source(value: str, source_group_ids: set[str] | None = None) ->
     if raw_value.lower().startswith(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):
         group_id = raw_value[len(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX) :].strip()
         if group_id in source_group_ids:
+            if source_groups is not None:
+                groups_by_id = {str(group.get("id", "")): group for group in source_groups}
+                resolved = source_group_to_rule_source(groups_by_id.get(group_id), groups_by_id)
+                return validate_nat_source(resolved, source_group_ids, None)
             return []
         return [f"NAT source references a firewall group that does not exist: {raw_value}."]
     errors: list[str] = []
@@ -126,20 +130,24 @@ def validate_wan_state(
     target_names: set[str],
     nat_rules: list[NatRule] | None = None,
     wan_target_names: set[str] | None = None,
-    source_group_ids: set[str] | None = None,
+    source_groups: list[dict] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     policy_ids = {policy.id for policy in policies}
     for route in routes:
         try:
-            ip_network(route.destination_cidr, strict=False)
+            destination_network = ip_network(route.destination_cidr, strict=False)
         except ValueError:
             errors.append(f"Route {route.destination_cidr} is not a valid destination CIDR.")
+            destination_network = None
         if route.gateway:
             try:
-                ip_address(route.gateway)
+                gateway_address = ip_address(route.gateway)
             except ValueError:
                 errors.append(f"Gateway {route.gateway} for {route.destination_cidr} is not a valid IP address.")
+                gateway_address = None
+            if destination_network and gateway_address and gateway_address.version != destination_network.version:
+                errors.append(f"Gateway {route.gateway} for {route.destination_cidr} must use the same IP family as the destination.")
         if route.enabled and route.interface_name not in target_names:
             errors.append(f"Route {route.destination_cidr} uses {route.interface_name}, which is not an access interface or VLAN target.")
         if route.metric < 0:
@@ -149,6 +157,8 @@ def validate_wan_state(
 
     seen_nat_names: set[str] = set()
     wan_target_names = wan_target_names or set()
+    source_groups = source_groups or []
+    source_group_ids = {str(group.get("id", "")) for group in source_groups}
     for rule in nat_rules or []:
         if not rule.name.strip():
             errors.append("NAT rule name is required.")
@@ -157,7 +167,7 @@ def validate_wan_state(
             errors.append(f"NAT rule {rule.name} is duplicated.")
         seen_nat_names.add(normalized_name)
         if rule.enabled:
-            errors.extend(validate_nat_source(rule.source, source_group_ids))
+            errors.extend(validate_nat_source(rule.source, source_group_ids, source_groups))
         if rule.enabled and rule.outbound_interface not in wan_target_names:
             errors.append(f"NAT rule {rule.name} must use an access physical interface or enabled VLAN with an IP CIDR.")
         if rule.priority < 0:
@@ -232,6 +242,7 @@ def render_wan_config(
                 f"  kind={target.get('kind', '')}",
                 f"  role={target.get('role', '')}",
                 f"  ip_cidr={target.get('ip_cidr', '')}",
+                f"  ipv6_cidr={target.get('ipv6_cidr', '')}",
                 f"  wan={_bool_value(bool(target.get('wan')))}",
             ]
         )
@@ -320,10 +331,12 @@ def render_wan_config(
         lines.append("nft -f /etc/labfoundry/nftables.d/labfoundry-nat.nft")
 
     for route in routes:
+        destination = ip_network(route.destination_cidr, strict=False)
+        route_family = "-6 " if destination.version == 6 else ""
         if not route.enabled:
-            lines.append(f"ip route del {route.destination_cidr} dev {route.interface_name}  # disabled desired route")
+            lines.append(f"ip {route_family}route del {route.destination_cidr} dev {route.interface_name}  # disabled desired route")
             continue
-        command = ["ip", "route", "replace", route.destination_cidr]
+        command = ["ip", "-6", "route", "replace", route.destination_cidr] if destination.version == 6 else ["ip", "route", "replace", route.destination_cidr]
         if route.gateway:
             command.extend(["via", route.gateway])
         command.extend(["dev", route.interface_name, "metric", str(route.metric)])
@@ -334,5 +347,10 @@ def render_wan_config(
         else:
             lines.append(" ".join(["tc", "qdisc", "del", "dev", route.interface_name, "root"]))
     for route in removed_routes or []:
-        lines.append(f"ip route del {route.get('destination_cidr', '')} dev {route.get('interface_name', '')}  # removed managed route")
+        try:
+            destination = ip_network(str(route.get("destination_cidr", "")), strict=False)
+        except ValueError:
+            destination = None
+        route_family = "-6 " if destination and destination.version == 6 else ""
+        lines.append(f"ip {route_family}route del {route.get('destination_cidr', '')} dev {route.get('interface_name', '')}  # removed managed route")
     return "\n".join(lines).strip() + "\n"

@@ -770,7 +770,30 @@ def address_from_cidr(value: str | None) -> str:
         return ""
 
 
-def service_bind_options(db: Session) -> list[dict[str, str]]:
+def cidr_for_family(value: str, version: int, label: str) -> Response | str:
+    candidate = value.strip()
+    if not candidate:
+        return ""
+    try:
+        parsed = ip_interface(candidate)
+    except ValueError:
+        return Response(f"{label} must be a valid address and prefix.", status_code=409, media_type="text/plain")
+    if parsed.version != version:
+        family = "IPv4" if version == 4 else "IPv6"
+        return Response(f"{label} must use an {family} address and prefix.", status_code=409, media_type="text/plain")
+    return candidate
+
+
+def interface_addresses_from_cidrs(ipv4_cidr: str | None, ipv6_cidr: str | None) -> list[str]:
+    addresses: list[str] = []
+    for cidr in (ipv4_cidr, ipv6_cidr):
+        address = address_from_cidr(cidr)
+        if address and address not in addresses:
+            addresses.append(address)
+    return addresses
+
+
+def service_bind_options(db: Session) -> list[dict]:
     physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlan_interfaces = db.execute(
         select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)
@@ -781,28 +804,36 @@ def service_bind_options(db: Session) -> list[dict[str, str]]:
         if interface.oper_state == "missing":
             continue
         mode = normalize_interface_mode(interface.mode)
-        address = address_from_cidr(interface.ip_cidr)
-        if mode == "trunk" or not address:
+        addresses = interface_addresses_from_cidrs(interface.ip_cidr, interface.ipv6_cidr)
+        if mode == "trunk" or not addresses:
             continue
+        address_label = " / ".join(addresses)
         options.append(
             {
                 "name": interface.name,
-                "label": f"{interface.name} - {interface.role} / {mode} / {address}",
-                "address": address,
+                "label": f"{interface.name} - {interface.role} / {mode} / {address_label}",
+                "address": addresses[0],
+                "addresses": addresses,
+                "ipv4_address": address_from_cidr(interface.ip_cidr),
+                "ipv6_address": address_from_cidr(interface.ipv6_cidr),
             }
         )
     for vlan in vlan_interfaces:
         parent = interfaces_by_name.get(vlan.parent_interface)
         if parent and parent.oper_state == "missing":
             continue
-        address = address_from_cidr(vlan.ip_cidr)
-        if not address:
+        addresses = interface_addresses_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
+        if not addresses:
             continue
+        address_label = " / ".join(addresses)
         options.append(
             {
                 "name": vlan.name,
-                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {vlan.role} / {address}",
-                "address": address,
+                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {vlan.role} / {address_label}",
+                "address": addresses[0],
+                "addresses": addresses,
+                "ipv4_address": address_from_cidr(vlan.ip_cidr),
+                "ipv6_address": address_from_cidr(vlan.ipv6_cidr),
             }
         )
     return options
@@ -818,7 +849,7 @@ def resolve_single_service_bind(db: Session, listen_interface: str, listen_addre
         if address_match and (not selected_interface or selected_interface not in options_by_name or options_by_name[selected_interface]["address"] != selected_address):
             selected_interface = address_match["name"]
     if selected_interface in options_by_name:
-        return selected_interface, options_by_name[selected_interface]["address"]
+        return selected_interface, join_addresses(options_by_name[selected_interface].get("addresses", []))
     return selected_interface, ""
 
 
@@ -834,29 +865,23 @@ def resolve_service_bind_targets(
 ) -> tuple[str, str]:
     options = service_bind_options(db)
     options_by_name = {option["name"]: option for option in options}
-    options_by_address = {option["address"]: option for option in options if option.get("address")}
 
     selected_interfaces = split_interfaces(join_interfaces(listen_interfaces))
     if listen_interfaces_present is None and not selected_interfaces:
         selected_interfaces = split_interfaces(current_interface)
     selected_interfaces = [interface for interface in selected_interfaces if interface in options_by_name]
 
-    selected_addresses = split_addresses(join_addresses(listen_addresses))
-    if listen_addresses_present is None and not selected_addresses:
-        selected_addresses = split_addresses(current_address)
-
-    for address in list(selected_addresses):
-        match = options_by_address.get(address)
-        if match and match["name"] not in selected_interfaces:
-            selected_interfaces.append(match["name"])
     derived_addresses: list[str] = []
     for interface in selected_interfaces:
-        address = options_by_name[interface].get("address", "")
-        if address and address not in derived_addresses:
-            derived_addresses.append(address)
-    selected_addresses = [*derived_addresses, *[address for address in selected_addresses if address not in derived_addresses]]
+        for address in options_by_name[interface].get("addresses", []):
+            if address and address not in derived_addresses:
+                derived_addresses.append(address)
+    if not selected_interfaces and listen_addresses_present is None:
+        for address in split_addresses(current_address):
+            if address and address not in derived_addresses:
+                derived_addresses.append(address)
 
-    return join_interfaces(selected_interfaces), join_addresses(selected_addresses)
+    return join_interfaces(selected_interfaces), join_addresses(derived_addresses)
 
 
 def primary_listen_address(raw_address: str | None) -> str:
@@ -1929,32 +1954,44 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
         if interface.oper_state == "missing":
             continue
         mode = normalize_interface_mode(interface.mode)
-        if mode == "trunk" or not interface.ip_cidr:
+        addresses = interface_addresses_from_cidrs(interface.ip_cidr, interface.ipv6_cidr)
+        if mode == "trunk" or not addresses:
             continue
+        address_label = " / ".join(addresses)
         targets.append(
             {
                 "name": interface.name,
                 "kind": "physical",
                 "role": interface.role,
                 "ip_cidr": interface.ip_cidr or "",
+                "ipv6_cidr": interface.ipv6_cidr or "",
+                "addresses": addresses,
                 "wan": interface.role == "wan",
-                "label": f"{interface.name} - physical / {interface.role} / {interface.ip_cidr}",
+                "label": f"{interface.name} - physical / {interface.role} / {address_label}",
             }
         )
     for vlan in vlans:
-        if not vlan.enabled or not vlan.ip_cidr:
+        addresses = interface_addresses_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
+        if not vlan.enabled or not addresses:
             continue
+        address_label = " / ".join(addresses)
         targets.append(
             {
                 "name": vlan.name,
                 "kind": "vlan",
                 "role": vlan.role,
                 "ip_cidr": vlan.ip_cidr or "",
+                "ipv6_cidr": vlan.ipv6_cidr or "",
+                "addresses": addresses,
                 "wan": vlan.role == "wan",
-                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {vlan.role} / {vlan.ip_cidr}",
+                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {vlan.role} / {address_label}",
             }
         )
     return targets
+
+
+def wan_nat_targets_from_route_targets(targets: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [target for target in targets if target.get("ip_cidr")]
 
 
 def routes_wan_context(db: Session) -> dict:
@@ -1962,15 +1999,15 @@ def routes_wan_context(db: Session) -> dict:
     policies = db.execute(select(WanPolicy).order_by(WanPolicy.name)).scalars().all()
     nat_rules = db.execute(select(NatRule).order_by(NatRule.priority, NatRule.name)).scalars().all()
     targets = wan_route_targets(db)
+    nat_targets = wan_nat_targets_from_route_targets(targets)
     source_groups = firewall_source_group_state_for_db(db)["groups"]
-    source_group_ids = {str(group.get("id", "")) for group in source_groups}
     validation_errors = validate_wan_state(
         routes,
         policies,
         {target["name"] for target in targets},
         nat_rules,
-        {target["name"] for target in targets},
-        source_group_ids,
+        {target["name"] for target in nat_targets},
+        source_groups,
     )
     config_preview = render_wan_config(routes, policies, nat_rules, targets, source_groups=source_groups)
     return {
@@ -1982,8 +2019,8 @@ def routes_wan_context(db: Session) -> dict:
         "policy_rows": [wan_policy_to_dict(policy) for policy in policies],
         "wan_route_targets": targets,
         "wan_route_target_names": [target["name"] for target in targets],
-        "wan_nat_targets": targets,
-        "wan_nat_target_names": [target["name"] for target in targets],
+        "wan_nat_targets": nat_targets,
+        "wan_nat_target_names": [target["name"] for target in nat_targets],
         "wan_source_groups": source_groups,
         "wan_policy_options": [{"id": policy.id, "label": policy.name} for policy in policies],
         "wan_modes": WAN_MODES,
@@ -2231,118 +2268,128 @@ def ensure_dns_for_dhcp_reservation(db: Session, reservation: DhcpReservation, a
     record_audit(db, actor=actor, action="create_dns_record_from_dhcp_reservation", resource_type="dns_record", resource_id=str(record.id))
 
 
+def desired_dns_records_for_listen_addresses(raw_addresses: str | None) -> dict[str, str]:
+    desired: dict[str, str] = {}
+    for selected_address in split_addresses(raw_addresses):
+        try:
+            parsed_address = ip_address(selected_address)
+        except ValueError:
+            continue
+        record_type = "AAAA" if parsed_address.version == 6 else "A"
+        desired.setdefault(record_type, str(parsed_address))
+    return desired
+
+
 def ensure_dns_for_vcf_registry(db: Session, settings: VcfPrivateRegistrySettings, actor: str) -> str | None:
     hostname = normalize_dns_hostname(settings.hostname)
-    selected_address = primary_listen_address(settings.listen_address)
-    if not hostname or not selected_address:
-        return None
-    try:
-        parsed_address = ip_address(selected_address)
-    except ValueError:
-        return None
-    record_type = "AAAA" if parsed_address.version == 6 else "A"
-    address = str(parsed_address)
-    if validate_dns_record(hostname, record_type, address):
+    desired_records = desired_dns_records_for_listen_addresses(settings.listen_address)
+    if not hostname or not desired_records:
         return None
     settings.hostname = hostname
-    existing = db.execute(
-        select(DnsRecord).where(
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type == record_type,
+    actions: list[str] = []
+    for record_type, address in desired_records.items():
+        if validate_dns_record(hostname, record_type, address):
+            continue
+        existing = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == hostname,
+                DnsRecord.record_type == record_type,
+            )
+        ).scalar_one_or_none()
+        if existing:
+            if existing.address == address and existing.enabled:
+                actions.append("unchanged")
+                continue
+            existing.address = address
+            existing.enabled = True
+            if not existing.description:
+                existing.description = "Created from VCF private registry endpoint."
+            db.flush()
+            record_audit(
+                db,
+                actor=actor,
+                action="update_dns_record_from_vcf_registry",
+                resource_type="dns_record",
+                resource_id=str(existing.id),
+                detail=f"{hostname} {record_type} -> {address}",
+            )
+            actions.append("updated")
+            continue
+        record = DnsRecord(
+            hostname=hostname,
+            record_type=record_type,
+            address=address,
+            description="Created from VCF private registry endpoint.",
+            enabled=True,
         )
-    ).scalar_one_or_none()
-    if existing:
-        if existing.address == address and existing.enabled:
-            return "unchanged"
-        existing.address = address
-        existing.enabled = True
-        if not existing.description:
-            existing.description = "Created from VCF private registry endpoint."
+        db.add(record)
         db.flush()
         record_audit(
             db,
             actor=actor,
-            action="update_dns_record_from_vcf_registry",
+            action="create_dns_record_from_vcf_registry",
             resource_type="dns_record",
-            resource_id=str(existing.id),
+            resource_id=str(record.id),
             detail=f"{hostname} {record_type} -> {address}",
         )
-        return "updated"
-    record = DnsRecord(
-        hostname=hostname,
-        record_type=record_type,
-        address=address,
-        description="Created from VCF private registry endpoint.",
-        enabled=True,
-    )
-    db.add(record)
-    db.flush()
-    record_audit(
-        db,
-        actor=actor,
-        action="create_dns_record_from_vcf_registry",
-        resource_type="dns_record",
-        resource_id=str(record.id),
-        detail=f"{hostname} {record_type} -> {address}",
-    )
-    return "created"
+        actions.append("created")
+    return "+".join(actions) if actions else None
 
 
 def ensure_dns_for_vcf_offline_depot(db: Session, settings: VcfOfflineDepotSettings, actor: str) -> str | None:
     hostname = normalize_dns_hostname(settings.hostname)
-    selected_address = primary_listen_address(settings.listen_address)
-    if not hostname or not selected_address:
-        return None
-    try:
-        parsed_address = ip_address(selected_address)
-    except ValueError:
-        return None
-    record_type = "AAAA" if parsed_address.version == 6 else "A"
-    address = str(parsed_address)
-    if validate_dns_record(hostname, record_type, address):
+    desired_records = desired_dns_records_for_listen_addresses(settings.listen_address)
+    if not hostname or not desired_records:
         return None
     settings.hostname = hostname
-    existing = db.execute(
-        select(DnsRecord).where(
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type == record_type,
+    actions: list[str] = []
+    for record_type, address in desired_records.items():
+        if validate_dns_record(hostname, record_type, address):
+            continue
+        existing = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == hostname,
+                DnsRecord.record_type == record_type,
+            )
+        ).scalar_one_or_none()
+        if existing:
+            if existing.address == address and existing.enabled:
+                actions.append("unchanged")
+                continue
+            existing.address = address
+            existing.enabled = True
+            if not existing.description:
+                existing.description = "Created from VCF Offline Depot endpoint."
+            db.flush()
+            record_audit(
+                db,
+                actor=actor,
+                action="update_dns_record_from_vcf_offline_depot",
+                resource_type="dns_record",
+                resource_id=str(existing.id),
+                detail=f"{hostname} {record_type} -> {address}",
+            )
+            actions.append("updated")
+            continue
+        record = DnsRecord(
+            hostname=hostname,
+            record_type=record_type,
+            address=address,
+            description="Created from VCF Offline Depot endpoint.",
+            enabled=True,
         )
-    ).scalar_one_or_none()
-    if existing:
-        if existing.address == address and existing.enabled:
-            return "unchanged"
-        existing.address = address
-        existing.enabled = True
-        if not existing.description:
-            existing.description = "Created from VCF Offline Depot endpoint."
+        db.add(record)
         db.flush()
         record_audit(
             db,
             actor=actor,
-            action="update_dns_record_from_vcf_offline_depot",
+            action="create_dns_record_from_vcf_offline_depot",
             resource_type="dns_record",
-            resource_id=str(existing.id),
+            resource_id=str(record.id),
             detail=f"{hostname} {record_type} -> {address}",
         )
-        return "updated"
-    record = DnsRecord(
-        hostname=hostname,
-        record_type=record_type,
-        address=address,
-        description="Created from VCF Offline Depot endpoint.",
-        enabled=True,
-    )
-    db.add(record)
-    db.flush()
-    record_audit(
-        db,
-        actor=actor,
-        action="create_dns_record_from_vcf_offline_depot",
-        resource_type="dns_record",
-        resource_id=str(record.id),
-        detail=f"{hostname} {record_type} -> {address}",
-    )
-    return "created"
+        actions.append("created")
+    return "+".join(actions) if actions else None
 
 
 def kms_dns_record_conflict(db: Session, hostname: str) -> bool:
@@ -2360,71 +2407,66 @@ def kms_dns_record_conflict(db: Session, hostname: str) -> bool:
 
 def ensure_dns_for_kms(db: Session, settings: KmsSettings, actor: str | None, *, previous_hostname: str | None = None) -> str | None:
     hostname = normalize_dns_hostname(settings.hostname)
-    selected_address = primary_listen_address(settings.listen_address)
-    if not hostname or not selected_address:
-        return None
-    try:
-        parsed_address = ip_address(selected_address)
-    except ValueError:
-        return None
-    record_type = "AAAA" if parsed_address.version == 6 else "A"
-    address = str(parsed_address)
-    if validate_dns_record(hostname, record_type, address):
+    desired_records = desired_dns_records_for_listen_addresses(settings.listen_address)
+    if not hostname or not desired_records:
         return None
     settings.hostname = hostname
     actions: list[str] = []
-    existing = db.execute(
-        select(DnsRecord).where(
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type == record_type,
-        )
-    ).scalar_one_or_none()
-    if existing and existing.description != KMS_DNS_RECORD_DESCRIPTION:
-        actions.append("conflict")
-    elif existing:
-        if existing.address != address or not existing.enabled:
-            existing.address = address
-            existing.enabled = True
-            existing.description = KMS_DNS_RECORD_DESCRIPTION
+    for record_type, address in desired_records.items():
+        if validate_dns_record(hostname, record_type, address):
+            continue
+        existing = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == hostname,
+                DnsRecord.record_type == record_type,
+            )
+        ).scalar_one_or_none()
+        if existing and existing.description != KMS_DNS_RECORD_DESCRIPTION:
+            actions.append("conflict")
+        elif existing:
+            if existing.address != address or not existing.enabled:
+                existing.address = address
+                existing.enabled = True
+                existing.description = KMS_DNS_RECORD_DESCRIPTION
+                db.flush()
+                if actor:
+                    record_audit(
+                        db,
+                        actor=actor,
+                        action="update_dns_record_from_kms",
+                        resource_type="dns_record",
+                        resource_id=str(existing.id),
+                        detail=f"{hostname} {record_type} -> {address}",
+                    )
+                actions.append("updated")
+            else:
+                actions.append("unchanged")
+        else:
+            record = DnsRecord(
+                hostname=hostname,
+                record_type=record_type,
+                address=address,
+                description=KMS_DNS_RECORD_DESCRIPTION,
+                enabled=True,
+            )
+            db.add(record)
             db.flush()
             if actor:
                 record_audit(
                     db,
                     actor=actor,
-                    action="update_dns_record_from_kms",
+                    action="create_dns_record_from_kms",
                     resource_type="dns_record",
-                    resource_id=str(existing.id),
+                    resource_id=str(record.id),
                     detail=f"{hostname} {record_type} -> {address}",
                 )
-            actions.append("updated")
-        else:
-            actions.append("unchanged")
-    else:
-        record = DnsRecord(
-            hostname=hostname,
-            record_type=record_type,
-            address=address,
-            description=KMS_DNS_RECORD_DESCRIPTION,
-            enabled=True,
-        )
-        db.add(record)
-        db.flush()
-        if actor:
-            record_audit(
-                db,
-                actor=actor,
-                action="create_dns_record_from_kms",
-                resource_type="dns_record",
-                resource_id=str(record.id),
-                detail=f"{hostname} {record_type} -> {address}",
-            )
-        actions.append("created")
+            actions.append("created")
 
     stale_records = db.execute(
         select(DnsRecord).where(
             DnsRecord.hostname == hostname,
             DnsRecord.record_type.in_(["A", "AAAA"]),
-            DnsRecord.record_type != record_type,
+            DnsRecord.record_type.notin_(list(desired_records)),
         )
     ).scalars().all()
     for record in stale_records:
@@ -2538,51 +2580,46 @@ def remove_dns_for_esxi_pxe_hostname(db: Session, hostname: str, actor: str | No
 
 def ensure_dns_for_esxi_pxe(db: Session, boot: dict[str, Any], actor: str | None, *, previous_hostname: str | None = None) -> str | None:
     hostname = normalize_dns_hostname(str(boot.get("hostname") or ESXI_PXE_DEFAULT_HOSTNAME))
-    selected_address = primary_listen_address(str(boot.get("listen_address") or ""))
+    desired_records = desired_dns_records_for_listen_addresses(str(boot.get("listen_address") or ""))
     if not bool(boot.get("enabled")):
         return remove_dns_for_esxi_pxe_hostname(db, previous_hostname or hostname, actor)
-    if not hostname or not selected_address:
-        return None
-    try:
-        parsed_address = ip_address(selected_address)
-    except ValueError:
-        return None
-    record_type = "AAAA" if parsed_address.version == 6 else "A"
-    address = str(parsed_address)
-    if validate_dns_record(hostname, record_type, address):
+    if not hostname or not desired_records:
         return None
     actions: list[str] = []
-    existing = db.execute(
-        select(DnsRecord).where(
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type == record_type,
-        )
-    ).scalar_one_or_none()
-    if existing and existing.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
-        actions.append("conflict")
-    elif existing:
-        if existing.address != address or not existing.enabled:
-            existing.address = address
-            existing.enabled = True
-            existing.description = ESXI_PXE_DNS_RECORD_DESCRIPTION
+    for record_type, address in desired_records.items():
+        if validate_dns_record(hostname, record_type, address):
+            continue
+        existing = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == hostname,
+                DnsRecord.record_type == record_type,
+            )
+        ).scalar_one_or_none()
+        if existing and existing.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
+            actions.append("conflict")
+        elif existing:
+            if existing.address != address or not existing.enabled:
+                existing.address = address
+                existing.enabled = True
+                existing.description = ESXI_PXE_DNS_RECORD_DESCRIPTION
+                db.flush()
+                if actor:
+                    record_audit(db, actor=actor, action="update_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(existing.id), detail=f"{hostname} {record_type} -> {address}")
+                actions.append("updated")
+            else:
+                actions.append("unchanged")
+        else:
+            record = DnsRecord(hostname=hostname, record_type=record_type, address=address, description=ESXI_PXE_DNS_RECORD_DESCRIPTION, enabled=True)
+            db.add(record)
             db.flush()
             if actor:
-                record_audit(db, actor=actor, action="update_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(existing.id), detail=f"{hostname} {record_type} -> {address}")
-            actions.append("updated")
-        else:
-            actions.append("unchanged")
-    else:
-        record = DnsRecord(hostname=hostname, record_type=record_type, address=address, description=ESXI_PXE_DNS_RECORD_DESCRIPTION, enabled=True)
-        db.add(record)
-        db.flush()
-        if actor:
-            record_audit(db, actor=actor, action="create_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(record.id), detail=f"{hostname} {record_type} -> {address}")
-        actions.append("created")
+                record_audit(db, actor=actor, action="create_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(record.id), detail=f"{hostname} {record_type} -> {address}")
+            actions.append("created")
     for record in db.execute(
         select(DnsRecord).where(
             DnsRecord.hostname == hostname,
             DnsRecord.record_type.in_(["A", "AAAA"]),
-            DnsRecord.record_type != record_type,
+            DnsRecord.record_type.notin_(list(desired_records)),
         )
     ).scalars().all():
         if record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
@@ -2618,14 +2655,16 @@ def available_dns_listen_addresses(
 
     add(dns_settings.listen_address, "current DNS")
     for option in listen_options:
-        add(option.get("address"), option["name"])
+        for address in option.get("addresses") or [option.get("address")]:
+            add(address, option["name"])
     add(dhcp_settings.site_address, "SiteA gateway")
     for vlan in vlan_interfaces:
-        if vlan.ip_cidr:
-            try:
-                add(str(ip_interface(vlan.ip_cidr).ip), vlan.name)
-            except ValueError:
-                add(vlan.ip_cidr, vlan.name)
+        for cidr in (vlan.ip_cidr, vlan.ipv6_cidr):
+            if cidr:
+                try:
+                    add(str(ip_interface(cidr).ip), vlan.name)
+                except ValueError:
+                    add(cidr, vlan.name)
     return choices
 
 
@@ -2641,7 +2680,8 @@ def available_service_listen_addresses(current_addresses: str | None, listen_opt
 
     add(current_addresses, "current")
     for option in listen_options:
-        add(option.get("address"), option["name"])
+        for address in option.get("addresses") or [option.get("address")]:
+            add(address, option["name"])
     return choices
 
 
@@ -2737,7 +2777,14 @@ def dns_record_suggested_ipv4(records: list[DnsRecord], domain: str, dhcp_scopes
     return ""
 
 
-def validate_vlan_form_values(parent_interface: str, vlan_id: str, ip_cidr: str, enabled: bool, db: Session) -> tuple[str, int, str, bool] | Response:
+def validate_vlan_form_values(
+    parent_interface: str,
+    vlan_id: str,
+    ip_cidr: str,
+    ipv6_cidr: str,
+    enabled: bool,
+    db: Session,
+) -> tuple[str, int, str, str, bool] | Response:
     parent_name = parent_interface.strip()
     if not parent_name:
         return Response("VLAN parent interface is required.", status_code=409, media_type="text/plain")
@@ -2750,13 +2797,14 @@ def validate_vlan_form_values(parent_interface: str, vlan_id: str, ip_cidr: str,
         return Response("VLAN ID must be a number between 1 and 4094.", status_code=409, media_type="text/plain")
     if parsed_vlan_id < 1 or parsed_vlan_id > 4094:
         return Response("VLAN ID must be between 1 and 4094.", status_code=409, media_type="text/plain")
-    ip_value = ip_cidr.strip()
-    if not ip_value:
-        return Response("VLAN IP CIDR is required.", status_code=409, media_type="text/plain")
-    try:
-        ip_interface(ip_value)
-    except ValueError:
-        return Response("VLAN IP CIDR must be a valid address and prefix, for example 192.168.50.1/24.", status_code=409, media_type="text/plain")
+    ip_value = cidr_for_family(ip_cidr, 4, "VLAN IPv4 CIDR")
+    if isinstance(ip_value, Response):
+        return ip_value
+    ipv6_value = cidr_for_family(ipv6_cidr, 6, "VLAN IPv6 CIDR")
+    if isinstance(ipv6_value, Response):
+        return ipv6_value
+    if not ip_value and not ipv6_value:
+        return Response("VLAN IPv4 CIDR, IPv6 CIDR, or both are required.", status_code=409, media_type="text/plain")
     parent = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == parent_name)).scalar_one_or_none()
     parent_missing = bool(parent and parent.oper_state == "missing")
     if parent_missing:
@@ -2766,14 +2814,14 @@ def validate_vlan_form_values(parent_interface: str, vlan_id: str, ip_cidr: str,
                 status_code=409,
                 media_type="text/plain",
             )
-        return parent_name, parsed_vlan_id, ip_value, True
+        return parent_name, parsed_vlan_id, ip_value, ipv6_value, True
     if not parent or normalize_interface_mode(parent.mode) != "trunk":
         return Response(
             f"{parent_name or 'Selected parent'} is not a trunk interface. Mark the physical NIC as trunk before creating VLANs on it.",
             status_code=409,
             media_type="text/plain",
         )
-    return parent_name, parsed_vlan_id, ip_value, False
+    return parent_name, parsed_vlan_id, ip_value, ipv6_value, False
 
 
 def reverse_records_by_zone(records: list[dict[str, str]]) -> list[dict]:
@@ -3859,11 +3907,28 @@ def log_appliance_apply_submission(
             )
 
 
+def _write_staged_config_file(path: Path, config_preview: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(config_preview, encoding="utf-8")
+        temp_path.chmod(0o600)
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def stage_appliance_apply_config(config_path: str, config_preview: str) -> str:
     path = Path(config_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(config_preview, encoding="utf-8")
-    path.chmod(0o600)
+    try:
+        _write_staged_config_file(path, config_preview)
+    except PermissionError as exc:
+        repair = SystemAdapter().prepare_apply_staging_path(str(path))
+        if repair.returncode != 0:
+            detail = (repair.stderr or repair.stdout or "apply staging ownership repair failed").strip()
+            raise PermissionError(f"Unable to prepare apply staging path {path}: {detail}") from exc
+        _write_staged_config_file(path, config_preview)
     return str(path)
 
 
@@ -4509,16 +4574,18 @@ def validate_route_form_values(
     if not destination:
         return Response("Destination CIDR is required.", status_code=422, media_type="text/plain")
     try:
-        ip_network(destination, strict=False)
+        destination_network = ip_network(destination, strict=False)
     except ValueError:
         return Response(f"{destination} is not a valid destination CIDR.", status_code=422, media_type="text/plain")
     gateway_value = gateway.strip() or None
     if gateway_value:
         try:
-            ip_address(gateway_value)
+            gateway_address = ip_address(gateway_value)
         except ValueError:
             return Response(f"{gateway_value} is not a valid gateway IP address.", status_code=422, media_type="text/plain")
-    target_names = {target["name"] for target in wan_route_targets(db)}
+        if gateway_address.version != destination_network.version:
+            return Response("Route gateway family must match the destination CIDR family.", status_code=422, media_type="text/plain")
+    target_names = {target["name"] for target in wan_nat_targets_from_route_targets(wan_route_targets(db))}
     interface_value = interface_name.strip()
     if interface_value not in target_names:
         return Response("Choose an access physical interface or enabled VLAN interface with an IP CIDR.", status_code=422, media_type="text/plain")
@@ -4579,7 +4646,7 @@ def validate_nat_rule_form_values(
         return Response("NAT rule name is required.", status_code=422, media_type="text/plain")
     source_value = source.strip() or "any"
     source_groups = firewall_source_group_state_for_db(db)["groups"]
-    source_errors = validate_nat_source(source_value, {str(group.get("id", "")) for group in source_groups})
+    source_errors = validate_nat_source(source_value, {str(group.get("id", "")) for group in source_groups}, source_groups)
     if source_errors:
         return Response(source_errors[0], status_code=422, media_type="text/plain")
     target_names = {target["name"] for target in wan_route_targets(db)}
@@ -4672,7 +4739,7 @@ def delete_route_from_ui(
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
-) -> RedirectResponse:
+) -> RedirectResponse | Response:
     verify_csrf(request, csrf)
     route = db.get(Route, route_id)
     if not route:
@@ -5342,6 +5409,7 @@ def edit_physical_interface_from_ui(
     role: str = Form("unused"),
     mode: str = Form("unused"),
     ip_cidr: str = Form(""),
+    ipv6_cidr: str = Form(""),
     mtu: int = Form(1500),
     admin_state: str = Form("up"),
     csrf: str = Form(...),
@@ -5361,14 +5429,51 @@ def edit_physical_interface_from_ui(
             status_code=409,
             media_type="text/plain",
         )
+    ip_value = cidr_for_family(ip_cidr, 4, "Interface IPv4 CIDR")
+    if isinstance(ip_value, Response):
+        return ip_value
+    ipv6_value = cidr_for_family(ipv6_cidr, 6, "Interface IPv6 CIDR")
+    if isinstance(ipv6_value, Response):
+        return ipv6_value
     interface.role = role.strip()
     interface.mode = new_mode
-    interface.ip_cidr = ip_cidr.strip() or None
+    interface.ip_cidr = ip_value or None
+    interface.ipv6_cidr = ipv6_value or None
     interface.mtu = mtu
     interface.admin_state = admin_state.strip()
     interface.desired_state_source = "user"
     db.commit()
     record_audit(db, actor=identity.username, action="update_physical_interface", resource_type="interface", resource_id=interface.name)
+    return RedirectResponse("/physical-interfaces", status_code=303)
+
+
+@router.post("/physical-interfaces/{interface_id}/forget", response_model=None)
+def forget_missing_physical_interface_from_ui(
+    request: Request,
+    interface_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | Response:
+    verify_csrf(request, csrf)
+    interface = db.get(PhysicalInterface, interface_id)
+    if not interface:
+        raise HTTPException(status_code=404, detail="Physical interface not found")
+    if interface.oper_state != "missing":
+        return Response("Only interfaces already marked missing from host inventory can be forgotten.", status_code=409, media_type="text/plain")
+    active_vlans = db.execute(
+        select(VlanInterface).where(VlanInterface.parent_interface == interface.name, VlanInterface.enabled.is_(True))
+    ).scalars().all()
+    if active_vlans:
+        return Response("Disable or move dependent VLAN interfaces before forgetting this missing interface.", status_code=409, media_type="text/plain")
+    disabled_vlans = db.execute(select(VlanInterface).where(VlanInterface.parent_interface == interface.name)).scalars().all()
+    for vlan in disabled_vlans:
+        db.delete(vlan)
+    old_name = interface.name
+    db.delete(interface)
+    db.commit()
+    detail = f"Forgot missing interface {old_name}; removed {len(disabled_vlans)} disabled dependent VLAN row{'s' if len(disabled_vlans) != 1 else ''}."
+    record_audit(db, actor=identity.username, action="forget_missing_physical_interface", resource_type="interface", resource_id=old_name, detail=detail)
     return RedirectResponse("/physical-interfaces", status_code=303)
 
 
@@ -5387,6 +5492,7 @@ def create_vlan_interface_from_ui(
     parent_interface: str = Form(...),
     vlan_id: str = Form(""),
     ip_cidr: str = Form(""),
+    ipv6_cidr: str = Form(""),
     mtu: int = Form(1500),
     role: str = Form("access"),
     enabled: str | None = Form(None),
@@ -5396,15 +5502,16 @@ def create_vlan_interface_from_ui(
 ) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
     requested_enabled = enabled == "on"
-    parsed = validate_vlan_form_values(parent_interface, vlan_id, ip_cidr, requested_enabled, db)
+    parsed = validate_vlan_form_values(parent_interface, vlan_id, ip_cidr, ipv6_cidr, requested_enabled, db)
     if isinstance(parsed, Response):
         return parsed
-    parent_name, parsed_vlan_id, ip_value, parent_missing = parsed
+    parent_name, parsed_vlan_id, ip_value, ipv6_value, parent_missing = parsed
     vlan = VlanInterface(
         name=f"{parent_name}.{parsed_vlan_id}",
         parent_interface=parent_name,
         vlan_id=parsed_vlan_id,
         ip_cidr=ip_value,
+        ipv6_cidr=ipv6_value,
         mtu=mtu,
         role=role.strip(),
         enabled=requested_enabled and not parent_missing,
@@ -5431,6 +5538,7 @@ def edit_vlan_interface_from_ui(
     parent_interface: str = Form(...),
     vlan_id_value: str = Form("", alias="vlan_id"),
     ip_cidr: str = Form(""),
+    ipv6_cidr: str = Form(""),
     mtu: int = Form(1500),
     role: str = Form("access"),
     enabled: str | None = Form(None),
@@ -5443,14 +5551,15 @@ def edit_vlan_interface_from_ui(
     if not vlan:
         raise HTTPException(status_code=404, detail="VLAN interface not found")
     requested_enabled = enabled == "on"
-    parsed = validate_vlan_form_values(parent_interface, vlan_id_value, ip_cidr, requested_enabled, db)
+    parsed = validate_vlan_form_values(parent_interface, vlan_id_value, ip_cidr, ipv6_cidr, requested_enabled, db)
     if isinstance(parsed, Response):
         return parsed
-    parent_name, parsed_vlan_id, ip_value, parent_missing = parsed
+    parent_name, parsed_vlan_id, ip_value, ipv6_value, parent_missing = parsed
     vlan.parent_interface = parent_name
     vlan.vlan_id = parsed_vlan_id
     vlan.name = f"{vlan.parent_interface}.{vlan.vlan_id}"
     vlan.ip_cidr = ip_value
+    vlan.ipv6_cidr = ipv6_value
     vlan.mtu = mtu
     vlan.role = role.strip()
     vlan.enabled = requested_enabled and not parent_missing
@@ -5517,19 +5626,28 @@ def update_dns_from_ui(
     settings = get_dns_settings_row(db)
     available_options = service_bind_options(db)
     available_names = {item["name"] for item in available_options}
-    selected_interfaces = [interface.strip() for interface in listen_interfaces if interface.strip()]
-    if available_names:
-        selected_interfaces = [interface for interface in selected_interfaces if interface in available_names]
-    if not selected_interfaces:
-        selected_interfaces = [interface for interface in split_interfaces(settings.listen_interface) if interface in available_names]
-    if not selected_interfaces:
-        selected_interfaces = [available_options[0]["name"]] if available_options else []
-    selected_addresses = split_addresses(join_addresses(listen_addresses))
-    if listen_addresses_present is None and not selected_addresses:
-        selected_addresses = split_addresses(settings.listen_address)
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        listen_interfaces,
+        listen_addresses,
+        current_interface=settings.listen_interface,
+        current_address=settings.listen_address,
+        listen_interfaces_present=listen_interfaces_present,
+        listen_addresses_present=listen_addresses_present,
+    )
+    if available_names and not split_interfaces(selected_interfaces):
+        selected_interfaces, selected_addresses = resolve_service_bind_targets(
+            db,
+            [available_options[0]["name"]],
+            [],
+            current_interface=settings.listen_interface,
+            current_address=settings.listen_address,
+            listen_interfaces_present="1",
+            listen_addresses_present=None,
+        )
     settings.enabled = enabled == "on"
-    settings.listen_interface = join_interfaces(selected_interfaces)
-    settings.listen_address = join_addresses(selected_addresses) or None
+    settings.listen_interface = selected_interfaces
+    settings.listen_address = selected_addresses or None
     if domains is not None:
         settings.domain = join_domains(split_domains(domains))
     settings.upstream_servers = join_servers(split_servers(upstream_servers))

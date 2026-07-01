@@ -258,7 +258,7 @@ def firewall_source_group_state(raw_json: str, interface_networks: dict[str, str
     for group_id, saved_group in saved_groups.items():
         if group_id == "any":
             continue
-        default_entries = [interface_networks[group_id.removeprefix("interface:")]] if group_id.startswith("interface:") and group_id.removeprefix("interface:") in interface_networks else ["any"]
+        default_entries = interface_networks[group_id.removeprefix("interface:")] if group_id.startswith("interface:") and group_id.removeprefix("interface:") in interface_networks else ["any"]
         groups.append(
             _source_group(
                 group_id,
@@ -318,20 +318,20 @@ def source_group_to_rule_source(group: dict | None, source_groups_by_id: dict[st
     return "\n".join(sources or ["any"])
 
 
-def firewall_interface_networks(interfaces: list[PhysicalInterface], vlans: list[VlanInterface]) -> dict[str, str]:
-    networks: dict[str, str] = {}
+def firewall_interface_networks(interfaces: list[PhysicalInterface], vlans: list[VlanInterface]) -> dict[str, list[str]]:
+    networks: dict[str, list[str]] = {}
     for interface in interfaces:
         if interface.oper_state == "missing":
             continue
-        network = _network_from_cidr(interface.ip_cidr)
-        if network:
-            networks[interface.name] = network
+        interface_networks = _networks_from_cidrs(interface.ip_cidr, interface.ipv6_cidr)
+        if interface_networks:
+            networks[interface.name] = interface_networks
     for vlan in vlans:
         if not vlan.enabled:
             continue
-        network = _network_from_cidr(vlan.ip_cidr)
-        if network:
-            networks[vlan.name] = network
+        vlan_networks = _networks_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
+        if vlan_networks:
+            networks[vlan.name] = vlan_networks
     return networks
 
 
@@ -473,7 +473,8 @@ def render_nftables_config(
             ],
             key=lambda item: item.priority,
         ):
-            lines.append(f"    {_render_rule(rule, source_groups_by_id)}")
+            for rendered_rule in _rule_family_variants(rule, source_groups_by_id):
+                lines.append(f"    {_render_rule(rendered_rule, source_groups_by_id)}")
         if settings.log_dropped and policy == "drop":
             lines.append(f'    log prefix "labfoundry {chain_name} drop: " flags all counter')
         lines.append("  }")
@@ -504,6 +505,39 @@ def _render_rule(rule: FirewallRule, source_groups_by_id: dict[str, dict] | None
     parts.append(rule.action)
     parts.append(f'comment "{_safe_comment(rule.name)}"')
     return " ".join(parts)
+
+
+def _rule_family_variants(rule: FirewallRule, source_groups_by_id: dict[str, dict]) -> list[FirewallRule]:
+    source = _rule_address_value(rule.source, source_groups_by_id)
+    destination = _rule_address_value(rule.destination, source_groups_by_id)
+    source_by_family = _address_values_by_family(source)
+    destination_by_family = _address_values_by_family(destination)
+    source_families = {family for family, values in source_by_family.items() if values}
+    destination_families = {family for family, values in destination_by_family.items() if values}
+    families = sorted(source_families | destination_families)
+    if not families:
+        return [rule]
+    variants: list[FirewallRule] = []
+    for family in families:
+        if source_families and family not in source_families:
+            continue
+        if destination_families and family not in destination_families:
+            continue
+        variant = FirewallRule(
+            name=rule.name,
+            direction=rule.direction,
+            action=rule.action,
+            protocol=rule.protocol,
+            source="\n".join(source_by_family.get(family) or ["any"]),
+            destination="\n".join(destination_by_family.get(family) or ["any"]),
+            destination_port=rule.destination_port,
+            interface_name=rule.interface_name,
+            priority=rule.priority,
+            enabled=rule.enabled,
+            description=rule.description,
+        )
+        variants.append(variant)
+    return variants or [rule]
 
 
 def _validate_ports(raw_ports: str) -> list[str]:
@@ -632,6 +666,15 @@ def _network_from_cidr(value: str | None) -> str:
         return str(ip_network(value, strict=False))
     except ValueError:
         return ""
+
+
+def _networks_from_cidrs(*values: str | None) -> list[str]:
+    networks: list[str] = []
+    for value in values:
+        network = _network_from_cidr(value)
+        if network and network not in networks:
+            networks.append(network)
+    return networks
 
 
 def _slug(value: str) -> str:
@@ -785,6 +828,20 @@ def _split_address_values(value: str) -> list[str]:
     return [item.strip().lower() for item in re.split(r"[\n,]+", value) if item.strip()]
 
 
+def _address_values_by_family(value: str) -> dict[int, list[str]]:
+    family_values: dict[int, list[str]] = {4: [], 6: []}
+    for item in _split_address_values(value):
+        if item == "any":
+            return family_values
+        try:
+            family = ip_network(item, strict=False).version
+        except ValueError:
+            continue
+        if item not in family_values[family]:
+            family_values[family].append(item)
+    return family_values
+
+
 def _validate_address_value(label: str, value: str) -> list[str]:
     normalized_values = _split_address_values(value)
     if not normalized_values:
@@ -798,6 +855,4 @@ def _validate_address_value(label: str, value: str) -> list[str]:
             families.add(ip_network(item, strict=False).version)
         except ValueError:
             errors.append(f"{label} must be 'any' or valid IPv4/IPv6 addresses or CIDRs.")
-    if len(families) > 1:
-        errors.append(f"{label} cannot mix IPv4 and IPv6 addresses in one rule.")
     return errors

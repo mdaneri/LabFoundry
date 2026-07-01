@@ -195,7 +195,6 @@
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the CA as enabled desired state. It does not generate keys until global appliance apply runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if ca_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <input type="hidden" name="listen_interfaces_present" value="1">
-        <input type="hidden" name="listen_addresses_present" value="1">
         <div class="form-field">
           <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more available network interfaces where CA publication should be reachable. Use the same interface picker pattern as DNS.">i</button></span>
           <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
@@ -226,33 +225,10 @@
           </datalist>
         </div>
         <div class="form-field">
-          <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="Optional appliance IP addresses for CA publication. Select one or more known addresses or type a custom address.">i</button></span>
-          <div class="tag-editor" data-tag-editor data-tag-name="listen_addresses" data-service-bind-address>
-            <div class="tag-editor-tags" data-tag-list>
-              {% for address in selected_ca_addresses %}
-                <span class="tag-token" data-value="{{ address }}">
-                  <span>{{ address }}</span>
-                  <button type="button" data-tag-remove aria-label="Remove {{ address }}">×</button>
-                  <input type="hidden" name="listen_addresses" value="{{ address }}">
-                </span>
-              {% endfor %}
-            </div>
-            <input class="tag-editor-input" type="text" placeholder="Add listen address..." list="ca-address-options" data-tag-entry autocomplete="off">
-            <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing listen address">+</button>
-            <div class="tag-suggestions" data-tag-menu hidden>
-              {% for item in available_ca_addresses %}
-                <button type="button" data-tag-option="{{ item.address }}">
-                  <strong>{{ item.address }}</strong>
-                  <small>{{ item.source }}</small>
-                </button>
-              {% endfor %}
-            </div>
+          <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="Read-only addresses resolved from selected interface IPv4 and IPv6 CIDRs. CA publication follows interface selection and global appliance apply.">i</button></span>
+          <div class="derived-field fixed-value-field">
+            <strong data-derived-listen-addresses>{{ selected_ca_addresses|join(", ") if selected_ca_addresses else "No interface address selected" }}</strong>
           </div>
-          <datalist id="ca-address-options">
-            {% for item in available_ca_addresses %}
-              <option value="{{ item.address }}">{{ item.source }}</option>
-            {% endfor %}
-          </datalist>
         </div>
         <label>
           <span class="field-label"><span>Root common name</span><button class="help-icon" type="button" data-help="Subject common name for the LabFoundry root CA certificate. Changing it affects future CA generation tasks.">i</button></span>

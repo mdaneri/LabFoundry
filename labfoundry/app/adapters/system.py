@@ -35,6 +35,9 @@ class SystemAdapter:
     def apply_wan_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("wan", "apply", config_path, dry_run_message="dry-run: WAN config apply command recorded")
 
+    def prepare_apply_staging_path(self, path: str) -> AdapterResult:
+        return self._helper_result("staging", "prepare", path, dry_run_message="dry-run: apply staging ownership repair command recorded")
+
     def service_action(self, service: str, action: str) -> AdapterResult:
         return self._record_only_result(["systemctl", action, service], f"dry-run: service {action} recorded for {service}")
 

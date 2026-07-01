@@ -9,11 +9,11 @@ from labfoundry.app.models import (
     VcfOfflineDepotSettings,
     VcfPrivateRegistrySettings,
 )
-from labfoundry.app.services.firewall import dhcp_firewall_rules, managed_service_firewall_rules, render_nftables_config
+from labfoundry.app.services.firewall import dhcp_firewall_rules, managed_service_firewall_rules, render_nftables_config, validate_firewall_state
 
 
 def test_dhcp_firewall_rules_follow_scope_interface_and_replace_legacy_rule():
-    settings = FirewallSettings(enabled=True, default_input_policy="drop")
+    settings = FirewallSettings(enabled=True, default_input_policy="drop", default_forward_policy="drop", default_output_policy="accept")
     legacy_rule = FirewallRule(
         name="sitea-dns-dhcp",
         direction="input",
@@ -45,7 +45,7 @@ def test_dhcp_firewall_rules_follow_scope_interface_and_replace_legacy_rule():
 
 
 def test_disabled_dhcp_removes_labfoundry_managed_dns_dhcp_rule():
-    settings = FirewallSettings(enabled=True, default_input_policy="drop")
+    settings = FirewallSettings(enabled=True, default_input_policy="drop", default_forward_policy="drop", default_output_policy="accept")
     legacy_rule = FirewallRule(
         name="sitea-dns-dhcp",
         direction="input",
@@ -167,3 +167,30 @@ def test_custom_firewall_rules_resolve_source_and_destination_groups():
     config = render_nftables_config(settings, [rule], source_groups=groups)
 
     assert 'iifname "eth2.50" ip saddr 10.10.0.0/16 ip daddr { 172.20.0.10/32, 172.20.0.20/32 } tcp dport 443 accept comment "custom-grouped"' in config
+
+
+def test_firewall_rules_split_mixed_family_source_groups():
+    settings = FirewallSettings(enabled=True, default_input_policy="drop", default_forward_policy="drop", default_output_policy="accept")
+    rule = FirewallRule(
+        name="dual-stack-service",
+        direction="input",
+        action="accept",
+        protocol="tcp",
+        source="group:custom:dual",
+        destination="any",
+        destination_port="443",
+        interface_name="eth2.50",
+        priority=100,
+        enabled=True,
+    )
+    groups = [
+        {"id": "any", "name": "Any", "entries": ["any"]},
+        {"id": "custom:dual", "name": "Dual stack clients", "entries": ["10.10.0.0/16", "2001:db8:10::/64"]},
+    ]
+
+    assert validate_firewall_state(settings, [rule], source_groups=groups) == []
+    config = render_nftables_config(settings, [rule], source_groups=groups)
+
+    assert 'iifname "eth2.50" ip saddr 10.10.0.0/16 tcp dport 443 accept comment "dual-stack-service"' in config
+    assert 'iifname "eth2.50" ip6 saddr 2001:db8:10::/64 tcp dport 443 accept comment "dual-stack-service"' in config
+    assert "ip saddr { 10.10.0.0/16, 2001:db8:10::/64 }" not in config

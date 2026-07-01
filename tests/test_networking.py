@@ -376,3 +376,35 @@ def test_render_network_config_includes_physical_roles_for_networkd_apply():
 
     assert "interface=eth0" in config
     assert "  role=management" in config
+
+
+def test_render_network_config_includes_dual_stack_physical_and_vlan_cidrs():
+    config = render_network_config(
+        interfaces=[
+            PhysicalInterface(
+                name="eth1",
+                mac_address="00:15:5d:aa:bb:02",
+                ip_cidr="192.168.50.1/24",
+                ipv6_cidr="2001:db8:50::1/64",
+                role="access",
+                mode="trunk",
+            )
+        ],
+        vlans=[
+            VlanInterface(
+                name="eth1.20",
+                parent_interface="eth1",
+                vlan_id=20,
+                ip_cidr="192.168.20.1/24",
+                ipv6_cidr="2001:db8:20::1/64",
+                enabled=True,
+            )
+        ],
+    )
+
+    assert "interface=eth1" in config
+    assert "  ip_cidr=192.168.50.1/24" in config
+    assert "  ipv6_cidr=2001:db8:50::1/64" in config
+    assert "vlan=eth1.20" in config
+    assert "  ip_cidr=192.168.20.1/24" in config
+    assert "  ipv6_cidr=2001:db8:20::1/64" in config

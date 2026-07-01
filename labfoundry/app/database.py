@@ -32,11 +32,36 @@ def init_db() -> None:
     from labfoundry.app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_sqlite_network_columns()
     _ensure_sqlite_user_sync_columns()
     _ensure_sqlite_appliance_settings_columns()
     _ensure_sqlite_ca_columns()
     _ensure_sqlite_vcf_depot_columns()
     _ensure_sqlite_esxi_pxe_columns()
+
+
+def _ensure_sqlite_network_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    tables = {
+        "physical_interfaces": {
+            "host_ipv6_cidr": "VARCHAR(64)",
+            "ipv6_cidr": "VARCHAR(64)",
+        },
+        "vlan_interfaces": {
+            "ipv6_cidr": "VARCHAR(64)",
+        },
+    }
+    with engine.begin() as connection:
+        for table_name, columns in tables.items():
+            if table_name not in table_names:
+                continue
+            existing = {column["name"] for column in inspector.get_columns(table_name)}
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {definition}"))
 
 
 def _ensure_sqlite_user_sync_columns() -> None:

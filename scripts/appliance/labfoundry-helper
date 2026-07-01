@@ -26,6 +26,7 @@ from urllib.request import urlopen
 
 
 COMMANDS: dict[str, set[str]] = {
+    "staging": {"prepare"},
     "local-users": {"validate", "apply", "status"},
     "appliance-settings": {"validate", "apply"},
     "network": {"validate", "apply"},
@@ -43,6 +44,7 @@ COMMANDS: dict[str, set[str]] = {
 SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "sync", "apply-https", "relocate-bundles", "restart-service"}
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
+LABFOUNDRY_APPLY_DIR = Path("/var/lib/labfoundry/apply")
 FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
 FIREWALL_CONFIG_PATH = FIREWALL_CONFIG_DIR / "labfoundry.nft"
 FIREWALL_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-firewall.service")
@@ -234,6 +236,39 @@ def _validate_path(path_value: str) -> str:
     if not path.is_absolute():
         raise ValueError(f"path must be absolute: {path_value}")
     return str(path)
+
+
+def _handle_staging(action: str, args: list[str]) -> int:
+    if action != "prepare":
+        print(f"unsupported staging action: {action}", file=sys.stderr)
+        return 2
+    try:
+        target = Path(_validate_path(args[0])).resolve()
+    except (IndexError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if not target.is_relative_to(LABFOUNDRY_APPLY_DIR):
+        print(f"staging path must be under {LABFOUNDRY_APPLY_DIR}", file=sys.stderr)
+        return 2
+    directory = target if target.suffix == "" else target.parent
+    if not directory.is_relative_to(LABFOUNDRY_APPLY_DIR):
+        print(f"staging directory must be under {LABFOUNDRY_APPLY_DIR}", file=sys.stderr)
+        return 2
+    try:
+        LABFOUNDRY_APPLY_DIR.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True)
+        shutil.chown(LABFOUNDRY_APPLY_DIR, user="labfoundry", group="labfoundry")
+        os.chmod(LABFOUNDRY_APPLY_DIR, 0o755)
+        shutil.chown(directory, user="labfoundry", group="labfoundry")
+        os.chmod(directory, 0o750)
+        if target.exists() and target.is_file():
+            shutil.chown(target, user="labfoundry", group="labfoundry")
+            os.chmod(target, 0o600)
+    except OSError as exc:
+        print(f"unable to prepare staging path {target}: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"staging": "prepared", "path": str(target), "directory": str(directory)}, sort_keys=True))
+    return 0
 
 
 def _validate_firewall_config_path(path_value: str) -> Path:
@@ -2635,12 +2670,14 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
         ]
         if interface.get("ip_cidr"):
             lines.append(f"Address={interface['ip_cidr']}")
+        if interface.get("ipv6_cidr"):
+            lines.append(f"Address={interface['ipv6_cidr']}")
         if name == management_name:
             for gateway in preserved_management["Gateway"]:
                 lines.append(f"Gateway={gateway}")
             for dns in preserved_management["DNS"]:
                 lines.append(f"DNS={dns}")
-        elif not interface.get("ip_cidr"):
+        elif not interface.get("ip_cidr") and not interface.get("ipv6_cidr"):
             lines.append("LinkLocalAddressing=no")
         if mode == "trunk":
             for vlan in sorted(vlans_by_parent.get(name, []), key=lambda row: int(row.get("vlan_id", "0"))):
@@ -2675,7 +2712,9 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
         ]
         if vlan.get("ip_cidr"):
             network_lines.append(f"Address={vlan['ip_cidr']}")
-        else:
+        if vlan.get("ipv6_cidr"):
+            network_lines.append(f"Address={vlan['ipv6_cidr']}")
+        if not vlan.get("ip_cidr") and not vlan.get("ipv6_cidr"):
             network_lines.append("LinkLocalAddressing=no")
         files[_networkd_managed_filename(name, "network")] = "\n".join(network_lines).strip() + "\n"
         reconfigure_links.append(name)
@@ -2697,6 +2736,17 @@ def _network_config_errors(path: Path) -> list[str]:
         name = interface.get("name", "")
         if not _valid_network_interface_name(name):
             errors.append(f"Interface name {name or '<missing>'} is invalid.")
+        for key, version, label in [("ip_cidr", 4, "IPv4 CIDR"), ("ipv6_cidr", 6, "IPv6 CIDR")]:
+            value = interface.get(key, "")
+            if not value:
+                continue
+            try:
+                parsed = ip_interface(value)
+            except ValueError:
+                errors.append(f"Interface {name or '<missing>'} {label} {value} is invalid.")
+                continue
+            if parsed.version != version:
+                errors.append(f"Interface {name or '<missing>'} {label} {value} uses the wrong IP family.")
     for vlan in vlan_interfaces:
         name = vlan.get("name", "")
         parent = vlan.get("parent", "")
@@ -2719,11 +2769,19 @@ def _network_config_errors(path: Path) -> list[str]:
         expected_name = f"{parent}.{vlan_id}" if parent and vlan_id else ""
         if expected_name and name != expected_name:
             errors.append(f"VLAN {name} should be named {expected_name}.")
-        if vlan.get("ip_cidr"):
+        if not vlan.get("ip_cidr") and not vlan.get("ipv6_cidr"):
+            errors.append(f"VLAN {name or '<unnamed>'} must include IPv4 CIDR, IPv6 CIDR, or both.")
+        for key, version, label in [("ip_cidr", 4, "IPv4 CIDR"), ("ipv6_cidr", 6, "IPv6 CIDR")]:
+            value = vlan.get(key, "")
+            if not value:
+                continue
             try:
-                ip_interface(vlan["ip_cidr"])
+                parsed = ip_interface(value)
             except ValueError:
-                errors.append(f"VLAN {name} IP CIDR {vlan['ip_cidr']} is invalid.")
+                errors.append(f"VLAN {name} {label} {value} is invalid.")
+                continue
+            if parsed.version != version:
+                errors.append(f"VLAN {name} {label} {value} uses the wrong IP family.")
         try:
             mtu = int(vlan.get("mtu", "1500"))
         except ValueError:
@@ -2827,6 +2885,12 @@ def _apply_vlan_interfaces(path: Path) -> int:
             return flush.returncode
         if vlan.get("ip_cidr"):
             address = _run(["ip", "address", "replace", vlan["ip_cidr"], "dev", name])
+            print(address.stdout, end="")
+            print(address.stderr, end="", file=sys.stderr)
+            if address.returncode != 0:
+                return address.returncode
+        if vlan.get("ipv6_cidr"):
+            address = _run(["ip", "address", "replace", vlan["ipv6_cidr"], "dev", name])
             print(address.stdout, end="")
             print(address.stderr, end="", file=sys.stderr)
             if address.returncode != 0:
@@ -3015,28 +3079,44 @@ def _wan_config_errors(path: Path) -> list[str]:
         name = target.get("name", "")
         if not _valid_network_interface_name(name):
             errors.append(f"WAN target name {name or '<missing>'} is invalid.")
-        if not target.get("ip_cidr"):
-            errors.append(f"WAN target {name or '<missing>'} must include an IP CIDR.")
-        else:
+        if not target.get("ip_cidr") and not target.get("ipv6_cidr"):
+            errors.append(f"WAN target {name or '<missing>'} must include an IPv4 or IPv6 CIDR.")
+        if target.get("ip_cidr"):
             try:
-                ip_interface(target["ip_cidr"])
+                parsed_interface = ip_interface(target["ip_cidr"])
             except ValueError:
                 errors.append(f"WAN target {name} IP CIDR {target['ip_cidr']} is invalid.")
+            else:
+                if parsed_interface.version != 4:
+                    errors.append(f"WAN target {name} IPv4 CIDR must use an IPv4 address.")
+        if target.get("ipv6_cidr"):
+            try:
+                parsed_interface = ip_interface(target["ipv6_cidr"])
+            except ValueError:
+                errors.append(f"WAN target {name} IPv6 CIDR {target['ipv6_cidr']} is invalid.")
+            else:
+                if parsed_interface.version != 6:
+                    errors.append(f"WAN target {name} IPv6 CIDR must use an IPv6 address.")
     for route in [*parsed["routes"], *parsed["removed_routes"]]:
         destination = route.get("destination_cidr", "")
+        destination_network = None
         if not destination:
             errors.append("Route entry is missing a destination CIDR.")
         else:
             try:
-                ip_network(destination, strict=False)
+                destination_network = ip_network(destination, strict=False)
             except ValueError:
                 errors.append(f"Route {destination} is not a valid destination CIDR.")
+                destination_network = None
         gateway = route.get("gateway", "")
         if gateway:
             try:
-                ip_address(gateway)
+                gateway_address = ip_address(gateway)
             except ValueError:
                 errors.append(f"Route {destination} gateway {gateway} is not a valid IP address.")
+                gateway_address = None
+            if destination_network and gateway_address and destination_network.version != gateway_address.version:
+                errors.append(f"Route {destination} gateway {gateway} must use the same IP family as the destination.")
         interface_name = route.get("interface", "")
         if interface_name not in targets:
             errors.append(f"Route {destination or '<missing>'} references missing WAN target {interface_name or '<missing>'}.")
@@ -3062,6 +3142,8 @@ def _wan_config_errors(path: Path) -> list[str]:
         outbound = rule.get("outbound_interface", "")
         if outbound not in targets:
             errors.append(f"NAT rule {name or '<missing>'} must use an access physical interface or enabled VLAN with an IP CIDR.")
+        elif not targets[outbound].get("ip_cidr"):
+            errors.append(f"NAT rule {name or '<missing>'} must use an outbound interface with an IPv4 CIDR.")
         if not _wan_bool(rule.get("masquerade", ""), default=True):
             errors.append(f"NAT rule {name or '<missing>'} must use masquerade; destination NAT is not supported.")
         source = rule.get("source_resolved") or rule.get("source") or "any"
@@ -3168,8 +3250,16 @@ def _wan_netem_args(policy: dict[str, str]) -> list[str]:
     return args
 
 
+def _route_command_prefix(destination: str) -> list[str]:
+    try:
+        network = ip_network(destination, strict=False)
+    except ValueError:
+        return ["ip", "route"]
+    return ["ip", "-6", "route"] if network.version == 6 else ["ip", "route"]
+
+
 def _run_route_delete(destination: str, interface_name: str) -> int:
-    command = ["ip", "route", "del", destination, "dev", interface_name]
+    command = [*_route_command_prefix(destination), "del", destination, "dev", interface_name]
     result = _run(command)
     print(result.stdout, end="")
     print(result.stderr, end="", file=sys.stderr)
@@ -3197,7 +3287,7 @@ def _apply_wan_routes_and_qdiscs(parsed: dict[str, list[dict[str, str]]]) -> int
                 return delete_result
             touched_qdisc_targets.add(interface_name)
             continue
-        command = ["ip", "route", "replace", destination]
+        command = [*_route_command_prefix(destination), "replace", destination]
         if route.get("gateway"):
             command.extend(["via", route["gateway"]])
         command.extend(["dev", interface_name, "metric", str(int(route.get("metric", "100") or "100"))])
@@ -4154,6 +4244,8 @@ def main(argv: list[str]) -> int:
     if record["dry_run"]:
         return 0
 
+    if group == "staging":
+        return _handle_staging(action, normalized_args)
     if group == "firewall":
         return _handle_firewall(action, normalized_args)
     if group == "network":

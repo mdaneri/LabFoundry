@@ -6,7 +6,7 @@
     <div class="panel-head">
       <div>
         <h2>VLAN Interfaces</h2>
-        <p class="muted">Create tagged lab networks on trunk parent interfaces. For standard access-mode NICs, assign IP CIDR on Physical Interfaces instead.</p>
+        <p class="muted">Create tagged lab networks on trunk parent interfaces. For standard access-mode NICs, assign IPv4/IPv6 CIDR on Physical Interfaces instead.</p>
       </div>
       <span class="status-pill muted">{{ vlan_interfaces|length }} VLANs</span>
     </div>
@@ -36,7 +36,7 @@
     ></div>
     <table id="vlan-interfaces-fallback" class="data-table dns-fallback-table">
       <thead>
-        <tr><th>Name</th><th>Parent</th><th>VLAN ID</th><th>IP CIDR</th><th>MTU</th><th>Role</th><th>Status</th><th>Actions</th></tr>
+        <tr><th>Name</th><th>Parent</th><th>VLAN ID</th><th>IPv4 CIDR</th><th>IPv6 CIDR</th><th>MTU</th><th>Role</th><th>Admin Up</th><th>Actions</th></tr>
       </thead>
       <tbody>
         {% for vlan in vlan_interfaces %}
@@ -45,9 +45,16 @@
             <td>{{ vlan.parent_interface }}</td>
             <td>{{ vlan.vlan_id }}</td>
             <td>{{ vlan.ip_cidr or "" }}</td>
+            <td>{{ vlan.ipv6_cidr or "" }}</td>
             <td>{{ vlan.mtu }}</td>
             <td>{{ vlan.role }}</td>
-            <td><span class="status-pill {{ 'good' if vlan.enabled else 'muted' }}">{{ "enabled" if vlan.enabled else "disabled" }}</span></td>
+            <td>
+              {% if vlan.enabled %}
+                <span class="network-state-icon up" title="up"><span class="state-symbol" aria-hidden="true">&#8593;</span><span class="state-label">up</span></span>
+              {% else %}
+                <span class="network-state-icon down" title="down"><span class="state-symbol" aria-hidden="true">&#8595;</span><span class="state-label">down</span></span>
+              {% endif %}
+            </td>
             <td>
               <form
                 action="/vlan-interfaces/{{ vlan.id }}/delete"
