@@ -140,7 +140,6 @@
           <input name="hostname" value="{{ kms_settings.hostname }}">
         </label>
         <input type="hidden" name="listen_interfaces_present" value="1">
-        <input type="hidden" name="listen_addresses_present" value="1">
         <div class="service-bind-editor stacked-service-bind-editor" data-service-bind>
           <div class="form-field">
             <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more access or VLAN interfaces where KMIP should be reachable. Firewall review uses every selected interface; PyKMIP binds to the first selected address.">i</button></span>
@@ -158,7 +157,7 @@
               <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface">+</button>
               <div class="tag-suggestions" data-tag-menu hidden>
                 {% for interface in available_interfaces %}
-                  <button type="button" data-tag-option="{{ interface.name }}" data-service-bind-address="{{ interface.address }}">
+                  <button type="button" data-tag-option="{{ interface.name }}" data-service-bind-address="{{ interface.address }}" data-service-bind-addresses="{{ interface.addresses|join(',') }}">
                     <strong>{{ interface.name }}</strong>
                     <small>{{ interface.label }}</small>
                   </button>
@@ -172,33 +171,10 @@
             </datalist>
           </div>
           <div class="form-field">
-            <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="One or more appliance IP addresses for KMIP reachability. The first address becomes the PyKMIP bind host; all selected addresses stay visible for review.">i</button></span>
-            <div class="tag-editor" data-tag-editor data-tag-name="listen_addresses" data-service-bind-address>
-              <div class="tag-editor-tags" data-tag-list>
-                {% for address in selected_kms_addresses %}
-                  <span class="tag-token" data-value="{{ address }}">
-                    <span>{{ address }}</span>
-                    <button type="button" data-tag-remove aria-label="Remove {{ address }}">×</button>
-                    <input type="hidden" name="listen_addresses" value="{{ address }}">
-                  </span>
-                {% endfor %}
-              </div>
-              <input class="tag-editor-input" type="text" placeholder="Add listen address..." list="kms-address-options" data-tag-entry autocomplete="off">
-              <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing listen address">+</button>
-              <div class="tag-suggestions" data-tag-menu hidden>
-                {% for item in available_kms_addresses %}
-                  <button type="button" data-tag-option="{{ item.address }}">
-                    <strong>{{ item.address }}</strong>
-                    <small>{{ item.source }}</small>
-                  </button>
-                {% endfor %}
-              </div>
+            <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="Read-only addresses resolved from selected interface IPv4 and IPv6 CIDRs. The first address is the PyKMIP bind host.">i</button></span>
+            <div class="derived-field fixed-value-field">
+              <strong data-derived-listen-addresses>{{ selected_kms_addresses|join(", ") if selected_kms_addresses else "No interface address selected" }}</strong>
             </div>
-            <datalist id="kms-address-options">
-              {% for item in available_kms_addresses %}
-                <option value="{{ item.address }}">{{ item.source }}</option>
-              {% endfor %}
-            </datalist>
           </div>
         </div>
         <label class="compact-service-field">

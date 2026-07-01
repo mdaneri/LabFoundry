@@ -777,6 +777,7 @@ function newDhcpScopeRow(defaultInterface = "eth2") {
   return {
     id: "__new__",
     name: "",
+    address_family: "ipv4",
     interface_name: defaultInterface,
     site_address: "",
     prefix_length: 24,
@@ -1897,6 +1898,15 @@ function initializeFirewallRulesTable() {
         },
         { title: "Ports", field: "destination_port", editor: "input", width: 120, cellEdited: (cell) => autoSaveFirewallRule(cell, csrf) },
         {
+          title: "Family",
+          field: "address_family",
+          editor: "list",
+          editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" } },
+          formatter: (cell) => (cell.getValue() === "ipv6" ? "IPv6" : "IPv4"),
+          width: 95,
+          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+        },
+        {
           title: "Interface",
           field: "interface_name",
           editor: "list",
@@ -2854,7 +2864,23 @@ function serviceBindSelection(form, payload = {}) {
   const interfaceEditor = form.querySelector(".tag-editor[data-service-bind-interface]");
   const addressEditor = form.querySelector(".tag-editor[data-service-bind-address]");
   const interfaces = Array.isArray(payload.listen_interfaces) ? payload.listen_interfaces : tagEditorValues(interfaceEditor);
-  const addresses = Array.isArray(payload.listen_addresses) ? payload.listen_addresses : tagEditorValues(addressEditor);
+  let addresses = Array.isArray(payload.listen_addresses) ? payload.listen_addresses : tagEditorValues(addressEditor);
+  if (!addresses.length && interfaceEditor instanceof HTMLElement) {
+    const options = Array.from(interfaceEditor.querySelectorAll("[data-tag-option]"));
+    interfaces.forEach((interfaceName) => {
+      const match = options.find((option) => option.getAttribute("data-tag-option") === interfaceName);
+      const rawAddresses = match?.getAttribute("data-service-bind-addresses") || match?.getAttribute("data-service-bind-address") || "";
+      rawAddresses
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .forEach((address) => {
+          if (!addresses.includes(address)) {
+            addresses.push(address);
+          }
+        });
+    });
+  }
   const interfaceName = payload.listen_interface || interfaces[0] || "";
   const address = payload.listen_address || addresses[0] || "";
   return {
@@ -2865,6 +2891,18 @@ function serviceBindSelection(form, payload = {}) {
     interfaceLabel: interfaces.length ? interfaces.join(", ") : interfaceName,
     addressLabel: addresses.length ? addresses.join(", ") : address,
   };
+}
+
+function updateDerivedListenAddressSummary(form, payload = {}) {
+  if (!(form instanceof HTMLElement) || !Array.isArray(payload.listen_addresses)) {
+    return;
+  }
+  const label = payload.listen_addresses.length ? payload.listen_addresses.join(", ") : "No interface address selected";
+  form.querySelectorAll("[data-derived-listen-addresses]").forEach((element) => {
+    if (element instanceof HTMLElement) {
+      element.textContent = label;
+    }
+  });
 }
 
 function updateKmsDerivedAddress(form, payload = {}) {
@@ -3501,9 +3539,14 @@ async function postNetworkAction(url, data, csrf, options = {}) {
       key === "mac_address" ||
       key === "driver" ||
       key === "speed" ||
+      key === "host_ip_cidr" ||
+      key === "host_ipv6_cidr" ||
+      key === "host_mtu" ||
+      key === "host_admin_state" ||
       key === "oper_state" ||
       key === "vlan_count" ||
-      key === "parent_missing"
+      key === "parent_missing" ||
+      key === "admin_up"
     ) {
       continue;
     }
@@ -3537,6 +3580,7 @@ function newVlanInterfaceRow(defaultParent = "eth1") {
     parent_interface: defaultParent,
     vlan_id: "",
     ip_cidr: "",
+    ipv6_cidr: "",
     mtu: 1500,
     role: "access",
     enabled: true,
@@ -3555,16 +3599,146 @@ function physicalLinkTypeFormatter(cell, modeOptions) {
   return escapeHtml(label);
 }
 
+function networkStateIcon(state, label) {
+  const normalized = String(state || "").toLowerCase();
+  const displayLabel = label || normalized || "unknown";
+  let className = "unknown";
+  let symbol = "?";
+  if (normalized === "up" || normalized === "enabled" || normalized === "true") {
+    className = "up";
+    symbol = "&#8593;";
+  } else if (normalized === "down" || normalized === "disabled" || normalized === "false") {
+    className = "down";
+    symbol = "&#8595;";
+  } else if (normalized === "missing") {
+    className = "missing";
+    symbol = "!";
+  }
+  const title = displayLabel === "missing" ? "missing from host inventory" : displayLabel;
+  return `<span class="network-state-icon ${className}" title="${escapeHtml(title)}"><span class="state-symbol" aria-hidden="true">${symbol}</span><span class="state-label">${escapeHtml(displayLabel)}</span></span>`;
+}
+
+function isValidIpv4Address(value) {
+  const parts = String(value || "").split(".");
+  return parts.length === 4 && parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) {
+      return false;
+    }
+    const numberValue = Number(part);
+    return numberValue >= 0 && numberValue <= 255;
+  });
+}
+
+function isValidIpv6Address(value) {
+  const address = String(value || "");
+  if (!address.includes(":") || /[\s[\]]/.test(address)) {
+    return false;
+  }
+  try {
+    new URL(`http://[${address}]/`);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function isValidCidr(value, family) {
+  const cidr = String(value || "").trim();
+  if (!cidr) {
+    return true;
+  }
+  const parts = cidr.split("/");
+  if (parts.length !== 2 || !parts[0] || !/^\d+$/.test(parts[1])) {
+    return false;
+  }
+  const prefix = Number(parts[1]);
+  if (family === "ipv4") {
+    return prefix >= 0 && prefix <= 32 && isValidIpv4Address(parts[0]);
+  }
+  return prefix >= 0 && prefix <= 128 && isValidIpv6Address(parts[0]);
+}
+
+function showCidrInputError(cell, family) {
+  const table = typeof cell.getTable === "function" ? cell.getTable() : null;
+  const tableElement = table?.element;
+  const target = tableElement?.id === "vlan-interfaces-table" ? "vlan-interface-error" : "physical-interface-error";
+  showNetworkMessage(target, family === "ipv4" ? "Enter a valid IPv4 CIDR such as 192.168.50.1/24." : "Enter a valid IPv6 CIDR such as fd00:50::1/64.");
+}
+
+function cidrInputEditor(cell, onRendered, success, cancel, editorParams = {}) {
+  const family = editorParams.family || "ipv4";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = cell.getValue() || "";
+  input.placeholder = editorParams.placeholder || (family === "ipv4" ? "192.168.50.1/24" : "fd00:50::1/64");
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.inputMode = family === "ipv4" ? "decimal" : "text";
+  input.setAttribute("aria-label", family === "ipv4" ? "IPv4 CIDR" : "IPv6 CIDR");
+  const disallowed = family === "ipv4" ? /[^0-9./]/g : /[^0-9A-Fa-f:./]/g;
+
+  const updateValidity = () => {
+    const nextValue = input.value.replace(disallowed, "");
+    if (nextValue !== input.value) {
+      input.value = nextValue;
+    }
+    input.classList.toggle("invalid-cidr-input", !isValidCidr(input.value, family));
+  };
+
+  const submit = () => {
+    const value = input.value.trim();
+    if (!isValidCidr(value, family)) {
+      input.classList.add("invalid-cidr-input");
+      showCidrInputError(cell, family);
+      return false;
+    }
+    success(value);
+    return true;
+  };
+
+  input.addEventListener("input", updateValidity);
+  input.addEventListener("change", submit);
+  input.addEventListener("blur", () => {
+    if (!submit()) {
+      cancel();
+    }
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    } else if (event.key === "Escape") {
+      cancel();
+    }
+  });
+
+  onRendered(() => {
+    input.focus();
+    input.select();
+    updateValidity();
+  });
+  return input;
+}
+
+function adminStateFormatter(cell) {
+  return networkStateIcon(cell.getValue() ? "up" : "down", cell.getValue() ? "up" : "down");
+}
+
+function operStateFormatter(cell) {
+  const value = cell.getValue() || "unknown";
+  return networkStateIcon(value, value);
+}
+
 function vlanEnabledFormatter(cell) {
   const data = cell.getRow().getData();
   if (data.parent_missing) {
-    return '<span class="muted" title="Parent NIC is missing; this VLAN is disabled until moved to an available trunk parent.">disabled</span>';
+    return '<span class="network-state-icon missing" title="Parent NIC is missing; this VLAN is disabled until moved to an available trunk parent."><span class="state-symbol" aria-hidden="true">!</span><span class="state-label">missing</span></span>';
   }
-  return cell.getValue() ? "✓" : "";
+  return adminStateFormatter(cell);
 }
 
 function hasRequiredVlanFields(data) {
-  return Boolean((data.parent_interface || "").trim() && String(data.vlan_id || "").trim() && String(data.ip_cidr || "").trim());
+  return Boolean((data.parent_interface || "").trim() && String(data.vlan_id || "").trim() && (String(data.ip_cidr || "").trim() || String(data.ipv6_cidr || "").trim()));
 }
 
 function editNewRowCell(cell, fieldName) {
@@ -3610,6 +3784,7 @@ async function autoSavePhysicalInterface(cell, csrf) {
   clearCaMessage("physical-interface-error");
   const row = cell.getRow();
   const data = row.getData();
+  data.admin_state = data.admin_up ? "up" : "down";
   try {
     await postNetworkAction(`/physical-interfaces/${data.id}/edit`, data, csrf, { reload: false });
     showTransientGridStatus("Saved");
@@ -3619,6 +3794,28 @@ async function autoSavePhysicalInterface(cell, csrf) {
     if (typeof cell.restoreOldValue === "function") {
       cell.restoreOldValue();
     }
+  }
+}
+
+async function forgetPhysicalInterfaceFromMenu(row, csrf) {
+  clearCaMessage("physical-interface-error");
+  const data = row.getData();
+  if (data.oper_state !== "missing") {
+    showNetworkMessage("physical-interface-error", "Only interfaces already marked missing from host inventory can be forgotten.");
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `Forget ${data.name}?`,
+    message: "This removes the missing interface row from LabFoundry inventory and deletes disabled VLAN rows tied to it. It does not touch the appliance until global appliance apply runs.",
+    label: "Forget interface",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await postNetworkAction(`/physical-interfaces/${data.id}/forget`, {}, csrf);
+  } catch (error) {
+    showNetworkMessage("physical-interface-error", error instanceof Error ? error.message : "The missing interface could not be forgotten.");
   }
 }
 
@@ -3710,18 +3907,36 @@ function initializePhysicalInterfacesTable() {
       rowHeight: 28,
       placeholder: "No physical interfaces discovered.",
       reactiveData: false,
+      rowContextMenu: [
+        {
+          label: "Forget missing interface",
+          disabled: (component) => component.getData().oper_state !== "missing",
+          action: (event, row) => forgetPhysicalInterfaceFromMenu(row, csrf),
+        },
+      ],
       columns: [
         { title: "Name", field: "name", width: 100, headerSort: false },
         { title: "MAC", field: "mac_address", minWidth: 170, headerSort: false },
         { title: "Driver", field: "driver", width: 110 },
         { title: "Speed", field: "speed", width: 110 },
-        { title: "Observed IP", field: "host_ip_cidr", minWidth: 150, headerSort: false },
+        { title: "Observed IPv4", field: "host_ip_cidr", minWidth: 150, headerSort: false },
+        { title: "Observed IPv6", field: "host_ipv6_cidr", minWidth: 180, headerSort: false },
         {
-          title: "Desired IP CIDR",
+          title: "IPv4 CIDR",
           field: "ip_cidr",
-          editor: "input",
+          editor: cidrInputEditor,
+          editorParams: { family: "ipv4", placeholder: "192.168.50.1/24" },
           formatter: (cell) => dnsAddRowHintFormatter(cell, "192.168.50.1/24"),
           minWidth: 160,
+          cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
+        },
+        {
+          title: "IPv6 CIDR",
+          field: "ipv6_cidr",
+          editor: cidrInputEditor,
+          editorParams: { family: "ipv6", placeholder: "fd00:50::1/64" },
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "fd00:50::1/64"),
+          minWidth: 180,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
         {
@@ -3760,14 +3975,16 @@ function initializePhysicalInterfacesTable() {
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
         {
-          title: "Admin",
-          field: "admin_state",
-          editor: "list",
-          editorParams: { values: { up: "up", down: "down" } },
-          width: 100,
+          title: "Admin Up",
+          field: "admin_up",
+          formatter: adminStateFormatter,
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 110,
+          headerSort: false,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
-        { title: "Oper", field: "oper_state", width: 90, headerSort: false },
+        { title: "Oper", field: "oper_state", formatter: operStateFormatter, width: 105, headerSort: false },
         { title: "Source", field: "inventory_source", width: 100, headerSort: false },
       ],
     });
@@ -3849,11 +4066,21 @@ function initializeVlanInterfacesTable() {
           cellEdited: (cell) => autoSaveVlanInterface(cell, csrf),
         },
         {
-          title: "IP CIDR",
+          title: "IPv4 CIDR",
           field: "ip_cidr",
-          editor: "input",
+          editor: cidrInputEditor,
+          editorParams: { family: "ipv4", placeholder: "192.168.50.1/24" },
           formatter: (cell) => dnsAddRowHintFormatter(cell, "192.168.50.1/24"),
           minWidth: 170,
+          cellEdited: (cell) => autoSaveVlanInterface(cell, csrf),
+        },
+        {
+          title: "IPv6 CIDR",
+          field: "ipv6_cidr",
+          editor: cidrInputEditor,
+          editorParams: { family: "ipv6", placeholder: "fd00:50::1/64" },
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "fd00:50::1/64"),
+          minWidth: 180,
           cellEdited: (cell) => autoSaveVlanInterface(cell, csrf),
         },
         {
@@ -3872,7 +4099,7 @@ function initializeVlanInterfacesTable() {
           cellEdited: (cell) => autoSaveVlanInterface(cell, csrf),
         },
         {
-          title: "Enabled",
+          title: "Admin Up",
           field: "enabled",
           formatter: vlanEnabledFormatter,
           editor: "tickCross",
@@ -4605,6 +4832,9 @@ function initializeAutosaveForms() {
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      updateDerivedListenAddressSummary(form, event.detail || {});
+    });
     const statusElement = document.getElementById(form.dataset.autosaveStatusId || "");
     const inputAutosave = form.dataset.autosaveTrigger !== "change";
     let timer = 0;

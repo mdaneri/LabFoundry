@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ from labfoundry.app.ui import router as ui_router
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
+REQUEST_LOGGER = logging.getLogger("labfoundry.operational")
 
 
 def configure_logging(db: Session | None = None) -> None:
@@ -67,7 +69,16 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
         request.state.request_id = request.headers.get("X-Request-ID", f"req_{uuid4().hex[:12]}")
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            REQUEST_LOGGER.exception(
+                "Unhandled request exception request_id=%s method=%s path=%s",
+                request.state.request_id,
+                request.method,
+                request.url.path,
+            )
+            raise
         response.headers["X-Request-ID"] = request.state.request_id
         return response
 

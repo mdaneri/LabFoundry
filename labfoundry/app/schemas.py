@@ -245,9 +245,11 @@ class PhysicalInterfaceResponse(BaseModel):
     driver: str | None
     speed: str | None
     host_ip_cidr: str | None
+    host_ipv6_cidr: str | None
     host_mtu: int | None
     host_admin_state: str | None
     ip_cidr: str | None
+    ipv6_cidr: str | None
     mtu: int
     admin_state: str
     oper_state: str
@@ -262,7 +264,8 @@ class PhysicalInterfaceResponse(BaseModel):
 class VlanCreate(BaseModel):
     parent_interface: str
     vlan_id: int = Field(ge=1, le=4094)
-    ip_cidr: str = Field(min_length=1)
+    ip_cidr: str = ""
+    ipv6_cidr: str = ""
     mtu: int = Field(default=1500, ge=576, le=9000)
     role: str = "access"
     enabled: bool = True
@@ -408,9 +411,10 @@ class DhcpSettingsResponse(DhcpSettingsUpdate):
 
 class DhcpScopeCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    address_family: str = Field(default="ipv4", pattern="^(ipv4|ipv6)$")
     interface_name: str
     site_address: str
-    prefix_length: int
+    prefix_length: int = Field(ge=1, le=128)
     range_start: str
     range_end: str
     lease_time: str

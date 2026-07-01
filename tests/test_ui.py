@@ -73,7 +73,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v8" in service_worker.text
+    assert "labfoundry-pwa-v9" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=session-services-20260630-1" in offline.text
+    assert "/static/app.css?v=network-dualstack-20260701-2" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -138,6 +138,128 @@ def test_sidebar_appliance_apply_uses_bottom_pending_cta(client):
     assert "Review appliance changes" in response.text
     assert "pending unit" in response.text
     assert 'class="nav-link " href="/appliance-apply"' not in response.text
+
+
+def test_dns_settings_derives_listen_addresses_from_selected_interface(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(
+            PhysicalInterface(
+                name="eth9",
+                mac_address="00:50:56:00:00:09",
+                role="access",
+                mode="access",
+                ip_cidr="192.168.90.1/24",
+                ipv6_cidr="2001:db8:90::1/64",
+                admin_state="up",
+                oper_state="up",
+            )
+        )
+        db.commit()
+
+    page = client.get("/dns")
+    assert page.status_code == 200
+    assert "Listen addresses" in page.text
+    assert "Add listen address" not in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/dns/settings",
+        data={
+            "csrf": csrf,
+            "enabled": "on",
+            "listen_interfaces_present": "1",
+            "listen_interfaces": "eth9",
+            "upstream_servers": "1.1.1.1",
+            "conditional_forwarders": "",
+            "cache_size": "1000",
+            "expand_hosts": "on",
+            "authoritative": "on",
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["listen_interfaces"] == ["eth9"]
+    assert response.json()["listen_addresses"] == ["192.168.90.1", "2001:db8:90::1"]
+
+
+def test_forget_missing_physical_interface_deletes_only_stale_rows(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface, VlanInterface
+
+    login(client)
+    with SessionLocal() as db:
+        missing = PhysicalInterface(
+            name="missing_eth7",
+            mac_address="00:50:56:00:00:07",
+            role="unused",
+            mode="unused",
+            admin_state="down",
+            oper_state="missing",
+        )
+        db.add(missing)
+        db.add(VlanInterface(name="missing_eth7.20", parent_interface="missing_eth7", vlan_id=20, enabled=False))
+        active = PhysicalInterface(
+            name="eth8",
+            mac_address="00:50:56:00:00:08",
+            role="access",
+            mode="access",
+            admin_state="up",
+            oper_state="up",
+        )
+        db.add(active)
+        db.commit()
+        missing_id = missing.id
+        active_id = active.id
+
+    page = client.get("/physical-interfaces")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    active_response = client.post(f"/physical-interfaces/{active_id}/forget", data={"csrf": csrf})
+    assert active_response.status_code == 409
+    response = client.post(f"/physical-interfaces/{missing_id}/forget", data={"csrf": csrf}, follow_redirects=False)
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        assert db.get(PhysicalInterface, missing_id) is None
+        assert db.query(VlanInterface).filter(VlanInterface.parent_interface == "missing_eth7").count() == 0
+        assert db.get(PhysicalInterface, active_id) is not None
+
+
+def test_stage_appliance_apply_config_repairs_staging_permission(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from labfoundry.app import ui
+
+    attempts = {"count": 0}
+    repairs: list[str] = []
+
+    def fake_write(path, config_preview):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("blocked")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(config_preview, encoding="utf-8")
+
+    class FakeAdapter:
+        def prepare_apply_staging_path(self, path):
+            repairs.append(path)
+            return SimpleNamespace(returncode=0, stdout="prepared", stderr="")
+
+    monkeypatch.setattr(ui, "_write_staged_config_file", fake_write)
+    monkeypatch.setattr(ui, "SystemAdapter", FakeAdapter)
+
+    config_path = tmp_path / "apply" / "wan" / "labfoundry-wan.conf"
+    result = ui.stage_appliance_apply_config(str(config_path), "config")
+
+    assert result == str(config_path)
+    assert repairs == [str(config_path)]
+    assert attempts["count"] == 2
+    assert config_path.read_text(encoding="utf-8") == "config"
 
 
 def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
@@ -1605,6 +1727,69 @@ def test_routes_wan_rejects_route_wan_mode(client):
     assert "planned but not supported in v1" in response.text
 
 
+def test_routes_wan_allows_ipv6_only_route_targets_but_not_nat_targets(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import NatRule, PhysicalInterface, Route
+
+    with SessionLocal() as db:
+        db.add(
+            PhysicalInterface(
+                name="eth6",
+                mac_address="00:50:56:aa:bb:66",
+                mode="access",
+                role="services",
+                ip_cidr="",
+                ipv6_cidr="fd00:66::1/64",
+                admin_state="up",
+                oper_state="up",
+            )
+        )
+        db.commit()
+
+    login(client)
+    page = client.get("/routes-wan")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    route_response = client.post(
+        "/routes-wan/routes",
+        data={
+            "destination_cidr": "2001:db8:66::/64",
+            "gateway": "",
+            "interface_name": "eth6",
+            "metric": "120",
+            "wan_policy_id": "",
+            "wan_mode": "interface",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    nat_response = client.post(
+        "/routes-wan/nat-rules",
+        data={
+            "name": "IPv6-only outbound",
+            "source": "192.168.50.0/24",
+            "outbound_interface": "eth6",
+            "masquerade": "on",
+            "priority": "110",
+            "description": "",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+
+    assert route_response.status_code == 303
+    assert nat_response.status_code == 422
+    assert "Choose an access physical interface" in nat_response.text
+    with SessionLocal() as db:
+        route = db.execute(select(Route).where(Route.interface_name == "eth6")).scalar_one()
+        assert route.destination_cidr == "2001:db8:66::/64"
+        assert db.execute(select(NatRule).where(NatRule.outbound_interface == "eth6")).scalar_one_or_none() is None
+
+
 def test_routes_wan_autosave_endpoints_and_apply_task(client):
     from sqlalchemy import select
 
@@ -2133,16 +2318,16 @@ def test_dns_and_dhcp_pages_render(client):
     assert "ptr-record=" not in dns.text
     assert "1.49.168.192.in-addr.arpa" in dns.text
     assert 'name="listen_interfaces"' in dns.text
-    assert 'name="listen_addresses"' in dns.text
+    assert 'data-derived-listen-addresses' in dns.text
     assert 'name="conditional_forwarders"' in dns.text
     assert "Conditional forwarders" in dns.text
     assert "domain=server1,server2" in dns.text
     assert "sddc.internal=192.168.10.10,192.168.10.11" in dns.text
-    assert dns.text.count('data-tag-editor') >= 2
-    assert dns.text.count('data-tag-menu-toggle') >= 2
-    assert dns.text.count('data-tag-option=') >= 4
+    assert dns.text.count('data-tag-editor') >= 1
+    assert dns.text.count('data-tag-menu-toggle') >= 1
+    assert dns.text.count('data-tag-option=') >= 2
     assert 'placeholder="Add interface..."' in dns.text
-    assert 'placeholder="Add listen address..."' in dns.text
+    assert 'placeholder="Add listen address..."' not in dns.text
     assert "eth1 - access / trunk" not in dns.text
     assert 'action="/dns/zones"' in dns.text
     assert 'action="/dns/zones/delete"' in dns.text
@@ -2207,6 +2392,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert "initializeDhcpScopesTable" in app_js.text
     assert "autoSaveDhcpScope" in app_js.text
     assert "+ Add IP zone here" in app_js.text
+    assert 'title: "Family"' in app_js.text
+    assert "address_family" in app_js.text
     assert 'title: "NTP"' in app_js.text
     assert "domainOptions" in app_js.text
     assert "domainValues" in app_js.text
@@ -2550,7 +2737,7 @@ def test_dns_listen_options_include_access_and_vlans_not_trunks(client):
     assert "eth1.60 - VLAN 60 on eth1 / services / 192.168.60.1" in page.text
     assert "eth1 - access / trunk" not in page.text
     assert 'data-tag-option="eth1.60"' in page.text
-    assert 'data-tag-option="192.168.60.1"' in page.text
+    assert 'data-tag-option="192.168.60.1"' not in page.text
 
 
 def test_certificate_authority_page_renders(client):
@@ -2572,15 +2759,13 @@ def test_certificate_authority_page_renders(client):
     assert "Listen interfaces" in ca.text
     assert "Listen addresses" in ca.text
     assert 'name="listen_interfaces_present"' in ca.text
-    assert 'name="listen_addresses_present"' in ca.text
     assert 'name="listen_interfaces"' in ca.text
-    assert 'name="listen_addresses"' in ca.text
+    assert 'data-derived-listen-addresses' in ca.text
     assert 'placeholder="Add interface..."' in ca.text
-    assert 'placeholder="Add listen address..."' in ca.text
+    assert 'placeholder="Add listen address..."' not in ca.text
     assert 'data-tag-option="eth2"' in ca.text
-    assert 'data-tag-option="192.168.50.1"' in ca.text
     assert "eth1 - unused / trunk" not in ca.text
-    assert "Derived address" not in ca.text
+    assert "Read-only addresses resolved" in ca.text
     assert 'data-ca-derived-address' not in ca.text
     assert 'name="listen_interface"' not in ca.text
     assert 'name="listen_address"' not in ca.text
@@ -2721,12 +2906,11 @@ def test_kms_page_renders(client):
     assert '<select name="backend"' not in kms.text
     assert 'type="hidden" name="backend" value="pykmip"' in kms.text
     assert kms.text.index('name="hostname"') < kms.text.index('data-tag-name="listen_interfaces"')
-    assert kms.text.index('data-tag-name="listen_interfaces"') < kms.text.index('data-tag-name="listen_addresses"')
-    assert kms.text.index('data-tag-name="listen_addresses"') < kms.text.index('name="port"')
+    assert kms.text.index('data-tag-name="listen_interfaces"') < kms.text.index('data-derived-listen-addresses')
+    assert kms.text.index('data-derived-listen-addresses') < kms.text.index('name="port"')
     assert 'name="listen_interfaces_present"' in kms.text
-    assert 'name="listen_addresses_present"' in kms.text
     assert 'data-tag-name="listen_interfaces"' in kms.text
-    assert 'data-tag-name="listen_addresses"' in kms.text
+    assert 'data-tag-name="listen_addresses"' not in kms.text
     assert "data-tag-single" not in kms.text
     assert "192.168.50.1" in kms.text
     assert "eth2 - access / access / 192.168.50.1" in kms.text
@@ -2794,7 +2978,7 @@ def test_kms_settings_autosave_returns_json(client):
     payload = response.json()
     assert payload["status"] == "saved"
     assert payload["listen_address"] == "192.168.50.1"
-    assert payload["listen_addresses"] == ["192.168.50.1", "10.0.0.99"]
+    assert payload["listen_addresses"] == ["192.168.50.1"]
     assert payload["server_certificate"] == "kms.labfoundry.internal"
     assert "KMS requires Certificate Authority to be enabled before activation." in payload["validation_errors"]
     refreshed = client.get("/kms")
@@ -2805,7 +2989,7 @@ def test_kms_settings_autosave_returns_json(client):
     assert "/etc/labfoundry/ca/root.crt" in refreshed.text
     assert "/var/lib/labfoundry/kms/pykmip.db" in refreshed.text
     assert "/etc/labfoundry/kms/pykmip.conf" in refreshed.text
-    assert "10.0.0.99" in refreshed.text
+    assert "10.0.0.99" not in refreshed.text
 
     with SessionLocal() as db:
         record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
@@ -2929,8 +3113,8 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert "Listen addresses" in page.text
     assert "service-bind-editor stacked-service-bind-editor" in page.text
     assert 'data-tag-name="listen_interfaces"' in page.text
-    assert 'data-tag-name="listen_addresses"' in page.text
-    assert page.text.index('data-tag-name="listen_addresses"') < page.text.index('name="port"')
+    assert 'data-tag-name="listen_addresses"' not in page.text
+    assert page.text.index('data-derived-listen-addresses') < page.text.index('name="port"')
     assert page.text.count("fixed-value-field") >= 2
     assert "<span>Config path</span>" not in page.text
     assert "eth1 - access / trunk" not in page.text
@@ -2985,6 +3169,7 @@ def test_vcf_private_registry_page_models_harbor_and_bundle_relocation(client):
     assert "Listen addresses" in page.text
     assert "service-bind-editor" in page.text
     assert 'data-service-bind-address="192.168.50.1"' in page.text
+    assert 'data-tag-name="listen_addresses"' not in page.text
     assert page.text.count("fixed-value-field") >= 1
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
@@ -3228,6 +3413,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
     assert "Listen interfaces" in page.text
+    assert "Listen addresses" in page.text
+    assert 'data-tag-name="listen_addresses"' not in page.text
     assert "Listen addresses" in page.text
     assert "service-bind-editor" in page.text
     assert 'data-service-bind-address="192.168.50.1"' in page.text
@@ -3893,12 +4080,14 @@ def test_physical_and_vlan_pages_render(client):
     physical = client.get("/physical-interfaces")
     assert physical.status_code == 200
     assert "Physical Interfaces" in physical.text
-    assert "Review observed Photon NICs, then edit desired access, trunk, and IP settings" in physical.text
+    assert "Review observed Photon NICs, then edit desired access, trunk, IPv4, IPv6, and admin state" in physical.text
     assert "physical-interfaces-table" in physical.text
     assert "Refresh host inventory" in physical.text
-    assert "Observed IP" in physical.text
-    assert "Desired IP CIDR" in physical.text
-    assert "IP CIDR" in physical.text
+    assert "Observed IPv4" in physical.text
+    assert "Observed IPv6" in physical.text
+    assert "IPv4 CIDR" in physical.text
+    assert "IPv6 CIDR" in physical.text
+    assert "network-state-icon up" in physical.text
     assert "eth0" in physical.text
     assert "192.168.49.1/24" in physical.text
     assert "192.168.50.1/24" in physical.text
@@ -3909,7 +4098,7 @@ def test_physical_and_vlan_pages_render(client):
     vlans = client.get("/vlan-interfaces")
     assert vlans.status_code == 200
     assert "VLAN Interfaces" in vlans.text
-    assert "For standard access-mode NICs, assign IP CIDR on Physical Interfaces instead." in vlans.text
+    assert "For standard access-mode NICs, assign IPv4/IPv6 CIDR on Physical Interfaces instead." in vlans.text
     assert "vlan-interfaces-table" in vlans.text
     assert "+ Add VLAN here" in client.get("/static/app.js").text
     assert 'data-parent-options=\'[{"label": "eth1 - access - trunk' in vlans.text
@@ -3917,6 +4106,17 @@ def test_physical_and_vlan_pages_render(client):
     app_js = client.get("/static/app.js").text
     assert "deleteVlanInterfaceFromMenu" in app_js
     assert "refreshNetworkSideStack" in app_js
+    assert "networkStateIcon" in app_js
+    assert "operStateFormatter" in app_js
+    assert "cidrInputEditor" in app_js
+    assert "isValidCidr" in app_js
+    assert 'editorParams: { family: "ipv4", placeholder: "192.168.50.1/24" }' in app_js
+    assert 'editorParams: { family: "ipv6", placeholder: "fd00:50::1/64" }' in app_js
+    app_css = client.get("/static/app.css").text
+    assert ".network-state-icon.up" in app_css
+    assert ".network-state-icon.down" in app_css
+    assert ".network-state-icon.missing" in app_css
+    assert ".invalid-cidr-input" in app_css
     assert "Review appliance changes" in vlans.text
     assert "/var/lib/labfoundry/apply/network/labfoundry-network.conf" in vlans.text
 
@@ -4265,7 +4465,7 @@ def test_vlan_interface_requires_vlan_id_and_ip_cidr(client):
         },
     )
     assert missing_ip.status_code == 409
-    assert "VLAN IP CIDR is required" in missing_ip.text
+    assert "VLAN IPv4 CIDR, IPv6 CIDR, or both are required." in missing_ip.text
 
     missing_vlan = client.post(
         "/vlan-interfaces",
@@ -4365,7 +4565,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "service-preview-tools-20260629-1" in page.text
+    assert "network-dualstack-20260701-2" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -4882,14 +5082,14 @@ def test_ca_settings_autosave_returns_json(client):
     payload = response.json()
     assert payload["status"] == "saved"
     assert payload["listen_interfaces"] == ["eth2"]
-    assert payload["listen_addresses"] == ["192.168.50.1", "10.0.0.99"]
-    assert "10.0.0.99" in payload["config_preview"]
+    assert payload["listen_addresses"] == ["192.168.50.1"]
+    assert "10.0.0.99" not in payload["config_preview"]
     assert "LabFoundry Test Root CA" in client.get("/certificate-authority").text
     with SessionLocal() as db:
         ca_settings = db.execute(select(CaSettings)).scalar_one()
         assert ca_settings.storage_path == "/etc/labfoundry/ca"
         assert ca_settings.listen_interface == "eth2"
-        assert ca_settings.listen_address == "192.168.50.1\n10.0.0.99"
+        assert ca_settings.listen_address == "192.168.50.1"
 
 
 def test_ca_apply_task_captures_current_desired_state(client):
@@ -4992,7 +5192,6 @@ def test_dns_settings_accept_multiple_listen_interfaces(client):
         data={
             "enabled": "on",
             "listen_interfaces": ["eth0", "eth2"],
-            "listen_addresses": ["192.168.50.1", "192.168.60.1"],
             "upstream_servers": "1.1.1.1\n9.9.9.9",
             "cache_size": "1000",
             "expand_hosts": "on",
@@ -5006,8 +5205,9 @@ def test_dns_settings_accept_multiple_listen_interfaces(client):
     refreshed = client.get("/dns")
     assert "interface=eth0" in refreshed.text
     assert "interface=eth2" in refreshed.text
+    assert "listen-address=192.168.49.1" in refreshed.text
     assert "listen-address=192.168.50.1" in refreshed.text
-    assert "listen-address=192.168.60.1" in refreshed.text
+    assert "listen-address=192.168.60.1" not in refreshed.text
     assert "domain=labfoundry.internal" in refreshed.text
 
 
@@ -5037,6 +5237,7 @@ def test_dns_settings_autosave_returns_json(client):
     assert response.json()["status"] == "saved"
     assert response.json()["listen_interfaces"] == ["eth2"]
     assert response.json()["valid"] is True
+    assert "ESXi PXE boot services require DHCP to be enabled so clients receive boot files." not in response.json()["validation_errors"]
     assert "server=/sddc.internal/192.168.10.10" in response.json()["config_preview"]
     assert "server=/sddc.internal/192.168.10.11" in response.json()["config_preview"]
     refreshed = client.get("/dns")
@@ -5069,16 +5270,44 @@ def test_dns_settings_autosave_filters_invalid_listen_interfaces(client):
     assert response.status_code == 200
     assert response.json()["listen_interfaces"] == ["eth2"]
     assert response.json()["valid"] is True
+    assert "ESXi PXE boot services require DHCP to be enabled so clients receive boot files." not in response.json()["validation_errors"]
     assert "interface=eth2" in response.json()["config_preview"]
+
+
+def test_dns_validation_requires_dhcp_only_when_esxi_pxe_boot_enabled(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting
+    from labfoundry.app.services.esxi_pxe import ESXI_PXE_BOOT_ENABLED_KEY
+
+    login(client)
+    with SessionLocal() as db:
+        setting = db.execute(select(Setting).where(Setting.key == ESXI_PXE_BOOT_ENABLED_KEY)).scalar_one_or_none()
+        if setting is None:
+            setting = Setting(key=ESXI_PXE_BOOT_ENABLED_KEY, value="true")
+            db.add(setting)
+        else:
+            setting.value = "true"
+        db.commit()
+
+    response = client.get("/dns")
+
+    assert response.status_code == 200
+    assert "ESXi PXE boot services require DHCP to be enabled so clients receive boot files." in response.text
 
 
 def test_dns_apply_task_captures_current_desired_state(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Job
+    from labfoundry.app.models import DhcpSettings, Job
 
     login(client)
+    with SessionLocal() as db:
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp_settings.enabled = True
+        db.commit()
     page = client.get("/dns")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "dnsmasq"})
@@ -5215,9 +5444,13 @@ def test_dhcp_apply_task_captures_current_desired_state(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Job
+    from labfoundry.app.models import DhcpSettings, Job
 
     login(client)
+    with SessionLocal() as db:
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp_settings.enabled = True
+        db.commit()
     page = client.get("/dhcp")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "dnsmasq"})

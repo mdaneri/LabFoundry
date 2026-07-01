@@ -6,7 +6,7 @@ LabFoundry Routing/WAN v1 is intentionally appliance-owned and conservative. Des
 
 - Static route desired state rendered to `/var/lib/labfoundry/apply/wan/labfoundry-wan.conf`.
 - IPv4 outbound masquerade NAT rules rendered as the LabFoundry-owned `table ip labfoundry_nat`.
-- NAT outbound interfaces can be access physical interfaces with IP CIDRs or enabled VLAN interfaces with IP CIDRs; they do not have to use role `wan`.
+- NAT outbound interfaces can be access physical interfaces with IPv4 CIDRs or enabled VLAN interfaces with IPv4 CIDRs; they do not have to use role `wan`.
 - IPv4 forwarding enabled only when an enabled NAT rule requires it.
 - Interface/VLAN-level WAN simulation through one `tc qdisc replace dev <target> root netem ...` per target with an enabled assigned policy.
 - Disabled or unassigned WAN policy targets clear only LabFoundry-owned root qdisc intent.
@@ -40,7 +40,7 @@ NAT v1 is explicit IPv4 masquerade only. Future NAT work can consider:
 
 - Destination NAT and port forwarding with clear listener ownership.
 - Per-rule counters or status readback.
-- IPv6 routing and NAT alternatives where appropriate.
+- IPv6 routing is supported through `ip -6 route`; IPv6 NAT/NPT remains future work only if a concrete lab use case justifies it.
 
 Do not infer broad NAT automatically from interface roles. NAT must remain an explicit desired-state rule reviewed through global appliance apply.
 

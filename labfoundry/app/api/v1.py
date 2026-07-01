@@ -1,5 +1,5 @@
 from datetime import datetime
-from ipaddress import ip_interface
+from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
 import re
 import socket
@@ -120,6 +120,7 @@ from labfoundry.app.security import (
 )
 from labfoundry.app.services.dnsmasq import (
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+    dhcp_bind_target_families,
     dhcp_bind_target_names,
     dns_domain_warnings,
     dns_settings_to_dict,
@@ -225,12 +226,23 @@ def validate_vlan_api_payload(payload: VlanCreate, db: Session) -> dict:
     values = payload.model_dump()
     values["parent_interface"] = values["parent_interface"].strip()
     values["ip_cidr"] = values["ip_cidr"].strip()
-    if not values["ip_cidr"]:
-        raise HTTPException(status_code=422, detail="VLAN IP CIDR is required.")
-    try:
-        ip_interface(values["ip_cidr"])
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="VLAN IP CIDR must be a valid address and prefix, for example 192.168.50.1/24.") from exc
+    values["ipv6_cidr"] = values["ipv6_cidr"].strip()
+    if not values["ip_cidr"] and not values["ipv6_cidr"]:
+        raise HTTPException(status_code=422, detail="VLAN IPv4 CIDR, IPv6 CIDR, or both are required.")
+    if values["ip_cidr"]:
+        try:
+            parsed_ipv4 = ip_interface(values["ip_cidr"])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="VLAN IPv4 CIDR must be a valid address and prefix, for example 192.168.50.1/24.") from exc
+        if parsed_ipv4.version != 4:
+            raise HTTPException(status_code=422, detail="VLAN IPv4 CIDR must use an IPv4 address and prefix.")
+    if values["ipv6_cidr"]:
+        try:
+            parsed_ipv6 = ip_interface(values["ipv6_cidr"])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="VLAN IPv6 CIDR must be a valid address and prefix, for example fd00:50::1/64.") from exc
+        if parsed_ipv6.version != 6:
+            raise HTTPException(status_code=422, detail="VLAN IPv6 CIDR must use an IPv6 address and prefix.")
     parent = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == values["parent_interface"])).scalar_one_or_none()
     if parent and parent.oper_state == "missing":
         if values.get("enabled", True):
@@ -677,8 +689,17 @@ def update_physical_interface(
     interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == name)).scalar_one_or_none()
     if not interface:
         raise HTTPException(status_code=404, detail="Interface not found")
-    for field in ("role", "mtu", "admin_state", "ip_cidr"):
+    for field in ("role", "mtu", "admin_state", "ip_cidr", "ipv6_cidr"):
         if field in payload:
+            if field in {"ip_cidr", "ipv6_cidr"} and payload[field]:
+                try:
+                    parsed = ip_interface(str(payload[field]).strip())
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=f"{field} must be a valid address and prefix.") from exc
+                expected_version = 4 if field == "ip_cidr" else 6
+                if parsed.version != expected_version:
+                    family = "IPv4" if expected_version == 4 else "IPv6"
+                    raise HTTPException(status_code=422, detail=f"{field} must use an {family} address and prefix.")
             setattr(interface, field, payload[field])
     if "mode" in payload:
         new_mode = normalize_interface_mode(payload["mode"])
@@ -861,8 +882,41 @@ def route_response(route: Route) -> RouteResponse:
     )
 
 
+def route_target_names(db: Session) -> set[str]:
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlans = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
+    names = {
+        interface.name
+        for interface in interfaces
+        if interface.oper_state != "missing"
+        and normalize_interface_mode(interface.mode) != "trunk"
+        and (interface.ip_cidr or interface.ipv6_cidr)
+    }
+    names.update({vlan.name for vlan in vlans if vlan.enabled and (vlan.ip_cidr or vlan.ipv6_cidr)})
+    return names
+
+
+def validate_route_payload(payload: RouteCreate, db: Session) -> None:
+    try:
+        destination = ip_network(payload.destination_cidr, strict=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{payload.destination_cidr} is not a valid destination CIDR.") from exc
+    if payload.gateway:
+        try:
+            gateway = ip_address(payload.gateway)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{payload.gateway} is not a valid gateway IP address.") from exc
+        if gateway.version != destination.version:
+            raise HTTPException(status_code=422, detail="Route gateway family must match the destination CIDR family.")
+    if payload.interface_name not in route_target_names(db):
+        raise HTTPException(status_code=422, detail="Choose an access physical interface or enabled VLAN interface with an IP CIDR.")
+    if payload.metric < 0:
+        raise HTTPException(status_code=422, detail="Route metric cannot be negative.")
+
+
 @router.post("/routes", response_model=RouteResponse, status_code=201, tags=["Routes"], operation_id="createRoute")
 def create_route(payload: RouteCreate, identity: Annotated[Identity, Depends(require_scope("write:routes"))], db: Session = Depends(get_db)) -> RouteResponse:
+    validate_route_payload(payload, db)
     route = Route(**payload.model_dump())
     db.add(route)
     db.commit()
@@ -884,6 +938,7 @@ def update_route(route_id: int, payload: RouteCreate, identity: Annotated[Identi
     route = db.get(Route, route_id)
     if not route:
         raise HTTPException(status_code=404, detail="Route not found")
+    validate_route_payload(payload, db)
     for key, value in payload.model_dump().items():
         setattr(route, key, value)
     db.commit()
@@ -1005,7 +1060,7 @@ def nat_outbound_target_names(db: Session) -> set[str]:
     names = {
         interface.name
         for interface in interfaces
-        if interface.ip_cidr and normalize_interface_mode(interface.mode) != "trunk"
+        if interface.ip_cidr and interface.oper_state != "missing" and normalize_interface_mode(interface.mode) != "trunk"
     }
     names.update({vlan.name for vlan in vlans if vlan.enabled and vlan.ip_cidr})
     return names
@@ -1020,7 +1075,8 @@ def nat_source_group_ids(db: Session) -> set[str]:
 
 
 def validate_nat_rule_payload(payload: NatRuleCreate, db: Session) -> None:
-    source_errors = validate_nat_source(payload.source, nat_source_group_ids(db))
+    source_groups = firewall_source_group_state(setting_value(db, FIREWALL_SOURCE_GROUPS_SETTING_KEY), firewall_interface_networks(db.execute(select(PhysicalInterface)).scalars().all(), db.execute(select(VlanInterface)).scalars().all()))["groups"]
+    source_errors = validate_nat_source(payload.source, nat_source_group_ids(db), source_groups)
     if source_errors:
         raise HTTPException(status_code=422, detail=source_errors[0])
     if payload.outbound_interface not in nat_outbound_target_names(db):
@@ -1390,10 +1446,11 @@ def dnsmasq_validation_response(db: Session) -> ConfigValidationResponse:
     physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
     bind_targets = dhcp_bind_target_names(physical_interfaces, vlan_interfaces)
+    bind_target_families = dhcp_bind_target_families(physical_interfaces, vlan_interfaces)
     errors = (
         validate_dns_settings(dns_settings, dns_records, conditional_forwarders)
         + validate_dns_listen_targets(dns_settings, bind_targets)
-        + validate_dhcp_bind_targets(dhcp_settings, dhcp_scopes, bind_targets)
+        + validate_dhcp_bind_targets(dhcp_settings, dhcp_scopes, bind_target_families)
         + validate_dhcp_settings(
             dhcp_settings,
             dhcp_reservations,

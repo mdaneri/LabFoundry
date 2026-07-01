@@ -6,7 +6,7 @@
     <div class="panel-head">
       <div>
         <h2>Physical Interfaces</h2>
-        <p class="muted">Review observed Photon NICs, then edit desired access, trunk, and IP settings for global appliance apply.</p>
+        <p class="muted">Review observed Photon NICs, then edit desired access, trunk, IPv4, IPv6, and admin state for global appliance apply.</p>
       </div>
       <div class="button-row">
         <form action="/physical-interfaces/refresh" method="post">
@@ -18,7 +18,7 @@
     </div>
     <div class="inline-help-row">
       <span class="field-label"><span>Host inventory</span><button class="help-icon" type="button" data-help="Reads current Linux network devices through safe host inventory commands, matching NICs by MAC so Linux eth renumbering does not move desired state. Missing NICs are marked for review; refresh does not apply network changes.">i</button></span>
-      <span class="field-label"><span>Desired state</span><button class="help-icon" type="button" data-help="Editable access/trunk, IP CIDR, MTU, and admin state values are stored in LabFoundry and enforced only through the global appliance apply workflow.">i</button></span>
+      <span class="field-label"><span>Desired state</span><button class="help-icon" type="button" data-help="Editable access/trunk, IPv4 CIDR, IPv6 CIDR, MTU, and admin state values are stored in LabFoundry and enforced only through the global appliance apply workflow.">i</button></span>
     </div>
     {% if form_error %}
       <div class="alert error">{{ form_error }}</div>
@@ -35,7 +35,7 @@
     ></div>
     <table id="physical-interfaces-fallback" class="data-table dns-fallback-table">
       <thead>
-        <tr><th>Name</th><th>MAC</th><th>Driver</th><th>Speed</th><th>Observed IP</th><th>Desired IP CIDR</th><th>Role</th><th>Link Type</th><th>MTU</th><th>Admin</th><th>Oper</th><th>Source</th></tr>
+        <tr><th>Name</th><th>MAC</th><th>Driver</th><th>Speed</th><th>Observed IPv4</th><th>Observed IPv6</th><th>IPv4 CIDR</th><th>IPv6 CIDR</th><th>Role</th><th>Link Type</th><th>MTU</th><th>Admin Up</th><th>Oper</th><th>Source</th></tr>
       </thead>
       <tbody>
         {% for interface in physical_interface_rows %}
@@ -45,12 +45,30 @@
             <td>{{ interface["driver"] or "" }}</td>
             <td>{{ interface["speed"] or "" }}</td>
             <td>{{ interface["host_ip_cidr"] or "" }}</td>
+            <td>{{ interface["host_ipv6_cidr"] or "" }}</td>
             <td>{{ interface["ip_cidr"] or "" }}</td>
+            <td>{{ interface["ipv6_cidr"] or "" }}</td>
             <td>{{ interface["role"] }}</td>
             <td>{{ interface["mode"] }}</td>
             <td>{{ interface["mtu"] }}</td>
-            <td>{{ interface["admin_state"] }}</td>
-            <td>{{ interface["oper_state"] }}</td>
+            <td>
+              {% if interface["admin_up"] %}
+                <span class="network-state-icon up" title="up"><span class="state-symbol" aria-hidden="true">&#8593;</span><span class="state-label">up</span></span>
+              {% else %}
+                <span class="network-state-icon down" title="down"><span class="state-symbol" aria-hidden="true">&#8595;</span><span class="state-label">down</span></span>
+              {% endif %}
+            </td>
+            <td>
+              {% if interface["oper_state"] == "up" %}
+                <span class="network-state-icon up" title="up"><span class="state-symbol" aria-hidden="true">&#8593;</span><span class="state-label">up</span></span>
+              {% elif interface["oper_state"] == "down" %}
+                <span class="network-state-icon down" title="down"><span class="state-symbol" aria-hidden="true">&#8595;</span><span class="state-label">down</span></span>
+              {% elif interface["oper_state"] == "missing" %}
+                <span class="network-state-icon missing" title="missing from host inventory"><span class="state-symbol" aria-hidden="true">!</span><span class="state-label">missing</span></span>
+              {% else %}
+                <span class="network-state-icon unknown" title="{{ interface['oper_state'] }}"><span class="state-symbol" aria-hidden="true">?</span><span class="state-label">{{ interface["oper_state"] }}</span></span>
+              {% endif %}
+            </td>
             <td>{{ interface["inventory_source"] }}</td>
           </tr>
         {% endfor %}

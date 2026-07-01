@@ -52,6 +52,7 @@ def network_config_text(
     eth2_admin_state: str = "up",
     include_vlan: bool = True,
     include_removed_vlan: bool = False,
+    dual_stack: bool = False,
 ) -> str:
     lines = [
         "[physical_interfaces]",
@@ -59,12 +60,14 @@ def network_config_text(
         "  role=management",
         "  mode=access",
         "  ip_cidr=192.168.49.1/24",
+        f"  ipv6_cidr={'2001:db8:49::1/64' if dual_stack else ''}",
         "  admin_state=up",
         "  mtu=1500",
         "interface=eth2",
         "  role=access",
         f"  mode={eth2_mode}",
         "  ip_cidr=",
+        f"  ipv6_cidr={'2001:db8:60::1/64' if dual_stack else ''}",
         f"  admin_state={eth2_admin_state}",
         "  mtu=1500",
         "",
@@ -77,6 +80,7 @@ def network_config_text(
                 "  parent=eth2",
                 "  vlan_id=20",
                 "  ip_cidr=192.168.20.1/24",
+                f"  ipv6_cidr={'2001:db8:20::1/64' if dual_stack else ''}",
                 "  mtu=1500",
                 "  role=services",
             ]
@@ -101,21 +105,28 @@ def wan_config_text(
     wan_mode: str = "interface",
     target_role: str = "wan",
     target_wan: bool = True,
+    ipv6_route: bool = False,
+    ipv6_only_target: bool = False,
 ) -> str:
     source = "not-a-cidr" if bad_nat_source else "192.168.50.0/24"
     outbound = "eth9" if bad_target else "eth1.20"
+    ipv4_cidr = "" if ipv6_only_target else "192.168.20.1/24"
+    ipv6_cidr = "2001:db8:20::1/64" if ipv6_route or ipv6_only_target else ""
+    destination = "2001:db8:100::/64" if ipv6_route else "10.20.0.0/24"
+    gateway = "2001:db8:20::fe" if ipv6_route else ""
     return "\n".join(
         [
             "[targets]",
             "target=eth1.20",
             "  kind=vlan",
             f"  role={target_role}",
-            "  ip_cidr=192.168.20.1/24",
+            f"  ip_cidr={ipv4_cidr}",
+            f"  ipv6_cidr={ipv6_cidr}",
             f"  wan={str(target_wan).lower()}",
             "",
             "[routes]",
-            "route=10.20.0.0/24",
-            "  gateway=",
+            f"route={destination}",
+            f"  gateway={gateway}",
             "  interface=eth1.20",
             "  metric=120",
             "  enabled=true",
@@ -266,6 +277,21 @@ def test_network_helper_accepts_valid_vlan_config(tmp_path):
     assert helper._network_config_errors(config_path) == []
 
 
+def test_network_helper_renders_dual_stack_networkd_addresses(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(network_config_text(dual_stack=True), encoding="utf-8")
+
+    assert helper._network_config_errors(config_path) == []
+    files, _reconfigure_links, _admin_down_links = helper._systemd_networkd_files(config_path)
+
+    assert "Address=192.168.49.1/24" in files["00-labfoundry-mgmt.network"]
+    assert "Address=2001:db8:49::1/64" in files["00-labfoundry-mgmt.network"]
+    vlan_network = files["10-labfoundry-eth2.20.network"]
+    assert "Address=192.168.20.1/24" in vlan_network
+    assert "Address=2001:db8:20::1/64" in vlan_network
+
+
 def test_wan_helper_rejects_config_outside_apply_dir(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-wan.conf"
@@ -315,6 +341,48 @@ def test_wan_helper_allows_nat_on_non_wan_role_target(tmp_path):
     config_path.write_text(wan_config_text(target_role="access", target_wan=False), encoding="utf-8")
 
     assert helper._wan_config_errors(config_path) == []
+
+
+def test_wan_helper_accepts_ipv6_routes_and_rejects_ipv6_only_nat_targets(tmp_path):
+    helper = load_helper_module()
+    ipv6_route = tmp_path / "ipv6-route.conf"
+    ipv6_route.write_text(wan_config_text(ipv6_route=True), encoding="utf-8")
+    ipv6_only_nat = tmp_path / "ipv6-only-nat.conf"
+    ipv6_only_nat.write_text(wan_config_text(ipv6_route=True, ipv6_only_target=True), encoding="utf-8")
+
+    assert helper._wan_config_errors(ipv6_route) == []
+    parsed = helper._parse_wan_config(ipv6_route)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    helper._run = fake_run
+    helper.shutil.which = lambda command: f"/usr/sbin/{command}" if command in {"ip", "tc"} else None
+    assert helper._apply_wan_routes_and_qdiscs(parsed) == 0
+    assert ["ip", "-6", "route", "replace", "2001:db8:100::/64", "via", "2001:db8:20::fe", "dev", "eth1.20", "metric", "120"] in commands
+    assert any("outbound interface with an IPv4 CIDR" in error for error in helper._wan_config_errors(ipv6_only_nat))
+
+
+def test_staging_prepare_repairs_apply_directory_ownership(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_root = tmp_path / "apply"
+    config_path = apply_root / "wan" / "labfoundry-wan.conf"
+    chowned: list[tuple[Path, str, str]] = []
+    chmodded: list[tuple[Path, int]] = []
+
+    monkeypatch.setattr(helper, "LABFOUNDRY_APPLY_DIR", apply_root)
+    monkeypatch.setattr(helper.shutil, "chown", lambda path, user, group: chowned.append((Path(path), user, group)))
+    monkeypatch.setattr(helper.os, "chmod", lambda path, mode: chmodded.append((Path(path), mode)))
+
+    assert helper.main(["labfoundry-helper", "staging", "prepare", "--real", str(config_path)]) == 0
+
+    assert config_path.parent.is_dir()
+    assert (apply_root, "labfoundry", "labfoundry") in chowned
+    assert (config_path.parent, "labfoundry", "labfoundry") in chowned
+    assert (apply_root, 0o755) in chmodded
+    assert (config_path.parent, 0o750) in chmodded
 
 
 def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, tmp_path):
