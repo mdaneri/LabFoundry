@@ -20,7 +20,7 @@ def sha256(path: str) -> str:
 
 
 def test_photon_provisioning_management_network_matches_eth0_only():
-    script = Path("image/hyperv/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
     main = Path("labfoundry/app/main.py").read_text(encoding="utf-8")
     seed = Path("labfoundry/app/seed.py").read_text(encoding="utf-8")
 
@@ -33,7 +33,7 @@ def test_photon_provisioning_management_network_matches_eth0_only():
 
 
 def test_photon_provisioning_installs_default_nginx_management_proxy():
-    script = Path("image/hyperv/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
     systemd_unit = Path("image/hyperv/systemd/labfoundry.service").read_text(encoding="utf-8")
     sudoers = Path("image/hyperv/sudoers.d/labfoundry-helper").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
@@ -59,6 +59,8 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'chown "$BOOTSTRAP_USERNAME:$(id -gn "$BOOTSTRAP_USERNAME")" "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME"' in script
     assert 'chmod 0750 "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME"' in script
     assert "UMask=0027" in systemd_unit
+    assert "--host 127.0.0.1 --port 8000" in systemd_unit
+    assert "--host 0.0.0.0" not in systemd_unit
     assert "configuring default LabFoundry management nginx proxy" in script
     assert "install -d -o root -g root -m 0755 /etc/nginx/conf.d" in script
     assert "/etc/nginx/conf.d/labfoundry.conf" in script
@@ -71,9 +73,15 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "nginx -t" in script
     assert "systemctl enable --now nginx" in script
     assert 'LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"' in script
+    assert 'LABFOUNDRY_MGMT_SOURCE_CIDR="${LABFOUNDRY_MGMT_SOURCE_CIDR:-}"' in script
+    assert 'ip -4 -o addr show dev "$LABFOUNDRY_MGMT_INTERFACE" scope global' in script
+    assert 'DETECTED_MGMT_ADDRESS' in script
+    assert "ipaddress.ip_interface(sys.argv[1]).network" in script
+    assert "printf '\\nLABFOUNDRY_MANAGEMENT_SOURCE_CIDR=%s\\n' \"$LABFOUNDRY_MGMT_SOURCE_CIDR\" >>/etc/labfoundry/labfoundry.env" in script
     assert 'log_step "system adapter dry-run mode: $LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS"' in script
     assert "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=$LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS" in script
-    assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/image/hyperv/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
+    assert 'ip saddr $LABFOUNDRY_MGMT_SOURCE_CIDR tcp dport { 22, 80, 443 } accept comment "LabFoundry management access"' in script
+    assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
     assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
     assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
     assert "labfoundry-root-login.conf" in script
@@ -110,6 +118,7 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
     root_docs = Path("README.md").read_text(encoding="utf-8")
     wrapper = Path("scripts/windows/build-photon-hyperv-image.ps1").read_text(encoding="utf-8")
+    build_module = Path("scripts/windows/LabFoundry.PhotonImage.psm1").read_text(encoding="utf-8")
     gitignore = Path(".gitignore").read_text(encoding="utf-8")
 
     assert 'default = "LabFoundry-Mgmt"' in template
@@ -151,27 +160,27 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
     assert "[string[]]$BuilderStaticDns = @()" in wrapper
     assert "[string]$PipGlobalIndex = ''" in wrapper
     assert "[string]$PipGlobalIndexUrl = ''" in wrapper
-    assert "function Get-HostIpv4DnsServers" in wrapper
-    assert "Get-DnsClientServerAddress -AddressFamily IPv4" in wrapper
-    assert "Using host IPv4 DNS for Photon builder/appliance" in wrapper
-    assert "falling back to public DNS" in wrapper
-    assert "create_photon_kickstart_iso.py" in wrapper
-    assert "Using remastered Photon ISO" in wrapper
-    assert "Packer will boot a single DVD with embedded photon-ks.json and a GRUB auto-install entry." in wrapper
-    assert "Write-PackerVarFile" in wrapper
-    assert "Using Packer var-file" in wrapper
+    assert "function Get-LabFoundryHostIpv4DnsServers" in build_module
+    assert "Get-DnsClientServerAddress -AddressFamily IPv4" in build_module
+    assert "Using host IPv4 DNS for Photon builder/appliance" in build_module
+    assert "falling back to public DNS" in build_module
+    assert "create_photon_kickstart_iso.py" in build_module
+    assert "Using remastered Photon ISO" in build_module
+    assert "Packer will boot a single DVD with embedded photon-ks.json and a GRUB auto-install entry." in build_module
+    assert "Write-LabFoundryPackerVarFile" in build_module
+    assert "Using Packer var-file" in build_module
     assert "[ValidateSet('cleanup', 'abort', 'ask', 'run-cleanup-provisioner')]" in wrapper
     assert "[string]$PackerOnError = 'cleanup'" in wrapper
     assert "[switch]$KeepExistingOutput" in wrapper
     assert "[switch]$EnableRealSystemAdapters" in wrapper
-    assert "Packer build will replace any existing output directory for this build." in wrapper
-    assert "$packerArgs += '-force'" in wrapper
-    assert '$packerArgs += "-on-error=$PackerOnError"' in wrapper
-    assert "'-var-file', $varFilePath" in wrapper
-    assert "builder_static_dns       = $BuilderStaticDns" in wrapper
-    assert "pip_global_index         = $PipGlobalIndex" in wrapper
-    assert "pip_global_index_url     = $PipGlobalIndexUrl" in wrapper
-    assert "dry_run_system_adapters  = -not $EnableRealSystemAdapters" in wrapper
+    assert "Packer build will replace any existing output directory for this build." in build_module
+    assert "$packerArgs += '-force'" in build_module
+    assert '$packerArgs += "-on-error=$PackerOnError"' in build_module
+    assert "'-var-file', $varFilePath" in build_module
+    assert "builder_static_dns       = $BuilderStaticDns" in build_module
+    assert "pip_global_index         = $PipGlobalIndex" in build_module
+    assert "pip_global_index_url     = $PipGlobalIndexUrl" in build_module
+    assert "dry_run_system_adapters  = -not $EnableRealSystemAdapters" in build_module
     assert "UseHttpKickstartFallback" not in wrapper
     assert "/image/hyperv/build" in gitignore
     remaster_helper = Path("scripts/interop/create_photon_kickstart_iso.py").read_text(encoding="utf-8")
@@ -192,12 +201,15 @@ def test_packer_build_uses_labfoundry_management_network_by_default():
 
 def test_photon_image_optional_pip_global_index_configuration():
     wrapper = Path("scripts/windows/build-photon-hyperv-image.ps1").read_text(encoding="utf-8")
+    build_module = Path("scripts/windows/LabFoundry.PhotonImage.psm1").read_text(encoding="utf-8")
     template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
-    script = Path("image/hyperv/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
 
-    assert "[string[]]$BuilderStaticDns = @(),\n    [string]$PipGlobalIndex = '',\n    [string]$PipGlobalIndexUrl = ''," in wrapper
-    assert "pip_global_index         = $PipGlobalIndex" in wrapper
-    assert "pip_global_index_url     = $PipGlobalIndexUrl" in wrapper
+    assert "[string[]]$BuilderStaticDns = @()" in wrapper
+    assert "[string]$PipGlobalIndex = ''" in wrapper
+    assert "[string]$PipGlobalIndexUrl = ''" in wrapper
+    assert "pip_global_index         = $PipGlobalIndex" in build_module
+    assert "pip_global_index_url     = $PipGlobalIndexUrl" in build_module
 
     assert 'variable "pip_global_index" {\n  type        = string\n  default     = ""' in template
     assert 'variable "pip_global_index_url" {\n  type        = string\n  default     = ""' in template
@@ -261,8 +273,8 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
 
 
 def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
-    script = Path("scripts/windows/create-labfoundry-test-vm.ps1").read_text(encoding="utf-8")
-    vm_script = Path("scripts/windows/create-labfoundry-vm.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/create-labfoundry-hyperv-test-vm.ps1").read_text(encoding="utf-8")
+    vm_script = Path("scripts/windows/create-labfoundry-hyperv-vm.ps1").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
 
     assert "[string]$Name = 'LabFoundry'" in script
@@ -278,16 +290,16 @@ def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
     assert "LabFoundry-Backups.vhdx" in script
     assert "Refusing to remove OS disk as a data disk" in script
     assert "create-hyperv-switches.ps1" in script
-    assert "create-labfoundry-vm.ps1" in script
+    assert "create-labfoundry-hyperv-vm.ps1" in script
     assert "-SkipLabNetworkAdapters:$SkipLabNetworkAdapters" in script
     assert "-SiteVlanId $SiteVlanId" in script
     assert "-TaggedVlanId $TaggedVlanId" in script
-    assert "start-labfoundry-vm.ps1" in script
-    assert "get-labfoundry-vm-ip.ps1" in script
+    assert "start-labfoundry-hyperv-vm.ps1" in script
+    assert "get-labfoundry-hyperv-vm-ip.ps1" in script
     assert "VM already exists: $Name. Pass -Redeploy" in script
     assert "Remove-VM -Name $Name -Force" in script
     assert "Run this script from an elevated PowerShell session." not in script
-    assert "create-labfoundry-test-vm.ps1 -WaitForIp" in docs
+    assert "create-labfoundry-hyperv-test-vm.ps1 -WaitForIp" in docs
     assert "pass `-Redeploy` to remove and recreate only that VM" in docs
     assert "same appliance-side lab NIC layout as the lifecycle" in docs
     assert "SiteA` on `LabFoundry-SiteA` as trunk VLAN 12" in docs
@@ -304,6 +316,78 @@ def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
     assert "Add-VMNetworkAdapter -VMName $VMName -Name 'Trunk' -SwitchName 'LabFoundry-Trunk'" in vm_script
     assert "Set-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName 'Trunk' -Trunk -AllowedVlanIdList \"$TaggedVlanTag\" -NativeVlanId 0" in vm_script
     assert "Add-VMNetworkAdapter -VMName $VMName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'" in vm_script
+
+
+def test_windows_script_names_use_provider_tokens():
+    script_names = {path.name for path in Path("scripts/windows").glob("*.ps1")}
+
+    old_vmware_token = "vmware-" + "workstation"
+    old_names = {
+        f"build-photon-{old_vmware_token}-image.ps1",
+        f"create-labfoundry-{old_vmware_token}-test-vm.ps1",
+        f"invoke-{old_vmware_token}-lifecycle-test.ps1",
+        f"prepare-{old_vmware_token}-networks.ps1",
+        "prepare-" + "tiny-linux-client.ps1",
+        "get-labfoundry-" + "vm-ip.ps1",
+        "start-labfoundry-" + "vm.ps1",
+        "stop-labfoundry-" + "vm.ps1",
+    }
+    assert script_names.isdisjoint(old_names)
+
+    assert "build-photon-vmware-image.ps1" in script_names
+    assert "create-labfoundry-vmware-test-vm.ps1" in script_names
+    assert "create-labfoundry-vmware-vm.ps1" in script_names
+    assert "invoke-vmware-lifecycle-test.ps1" in script_names
+    assert "prepare-vmware-networks.ps1" in script_names
+    assert "prepare-vmware-tiny-linux-client.ps1" in script_names
+    assert "get-labfoundry-vmware-vm-ip.ps1" in script_names
+    assert "start-labfoundry-vmware-vm.ps1" in script_names
+    assert "stop-labfoundry-vmware-vm.ps1" in script_names
+    assert "remove-labfoundry-vmware-vm.ps1" in script_names
+    assert "remove-vmware-lifecycle-vms.ps1" in script_names
+    assert "reset-labfoundry-vmware-vm.ps1" in script_names
+    assert "set-labfoundry-vmware-test-nics.ps1" in script_names
+    assert "create-labfoundry-hyperv-test-vm.ps1" in script_names
+    assert "create-labfoundry-hyperv-vm.ps1" in script_names
+    assert "prepare-hyperv-tiny-linux-client.ps1" in script_names
+    assert "get-labfoundry-hyperv-vm-ip.ps1" in script_names
+    assert "start-labfoundry-hyperv-vm.ps1" in script_names
+    assert "stop-labfoundry-hyperv-vm.ps1" in script_names
+
+
+def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
+    script = Path("scripts/windows/create-labfoundry-vmware-test-vm.ps1").read_text(encoding="utf-8")
+    vm_script = Path("scripts/windows/create-labfoundry-vmware-vm.ps1").read_text(encoding="utf-8")
+    nics_script = Path("scripts/windows/set-labfoundry-vmware-test-nics.ps1").read_text(encoding="utf-8")
+
+    assert "[string]$Name = 'LabFoundry-VMware'" in script
+    assert "[switch]$Redeploy" in script
+    assert "[switch]$SkipLabNetworkAdapters" in script
+    assert "[switch]$IncludeLabNetworkAdapters" in script
+    assert "[switch]$ResetDataDisks" in script
+    assert "[switch]$WaitForIp" in script
+    assert "prepare-vmware-networks.ps1" in script
+    assert "create-labfoundry-vmware-vm.ps1" in script
+    assert "start-labfoundry-vmware-vm.ps1" in script
+    assert "get-labfoundry-vmware-vm-ip.ps1" in script
+    assert "remove-labfoundry-vmware-vm.ps1" in script
+    assert "Find-LatestApplianceVmx" in script
+    assert "image\\vmware-workstation\\output" in script
+    assert "image\\vmware-workstation\\test-vms\\$Name" in script
+    assert "$effectiveSkipLabNetworkAdapters = -not $IncludeLabNetworkAdapters" in script
+    assert "LabFoundry-Depot.vmdk" in script
+    assert "LabFoundry-Backups.vmdk" in script
+    assert "Refusing to reset VMware data disk outside the VM output directory" in script
+    assert "vmrun.exe was not found" in vm_script
+    assert "vmware-vdiskmanager.exe was not found" in vm_script
+    assert "vmrun $($Arguments -join ' ') failed" in vm_script
+    assert "New-DataVmdk" in vm_script
+    assert "Set-VmxScsiDisk" in vm_script
+    assert "scsi0:$Unit" in vm_script
+    assert "set-labfoundry-vmware-test-nics.ps1" in vm_script
+    assert '"$prefix.vnet"' in nics_script
+    assert "$prefix.virtualDev" in nics_script
+    assert "vmxnet3" in nics_script
 
 
 def test_lifecycle_hyperv_script_does_not_cleanup_without_explicit_flag():
@@ -331,7 +415,7 @@ def test_lifecycle_single_command_wrapper_prepares_runs_and_cleans_up_by_default
     assert "[string]$SiteInterface = 'eth1.12'" in script
     assert "[string]$SiteCidr = '192.168.12.1/24'" in script
     assert "[int]$SiteVlanId = 12" in script
-    assert "prepare-tiny-linux-client.ps1" in script
+    assert "prepare-hyperv-tiny-linux-client.ps1" in script
     assert "Find-LatestApplianceVhdx" in script
     assert "run-hyperv-lifecycle-test.ps1" in script
     assert "$arguments += '-CleanupCreatedLab'" in script
@@ -358,6 +442,30 @@ def test_lifecycle_cleanup_scripts_are_scoped_to_labfoundry_assets():
     assert "LabFoundry-Photon-Builder" in vm_script
     assert "Refusing VM cleanup" in vm_script
     assert "Remove-VM -Name $vm.Name -Force" in vm_script
+
+
+def test_vmware_lifecycle_cleanup_only_removes_existing_lifecycle_vms():
+    wrapper = Path("scripts/windows/invoke-vmware-lifecycle-test.ps1").read_text(encoding="utf-8")
+    cleanup_script = Path("scripts/windows/remove-vmware-lifecycle-vms.ps1").read_text(encoding="utf-8")
+    docs = Path("docs/vmware-workstation-lifecycle-testing.md").read_text(encoding="utf-8")
+
+    assert "ParameterSetName = 'CleanupVms'" in wrapper
+    assert "remove-vmware-lifecycle-vms.ps1" in wrapper
+    assert "run-vmware-lifecycle-test.ps1" in wrapper
+    cleanup_block = wrapper.split("if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {\n    &", 1)[1].split("return", 1)[0]
+    assert "remove-vmware-lifecycle-vms.ps1" in cleanup_block
+    assert "run-vmware-lifecycle-test.ps1" not in cleanup_block
+    assert "ApplianceVmxPath" not in cleanup_block
+    assert "ClientVmdkPath" not in cleanup_block
+    assert "CleanupCreatedLab" not in cleanup_block
+    assert "Refusing VM cleanup for prefix '$LabName'" in cleanup_script
+    assert "LabFoundryWorkstationLifecycle" in cleanup_script
+    assert "test-results\\vmware-workstation-lifecycle" in cleanup_script
+    assert "vmrun.exe was not found" in cleanup_script
+    assert "Get-VmxDisplayName" in cleanup_script
+    assert "Refusing to remove VM outside Workstation lifecycle results" in cleanup_script
+    assert "Remove-Item -LiteralPath $candidate.Directory -Recurse -Force" in cleanup_script
+    assert "-CleanupVmsOnly" in docs
 
 
 def test_lifecycle_hyperv_script_finds_alpine_ips_and_pins_plink_hostkeys():
@@ -407,7 +515,7 @@ def test_nocloud_seed_helper_writes_client_cloud_init_contract():
 
 
 def test_prepare_tiny_linux_client_downloads_verifies_and_converts_alpine():
-    script = Path("scripts/windows/prepare-tiny-linux-client.ps1").read_text(encoding="utf-8")
+    script = Path("scripts/windows/prepare-hyperv-tiny-linux-client.ps1").read_text(encoding="utf-8")
 
     assert "dl-cdn.alpinelinux.org/alpine/latest-stable/releases/cloud" in script
     assert "generic_alpine-3.24.1-x86_64-uefi-cloudinit-r0.qcow2" in script

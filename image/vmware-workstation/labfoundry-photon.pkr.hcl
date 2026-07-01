@@ -2,26 +2,33 @@ packer {
   required_version = ">= 1.10.0"
 
   required_plugins {
-    hyperv = {
-      version = ">= 1.1.3"
-      source  = "github.com/hashicorp/hyperv"
+    vmware = {
+      version = ">= 2.1.3"
+      source  = "github.com/vmware/vmware"
     }
   }
 }
 
 variable "vm_name" {
   type    = string
-  default = "LabFoundry-Photon-Builder"
+  default = "LabFoundry-Photon-Builder-VMware"
 }
 
 variable "output_directory" {
   type    = string
-  default = "output/labfoundry-photon-hyperv"
+  default = "output/labfoundry-photon-vmware-workstation"
 }
 
-variable "switch_name" {
-  type    = string
-  default = "LabFoundry-Mgmt"
+variable "vmnet_name" {
+  type        = string
+  default     = "vmnet8"
+  description = "VMware Workstation network used by the Packer builder NIC."
+}
+
+variable "headless" {
+  type        = bool
+  default     = false
+  description = "Run the VMware Workstation builder without a visible console window."
 }
 
 variable "iso_url" {
@@ -55,24 +62,24 @@ variable "bootstrap_admin_password" {
 variable "ssh_host" {
   type        = string
   default     = null
-  description = "Optional Photon guest SSH host override. Leave null to let the Hyper-V builder discover the guest IP through KVP."
+  description = "Optional Photon guest SSH host override."
 }
 
 variable "iso_contains_kickstart" {
   type        = bool
   default     = false
-  description = "Set true only for a Photon ISO remastered by scripts/windows/build-photon-hyperv-image.ps1 with photon-ks.json and the LabFoundry GRUB auto-install entry embedded."
+  description = "Set true only for a Photon ISO remastered by scripts/windows/build-photon-vmware-image.ps1 with photon-ks.json and the LabFoundry GRUB auto-install entry embedded."
 
   validation {
     condition     = var.iso_contains_kickstart
-    error_message = "Iso_contains_kickstart must be true. Run scripts/windows/build-photon-hyperv-image.ps1 so it creates and passes the remastered Photon ISO."
+    error_message = "Iso_contains_kickstart must be true. Run scripts/windows/build-photon-vmware-image.ps1 so it creates and passes the remastered Photon ISO."
   }
 }
 
 variable "builder_static_ip" {
   type        = string
-  default     = "192.168.49.30/24"
-  description = "Static IP or CIDR for the installed Photon builder VM. Packer uses this address for SSH."
+  default     = "192.168.167.30/24"
+  description = "Static IP or CIDR for the installed Photon builder VM. Packer uses this address for SSH when ssh_host is unset."
 }
 
 variable "builder_static_netmask" {
@@ -83,8 +90,8 @@ variable "builder_static_netmask" {
 
 variable "builder_static_gateway" {
   type        = string
-  default     = "192.168.49.254"
-  description = "Gateway for builder_static_ip. For LabFoundry-Mgmt this is the Windows host-side vEthernet address."
+  default     = "192.168.167.2"
+  description = "Gateway for builder_static_ip. For the default Workstation NAT vmnet this is the VMware NAT gateway."
 }
 
 variable "builder_static_dns" {
@@ -95,13 +102,13 @@ variable "builder_static_dns" {
 
 variable "final_mgmt_address" {
   type        = string
-  default     = "192.168.49.1/24"
+  default     = "192.168.167.10/24"
   description = "Final LabFoundry appliance management address after provisioning."
 }
 
 variable "final_mgmt_gateway" {
   type        = string
-  default     = "192.168.49.254"
+  default     = "192.168.167.2"
   description = "Final LabFoundry appliance management gateway after provisioning."
 }
 
@@ -136,40 +143,42 @@ locals {
   dry_run_system_adapters_text = var.dry_run_system_adapters ? "true" : "false"
 }
 
-source "hyperv-iso" "photon" {
-  vm_name            = var.vm_name
-  output_directory   = var.output_directory
-  switch_name        = var.switch_name
-  generation         = 2
-  enable_secure_boot = false
-  cpus               = 2
-  memory             = 4096
-  disk_size          = 40960
-  differencing_disk  = false
-  headless           = true
-  iso_url            = var.iso_url
-  iso_checksum       = var.iso_checksum
-  communicator       = "ssh"
-  # Hyper-V auto-detects this through the guest KVP daemon. Use ssh_host only
-  # as a fallback when Photon is reachable but Packer cannot infer the guest IP.
-  ssh_host               = var.ssh_host != null ? var.ssh_host : (local.builder_static_address != "" ? local.builder_static_address : null)
-  ssh_port               = 22
-  ssh_username           = var.ssh_username
-  ssh_password           = var.ssh_password
-  ssh_timeout            = "45m"
-  ssh_handshake_attempts = 200
-  shutdown_command       = "echo '${var.ssh_password}' | sudo -S systemctl poweroff"
-  # The remastered ISO owns the GRUB auto-install entry; Packer should not race
-  # the VM console by typing boot commands.
+source "vmware-iso" "photon" {
+  vm_name              = var.vm_name
+  output_directory     = var.output_directory
+  guest_os_type        = "other5xlinux-64"
+  version              = 21
+  headless             = var.headless
+  cpus                 = 2
+  memory               = 4096
+  disk_size            = 40960
+  disk_type_id         = 0
+  cdrom_adapter_type   = "sata"
+  network              = var.vmnet_name
+  network_adapter_type = "vmxnet3"
+  iso_url              = var.iso_url
+  iso_checksum         = var.iso_checksum
+  communicator         = "ssh"
+  ssh_host             = var.ssh_host != null ? var.ssh_host : (local.builder_static_address != "" ? local.builder_static_address : null)
+  ssh_port             = 22
+  ssh_username         = var.ssh_username
+  ssh_password         = var.ssh_password
+  ssh_timeout          = "45m"
+  shutdown_command     = "echo '${var.ssh_password}' | sudo -S systemctl poweroff"
+
+  vmx_data = {
+    "firmware"                = "efi"
+    "uefi.secureBoot.enabled" = "FALSE"
+  }
 }
 
 build {
-  name    = "labfoundry-photon-hyperv"
-  sources = ["source.hyperv-iso.photon"]
+  name    = "labfoundry-photon-vmware-workstation"
+  sources = ["source.vmware-iso.photon"]
 
   provisioner "shell" {
     inline = [
-      "mkdir -p /tmp/labfoundry-src/scripts /tmp/labfoundry-src/image/hyperv /tmp/labfoundry-src/third_party"
+      "mkdir -p /tmp/labfoundry-src/scripts /tmp/labfoundry-src/image/vmware-workstation /tmp/labfoundry-src/third_party"
     ]
   }
 
@@ -205,18 +214,18 @@ build {
 
   provisioner "file" {
     source      = "systemd"
-    destination = "/tmp/labfoundry-src/image/hyperv/systemd"
+    destination = "/tmp/labfoundry-src/image/vmware-workstation/systemd"
   }
 
   provisioner "file" {
     source      = "sudoers.d"
-    destination = "/tmp/labfoundry-src/image/hyperv/sudoers.d"
+    destination = "/tmp/labfoundry-src/image/vmware-workstation/sudoers.d"
   }
 
   provisioner "shell" {
     environment_vars = [
-      "LABFOUNDRY_GUEST_PLATFORM=hyperv",
-      "LABFOUNDRY_IMAGE_ASSET_DIR=image/hyperv",
+      "LABFOUNDRY_GUEST_PLATFORM=vmware",
+      "LABFOUNDRY_IMAGE_ASSET_DIR=image/vmware-workstation",
       "LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD=${local.bootstrap_admin_password}",
       "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}",
       "LABFOUNDRY_MGMT_ADDRESS=${var.final_mgmt_address}",

@@ -39,7 +39,7 @@ Prepare or refresh that image with:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/prepare-tiny-linux-client.ps1
+  -File scripts/windows/prepare-hyperv-tiny-linux-client.ps1
 ```
 
 The preparation script downloads Alpine's official UEFI cloud-init QCOW2 image,

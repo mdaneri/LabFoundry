@@ -18,4 +18,10 @@ playwright-report/
 /image/hyperv/packer_cache
 /image/hyperv/output
 /image/hyperv/clients
+/image/common/source
+/image/vmware-workstation/build
+/image/vmware-workstation/packer_cache
+/image/vmware-workstation/output
+/image/vmware-workstation/clients
+/image/vmware-workstation/test-vms
 /dist

@@ -451,7 +451,9 @@ The scaffold uses these switch names:
 - `LabFoundry-SiteB`
 - `LabFoundry-Trunk`
 
-The primary appliance image target is Hyper-V VHDX. ESXi/vSphere OVA and KVM/Proxmox QCOW2 are future packaging targets.
+The primary appliance image target remains Hyper-V VHDX. VMware Workstation
+VMX/VMDK is also available for local desktop parity work; ESXi/vSphere OVA and
+KVM/Proxmox QCOW2 are future packaging targets.
 
 The Photon image build scaffold lives in:
 
@@ -464,6 +466,14 @@ start the VM, attach test NICs, and run smoke checks. The first appliance smoke
 pass should verify SSH, `systemctl status labfoundry`, web UI login,
 `/openapi.json`, `/api/v1/dashboard`, reboot persistence, and dry-run
 `/appliance-apply` job output.
+
+For a normal Hyper-V test appliance, use the explicit Hyper-V wrapper:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/create-labfoundry-hyperv-test-vm.ps1 `
+  -WaitForIp
+```
 
 Lifecycle interop testing uses a separate Hyper-V VM set and must not reuse or
 destroy the normal `LabFoundry` test VM. The simple entry point is:
@@ -497,8 +507,58 @@ switches/NAT after all attached VMs are gone. Details live in
 [`docs/hyperv-lifecycle-testing.md`](docs/hyperv-lifecycle-testing.md).
 
 When troubleshooting a Hyper-V builder VM, use
-`scripts/windows/get-labfoundry-vm-ip.ps1` from an elevated PowerShell session
+`scripts/windows/get-labfoundry-hyperv-vm-ip.ps1` from an elevated PowerShell session
 to read the current IPv4 address reported by Hyper-V.
+
+## VMware Workstation Workflow
+
+The Workstation image target lives in:
+
+```text
+image/vmware-workstation/
+```
+
+It shares Photon ISO remastering, kickstart generation, checksum validation,
+Packer var-file generation, and appliance provisioning with the Hyper-V image
+path. The original Photon source ISO cache is shared under
+`image/common/source`; the Workstation image installs `open-vm-tools` instead
+of Hyper-V guest integration packages.
+
+Build the image with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/build-photon-vmware-image.ps1 `
+  -IsoUrl "<photon-iso-url-or-path>" `
+  -IsoChecksum "<packer-checksum>"
+```
+
+Lifecycle testing uses VMX/VMDK artifacts and `vmrun.exe`:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/invoke-vmware-lifecycle-test.ps1
+```
+
+Results are written under
+`test-results/vmware-workstation-lifecycle/<timestamp>`. Workstation vmnets
+provide isolated layer-2 segments, but they do not model Hyper-V access/trunk
+VLAN port controls exactly; keep Hyper-V lifecycle evidence authoritative for
+that VLAN-specific behavior. Details live in
+[`docs/vmware-workstation-lifecycle-testing.md`](docs/vmware-workstation-lifecycle-testing.md).
+
+For a normal Workstation test appliance on the management vmnet:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/create-labfoundry-vmware-test-vm.ps1 `
+  -Redeploy `
+  -ResetDataDisks `
+  -WaitForIp
+```
+
+Pass `-IncludeLabNetworkAdapters` only after `vmnet2`, `vmnet3`, and `vmnet4`
+exist for the SiteA, WAN/SiteB, and trunk-like validation networks.
 
 ## PowerShell Roadmap
 

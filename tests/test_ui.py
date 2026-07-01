@@ -2514,7 +2514,7 @@ def test_firewall_preview_derives_dns_dhcp_rule_from_dhcp_scope_vlan(client):
     assert source_group_manager is not None
     assert 'data-source-group-select' in source_group_manager.group(1)
     assert '<option value="any">' not in source_group_manager.group(1)
-    assert 'iifname &#34;eth0&#34; ip saddr 10.77.0.0/16 tcp dport { 22, 80, 443, 8000 } accept comment &#34;mgmt-console&#34;' in updated_firewall.text
+    assert 'iifname &#34;eth0&#34; ip saddr 10.77.0.0/16 tcp dport { 22, 80, 443 } accept comment &#34;mgmt-console&#34;' in updated_firewall.text
     assert 'iifname &#34;eth2.50&#34; ip saddr 10.77.0.0/16 ip daddr 10.77.0.0/16 tcp dport 443 accept comment &#34;grouped-custom&#34;' in updated_firewall.text
     assert 'iifname &#34;eth2.50&#34; udp dport 67 accept comment &#34;sitea-dns-dhcp&#34;' in updated_firewall.text
 
@@ -4413,7 +4413,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     assert "table inet labfoundry" in enabled_payload["config_preview"]
     assert 'comment "mgmt-console"' in enabled_payload["config_preview"]
     assert 'tcp ip saddr' not in enabled_payload["config_preview"]
-    assert 'tcp dport { 22, 80, 443, 8000 } accept comment "mgmt-console"' in enabled_payload["config_preview"]
+    assert 'tcp dport { 22, 80, 443 } accept comment "mgmt-console"' in enabled_payload["config_preview"]
 
 
 def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):

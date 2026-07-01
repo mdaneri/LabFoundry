@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: str = "labfoundry-admin"
     dry_run_system_adapters: bool = True
+    management_source_cidr: str = "192.168.49.0/24"
     repository_path: Path = Path("/mnt/labfoundry-vcf-offline-depot")
     vcf_backup_path: Path = Path("/mnt/labfoundry-vcf-backups")
     app_log_path: Path = Path("/var/log/labfoundry/labfoundry.log")
