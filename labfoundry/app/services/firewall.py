@@ -2,6 +2,7 @@ from ipaddress import ip_network
 import json
 import re
 
+from labfoundry.app.config import get_settings
 from labfoundry.app.models import (
     DhcpScope,
     DhcpSettings,
@@ -157,7 +158,7 @@ def managed_service_firewall_rules(
             interface_name="eth0",
             source=_managed_rule_source("mgmt-console", "eth0", interface_networks, source_groups_by_id, source_group_assignments),
             protocol="tcp",
-            ports="22,80,443,8000",
+            ports="22,80,443",
             priority=10,
         )
     ]
@@ -422,6 +423,7 @@ def render_nftables_config(
     replace_labfoundry_dhcp_rules: bool = False,
     replace_labfoundry_dns_rules: bool = False,
     replace_labfoundry_service_rules: bool = False,
+    management_source_cidr: str | None = None,
 ) -> str:
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
@@ -436,6 +438,8 @@ def render_nftables_config(
             ]
         )
         return "\n".join(lines) + "\n"
+    effective_management_source_cidr = management_source_cidr or get_settings().management_source_cidr
+    ip_network(effective_management_source_cidr, strict=False)
     source_groups_by_id = {str(group.get("id", "")): group for group in source_groups or []}
     lines.append("table inet labfoundry {")
     for chain_name, policy in [
@@ -451,7 +455,7 @@ def render_nftables_config(
         if settings.allow_established:
             lines.append('    ct state established,related accept comment "LabFoundry established traffic"')
         if chain_name == "input" and not replace_labfoundry_service_rules:
-            lines.append('    ip saddr 192.168.49.0/24 tcp dport { 22, 80, 443, 8000 } accept comment "LabFoundry management access"')
+            lines.append(f'    ip saddr {effective_management_source_cidr} tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry management access"')
         if settings.allow_icmp:
             lines.append('    meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"')
             lines.append('    meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"')

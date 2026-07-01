@@ -147,7 +147,7 @@ If Photon installs and SSH works from the Windows host but Packer remains at
 `Waiting for SSH to become available`, query the IPv4 reported by Hyper-V:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-vm-ip.ps1 `
+powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-hyperv-vm-ip.ps1 `
   -Name LabFoundry-Photon-Builder `
   -SwitchName "LabFoundry-Mgmt"
 ```
@@ -163,7 +163,7 @@ If you override networking and SSH is reachable but Packer still does not
 detect the guest IP, stop the build and rerun with a queried `ssh_host`:
 
 ```powershell
-$photonVmIp = powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-vm-ip.ps1 `
+$photonVmIp = powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\windows\get-labfoundry-hyperv-vm-ip.ps1 `
   -Name LabFoundry-Photon-Builder `
   -SwitchName "LabFoundry-Mgmt"
 
@@ -182,10 +182,10 @@ host-side management switch address.
 Photon's Hyper-V guest integration package is `hyper-v`. The kickstart and
 provisioning scripts install it and enable `hv_kvp_daemon`, `hv_fcopy_daemon`,
 and `hv_vss_daemon` so Hyper-V can report guest metadata such as IP addresses.
-Do not install `open-vm-tools` in this Hyper-V image; reserve VMware Tools for a
-future vSphere/ESXi image path. Keep the `ssh_host` override as a fallback for
-early build runs where the guest IP is visible manually before Hyper-V reports
-it to Packer.
+Do not install `open-vm-tools` in this Hyper-V image; the VMware Workstation
+image path owns VMware guest tools. Keep the `ssh_host` override as a fallback
+for early build runs where the guest IP is visible manually before Hyper-V
+reports it to Packer.
 
 ## What Provisioning Installs
 
@@ -359,7 +359,7 @@ into the builder VM.
 After Packer completes, create and start the test appliance VM with the wrapper:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-test-vm.ps1 -WaitForIp
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-hyperv-test-vm.ps1 -WaitForIp
 ```
 
 The wrapper finds the latest appliance VHDX under `image/hyperv/output`,
@@ -377,10 +377,10 @@ management-only VM.
 
 For a clean appliance data start, also pass `-ResetDataDisks`. The wrapper
 removes the default Depot and Backups data VHDX files next to the selected OS
-disk, then lets `create-labfoundry-vm.ps1` create fresh empty data disks:
+disk, then lets `create-labfoundry-hyperv-vm.ps1` create fresh empty data disks:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-test-vm.ps1 -Redeploy -ResetDataDisks -WaitForIp
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-labfoundry-hyperv-test-vm.ps1 -Redeploy -ResetDataDisks -WaitForIp
 ```
 
 The finished appliance VM gets two additional dynamic VHDX data disks by
@@ -389,8 +389,8 @@ default:
 - `LabFoundry-Depot.vhdx`, intended for `/mnt/labfoundry-vcf-offline-depot`;
 - `LabFoundry-Backups.vhdx`, intended for `/mnt/labfoundry-vcf-backups`.
 
-Use `create-hyperv-switches.ps1`, `create-labfoundry-vm.ps1`, and
-`start-labfoundry-vm.ps1` directly only when you need to control each step by
+Use `create-hyperv-switches.ps1`, `create-labfoundry-hyperv-vm.ps1`, and
+`start-labfoundry-hyperv-vm.ps1` directly only when you need to control each step by
 hand.
 
 The default data disks are dynamic 500 GB VHDX files stored next to the OS

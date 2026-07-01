@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import io
 import sys
+import time
 from pathlib import Path
 
 GRUB_BOOT_CONFIG = """set default=0
@@ -77,6 +78,17 @@ def replace_grub_config(iso) -> str:
     raise RuntimeError(f"Could not embed LabFoundry GRUB config. Tried: {targets}. {detail}")
 
 
+def unlink_with_retry(path: Path) -> None:
+    for attempt in range(10):
+        try:
+            path.unlink()
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.5)
+
+
 def main() -> int:
     try:
         import pycdlib
@@ -98,7 +110,7 @@ def main() -> int:
 
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
-        output.unlink()
+        unlink_with_retry(output)
 
     iso = pycdlib.PyCdlib()
     iso.open(str(source_iso))

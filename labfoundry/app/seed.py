@@ -336,10 +336,10 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
                     protocol="tcp",
                     source="192.168.49.0/24",
                     destination="any",
-                    destination_port="22,443,8000",
+                    destination_port="22,80,443",
                     interface_name="eth0",
                     priority=10,
-                    description="Allow management access to SSH, HTTPS, and the development console.",
+                    description="Allow management access to SSH, HTTP, and HTTPS.",
                 ),
                 FirewallRule(
                     name="sitea-dns-dhcp",

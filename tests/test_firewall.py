@@ -67,6 +67,15 @@ def test_disabled_dhcp_removes_labfoundry_managed_dns_dhcp_rule():
     assert 'iifname "eth1"' not in config
 
 
+def test_default_management_firewall_source_cidr_can_follow_image_network():
+    settings = FirewallSettings(enabled=True, default_input_policy="drop")
+
+    config = render_nftables_config(settings, [], management_source_cidr="192.168.167.0/24")
+
+    assert 'ip saddr 192.168.167.0/24 tcp dport { 22, 80, 443 } accept comment "LabFoundry management access"' in config
+    assert "192.168.49.0/24" not in config
+
+
 def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     rules = managed_service_firewall_rules(
         dns_settings=DnsSettings(enabled=True, listen_interface="eth2.50"),

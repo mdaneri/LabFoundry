@@ -7,14 +7,17 @@ LABFOUNDRY_STATE="${LABFOUNDRY_STATE:-/var/lib/labfoundry}"
 LABFOUNDRY_LOG="${LABFOUNDRY_LOG:-/var/log/labfoundry}"
 LABFOUNDRY_MGMT_ADDRESS="${LABFOUNDRY_MGMT_ADDRESS:-192.168.49.1/24}"
 LABFOUNDRY_MGMT_GATEWAY="${LABFOUNDRY_MGMT_GATEWAY:-192.168.49.254}"
+LABFOUNDRY_MGMT_SOURCE_CIDR="${LABFOUNDRY_MGMT_SOURCE_CIDR:-}"
 LABFOUNDRY_MGMT_DNS="${LABFOUNDRY_MGMT_DNS:-1.1.1.1 9.9.9.9}"
 LABFOUNDRY_MGMT_INTERFACE="${LABFOUNDRY_MGMT_INTERFACE:-eth0}"
 LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"
+LABFOUNDRY_GUEST_PLATFORM="${LABFOUNDRY_GUEST_PLATFORM:-hyperv}"
+LABFOUNDRY_IMAGE_ASSET_DIR="${LABFOUNDRY_IMAGE_ASSET_DIR:-image/hyperv}"
 LABFOUNDRY_PIP_GLOBAL_INDEX="${LABFOUNDRY_PIP_GLOBAL_INDEX:-}"
 LABFOUNDRY_PIP_GLOBAL_INDEX_URL="${LABFOUNDRY_PIP_GLOBAL_INDEX_URL:-}"
 BOOTSTRAP_USERNAME="${LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME:-admin}"
 BOOTSTRAP_PASSWORD="${LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD:-}"
-BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/bin/bash}"
+BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/usr/bin/pwsh}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-/var/cache/labfoundry-pip}"
 
 log_step() {
@@ -48,6 +51,7 @@ if [ -z "$BOOTSTRAP_PASSWORD" ]; then
 fi
 
 log_step "system adapter dry-run mode: $LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS"
+log_step "guest platform: $LABFOUNDRY_GUEST_PLATFORM"
 
 log_step "refreshing Photon package metadata"
 tdnf -y clean all || true
@@ -57,14 +61,29 @@ log_step "applying Photon OS updates"
 tdnf -y update
 
 log_step "installing Photon appliance packages"
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow hyper-v nftables dnsmasq ipxe syslinux nginx powershell
+GUEST_INTEGRATION_PACKAGES=""
+case "$LABFOUNDRY_GUEST_PLATFORM" in
+  hyperv)
+    GUEST_INTEGRATION_PACKAGES="hyper-v"
+    ;;
+  vmware)
+    GUEST_INTEGRATION_PACKAGES="open-vm-tools"
+    ;;
+  *)
+    echo "Unsupported LABFOUNDRY_GUEST_PLATFORM: $LABFOUNDRY_GUEST_PLATFORM" >&2
+    exit 2
+    ;;
+esac
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow $GUEST_INTEGRATION_PACKAGES nftables dnsmasq ipxe syslinux nginx powershell
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
 
 log_step "disabling systemd SSH-over-vsock auto generator"
-install -d -o root -g root -m 0755 /etc/systemd/system-generators
-ln -sfn /dev/null /etc/systemd/system-generators/systemd-ssh-generator
+if [ "$LABFOUNDRY_GUEST_PLATFORM" = "hyperv" ]; then
+  install -d -o root -g root -m 0755 /etc/systemd/system-generators
+  ln -sfn /dev/null /etc/systemd/system-generators/systemd-ssh-generator
+fi
 
 if ! getent group labfoundry >/dev/null 2>&1; then
   groupadd --system labfoundry
@@ -184,9 +203,9 @@ EOF
 chmod 0640 /etc/labfoundry/labfoundry.env
 chown root:labfoundry /etc/labfoundry/labfoundry.env
 
-install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/hyperv/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
+install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
-install -o root -g root -m 0440 "$LABFOUNDRY_HOME/image/hyperv/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
+install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
 sed -i 's/\r$//' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
 visudo -cf /etc/sudoers.d/labfoundry-helper
 
@@ -292,15 +311,29 @@ systemctl daemon-reload
 systemctl enable systemd-networkd
 systemctl enable systemd-resolved || true
 systemctl enable sshd
-systemctl enable --now hv_kvp_daemon || true
-systemctl enable --now hv_fcopy_daemon || true
-systemctl enable --now hv_vss_daemon || true
+if [ "$LABFOUNDRY_GUEST_PLATFORM" = "hyperv" ]; then
+  systemctl enable --now hv_kvp_daemon || true
+  systemctl enable --now hv_fcopy_daemon || true
+  systemctl enable --now hv_vss_daemon || true
+elif [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
+  systemctl enable --now vmtoolsd || true
+fi
 systemctl enable labfoundry
 systemctl enable --now nginx
 
 log_step "configuring LabFoundry nftables firewall"
+if [ -z "$LABFOUNDRY_MGMT_SOURCE_CIDR" ]; then
+  DETECTED_MGMT_ADDRESS="$(ip -4 -o addr show dev "$LABFOUNDRY_MGMT_INTERFACE" scope global 2>/dev/null | awk 'NR == 1 { print $4 }')"
+  if [ -n "$DETECTED_MGMT_ADDRESS" ]; then
+    LABFOUNDRY_MGMT_SOURCE_CIDR="$(python3 -c 'import ipaddress, sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$DETECTED_MGMT_ADDRESS")"
+  fi
+fi
+if [ -z "$LABFOUNDRY_MGMT_SOURCE_CIDR" ]; then
+  LABFOUNDRY_MGMT_SOURCE_CIDR="$(python3 -c 'import ipaddress, sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$LABFOUNDRY_MGMT_ADDRESS")"
+fi
+printf '\nLABFOUNDRY_MANAGEMENT_SOURCE_CIDR=%s\n' "$LABFOUNDRY_MGMT_SOURCE_CIDR" >>/etc/labfoundry/labfoundry.env
 install -d -o root -g root -m 0755 /etc/labfoundry/nftables.d
-cat >/etc/labfoundry/nftables.d/labfoundry.nft <<'EOF'
+cat >/etc/labfoundry/nftables.d/labfoundry.nft <<EOF
 # Managed by LabFoundry. Local changes may be overwritten.
 # nftables firewall state for Photon OS appliance images.
 flush ruleset
@@ -309,7 +342,7 @@ table inet labfoundry {
     type filter hook input priority filter; policy drop;
     iifname "lo" accept comment "LabFoundry loopback"
     ct state established,related accept comment "LabFoundry established traffic"
-    ip saddr 192.168.49.0/24 tcp dport { 22, 80, 443, 8000 } accept comment "LabFoundry management access"
+    ip saddr $LABFOUNDRY_MGMT_SOURCE_CIDR tcp dport { 22, 80, 443 } accept comment "LabFoundry management access"
     meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
     meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
   }
