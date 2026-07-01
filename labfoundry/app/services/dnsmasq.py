@@ -563,7 +563,7 @@ def render_dnsmasq_config(
             lines.append(f"cname={record.hostname},{record.address.strip().strip('.').lower()}")
     scope_tags = {scope.id: dnsmasq_tag(scope.name) for scope in scopes}
     if dhcp_settings.enabled:
-        if esxi_pxe_boot and (esxi_pxe_boot.get("enabled") or esxi_pxe_boot.get("native_uefi_http_enabled")):
+        if esxi_pxe_boot and esxi_pxe_boot.get("enabled"):
             tftp_hostname = str(esxi_pxe_boot.get("hostname") or "").strip()
             native_uefi_http_enabled = bool(esxi_pxe_boot.get("native_uefi_http_enabled"))
             manual_native_http_url = str(esxi_pxe_boot.get("native_uefi_http_url") or "").strip()

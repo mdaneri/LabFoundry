@@ -5171,8 +5171,8 @@ def test_dns_settings_autosave_returns_json(client):
     assert response.status_code == 200
     assert response.json()["status"] == "saved"
     assert response.json()["listen_interfaces"] == ["eth2"]
-    assert response.json()["valid"] is False
-    assert "ESXi PXE boot services require DHCP to be enabled so clients receive boot files." in response.json()["validation_errors"]
+    assert response.json()["valid"] is True
+    assert "ESXi PXE boot services require DHCP to be enabled so clients receive boot files." not in response.json()["validation_errors"]
     assert "server=/sddc.internal/192.168.10.10" in response.json()["config_preview"]
     assert "server=/sddc.internal/192.168.10.11" in response.json()["config_preview"]
     refreshed = client.get("/dns")
@@ -5204,9 +5204,32 @@ def test_dns_settings_autosave_filters_invalid_listen_interfaces(client):
 
     assert response.status_code == 200
     assert response.json()["listen_interfaces"] == ["eth2"]
-    assert response.json()["valid"] is False
-    assert "ESXi PXE boot services require DHCP to be enabled so clients receive boot files." in response.json()["validation_errors"]
+    assert response.json()["valid"] is True
+    assert "ESXi PXE boot services require DHCP to be enabled so clients receive boot files." not in response.json()["validation_errors"]
     assert "interface=eth2" in response.json()["config_preview"]
+
+
+def test_dns_validation_requires_dhcp_only_when_esxi_pxe_boot_enabled(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting
+    from labfoundry.app.services.esxi_pxe import ESXI_PXE_BOOT_ENABLED_KEY
+
+    login(client)
+    with SessionLocal() as db:
+        setting = db.execute(select(Setting).where(Setting.key == ESXI_PXE_BOOT_ENABLED_KEY)).scalar_one_or_none()
+        if setting is None:
+            setting = Setting(key=ESXI_PXE_BOOT_ENABLED_KEY, value="true")
+            db.add(setting)
+        else:
+            setting.value = "true"
+        db.commit()
+
+    response = client.get("/dns")
+
+    assert response.status_code == 200
+    assert "ESXi PXE boot services require DHCP to be enabled so clients receive boot files." in response.text
 
 
 def test_dns_apply_task_captures_current_desired_state(client):

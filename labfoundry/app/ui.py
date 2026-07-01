@@ -2073,7 +2073,7 @@ def dnsmasq_context(db: Session) -> dict:
             dhcp_options,
         )
     )
-    if (esxi_boot.get("enabled") or esxi_boot.get("native_uefi_http_enabled")) and not dhcp_settings.enabled:
+    if esxi_boot.get("enabled") and not dhcp_settings.enabled:
         validation_errors.append("ESXi PXE boot services require DHCP to be enabled so clients receive boot files.")
     dns_domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
     dns_warnings = dns_domain_warnings(dns_domains)
@@ -2120,7 +2120,7 @@ def dnsmasq_context(db: Session) -> dict:
 
 
 def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any], scopes: list[DhcpScope]) -> list[dict[str, str]]:
-    if not esxi_boot or not (esxi_boot.get("enabled") or esxi_boot.get("native_uefi_http_enabled")):
+    if not esxi_boot or not esxi_boot.get("enabled"):
         return []
     rows: list[dict[str, str]] = []
     tftp_hostname = str(esxi_boot.get("hostname") or "").strip()
