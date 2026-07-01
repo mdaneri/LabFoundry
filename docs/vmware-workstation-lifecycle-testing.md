@@ -86,6 +86,11 @@ powershell.exe -ExecutionPolicy Bypass `
 powershell.exe -ExecutionPolicy Bypass `
   -File scripts/windows/invoke-vmware-lifecycle-test.ps1 `
   -PrepareNetworksOnly
+
+# Stop and remove existing LabFoundryWorkstationLifecycle* VMs.
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/invoke-vmware-lifecycle-test.ps1 `
+  -CleanupVmsOnly
 ```
 
 ## Normal Test VM

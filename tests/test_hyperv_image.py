@@ -344,6 +344,7 @@ def test_windows_script_names_use_provider_tokens():
     assert "start-labfoundry-vmware-vm.ps1" in script_names
     assert "stop-labfoundry-vmware-vm.ps1" in script_names
     assert "remove-labfoundry-vmware-vm.ps1" in script_names
+    assert "remove-vmware-lifecycle-vms.ps1" in script_names
     assert "reset-labfoundry-vmware-vm.ps1" in script_names
     assert "set-labfoundry-vmware-test-nics.ps1" in script_names
     assert "create-labfoundry-hyperv-test-vm.ps1" in script_names
@@ -441,6 +442,30 @@ def test_lifecycle_cleanup_scripts_are_scoped_to_labfoundry_assets():
     assert "LabFoundry-Photon-Builder" in vm_script
     assert "Refusing VM cleanup" in vm_script
     assert "Remove-VM -Name $vm.Name -Force" in vm_script
+
+
+def test_vmware_lifecycle_cleanup_only_removes_existing_lifecycle_vms():
+    wrapper = Path("scripts/windows/invoke-vmware-lifecycle-test.ps1").read_text(encoding="utf-8")
+    cleanup_script = Path("scripts/windows/remove-vmware-lifecycle-vms.ps1").read_text(encoding="utf-8")
+    docs = Path("docs/vmware-workstation-lifecycle-testing.md").read_text(encoding="utf-8")
+
+    assert "ParameterSetName = 'CleanupVms'" in wrapper
+    assert "remove-vmware-lifecycle-vms.ps1" in wrapper
+    assert "run-vmware-lifecycle-test.ps1" in wrapper
+    cleanup_block = wrapper.split("if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {\n    &", 1)[1].split("return", 1)[0]
+    assert "remove-vmware-lifecycle-vms.ps1" in cleanup_block
+    assert "run-vmware-lifecycle-test.ps1" not in cleanup_block
+    assert "ApplianceVmxPath" not in cleanup_block
+    assert "ClientVmdkPath" not in cleanup_block
+    assert "CleanupCreatedLab" not in cleanup_block
+    assert "Refusing VM cleanup for prefix '$LabName'" in cleanup_script
+    assert "LabFoundryWorkstationLifecycle" in cleanup_script
+    assert "test-results\\vmware-workstation-lifecycle" in cleanup_script
+    assert "vmrun.exe was not found" in cleanup_script
+    assert "Get-VmxDisplayName" in cleanup_script
+    assert "Refusing to remove VM outside Workstation lifecycle results" in cleanup_script
+    assert "Remove-Item -LiteralPath $candidate.Directory -Recurse -Force" in cleanup_script
+    assert "-CleanupVmsOnly" in docs
 
 
 def test_lifecycle_hyperv_script_finds_alpine_ips_and_pins_plink_hostkeys():

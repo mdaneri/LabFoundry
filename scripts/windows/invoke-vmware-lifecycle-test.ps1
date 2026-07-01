@@ -165,12 +165,12 @@ if (-not $ClientVmdkPath) {
 $effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "http://${ApplianceIPAddress}" }
 
 if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {
-    & (Join-Path $PSScriptRoot 'run-vmware-lifecycle-test.ps1') `
+    & (Join-Path $PSScriptRoot 'remove-vmware-lifecycle-vms.ps1') `
         -LabName $LabName `
-        -ApplianceVmxPath $ApplianceVmxPath `
-        -ClientVmdkPath $ClientVmdkPath `
-        -VmrunPath $VmrunPath `
-        -CleanupCreatedLab
+        -VmrunPath $VmrunPath
+    if (-not $?) {
+        throw "VMware Workstation lifecycle VM cleanup failed."
+    }
     return
 }
 
