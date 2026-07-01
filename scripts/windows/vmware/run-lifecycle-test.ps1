@@ -32,7 +32,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')
+$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')
 if (-not $ApplianceUrl) {
     $ApplianceUrl = "http://${ApplianceIPAddress}"
 }

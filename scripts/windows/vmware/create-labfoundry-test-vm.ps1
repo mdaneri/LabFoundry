@@ -42,7 +42,7 @@ function Find-LatestApplianceVmx {
     return $selected.FullName
 }
 
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 
 if ($SkipLabNetworkAdapters -and $IncludeLabNetworkAdapters) {
     throw "Pass either -SkipLabNetworkAdapters or -IncludeLabNetworkAdapters, not both."
@@ -79,7 +79,7 @@ if ((Test-Path -LiteralPath $targetVmx) -and -not $Redeploy) {
 }
 
 if (-not $SkipNetworkPrepare) {
-    & (Join-Path $PSScriptRoot 'prepare-vmware-networks.ps1') `
+    & (Join-Path $PSScriptRoot 'prepare-networks.ps1') `
         -VmrunPath $VmrunPath `
         -ManagementNetwork $ManagementNetwork `
         -SiteANetwork $SiteANetwork `
@@ -94,7 +94,7 @@ if (-not $SkipNetworkPrepare) {
 if ((Test-Path -LiteralPath $resolvedOutputDirectory) -and $Redeploy) {
     if ($PSCmdlet.ShouldProcess($targetVmx, 'Remove existing LabFoundry Workstation test VM')) {
         if (Test-Path -LiteralPath $targetVmx) {
-            & (Join-Path $PSScriptRoot 'remove-labfoundry-vmware-vm.ps1') `
+            & (Join-Path $PSScriptRoot 'remove-labfoundry-vm.ps1') `
                 -VmxPath $targetVmx `
                 -VmrunPath $VmrunPath
         } else {
@@ -120,7 +120,7 @@ if ($ResetDataDisks) {
 }
 
 if ($PSCmdlet.ShouldProcess($targetVmx, "Create LabFoundry Workstation test VM from $resolvedSourceVmx")) {
-    & (Join-Path $PSScriptRoot 'create-labfoundry-vmware-vm.ps1') `
+    & (Join-Path $PSScriptRoot 'create-labfoundry-vm.ps1') `
         -Name $Name `
         -ApplianceVmxPath $resolvedSourceVmx `
         -OutputDirectory $resolvedOutputDirectory `
@@ -141,7 +141,7 @@ if ($PSCmdlet.ShouldProcess($targetVmx, "Create LabFoundry Workstation test VM f
 }
 
 if (-not $NoStart -and -not $WhatIfPreference) {
-    & (Join-Path $PSScriptRoot 'start-labfoundry-vmware-vm.ps1') `
+    & (Join-Path $PSScriptRoot 'start-labfoundry-vm.ps1') `
         -VmxPath $targetVmx `
         -VmrunPath $VmrunPath `
         -Mode gui
@@ -154,7 +154,7 @@ Write-Host "LabFoundry Workstation test VM ready: $Name"
 Write-Host "Appliance VMX: $targetVmx"
 
 if ($WaitForIp -and -not $NoStart -and -not $WhatIfPreference) {
-    $ip = & (Join-Path $PSScriptRoot 'get-labfoundry-vmware-vm-ip.ps1') `
+    $ip = & (Join-Path $PSScriptRoot 'get-labfoundry-vm-ip.ps1') `
         -VmxPath $targetVmx `
         -VmrunPath $VmrunPath `
         -TimeoutSeconds $IpTimeoutSeconds

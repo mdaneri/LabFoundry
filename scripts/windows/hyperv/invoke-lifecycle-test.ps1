@@ -1,5 +1,5 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '')]
-[CmdletBinding(DefaultParameterSetName = 'Run')]
+[CmdletBinding(DefaultParameterSetName = 'Run', SupportsShouldProcess = $true)]
 param(
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
@@ -8,35 +8,23 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
-    [string]$ApplianceVmxPath = '',
+    [string]$ApplianceVhdxPath = '',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
-    [string]$ClientVmdkPath = '',
+    [string]$ClientVhdxPath = '',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
-    [string]$VmrunPath = '',
+    [string]$EsxIsoPath = '',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
-    [string]$ManagementNetwork = 'vmnet8',
+    [string]$ClientManagementSwitch = 'Default Switch',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
-    [string]$SiteANetwork = 'vmnet2',
-
-    [Parameter(ParameterSetName = 'Run')]
-    [Parameter(ParameterSetName = 'Plan')]
-    [string]$SiteBNetwork = 'vmnet3',
-
-    [Parameter(ParameterSetName = 'Run')]
-    [Parameter(ParameterSetName = 'Plan')]
-    [string]$TrunkNetwork = 'vmnet4',
-
-    [Parameter(ParameterSetName = 'Run')]
-    [Parameter(ParameterSetName = 'Plan')]
-    [string]$ApplianceIPAddress = '192.168.167.10',
+    [string]$ApplianceIPAddress = '192.168.49.1',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
@@ -44,11 +32,15 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
-    [string]$SiteInterface = 'eth1',
+    [string]$SiteInterface = 'eth1.12',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
     [string]$SiteCidr = '192.168.12.1/24',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [int]$SiteVlanId = 12,
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
@@ -96,8 +88,14 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'PrepareNetworks')]
     [switch]$PrepareNetworksOnly,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'CleanupNetworks')]
+    [switch]$CleanupNetworksOnly,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'CleanupVms')]
     [switch]$CleanupVmsOnly,
+
+    [Parameter(ParameterSetName = 'Run')]
+    [switch]$CleanupNetworksAfterTest,
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
@@ -113,39 +111,54 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')
+$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')
 
-function Find-LatestApplianceVmx {
-    $outputRoot = Join-Path $repoRoot 'image\vmware-workstation\output'
+function Find-LatestApplianceVhdx {
+    $outputRoot = Join-Path $repoRoot 'image\hyperv\output'
     if (-not (Test-Path -LiteralPath $outputRoot)) {
-        throw "VMware Workstation output directory not found: $outputRoot"
+        throw "Hyper-V output directory not found: $outputRoot"
     }
-    $selected = Get-ChildItem -Path $outputRoot -Recurse -Filter '*.vmx' |
-        Sort-Object -Property LastWriteTime -Descending |
-        Select-Object -First 1
+    $candidates = Get-ChildItem -Path $outputRoot -Recurse -Filter '*.vhdx' |
+        Where-Object {
+            $_.Name -notmatch 'Depot|Backups' -and
+            $_.FullName -notmatch '\\clients\\'
+        } |
+        Sort-Object -Property LastWriteTime -Descending
+    $selected = $candidates | Select-Object -First 1
     if (-not $selected) {
-        throw "No appliance VMX found under $outputRoot. Build the Workstation image or pass -ApplianceVmxPath."
+        throw "No appliance VHDX found under $outputRoot. Build the Hyper-V image or pass -ApplianceVhdxPath."
     }
     return $selected.FullName
 }
 
 if (-not $LabName) {
     if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {
-        $LabName = 'LabFoundryWorkstationLifecycle'
+        $LabName = 'LabFoundryLifecycle'
     } else {
-        $LabName = "LabFoundryWorkstationLifecycle-$(Get-Date -Format 'yyyyMMddHHmmss')"
+        $LabName = "LabFoundryLifecycle-$(Get-Date -Format 'yyyyMMddHHmmss')"
     }
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'PrepareNetworks') {
-    & (Join-Path $PSScriptRoot 'prepare-vmware-networks.ps1') `
-        -VmrunPath $VmrunPath `
-        -ManagementNetwork $ManagementNetwork `
-        -SiteANetwork $SiteANetwork `
-        -SiteBNetwork $SiteBNetwork `
-        -TrunkNetwork $TrunkNetwork
+    & (Join-Path $PSScriptRoot 'create-switches.ps1')
     if (-not $?) {
-        throw "VMware Workstation network preparation failed."
+        throw "Hyper-V network preparation failed."
+    }
+    return
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'CleanupNetworks') {
+    & (Join-Path $PSScriptRoot 'remove-lifecycle-networks.ps1')
+    if (-not $?) {
+        throw "Hyper-V network cleanup failed."
+    }
+    return
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {
+    & (Join-Path $PSScriptRoot 'remove-lifecycle-vms.ps1') -LabName $LabName
+    if (-not $?) {
+        throw "Hyper-V VM cleanup failed."
     }
     return
 }
@@ -156,45 +169,39 @@ if (-not $SshPassword) {
 if (-not $VcfBackupPassword) {
     $VcfBackupPassword = 'VMware01!Test'
 }
-if (-not $ApplianceVmxPath) {
-    $ApplianceVmxPath = Find-LatestApplianceVmx
+if (-not $ApplianceVhdxPath) {
+    $ApplianceVhdxPath = Find-LatestApplianceVhdx
 }
-if (-not $ClientVmdkPath) {
-    $ClientVmdkPath = Join-Path $repoRoot 'image\vmware-workstation\clients\alpine-cloud\labfoundry-tiny-linux-client.vmdk'
+if (-not $ClientVhdxPath) {
+    $ClientVhdxPath = Join-Path $repoRoot 'image\hyperv\clients\alpine-cloud\labfoundry-tiny-linux-client.vhdx'
+}
+if ($EsxIsoPath) {
+    $EsxIsoPath = (Resolve-Path -LiteralPath $EsxIsoPath).Path
+    if ([System.IO.Path]::GetExtension($EsxIsoPath).ToLowerInvariant() -ne '.iso') {
+        throw "-EsxIsoPath must point to an .iso file."
+    }
 }
 $effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "http://${ApplianceIPAddress}" }
 
-if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {
-    & (Join-Path $PSScriptRoot 'remove-vmware-lifecycle-vms.ps1') `
-        -LabName $LabName `
-        -VmrunPath $VmrunPath
-    if (-not $?) {
-        throw "VMware Workstation lifecycle VM cleanup failed."
-    }
-    return
-}
-
 if (-not $SkipClientPrepare -and -not $PlanOnly) {
-    & (Join-Path $PSScriptRoot 'prepare-vmware-tiny-linux-client.ps1')
+    & (Join-Path $PSScriptRoot 'prepare-tiny-linux-client.ps1')
     if (-not $?) {
-        throw "Tiny Linux VMware client preparation failed."
+        throw "Tiny Linux client preparation failed."
     }
 }
 
 $arguments = @(
     '-ExecutionPolicy', 'Bypass',
-    '-File', (Join-Path $PSScriptRoot 'run-vmware-lifecycle-test.ps1'),
+    '-File', (Join-Path $PSScriptRoot 'run-lifecycle-test.ps1'),
     '-LabName', $LabName,
-    '-ApplianceVmxPath', $ApplianceVmxPath,
-    '-ClientVmdkPath', $ClientVmdkPath,
-    '-ManagementNetwork', $ManagementNetwork,
-    '-SiteANetwork', $SiteANetwork,
-    '-SiteBNetwork', $SiteBNetwork,
-    '-TrunkNetwork', $TrunkNetwork,
+    '-ApplianceVhdxPath', $ApplianceVhdxPath,
+    '-ClientVhdxPath', $ClientVhdxPath,
+    '-ClientManagementSwitch', $ClientManagementSwitch,
     '-ApplianceIPAddress', $ApplianceIPAddress,
     '-ApplianceUrl', $effectiveApplianceUrl,
     '-SiteInterface', $SiteInterface,
     '-SiteCidr', $SiteCidr,
+    '-SiteVlanId', "$SiteVlanId",
     '-AdminUsername', $AdminUsername,
     '-AdminPassword', $AdminPassword,
     '-ApplianceSshUser', $ApplianceSshUser,
@@ -205,20 +212,38 @@ $arguments = @(
     '-TaggedVlanCidr', $TaggedVlanCidr,
     '-WanCidr', $WanCidr
 )
-if ($VmrunPath) { $arguments += @('-VmrunPath', $VmrunPath) }
-if (-not $KeepVms) { $arguments += '-CleanupCreatedLab' }
-if ($AllowDryRunApply) { $arguments += '-AllowDryRunApply' }
-if ($SkipBackupRestoreTest) { $arguments += '-SkipBackupRestoreTest' }
-if ($PlanOnly) { $arguments += '-PlanOnly' }
+if ($EsxIsoPath) {
+    $arguments += @('-EsxIsoPath', $EsxIsoPath)
+}
 
-Write-Host "Workstation lifecycle lab: $LabName"
-Write-Host "Appliance VMX: $ApplianceVmxPath"
-Write-Host "Client VMDK: $ClientVmdkPath"
+if (-not $KeepVms) {
+    $arguments += '-CleanupCreatedLab'
+}
+if ($AllowDryRunApply) {
+    $arguments += '-AllowDryRunApply'
+}
+if ($SkipBackupRestoreTest) {
+    $arguments += '-SkipBackupRestoreTest'
+}
+if ($PlanOnly) {
+    $arguments += '-PlanOnly'
+}
+
+Write-Host "Lifecycle lab: $LabName"
+Write-Host "Appliance VHDX: $ApplianceVhdxPath"
+Write-Host "Client VHDX: $ClientVhdxPath"
 Write-Host "Appliance URL: $effectiveApplianceUrl"
 Write-Host ("Backup/restore validation: {0}" -f (-not $SkipBackupRestoreTest))
 Write-Host ("Cleanup created VMs: {0}" -f (-not $KeepVms))
 
 & powershell.exe @arguments
 if ($LASTEXITCODE -ne 0) {
-    throw "VMware Workstation lifecycle test failed with exit code $LASTEXITCODE"
+    throw "Hyper-V lifecycle test failed with exit code $LASTEXITCODE"
+}
+
+if ($CleanupNetworksAfterTest) {
+    & (Join-Path $PSScriptRoot 'remove-lifecycle-networks.ps1')
+    if (-not $?) {
+        throw "Hyper-V network cleanup failed."
+    }
 }

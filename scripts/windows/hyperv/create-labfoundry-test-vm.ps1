@@ -70,7 +70,7 @@ function Remove-ExistingDataDisks {
     }
 }
 
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 if (-not $VhdxPath) {
     $VhdxPath = Find-LatestApplianceVhdx -RepoRoot $repoRoot
 }
@@ -82,7 +82,7 @@ if ($existing -and -not $Redeploy) {
 }
 
 if (-not $SkipNetworkPrepare) {
-    & (Join-Path $PSScriptRoot 'create-hyperv-switches.ps1')
+    & (Join-Path $PSScriptRoot 'create-switches.ps1')
     if (-not $?) {
         throw "Hyper-V network preparation failed."
     }
@@ -101,7 +101,7 @@ if ($ResetDataDisks) {
 }
 
 if ($PSCmdlet.ShouldProcess($Name, "Create LabFoundry test VM from $resolvedVhdxPath")) {
-    & (Join-Path $PSScriptRoot 'create-labfoundry-hyperv-vm.ps1') `
+    & (Join-Path $PSScriptRoot 'create-labfoundry-vm.ps1') `
         -Name $Name `
         -VhdxPath $resolvedVhdxPath `
         -MemoryStartupBytes $MemoryStartupBytes `
@@ -115,7 +115,7 @@ if ($PSCmdlet.ShouldProcess($Name, "Create LabFoundry test VM from $resolvedVhdx
 }
 
 if (-not $NoStart -and -not $WhatIfPreference) {
-    & (Join-Path $PSScriptRoot 'start-labfoundry-hyperv-vm.ps1') -Name $Name
+    & (Join-Path $PSScriptRoot 'start-labfoundry-vm.ps1') -Name $Name
     if (-not $?) {
         throw "LabFoundry VM start failed."
     }
@@ -125,7 +125,7 @@ Write-Host "LabFoundry test VM ready: $Name"
 Write-Host "Appliance VHDX: $resolvedVhdxPath"
 
 if ($WaitForIp -and -not $NoStart -and -not $WhatIfPreference) {
-    $ip = & (Join-Path $PSScriptRoot 'get-labfoundry-hyperv-vm-ip.ps1') `
+    $ip = & (Join-Path $PSScriptRoot 'get-labfoundry-vm-ip.ps1') `
         -Name $Name `
         -SwitchName 'LabFoundry-Mgmt' `
         -TimeoutSeconds $IpTimeoutSeconds

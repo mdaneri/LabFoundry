@@ -55,7 +55,7 @@ single remastered ISO instead of depending on early installer networking:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/build-photon-hyperv-image.ps1 `
+  -File scripts/windows/hyperv/build-photon-image.ps1 `
   -IsoUrl "https://packages.broadcom.com/photon/5.0/GA/iso/photon-5.0-dde71ec57.x86_64.iso" `
   -IsoChecksum "sha512:6a7a258399a258da742032987c043ab25503698d35edafaf1ae000f12127da1a161d8b84caa17fd8f23d129e81e1faa7ab087c20ab9229772a643f8f9475305f" `
   -SshPassword "<one-time-build-root-password>" `
@@ -67,7 +67,7 @@ Run Packer from an elevated PowerShell session or as a user in the
 network before building:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switches.ps1
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/hyperv/create-switches.ps1
 ```
 
 The Packer build VM uses the `LabFoundry-Mgmt` switch by default with temporary
@@ -99,7 +99,7 @@ before the application install starts. Leave both options empty to keep standard
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/build-photon-hyperv-image.ps1 `
+  -File scripts/windows/hyperv/build-photon-image.ps1 `
   -IsoUrl "<photon-5.0-iso-url>" `
   -IsoChecksum "<packer-checksum>" `
   -PipGlobalIndex "https://packages.vcfd.broadcom.net/artifactory/api/pypi/upstream-pypi-virtual/pypi" `
@@ -133,7 +133,7 @@ build time, wheel name, and SHA256. See
 
 The exported Hyper-V appliance resets to `192.168.49.1/24` on
 `LabFoundry-Mgmt`; the Windows host side should be `192.168.49.254/24`.
-`scripts/windows/create-hyperv-switches.ps1` configures that address and a NAT
+`scripts/windows/hyperv/create-switches.ps1` configures that address and a NAT
 for the management network so Photon package checks work when the host has
 internet access.
 
@@ -436,12 +436,14 @@ Role checks and scope checks are both enforced. A viewer cannot mint admin scope
 
 ## Hyper-V Workflow
 
-Windows-side automation lives in `scripts/windows/`.
+Windows-side automation lives in `scripts/windows/`, with shared helpers under
+`scripts/windows/common/` and provider-specific entry points under
+`scripts/windows/hyperv/` and `scripts/windows/vmware/`.
 
 From WSL2:
 
 ```bash
-powershell.exe -ExecutionPolicy Bypass -File scripts/windows/create-hyperv-switches.ps1
+powershell.exe -ExecutionPolicy Bypass -File scripts/windows/hyperv/create-switches.ps1
 ```
 
 The scaffold uses these switch names:
@@ -471,7 +473,7 @@ For a normal Hyper-V test appliance, use the explicit Hyper-V wrapper:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/create-labfoundry-hyperv-test-vm.ps1 `
+  -File scripts/windows/hyperv/create-labfoundry-test-vm.ps1 `
   -WaitForIp
 ```
 
@@ -480,7 +482,7 @@ destroy the normal `LabFoundry` test VM. The simple entry point is:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-hyperv-lifecycle-test.ps1
+  -File scripts/windows/hyperv/invoke-lifecycle-test.ps1
 ```
 
 The wrapper prepares the tiny Alpine client VHDX, selects the newest appliance
@@ -507,7 +509,7 @@ switches/NAT after all attached VMs are gone. Details live in
 [`docs/hyperv-lifecycle-testing.md`](docs/hyperv-lifecycle-testing.md).
 
 When troubleshooting a Hyper-V builder VM, use
-`scripts/windows/get-labfoundry-hyperv-vm-ip.ps1` from an elevated PowerShell session
+`scripts/windows/hyperv/get-labfoundry-vm-ip.ps1` from an elevated PowerShell session
 to read the current IPv4 address reported by Hyper-V.
 
 ## VMware Workstation Workflow
@@ -528,7 +530,7 @@ Build the image with:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/build-photon-vmware-image.ps1 `
+  -File scripts/windows/vmware/build-photon-image.ps1 `
   -IsoUrl "<photon-iso-url-or-path>" `
   -IsoChecksum "<packer-checksum>"
 ```
@@ -537,7 +539,7 @@ Lifecycle testing uses VMX/VMDK artifacts and `vmrun.exe`:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-vmware-lifecycle-test.ps1
+  -File scripts/windows/vmware/invoke-lifecycle-test.ps1
 ```
 
 Results are written under
@@ -551,7 +553,7 @@ For a normal Workstation test appliance on the management vmnet:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/create-labfoundry-vmware-test-vm.ps1 `
+  -File scripts/windows/vmware/create-labfoundry-test-vm.ps1 `
   -Redeploy `
   -ResetDataDisks `
   -WaitForIp

@@ -158,7 +158,7 @@ function Set-VmxScsiDisk {
     Set-VmxValue -Path $Path -Key "$prefix.redo" -Value ''
 }
 
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $resolvedVmrun = Resolve-VmrunPath -Path $VmrunPath
 $resolvedVdiskManager = Resolve-VdiskManagerPath -Path $VdiskManagerPath
 $resolvedSourceVmx = (Resolve-Path -LiteralPath $ApplianceVmxPath).Path
@@ -197,7 +197,7 @@ New-DataVmdk -Path $resolvedDepotVmdkPath -Size $DepotDiskSize -Label 'VCF Offli
 New-DataVmdk -Path $resolvedBackupVmdkPath -Size $BackupDiskSize -Label 'VCF Backups'
 Set-VmxScsiDisk -Path $targetVmx -Unit 1 -DiskPath $resolvedDepotVmdkPath
 Set-VmxScsiDisk -Path $targetVmx -Unit 2 -DiskPath $resolvedBackupVmdkPath
-& (Join-Path $PSScriptRoot 'set-labfoundry-vmware-test-nics.ps1') `
+& (Join-Path $PSScriptRoot 'set-test-nics.ps1') `
     -VmxPath $targetVmx `
     -ManagementNetwork $ManagementNetwork `
     -SiteANetwork $SiteANetwork `

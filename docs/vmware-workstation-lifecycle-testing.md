@@ -27,7 +27,7 @@ Check the current Workstation host network inventory with:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/prepare-vmware-networks.ps1 `
+  -File scripts/windows/vmware/prepare-networks.ps1 `
   -PlanOnly
 ```
 
@@ -45,7 +45,7 @@ Build the Workstation appliance with:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/build-photon-vmware-image.ps1 `
+  -File scripts/windows/vmware/build-photon-image.ps1 `
   -IsoUrl "<photon-iso-url-or-path>" `
   -IsoChecksum "<packer-checksum>" `
   -EnableRealSystemAdapters
@@ -64,7 +64,7 @@ The Workstation build wrapper opens a visible VMware console by default. Use
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-vmware-lifecycle-test.ps1
+  -File scripts/windows/vmware/invoke-lifecycle-test.ps1
 ```
 
 The wrapper selects the newest appliance VMX under
@@ -79,17 +79,17 @@ Useful commands:
 ```powershell
 # Print selected paths and topology without creating VMs.
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-vmware-lifecycle-test.ps1 `
+  -File scripts/windows/vmware/invoke-lifecycle-test.ps1 `
   -PlanOnly
 
 # Validate Workstation vmnet inventory.
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-vmware-lifecycle-test.ps1 `
+  -File scripts/windows/vmware/invoke-lifecycle-test.ps1 `
   -PrepareNetworksOnly
 
 # Stop and remove existing LabFoundryWorkstationLifecycle* VMs.
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/invoke-vmware-lifecycle-test.ps1 `
+  -File scripts/windows/vmware/invoke-lifecycle-test.ps1 `
   -CleanupVmsOnly
 ```
 
@@ -99,14 +99,14 @@ For a normal Workstation appliance VM, separate from the lifecycle lab, use:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass `
-  -File scripts/windows/create-labfoundry-vmware-test-vm.ps1 `
+  -File scripts/windows/vmware/create-labfoundry-test-vm.ps1 `
   -Redeploy `
   -ResetDataDisks `
   -WaitForIp
 ```
 
 That is the Workstation counterpart to
-`scripts/windows/create-labfoundry-hyperv-test-vm.ps1`.
+`scripts/windows/hyperv/create-labfoundry-test-vm.ps1`.
 It defaults to the management vmnet only; pass `-IncludeLabNetworkAdapters`
 after creating the SiteA, WAN/SiteB, and trunk-like vmnets.
 
