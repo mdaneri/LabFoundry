@@ -777,6 +777,7 @@ function newDhcpScopeRow(defaultInterface = "eth2") {
   return {
     id: "__new__",
     name: "",
+    address_family: "ipv4",
     interface_name: defaultInterface,
     site_address: "",
     prefix_length: 24,
@@ -1896,6 +1897,15 @@ function initializeFirewallRulesTable() {
           cellEdited: (cell) => autoSaveFirewallRule(cell, csrf),
         },
         { title: "Ports", field: "destination_port", editor: "input", width: 120, cellEdited: (cell) => autoSaveFirewallRule(cell, csrf) },
+        {
+          title: "Family",
+          field: "address_family",
+          editor: "list",
+          editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" } },
+          formatter: (cell) => (cell.getValue() === "ipv6" ? "IPv6" : "IPv4"),
+          width: 95,
+          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+        },
         {
           title: "Interface",
           field: "interface_name",

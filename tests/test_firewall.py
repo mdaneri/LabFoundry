@@ -44,6 +44,27 @@ def test_dhcp_firewall_rules_follow_scope_interface_and_replace_legacy_rule():
     assert 'iifname "eth1" ip saddr 192.168.50.0/24 udp dport { 53, 67 } accept comment "sitea-dns-dhcp"' not in config
 
 
+def test_dhcp_firewall_rules_use_dhcpv6_port_for_ipv6_zones():
+    settings = FirewallSettings(enabled=True, default_input_policy="drop", default_forward_policy="drop", default_output_policy="accept")
+    scopes = [
+        DhcpScope(
+            name="IPv6Lab",
+            address_family="ipv6",
+            interface_name="eth2",
+            site_address="fd00:50::1",
+            prefix_length=64,
+            enabled=True,
+        )
+    ]
+
+    generated_rules = dhcp_firewall_rules(DhcpSettings(enabled=True), scopes)
+    config = render_nftables_config(settings, [], generated_rules, replace_labfoundry_dhcp_rules=True)
+
+    assert generated_rules[0].name == "ipv6lab-dns-dhcpv6"
+    assert generated_rules[0].destination_port == "547"
+    assert 'iifname "eth2" udp dport 547 accept comment "ipv6lab-dns-dhcpv6"' in config
+
+
 def test_disabled_dhcp_removes_labfoundry_managed_dns_dhcp_rule():
     settings = FirewallSettings(enabled=True, default_input_policy="drop", default_forward_policy="drop", default_output_policy="accept")
     legacy_rule = FirewallRule(

@@ -1,6 +1,7 @@
 from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
 from labfoundry.app.services.dnsmasq import (
     DNSMASQ_LEASE_FILE_PATH,
+    dhcp_bind_target_families,
     dhcp_bind_target_names,
     dns_domain_warnings,
     dns_reverse_records,
@@ -78,6 +79,43 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
     assert "ptr-record=" not in config
     assert f"dhcp-leasefile={DNSMASQ_LEASE_FILE_PATH}" in config
     assert "dhcp-host=02:15:5d:00:20:20,client1,192.168.50.120" in config
+
+
+def test_dnsmasq_renderer_supports_ipv6_dhcp_zones():
+    scope = DhcpScope(
+        name="IPv6Lab",
+        address_family="ipv6",
+        interface_name="eth2",
+        site_address="fd00:50::1",
+        prefix_length=64,
+        range_start="fd00:50::100",
+        range_end="fd00:50::1ff",
+        lease_time="12h",
+        domain_name="labfoundry.internal",
+        dns_server="fd00:50::1",
+        ntp_server="fd00:50::1",
+        enabled=True,
+    )
+    reservations = [DhcpReservation(hostname="v6client", mac_address="02:15:5d:00:20:21", ip_address="fd00:50::120")]
+
+    errors = validate_dhcp_settings(DhcpSettings(enabled=True), reservations, [scope])
+    config = render_dnsmasq_config(
+        dns_settings=DnsSettings(domain="labfoundry.internal"),
+        dns_records=[],
+        dhcp_settings=DhcpSettings(enabled=True),
+        dhcp_scopes=[scope],
+        dhcp_reservations=reservations,
+    )
+
+    assert errors == []
+    assert "enable-ra" in config
+    assert "interface=eth2" in config
+    assert "dhcp-range=set:ipv6lab,fd00:50::100,fd00:50::1ff,64,12h" in config
+    assert "dhcp-option=tag:ipv6lab,option6:dns-server,[fd00:50::1]" in config
+    assert "dhcp-option=tag:ipv6lab,option6:domain-search,labfoundry.internal" in config
+    assert "dhcp-option=tag:ipv6lab,option6:ntp-server,[fd00:50::1]" in config
+    assert "dhcp-option=tag:ipv6lab,option:router" not in config
+    assert "dhcp-host=02:15:5d:00:20:21,v6client,[fd00:50::120]" in config
 
 
 def test_dns_conditional_forwarders_accept_multiple_servers_per_domain():
@@ -320,7 +358,7 @@ def test_dhcp_bind_target_validation_accepts_access_physical_and_vlans():
     physical = [
         PhysicalInterface(name="eth0", mode="access", ip_cidr="192.168.49.1/24", mac_address="00:00:00:00:00:01"),
         PhysicalInterface(name="eth1", mode="trunk", ip_cidr="192.168.60.1/24", mac_address="00:00:00:00:00:02"),
-        PhysicalInterface(name="eth2", mode="access", ip_cidr="192.168.50.1/24", mac_address="00:00:00:00:00:03"),
+        PhysicalInterface(name="eth2", mode="access", ip_cidr="192.168.50.1/24", ipv6_cidr="fd00:50::1/64", mac_address="00:00:00:00:00:03"),
         PhysicalInterface(name="eth3", mode="access", ip_cidr="", mac_address="00:00:00:00:00:04"),
     ]
     vlans = [
@@ -330,16 +368,27 @@ def test_dhcp_bind_target_validation_accepts_access_physical_and_vlans():
     ]
 
     targets = dhcp_bind_target_names(physical, vlans)
+    target_families = dhcp_bind_target_families(physical, vlans)
 
     assert targets == {"eth0", "eth2", "eth1.20"}
+    assert target_families["eth2"] == {"ipv4", "ipv6"}
     assert validate_dhcp_bind_targets(
         DhcpSettings(enabled=True),
         [
             DhcpScope(name="SiteA", interface_name="eth2"),
+            DhcpScope(name="IPv6Lab", address_family="ipv6", interface_name="eth2", site_address="fd00:50::1", prefix_length=64, range_start="fd00:50::100", range_end="fd00:50::1ff", dns_server="fd00:50::1"),
             DhcpScope(name="SiteB", interface_name="eth1.20"),
         ],
-        targets,
+        target_families,
     ) == []
+    assert any(
+        "does not have a matching IPv6 CIDR" in error
+        for error in validate_dhcp_bind_targets(
+            DhcpSettings(enabled=True),
+            [DhcpScope(name="BadIPv6", address_family="ipv6", interface_name="eth1.20")],
+            target_families,
+        )
+    )
 
 
 def test_dhcp_bind_target_validation_rejects_trunks_missing_ip_and_unknown_targets():

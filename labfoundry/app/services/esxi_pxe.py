@@ -170,6 +170,7 @@ def selected_dhcp_scope_payload(scope: DhcpScope) -> dict[str, Any]:
     return {
         "id": scope.id,
         "name": scope.name,
+        "address_family": _dhcp_scope_address_family(scope),
         "interface_name": scope.interface_name,
         "site_address": scope.site_address,
         "prefix_length": scope.prefix_length,
@@ -288,7 +289,7 @@ def _selected_dhcp_scope(db: Session, raw_scope_id: str | None, listen_interface
     scope_id = (raw_scope_id or "").strip()
     if scope_id.isdigit():
         scope = db.get(DhcpScope, int(scope_id))
-        if scope is not None and scope.enabled is not False:
+        if scope is not None and scope.enabled is not False and _dhcp_scope_address_family(scope) == "ipv4":
             return scope
     interface = next((item.strip() for item in (listen_interface or "").splitlines() if item.strip()), "")
     address = next((item.strip() for item in (listen_address or "").splitlines() if item.strip()), "")
@@ -297,6 +298,8 @@ def _selected_dhcp_scope(db: Session, raw_scope_id: str | None, listen_interface
     query = select(DhcpScope).order_by(DhcpScope.name)
     for scope in db.execute(query).scalars().all():
         if scope.enabled is False:
+            continue
+        if _dhcp_scope_address_family(scope) != "ipv4":
             continue
         if address and scope.site_address.strip() != address:
             continue
@@ -329,6 +332,8 @@ def _normalize_dhcp_scope_selection(db: Session, raw_scope_id: int | str | None)
     scope = db.get(DhcpScope, int(value))
     if scope is None or scope.enabled is False:
         raise ValueError("ESXi PXE DHCP zone must be an enabled DHCP IP zone.")
+    if _dhcp_scope_address_family(scope) != "ipv4":
+        raise ValueError("ESXi PXE DHCP zone must be an IPv4 DHCP IP zone.")
     return scope.id, scope.interface_name.strip(), scope.site_address.strip()
 
 
@@ -344,12 +349,24 @@ def _normalize_dhcp_scope_selections(db: Session, raw_scope_ids: list[int | str]
         scope = db.get(DhcpScope, int(value))
         if scope is None or scope.enabled is False:
             raise ValueError("ESXi PXE DHCP zones must be enabled DHCP IP zones.")
+        if _dhcp_scope_address_family(scope) != "ipv4":
+            raise ValueError("ESXi PXE DHCP zones must be IPv4 DHCP IP zones.")
         if scope.id not in seen:
             scopes.append(scope)
             seen.add(scope.id)
     if not scopes and not allow_empty:
         return []
     return scopes
+
+
+def _dhcp_scope_address_family(scope: DhcpScope) -> str:
+    family = str(getattr(scope, "address_family", "") or "").strip().lower()
+    if family in {"ipv4", "ipv6"}:
+        return family
+    try:
+        return "ipv6" if ip_address(scope.site_address).version == 6 else "ipv4"
+    except ValueError:
+        return "ipv4"
 
 
 def _normalize_hostname(value: str) -> str:

@@ -2329,6 +2329,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert "initializeDhcpScopesTable" in app_js.text
     assert "autoSaveDhcpScope" in app_js.text
     assert "+ Add IP zone here" in app_js.text
+    assert 'title: "Family"' in app_js.text
+    assert "address_family" in app_js.text
     assert 'title: "NTP"' in app_js.text
     assert "domainOptions" in app_js.text
     assert "domainValues" in app_js.text

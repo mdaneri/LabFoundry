@@ -255,6 +255,7 @@ def dhcp_settings_to_scope(settings: DhcpSettings) -> dict:
     return {
         "id": 0,
         "name": "SiteA",
+        "address_family": "ipv4",
         "interface_name": settings.interface_name,
         "site_address": settings.site_address,
         "prefix_length": settings.prefix_length,
@@ -273,6 +274,7 @@ def dhcp_scope_to_dict(scope: DhcpScope) -> dict:
     return {
         "id": scope.id,
         "name": scope.name,
+        "address_family": dhcp_scope_address_family(scope),
         "interface_name": scope.interface_name,
         "site_address": scope.site_address,
         "prefix_length": scope.prefix_length,
@@ -377,35 +379,60 @@ def validate_dns_listen_targets(settings: DnsSettings, available_interface_names
 
 
 def dhcp_bind_target_names(physical_interfaces: list[PhysicalInterface], vlan_interfaces: list[VlanInterface]) -> set[str]:
-    names: set[str] = set()
+    return set(dhcp_bind_target_families(physical_interfaces, vlan_interfaces))
+
+
+def dhcp_bind_target_families(physical_interfaces: list[PhysicalInterface], vlan_interfaces: list[VlanInterface]) -> dict[str, set[str]]:
+    names: dict[str, set[str]] = {}
+    def add(name: str, family: str) -> None:
+        names.setdefault(name, set()).add(family)
+
     for interface in physical_interfaces:
         if interface.oper_state == "missing":
             continue
         mode = (interface.mode or "").strip().lower()
-        if mode == "trunk" or not _valid_cidr(interface.ip_cidr):
+        if mode == "trunk":
             continue
-        names.add(interface.name)
+        if _valid_cidr(interface.ip_cidr, version=4):
+            add(interface.name, "ipv4")
+        if _valid_cidr(interface.ipv6_cidr, version=6):
+            add(interface.name, "ipv6")
     for vlan in vlan_interfaces:
-        if vlan.enabled is False or not _valid_cidr(vlan.ip_cidr):
+        if vlan.enabled is False:
             continue
-        names.add(vlan.name)
+        if _valid_cidr(vlan.ip_cidr, version=4):
+            add(vlan.name, "ipv4")
+        if _valid_cidr(vlan.ipv6_cidr, version=6):
+            add(vlan.name, "ipv6")
     return names
 
 
-def validate_dhcp_bind_targets(settings: DhcpSettings, scopes: list[DhcpScope], available_interface_names: set[str]) -> list[str]:
+def validate_dhcp_bind_targets(settings: DhcpSettings, scopes: list[DhcpScope], available_interface_names: set[str] | dict[str, set[str]]) -> list[str]:
     errors: list[str] = []
     if not settings.enabled:
         return errors
+    available_families = (
+        {name: {"ipv4", "ipv6"} for name in available_interface_names}
+        if isinstance(available_interface_names, set)
+        else available_interface_names
+    )
     scope_rows = scopes if scopes else [_legacy_scope(settings)]
     enabled_scopes = [scope for scope in scope_rows if scope.enabled is not False]
-    if enabled_scopes and not available_interface_names:
+    if enabled_scopes and not available_families:
         return ["DHCP has no valid bind targets. Configure an access physical interface or enabled VLAN with an IP CIDR."]
     for scope in enabled_scopes:
         interface_name = scope.interface_name.strip()
-        if interface_name not in available_interface_names:
+        if interface_name not in available_families:
             errors.append(
                 f"DHCP IP zone {scope.name} interface {interface_name or '<missing>'} is not a valid bind target. "
                 "Use an access physical interface with an IP CIDR or an enabled VLAN interface with an IP CIDR."
+            )
+            continue
+        family = dhcp_scope_address_family(scope)
+        if family not in available_families.get(interface_name, set()):
+            errors.append(
+                f"DHCP IP zone {scope.name} is {family.upper()}, but interface {interface_name} does not have a matching "
+                f"{'IPv4' if family == 'ipv4' else 'IPv6'} CIDR."
             )
     return errors
 
@@ -489,19 +516,25 @@ def validate_dhcp_settings(
 def validate_dhcp_scope(scope: DhcpScope) -> tuple[list[str], object | None]:
     errors: list[str] = []
     label = f"DHCP IP zone {scope.name}"
+    family = dhcp_scope_address_family(scope)
+    required_version = 6 if family == "ipv6" else 4
     if not scope.name.strip():
         errors.append("DHCP IP zone name is required.")
-    site_address = _validate_ip(scope.site_address, f"{label} gateway", errors)
-    range_start = _validate_ip(scope.range_start, f"{label} range start", errors)
-    range_end = _validate_ip(scope.range_end, f"{label} range end", errors)
-    dns_server = _validate_ip(scope.dns_server, f"{label} DNS server", errors)
-    ntp_server = _validate_ip(scope.ntp_server, f"{label} NTP server", errors) if scope.ntp_server else None
+    site_address = _validate_ip(scope.site_address, f"{label} gateway", errors, version=required_version)
+    range_start = _validate_ip(scope.range_start, f"{label} range start", errors, version=required_version)
+    range_end = _validate_ip(scope.range_end, f"{label} range end", errors, version=required_version)
+    dns_server = _validate_ip(scope.dns_server, f"{label} DNS server", errors, version=required_version)
+    ntp_server = _validate_ip(scope.ntp_server, f"{label} NTP server", errors, version=required_version) if scope.ntp_server else None
     network = None
     if site_address:
         try:
             network = ip_network(f"{site_address}/{scope.prefix_length}", strict=False)
         except ValueError:
             errors.append(f"{label} prefix length is not valid.")
+    if family == "ipv4" and not 1 <= int(scope.prefix_length or 0) <= 32:
+        errors.append(f"{label} IPv4 prefix length must be between 1 and 32.")
+    if family == "ipv6" and not 1 <= int(scope.prefix_length or 0) <= 128:
+        errors.append(f"{label} IPv6 prefix length must be between 1 and 128.")
     if network and range_start and range_start not in network:
         errors.append(f"{label} range start must be inside the zone subnet.")
     if network and range_end and range_end not in network:
@@ -563,6 +596,8 @@ def render_dnsmasq_config(
             lines.append(f"cname={record.hostname},{record.address.strip().strip('.').lower()}")
     scope_tags = {scope.id: dnsmasq_tag(scope.name) for scope in scopes}
     if dhcp_settings.enabled:
+        if any(scope.enabled is not False and dhcp_scope_address_family(scope) == "ipv6" for scope in scopes):
+            lines.append("enable-ra")
         if esxi_pxe_boot and esxi_pxe_boot.get("enabled"):
             tftp_hostname = str(esxi_pxe_boot.get("hostname") or "").strip()
             native_uefi_http_enabled = bool(esxi_pxe_boot.get("native_uefi_http_enabled"))
@@ -571,6 +606,8 @@ def render_dnsmasq_config(
             selected_scope_payloads = list(esxi_pxe_boot.get("dhcp_scopes") or [])
             pxe_scope_entries = []
             for scope_payload in selected_scope_payloads:
+                if str(scope_payload.get("address_family") or "ipv4").lower() != "ipv4":
+                    continue
                 scope_id = scope_payload.get("id")
                 scope_tag = scope_tags.get(scope_id) if isinstance(scope_id, int) else scope_tags.get(int(scope_id)) if str(scope_id or "").isdigit() else ""
                 if not scope_tag:
@@ -657,16 +694,27 @@ def render_dnsmasq_config(
             if scope.enabled is False:
                 continue
             tag = dnsmasq_tag(scope.name)
-            lines.extend(
-                [
-                    f"dhcp-range=set:{tag},{scope.range_start},{scope.range_end},{scope.lease_time or '12h'}",
-                    f"dhcp-option=tag:{tag},option:router,{scope.site_address}",
-                    f"dhcp-option=tag:{tag},option:dns-server,{scope.dns_server}",
-                    f"dhcp-option=tag:{tag},option:domain-name,{scope.domain_name or domains[0]}",
-                ]
-            )
-            if scope.ntp_server:
-                lines.append(f"dhcp-option=tag:{tag},option:ntp-server,{scope.ntp_server}")
+            if dhcp_scope_address_family(scope) == "ipv6":
+                lines.extend(
+                    [
+                        f"dhcp-range=set:{tag},{scope.range_start},{scope.range_end},{scope.prefix_length},{scope.lease_time or '12h'}",
+                        f"dhcp-option=tag:{tag},option6:dns-server,{_dnsmasq_ipv6_option_address(scope.dns_server)}",
+                        f"dhcp-option=tag:{tag},option6:domain-search,{scope.domain_name or domains[0]}",
+                    ]
+                )
+                if scope.ntp_server:
+                    lines.append(f"dhcp-option=tag:{tag},option6:ntp-server,{_dnsmasq_ipv6_option_address(scope.ntp_server)}")
+            else:
+                lines.extend(
+                    [
+                        f"dhcp-range=set:{tag},{scope.range_start},{scope.range_end},{scope.lease_time or '12h'}",
+                        f"dhcp-option=tag:{tag},option:router,{scope.site_address}",
+                        f"dhcp-option=tag:{tag},option:dns-server,{scope.dns_server}",
+                        f"dhcp-option=tag:{tag},option:domain-name,{scope.domain_name or domains[0]}",
+                    ]
+                )
+                if scope.ntp_server:
+                    lines.append(f"dhcp-option=tag:{tag},option:ntp-server,{scope.ntp_server}")
         for option in dhcp_options or []:
             if option.enabled is False:
                 continue
@@ -680,7 +728,12 @@ def render_dnsmasq_config(
                 lines.append(f"dhcp-option=tag:{scope_tags[option.scope_id]},option:{option_code},{option_value}")
         for reservation in dhcp_reservations:
             if reservation.enabled is not False:
-                lines.append(f"dhcp-host={reservation.mac_address},{reservation.hostname},{reservation.ip_address}")
+                try:
+                    reserved_ip = ip_address(reservation.ip_address)
+                except ValueError:
+                    reserved_ip = None
+                reservation_ip = f"[{reservation.ip_address}]" if reserved_ip and reserved_ip.version == 6 else reservation.ip_address
+                lines.append(f"dhcp-host={reservation.mac_address},{reservation.hostname},{reservation_ip}")
     return "\n".join(lines) + "\n"
 
 
@@ -704,22 +757,45 @@ def dnsmasq_test_command(config_path: str) -> list[str]:
     return ["dnsmasq", "--test", f"--conf-file={normalized_path}"]
 
 
-def _validate_ip(value: str, label: str, errors: list[str]):
+def _validate_ip(value: str, label: str, errors: list[str], *, version: int | None = None):
     try:
-        return ip_address(value)
+        parsed = ip_address(value)
     except ValueError:
         errors.append(f"{label} is not a valid IP address.")
         return None
+    if version is not None and parsed.version != version:
+        errors.append(f"{label} must be an IPv{version} address.")
+        return None
+    return parsed
 
 
-def _valid_cidr(value: str | None) -> bool:
+def _valid_cidr(value: str | None, *, version: int | None = None) -> bool:
     if not value:
         return False
     try:
-        ip_interface(value)
+        parsed = ip_interface(value)
     except ValueError:
         return False
+    if version is not None and parsed.version != version:
+        return False
     return True
+
+
+def dhcp_scope_address_family(scope: DhcpScope) -> str:
+    family = str(getattr(scope, "address_family", "") or "").strip().lower()
+    if family in {"ipv4", "ipv6"}:
+        return family
+    try:
+        return "ipv6" if ip_address(scope.site_address).version == 6 else "ipv4"
+    except ValueError:
+        return "ipv4"
+
+
+def _dnsmasq_ipv6_option_address(value: str) -> str:
+    address = value.strip()
+    if not address:
+        return ""
+    return address if address.startswith("[") and address.endswith("]") else f"[{address}]"
 
 
 def _is_ip_address(value: str) -> bool:
@@ -762,6 +838,7 @@ def _legacy_scope(settings: DhcpSettings) -> DhcpScope:
     return DhcpScope(
         id=0,
         name="SiteA",
+        address_family="ipv4",
         interface_name=settings.interface_name,
         site_address=settings.site_address,
         prefix_length=settings.prefix_length,

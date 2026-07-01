@@ -411,9 +411,10 @@ class DhcpSettingsResponse(DhcpSettingsUpdate):
 
 class DhcpScopeCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    address_family: str = Field(default="ipv4", pattern="^(ipv4|ipv6)$")
     interface_name: str
     site_address: str
-    prefix_length: int
+    prefix_length: int = Field(ge=1, le=128)
     range_start: str
     range_end: str
     lease_time: str

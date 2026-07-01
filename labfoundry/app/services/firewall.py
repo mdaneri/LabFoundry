@@ -16,7 +16,7 @@ from labfoundry.app.models import (
     VcfPrivateRegistrySettings,
     VlanInterface,
 )
-from labfoundry.app.services.dnsmasq import split_interfaces
+from labfoundry.app.services.dnsmasq import dhcp_scope_address_family, split_interfaces
 
 
 FIREWALL_DIRECTIONS = ["input", "forward", "output"]
@@ -116,7 +116,9 @@ def dhcp_firewall_rules(
         return []
     generated_rules: list[FirewallRule] = []
     for index, scope in enumerate([item for item in scopes if item.enabled], start=1):
-        rule_name = f"{_slug(scope.name)}-dns-dhcp"
+        family = dhcp_scope_address_family(scope)
+        port = "547" if family == "ipv6" else "67"
+        rule_name = f"{_slug(scope.name)}-dns-dhcp{'v6' if family == 'ipv6' else ''}"
         generated_rules.append(
             FirewallRule(
                 name=rule_name,
@@ -125,11 +127,11 @@ def dhcp_firewall_rules(
                 protocol="udp",
                 source="any",
                 destination="any",
-                destination_port="67",
+                destination_port=port,
                 interface_name=scope.interface_name.strip(),
                 priority=20 + index,
                 enabled=True,
-                description=f"{LABFOUNDRY_DHCP_FIREWALL_RULE_MARKER} for DHCP IP zone {scope.name}. DHCP bootstrap traffic is interface-bound and not group-restricted.",
+                description=f"{LABFOUNDRY_DHCP_FIREWALL_RULE_MARKER} for DHCP {'IPv6' if family == 'ipv6' else 'IPv4'} IP zone {scope.name}. DHCP bootstrap traffic is interface-bound and not group-restricted.",
             )
         )
     return generated_rules

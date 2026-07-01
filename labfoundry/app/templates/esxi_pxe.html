@@ -30,7 +30,7 @@
       {% endfor %}
       <input type="hidden" name="dhcp_scope_id" value="{{ esxi_pxe_boot.dhcp_scope_id or '' }}">
       <div class="form-field">
-        <span class="field-label"><span>DHCP IP Zones</span><button class="help-icon" type="button" data-help="Selects one or more DHCP IP zones that receive scoped ESXi PXE boot options. LabFoundry derives PXE interfaces, TFTP server addresses, DNS records, firewall rules, and dnsmasq tags from the selected zones.">i</button></span>
+        <span class="field-label"><span>DHCP IP Zones</span><button class="help-icon" type="button" data-help="Selects one or more IPv4 DHCP IP zones that receive scoped ESXi PXE boot options. IPv6 DHCP zones are available for address service, but PXE bootfile rendering remains IPv4-only.">i</button></span>
         <div class="tag-editor" data-tag-editor data-tag-name="dhcp_scope_ids">
           <div class="tag-editor-tags" data-tag-list>
             {% for scope in esxi_pxe_dhcp_scope_options %}

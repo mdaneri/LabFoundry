@@ -108,7 +108,7 @@ from labfoundry.app.security import (
 )
 from labfoundry.app.services.dnsmasq import (
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
-    dhcp_bind_target_names,
+    dhcp_bind_target_families,
     dns_domain_warnings,
     dns_reverse_records,
     dhcp_option_to_dict,
@@ -2061,7 +2061,7 @@ def dnsmasq_context(db: Session) -> dict:
         + validate_dhcp_bind_targets(
             dhcp_settings,
             dhcp_scopes,
-            dhcp_bind_target_names(
+            dhcp_bind_target_families(
                 db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all(),
                 vlan_interfaces,
             ),
@@ -6135,6 +6135,7 @@ def update_dhcp_from_ui(
 def create_dhcp_scope_from_ui(
     request: Request,
     name: str = Form(...),
+    address_family: str = Form("ipv4"),
     interface_name: str = Form(...),
     site_address: str = Form(...),
     prefix_length: int = Form(...),
@@ -6153,6 +6154,7 @@ def create_dhcp_scope_from_ui(
     verify_csrf(request, csrf)
     scope = DhcpScope(
         name=name.strip(),
+        address_family=address_family.strip().lower() if address_family.strip().lower() in {"ipv4", "ipv6"} else "ipv4",
         interface_name=interface_name.strip(),
         site_address=site_address.strip(),
         prefix_length=prefix_length,
@@ -6189,6 +6191,7 @@ def edit_dhcp_scope_from_ui(
     request: Request,
     scope_id: int,
     name: str = Form(...),
+    address_family: str = Form("ipv4"),
     interface_name: str = Form(...),
     site_address: str = Form(...),
     prefix_length: int = Form(...),
@@ -6209,6 +6212,7 @@ def edit_dhcp_scope_from_ui(
     if not scope:
         raise HTTPException(status_code=404, detail="DHCP IP zone not found")
     scope.name = name.strip()
+    scope.address_family = address_family.strip().lower() if address_family.strip().lower() in {"ipv4", "ipv6"} else "ipv4"
     scope.interface_name = interface_name.strip()
     scope.site_address = site_address.strip()
     scope.prefix_length = prefix_length

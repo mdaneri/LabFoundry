@@ -120,6 +120,7 @@ from labfoundry.app.security import (
 )
 from labfoundry.app.services.dnsmasq import (
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+    dhcp_bind_target_families,
     dhcp_bind_target_names,
     dns_domain_warnings,
     dns_settings_to_dict,
@@ -1445,10 +1446,11 @@ def dnsmasq_validation_response(db: Session) -> ConfigValidationResponse:
     physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
     bind_targets = dhcp_bind_target_names(physical_interfaces, vlan_interfaces)
+    bind_target_families = dhcp_bind_target_families(physical_interfaces, vlan_interfaces)
     errors = (
         validate_dns_settings(dns_settings, dns_records, conditional_forwarders)
         + validate_dns_listen_targets(dns_settings, bind_targets)
-        + validate_dhcp_bind_targets(dhcp_settings, dhcp_scopes, bind_targets)
+        + validate_dhcp_bind_targets(dhcp_settings, dhcp_scopes, bind_target_families)
         + validate_dhcp_settings(
             dhcp_settings,
             dhcp_reservations,

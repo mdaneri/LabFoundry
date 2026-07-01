@@ -284,6 +284,7 @@ class DhcpScope(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    address_family: Mapped[str] = mapped_column(String(10), default="ipv4")
     interface_name: Mapped[str] = mapped_column(String(80), default="eth2")
     site_address: Mapped[str] = mapped_column(String(64), default="192.168.50.1")
     prefix_length: Mapped[int] = mapped_column(Integer, default=24)
