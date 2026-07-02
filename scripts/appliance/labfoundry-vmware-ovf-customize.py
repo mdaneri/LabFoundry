@@ -37,6 +37,7 @@ ENV_PATH = Path("/etc/labfoundry/labfoundry.env")
 NETWORKD_PATH = Path("/etc/systemd/network/00-labfoundry-mgmt.network")
 RESOLV_CONF_PATH = Path("/etc/resolv.conf")
 NGINX_MANAGEMENT_PATH = Path("/etc/labfoundry/nginx/sites.d/management.conf")
+FIREWALL_CONFIG_PATH = Path("/etc/labfoundry/nftables.d/labfoundry.nft")
 MARKER_PATH = Path("/var/lib/labfoundry/vmware-ovf-customization.applied")
 LOG_PATH = Path("/var/log/labfoundry/vmware-ovf-customize.log")
 DEFAULT_INTERFACE = "eth0"
@@ -239,6 +240,39 @@ def write_nginx_management_server_name(config: dict[str, object]) -> None:
     os.chmod(NGINX_MANAGEMENT_PATH, 0o644)
 
 
+def write_initial_firewall_config(config: dict[str, object]) -> None:
+    source_cidr = str(config["management_source_cidr"])
+    content = f"""# Managed by LabFoundry. Local changes may be overwritten.
+# nftables firewall state for Photon OS appliance images.
+flush ruleset
+table inet labfoundry {{
+  chain input {{
+    type filter hook input priority filter; policy drop;
+    iifname "lo" accept comment "LabFoundry loopback"
+    ct state established,related accept comment "LabFoundry established traffic"
+    ip saddr {source_cidr} tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry management access"
+    meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
+    meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
+  }}
+  chain forward {{
+    type filter hook forward priority filter; policy drop;
+    ct state established,related accept comment "LabFoundry established traffic"
+    meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
+    meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
+  }}
+  chain output {{
+    type filter hook output priority filter; policy accept;
+    ct state established,related accept comment "LabFoundry established traffic"
+    meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
+    meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
+  }}
+}}
+"""
+    FIREWALL_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FIREWALL_CONFIG_PATH.write_text(content, encoding="utf-8")
+    os.chmod(FIREWALL_CONFIG_PATH, 0o644)
+
+
 def set_password(username: str, password: str) -> None:
     subprocess.run(["chpasswd"], input=f"{username}:{password}\n", text=True, check=True)
 
@@ -262,6 +296,7 @@ def apply_customization(config: dict[str, object], *, dry_run: bool = False) -> 
     write_networkd_config(config)
     write_resolv_conf(config)
     write_nginx_management_server_name(config)
+    write_initial_firewall_config(config)
     set_hostname(str(config["fqdn"]))
     set_password("root", str(config["root_password"]))
     bootstrap_user = read_env_file(ENV_PATH).get("LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME", "admin").strip('"') or "admin"

@@ -67,6 +67,22 @@ def test_vmware_ovf_customizer_requires_all_non_ntp_deployment_properties():
         raise AssertionError("missing root password should fail validation")
 
 
+def test_vmware_ovf_customizer_renders_initial_firewall_for_ovf_subnet(tmp_path):
+    customizer = load_customizer()
+    firewall_path = tmp_path / "labfoundry.nft"
+    customizer.FIREWALL_CONFIG_PATH = firewall_path
+    properties = customizer.parse_ovf_environment(OVF_ENV)
+    config = customizer.validate_properties(properties)
+
+    customizer.write_initial_firewall_config(config)
+
+    rendered = firewall_path.read_text(encoding="utf-8")
+    assert "ip saddr 192.168.10.0/24 tcp dport { 22, 80, 443 } accept" in rendered
+    assert "192.168.49.0/24" not in rendered
+    assert "flush ruleset" in rendered
+    assert "policy drop" in rendered
+
+
 def test_vmware_ovf_export_and_image_plumbing_are_present():
     export_script = Path("scripts/windows/vmware/export-ovf.ps1").read_text(encoding="utf-8")
     provision_script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
