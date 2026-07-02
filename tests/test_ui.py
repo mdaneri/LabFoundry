@@ -1617,6 +1617,9 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "<span>UEFI bootfile</span><strong>snponly.efi</strong>" in page.text
     assert "PXE HTTP port" in page.text
     assert "HTTP endpoint" in page.text
+    assert "Kickstart variables" in page.text
+    assert "{{host.hostname}}" in page.text
+    assert "{{custom.install_disk}}" in page.text
     assert 'class="left-stack"' in page.text
     assert page.text.index("<h2>Boot Service</h2>") < page.text.index("<h2>ESXi Kickstarts</h2>")
     css = client.get("/static/app.css").text
