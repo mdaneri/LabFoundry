@@ -898,13 +898,14 @@ def _bootif_from_mac_key(mac_key: str) -> str:
     return ""
 
 
-def _render_esxi_boot_cfg(source_text: str, *, prefix_url: str, kickstart_url: str = "", bootif: str = "") -> str:
+def _render_esxi_boot_cfg(source_text: str, *, prefix_url: str, kickstart_url: str = "", bootif: str = "", fallback_netdevice: str = "") -> str:
     lines = source_text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
     rendered: list[str] = []
     saw_prefix = False
     saw_kernelopt = False
     kernel_index = -1
     bootif_option = bootif.strip()
+    fallback_netdevice = fallback_netdevice.strip()
     for raw_line in lines:
         stripped = raw_line.strip()
         if stripped.startswith("#") or "=" not in stripped:
@@ -930,6 +931,8 @@ def _render_esxi_boot_cfg(source_text: str, *, prefix_url: str, kickstart_url: s
                 options.append(f"ks={kickstart_url}")
             if bootif_option and not any(item.startswith("BOOTIF=") for item in options):
                 options.append(bootif_option)
+            if fallback_netdevice and not bootif_option and not any(item.startswith(("BOOTIF=", "netdevice=", "ksdevice=")) for item in options):
+                options.append(f"netdevice={fallback_netdevice}")
             rendered.append(f"kernelopt={' '.join(options)}".rstrip())
             saw_kernelopt = True
         else:
@@ -945,6 +948,8 @@ def _render_esxi_boot_cfg(source_text: str, *, prefix_url: str, kickstart_url: s
             options.append(f"ks={kickstart_url}")
         if bootif_option:
             options.append(bootif_option)
+        elif fallback_netdevice:
+            options.append(f"netdevice={fallback_netdevice}")
         line = f"kernelopt={' '.join(options)}".rstrip()
         if kernel_index >= 0:
             rendered.insert(kernel_index + 1, line)
@@ -1181,6 +1186,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
                 prefix_url=str(artifact.get("image_http_url") or ""),
                 kickstart_url=str(artifact.get("kickstart_url") or ""),
                 bootif=_bootif_from_mac_key(str(artifact.get("mac_key") or "")),
+                fallback_netdevice="vmnic0" if is_default_artifact else "",
             )
             tftp_boot_cfg = Path(str(artifact["uefi_tftp_boot_cfg_path"]))
             http_boot_cfg = Path(str(artifact["http_boot_cfg_path"]))

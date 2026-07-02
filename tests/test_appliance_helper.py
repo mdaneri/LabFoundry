@@ -426,6 +426,20 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     stale = http_root / "99.cfg"
     stale.write_text("old", encoding="utf-8")
     manifest = esxi_pxe_manifest(http_root, iso_root=iso_root)
+    default_artifact = dict(manifest["artifacts"][0])
+    default_artifact.update(
+        {
+            "host_id": None,
+            "hostname": "Default / undefined MACs",
+            "mac_address": "*",
+            "mac_key": "default",
+            "is_default": True,
+            "pxelinux_config_path": str(tftp_root / "pxelinux.cfg" / "default"),
+            "uefi_tftp_boot_cfg_path": str(tftp_root / "boot.cfg"),
+            "http_boot_cfg_path": str(http_base / "boot.cfg"),
+        }
+    )
+    manifest["artifacts"].append(default_artifact)
     manifest["boot"] = {
         "enabled": True,
         "hostname": "esxi-pxe.labfoundry.internal",
@@ -483,6 +497,10 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert "kernel=b.b00" in boot_cfg
     assert "kernelopt=runweasel ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg BOOTIF=01-00-50-56-aa-bb-cc" in boot_cfg
     assert "modules=jumpstrt.gz---useropts.gz" in boot_cfg
+    default_boot_cfg = (tftp_root / "boot.cfg").read_text(encoding="utf-8")
+    assert "kernelopt=runweasel ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg netdevice=vmnic0" in default_boot_cfg
+    assert "BOOTIF=" not in default_boot_cfg
+    assert (http_base / "boot.cfg").read_text(encoding="utf-8") == default_boot_cfg
     pxelinux = (tftp_root / "pxelinux.cfg" / "01-00-50-56-aa-bb-cc").read_text(encoding="utf-8")
     assert "KERNEL images/" in pxelinux
     assert "IPAPPEND 2" in pxelinux
@@ -544,6 +562,16 @@ def test_esxi_boot_cfg_rewrite_uses_http_prefix_and_kickstart():
     assert "cdromBoot" not in rendered
     assert "kernelopt=runweasel systemMediaSize=max ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg BOOTIF=01-00-50-56-aa-bb-cc" in rendered
     assert "modules=jumpstrt.gz---useropts.gz---features.gz" in rendered
+
+    default_rendered = helper._render_esxi_boot_cfg(
+        source,
+        prefix_url="http://192.168.50.1:8080/pxe/esxi/images/esx-9",
+        kickstart_url="http://192.168.50.1:8080/pxe/esxi/ks/7.cfg",
+        fallback_netdevice="vmnic0",
+    )
+
+    assert "BOOTIF=" not in default_rendered
+    assert "kernelopt=runweasel systemMediaSize=max ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg netdevice=vmnic0" in default_rendered
 
 
 def test_esxi_uefi_bootloader_must_come_from_iso_efi_boot(tmp_path):
