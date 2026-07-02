@@ -1712,29 +1712,32 @@ def appliance_settings_json(
     management_https_cert_path: str = "",
     management_https_key_path: str = "",
     root_ssh_enabled: bool = False,
+    ntp_servers: list[str] | None = None,
 ) -> str:
     import json
 
-    return json.dumps(
-        {
-            "fqdn": "labfoundry.labfoundry.internal",
-            "resolver_mode": resolver_mode,
-            "resolver_servers": resolver_servers or ["127.0.0.1"],
-            "local_dns_enabled": local_dns_enabled,
-            "management_interface": "eth0",
-            "management_ip": "192.168.49.1",
-            "management_ip_cidr": "192.168.49.1/24",
-            "management_https_enabled": management_https_enabled,
-            "root_ssh_enabled": root_ssh_enabled,
-            "management_http_port": 8000,
-            "management_public_http_port": 80,
-            "management_public_https_port": 443,
-            "management_upstream_host": "127.0.0.1",
-            "management_upstream_port": 8000,
-            "management_https_cert_path": management_https_cert_path,
-            "management_https_key_path": management_https_key_path,
-        }
-    )
+    payload = {
+        "fqdn": "labfoundry.labfoundry.internal",
+        "resolver_mode": resolver_mode,
+        "resolver_servers": resolver_servers or ["127.0.0.1"],
+        "local_dns_enabled": local_dns_enabled,
+        "management_interface": "eth0",
+        "management_ip": "192.168.49.1",
+        "management_ip_cidr": "192.168.49.1/24",
+        "management_https_enabled": management_https_enabled,
+        "root_ssh_enabled": root_ssh_enabled,
+        "management_http_port": 8000,
+        "management_public_http_port": 80,
+        "management_public_https_port": 443,
+        "management_upstream_host": "127.0.0.1",
+        "management_upstream_port": 8000,
+        "management_https_cert_path": management_https_cert_path,
+        "management_https_key_path": management_https_key_path,
+    }
+    if ntp_servers is not None:
+        payload["time_sync_mode"] = "systemd-timesyncd"
+        payload["ntp_servers"] = ntp_servers
+    return json.dumps(payload)
 
 
 def chronyd_config_text(*, enabled: bool = True, server: str = "time1.google.com", listen_address: str = "192.168.50.1", allow_clients: str = "192.168.50.0/24") -> str:
@@ -1794,6 +1797,16 @@ def test_appliance_settings_helper_rejects_invalid_json(tmp_path):
 
     assert "fqdn must be a valid fully qualified DNS name." in errors
     assert "resolver_mode must be local_dns or external." in errors
+
+
+def test_appliance_settings_helper_rejects_invalid_ntp_server(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-settings.json"
+    config_path.write_text(appliance_settings_json(ntp_servers=["bad_name"]), encoding="utf-8")
+
+    errors = helper._appliance_settings_config_errors(config_path)
+
+    assert "ntp server bad_name must be a valid DNS name or IP address." in errors
 
 
 def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tmp_path):
@@ -2074,6 +2087,52 @@ def test_appliance_settings_helper_applies_external_resolver_without_catchall(mo
     assert "Domains=~." not in network_text
     assert "DNS=1.1.1.1" in network_text
     assert "DNS=9.9.9.9" in network_text
+
+
+def test_appliance_settings_helper_configures_timesyncd_when_ntp_servers_present(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "appliance-settings"
+    networkd_dir = tmp_path / "etc" / "systemd" / "network"
+    dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
+    timesyncd_dir = tmp_path / "etc" / "systemd" / "timesyncd.conf.d"
+    timesyncd_path = timesyncd_dir / "labfoundry.conf"
+    apply_dir.mkdir(parents=True)
+    networkd_dir.mkdir(parents=True)
+    mgmt_network = networkd_dir / "00-labfoundry-mgmt.network"
+    mgmt_network.write_text("\n".join(["[Match]", "Name=eth0", "", "[Network]", "Address=192.168.49.1/24"]) + "\n", encoding="utf-8")
+    config_path = apply_dir / "labfoundry-settings.json"
+    config_path.write_text(appliance_settings_json(ntp_servers=["time.cloudflare.com", "192.0.2.10"]), encoding="utf-8")
+    patch_appliance_settings_nginx_paths(monkeypatch, helper, tmp_path)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", mgmt_network)
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
+    monkeypatch.setattr(helper, "TIMESYNCD_CONFIG_DIR", timesyncd_dir)
+    monkeypatch.setattr(helper, "TIMESYNCD_CONFIG_PATH", timesyncd_path)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(
+        helper.shutil,
+        "which",
+        lambda command: {
+            "hostnamectl": "/usr/bin/hostnamectl",
+            "nginx": "/usr/sbin/nginx",
+            "sshd": "/usr/sbin/sshd",
+        }.get(command),
+    )
+
+    assert helper._handle_appliance_settings("apply", [str(config_path)]) == 0
+
+    timesyncd_text = timesyncd_path.read_text(encoding="utf-8")
+    assert "NTP=time.cloudflare.com 192.0.2.10" in timesyncd_text
+    assert ["systemctl", "disable", "--now", "chronyd.service"] in commands
+    assert ["systemctl", "enable", "--now", "systemd-timesyncd"] in commands
+    assert ["systemctl", "restart", "systemd-timesyncd"] in commands
 
 
 def test_chronyd_helper_rejects_invalid_staged_config(monkeypatch, tmp_path):

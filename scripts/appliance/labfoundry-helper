@@ -100,6 +100,8 @@ WAN_NAT_CONFIG_PATH = WAN_NAT_CONFIG_DIR / "labfoundry-nat.nft"
 WAN_NAT_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-nat.service")
 WAN_SYSCTL_PATH = Path("/etc/sysctl.d/90-labfoundry-routing-wan.conf")
 APPLIANCE_SETTINGS_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-settings")
+TIMESYNCD_CONFIG_DIR = Path("/etc/systemd/timesyncd.conf.d")
+TIMESYNCD_CONFIG_PATH = TIMESYNCD_CONFIG_DIR / "labfoundry.conf"
 LOCAL_USERS_APPLY_DIR = Path("/var/lib/labfoundry/apply/local-users")
 CA_APPLY_DIR = Path("/var/lib/labfoundry/apply/ca")
 CA_MANAGED_PATH_BASE = Path("/etc/labfoundry")
@@ -1686,6 +1688,19 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
         except ValueError:
             errors.append(f"resolver server {server} must be an IP address.")
 
+    ntp_servers = [str(server).strip() for server in payload.get("ntp_servers") or [] if str(server).strip()]
+    if "ntp_servers" in payload and not ntp_servers:
+        errors.append("ntp_servers must include at least one server when present.")
+    for server in ntp_servers:
+        try:
+            ip_address(server)
+            continue
+        except ValueError:
+            pass
+        normalized = server.strip().strip(".").lower()
+        if not HOSTNAME_PATTERN.fullmatch(normalized):
+            errors.append(f"ntp server {server} must be a valid DNS name or IP address.")
+
     management_interface = str(payload.get("management_interface") or "").strip()
     if not _valid_network_interface_name(management_interface):
         errors.append("management_interface must be a valid interface name.")
@@ -1790,6 +1805,36 @@ def _run_checked_commands(commands: list[list[str]]) -> int:
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
         if result.returncode != 0:
+            return result.returncode
+    return 0
+
+
+def _configure_timesyncd(ntp_servers: list[str]) -> int:
+    if not ntp_servers:
+        return 0
+    TIMESYNCD_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config_text = "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "[Time]",
+            f"NTP={' '.join(ntp_servers)}",
+            "",
+        ]
+    )
+    tmp_target = TIMESYNCD_CONFIG_PATH.with_suffix(".conf.tmp")
+    tmp_target.write_text(config_text, encoding="utf-8")
+    os.chmod(tmp_target, 0o644)
+    tmp_target.replace(TIMESYNCD_CONFIG_PATH)
+    commands = [
+        ["systemctl", "disable", "--now", "chronyd.service"],
+        ["systemctl", "enable", "--now", "systemd-timesyncd"],
+        ["systemctl", "restart", "systemd-timesyncd"],
+    ]
+    for command in commands:
+        result = _run(command)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        if result.returncode != 0 and command[:3] != ["systemctl", "disable", "--now"]:
             return result.returncode
     return 0
 
@@ -2188,7 +2233,8 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                     "management_https_enabled": bool(payload.get("management_https_enabled")),
                     "root_ssh_enabled": bool(payload.get("root_ssh_enabled")),
                     "management_interface": payload["management_interface"],
-                    "scope": "systemd-resolved, LabFoundry management UI, and root SSH login",
+                    "time_sync_mode": str(payload.get("time_sync_mode") or ""),
+                    "scope": "systemd-resolved, optional systemd-timesyncd, LabFoundry management UI, and root SSH login",
                 },
                 sort_keys=True,
             )
@@ -2204,6 +2250,7 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     management_interface = str(payload["management_interface"])
     resolver_mode = str(payload["resolver_mode"])
     resolver_servers = [str(server) for server in payload["resolver_servers"]]
+    ntp_servers = [str(server) for server in payload.get("ntp_servers") or []]
     domains = ["~."] if resolver_mode == "local_dns" else []
     hostname = _apply_hostname(fqdn)
     if hostname != 0:
@@ -2211,6 +2258,9 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     resolver = _configure_resolver(management_interface, resolver_servers, domains)
     if resolver.returncode != 0:
         return resolver.returncode
+    timesyncd = _configure_timesyncd(ntp_servers)
+    if timesyncd != 0:
+        return timesyncd
     root_ssh = _configure_root_ssh(bool(payload.get("root_ssh_enabled")))
     if root_ssh != 0:
         return root_ssh
@@ -2226,6 +2276,7 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                 "root_ssh_enabled": bool(payload.get("root_ssh_enabled")),
                 "resolver_mode": resolver_mode,
                 "resolver_servers": resolver_servers,
+                "time_sync_mode": str(payload.get("time_sync_mode") or ""),
             },
             sort_keys=True,
         )

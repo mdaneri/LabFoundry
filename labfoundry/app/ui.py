@@ -1422,6 +1422,9 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         db.refresh(settings)
         db.refresh(dns_settings)
     local_dns_enabled = bool(dns_settings.enabled)
+    chrony_settings = get_chrony_settings_row(db)
+    chrony_enabled = bool(chrony_settings.enabled)
+    show_settings_ntp_servers = not chrony_enabled
     management = appliance_settings_management_context(db)
     ca_settings = get_ca_settings_row(db)
     management_https_cert_path, management_https_key_path, _management_https_chain_path = ca_managed_certificate_paths(db, "appliance:https")
@@ -1433,6 +1436,7 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         dns_record_conflict=local_dns_enabled and appliance_dns_record_conflict(db, settings.fqdn),
         ca_enabled=bool(ca_settings.enabled),
         management_https_cert_available=management_https_cert_available,
+        chrony_enabled=chrony_enabled,
     )
     if settings.root_ssh_enabled and get_settings().dry_run_system_adapters:
         validation_warnings.append("Root SSH is enabled as desired state, but dry-run system adapters are active. Global appliance apply will record intent without changing sshd.")
@@ -1440,8 +1444,10 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "app_settings": get_settings(),
         "runtime_hostname": socket.gethostname(),
         "appliance_settings": settings,
-        "appliance_settings_json": appliance_settings_to_dict(settings),
+        "appliance_settings_json": appliance_settings_to_dict(settings, include_ntp_servers=show_settings_ntp_servers),
         "local_dns_enabled": local_dns_enabled,
+        "chrony_enabled": chrony_enabled,
+        "show_settings_ntp_servers": show_settings_ntp_servers,
         "ca_enabled": bool(ca_settings.enabled),
         "management_https_cert_available": management_https_cert_available,
         "management_https_cert_path": management_https_cert_path,
@@ -1456,6 +1462,7 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
             management_interface=management,
             management_https_cert_path=management_https_cert_path,
             management_https_key_path=management_https_key_path,
+            include_ntp_servers=show_settings_ntp_servers,
         ),
     }
 
@@ -9680,6 +9687,7 @@ def update_settings_from_ui(
     management_https_enabled: bool = Form(False),
     root_ssh_enabled: bool = Form(False),
     external_dns_servers: str = Form(""),
+    ntp_servers: str | None = Form(None),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -9691,6 +9699,10 @@ def update_settings_from_ui(
     settings.management_https_enabled = bool(management_https_enabled)
     settings.root_ssh_enabled = bool(root_ssh_enabled)
     settings.external_dns_servers = normalize_multiline_values(external_dns_servers)
+    chrony_settings = get_chrony_settings_row(db)
+    chrony_enabled = bool(chrony_settings.enabled)
+    if not chrony_enabled and ntp_servers is not None:
+        settings.ntp_servers = normalize_multiline_values(ntp_servers)
     settings.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
     settings.updated_at = utcnow()
     dns_settings = get_dns_settings_row(db)
@@ -9705,6 +9717,7 @@ def update_settings_from_ui(
         dns_record_conflict=bool(dns_settings.enabled) and appliance_dns_record_conflict(db, settings.fqdn),
         ca_enabled=bool(ca_settings.enabled),
         management_https_cert_available=management_https_cert_available,
+        chrony_enabled=chrony_enabled,
     )
     dns_record_action = None
     if not validation_errors:
@@ -9724,7 +9737,9 @@ def update_settings_from_ui(
                 "management_https_cert_available": context["management_https_cert_available"],
                 "root_ssh_enabled": saved.root_ssh_enabled,
                 "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
+                **({"ntp_servers": context["appliance_settings_json"]["ntp_servers"]} if context["show_settings_ntp_servers"] else {}),
                 "local_dns_enabled": context["local_dns_enabled"],
+                "chrony_enabled": context["chrony_enabled"],
                 "management_interface": context["management_interface"],
                 "dns_record_action": dns_record_action,
                 "valid": not context["appliance_settings_validation_errors"],

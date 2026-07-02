@@ -312,8 +312,10 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
 def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(client):
     import json
 
+    from sqlalchemy import select
+
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Setting
+    from labfoundry.app.models import ChronySettings, Setting
     from labfoundry.app.ui import APPLIANCE_APPLY_BASELINES_KEY
 
     login(client)
@@ -341,6 +343,9 @@ def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(c
         sort_keys=True,
     )
     with SessionLocal() as db:
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = True
+        db.add(chrony_settings)
         db.merge(
             Setting(
                 key=APPLIANCE_APPLY_BASELINES_KEY,
@@ -400,6 +405,8 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "Management UI HTTPS" in response.text
     assert "Root SSH login" in response.text
     assert "Operational Logging" in response.text
+    assert "External NTP servers" in response.text
+    assert 'textarea name="ntp_servers"' in response.text
     assert 'action="/settings/logging"' in response.text
     assert 'select name="level"' in response.text
     assert 'input class="switch-input" type="checkbox" name="syslog_enabled"' in response.text
@@ -513,16 +520,40 @@ def test_settings_page_shows_external_dns_editor_when_local_dns_is_disabled(clie
     assert "Local DNS is disabled. External DNS servers are required" in response.text
 
 
+def test_settings_page_hides_ntp_editor_when_chrony_is_enabled(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ChronySettings
+
+    login(client)
+    with SessionLocal() as db:
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = True
+        db.add(chrony_settings)
+        db.commit()
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert "External NTP servers" not in response.text
+    assert 'textarea name="ntp_servers"' not in response.text
+    assert 'input type="hidden" name="ntp_servers"' in response.text
+    assert '  "ntp_servers": [' not in response.text
+
+
 def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ApplianceSettings, DnsRecord, DnsSettings
+    from labfoundry.app.models import ApplianceSettings, ChronySettings, DnsRecord, DnsSettings
 
     login(client)
     with SessionLocal() as db:
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.enabled = True
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = True
         db.commit()
 
     page = client.get("/settings")
@@ -564,6 +595,48 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     assert "app-owned appliance FQDN" in (record.description or "")
 
 
+def test_settings_autosave_updates_ntp_servers_when_chrony_is_disabled(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, ChronySettings, DnsSettings
+
+    login(client)
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = False
+        db.add_all([dns_settings, chrony_settings])
+        db.commit()
+
+    page = client.get("/settings")
+    assert 'textarea name="ntp_servers"' in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/settings",
+        data={
+            "fqdn": "labfoundry.labfoundry.internal",
+            "external_dns_servers": "1.1.1.1\n9.9.9.9",
+            "ntp_servers": "time.cloudflare.com\n192.0.2.10",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["chrony_enabled"] is False
+    assert payload["ntp_servers"] == ["time.cloudflare.com", "192.0.2.10"]
+    assert '"time_sync_mode": "systemd-timesyncd"' in payload["config_preview"]
+    assert '"ntp_servers": [' in payload["config_preview"]
+    assert payload["valid"] is True
+
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        assert settings.ntp_servers == "time.cloudflare.com\n192.0.2.10"
+
+
 def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     from sqlalchemy import select
 
@@ -575,7 +648,6 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     assert page.status_code == 200
     assert "Chrony Settings" in page.text
     assert "/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf" in page.text
-    assert "NTP servers" not in client.get("/settings").text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
         "/chrony/settings",
@@ -609,6 +681,8 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     assert js.status_code == 200
     assert "initializeChronySettings" in js.text
     assert "updateNtpValidation" in js.text
+
+    assert "External NTP servers" not in client.get("/settings").text
 
     with SessionLocal() as db:
         settings = db.execute(select(ChronySettings)).scalar_one()
