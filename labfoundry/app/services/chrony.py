@@ -76,19 +76,19 @@ def validate_chrony_state(settings: ChronySettings, available_interfaces: set[st
                 ip_address(address)
             except ValueError:
                 errors.append(f"Chrony listen address {address} must be a valid IPv4 or IPv6 address.")
+        upstream_servers = split_servers(settings.upstream_servers)
+        if not upstream_servers:
+            errors.append("At least one Chrony upstream server is required.")
+        for server in upstream_servers:
+            try:
+                ip_address(server)
+                continue
+            except ValueError:
+                pass
+            if not HOSTNAME_PATTERN.fullmatch(normalize_hostname(server)):
+                errors.append(f"Chrony upstream server {server} must be a valid DNS name or IP address.")
     if settings.port != 123:
         errors.append("Chrony port must be UDP 123.")
-    upstream_servers = split_servers(settings.upstream_servers)
-    if not upstream_servers:
-        errors.append("At least one Chrony upstream server is required.")
-    for server in upstream_servers:
-        try:
-            ip_address(server)
-            continue
-        except ValueError:
-            pass
-        if not HOSTNAME_PATTERN.fullmatch(normalize_hostname(server)):
-            errors.append(f"Chrony upstream server {server} must be a valid DNS name or IP address.")
     allow_entries = split_allow_clients(settings.allow_clients)
     if not allow_entries:
         errors.append("Chrony client allow list must include 'any' or at least one IPv4/IPv6 CIDR.")

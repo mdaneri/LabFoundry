@@ -1519,6 +1519,7 @@ def _chronyd_config_errors(path: Path) -> list[str]:
     servers: list[str] = []
     listen_addresses: list[str] = []
     allow_entries: list[str] = []
+    enabled = _chronyd_config_enabled(path)
 
     def add_allow_entry(value: str) -> None:
         normalized = value.strip().lower()
@@ -1551,18 +1552,19 @@ def _chronyd_config_errors(path: Path) -> list[str]:
         elif lower.startswith("# labfoundry chrony client allow list:"):
             for item in line.split(":", 1)[1].replace(",", "\n").splitlines():
                 add_allow_entry(item)
-    if not servers:
+    if enabled and not servers:
         errors.append("chronyd config must include at least one server line.")
-    for server in servers:
-        try:
-            ip_address(server)
-            continue
-        except ValueError:
-            pass
-        normalized = server.strip().strip(".").lower()
-        if not HOSTNAME_PATTERN.fullmatch(normalized):
-            errors.append(f"chronyd server {server} must be a valid DNS name or IP address.")
-    if _chronyd_config_enabled(path) and not listen_addresses:
+    if enabled:
+        for server in servers:
+            try:
+                ip_address(server)
+                continue
+            except ValueError:
+                pass
+            normalized = server.strip().strip(".").lower()
+            if not HOSTNAME_PATTERN.fullmatch(normalized):
+                errors.append(f"chronyd server {server} must be a valid DNS name or IP address.")
+    if enabled and not listen_addresses:
         errors.append("enabled chronyd config must include at least one bindaddress.")
     for address in listen_addresses:
         try:

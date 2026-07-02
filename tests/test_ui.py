@@ -642,6 +642,34 @@ def test_chrony_validation_rejects_enabled_service_without_bind_or_upstreams(cli
     assert "At least one Chrony upstream server is required." in payload["validation_errors"]
 
 
+def test_chrony_validation_allows_disabled_service_without_upstreams(client):
+    login(client)
+    page = client.get("/chrony")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/chrony/settings",
+        data={
+            "hostname": "ntp.labfoundry.internal",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": [],
+            "upstream_servers": "",
+            "allow_clients": "any",
+            "port": "123",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is False
+    assert payload["valid"] is True
+    assert payload["upstream_servers"] == []
+    assert "At least one Chrony upstream server is required." not in payload["validation_errors"]
+    assert "server " not in payload["config_preview"]
+
+
 def test_dns_defaults_follow_appliance_fqdn_and_management_ip(client):
     from sqlalchemy import select
 

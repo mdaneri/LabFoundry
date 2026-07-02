@@ -1754,7 +1754,7 @@ def chronyd_config_text(*, enabled: bool = True, server: str = "time1.google.com
             "driftfile /var/lib/chrony/drift",
             "makestep 1.0 3",
             "rtcsync",
-            f"server {server} iburst",
+            *([f"server {server} iburst"] if server else []),
             *([f"bindaddress {listen_address}"] if listen_address else []),
             *allow_directives,
             "",
@@ -2127,6 +2127,29 @@ def test_chronyd_helper_disabled_apply_stops_chronyd_without_installing_config(m
     chrony_conf = tmp_path / "etc" / "chrony.conf"
     apply_dir.mkdir(parents=True)
     config_path.write_text(chronyd_config_text(enabled=False, listen_address="", allow_clients="all"), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CHRONY_CONFIG_PATH", chrony_conf)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_chronyd("apply", [str(config_path)]) == 0
+
+    assert not chrony_conf.exists()
+    assert commands == [["systemctl", "disable", "--now", "chronyd.service"]]
+
+
+def test_chronyd_helper_disabled_apply_allows_empty_upstream_list(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "chronyd"
+    config_path = apply_dir / "labfoundry-chrony.conf"
+    chrony_conf = tmp_path / "etc" / "chrony.conf"
+    apply_dir.mkdir(parents=True)
+    config_path.write_text(chronyd_config_text(enabled=False, server="", listen_address="", allow_clients="all"), encoding="utf-8")
     commands: list[list[str]] = []
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
