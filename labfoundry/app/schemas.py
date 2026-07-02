@@ -217,6 +217,7 @@ class EsxiPxeHostCreate(BaseModel):
     ip_address: str = Field(default="", max_length=64)
     kickstart_id: int | None = None
     installer_iso_path: str = ""
+    variables: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
 
 

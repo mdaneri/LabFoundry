@@ -354,16 +354,20 @@ from labfoundry.app.services.esxi_pxe import (
     esxi_pxe_service_state_from_boot,
     generated_kickstart_path,
     host_to_dict,
+    host_variables_json,
     installer_iso_inventory,
     installer_iso_root_path,
     kickstart_drift_state,
+    kickstart_template_validation_errors,
     kickstart_to_dict,
     kickstart_validation,
     mark_kickstarts_applied,
+    normalize_host_mac,
     normalize_kickstart_content,
     normalize_kickstart_name,
     normalize_installer_iso_path,
     normalize_pxe_mac,
+    render_kickstart_for_host,
     render_esxi_pxe_manifest,
     render_esxi_pxe_preview,
     save_esxi_pxe_default_host_settings,
@@ -3757,6 +3761,7 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
             validation_warnings.append(f"ESXi PXE hostname {boot_settings['hostname']} is not present in managed DNS records.")
         if not esxi_pxe_host_artifacts(hosts, boot_settings, default_host):
             validation_warnings.append("ESXi PXE bootstrap is enabled, but no enabled host reference or default profile has an installer ISO selected.")
+    validation_errors.extend(kickstart_template_validation_errors(kickstarts, hosts, boot_settings, default_host))
     esxi_service_state = esxi_pxe_service_state_from_boot(boot_settings)
     return {
         "esxi_kickstarts": kickstarts,
@@ -9166,9 +9171,12 @@ def audit_log(
 
 
 @router.get("/pxe/esxi/ks/{kickstart_file}", response_model=None)
-def serve_esxi_kickstart_file(kickstart_file: str, db: Session = Depends(get_db)) -> FileResponse:
+def serve_esxi_kickstart_file(kickstart_file: str, mac: str = "", db: Session = Depends(get_db)) -> Response:
     if not kickstart_file.endswith(".cfg"):
         raise HTTPException(status_code=404, detail="Kickstart not found")
+    mac_key = normalize_pxe_mac(mac)
+    if not mac_key:
+        raise HTTPException(status_code=400, detail="Kickstart request requires a valid mac query parameter.")
     stem = kickstart_file.removesuffix(".cfg").strip().lower()
     if not re.fullmatch(r"(?:\d+|[0-9a-f]{12,64})", stem):
         raise HTTPException(status_code=404, detail="Kickstart not found")
@@ -9185,13 +9193,29 @@ def serve_esxi_kickstart_file(kickstart_file: str, db: Session = Depends(get_db)
         )
     if not kickstart or not kickstart.enabled:
         raise HTTPException(status_code=404, detail="Kickstart not found")
-    path = generated_kickstart_path(kickstart.id, kickstart.content_hash)
-    legacy_path = generated_kickstart_path(kickstart.id)
-    if not path.is_file() and stem.isdigit() and legacy_path.is_file():
-        path = legacy_path
-    if not kickstart or not kickstart.enabled or not path.is_file():
-        raise HTTPException(status_code=404, detail="Kickstart not found")
-    return FileResponse(path, media_type="text/plain; charset=utf-8")
+    host = db.execute(
+        select(EsxiPxeHost)
+        .options(selectinload(EsxiPxeHost.kickstart))
+        .where(EsxiPxeHost.mac_address == mac_key.replace("-", ":"))
+    ).scalar_one_or_none()
+    if host is None:
+        host = next(
+            (
+                row
+                for row in db.execute(select(EsxiPxeHost).options(selectinload(EsxiPxeHost.kickstart))).scalars().all()
+                if normalize_pxe_mac(row.mac_address) == mac_key
+            ),
+            None,
+        )
+    if not host or host.enabled is False:
+        raise HTTPException(status_code=404, detail="ESXi PXE host not found")
+    if host.kickstart_id != kickstart.id:
+        raise HTTPException(status_code=404, detail="Kickstart not assigned to host")
+    try:
+        rendered = render_kickstart_for_host(kickstart.content, host, esxi_pxe_boot_settings(db))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(rendered, media_type="text/plain; charset=utf-8")
 
 
 @router.get("/pxe/esxi/boot.ipxe", response_model=None)
@@ -9634,6 +9658,7 @@ def create_esxi_pxe_host_from_ui(
     ip_address: str = Form(""),
     kickstart_id: str = Form(""),
     installer_iso_path: str = Form(""),
+    variables: str = Form("{}"),
     enabled: bool = Form(False),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -9643,15 +9668,20 @@ def create_esxi_pxe_host_from_ui(
     verify_csrf(request, csrf)
     normalized_kickstart_id = parse_optional_esxi_kickstart_id(db, kickstart_id)
     try:
+        normalized_mac = normalize_host_mac(mac_address)
+        if not normalized_mac:
+            raise ValueError("ESXi PXE host MAC address is invalid.")
         normalized_iso_path = normalize_installer_iso_path(installer_iso_path)
+        normalized_variables_json = host_variables_json(variables)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     host = EsxiPxeHost(
         hostname=hostname.strip(),
-        mac_address=mac_address.strip().lower(),
+        mac_address=normalized_mac,
         ip_address=ip_address.strip(),
         kickstart_id=normalized_kickstart_id,
         installer_iso_path=normalized_iso_path,
+        variables_json=normalized_variables_json,
         enabled=enabled,
     )
     db.add(host)
@@ -9678,6 +9708,7 @@ def update_esxi_pxe_host_from_ui(
     ip_address: str = Form(""),
     kickstart_id: str = Form(""),
     installer_iso_path: str = Form(""),
+    variables: str = Form("{}"),
     enabled: bool = Form(False),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -9690,14 +9721,19 @@ def update_esxi_pxe_host_from_ui(
         raise HTTPException(status_code=404, detail="ESXi PXE host not found")
     normalized_kickstart_id = parse_optional_esxi_kickstart_id(db, kickstart_id)
     try:
+        normalized_mac = normalize_host_mac(mac_address)
+        if not normalized_mac:
+            raise ValueError("ESXi PXE host MAC address is invalid.")
         normalized_iso_path = normalize_installer_iso_path(installer_iso_path)
+        normalized_variables_json = host_variables_json(variables)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     host.hostname = hostname.strip()
-    host.mac_address = mac_address.strip().lower()
+    host.mac_address = normalized_mac
     host.ip_address = ip_address.strip()
     host.kickstart_id = normalized_kickstart_id
     host.installer_iso_path = normalized_iso_path
+    host.variables_json = normalized_variables_json
     host.enabled = enabled
     host.updated_at = utcnow()
     db.add(host)

@@ -151,7 +151,7 @@
                   <input name="description" value="{{ esxi_selected_kickstart.description or '' }}">
                 </label>
                 <div class="form-field">
-                  <span class="field-label"><span>Source content</span><button class="help-icon" type="button" data-help="Editable database source of truth. Saving updates desired state only; generated PXE files are overwritten later by global appliance apply.">i</button></span>
+                  <span class="field-label"><span>Source content</span><button class="help-icon" type="button" data-help="Editable database source of truth. Use &#123;&#123;host.*&#125;&#125;, &#123;&#123;dhcp.*&#125;&#125;, &#123;&#123;pxe.*&#125;&#125;, and &#123;&#123;custom.*&#125;&#125; markers for host-specific rendering; generated PXE files are overwritten later by global appliance apply.">i</button></span>
                   <textarea class="monospace-textarea kickstart-code-editor" name="content" rows="22" data-codemirror-editor data-codemirror-language="labfoundry-kickstart">{{ esxi_selected_kickstart.content }}</textarea>
                 </div>
                 <div class="editor-action-row">
@@ -167,6 +167,17 @@
                 <code data-esxi-pxe-preview>{{ esxi_selected_kickstart_json.redacted_preview }}</code>
               </div>
             {% endif %}
+
+            <details class="terminal-note" open>
+              <summary>Kickstart variables</summary>
+              <div class="settings-list compact-settings-list">
+                <div><span>Host</span><strong><code>{{ "{{host.hostname}}" }}</code> <code>{{ "{{host.mac}}" }}</code> <code>{{ "{{host.ip_address}}" }}</code></strong></div>
+                <div><span>DHCP</span><strong><code>{{ "{{dhcp.gateway}}" }}</code> <code>{{ "{{dhcp.netmask}}" }}</code> <code>{{ "{{dhcp.prefix}}" }}</code> <code>{{ "{{dhcp.dns_servers}}" }}</code> <code>{{ "{{dhcp.ntp_servers}}" }}</code> <code>{{ "{{dhcp.domain}}" }}</code></strong></div>
+                <div><span>PXE</span><strong><code>{{ "{{pxe.http_base_url}}" }}</code></strong></div>
+                <div><span>Custom</span><strong><code>{{ "{{custom.install_disk}}" }}</code></strong></div>
+              </div>
+              <p class="muted">Custom values come from Host References variables JSON, for example <code>{"install_disk":"mpx.vmhba0:C0:T0:L0"}</code>. Unresolved or invalid markers fail validation and the dynamic Kickstart request.</p>
+            </details>
 
             {% if esxi_can_write %}
               <details class="create-kickstart-panel" {% if not esxi_selected_kickstart %}open{% endif %}>
@@ -188,7 +199,7 @@
                     <input name="description" value="">
                   </label>
                   <div class="form-field">
-                    <span class="field-label"><span>Source content</span><button class="help-icon" type="button" data-help="Initial Kickstart source saved in the database. Generated files are created later through global appliance apply.">i</button></span>
+                    <span class="field-label"><span>Source content</span><button class="help-icon" type="button" data-help="Initial Kickstart source saved in the database. It may include &#123;&#123;host.*&#125;&#125;, &#123;&#123;dhcp.*&#125;&#125;, &#123;&#123;pxe.*&#125;&#125;, and &#123;&#123;custom.*&#125;&#125; markers for host-specific rendering. Generated files are created later through global appliance apply.">i</button></span>
                     <textarea class="monospace-textarea" name="content" rows="10" data-codemirror-editor data-codemirror-language="labfoundry-kickstart">{{ esxi_default_kickstart_content }}</textarea>
                   </div>
                   <button class="button secondary" type="submit">Create Kickstart</button>
@@ -236,7 +247,7 @@
             data-fallback-id="esxi-pxe-hosts-fallback"
           ></div>
           <table id="esxi-pxe-hosts-fallback" class="data-table compact dns-fallback-table">
-            <thead><tr><th>Host</th><th>MAC</th><th>IP address</th><th>Kickstart</th><th>Installer ISO</th><th>Enabled</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Host</th><th>MAC</th><th>IP address</th><th>Kickstart</th><th>Installer ISO</th><th>Variables JSON</th><th>Enabled</th><th>Actions</th></tr></thead>
             <tbody>
               <tr>
                 <form action="/esxi-pxe/default-host" method="post">
@@ -260,6 +271,7 @@
                       {% endfor %}
                     </select>
                   </td>
+                  <td></td>
                   <td><input type="checkbox" name="enabled" {{ "checked" if esxi_pxe_default_host.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}></td>
                   <td><button class="button tiny secondary" type="submit" {{ "disabled" if not esxi_can_write else "" }}>Update</button></td>
                 </form>
@@ -287,6 +299,7 @@
                         {% endfor %}
                       </select>
                     </td>
+                    <td><input name="variables" value="{{ host.variables_json or '{}' }}" {{ "disabled" if not esxi_can_write else "" }}></td>
                     <td><input type="checkbox" name="enabled" {{ "checked" if host.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}></td>
                     <td>
                       <button class="button tiny secondary" type="submit" {{ "disabled" if not esxi_can_write else "" }}>Update</button>

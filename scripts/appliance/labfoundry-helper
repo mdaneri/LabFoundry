@@ -1104,6 +1104,14 @@ def _esxi_pxe_nginx_config(port: int) -> str:
             "server {",
             f"    listen {port};",
             "    server_name _;",
+            "    location /pxe/esxi/ks/ {",
+            "        proxy_pass http://127.0.0.1:8000;",
+            "        proxy_http_version 1.1;",
+            "        proxy_set_header Host $host;",
+            "        proxy_set_header X-Real-IP $remote_addr;",
+            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+            "        proxy_set_header X-Forwarded-Proto http;",
+            "    }",
             "    location /pxe/esxi/ {",
             f"        alias {ESXI_PXE_HTTP_BASE}/;",
             "        autoindex off;",
@@ -1153,8 +1161,6 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             _copy_file(source, target)
             generated_tftp_files.append(str(target))
         staged_images: set[str] = set()
-        first_host_artifact: dict | None = None
-        explicit_default_artifact = any(bool(artifact.get("is_default")) for artifact in payload.get("artifacts", []))
         first_mboot_efi: Path | None = None
         first_crypto64: Path | None = None
         uefi_second_stage = str(boot.get("uefi_second_stage_bootfile") or "mboot.efi")
@@ -1227,15 +1233,6 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             )
             _write_text(pxelinux_config, pxelinux_text)
             generated_tftp_files.append(str(pxelinux_config))
-            if is_default_artifact:
-                first_host_artifact = artifact
-            elif first_host_artifact is None and not explicit_default_artifact:
-                first_host_artifact = artifact
-                _write_text(ESXI_TFTP_ROOT / "boot.cfg", boot_cfg)
-                _write_text(ESXI_PXE_HTTP_BASE / "boot.cfg", boot_cfg)
-                _write_text(ESXI_TFTP_ROOT / "pxelinux.cfg" / "default", pxelinux_text)
-                generated_tftp_files.extend([str(ESXI_TFTP_ROOT / "boot.cfg"), str(ESXI_TFTP_ROOT / "pxelinux.cfg" / "default")])
-                generated_files.append(str(ESXI_PXE_HTTP_BASE / "boot.cfg"))
         if first_mboot_efi is not None:
             native_bootfile = str(boot.get("native_uefi_bootfile") or "mboot.efi")
             for target in {ESXI_TFTP_ROOT / uefi_second_stage, ESXI_PXE_HTTP_BASE / native_bootfile}:
