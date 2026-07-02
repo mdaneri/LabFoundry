@@ -147,6 +147,7 @@ from labfoundry.app.services.ca import (
     ManagedCertificateSpec,
     ca_certificate_to_dict,
     ca_profile_to_dict,
+    ca_service_state,
     ensure_ca_issued_state,
     ensure_aware,
     ensure_default_ca_profiles,
@@ -270,6 +271,7 @@ from labfoundry.app.services.vcf_backups import (
     render_vcf_backup_config,
     validate_vcf_backup_state,
     vcf_backup_remote_directory,
+    vcf_backup_service_state,
     vcf_backup_settings_to_dict,
 )
 from labfoundry.app.services.vcf_private_registry import (
@@ -324,6 +326,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     validate_vcf_depot_state,
     vcf_depot_endpoint,
     vcf_depot_profile_to_dict,
+    vcf_depot_service_state,
     vcf_depot_settings_to_dict,
     vcfdt_commands_for_profile,
     _find_vcf_download_tool_binary,
@@ -347,6 +350,7 @@ from labfoundry.app.services.esxi_pxe import (
     esxi_pxe_boot_settings,
     esxi_pxe_default_host_settings,
     esxi_pxe_host_artifacts,
+    esxi_pxe_service_state_from_boot,
     generated_kickstart_path,
     host_to_dict,
     installer_iso_inventory,
@@ -1185,6 +1189,22 @@ def service_bind_label(raw_interface: str | None, raw_address: str | None) -> st
     return f"{interface_label} / {address_label}"
 
 
+def backing_systemd_unit_active(unit: str) -> bool | None:
+    if get_settings().dry_run_system_adapters:
+        return None
+    result = SystemAdapter().service_status(unit)
+    if not result.stdout:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    active_state = str(payload.get("active") or "").strip()
+    if not active_state or active_state == "unknown":
+        return None
+    return active_state == "active"
+
+
 def vcf_backup_context(db: Session) -> dict:
     settings = get_vcf_backup_settings_row(db)
     users = db.execute(select(User).order_by(User.username)).scalars().all()
@@ -1204,7 +1224,7 @@ def vcf_backup_context(db: Session) -> dict:
         "vcf_backup_remote_directory": vcf_backup_remote_directory(settings),
         "vcf_backup_config_preview": config_preview,
         "vcf_backup_validation_errors": validation_errors,
-        "vcf_backup_service_status": service_runtime_status(db, "vcf-backups"),
+        "vcf_backup_service_status": vcf_backup_service_state(settings, sshd_active=backing_systemd_unit_active("sshd.service")),
     }
 
 
@@ -1747,7 +1767,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         "vcf_depot_primary_listen_address": primary_listen_address(settings.listen_address),
         "vcf_depot_bind_label": service_bind_label(settings.listen_interface, settings.listen_address),
         "vcf_depot_endpoint": vcf_depot_endpoint(settings),
-        "vcf_depot_service_status": service_runtime_status(db, "repository"),
+        "vcf_depot_service_status": vcf_depot_service_state(settings, nginx_active=backing_systemd_unit_active("nginx.service")),
         "vcf_depot_https_config_preview": https_config_preview,
         "vcf_depot_https_cert_path": depot_cert_path,
         "vcf_depot_https_key_path": depot_key_path,
@@ -2112,6 +2132,9 @@ def ca_context(db: Session) -> dict:
     )
     managed_count = len([certificate for certificate in certificates if certificate.managed_owner])
     key_status = secret_key_status()
+    ca_status = ca_service_state(settings)
+    if settings.enabled and validation_errors:
+        ca_status = {**ca_status, "health": "degraded", "label": "needs attention", "pill": "warn"}
     return {
         "ca_settings": settings,
         "ca_profiles": profiles,
@@ -2127,7 +2150,7 @@ def ca_context(db: Session) -> dict:
         "ca_apply_payload": apply_payload,
         "ca_apply_config_path": CA_STAGED_CONFIG_PATH,
         "ca_validation_errors": validation_errors,
-        "ca_service_status": service_runtime_status(db, "ca"),
+        "ca_service_status": ca_status,
         "ca_status_summary": {
             "root_present": bool(settings.root_certificate_pem),
             "bundle_present": bool(settings.root_certificate_pem),
@@ -3707,6 +3730,7 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
             validation_warnings.append(f"ESXi PXE hostname {boot_settings['hostname']} is not present in managed DNS records.")
         if not esxi_pxe_host_artifacts(hosts, boot_settings, default_host):
             validation_warnings.append("ESXi PXE bootstrap is enabled, but no enabled host reference or default profile has an installer ISO selected.")
+    esxi_service_state = esxi_pxe_service_state_from_boot(boot_settings)
     return {
         "esxi_kickstarts": kickstarts,
         "esxi_kickstart_rows": [kickstart_to_dict(row, include_content=True) for row in kickstarts],
@@ -3737,7 +3761,10 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
         "esxi_pxe_available_addresses": available_boot_addresses,
         "esxi_pxe_bind_label": service_bind_label(boot_settings.get("listen_interface"), boot_settings.get("listen_address")),
         "esxi_pxe_primary_listen_address": primary_listen_address(boot_settings.get("listen_address")),
-        "esxi_pxe_service_status": service_runtime_status(db, "esxi-pxe"),
+        "esxi_pxe_service_status": {
+            **esxi_service_state,
+            "detail": "dnsmasq TFTP/DHCP boot options and PXE HTTP files",
+        },
         "esxi_pxe_artifacts": esxi_pxe_host_artifacts(hosts, boot_settings, default_host),
         "esxi_pxe_validation_errors": validation_errors,
         "esxi_pxe_validation_warnings": list(dict.fromkeys(validation_warnings)),
@@ -8885,9 +8912,54 @@ def service_state_to_grid_row(service: ServiceState) -> dict[str, object]:
     return row
 
 
+def esxi_pxe_service_grid_row(service: ServiceState, db: Session) -> dict[str, object]:
+    row = service_state_to_grid_row(service)
+    row.update(esxi_pxe_service_state_from_boot(esxi_pxe_boot_settings(db)))
+    row.pop("health", None)
+    row["detail"] = "dnsmasq TFTP/DHCP boot options and PXE HTTP files"
+    return row
+
+
+def ca_service_grid_row(service: ServiceState, db: Session) -> dict[str, object]:
+    row = service_state_to_grid_row(service)
+    row.update(ca_service_state(get_ca_settings_row(db)))
+    row.pop("health", None)
+    row["detail"] = service.detail or "LabFoundry CA material and issued certificates"
+    return row
+
+
+def vcf_backup_service_grid_row(service: ServiceState, db: Session) -> dict[str, object]:
+    row = service_state_to_grid_row(service)
+    settings = get_vcf_backup_settings_row(db)
+    row.update(vcf_backup_service_state(settings, sshd_active=backing_systemd_unit_active("sshd.service")))
+    row.pop("health", None)
+    row["detail"] = service.detail or "/mnt/labfoundry-vcf-backups"
+    return row
+
+
+def vcf_depot_service_grid_row(service: ServiceState, db: Session) -> dict[str, object]:
+    row = service_state_to_grid_row(service)
+    settings = get_vcf_offline_depot_settings_row(db)
+    row.update(vcf_depot_service_state(settings, nginx_active=backing_systemd_unit_active("nginx.service")))
+    row.pop("health", None)
+    row["detail"] = service.detail or "/mnt/labfoundry-vcf-offline-depot"
+    return row
+
+
 def services_template_context(db: Session) -> dict[str, object]:
     rows = db.execute(select(ServiceState).where(ServiceState.service.in_(SERVICE_STATE_IDS)).order_by(ServiceState.display_name)).scalars().all()
-    service_rows = [service_state_to_grid_row(row) for row in rows]
+    service_rows = [
+        esxi_pxe_service_grid_row(row, db)
+        if row.service == "esxi-pxe"
+        else ca_service_grid_row(row, db)
+        if row.service == "ca"
+        else vcf_backup_service_grid_row(row, db)
+        if row.service == "vcf-backups"
+        else vcf_depot_service_grid_row(row, db)
+        if row.service == "repository"
+        else service_state_to_grid_row(row)
+        for row in rows
+    ]
     system_adapter_dry_run = get_settings().dry_run_system_adapters
     return {
         "services": service_rows,

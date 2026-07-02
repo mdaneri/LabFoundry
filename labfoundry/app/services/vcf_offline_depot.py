@@ -238,6 +238,34 @@ def vcf_depot_settings_to_dict(settings: VcfOfflineDepotSettings) -> dict[str, o
     }
 
 
+def vcf_depot_service_state(settings: VcfOfflineDepotSettings, *, nginx_active: bool | None = None) -> dict[str, object]:
+    desired_enabled = bool(settings.enabled)
+    running = bool(nginx_active) if nginx_active is not None else desired_enabled
+    if running and desired_enabled:
+        health = "healthy"
+        label = "live"
+        pill = "good"
+    elif running:
+        health = "degraded"
+        label = "running"
+        pill = "warn"
+    elif desired_enabled:
+        health = "degraded"
+        label = "enabled"
+        pill = "warn"
+    else:
+        health = "disabled"
+        label = "disabled"
+        pill = "muted"
+    return {
+        "running": running,
+        "enabled": desired_enabled,
+        "health": health,
+        "label": label,
+        "pill": pill,
+    }
+
+
 def vcf_depot_profile_to_dict(profile: VcfDepotDownloadProfile) -> dict[str, object]:
     component = profile.component or ""
     return {

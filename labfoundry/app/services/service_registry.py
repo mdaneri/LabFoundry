@@ -60,4 +60,5 @@ SERVICE_STATE_IDS = frozenset(row["service"] for row in SERVICE_STATE_DEFAULTS)
 RETIRED_SERVICE_IDS = frozenset({"ntpd"})
 SERVICE_SYSTEMD_UNITS = {
     "chronyd": "chronyd.service",
+    "kms": "labfoundry-kms.service",
 }

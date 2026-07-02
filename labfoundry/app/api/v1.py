@@ -152,6 +152,7 @@ from labfoundry.app.services.appliance_settings import (
     validate_appliance_settings,
 )
 from labfoundry.app.services.chrony import CHRONY_DEFAULT_UPSTREAM_SERVERS
+from labfoundry.app.services.ca import ca_service_state
 from labfoundry.app.services.firewall import (
     FIREWALL_ACTIONS,
     FIREWALL_DIRECTIONS,
@@ -168,7 +169,7 @@ from labfoundry.app.services.firewall import (
     validate_firewall_state,
 )
 from labfoundry.app.services.networking import normalize_interface_mode, sync_host_physical_interfaces
-from labfoundry.app.services.vcf_backups import vcf_backup_settings_to_dict
+from labfoundry.app.services.vcf_backups import vcf_backup_service_state, vcf_backup_settings_to_dict
 from labfoundry.app.services.vcf_private_registry import (
     VCF_REGISTRY_UPLOADED_CA_BUNDLE_PEM_KEY,
     validate_vcf_registry_state,
@@ -185,6 +186,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     detect_vcf_download_tool_version,
     find_local_vcf_download_tool_archive,
     validate_vcf_depot_state,
+    vcf_depot_service_state,
     vcf_depot_settings_to_dict,
 )
 from labfoundry.app.services.esxi_pxe import (
@@ -193,6 +195,7 @@ from labfoundry.app.services.esxi_pxe import (
     content_hash,
     decode_kickstart_upload,
     esxi_pxe_boot_settings,
+    esxi_pxe_service_state_from_boot,
     installer_iso_inventory,
     kickstart_to_dict,
     kickstart_validation,
@@ -212,7 +215,23 @@ DNSMASQ_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf"
 APPROVED_SERVICES = set(SERVICE_STATE_IDS) | {"vcf-offline-depot"}
 
 
-def service_state_response(row: ServiceState) -> ServiceStateResponse:
+def backing_systemd_unit_active(unit: str) -> bool | None:
+    if get_settings().dry_run_system_adapters:
+        return None
+    result = SystemAdapter().service_status(unit)
+    if not result.stdout:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    active_state = str(payload.get("active") or "").strip()
+    if not active_state or active_state == "unknown":
+        return None
+    return active_state == "active"
+
+
+def service_state_response(row: ServiceState, db: Session | None = None) -> ServiceStateResponse:
     data = {
         "id": row.id,
         "service": row.service,
@@ -222,6 +241,29 @@ def service_state_response(row: ServiceState) -> ServiceStateResponse:
         "health": row.health,
         "detail": row.detail,
     }
+    if row.service == "esxi-pxe" and db is not None:
+        data.update(esxi_pxe_service_state_from_boot(esxi_pxe_boot_settings(db)))
+        data["detail"] = "dnsmasq TFTP/DHCP boot options and PXE HTTP files"
+        data.pop("label", None)
+        data.pop("pill", None)
+        return ServiceStateResponse(**data)
+    if row.service == "ca" and db is not None:
+        settings = db.execute(select(CaSettings)).scalar_one_or_none() or CaSettings()
+        data.update(ca_service_state(settings))
+        data["detail"] = row.detail or "LabFoundry CA material and issued certificates"
+        data.pop("label", None)
+        data.pop("pill", None)
+        return ServiceStateResponse(**data)
+    if row.service == "vcf-backups" and db is not None:
+        data.update(vcf_backup_service_state(get_vcf_backup_settings(db), sshd_active=backing_systemd_unit_active("sshd.service")))
+        data.pop("label", None)
+        data.pop("pill", None)
+        return ServiceStateResponse(**data)
+    if row.service == "repository" and db is not None:
+        data.update(vcf_depot_service_state(get_vcf_offline_depot_settings(db), nginx_active=backing_systemd_unit_active("nginx.service")))
+        data.pop("label", None)
+        data.pop("pill", None)
+        return ServiceStateResponse(**data)
     unit = SERVICE_SYSTEMD_UNITS.get(row.service)
     if unit and not get_settings().dry_run_system_adapters:
         result = SystemAdapter().service_status(unit)
@@ -1918,7 +1960,7 @@ def get_firewall_logs(identity: Annotated[Identity, Depends(require_scope("read:
 @router.get("/services", response_model=list[ServiceStateResponse], tags=["Services"], operation_id="listServices")
 def list_services(identity: Annotated[Identity, Depends(require_scope("read:services"))], db: Session = Depends(get_db)) -> list[ServiceStateResponse]:
     rows = db.execute(select(ServiceState).where(ServiceState.service.in_(SERVICE_STATE_IDS)).order_by(ServiceState.display_name)).scalars().all()
-    return [service_state_response(row) for row in rows]
+    return [service_state_response(row, db) for row in rows]
 
 
 @router.get("/services/{service}", response_model=ServiceStateResponse, tags=["Services"], operation_id="getService")
@@ -1928,7 +1970,7 @@ def get_service(service: str, identity: Annotated[Identity, Depends(require_scop
     row = db.execute(select(ServiceState).where(ServiceState.service == service)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Service not found")
-    return service_state_response(row)
+    return service_state_response(row, db)
 
 
 def service_action(service: str, action: str, identity: Identity, db: Session) -> ServiceActionResponse:

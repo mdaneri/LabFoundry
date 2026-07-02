@@ -191,6 +191,32 @@ def effective_native_uefi_http_url(boot: dict[str, Any]) -> str:
     return f"{base_url}/{ESXI_PXE_NATIVE_UEFI_BOOTFILE}" if base_url else ""
 
 
+def esxi_pxe_service_state_from_boot(boot: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool(boot.get("enabled"))
+    has_scope = bool(boot.get("dhcp_scope_ids") or boot.get("dhcp_scope_id"))
+    has_address = bool(primary_boot_address(boot))
+    running = enabled and has_scope and has_address
+    if running:
+        health = "healthy"
+        label = "live"
+        pill = "good"
+    elif enabled:
+        health = "degraded"
+        label = "enabled"
+        pill = "warn"
+    else:
+        health = "disabled"
+        label = "disabled"
+        pill = "muted"
+    return {
+        "running": running,
+        "enabled": enabled,
+        "health": health,
+        "label": label,
+        "pill": pill,
+    }
+
+
 def selected_dhcp_scope_payload(scope: DhcpScope) -> dict[str, Any]:
     return {
         "id": scope.id,

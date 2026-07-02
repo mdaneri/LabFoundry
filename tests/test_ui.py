@@ -5727,6 +5727,132 @@ def test_services_prunes_and_hides_retired_ntpd_row(client):
     assert client.get("/api/v1/services/ntpd", headers={"Authorization": f"Bearer {token}"}).status_code == 404
 
 
+def test_services_and_esxi_page_show_enabled_esxi_pxe_boot_state(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope
+    from labfoundry.app.services.esxi_pxe import (
+        ESXI_PXE_BIOS_BOOTFILE,
+        ESXI_PXE_UEFI_BOOTFILE,
+        ESXI_TFTP_ROOT,
+        save_esxi_pxe_boot_settings,
+    )
+
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.enabled.is_(True)).order_by(DhcpScope.id)).scalars().first()
+        assert scope is not None
+        save_esxi_pxe_boot_settings(
+            db,
+            enabled=True,
+            hostname="esxi-pxe.labfoundry.internal",
+            dhcp_scope_ids=[scope.id],
+            listen_interface=scope.interface_name,
+            listen_address=scope.site_address,
+            tftp_root=ESXI_TFTP_ROOT.as_posix(),
+            bios_bootfile=ESXI_PXE_BIOS_BOOTFILE,
+            uefi_bootfile=ESXI_PXE_UEFI_BOOTFILE,
+            native_uefi_http_enabled=True,
+        )
+        db.commit()
+
+    login(client)
+    esxi_page = client.get("/esxi-pxe")
+    assert esxi_page.status_code == 200
+    assert '<span class="status-pill good">live</span>' in esxi_page.text
+
+    services_page = client.get("/services")
+    assert services_page.status_code == 200
+    service_rows = json.loads(html.unescape(services_page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    esxi_row = next(row for row in service_rows if row["service"] == "esxi-pxe")
+    assert esxi_row["running"] is True
+    assert esxi_row["enabled"] is True
+    assert esxi_row["detail"] == "dnsmasq TFTP/DHCP boot options and PXE HTTP files"
+
+    token = create_api_token(client, ["read:services"])
+    api_response = client.get("/api/v1/services/esxi-pxe", headers={"Authorization": f"Bearer {token}"})
+    assert api_response.status_code == 200
+    assert api_response.json()["running"] is True
+    assert api_response.json()["enabled"] is True
+    assert api_response.json()["health"] == "healthy"
+
+
+def test_services_and_service_pages_derive_composite_runtime_status(client, monkeypatch):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings, DhcpScope, KmsSettings, VcfBackupSettings, VcfOfflineDepotSettings
+
+    def fake_service_status(self, unit: str):
+        return AdapterResult(
+            command=["systemctl", "status", unit],
+            dry_run=False,
+            stdout=json.dumps({"active": "active", "enabled": "enabled"}),
+        )
+
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.service_status", fake_service_status)
+    monkeypatch.setattr("labfoundry.app.api.v1.SystemAdapter.service_status", fake_service_status)
+
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.enabled.is_(True)).order_by(DhcpScope.id)).scalars().first()
+        assert scope is not None
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        ca_settings.enabled = True
+        ca_settings.listen_interface = scope.interface_name
+        ca_settings.listen_address = scope.site_address
+        ca_settings.root_certificate_pem = "present"
+        ca_settings.root_private_key_encrypted = "present"
+        db.add(ca_settings)
+        kms_settings = db.execute(select(KmsSettings)).scalar_one()
+        kms_settings.enabled = True
+        db.add(kms_settings)
+        backup_settings = db.execute(select(VcfBackupSettings)).scalar_one()
+        backup_settings.enabled = False
+        db.add(backup_settings)
+        depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        depot_settings.enabled = True
+        db.add(depot_settings)
+        db.commit()
+
+    login(client)
+    services_page = client.get("/services")
+    assert services_page.status_code == 200
+    service_rows = json.loads(html.unescape(services_page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    ca_row = next(row for row in service_rows if row["service"] == "ca")
+    kms_row = next(row for row in service_rows if row["service"] == "kms")
+    backup_row = next(row for row in service_rows if row["service"] == "vcf-backups")
+    depot_row = next(row for row in service_rows if row["service"] == "repository")
+    assert ca_row["running"] is True
+    assert ca_row["enabled"] is True
+    assert kms_row["running"] is True
+    assert kms_row["enabled"] is True
+    assert backup_row["running"] is True
+    assert backup_row["enabled"] is False
+    assert depot_row["running"] is True
+    assert depot_row["enabled"] is True
+
+    assert '<span class="status-pill good">live</span>' in client.get("/kms").text
+    assert '<span class="status-pill good">live</span>' in client.get("/vcf-offline-depot").text
+    ca_page = client.get("/certificate-authority").text
+    assert '<span class="status-pill muted">disabled</span>' not in ca_page
+    assert '<span class="status-pill good">live</span>' in ca_page or '<span class="status-pill warn">needs attention</span>' in ca_page
+
+    token = create_api_token(client, ["read:services"])
+    assert client.get("/api/v1/services/ca", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+    assert client.get("/api/v1/services/repository", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+    assert client.get("/api/v1/services/vcf-backups", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+
+
 def test_services_live_chrony_status_uses_systemd(client, monkeypatch):
     import html
     import json
@@ -5735,11 +5861,12 @@ def test_services_live_chrony_status_uses_systemd(client, monkeypatch):
     from labfoundry.app.config import get_settings
 
     def fake_service_status(self, unit: str):
-        assert unit == "chronyd.service"
+        active = "active" if unit == "chronyd.service" else "inactive"
+        enabled = "enabled" if unit == "chronyd.service" else "disabled"
         return AdapterResult(
             command=["systemctl", "is-active", unit, "&&", "systemctl", "is-enabled", unit],
             dry_run=False,
-            stdout=json.dumps({"active": "active", "enabled": "enabled"}),
+            stdout=json.dumps({"active": active, "enabled": enabled}),
         )
 
     monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
