@@ -187,6 +187,7 @@ def test_vcf_depot_generates_software_depot_id_from_extracted_tool(tmp_path, mon
     def fake_run(command, **kwargs):
         assert command[0] == str((tmp_path / "active-tool" / "bin" / "vcf-download-tool").resolve())
         assert kwargs["cwd"] == str((tmp_path / "active-tool" / "bin").resolve())
+        assert kwargs["input"] == "Y\n"
         return type("Completed", (), {"returncode": 0, "stdout": "Software Depot ID: 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n", "stderr": ""})()
 
     monkeypatch.setattr("labfoundry.app.services.vcf_offline_depot.subprocess.run", fake_run)
@@ -195,6 +196,16 @@ def test_vcf_depot_generates_software_depot_id_from_extracted_tool(tmp_path, mon
     assert result.success is True
     assert result.software_depot_id == "8c9506c6-7bdf-44d5-b2e9-50d829d66b99"
     assert result.error == ""
+
+
+def test_vcf_depot_software_depot_id_generation_handles_truncated_archive(tmp_path):
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    archive_path.write_bytes(b"\x1f\x8b\x08\x00truncated")
+
+    result = generate_vcf_software_depot_id(archive_path, extraction_dir=tmp_path / "active-tool")
+
+    assert result.success is False
+    assert "archive appears incomplete or invalid" in result.error
 
 
 def test_vcf_depot_command_preview_uses_staged_secret_paths():

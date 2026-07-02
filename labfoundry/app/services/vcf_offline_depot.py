@@ -90,6 +90,7 @@ VCF_DEPOT_LIFECYCLE_MANAGERS: dict[str, str] = {
     "SELF": "Self-managed",
 }
 HOSTNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{1,251}[A-Za-z0-9]$")
+VCF_DEPOT_INVALID_ARCHIVE_MESSAGE = "VCF Download Tool archive appears incomplete or invalid. Upload the full vcf-download-tool-*.tar.gz file again."
 
 
 @dataclass(frozen=True)
@@ -124,7 +125,7 @@ def detect_vcf_download_tool_version(archive_path: str | Path) -> str:
             if version_file is None:
                 return ""
             return version_file.read(200).decode("utf-8", errors="replace").strip()
-    except (tarfile.TarError, OSError):
+    except (EOFError, tarfile.TarError, OSError):
         return ""
 
 
@@ -135,17 +136,34 @@ def safe_archive_upload_name(filename: str) -> str:
     return name
 
 
-def _safe_extract_tar_gz(archive_path: Path, destination: Path) -> None:
+def _validate_tar_members(members: list[tarfile.TarInfo], destination: Path) -> None:
     destination_resolved = destination.resolve()
+    for member in members:
+        target = (destination / member.name).resolve()
+        if target != destination_resolved and destination_resolved not in target.parents:
+            raise ValueError("VCF Download Tool archive contains an unsafe path.")
+
+
+def validate_vcf_download_tool_archive(archive_path: Path) -> None:
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            members = archive.getmembers()
+    except (EOFError, tarfile.TarError, OSError) as exc:
+        raise ValueError(VCF_DEPOT_INVALID_ARCHIVE_MESSAGE) from exc
+    _validate_tar_members(members, Path("vcf-download-tool-validation"))
+
+
+def _safe_extract_tar_gz(archive_path: Path, destination: Path) -> None:
     if destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(archive_path, "r:gz") as archive:
-        for member in archive.getmembers():
-            target = (destination / member.name).resolve()
-            if target != destination_resolved and destination_resolved not in target.parents:
-                raise ValueError("VCF Download Tool archive contains an unsafe path.")
-        archive.extractall(destination)
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            members = archive.getmembers()
+            _validate_tar_members(members, destination)
+            archive.extractall(destination)
+    except (EOFError, tarfile.TarError, OSError) as exc:
+        raise ValueError(VCF_DEPOT_INVALID_ARCHIVE_MESSAGE) from exc
 
 
 def _find_vcf_download_tool_binary(extraction_dir: Path) -> Path:
@@ -198,6 +216,7 @@ def generate_vcf_software_depot_id(
             cwd=str(tool.parent),
             capture_output=True,
             check=False,
+            input="Y\n",
             text=True,
             timeout=timeout_seconds,
         )

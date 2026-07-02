@@ -324,6 +324,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     safe_archive_upload_name,
     setting_secret_state,
     validate_vcf_depot_state,
+    validate_vcf_download_tool_archive,
     vcf_depot_endpoint,
     vcf_depot_profile_to_dict,
     vcf_depot_service_state,
@@ -1593,9 +1594,20 @@ def store_uploaded_vcf_depot_archive(settings: VcfOfflineDepotSettings, archive_
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     VCF_DEPOT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     archive_path = VCF_DEPOT_UPLOAD_DIR / archive_name
-    with archive_path.open("wb") as destination:
-        shutil.copyfileobj(archive_file.file, destination)
-    version = detect_vcf_download_tool_version(archive_path)
+    temp_path = VCF_DEPOT_UPLOAD_DIR / f".{archive_name}.{uuid4().hex}.upload"
+    try:
+        with temp_path.open("wb") as destination:
+            shutil.copyfileobj(archive_file.file, destination)
+        validate_vcf_download_tool_archive(temp_path)
+        version = detect_vcf_download_tool_version(temp_path)
+        temp_path.replace(archive_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Unable to store the VCF Download Tool archive.") from exc
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
     settings.tool_archive_path = str(archive_path)
     settings.tool_version = version
     return archive_name
@@ -1828,7 +1840,7 @@ def vcf_depot_command_entry(command: list[str], *, dry_run: bool) -> dict[str, A
 
 def vcf_depot_runtime_secret_path(staged_path: str) -> Path:
     name = Path(staged_path).name
-    return VCF_DEPOT_VDT_LOG_PATH.parent.parent / "secrets" / name
+    return filesystem_path(VCF_DEPOT_VDT_LOG_PATH.parent.parent / "secrets" / name)
 
 
 def vcf_depot_runtime_command(command: list[str], tool_path: Path) -> list[str]:
@@ -1871,18 +1883,33 @@ def write_vcf_depot_runtime_file(path: Path, value: str) -> None:
     path.chmod(0o600)
 
 
-def prepare_vcf_depot_runtime(settings: VcfOfflineDepotSettings, db: Session) -> Path:
-    tool_path = resolve_vcf_download_tool(settings)
-    tool_home = vcf_download_tool_home(tool_path)
-    vdt_log_path = filesystem_path(VCF_DEPOT_VDT_LOG_PATH)
-    vdt_log_path.parent.mkdir(parents=True, exist_ok=True)
-    vdt_log_path.touch(exist_ok=True)
+def stage_vcf_depot_runtime_secrets(db: Session) -> None:
     token = setting_value(db, VCF_DEPOT_TOKEN_VALUE_KEY)
     if token.strip():
         write_vcf_depot_runtime_file(vcf_depot_runtime_secret_path(VCF_DEPOT_STAGED_TOKEN_FILE), token)
     activation_code = setting_value(db, VCF_DEPOT_ACTIVATION_VALUE_KEY)
     if activation_code.strip():
         write_vcf_depot_runtime_file(vcf_depot_runtime_secret_path(VCF_DEPOT_STAGED_ACTIVATION_FILE), activation_code)
+
+
+def stage_vcf_depot_runtime_secrets_after_upload(db: Session) -> None:
+    try:
+        stage_vcf_depot_runtime_secrets(db)
+    except OSError as exc:
+        if get_settings().environment == "appliance":
+            raise HTTPException(
+                status_code=500,
+                detail="Unable to stage VCFDT runtime credential files under /var/lib/labfoundry/vcfDownloadTool/active-tool/secrets.",
+            ) from exc
+
+
+def prepare_vcf_depot_runtime(settings: VcfOfflineDepotSettings, db: Session) -> Path:
+    tool_path = resolve_vcf_download_tool(settings)
+    tool_home = vcf_download_tool_home(tool_path)
+    vdt_log_path = filesystem_path(VCF_DEPOT_VDT_LOG_PATH)
+    vdt_log_path.parent.mkdir(parents=True, exist_ok=True)
+    vdt_log_path.touch(exist_ok=True)
+    stage_vcf_depot_runtime_secrets(db)
     telemetry_choice = settings.telemetry_choice if settings.telemetry_choice in VCF_DEPOT_TELEMETRY_CHOICES else "DISABLE"
     if telemetry_choice != "NOT_PROVIDED":
         telemetry_file = tool_home / "conf" / "telemetry" / "telemetry.flag"
@@ -7942,6 +7969,8 @@ def update_vcf_offline_depot_settings_from_ui(
     dns_actions = [action for action in [dns_record_action, old_dns_record_action] if action]
     dns_record_action = "+".join(dns_actions) if dns_actions else None
     db.commit()
+    if uploaded_token_name or uploaded_activation_name:
+        stage_vcf_depot_runtime_secrets_after_upload(db)
     record_audit(db, actor=identity.username, action="update_vcf_offline_depot_settings", resource_type="vcf_offline_depot", resource_id=str(settings.id))
 
     if request.headers.get("X-LabFoundry-Autosave") == "1":
@@ -8019,6 +8048,7 @@ def paste_vcf_depot_download_token_from_ui(
             action="paste_vcf_depot_download_token",
         )
     db.commit()
+    stage_vcf_depot_runtime_secrets_after_upload(db)
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         context = vcf_offline_depot_context(db)
         token_state = context["vcf_depot_download_token"]

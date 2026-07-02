@@ -3928,6 +3928,9 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
     assert "initializeVcfDepotTokenPaste" in app_js.text
     assert "initializeCopyValueButtons" in app_js.text
+    assert "clearSelectedFileInputs" in app_js.text
+    assert "Uploaded ${payload.tool_archive_name" in app_js.text
+    assert "autosaveErrorFromText" in app_js.text
     assert "copyTextWithTextareaFallback" in app_js.text
     assert "window.isSecureContext" in app_js.text
     assert "softwareDepotId instanceof HTMLInputElement" in app_js.text
@@ -4085,10 +4088,43 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         assert "vcf-offline-depot" in (job.result or "")
         assert "stage-tool" in (job.result or "")
         assert "vcf-download-tool binaries download" in (job.result or "")
-        assert "super-secret-token" not in (job.result or "")
+    assert "super-secret-token" not in (job.result or "")
 
 
-def test_vcf_offline_depot_accepts_pasted_download_token(client):
+def test_vcf_offline_depot_rejects_truncated_vcfdt_upload(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import VcfOfflineDepotSettings
+
+    login(client)
+    page = client.get("/vcf-offline-depot")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/vcf-offline-depot/settings",
+        data={
+            "hostname": "depot.labfoundry.internal",
+            "listen_interface": "eth2",
+            "port": "443",
+            "csrf": csrf,
+        },
+        files={
+            "tool_archive_file": ("vcf-download-tool-9.1.0.test.tar.gz", b"\x1f\x8b\x08\x00truncated", "application/gzip"),
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 400
+    assert "archive appears incomplete or invalid" in response.text
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        assert settings.tool_archive_path == ""
+
+
+def test_vcf_offline_depot_accepts_pasted_download_token(client, tmp_path, monkeypatch):
+    from pathlib import PurePosixPath
+
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -4097,6 +4133,10 @@ def test_vcf_offline_depot_accepts_pasted_download_token(client):
         VCF_DEPOT_TOKEN_NAME_KEY,
         VCF_DEPOT_TOKEN_VALUE_KEY,
     )
+
+    runtime_log = tmp_path / "active-tool" / "log" / "vdt.log"
+    runtime_token = tmp_path / "active-tool" / "secrets" / "download-token.txt"
+    monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_VDT_LOG_PATH", PurePosixPath(runtime_log.as_posix()))
 
     login(client)
     page = client.get("/vcf-offline-depot")
@@ -4116,6 +4156,7 @@ def test_vcf_offline_depot_accepts_pasted_download_token(client):
     assert payload["download_token_updated_at"]
     assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in payload["command_preview"]
     assert "pasted-secret-token" not in response.text
+    assert runtime_token.read_text(encoding="utf-8") == "pasted-secret-token"
 
     with SessionLocal() as db:
         token_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_NAME_KEY)).scalar_one()
@@ -4134,6 +4175,7 @@ def test_vcf_offline_depot_accepts_pasted_download_token(client):
     assert upload_payload["download_token_present"] is True
     assert upload_payload["download_token_name"] == "download-token.txt"
     assert "uploaded-secret-token" not in upload_response.text
+    assert runtime_token.read_text(encoding="utf-8") == "uploaded-secret-token"
 
     with SessionLocal() as db:
         token_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_NAME_KEY)).scalar_one()

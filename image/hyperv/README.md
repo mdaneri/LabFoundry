@@ -395,8 +395,10 @@ hand.
 
 The default data disks are dynamic 500 GB VHDX files stored next to the OS
 VHDX. Override them with `-DepotVhdxPath`, `-BackupVhdxPath`,
-`-DepotDiskSizeBytes`, or `-BackupDiskSizeBytes` when needed. Format and mount
-them inside Photon before enabling real Depot or Backup apply actions.
+`-DepotDiskSizeBytes`, or `-BackupDiskSizeBytes` when needed. On first boot,
+`labfoundry-data-disks.service` formats blank attached data disks, labels them
+as `LABFOUNDRY_DEPOT` and `LABFOUNDRY_BKUP`, writes `/etc/fstab`, and mounts
+them before the LabFoundry control plane starts.
 
 ## Appliance Smoke Checks
 

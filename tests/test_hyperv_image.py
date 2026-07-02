@@ -95,6 +95,41 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "standard pip behavior" in root_docs
 
 
+def test_photon_provisioning_prepares_attached_data_disks():
+    provision = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    mount_script = Path("scripts/appliance/labfoundry-mount-data-disks").read_text(encoding="utf-8")
+    hyperv_unit = Path("image/hyperv/systemd/labfoundry.service").read_text(encoding="utf-8")
+    vmware_unit = Path("image/vmware-workstation/systemd/labfoundry.service").read_text(encoding="utf-8")
+    hyperv_docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
+    vmware_docs = Path("image/vmware-workstation/README.md").read_text(encoding="utf-8")
+    root_docs = Path("README.md").read_text(encoding="utf-8")
+
+    assert "tdnf -y install" in provision and "e2fsprogs" in provision
+    assert "labfoundry-mount-data-disks" in provision
+    assert "labfoundry-data-disks.service" in provision
+    assert "systemctl enable labfoundry-data-disks.service" in provision
+    assert "Before=labfoundry.service" in provision
+
+    assert "LABFOUNDRY_DEPOT" in mount_script
+    assert "LABFOUNDRY_BKUP" in mount_script
+    assert "/mnt/labfoundry-vcf-offline-depot" in mount_script
+    assert "/mnt/labfoundry-vcf-backups" in mount_script
+    assert 'mkfs.ext4 -F -L "$label" "$disk"' in mount_script
+    assert "UUID=%s %s ext4 defaults,nofail,x-systemd.device-timeout=30s 0 2" in mount_script
+    assert "findmnt -n -o SOURCE /" in mount_script
+    assert "No blank data disk available" in mount_script
+
+    assert "After=network-online.target labfoundry-data-disks.service" in hyperv_unit
+    assert "Wants=network-online.target labfoundry-data-disks.service" in hyperv_unit
+    assert "After=network-online.target labfoundry-data-disks.service" in vmware_unit
+    assert "Wants=network-online.target labfoundry-data-disks.service" in vmware_unit
+
+    assert "labfoundry-data-disks.service" in root_docs
+    assert "labfoundry-data-disks.service" in hyperv_docs
+    assert "labfoundry-data-disks.service" in vmware_docs
+    assert "Format and mount" not in hyperv_docs
+
+
 def test_bundled_ipxe_bootloaders_have_provenance_and_expected_hashes():
     readme = Path("third_party/ipxe/README.md").read_text(encoding="utf-8")
     copying = Path("third_party/ipxe/COPYING").read_text(encoding="utf-8")

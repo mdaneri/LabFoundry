@@ -5341,6 +5341,14 @@ function initializeAutosaveForms() {
         input instanceof HTMLInputElement && input.files ? Array.from(input.files) : [],
       );
 
+    const clearSelectedFileInputs = () => {
+      form.querySelectorAll('input[type="file"]').forEach((input) => {
+        if (input instanceof HTMLInputElement) {
+          input.value = "";
+        }
+      });
+    };
+
     const uploadProgress = () => form.querySelector("[data-autosave-upload-progress]");
 
     const resetUploadProgress = () => {
@@ -5350,6 +5358,18 @@ function initializeAutosaveForms() {
         progress.value = 0;
         progress.max = 100;
       }
+    };
+
+    const autosaveErrorFromText = (text) => {
+      try {
+        const payload = JSON.parse(text || "{}");
+        if (payload.detail) {
+          return String(payload.detail);
+        }
+      } catch {
+        // Fall through to the generic message below.
+      }
+      return "Settings could not be saved.";
     };
 
     const postWithFetch = async (actionUrl, formData) => {
@@ -5364,7 +5384,7 @@ function initializeAutosaveForms() {
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new Error("Settings could not be saved.");
+        throw new Error(autosaveErrorFromText(await response.text()));
       }
       return { payload: await response.json(), request };
     };
@@ -5398,7 +5418,7 @@ function initializeAutosaveForms() {
         });
         xhr.addEventListener("load", () => {
           if (xhr.status < 200 || xhr.status >= 300) {
-            reject(new Error("Settings could not be saved."));
+            reject(new Error(autosaveErrorFromText(xhr.responseText)));
             return;
           }
           try {
@@ -5419,6 +5439,7 @@ function initializeAutosaveForms() {
       }
       const files = selectedFiles();
       const hasFiles = files.length > 0;
+      const uploadedFileName = files[0]?.name || "file";
       setAutosaveStatus(statusElement, hasFiles ? `Uploading ${files[0]?.name || "file"}...` : "Saving changes...", "saving");
       try {
         const actionUrl = form.getAttribute("action") || window.location.href;
@@ -5427,9 +5448,16 @@ function initializeAutosaveForms() {
           ? await postWithUploadProgress(actionUrl, formData, files)
           : await postWithFetch(actionUrl, formData);
         form.dispatchEvent(new CustomEvent("labfoundry:autosave-success", { detail: payload }));
+        if (hasFiles) {
+          clearSelectedFileInputs();
+        }
         setAutosaveStatus(
           statusElement,
-          payload.updated_at ? `Saved automatically at ${new Date(payload.updated_at).toLocaleTimeString()}.` : "Saved automatically.",
+          hasFiles
+            ? `Uploaded ${payload.tool_archive_name || payload.download_token_name || uploadedFileName}.`
+            : payload.updated_at
+              ? `Saved automatically at ${new Date(payload.updated_at).toLocaleTimeString()}.`
+              : "Saved automatically.",
           "saved",
         );
         if (inFlightRequest === request) {

@@ -32,7 +32,10 @@ builder lives in [`image/hyperv/`](image/hyperv/) and provisions:
 The finished Hyper-V appliance VM also attaches two durable dynamic data disks:
 one for the VCF Offline Depot at `/mnt/labfoundry-vcf-offline-depot` and one
 for VCF Backups at `/mnt/labfoundry-vcf-backups`. Keep those workloads off the
-OS VHDX.
+OS VHDX. On first boot, `labfoundry-data-disks.service` labels blank attached
+data disks as `LABFOUNDRY_DEPOT` and `LABFOUNDRY_BKUP`, formats them as ext4,
+persists them in `/etc/fstab`, and mounts them at those fixed paths before
+`labfoundry.service` starts.
 
 LabFoundry writes operational events to `/var/log/labfoundry/labfoundry.log`.
 Audit events, desired-state edits, and appliance apply submissions are mirrored

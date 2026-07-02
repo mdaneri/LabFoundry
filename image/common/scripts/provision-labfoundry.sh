@@ -74,7 +74,7 @@ case "$LABFOUNDRY_GUEST_PLATFORM" in
     exit 2
     ;;
 esac
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony ipxe syslinux nginx powershell
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow e2fsprogs $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony ipxe syslinux nginx powershell
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
@@ -206,8 +206,9 @@ chown root:labfoundry /etc/labfoundry/labfoundry.env
 
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
+install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks"
 install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
-sed -i 's/\r$//' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
+sed -i 's/\r$//' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" /etc/sudoers.d/labfoundry-helper
 visudo -cf /etc/sudoers.d/labfoundry-helper
 
 chown -R root:root "$LABFOUNDRY_HOME"
@@ -223,6 +224,22 @@ cat >/etc/ssh/sshd_config.d/labfoundry-root-login.conf <<'EOF'
 PermitRootLogin no
 EOF
 chmod 0644 /etc/ssh/sshd_config.d/labfoundry-root-login.conf
+cat >/etc/systemd/system/labfoundry-data-disks.service <<'EOF'
+[Unit]
+Description=Prepare LabFoundry data disks
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=labfoundry.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/labfoundry/bin/labfoundry-mount-data-disks
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod 0644 /etc/systemd/system/labfoundry-data-disks.service
 chown -R labfoundry:labfoundry "$LABFOUNDRY_STATE" "$LABFOUNDRY_LOG"
 chmod 0711 "$LABFOUNDRY_STATE"
 if id "$BOOTSTRAP_USERNAME" >/dev/null 2>&1 && [ -d "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME" ]; then
@@ -319,6 +336,7 @@ if [ "$LABFOUNDRY_GUEST_PLATFORM" = "hyperv" ]; then
 elif [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   systemctl enable --now vmtoolsd || true
 fi
+systemctl enable labfoundry-data-disks.service
 systemctl enable labfoundry
 systemctl enable --now nginx
 

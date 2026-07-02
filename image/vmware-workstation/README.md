@@ -112,6 +112,10 @@ The wrapper creates fresh Depot and Backups data VMDKs when needed, and
 `-ResetDataDisks` removes those data VMDKs before recreating them. Pass
 `-IncludeLabNetworkAdapters` only after `vmnet2`, `vmnet3`, and `vmnet4` exist
 for the SiteA, WAN/SiteB, and trunk-like lifecycle networks.
+On first boot, `labfoundry-data-disks.service` formats blank attached data
+VMDKs, labels them as `LABFOUNDRY_DEPOT` and `LABFOUNDRY_BKUP`, writes
+`/etc/fstab`, and mounts them at `/mnt/labfoundry-vcf-offline-depot` and
+`/mnt/labfoundry-vcf-backups` before the LabFoundry control plane starts.
 
 ## Fidelity Notes
 
