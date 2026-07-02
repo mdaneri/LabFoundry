@@ -37,6 +37,34 @@ def vcf_backup_settings_to_dict(settings: VcfBackupSettings) -> dict:
     }
 
 
+def vcf_backup_service_state(settings: VcfBackupSettings, *, sshd_active: bool | None = None) -> dict[str, object]:
+    desired_enabled = bool(settings.enabled)
+    running = bool(sshd_active) if sshd_active is not None else desired_enabled
+    if running and desired_enabled:
+        health = "healthy"
+        label = "live"
+        pill = "good"
+    elif running:
+        health = "degraded"
+        label = "running"
+        pill = "warn"
+    elif desired_enabled:
+        health = "degraded"
+        label = "enabled"
+        pill = "warn"
+    else:
+        health = "disabled"
+        label = "disabled"
+        pill = "muted"
+    return {
+        "running": running,
+        "enabled": desired_enabled,
+        "health": health,
+        "label": label,
+        "pill": pill,
+    }
+
+
 def validate_vcf_backup_state(settings: VcfBackupSettings, users: list[User], interface_names: set[str] | None = None) -> list[str]:
     errors: list[str] = []
     user_by_id = {user.id: user for user in users}

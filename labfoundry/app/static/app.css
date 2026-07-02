@@ -1399,6 +1399,11 @@ textarea {
   border-bottom: 1px dashed #93c5fd;
 }
 
+.tabulator .tabulator-row.new-record-row-locked .tabulator-cell:not([tabulator-field="name"]) {
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
 .tabulator .tabulator-row.new-record-row .add-row-hint {
   display: inline-flex;
   align-items: center;
@@ -2352,7 +2357,8 @@ input[type="checkbox"] {
 }
 
 .user-row-menu,
-.service-row-menu {
+.service-row-menu,
+.lease-row-menu {
   position: absolute;
   z-index: 45;
   display: grid;
@@ -2365,7 +2371,8 @@ input[type="checkbox"] {
 }
 
 .user-row-menu button,
-.service-row-menu button {
+.service-row-menu button,
+.lease-row-menu button {
   border: 0;
   border-bottom: 1px solid #edf2f7;
   padding: 9px 10px;
@@ -2377,28 +2384,63 @@ input[type="checkbox"] {
   cursor: pointer;
 }
 
+.lease-row-menu form {
+  display: contents;
+}
+
 .user-row-menu button:last-child,
-.service-row-menu button:last-child {
+.service-row-menu button:last-child,
+.lease-row-menu button:last-child {
   border-bottom: 0;
 }
 
 .user-row-menu button:hover,
 .user-row-menu button:focus-visible,
 .service-row-menu button:hover,
-.service-row-menu button:focus-visible {
+.service-row-menu button:focus-visible,
+.lease-row-menu button:hover,
+.lease-row-menu button:focus-visible {
   background: #eff6ff;
 }
 
 .user-row-menu button.danger,
-.service-row-menu button.danger {
+.service-row-menu button.danger,
+.lease-row-menu button.danger {
   color: var(--bad);
 }
 
 .user-row-menu button:disabled,
-.service-row-menu button:disabled {
+.service-row-menu button:disabled,
+.lease-row-menu button:disabled {
   color: var(--muted);
   cursor: not-allowed;
   opacity: 0.65;
+}
+
+.lease-action-cell {
+  width: 64px;
+}
+
+.lease-action-menu {
+  position: relative;
+  display: inline-grid;
+}
+
+.lease-row-menu {
+  right: 0;
+  top: calc(100% + 4px);
+}
+
+.lease-reservation-summary {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.lease-reservation-summary strong {
+  color: var(--text);
 }
 
 .tabulator-checklist-editor {

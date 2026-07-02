@@ -54,6 +54,31 @@ def join_multiline(values: list[str]) -> str:
     return "\n".join(split_multiline("\n".join(values)))
 
 
+def ca_service_state(settings: CaSettings) -> dict[str, object]:
+    desired_enabled = bool(settings.enabled)
+    has_material = bool(settings.root_certificate_pem and settings.root_private_key_encrypted)
+    running = desired_enabled and has_material
+    if running:
+        health = "healthy"
+        label = "live"
+        pill = "good"
+    elif desired_enabled:
+        health = "degraded"
+        label = "enabled"
+        pill = "warn"
+    else:
+        health = "disabled"
+        label = "disabled"
+        pill = "muted"
+    return {
+        "running": running,
+        "enabled": desired_enabled,
+        "health": health,
+        "label": label,
+        "pill": pill,
+    }
+
+
 def safe_certificate_name(value: str) -> str:
     safe = SAFE_NAME_PATTERN.sub("-", value.strip()).strip("-")
     return safe or "certificate"

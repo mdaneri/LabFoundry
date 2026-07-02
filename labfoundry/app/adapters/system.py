@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import subprocess
 
@@ -40,6 +41,29 @@ class SystemAdapter:
 
     def service_action(self, service: str, action: str) -> AdapterResult:
         return self._record_only_result(["systemctl", action, service], f"dry-run: service {action} recorded for {service}")
+
+    def service_status(self, unit: str) -> AdapterResult:
+        command = ["systemctl", "is-active", unit, "&&", "systemctl", "is-enabled", unit]
+        if self.dry_run:
+            return AdapterResult(command=command, dry_run=True, stdout=json.dumps({"active": "unknown", "enabled": "unknown"}))
+        try:
+            active = subprocess.run(["systemctl", "is-active", unit], check=False, capture_output=True, text=True)
+            enabled = subprocess.run(["systemctl", "is-enabled", unit], check=False, capture_output=True, text=True)
+        except OSError as exc:
+            return AdapterResult(command=command, dry_run=False, stderr=f"Unable to query {unit}: {exc}", returncode=127)
+        return AdapterResult(
+            command=command,
+            dry_run=False,
+            stdout=json.dumps(
+                {
+                    "active": active.stdout.strip() or active.stderr.strip(),
+                    "active_returncode": active.returncode,
+                    "enabled": enabled.stdout.strip() or enabled.stderr.strip(),
+                    "enabled_returncode": enabled.returncode,
+                },
+                sort_keys=True,
+            ),
+        )
 
     def validate_dnsmasq_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("dnsmasq", "validate", config_path, dry_run_message="dry-run: dnsmasq validation command recorded")
@@ -104,6 +128,12 @@ class SystemAdapter:
 
     def validate_kms_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("kms", "validate", config_path, dry_run_message="dry-run: KMS validation command recorded")
+
+    def apply_chronyd_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("chronyd", "apply", config_path, dry_run_message="dry-run: Chrony apply command recorded")
+
+    def validate_chronyd_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("chronyd", "validate", config_path, dry_run_message="dry-run: Chrony validation command recorded")
 
     def apply_network_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("network", "apply", config_path, dry_run_message="dry-run: network apply command recorded")

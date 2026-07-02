@@ -6,6 +6,7 @@ from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSe
 
 DNS_CONDITIONAL_FORWARDERS_SETTING_KEY = "dns.conditional_forwarders"
 DNSMASQ_LEASE_FILE_PATH = "/var/lib/labfoundry/dnsmasq/dhcp.leases"
+DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX = "Deny DHCP for "
 
 
 def split_servers(raw: str | None) -> list[str]:
@@ -542,9 +543,9 @@ def validate_dhcp_scope(scope: DhcpScope) -> tuple[list[str], object | None]:
     if range_start and range_end and int(range_start) > int(range_end):
         errors.append(f"{label} range start must be less than or equal to range end.")
     if network and dns_server and dns_server not in network:
-        errors.append(f"{label} DNS server should be inside the zone subnet.")
+        errors.append(f"{label} DNS server {dns_server} is outside {network.with_prefixlen}. Bind DNS to {scope.interface_name} or leave the DNS server blank for this zone.")
     if network and ntp_server and ntp_server not in network:
-        errors.append(f"{label} NTP server should be inside the zone subnet.")
+        errors.append(f"{label} NTP server {ntp_server} is outside {network.with_prefixlen}. Bind Chrony to {scope.interface_name} or leave the NTP server blank for this zone.")
     return errors, network
 
 
@@ -727,7 +728,9 @@ def render_dnsmasq_config(
             elif option.scope_id in scope_tags:
                 lines.append(f"dhcp-option=tag:{scope_tags[option.scope_id]},option:{option_code},{option_value}")
         for reservation in dhcp_reservations:
-            if reservation.enabled is not False:
+            if reservation.enabled is False and (reservation.description or "").startswith(DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX):
+                lines.append(f"dhcp-host={reservation.mac_address},ignore")
+            elif reservation.enabled is not False:
                 try:
                     reserved_ip = ip_address(reservation.ip_address)
                 except ValueError:

@@ -1,5 +1,6 @@
 from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
 from labfoundry.app.services.dnsmasq import (
+    DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNSMASQ_LEASE_FILE_PATH,
     dhcp_bind_target_families,
     dhcp_bind_target_names,
@@ -53,7 +54,14 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
         ],
         dhcp_settings=dhcp_settings,
         dhcp_reservations=[
-            DhcpReservation(hostname="client1", mac_address="02:15:5d:00:20:20", ip_address="192.168.50.120")
+            DhcpReservation(hostname="client1", mac_address="02:15:5d:00:20:20", ip_address="192.168.50.120"),
+            DhcpReservation(
+                hostname="deny-client.labfoundry.internal",
+                mac_address="02:15:5d:00:20:99",
+                ip_address="192.168.50.199",
+                enabled=False,
+                description=f"{DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX}02:15:5d:00:20:99.",
+            ),
         ],
         dhcp_options=[DhcpOption(option_code="ntp-server", value="192.168.50.1")],
         conditional_forwarders="sddc.internal=192.168.10.10\ncorp.example=192.168.20.10#5353",
@@ -79,6 +87,7 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
     assert "ptr-record=" not in config
     assert f"dhcp-leasefile={DNSMASQ_LEASE_FILE_PATH}" in config
     assert "dhcp-host=02:15:5d:00:20:20,client1,192.168.50.120" in config
+    assert "dhcp-host=02:15:5d:00:20:99,ignore" in config
 
 
 def test_dnsmasq_renderer_supports_ipv6_dhcp_zones():

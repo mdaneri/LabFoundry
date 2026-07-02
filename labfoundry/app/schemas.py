@@ -565,7 +565,6 @@ class SettingsResponse(BaseModel):
     management_https_cert_available: bool = False
     root_ssh_enabled: bool = False
     external_dns_servers: list[str]
-    ntp_servers: list[str]
     appliance_settings_config_path: str
     local_dns_enabled: bool
     management_interface: str
@@ -581,6 +580,3 @@ class SettingsUpdate(BaseModel):
     management_https_enabled: bool = False
     root_ssh_enabled: bool = False
     external_dns_servers: list[str] = Field(default_factory=lambda: ["1.1.1.1", "9.9.9.9"])
-    ntp_servers: list[str] = Field(
-        default_factory=lambda: ["time1.google.com", "time2.google.com", "time3.google.com", "time4.google.com"]
-    )

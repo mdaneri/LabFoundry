@@ -38,7 +38,7 @@
               <strong>{{ service.display_name }}</strong>
               <span class="muted">{{ service.service }}</span>
             </td>
-            <td>{{ "running" if service.running else "stopped" }}</td>
+            <td>{{ "running" if service.running else ("disabled" if service.enabled is sameas false else "stopped") }}</td>
             <td>{{ "enabled" if service.enabled else "disabled" }}</td>
             <td>{{ service.detail or "native host service" }}</td>
             <td class="fallback-actions">

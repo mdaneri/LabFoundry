@@ -20,6 +20,7 @@ from labfoundry.app.models import (
     KmsKey,
     KmsSettings,
     NatRule,
+    ChronySettings,
     PhysicalInterface,
     Route,
     ServiceState,
@@ -36,63 +37,14 @@ from labfoundry.app.services.appliance_settings import APPLIANCE_DNS_RECORD_DESC
 from labfoundry.app.services.local_users import DEFAULT_LOCAL_USER_SHELL, POWERSHELL_LOCAL_USER_SHELL, stage_user_os_password
 from labfoundry.app.services.dnsmasq import join_domains, split_domains, validate_dns_record
 from labfoundry.app.services.networking import normalize_interface_mode
+from labfoundry.app.services.chrony import CHRONY_DEFAULT_HOSTNAME, CHRONY_DEFAULT_UPSTREAM_SERVERS, CHRONY_STAGED_CONFIG_PATH
+from labfoundry.app.services.service_registry import RETIRED_SERVICE_IDS, SERVICE_STATE_DEFAULTS
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
 from labfoundry.app.security import ensure_appliance_instance_id
 
 
 VCF_BACKUP_USERNAME = VCF_BACKUP_DEFAULT_USERNAME
 SEED_EXAMPLES_SETTING_KEY = "seed.include_examples"
-
-
-SERVICE_STATE_DEFAULTS = [
-    {"service": "routing", "display_name": "Routing", "running": True, "enabled": True, "health": "healthy"},
-    {"service": "firewall", "display_name": "Firewall", "running": True, "enabled": True, "health": "healthy"},
-    {"service": "dns", "display_name": "DNS", "running": False, "enabled": False, "health": "disabled"},
-    {"service": "dhcp", "display_name": "DHCP", "running": False, "enabled": False, "health": "disabled"},
-    {
-        "service": "kms",
-        "display_name": "KMS / KMIP",
-        "running": False,
-        "enabled": False,
-        "health": "planned",
-        "detail": "PyKMIP lab backend",
-    },
-    {
-        "service": "repository",
-        "display_name": "VCF Offline Depot",
-        "running": False,
-        "enabled": False,
-        "health": "planned",
-        "detail": "/mnt/labfoundry-vcf-offline-depot",
-    },
-    {
-        "service": "esxi-pxe",
-        "display_name": "ESXi PXE",
-        "running": False,
-        "enabled": False,
-        "health": "planned",
-        "detail": "/var/lib/labfoundry/pxe/http/esxi/ks",
-    },
-    {
-        "service": "vcf-private-registry",
-        "display_name": "VCF Private Registry",
-        "running": False,
-        "enabled": False,
-        "health": "planned",
-        "detail": "Harbor / vcf-supervisor-services",
-    },
-    {
-        "service": "vcf-backups",
-        "display_name": "VCF Backup SFTP",
-        "running": True,
-        "enabled": True,
-        "health": "healthy",
-        "detail": "/mnt/labfoundry-vcf-backups",
-    },
-    {"service": "ca", "display_name": "Certificate Authority", "running": False, "enabled": False, "health": "planned"},
-    {"service": "ldap", "display_name": "LDAP", "running": False, "enabled": False, "health": "planned"},
-    {"service": "auth", "display_name": "Authentication", "running": True, "enabled": True, "health": "healthy"},
-]
 
 
 def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
@@ -241,23 +193,41 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
             )
         )
 
-    existing_services = {row.service for row in db.execute(select(ServiceState)).scalars().all()}
+    for retired_service in db.execute(select(ServiceState).where(ServiceState.service.in_(RETIRED_SERVICE_IDS))).scalars().all():
+        db.delete(retired_service)
+    vcf_backup_settings = db.execute(select(VcfBackupSettings)).scalar_one_or_none()
+    vcf_backup_desired_enabled = bool(vcf_backup_settings and vcf_backup_settings.enabled)
     for service_state in SERVICE_STATE_DEFAULTS:
         existing_service = db.execute(select(ServiceState).where(ServiceState.service == service_state["service"])).scalar_one_or_none()
         if existing_service is None:
             db.add(ServiceState(**service_state))
-        elif service_state["service"] == "repository":
+        elif service_state["service"] in {"chronyd", "repository", "vcf-backups"}:
             existing_service.display_name = service_state["display_name"]
             existing_service.detail = service_state["detail"]
             if existing_service.health == "healthy":
                 existing_service.health = service_state["health"]
-            existing_service.enabled = service_state["enabled"]
-            existing_service.running = service_state["running"]
+            if service_state["service"] == "repository":
+                existing_service.enabled = service_state["enabled"]
+                existing_service.running = service_state["running"]
+            if service_state["service"] == "vcf-backups" and not vcf_backup_desired_enabled:
+                existing_service.enabled = service_state["enabled"]
+                existing_service.running = service_state["running"]
+                existing_service.health = service_state["health"]
 
     appliance_settings = db.execute(select(ApplianceSettings)).scalar_one_or_none()
     if appliance_settings is None:
         appliance_settings = ApplianceSettings()
         db.add(appliance_settings)
+        db.flush()
+
+    chrony_settings = db.execute(select(ChronySettings)).scalar_one_or_none()
+    if chrony_settings is None:
+        chrony_settings = ChronySettings(
+            hostname=CHRONY_DEFAULT_HOSTNAME,
+            upstream_servers=appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS,
+            config_path=CHRONY_STAGED_CONFIG_PATH,
+        )
+        db.add(chrony_settings)
         db.flush()
 
     appliance_dns_domain = _domain_from_fqdn(appliance_settings.fqdn) or "labfoundry.internal"

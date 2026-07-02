@@ -317,7 +317,7 @@ selected SFTP user is new, disabled/enabled, has a pending password, changes she
 
 The firewall preview derives LabFoundry-managed service allow rules from
 enabled service listener desired state, including management, DNS, DHCP, KMS,
-VCF Backup, VCF Offline Depot, and VCF Private Registry listeners. DHCP VLAN
+Chrony, VCF Backup, VCF Offline Depot, and VCF Private Registry listeners. DHCP VLAN
 moves or service listener moves should be applied with the changed Firewall
 unit when `/appliance-apply` shows it pending.
 

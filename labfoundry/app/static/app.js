@@ -773,8 +773,60 @@ async function postDhcpOptionAction(url, data, csrf, options = {}) {
   }
 }
 
-function newDhcpScopeRow(defaultInterface = "eth2") {
-  return {
+function normalizeDhcpZoneName(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function dhcpInterfaceDefaults(defaults, interfaceName) {
+  const entries = Array.isArray(defaults.interfaces) ? defaults.interfaces : [];
+  return entries.find((item) => item.name === interfaceName) || entries[0] || {};
+}
+
+function applyDhcpScopeInterfaceDefaults(rowData, defaults, options = {}) {
+  const overwrite = options.overwrite ?? false;
+  const interfaceDefaults = dhcpInterfaceDefaults(defaults, rowData.interface_name);
+  const gateway = rowData.address_family === "ipv6" ? interfaceDefaults.ipv6_address || interfaceDefaults.address : interfaceDefaults.ipv4_address || interfaceDefaults.address;
+  const prefix = rowData.address_family === "ipv6" ? interfaceDefaults.ipv6_prefix : interfaceDefaults.ipv4_prefix;
+  if ((overwrite || !rowData.site_address) && gateway) {
+    rowData.site_address = gateway;
+  }
+  if ((overwrite || !rowData.prefix_length) && Number.isInteger(prefix)) {
+    rowData.prefix_length = prefix;
+  }
+  if (overwrite) {
+    rowData.dns_server = interfaceDefaults.dns_default || "";
+  } else if (!rowData.dns_server && interfaceDefaults.dns_default) {
+    rowData.dns_server = interfaceDefaults.dns_default;
+  }
+  if (overwrite) {
+    rowData.ntp_server = interfaceDefaults.ntp_default || "";
+  } else if (!rowData.ntp_server && interfaceDefaults.ntp_default) {
+    rowData.ntp_server = interfaceDefaults.ntp_default;
+  }
+  if ((overwrite || !rowData.domain_name) && defaults.default_domain) {
+    rowData.domain_name = defaults.default_domain;
+  }
+  return rowData;
+}
+
+function isUniqueNewDhcpScopeName(data, existingNames) {
+  const name = normalizeDhcpZoneName(data.name);
+  return Boolean(name) && !existingNames.has(name);
+}
+
+function dhcpScopeCellEditable(cell, existingNames) {
+  const data = cell.getRow().getData();
+  if (!data.is_new) {
+    return true;
+  }
+  if (cell.getField() === "name") {
+    return true;
+  }
+  return isUniqueNewDhcpScopeName(data, existingNames);
+}
+
+function newDhcpScopeRow(defaultInterface = "eth2", defaults = {}) {
+  const row = {
     id: "__new__",
     name: "",
     address_family: "ipv4",
@@ -791,6 +843,7 @@ function newDhcpScopeRow(defaultInterface = "eth2") {
     description: "",
     is_new: true,
   };
+  return applyDhcpScopeInterfaceDefaults(row, defaults);
 }
 
 function newDhcpOptionRow() {
@@ -1022,6 +1075,272 @@ async function deleteDhcpReservationFromMenu(row, csrf) {
   } catch (error) {
     showDhcpReservationError(error instanceof Error ? error.message : "The DHCP reservation could not be deleted.");
   }
+}
+
+function closeDhcpLeaseMenus(exceptMenu = null) {
+  document.querySelectorAll("[data-lease-menu]").forEach((menu) => {
+    if (menu !== exceptMenu) {
+      menu.setAttribute("hidden", "");
+    }
+  });
+}
+
+function openDhcpLeaseReservationModal(source) {
+  const modal = document.getElementById("dhcp-lease-reservation-modal");
+  if (!(modal instanceof HTMLDialogElement)) {
+    return;
+  }
+  const hostnameInput = modal.querySelector("[data-dhcp-lease-modal-hostname]");
+  const macInput = modal.querySelector("[data-dhcp-lease-modal-mac-input]");
+  const ipInput = modal.querySelector("[data-dhcp-lease-modal-ip-input]");
+  const descriptionInput = modal.querySelector("[data-dhcp-lease-modal-description-input]");
+  const macText = modal.querySelector("[data-dhcp-lease-modal-mac]");
+  const ipText = modal.querySelector("[data-dhcp-lease-modal-ip]");
+  const hostname = source instanceof HTMLElement ? source.dataset.hostname || "" : source?.hostname || "";
+  const macAddress = source instanceof HTMLElement ? source.dataset.macAddress || "" : source?.mac_address || "";
+  const ipAddress = source instanceof HTMLElement ? source.dataset.ipAddress || "" : source?.ip_address || "";
+  if (hostnameInput instanceof HTMLInputElement) {
+    hostnameInput.value = hostname;
+  }
+  if (macInput instanceof HTMLInputElement) {
+    macInput.value = macAddress;
+  }
+  if (ipInput instanceof HTMLInputElement) {
+    ipInput.value = ipAddress;
+  }
+  if (descriptionInput instanceof HTMLInputElement) {
+    descriptionInput.value = `Created from live DHCP lease ${ipAddress}.`;
+  }
+  if (macText instanceof HTMLElement) {
+    macText.textContent = macAddress;
+  }
+  if (ipText instanceof HTMLElement) {
+    ipText.textContent = ipAddress;
+  }
+  closeDhcpLeaseMenus();
+  if (typeof modal.showModal === "function") {
+    modal.showModal();
+  } else {
+    modal.setAttribute("open", "");
+  }
+  if (hostnameInput instanceof HTMLInputElement) {
+    hostnameInput.focus();
+    hostnameInput.select();
+  }
+}
+
+function dhcpLeaseHostname(source) {
+  const hostname = source instanceof HTMLElement ? source.dataset.hostname || "" : source?.hostname || "";
+  return String(hostname || "").trim().replace(/\.$/, "").toLowerCase();
+}
+
+function dhcpLeaseMacAddress(source) {
+  return source instanceof HTMLElement ? source.dataset.macAddress || "" : source?.mac_address || "";
+}
+
+function dhcpLeaseIpAddress(source) {
+  return source instanceof HTMLElement ? source.dataset.ipAddress || "" : source?.ip_address || "";
+}
+
+function defaultDhcpLeasePxeHostname(source) {
+  const hostname = dhcpLeaseHostname(source);
+  if (hostname && hostname !== "-") {
+    return hostname;
+  }
+  const macSuffix = dhcpLeaseMacAddress(source).toLowerCase().replace(/[^0-9a-f]/g, "").slice(-6) || "host";
+  return `esxi-${macSuffix}.labfoundry.internal`;
+}
+
+function openDhcpLeasePxeModal(source) {
+  const modal = document.getElementById("dhcp-lease-pxe-modal");
+  if (!(modal instanceof HTMLDialogElement)) {
+    return;
+  }
+  const hostnameInput = modal.querySelector("[data-dhcp-lease-pxe-hostname]");
+  const macInput = modal.querySelector("[data-dhcp-lease-pxe-mac-input]");
+  const ipInput = modal.querySelector("[data-dhcp-lease-pxe-ip-input]");
+  const macText = modal.querySelector("[data-dhcp-lease-pxe-mac]");
+  const ipText = modal.querySelector("[data-dhcp-lease-pxe-ip]");
+  const macAddress = dhcpLeaseMacAddress(source);
+  const ipAddress = dhcpLeaseIpAddress(source);
+  if (hostnameInput instanceof HTMLInputElement) {
+    hostnameInput.value = defaultDhcpLeasePxeHostname(source);
+  }
+  if (macInput instanceof HTMLInputElement) {
+    macInput.value = macAddress;
+  }
+  if (ipInput instanceof HTMLInputElement) {
+    ipInput.value = ipAddress;
+  }
+  if (macText instanceof HTMLElement) {
+    macText.textContent = macAddress;
+  }
+  if (ipText instanceof HTMLElement) {
+    ipText.textContent = ipAddress;
+  }
+  closeDhcpLeaseMenus();
+  if (typeof modal.showModal === "function") {
+    modal.showModal();
+  } else {
+    modal.setAttribute("open", "");
+  }
+  if (hostnameInput instanceof HTMLInputElement) {
+    hostnameInput.focus();
+    hostnameInput.select();
+  }
+}
+
+function dhcpLeaseStatusFormatter(cell) {
+  const status = String(cell.getValue() || "");
+  return `<span class="status-pill ${status === "active" ? "good" : "muted"}">${escapeHtml(status || "unknown")}</span>`;
+}
+
+function submitDhcpLeaseAction(path, data, csrf) {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = path;
+  const values = {
+    csrf,
+    hostname: data.hostname || "",
+    mac_address: data.mac_address || "",
+    ip_address: data.ip_address || "",
+  };
+  Object.entries(values).forEach(([name, value]) => {
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = name;
+    input.value = value;
+    form.append(input);
+  });
+  document.body.append(form);
+  form.requestSubmit();
+}
+
+function initializeDhcpLeasesTable() {
+  const tableElement = document.getElementById("dhcp-leases-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  if (typeof Tabulator === "undefined") {
+    showDhcpReservationError("Tabulator did not load. Showing the fallback table.");
+    return;
+  }
+  const csrf = tableElement.dataset.csrf || "";
+  const rows = JSON.parse(tableElement.dataset.leases || "[]");
+  try {
+    new Tabulator(tableElement, {
+      data: rows,
+      layout: "fitColumns",
+      height: "300px",
+      rowHeight: 28,
+      placeholder: "No DHCP leases reported.",
+      reactiveData: false,
+      rowContextMenu: [
+        {
+          label: "Create reservation",
+          action: (event, row) => openDhcpLeaseReservationModal(row.getData()),
+        },
+        {
+          label: "Create PXE entry",
+          action: (event, row) => openDhcpLeasePxeModal(row.getData()),
+        },
+        {
+          label: "Deny DHCP for MAC",
+          action: async (event, row) => {
+            const data = row.getData();
+            const confirmed = await requestConfirmation({
+              title: `Deny DHCP for ${data.mac_address}?`,
+              message: "This adds a LabFoundry desired-state dnsmasq ignore rule for this MAC. It will not affect the appliance until global appliance apply runs.",
+              label: "Deny DHCP",
+            });
+            if (confirmed) {
+              submitDhcpLeaseAction("/dhcp/leases/deny", data, csrf);
+            }
+          },
+        },
+      ],
+      columns: [
+        { title: "Status", field: "status", formatter: dhcpLeaseStatusFormatter, width: 100 },
+        { title: "DNS name / FQDN", field: "hostname", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 190 },
+        { title: "IP", field: "ip_address", minWidth: 140 },
+        { title: "MAC", field: "mac_address", minWidth: 170 },
+        { title: "Expires", field: "expires_at", minWidth: 210 },
+        { title: "Client ID", field: "client_id", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 210 },
+      ],
+    });
+    if (fallback) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    showDhcpReservationError(error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
+  }
+}
+
+function initializeDhcpLeaseReservationActions() {
+  const reservationModal = document.getElementById("dhcp-lease-reservation-modal");
+  if (reservationModal instanceof HTMLDialogElement && reservationModal.dataset.leaseReservationInitialized !== "1") {
+    reservationModal.dataset.leaseReservationInitialized = "1";
+    reservationModal.querySelectorAll("[data-dhcp-lease-modal-cancel]").forEach((button) => {
+      if (button instanceof HTMLButtonElement) {
+        button.addEventListener("click", () => reservationModal.close("cancel"));
+      }
+    });
+    reservationModal.addEventListener("click", (event) => {
+      if (event.target === reservationModal) {
+        reservationModal.close("cancel");
+      }
+    });
+  }
+  const pxeModal = document.getElementById("dhcp-lease-pxe-modal");
+  if (pxeModal instanceof HTMLDialogElement && pxeModal.dataset.leasePxeInitialized !== "1") {
+    pxeModal.dataset.leasePxeInitialized = "1";
+    pxeModal.querySelectorAll("[data-dhcp-lease-pxe-cancel]").forEach((button) => {
+      if (button instanceof HTMLButtonElement) {
+        button.addEventListener("click", () => pxeModal.close("cancel"));
+      }
+    });
+    pxeModal.addEventListener("click", (event) => {
+      if (event.target === pxeModal) {
+        pxeModal.close("cancel");
+      }
+    });
+  }
+  document.querySelectorAll("[data-lease-menu-toggle]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.leaseMenuInitialized === "1") {
+      return;
+    }
+    button.dataset.leaseMenuInitialized = "1";
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const menu = button.closest("[data-lease-action-menu]")?.querySelector("[data-lease-menu]");
+      if (!(menu instanceof HTMLElement)) {
+        return;
+      }
+      const isOpening = menu.hasAttribute("hidden");
+      closeDhcpLeaseMenus(menu);
+      menu.toggleAttribute("hidden", !isOpening);
+    });
+  });
+  document.querySelectorAll("[data-dhcp-lease-reservation]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.leaseReservationButtonInitialized === "1") {
+      return;
+    }
+    button.dataset.leaseReservationButtonInitialized = "1";
+    button.addEventListener("click", () => openDhcpLeaseReservationModal(button));
+  });
+  document.querySelectorAll("[data-dhcp-lease-pxe-host]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.leasePxeButtonInitialized === "1") {
+      return;
+    }
+    button.dataset.leasePxeButtonInitialized = "1";
+    button.addEventListener("click", () => openDhcpLeasePxeModal(button));
+  });
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof HTMLElement) || !event.target.closest("[data-lease-action-menu]")) {
+      closeDhcpLeaseMenus();
+    }
+  });
 }
 
 function showEsxiHostMessage(message, type = "error") {
@@ -2035,6 +2354,10 @@ function initializeManagedFirewallRulesTable() {
 
 function serviceRuntimeFormatter(cell) {
   const running = Boolean(cell.getValue());
+  const data = cell.getRow().getData() || {};
+  if (!running && data.enabled === false) {
+    return '<span class="service-state muted">disabled</span>';
+  }
   return `<span class="service-state ${running ? "good" : "muted"}">${running ? "running" : "stopped"}</span>`;
 }
 
@@ -2988,6 +3311,81 @@ function initializeKmsSettings() {
       updateKmsValidation(payload);
     });
     refresh();
+  });
+}
+
+function updateChronySettingsPreview(form, payload = {}) {
+  updateDerivedListenAddressSummary(form, payload);
+  const configPath = document.querySelector("[data-ntp-config-path]");
+  if (configPath instanceof HTMLElement && payload.config_path) {
+    configPath.textContent = payload.config_path;
+  }
+  const configPreview = document.querySelector("[data-ntp-config-preview]");
+  if (configPreview instanceof HTMLElement && payload.config_preview !== undefined) {
+    configPreview.textContent = payload.config_preview;
+    highlightConfigPreviewElement(configPreview);
+  }
+  const hostname = form.querySelector('input[name="hostname"]');
+  if (hostname instanceof HTMLInputElement && payload.hostname) {
+    hostname.value = payload.hostname;
+  }
+  const port = form.querySelector('input[name="port"]');
+  if (port instanceof HTMLInputElement && payload.port) {
+    port.value = String(payload.port);
+  }
+}
+
+function updateNtpValidation(payload = {}) {
+  const status = document.querySelector("[data-ntp-validation-status]");
+  const validationPanel = status?.closest(".panel");
+  if (!(status instanceof HTMLElement) || !(validationPanel instanceof HTMLElement)) {
+    return;
+  }
+  const errors = Array.isArray(payload.validation_errors) ? payload.validation_errors : [];
+  status.textContent = errors.length ? "needs attention" : "valid";
+  status.classList.toggle("good", errors.length === 0);
+  status.classList.toggle("warn", errors.length > 0);
+  const terminalNote = validationPanel.querySelector(".terminal-note");
+  let errorBox = validationPanel.querySelector("[data-ntp-validation-errors]");
+  const validMessage = validationPanel.querySelector("[data-ntp-validation-message]");
+  if (errors.length === 0) {
+    errorBox?.remove();
+    if (!(validMessage instanceof HTMLElement) && terminalNote instanceof HTMLElement) {
+      const message = document.createElement("p");
+      message.className = "muted";
+      message.setAttribute("data-ntp-validation-message", "");
+      message.textContent = "The desired Chrony state passes LabFoundry validation. Appliance validation still runs through the allowlisted Chrony helper before apply.";
+      validationPanel.insertBefore(message, terminalNote);
+    }
+    return;
+  }
+  validMessage?.remove();
+  if (!(errorBox instanceof HTMLElement) && terminalNote instanceof HTMLElement) {
+    errorBox = document.createElement("ul");
+    errorBox.className = "error-list";
+    errorBox.setAttribute("data-ntp-validation-errors", "");
+    validationPanel.insertBefore(errorBox, terminalNote);
+  }
+  if (errorBox instanceof HTMLElement) {
+    errorBox.innerHTML = "";
+    errors.forEach((error) => {
+      const row = document.createElement("li");
+      row.textContent = error;
+      errorBox.appendChild(row);
+    });
+  }
+}
+
+function initializeChronySettings() {
+  document.querySelectorAll("[data-ntp-settings]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    form.addEventListener("labfoundry:autosave-success", (event) => {
+      const payload = event.detail || {};
+      updateChronySettingsPreview(form, payload);
+      updateNtpValidation(payload);
+    });
   });
 }
 
@@ -4235,11 +4633,29 @@ function initializeDhcpScopesTable() {
   }
   const csrf = tableElement.dataset.csrf || "";
   const interfaceOptions = JSON.parse(tableElement.dataset.interfaceOptions || "[]");
+  const scopeDefaults = JSON.parse(tableElement.dataset.scopeDefaults || "{}");
   const domainOptions = JSON.parse(tableElement.dataset.domainOptions || "[]");
   const defaultInterface = interfaceOptions[0] || "eth1";
-  const rows = [...JSON.parse(tableElement.dataset.scopes || "[]"), newDhcpScopeRow(defaultInterface)];
+  const existingRows = JSON.parse(tableElement.dataset.scopes || "[]");
+  const existingScopeNames = new Set([
+    ...(Array.isArray(scopeDefaults.existing_names) ? scopeDefaults.existing_names : []),
+    ...existingRows.map((row) => normalizeDhcpZoneName(row.name)).filter(Boolean),
+  ]);
+  const rows = [...existingRows, newDhcpScopeRow(defaultInterface, scopeDefaults)];
   const interfaceValues = Object.fromEntries(interfaceOptions.map((item) => [item, item]));
   const domainValues = Object.fromEntries(domainOptions.map((item) => [item, item]));
+  const handleDhcpScopeEdited = (cell) => {
+    const row = cell.getRow();
+    const data = row.getData();
+    if (data.is_new) {
+      if (["name", "interface_name", "address_family"].includes(cell.getField())) {
+        const updated = applyDhcpScopeInterfaceDefaults(data, scopeDefaults, { overwrite: cell.getField() !== "name" });
+        row.update(updated);
+      }
+      row.reformat();
+    }
+    return autoSaveDhcpScope(cell, csrf);
+  };
   try {
     new Tabulator(tableElement, {
       data: rows,
@@ -4260,97 +4676,110 @@ function initializeDhcpScopesTable() {
           title: "Zone",
           field: "name",
           editor: "input",
+          editable: true,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add IP zone here"),
           minWidth: 140,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "Interface",
           field: "interface_name",
           editor: "list",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           editorParams: { values: interfaceValues },
           minWidth: 120,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "Gateway",
           field: "site_address",
           editor: "input",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           formatter: (cell) => dnsAddRowHintFormatter(cell, "gateway..."),
           minWidth: 140,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "Prefix",
           field: "prefix_length",
           editor: "number",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           width: 90,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "Range start",
           field: "range_start",
           editor: "input",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           formatter: (cell) => dnsAddRowHintFormatter(cell, "start IP..."),
           minWidth: 140,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "Range end",
           field: "range_end",
           editor: "input",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           formatter: (cell) => dnsAddRowHintFormatter(cell, "end IP..."),
           minWidth: 140,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "Lease",
           field: "lease_time",
           editor: "input",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           width: 90,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "DNS",
           field: "dns_server",
           editor: "input",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           formatter: (cell) => dnsAddRowHintFormatter(cell, "DNS IP..."),
           minWidth: 140,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "NTP",
           field: "ntp_server",
           editor: "input",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           formatter: (cell) => dnsAddRowHintFormatter(cell, "NTP IP..."),
           minWidth: 140,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "Domain",
           field: "domain_name",
           editor: "list",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           editorParams: {
             values: domainValues,
             autocomplete: true,
             allowEmpty: false,
           },
           minWidth: 180,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
         {
           title: "Enabled",
           field: "enabled",
           formatter: "tickCross",
           editor: "tickCross",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           hozAlign: "center",
           width: 100,
           headerSort: false,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
+          cellEdited: handleDhcpScopeEdited,
         },
       ],
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        const data = row.getData();
+        row.getElement().classList.toggle("new-record-row", Boolean(data.is_new));
+        row.getElement().classList.toggle("new-record-row-locked", Boolean(data.is_new && !isUniqueNewDhcpScopeName(data, existingScopeNames)));
       },
     });
     if (fallback) {
@@ -4685,10 +5114,66 @@ function initializeCodeMirrorEditors() {
     if (!(textarea instanceof HTMLTextAreaElement)) {
       return;
     }
-    window.LabFoundryCodeMirror.enhanceTextarea(textarea, {
+    const view = window.LabFoundryCodeMirror.enhanceTextarea(textarea, {
       language: textarea.dataset.codemirrorLanguage || "labfoundry-hosts",
     });
+    installCodeMirrorPlainTextFallback(textarea, view);
   });
+}
+
+function installCodeMirrorPlainTextFallback(textarea, view) {
+  if (!(textarea instanceof HTMLTextAreaElement) || !view || textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart") {
+    return;
+  }
+  const editorDom = view.dom instanceof HTMLElement ? view.dom : null;
+  const contentDom = view.contentDOM instanceof HTMLElement ? view.contentDOM : editorDom?.querySelector?.(".cm-content");
+  const eventTarget = editorDom || contentDom;
+  if (!(eventTarget instanceof HTMLElement) || !(contentDom instanceof HTMLElement) || eventTarget.dataset.labfoundryPlainTextFallback === "1") {
+    return;
+  }
+  eventTarget.dataset.labfoundryPlainTextFallback = "1";
+  const insertTextAtSelection = (text) => {
+    const selection = view.state?.selection?.main;
+    if (!selection || typeof selection.from !== "number" || typeof selection.to !== "number") {
+      return false;
+    }
+    const cursor = selection.from + text.length;
+    view.dispatch({
+      changes: { from: selection.from, to: selection.to, insert: text },
+      selection: { anchor: cursor },
+      scrollIntoView: true,
+      userEvent: "input.type",
+    });
+    view.focus();
+    return true;
+  };
+  eventTarget.addEventListener("pointerdown", () => view.focus());
+  eventTarget.addEventListener("click", (event) => {
+    event.stopPropagation();
+    view.focus();
+  });
+  eventTarget.addEventListener(
+    "beforeinput",
+    (event) => {
+      if (event.defaultPrevented || event.isComposing || event.inputType !== "insertText" || typeof event.data !== "string" || event.data.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      insertTextAtSelection(event.data);
+    },
+    true
+  );
+  eventTarget.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1) {
+        return;
+      }
+      event.preventDefault();
+      insertTextAtSelection(event.key);
+    },
+    true
+  );
 }
 
 function initializeKickstartEditorDirtyState() {
@@ -7309,6 +7794,8 @@ document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpReservationsTable);
+document.addEventListener("DOMContentLoaded", initializeDhcpLeasesTable);
+document.addEventListener("DOMContentLoaded", initializeDhcpLeaseReservationActions);
 document.addEventListener("DOMContentLoaded", initializeEsxiPxeHostsTable);
 document.addEventListener("DOMContentLoaded", initializeCaProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeCaCertificatesTable);
@@ -7316,6 +7803,7 @@ document.addEventListener("DOMContentLoaded", initializeCaSettings);
 document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
 document.addEventListener("DOMContentLoaded", initializeKmsSettings);
+document.addEventListener("DOMContentLoaded", initializeChronySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);

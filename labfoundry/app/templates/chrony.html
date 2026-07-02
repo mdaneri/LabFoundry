@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block page_title %}Chrony{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Chrony</h2>
+        <p class="muted">Provide a LabFoundry-managed NTP endpoint for lab systems through Photon Chrony.</p>
+      </div>
+      <span class="status-pill {{ 'good' if chrony_settings.enabled else 'muted' }}">{{ "enabled" if chrony_settings.enabled else "disabled" }}</span>
+    </div>
+
+    <div class="metric-grid service-summary-grid">
+      <div class="metric">
+        <span>Endpoint</span>
+        <strong>{{ ntp_primary_listen_address or "no interface IP" }}:{{ chrony_settings.port }}</strong>
+        <small>{{ ntp_bind_label }}</small>
+      </div>
+      <div class="metric">
+        <span>Hostname</span>
+        <strong>{{ chrony_settings.hostname }}</strong>
+        <small>client-facing name</small>
+      </div>
+      <div class="metric">
+        <span>Upstreams</span>
+        <strong>{{ chrony_settings_json.upstream_servers|length }}</strong>
+        <small>server lines</small>
+      </div>
+      <div class="metric">
+        <span>Client sources</span>
+        <strong>{{ chrony_settings.allow_clients }}</strong>
+        <small>firewall still applies</small>
+      </div>
+    </div>
+  </div>
+
+  <aside class="side-stack">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>Chrony Settings</h2>
+        <span class="status-pill {{ ntp_service_status.pill }}">{{ ntp_service_status.label }}</span>
+      </div>
+      <form class="form-stack" action="/chrony/settings" method="post" data-autosave-form data-ntp-settings data-autosave-status-id="ntp-settings-autosave-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats Chrony as enabled desired state. The host service changes only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if chrony_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="compact-service-field">
+          <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="DNS name lab clients can use for the NTP endpoint. It is recorded in desired state and previews; DNS records remain owned by the DNS page.">i</button></span>
+          <input name="hostname" value="{{ chrony_settings.hostname }}" autocomplete="off">
+        </label>
+        <input type="hidden" name="listen_interfaces_present" value="1">
+        <div class="service-bind-editor stacked-service-bind-editor" data-service-bind>
+          <div class="form-field">
+            <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more access-mode physical interfaces and VLAN interfaces with configured IP addresses where UDP 123 should be reachable. Trunk physical NICs are not direct bind targets.">i</button></span>
+            <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
+              <div class="tag-editor-tags" data-tag-list>
+                {% for interface_name in selected_ntp_interfaces %}
+                  <span class="tag-token" data-value="{{ interface_name }}">
+                    <span>{{ interface_name }}</span>
+                    <button type="button" data-tag-remove aria-label="Remove {{ interface_name }}">x</button>
+                    <input type="hidden" name="listen_interfaces" value="{{ interface_name }}">
+                  </span>
+                {% endfor %}
+              </div>
+              <input class="tag-editor-input" type="text" placeholder="Add interface..." list="ntp-interface-options" data-tag-entry autocomplete="off">
+              <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface">+</button>
+              <div class="tag-suggestions" data-tag-menu hidden>
+                {% for interface in available_interfaces %}
+                  <button type="button" data-tag-option="{{ interface.name }}" data-service-bind-address="{{ interface.address }}" data-service-bind-addresses="{{ interface.addresses|join(',') }}">
+                    <strong>{{ interface.name }}</strong>
+                    <small>{{ interface.label }}</small>
+                  </button>
+                {% endfor %}
+              </div>
+            </div>
+            <datalist id="ntp-interface-options">
+              {% for interface in available_interfaces %}
+                <option value="{{ interface.name }}">{{ interface.label }}</option>
+              {% endfor %}
+            </datalist>
+          </div>
+          <div class="form-field">
+            <span class="field-label"><span>Listen addresses</span><button class="help-icon" type="button" data-help="Read-only addresses resolved from selected interface IPv4 and IPv6 CIDRs. Global Firewall apply opens UDP 123 on the same selected interfaces.">i</button></span>
+            <div class="derived-field fixed-value-field">
+              <strong data-derived-listen-addresses>{{ selected_ntp_addresses|join(", ") if selected_ntp_addresses else "No interface address selected" }}</strong>
+            </div>
+          </div>
+        </div>
+        <label class="compact-service-field">
+          <span class="field-label"><span>Port</span><button class="help-icon" type="button" data-help="NTP uses UDP 123. LabFoundry keeps Chrony fixed on this protocol port for predictable firewall and client behavior.">i</button></span>
+          <input type="number" name="port" value="{{ chrony_settings.port }}" min="123" max="123">
+        </label>
+        <label>
+          <span class="field-label"><span>Upstream servers</span><button class="help-icon" type="button" data-help="One upstream NTP server per line. Chrony uses these as its own time sources when the Chrony apply unit runs.">i</button></span>
+          <textarea name="upstream_servers" rows="5">{{ chrony_settings.upstream_servers }}</textarea>
+        </label>
+        <label>
+          <span class="field-label"><span>Allowed clients</span><button class="help-icon" type="button" data-help="Use any or one IPv4/IPv6 CIDR per line for Chrony allow rules. Firewall source groups can still narrow UDP 123 exposure during Firewall apply.">i</button></span>
+          <textarea name="allow_clients" rows="4">{{ chrony_settings.allow_clients }}</textarea>
+        </label>
+        <p id="ntp-settings-autosave-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
+      </form>
+    </div>
+
+    {% include "partials/appliance_apply_status.html" %}
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not ntp_validation_errors else 'warn' }}" data-ntp-validation-status>{{ "valid" if not ntp_validation_errors else "needs attention" }}</span>
+      </div>
+      {% if ntp_validation_errors %}
+        <ul class="error-list" data-ntp-validation-errors>
+          {% for error in ntp_validation_errors %}
+            <li>{{ error }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted" data-ntp-validation-message>The desired Chrony state passes LabFoundry validation. Appliance validation still runs through the allowlisted Chrony helper before apply.</p>
+      {% endif %}
+      <div class="terminal-note">
+        <strong data-ntp-config-path>{{ chrony_settings.config_path }}</strong>
+        <code data-ntp-config-preview>{{ ntp_config_preview }}</code>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}

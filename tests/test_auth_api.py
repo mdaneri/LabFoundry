@@ -53,7 +53,6 @@ def test_settings_api_updates_root_ssh_desired_state(client):
             "management_https_enabled": False,
             "root_ssh_enabled": True,
             "external_dns_servers": ["1.1.1.1", "9.9.9.9"],
-            "ntp_servers": ["time1.google.com"],
         },
     )
 

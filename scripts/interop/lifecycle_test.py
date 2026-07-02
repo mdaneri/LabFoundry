@@ -808,7 +808,6 @@ def configure_management_https(client: HttpClient, args: argparse.Namespace) -> 
         "fqdn": "labfoundry.labfoundry.internal",
         "management_https_enabled": "on",
         "external_dns_servers": "1.1.1.1\n9.9.9.9",
-        "ntp_servers": "time1.google.com\ntime2.google.com",
         "csrf": csrf,
     }
     status, response_body, _headers = client.request(

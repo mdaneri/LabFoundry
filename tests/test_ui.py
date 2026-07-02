@@ -309,6 +309,73 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
     assert pending.json()["badge"] == "pending"
 
 
+def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ChronySettings, Setting
+    from labfoundry.app.ui import APPLIANCE_APPLY_BASELINES_KEY
+
+    login(client)
+    legacy_preview = json.dumps(
+        {
+            "fqdn": "labfoundry.labfoundry.internal",
+            "resolver_mode": "local_dns",
+            "resolver_servers": ["127.0.0.1"],
+            "local_dns_enabled": True,
+            "management_interface": "eth0",
+            "management_ip": "192.168.49.1",
+            "management_ip_cidr": "192.168.49.1/24",
+            "management_https_enabled": False,
+            "root_ssh_enabled": False,
+            "management_http_port": 8000,
+            "management_public_http_port": 80,
+            "management_public_https_port": 443,
+            "management_upstream_host": "127.0.0.1",
+            "management_upstream_port": 8000,
+            "management_https_cert_path": "",
+            "management_https_key_path": "",
+            "ntp_servers": ["time1.google.com", "time2.google.com"],
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    with SessionLocal() as db:
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = True
+        db.add(chrony_settings)
+        db.merge(
+            Setting(
+                key=APPLIANCE_APPLY_BASELINES_KEY,
+                value=json.dumps(
+                    {
+                        "appliance_settings": {
+                            "snapshot_hash": "legacy-hash",
+                            "summary": [
+                                "FQDN labfoundry.labfoundry.internal",
+                                "resolver local DNS",
+                                "root SSH disabled",
+                                "2 NTP servers",
+                            ],
+                            "config_path": "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json",
+                            "config_preview": legacy_preview,
+                            "applied_at": "2026-07-01T00:00:00+00:00",
+                        }
+                    }
+                ),
+            )
+        )
+        db.commit()
+
+    page = client.get("/appliance-apply")
+
+    assert page.status_code == 200
+    assert "2 NTP servers" not in page.text
+    assert "ntp_servers" not in page.text
+
+
 def test_settings_page_renders_autosave_validation_and_preview(client, monkeypatch):
     from sqlalchemy import select
 
@@ -338,6 +405,8 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "Management UI HTTPS" in response.text
     assert "Root SSH login" in response.text
     assert "Operational Logging" in response.text
+    assert "External NTP servers" in response.text
+    assert 'textarea name="ntp_servers"' in response.text
     assert 'action="/settings/logging"' in response.text
     assert 'select name="level"' in response.text
     assert 'input class="switch-input" type="checkbox" name="syslog_enabled"' in response.text
@@ -451,16 +520,40 @@ def test_settings_page_shows_external_dns_editor_when_local_dns_is_disabled(clie
     assert "Local DNS is disabled. External DNS servers are required" in response.text
 
 
-def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
+def test_settings_page_hides_ntp_editor_when_chrony_is_enabled(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ApplianceSettings, DnsRecord, DnsSettings
+    from labfoundry.app.models import ChronySettings
+
+    login(client)
+    with SessionLocal() as db:
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = True
+        db.add(chrony_settings)
+        db.commit()
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert "External NTP servers" not in response.text
+    assert 'textarea name="ntp_servers"' not in response.text
+    assert 'input type="hidden" name="ntp_servers"' in response.text
+    assert '  "ntp_servers": [' not in response.text
+
+
+def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, ChronySettings, DnsRecord, DnsSettings
 
     login(client)
     with SessionLocal() as db:
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.enabled = True
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = True
         db.commit()
 
     page = client.get("/settings")
@@ -471,7 +564,6 @@ def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
             "fqdn": "console.labfoundry.internal",
             "root_ssh_enabled": "on",
             "external_dns_servers": "8.8.8.8\n1.1.1.1",
-            "ntp_servers": "time.cloudflare.com\ntime.google.com",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -483,13 +575,14 @@ def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
     assert payload["fqdn"] == "console.labfoundry.internal"
     assert payload["root_ssh_enabled"] is True
     assert payload["external_dns_servers"] == ["8.8.8.8", "1.1.1.1"]
-    assert payload["ntp_servers"] == ["time.cloudflare.com", "time.google.com"]
+    assert "ntp_servers" not in payload
     assert payload["dns_record_action"] in {"created", "updated", "unchanged", "created+removed-old", "updated+removed-old"}
     assert payload["valid"] is True
     assert '"resolver_mode": "local_dns"' in payload["config_preview"]
     assert '"resolver_servers": [' in payload["config_preview"]
     assert '"127.0.0.1"' in payload["config_preview"]
     assert '"root_ssh_enabled": true' in payload["config_preview"]
+    assert "ntp_servers" not in payload["config_preview"]
 
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
@@ -499,7 +592,156 @@ def test_settings_autosave_updates_appliance_identity_dns_and_ntp(client):
             select(DnsRecord).where(DnsRecord.hostname == "console.labfoundry.internal", DnsRecord.record_type == "A")
         ).scalar_one()
         assert record.address == "192.168.49.1"
-        assert "app-owned appliance FQDN" in (record.description or "")
+    assert "app-owned appliance FQDN" in (record.description or "")
+
+
+def test_settings_autosave_updates_ntp_servers_when_chrony_is_disabled(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, ChronySettings, DnsSettings
+
+    login(client)
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = False
+        db.add_all([dns_settings, chrony_settings])
+        db.commit()
+
+    page = client.get("/settings")
+    assert 'textarea name="ntp_servers"' in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/settings",
+        data={
+            "fqdn": "labfoundry.labfoundry.internal",
+            "external_dns_servers": "1.1.1.1\n9.9.9.9",
+            "ntp_servers": "time.cloudflare.com\n192.0.2.10",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["chrony_enabled"] is False
+    assert payload["ntp_servers"] == ["time.cloudflare.com", "192.0.2.10"]
+    assert '"time_sync_mode": "systemd-timesyncd"' in payload["config_preview"]
+    assert '"ntp_servers": [' in payload["config_preview"]
+    assert payload["valid"] is True
+
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        assert settings.ntp_servers == "time.cloudflare.com\n192.0.2.10"
+
+
+def test_chrony_page_autosave_updates_desired_state_and_preview(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ChronySettings
+
+    login(client)
+    page = client.get("/chrony")
+    assert page.status_code == 200
+    assert "Chrony Settings" in page.text
+    assert "/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf" in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/chrony/settings",
+        data={
+            "enabled": "on",
+            "hostname": "ntp.labfoundry.internal",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": ["eth2"],
+            "upstream_servers": "time.cloudflare.com\ntime.google.com",
+            "allow_clients": "192.168.50.0/24",
+            "port": "123",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "saved"
+    assert payload["enabled"] is True
+    assert payload["listen_interfaces"] == ["eth2"]
+    assert payload["listen_addresses"] == ["192.168.50.1"]
+    assert payload["upstream_servers"] == ["time.cloudflare.com", "time.google.com"]
+    assert payload["allow_clients"] == "192.168.50.0/24"
+    assert payload["valid"] is True
+    assert "server time.cloudflare.com iburst" in payload["config_preview"]
+    assert "bindaddress 192.168.50.1" in payload["config_preview"]
+    assert "allow 192.168.50.0/24" in payload["config_preview"]
+    js = client.get("/static/app.js")
+    assert js.status_code == 200
+    assert "initializeChronySettings" in js.text
+    assert "updateNtpValidation" in js.text
+
+    assert "External NTP servers" not in client.get("/settings").text
+
+    with SessionLocal() as db:
+        settings = db.execute(select(ChronySettings)).scalar_one()
+        assert settings.enabled is True
+        assert settings.listen_interface == "eth2"
+        assert settings.listen_address == "192.168.50.1"
+
+
+def test_chrony_validation_rejects_enabled_service_without_bind_or_upstreams(client):
+    login(client)
+    page = client.get("/chrony")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/chrony/settings",
+        data={
+            "enabled": "on",
+            "hostname": "ntp.labfoundry.internal",
+            "listen_interfaces_present": "1",
+            "upstream_servers": "",
+            "allow_clients": "any",
+            "port": "123",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["valid"] is False
+    assert "Chrony listen interface is required when the service is enabled." in payload["validation_errors"]
+    assert "At least one Chrony upstream server is required." in payload["validation_errors"]
+
+
+def test_chrony_validation_allows_disabled_service_without_upstreams(client):
+    login(client)
+    page = client.get("/chrony")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/chrony/settings",
+        data={
+            "hostname": "ntp.labfoundry.internal",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": [],
+            "upstream_servers": "",
+            "allow_clients": "any",
+            "port": "123",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is False
+    assert payload["valid"] is True
+    assert payload["upstream_servers"] == []
+    assert "At least one Chrony upstream server is required." not in payload["validation_errors"]
+    assert "server " not in payload["config_preview"]
 
 
 def test_dns_defaults_follow_appliance_fqdn_and_management_ip(client):
@@ -552,7 +794,6 @@ def test_settings_fqdn_rename_removes_only_old_app_owned_record(client):
         data={
             "fqdn": "old-appliance.labfoundry.internal",
             "external_dns_servers": "1.1.1.1\n9.9.9.9",
-            "ntp_servers": "time1.google.com",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -563,7 +804,6 @@ def test_settings_fqdn_rename_removes_only_old_app_owned_record(client):
         data={
             "fqdn": "new-appliance.labfoundry.internal",
             "external_dns_servers": "1.1.1.1\n9.9.9.9",
-            "ntp_servers": "time1.google.com",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -599,7 +839,6 @@ def test_settings_local_dns_disabled_requires_external_dns_without_dns_registrat
         data={
             "fqdn": "external-only.labfoundry.internal",
             "external_dns_servers": "",
-            "ntp_servers": "time1.google.com",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -638,7 +877,6 @@ def test_settings_management_https_requires_ca_managed_certificate(client):
             "fqdn": "secure.labfoundry.internal",
             "management_https_enabled": "on",
             "external_dns_servers": "1.1.1.1",
-            "ntp_servers": "time1.google.com",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -672,7 +910,6 @@ def test_settings_management_https_requires_ca_managed_certificate(client):
             "fqdn": "secure.labfoundry.internal",
             "management_https_enabled": "on",
             "external_dns_servers": "1.1.1.1",
-            "ntp_servers": "time1.google.com",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -706,7 +943,6 @@ def test_appliance_settings_apply_task_records_dry_run_helper_commands(client, c
         data={
             "fqdn": "apply.labfoundry.internal",
             "external_dns_servers": "1.1.1.1\n9.9.9.9",
-            "ntp_servers": "time1.google.com",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -754,7 +990,7 @@ def test_appliance_apply_failure_renders_command_details(client, monkeypatch):
                 command=["labfoundry-helper", "appliance-settings", "apply", config_path],
                 dry_run=False,
                 stdout="password=super-secret\nattempted write",
-                stderr="OSError: [Errno 30] Read-only file system: '/etc/systemd/timesyncd.conf.d/labfoundry.conf'",
+                stderr="OSError: [Errno 30] Read-only file system: '/etc/labfoundry/nginx/sites.d/management.conf'",
                 returncode=30,
             )
 
@@ -814,7 +1050,6 @@ def test_appliance_apply_stops_unit_after_validation_failure(client, monkeypatch
         data={
             "fqdn": "validate-fail.labfoundry.internal",
             "external_dns_servers": "1.1.1.1",
-            "ntp_servers": "time1.google.com",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -926,6 +1161,14 @@ def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
     assert page.status_code == 200
     assert "ESXi Kickstarts" in page.text
     assert 'data-codemirror-language="labfoundry-kickstart"' in page.text
+    assert "# Sample scripted installation file" in page.text
+    assert "vmaccepteula" in page.text
+    assert "rootpw vmware01!" in page.text
+    assert "install --firstdisk --overwritevmfs" in page.text
+    assert "# install --firstdisk --overwritevmfs --dpupcislots=&lt;PCIeSlotID&gt;" in page.text
+    assert "network --bootproto=dhcp --device=vmnic0" in page.text
+    assert "%post --interpreter=python --ignorefailure=true" in page.text
+    assert "stampFile.write(time.asctime())" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     created = client.post(
@@ -944,7 +1187,7 @@ def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
     with SessionLocal() as db:
         kickstart = db.execute(select(EsxiKickstart).where(EsxiKickstart.id == kickstart_id)).scalar_one()
         assert "SuperSecret!" in kickstart.content
-        assert kickstart.http_path == f"/pxe/esxi/ks/{kickstart_id}.cfg"
+        assert kickstart.http_path == f"/pxe/esxi/ks/{kickstart.content_hash[:12]}.cfg"
 
     apply_page = client.get("/appliance-apply")
     assert 'value="esxi_pxe"' in apply_page.text
@@ -1108,6 +1351,8 @@ def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
 
 
 def test_esxi_pxe_default_host_settings_update_existing_rows(client, monkeypatch, tmp_path):
+    import json
+
     from sqlalchemy import select
 
     import labfoundry.app.services.esxi_pxe as esxi_pxe
@@ -1129,6 +1374,7 @@ def test_esxi_pxe_default_host_settings_update_existing_rows(client, monkeypatch
         db.flush()
         first_kickstart_id = first_kickstart.id
         second_kickstart_id = second_kickstart.id
+        second_kickstart_hash = second_kickstart.content_hash
 
         first = esxi_pxe.save_esxi_pxe_default_host_settings(
             db,
@@ -1146,18 +1392,89 @@ def test_esxi_pxe_default_host_settings_update_existing_rows(client, monkeypatch
         db.flush()
 
         rows = db.execute(select(Setting).where(Setting.key.like("esxi_pxe.default_host.%"))).scalars().all()
+        manifest = json.loads(esxi_pxe.render_esxi_pxe_manifest([], [], default_host=second))
 
     assert first["enabled"] is True
     assert first["kickstart_id"] == first_kickstart_id
     assert second["enabled"] is False
     assert second["kickstart_id"] == second_kickstart_id
     assert second["installer_iso_path"] == str(second_iso)
+    assert manifest["default_host"] == {
+        "enabled": False,
+        "kickstart_id": second_kickstart_id,
+        "kickstart_name": "Second",
+        "kickstart_http_path": f"/pxe/esxi/ks/{second_kickstart_hash[:12]}.cfg",
+        "installer_iso_path": str(second_iso),
+        "installer_iso_name": "Second-ESXi.iso",
+    }
     assert len(rows) == 3
     assert {row.key for row in rows} == {
         esxi_pxe.ESXI_PXE_DEFAULT_HOST_ENABLED_KEY,
         esxi_pxe.ESXI_PXE_DEFAULT_HOST_KICKSTART_ID_KEY,
         esxi_pxe.ESXI_PXE_DEFAULT_HOST_INSTALLER_ISO_KEY,
     }
+
+
+def test_esxi_pxe_default_host_edit_marks_appliance_apply_pending(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart
+    from labfoundry.app.services import esxi_pxe
+    from labfoundry.app.ui import appliance_apply_status, appliance_apply_units, update_appliance_apply_baselines
+
+    login(client)
+    page = client.get("/esxi-pxe")
+    assert page.status_code == 200
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    with SessionLocal() as db:
+        kickstart = EsxiKickstart(name="Baseline ESXi", content="install", content_hash=esxi_pxe.content_hash("install"))
+        db.add(kickstart)
+        db.flush()
+        kickstart_id = kickstart.id
+        units = appliance_apply_units(db)
+        update_appliance_apply_baselines(db, units, {unit["id"] for unit in units})
+        db.commit()
+    with SessionLocal() as db:
+        assert appliance_apply_status(db, "esxi_pxe")["changed"] is False
+
+    current = client.get("/appliance-apply/status")
+    assert current.status_code == 200
+    current_pending_count = current.json()["pending_count"]
+
+    response = client.post(
+        "/esxi-pxe/default-host",
+        data={"csrf": csrf, "enabled": "on", "kickstart_id": str(kickstart_id), "installer_iso_path": ""},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    pending = client.get("/appliance-apply/status")
+    assert pending.status_code == 200
+    assert pending.json()["pending_count"] > current_pending_count
+    assert pending.json()["label"] == "Review appliance changes"
+    with SessionLocal() as db:
+        assert appliance_apply_status(db, "esxi_pxe")["changed"] is True
+
+
+def test_esxi_kickstart_validation_rejects_duplicate_install_directives(client):
+    from labfoundry.app.services.esxi_pxe import kickstart_validation
+
+    content = "\n".join(
+        [
+            "vmaccepteula",
+            "rootpw vmware01!",
+            "install --firstdisk --overwritevmfs",
+            "install --firstdisk --overwritevmfs --dpupcislots=<PCIeSlotID>",
+            "network --bootproto=dhcp --device=vmnic0",
+            "reboot",
+            "",
+        ]
+    )
+
+    errors, warnings = kickstart_validation(content, strict=False, max_bytes=8192)
+
+    assert "multiple install/upgrade directives on lines 3, 4; ESXi allows only one." in errors
+    assert "missing install or upgrade directive" not in warnings
 
 
 def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
@@ -1447,7 +1764,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
         from labfoundry.app.services.esxi_pxe import assign_kickstart_content, canonical_http_path
 
         assign_kickstart_content(kickstart, kickstart.content, max_bytes=262_144)
-        kickstart.http_path = canonical_http_path(kickstart.id)
+        kickstart.http_path = canonical_http_path(kickstart.id, kickstart.content_hash)
         db.add(
             EsxiPxeHost(
                 hostname="esxi-archive",
@@ -1504,9 +1821,9 @@ def test_esxi_pxe_drift_detection_uses_generated_filesystem_copy(client, monkeyp
         kickstart = EsxiKickstart(name="Drift ESXi", content=content, content_hash=esxi_pxe.content_hash(content), rendered_content=content, rendered_hash=esxi_pxe.content_hash(content), enabled=True)
         db.add(kickstart)
         db.flush()
-        kickstart.http_path = esxi_pxe.canonical_http_path(kickstart.id)
+        kickstart.http_path = esxi_pxe.canonical_http_path(kickstart.id, kickstart.content_hash)
         tmp_path.mkdir(parents=True, exist_ok=True)
-        (tmp_path / f"{kickstart.id}.cfg").write_text(content.replace("DriftSecret", "ChangedOnDisk"), encoding="utf-8")
+        (tmp_path / f"{kickstart.content_hash[:12]}.cfg").write_text(content.replace("DriftSecret", "ChangedOnDisk"), encoding="utf-8")
         db.commit()
         kickstart_id = kickstart.id
 
@@ -2362,6 +2679,10 @@ def test_dns_and_dhcp_pages_render(client):
     assert 'data.record_type !== "A" && data.address === data.suggested_ipv4' in app_js.text
     assert "DNS_ACTIVE_ZONE_STORAGE_KEY" in app_js.text
     assert "initializeCodeMirrorEditors" in app_js.text
+    assert "installCodeMirrorPlainTextFallback" in app_js.text
+    assert 'textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart"' in app_js.text
+    assert 'eventTarget.addEventListener("keydown"' in app_js.text
+    assert "event.stopPropagation()" in app_js.text
     assert "LabFoundryCodeMirror.setValue" in app_js.text
     assert "rememberDnsActiveZone(data.domain)" in app_js.text
     assert "dnsZoneTabButtonForDomain(storedDomain)" in app_js.text
@@ -2392,6 +2713,9 @@ def test_dns_and_dhcp_pages_render(client):
     assert "initializeDhcpScopesTable" in app_js.text
     assert "autoSaveDhcpScope" in app_js.text
     assert "+ Add IP zone here" in app_js.text
+    assert "isUniqueNewDhcpScopeName" in app_js.text
+    assert "dhcpScopeCellEditable" in app_js.text
+    assert "applyDhcpScopeInterfaceDefaults" in app_js.text
     assert 'title: "Family"' in app_js.text
     assert "address_family" in app_js.text
     assert 'title: "NTP"' in app_js.text
@@ -2420,6 +2744,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "background: var(--bg);" in app_css.text
     assert "color: var(--text);" in app_css.text
     assert ".add-row-hint" in app_css.text
+    assert ".new-record-row-locked" in app_css.text
     assert 'tabulator-field="host_label"' in app_css.text
     assert ".alert.warning" in app_css.text
     assert ".tag-editor" in app_css.text
@@ -2456,6 +2781,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "api-client.labfoundry.internal" in dhcp.text
     assert "labfoundry-helper dnsmasq leases" in dhcp.text
     assert "dhcp-scopes-table" in dhcp.text
+    assert "data-scope-defaults" in dhcp.text
     assert "data-domain-options" in dhcp.text
     assert 'data-domain-options=\'["labfoundry.internal"]\'' in dhcp.text
     assert "labfoundry.internal" in dhcp.text
@@ -2473,6 +2799,49 @@ def test_dns_and_dhcp_pages_render(client):
     assert "Save DHCP" not in dhcp.text
     assert "192.168.50.100" in dhcp.text
     assert "192.168.50.1" in dhcp.text
+
+
+def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ChronySettings, DnsSettings
+
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        dns_settings.listen_interface = "eth2"
+        dns_settings.listen_address = "192.168.50.1"
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = True
+        chrony_settings.listen_interface = "eth2"
+        chrony_settings.listen_address = "192.168.50.1"
+        db.add_all([dns_settings, chrony_settings])
+        db.commit()
+
+    login(client)
+    page = client.get("/dhcp")
+
+    assert page.status_code == 200
+    payload = page.text.split("data-scope-defaults='", 1)[1].split("'", 1)[0]
+    defaults = json.loads(html.unescape(payload))
+    eth2 = next(item for item in defaults["interfaces"] if item["name"] == "eth2")
+    eth1_vlan = next(item for item in defaults["interfaces"] if item["name"] == "eth1.20")
+    assert eth2["ipv4_address"] == "192.168.50.1"
+    assert eth2["ipv4_prefix"] == 24
+    assert eth2["dns_default"] == "192.168.50.1"
+    assert eth2["ntp_default"] == "192.168.50.1"
+    assert eth1_vlan["dns_default"] == ""
+    assert eth1_vlan["ntp_default"] == ""
+    assert "sitea" in defaults["existing_names"]
+    assert defaults["default_domain"] == "labfoundry.internal"
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    assert 'rowData.dns_server = interfaceDefaults.dns_default || "";' in app_js.text
+    assert 'rowData.ntp_server = interfaceDefaults.ntp_default || "";' in app_js.text
 
 
 def test_dns_new_record_row_suggests_next_available_ipv4(client):
@@ -2522,35 +2891,45 @@ def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
     assert dns_record_suggested_ipv4(records, "labfoundry.internal", scopes, reservations) == "192.168.50.3"
 
 
-def test_dns_settings_badge_reflects_runtime_service_state(client):
+def test_dns_settings_badge_reflects_desired_state_not_runtime_state(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ServiceState
+    from labfoundry.app.models import DnsSettings, ServiceState
 
     login(client)
     with SessionLocal() as db:
+        settings = db.execute(select(DnsSettings)).scalar_one()
+        settings.enabled = True
         service = db.execute(select(ServiceState).where(ServiceState.service == "dns")).scalar_one()
-        service.enabled = True
-        service.running = True
-        service.health = "healthy"
+        service.enabled = False
+        service.running = False
+        service.health = "disabled"
         db.commit()
 
     page = client.get("/dns")
+    settings_panel = page.text.split("<h2>DNS Settings</h2>", 1)[1].split("</form>", 1)[0]
 
     assert page.status_code == 200
-    assert '<span class="status-pill good">live</span>' in page.text
-    assert '<span class="status-pill warn">dry-run</span>' not in page.text
+    assert '<span class="status-pill good">enabled</span>' in settings_panel
+    assert '<span class="status-pill muted">disabled</span>' not in settings_panel
 
 
 def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
+    from sqlalchemy import select
+
     from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpReservation, DnsRecord, EsxiPxeHost
 
     def fake_read_dhcp_leases(self):
         return AdapterResult(
             command=["sudo", "-n", "/opt/labfoundry/bin/labfoundry-helper", "dnsmasq", "leases", "--real"],
             dry_run=False,
-            stdout="1893456000 02:15:5d:00:20:40 192.168.50.140 live-client.labfoundry.internal *\n",
+            stdout=(
+                "1893456000 02:15:5d:00:20:40 192.168.50.140 live-client.labfoundry.internal *\n"
+                "1893456000 02:15:5d:00:20:41 192.168.1.110 stale-client.labfoundry.internal *\n"
+            ),
         )
 
     monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.read_dhcp_leases", fake_read_dhcp_leases)
@@ -2562,7 +2941,107 @@ def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
     assert '<span class="status-pill good">live</span>' in page.text
     assert "sudo -n /opt/labfoundry/bin/labfoundry-helper dnsmasq leases --real" in page.text
     assert "live-client.labfoundry.internal" in page.text
+    assert "stale-client.labfoundry.internal" not in page.text
+    assert "192.168.1.110" not in page.text
+    assert "dhcp-leases-table" in page.text
+    assert "dhcp-leases-fallback" in page.text
+    assert "data-leases=" in page.text
+    assert "data-dhcp-lease-reservation" in page.text
+    assert "data-dhcp-lease-pxe-host" in page.text
+    assert "dhcp-lease-reservation-modal" in page.text
+    assert "dhcp-lease-pxe-modal" in page.text
+    assert "Create reservation" in page.text
+    assert "Create PXE entry" in page.text
+    assert "Deny DHCP for MAC" in page.text
+    app_js = client.get("/static/app.js").text
+    assert "initializeDhcpLeasesTable" in app_js
+    assert "rowContextMenu" in app_js
+    assert "openDhcpLeasePxeModal" in app_js
+    assert "dhcpLeaseActionFormatter" not in app_js
+    assert "openDhcpLeaseActionsMenu" not in app_js
+    assert "Create PXE entry" in app_js
+    assert "Deny DHCP for MAC" in app_js
+    assert "initializeDhcpLeaseReservationActions" in app_js
     assert '<span class="status-pill warn">dry-run</span>' not in page.text
+
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/dhcp/reservations",
+        data={
+            "hostname": "live-client.labfoundry.internal",
+            "mac_address": "02:15:5d:00:20:40",
+            "ip_address": "192.168.50.140",
+            "description": "Created from live DHCP lease 192.168.50.140.",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        reservation = db.execute(select(DhcpReservation).where(DhcpReservation.mac_address == "02:15:5d:00:20:40")).scalar_one()
+        assert reservation.hostname == "live-client.labfoundry.internal"
+        assert reservation.ip_address == "192.168.50.140"
+        assert reservation.enabled is True
+        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "live-client.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert record.address == "192.168.50.140"
+
+    with SessionLocal() as db:
+        from labfoundry.app.models import DhcpScope
+        from labfoundry.app.services.esxi_pxe import save_esxi_pxe_boot_settings
+
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        save_esxi_pxe_boot_settings(
+            db,
+            enabled=True,
+            hostname="esxi-pxe.labfoundry.internal",
+            listen_interface="eth2",
+            listen_address="192.168.50.1",
+            dhcp_scope_id=str(scope.id),
+            dhcp_scope_ids=[str(scope.id)],
+            tftp_root="/var/lib/labfoundry/pxe/tftp",
+            http_port=8080,
+            bios_bootfile="undionly.kpxe",
+            uefi_bootfile="snponly.efi",
+            native_uefi_http_enabled=True,
+            native_uefi_http_url="",
+        )
+        db.commit()
+
+    pxe_response = client.post(
+        "/dhcp/leases/pxe-host",
+        data={
+            "hostname": "pxe-client.labfoundry.internal",
+            "mac_address": "02:15:5d:00:20:42",
+            "ip_address": "192.168.50.142",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert pxe_response.status_code == 303
+    assert pxe_response.headers["location"] == "/esxi-pxe#esxi-pxe-hosts"
+    with SessionLocal() as db:
+        host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.mac_address == "02:15:5d:00:20:42")).scalar_one()
+        assert host.hostname == "pxe-client.labfoundry.internal"
+        assert host.ip_address == "192.168.50.142"
+        assert host.enabled is True
+
+    deny_response = client.post(
+        "/dhcp/leases/deny",
+        data={
+            "hostname": "deny-client.labfoundry.internal",
+            "mac_address": "02:15:5d:00:20:43",
+            "ip_address": "192.168.50.143",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert deny_response.status_code == 303
+    with SessionLocal() as db:
+        deny = db.execute(select(DhcpReservation).where(DhcpReservation.mac_address == "02:15:5d:00:20:43")).scalar_one()
+        assert deny.enabled is False
+        assert deny.description == "Deny DHCP for 02:15:5d:00:20:43."
 
 
 def test_firewall_preview_derives_dns_dhcp_rule_from_dhcp_scope_vlan(client):
@@ -3127,7 +3606,7 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert "updateVcfBackupValidation" in app_js.text
 
 
-def test_vcf_backups_settings_badge_reflects_live_adapter_mode(client, monkeypatch):
+def test_vcf_backups_settings_badge_reflects_desired_state(client, monkeypatch):
     from labfoundry.app.config import get_settings
 
     login(client)
@@ -3137,7 +3616,8 @@ def test_vcf_backups_settings_badge_reflects_live_adapter_mode(client, monkeypat
     page = client.get("/vcf-backups")
 
     assert page.status_code == 200
-    assert '<span class="status-pill good">live</span>' in page.text
+    settings_panel = page.text.split("<h2>SFTP Settings</h2>", 1)[1].split("</form>", 1)[0]
+    assert '<span class="status-pill muted">disabled</span>' in settings_panel
     assert '<span class="status-pill warn">dry-run</span>' not in page.text
 
 
@@ -4173,7 +4653,79 @@ def test_physical_interface_edit_updates_desired_state(client):
     import html
     import json
 
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import (
+        CaSettings,
+        ChronySettings,
+        DhcpScope,
+        DnsRecord,
+        DnsSettings,
+        KmsSettings,
+        VcfBackupSettings,
+        VcfOfflineDepotSettings,
+        VcfPrivateRegistrySettings,
+    )
+    from labfoundry.app.services.esxi_pxe import (
+        ESXI_PXE_DEFAULT_HOSTNAME,
+        ESXI_PXE_DNS_RECORD_DESCRIPTION,
+        ESXI_PXE_HTTP_PORT,
+        ESXI_TFTP_ROOT,
+        esxi_pxe_boot_settings,
+        save_esxi_pxe_boot_settings,
+    )
+
     login(client)
+    with SessionLocal() as db:
+        for model in (
+            DnsSettings,
+            ChronySettings,
+            CaSettings,
+            KmsSettings,
+            VcfBackupSettings,
+            VcfOfflineDepotSettings,
+            VcfPrivateRegistrySettings,
+        ):
+            settings = db.execute(select(model)).scalar_one()
+            settings.enabled = True
+            settings.listen_interface = "eth2"
+            settings.listen_address = "192.168.50.1"
+            db.add(settings)
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        scope.interface_name = "eth2"
+        scope.site_address = "192.168.50.1"
+        scope.prefix_length = 24
+        scope.range_start = "192.168.50.100"
+        scope.range_end = "192.168.50.200"
+        scope.dns_server = "192.168.50.1"
+        scope.ntp_server = "192.168.50.1"
+        db.add(scope)
+        save_esxi_pxe_boot_settings(
+            db,
+            enabled=True,
+            hostname=ESXI_PXE_DEFAULT_HOSTNAME,
+            listen_interface="eth2",
+            listen_address="192.168.50.1",
+            dhcp_scope_ids=[scope.id],
+            tftp_root=ESXI_TFTP_ROOT.as_posix(),
+            http_port=ESXI_PXE_HTTP_PORT,
+            bios_bootfile="undionly.kpxe",
+            uefi_bootfile="snponly.efi",
+            native_uefi_http_enabled=True,
+            native_uefi_http_url="http://192.168.50.1:8080/pxe/esxi/mboot.efi",
+        )
+        db.add(
+            DnsRecord(
+                hostname=ESXI_PXE_DEFAULT_HOSTNAME,
+                record_type="A",
+                address="192.168.50.1",
+                description=ESXI_PXE_DNS_RECORD_DESCRIPTION,
+                enabled=True,
+            )
+        )
+        db.commit()
+
     page = client.get("/physical-interfaces")
     payload = page.text.split("data-interfaces='", 1)[1].split("'", 1)[0]
     rows = json.loads(html.unescape(payload))
@@ -4200,6 +4752,142 @@ def test_physical_interface_edit_updates_desired_state(client):
     assert '"mtu": 1400' in refreshed.text
     assert '"admin_state": "down"' in refreshed.text
     assert '"desired_state_source": "user"' in refreshed.text
+
+    with SessionLocal() as db:
+        for model in (
+            DnsSettings,
+            ChronySettings,
+            CaSettings,
+            KmsSettings,
+            VcfBackupSettings,
+            VcfOfflineDepotSettings,
+            VcfPrivateRegistrySettings,
+        ):
+            settings = db.execute(select(model)).scalar_one()
+            assert settings.listen_interface == "eth2"
+            assert settings.listen_address == "192.168.70.1"
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        assert scope.interface_name == "eth2"
+        assert scope.site_address == "192.168.70.1"
+        assert scope.prefix_length == 24
+        assert scope.range_start == "192.168.70.100"
+        assert scope.range_end == "192.168.70.200"
+        assert scope.dns_server == "192.168.70.1"
+        assert scope.ntp_server == "192.168.70.1"
+        kms_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert kms_record.address == "192.168.70.1"
+        boot = esxi_pxe_boot_settings(db)
+        assert boot["listen_interface"] == "eth2"
+        assert boot["listen_address"] == "192.168.70.1"
+        assert boot["effective_native_uefi_http_url"] == "http://192.168.70.1:8080/pxe/esxi/mboot.efi"
+        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "A")).scalar_one()
+        assert pxe_record.address == "192.168.70.1"
+
+
+def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refresh(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ChronySettings, DhcpScope, DnsRecord, DnsSettings, Setting
+    from labfoundry.app.services.esxi_pxe import ESXI_PXE_DEFAULT_HOSTNAME, ESXI_PXE_DNS_RECORD_DESCRIPTION, ESXI_PXE_HTTP_PORT, ESXI_PXE_LISTEN_ADDRESS_KEY, ESXI_TFTP_ROOT, save_esxi_pxe_boot_settings
+
+    login(client)
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        dns_settings.listen_interface = "eth2"
+        dns_settings.listen_address = "192.168.1.1"
+        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
+        chrony_settings.enabled = True
+        chrony_settings.listen_interface = "eth2"
+        chrony_settings.listen_address = "192.168.1.1"
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        scope.interface_name = "eth2"
+        scope.site_address = "192.168.1.1"
+        scope.prefix_length = 24
+        scope.range_start = "192.168.1.100"
+        scope.range_end = "192.168.1.120"
+        scope.dns_server = "192.168.1.1"
+        scope.ntp_server = "192.168.1.1"
+        save_esxi_pxe_boot_settings(
+            db,
+            enabled=True,
+            hostname=ESXI_PXE_DEFAULT_HOSTNAME,
+            listen_interface="eth2",
+            listen_address="192.168.1.1",
+            dhcp_scope_ids=[scope.id],
+            tftp_root=ESXI_TFTP_ROOT.as_posix(),
+            http_port=ESXI_PXE_HTTP_PORT,
+            bios_bootfile="undionly.kpxe",
+            uefi_bootfile="snponly.efi",
+            native_uefi_http_enabled=True,
+            native_uefi_http_url="",
+        )
+        db.add(
+            DnsRecord(
+                hostname=ESXI_PXE_DEFAULT_HOSTNAME,
+                record_type="A",
+                address="192.168.1.1",
+                description=ESXI_PXE_DNS_RECORD_DESCRIPTION,
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    page = client.get("/physical-interfaces")
+    payload = page.text.split("data-interfaces='", 1)[1].split("'", 1)[0]
+    rows = json.loads(html.unescape(payload))
+    interface_id = next(row["id"] for row in rows if row["name"] == "eth2")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        f"/physical-interfaces/{interface_id}/edit",
+        data={
+            "role": "access",
+            "mode": "access",
+            "ip_cidr": "192.168.50.1/24",
+            "mtu": "1500",
+            "admin_state": "up",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        assert scope.site_address == "192.168.50.1"
+        assert scope.range_start == "192.168.50.100"
+        assert scope.range_end == "192.168.50.120"
+        assert scope.dns_server == "192.168.50.1"
+        assert scope.ntp_server == "192.168.50.1"
+        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "A")).scalar_one()
+        assert pxe_record.address == "192.168.50.1"
+        pxe_listen = db.execute(select(Setting).where(Setting.key == ESXI_PXE_LISTEN_ADDRESS_KEY)).scalar_one()
+        assert pxe_listen.value == "192.168.50.1"
+        pxe_listen.value = "192.168.1.1"
+        db.add(pxe_listen)
+        db.commit()
+
+    second_response = client.post(
+        f"/physical-interfaces/{interface_id}/edit",
+        data={
+            "role": "access",
+            "mode": "access",
+            "ip_cidr": "192.168.50.1/24",
+            "mtu": "1500",
+            "admin_state": "up",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+
+    assert second_response.status_code == 303
+    with SessionLocal() as db:
+        pxe_listen = db.execute(select(Setting).where(Setting.key == ESXI_PXE_LISTEN_ADDRESS_KEY)).scalar_one()
+        assert pxe_listen.value == "192.168.50.1"
 
 
 def test_physical_interface_link_type_locked_when_vlans_exist(client):
@@ -4565,7 +5253,8 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "network-dualstack-20260701-2" in page.text
+    assert "dhcp-lease-row-menu-20260702-1" in page.text
+    assert "kickstart-editor-keydown-20260702-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -4997,6 +5686,18 @@ def test_services_ui_records_dry_run_action(client):
     assert '<span class="status-pill warn">dry-run</span>' in page.text
     assert "Command shape" in page.text
     assert "systemctl restart dns" in page.text
+    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    assert all(row["service"] != "ntpd" for row in service_rows)
+    assert "NTPD" not in page.text
+    chrony_row = next(row for row in service_rows if row["service"] == "chronyd")
+    assert chrony_row["display_name"] == "Chrony"
+    assert chrony_row["detail"] == "chronyd.service / UDP 123"
+    ca_row = next(row for row in service_rows if row["service"] == "ca")
+    assert ca_row["running"] is False
+    assert ca_row["enabled"] is False
+    vcf_backup_row = next(row for row in service_rows if row["service"] == "vcf-backups")
+    assert vcf_backup_row["running"] is False
+    assert vcf_backup_row["enabled"] is False
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/services/firewall/restart", data={"csrf": csrf})
     assert response.status_code == 200
@@ -5020,11 +5721,206 @@ def test_services_ui_records_dry_run_action(client):
     assert "serviceActionsFormatter" not in js.text
     assert 'title: "Enabled"' in js.text
     assert 'editor: "tickCross"' in js.text
+    assert 'service-state muted">disabled' in js.text
     css = client.get("/static/app.css")
     assert css.status_code == 200
     assert ".service-name-cell" in css.text
     assert ".services-workspace" in css.text
     assert ".services-table" in css.text
+
+
+def test_services_prunes_and_hides_retired_ntpd_row(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ServiceState
+    from labfoundry.app.seed import seed_initial_data
+
+    with SessionLocal() as db:
+        db.add(ServiceState(service="ntpd", display_name="NTPD", running=False, enabled=False, health="disabled", detail="ntpd.service / UDP 123"))
+        db.commit()
+        seed_initial_data(db, include_examples=False)
+        assert db.execute(select(ServiceState).where(ServiceState.service == "ntpd")).scalar_one_or_none() is None
+
+    login(client)
+    page = client.get("/services")
+    assert page.status_code == 200
+    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    assert all(row["service"] != "ntpd" for row in service_rows)
+    assert "NTPD" not in page.text
+
+    token = create_api_token(client, ["read:services"])
+    api_response = client.get("/api/v1/services", headers={"Authorization": f"Bearer {token}"})
+    assert api_response.status_code == 200
+    assert all(row["service"] != "ntpd" for row in api_response.json())
+    assert client.get("/api/v1/services/ntpd", headers={"Authorization": f"Bearer {token}"}).status_code == 404
+
+
+def test_services_and_esxi_page_show_enabled_esxi_pxe_boot_state(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope
+    from labfoundry.app.services.esxi_pxe import (
+        ESXI_PXE_BIOS_BOOTFILE,
+        ESXI_PXE_UEFI_BOOTFILE,
+        ESXI_TFTP_ROOT,
+        save_esxi_pxe_boot_settings,
+    )
+
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.enabled.is_(True)).order_by(DhcpScope.id)).scalars().first()
+        assert scope is not None
+        save_esxi_pxe_boot_settings(
+            db,
+            enabled=True,
+            hostname="esxi-pxe.labfoundry.internal",
+            dhcp_scope_ids=[scope.id],
+            listen_interface=scope.interface_name,
+            listen_address=scope.site_address,
+            tftp_root=ESXI_TFTP_ROOT.as_posix(),
+            bios_bootfile=ESXI_PXE_BIOS_BOOTFILE,
+            uefi_bootfile=ESXI_PXE_UEFI_BOOTFILE,
+            native_uefi_http_enabled=True,
+        )
+        db.commit()
+
+    login(client)
+    esxi_page = client.get("/esxi-pxe")
+    assert esxi_page.status_code == 200
+    assert '<span class="status-pill good">live</span>' in esxi_page.text
+
+    services_page = client.get("/services")
+    assert services_page.status_code == 200
+    service_rows = json.loads(html.unescape(services_page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    esxi_row = next(row for row in service_rows if row["service"] == "esxi-pxe")
+    assert esxi_row["running"] is True
+    assert esxi_row["enabled"] is True
+    assert esxi_row["detail"] == "dnsmasq TFTP/DHCP boot options and PXE HTTP files"
+
+    token = create_api_token(client, ["read:services"])
+    api_response = client.get("/api/v1/services/esxi-pxe", headers={"Authorization": f"Bearer {token}"})
+    assert api_response.status_code == 200
+    assert api_response.json()["running"] is True
+    assert api_response.json()["enabled"] is True
+    assert api_response.json()["health"] == "healthy"
+
+
+def test_services_and_service_pages_derive_composite_runtime_status(client, monkeypatch):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings, DhcpScope, KmsSettings, VcfBackupSettings, VcfOfflineDepotSettings
+
+    def fake_service_status(self, unit: str):
+        return AdapterResult(
+            command=["systemctl", "status", unit],
+            dry_run=False,
+            stdout=json.dumps({"active": "active", "enabled": "enabled"}),
+        )
+
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.service_status", fake_service_status)
+    monkeypatch.setattr("labfoundry.app.api.v1.SystemAdapter.service_status", fake_service_status)
+
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.enabled.is_(True)).order_by(DhcpScope.id)).scalars().first()
+        assert scope is not None
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        ca_settings.enabled = True
+        ca_settings.listen_interface = scope.interface_name
+        ca_settings.listen_address = scope.site_address
+        ca_settings.root_certificate_pem = "present"
+        ca_settings.root_private_key_encrypted = "present"
+        db.add(ca_settings)
+        kms_settings = db.execute(select(KmsSettings)).scalar_one()
+        kms_settings.enabled = True
+        db.add(kms_settings)
+        backup_settings = db.execute(select(VcfBackupSettings)).scalar_one()
+        backup_settings.enabled = False
+        db.add(backup_settings)
+        depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        depot_settings.enabled = True
+        db.add(depot_settings)
+        db.commit()
+
+    login(client)
+    services_page = client.get("/services")
+    assert services_page.status_code == 200
+    service_rows = json.loads(html.unescape(services_page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    ca_row = next(row for row in service_rows if row["service"] == "ca")
+    kms_row = next(row for row in service_rows if row["service"] == "kms")
+    backup_row = next(row for row in service_rows if row["service"] == "vcf-backups")
+    depot_row = next(row for row in service_rows if row["service"] == "repository")
+    assert ca_row["running"] is True
+    assert ca_row["enabled"] is True
+    assert kms_row["running"] is True
+    assert kms_row["enabled"] is True
+    assert backup_row["running"] is True
+    assert backup_row["enabled"] is False
+    assert depot_row["running"] is True
+    assert depot_row["enabled"] is True
+
+    assert '<span class="status-pill good">live</span>' in client.get("/kms").text
+    assert '<span class="status-pill good">live</span>' in client.get("/vcf-offline-depot").text
+    ca_page = client.get("/certificate-authority").text
+    assert '<span class="status-pill muted">disabled</span>' not in ca_page
+    assert '<span class="status-pill good">live</span>' in ca_page or '<span class="status-pill warn">needs attention</span>' in ca_page
+
+    token = create_api_token(client, ["read:services"])
+    assert client.get("/api/v1/services/ca", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+    assert client.get("/api/v1/services/repository", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+    assert client.get("/api/v1/services/vcf-backups", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+
+
+def test_services_live_chrony_status_uses_systemd(client, monkeypatch):
+    import html
+    import json
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.config import get_settings
+
+    def fake_service_status(self, unit: str):
+        active = "active" if unit == "chronyd.service" else "inactive"
+        enabled = "enabled" if unit == "chronyd.service" else "disabled"
+        return AdapterResult(
+            command=["systemctl", "is-active", unit, "&&", "systemctl", "is-enabled", unit],
+            dry_run=False,
+            stdout=json.dumps({"active": active, "enabled": enabled}),
+        )
+
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.service_status", fake_service_status)
+    monkeypatch.setattr("labfoundry.app.api.v1.SystemAdapter.service_status", fake_service_status)
+
+    login(client)
+    page = client.get("/services")
+    assert page.status_code == 200
+    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    chrony_row = next(row for row in service_rows if row["service"] == "chronyd")
+    assert chrony_row["running"] is True
+    assert chrony_row["enabled"] is True
+    assert "health" not in chrony_row
+
+    token = create_api_token(client, ["read:services"])
+    api_response = client.get("/api/v1/services/chronyd", headers={"Authorization": f"Bearer {token}"})
+    assert api_response.status_code == 200
+    assert api_response.json()["running"] is True
+    assert api_response.json()["enabled"] is True
+    assert api_response.json()["health"] == "healthy"
 
 
 def test_services_ui_hides_dry_run_badge_when_adapters_are_live(client, monkeypatch):

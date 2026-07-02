@@ -34,10 +34,14 @@
           <textarea name="external_dns_servers" rows="4">{{ appliance_settings.external_dns_servers }}</textarea>
         </label>
       {% endif %}
-      <label>
-        <span class="field-label"><span>NTP servers</span><button class="help-icon" type="button" data-help="One appliance NTP client server per line. DHCP NTP options stay on the DHCP page, and systemd-timesyncd is configured only through global appliance apply.">i</button></span>
-        <textarea name="ntp_servers" rows="5">{{ appliance_settings.ntp_servers }}</textarea>
-      </label>
+      {% if show_settings_ntp_servers %}
+        <label>
+          <span class="field-label"><span>External NTP servers</span><button class="help-icon" type="button" data-help="One NTP server name or IP per line. These configure the appliance's external time client through global appliance apply only when Chrony is disabled; Chrony owns time service behavior when enabled.">i</button></span>
+          <textarea name="ntp_servers" rows="4">{{ appliance_settings.ntp_servers }}</textarea>
+        </label>
+      {% else %}
+        <input type="hidden" name="ntp_servers" value="{{ appliance_settings.ntp_servers }}">
+      {% endif %}
       <p id="appliance-settings-autosave-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
     </form>
 
@@ -125,6 +129,11 @@
           Local DNS is disabled. External DNS servers are required for appliance resolver apply.
         {% endif %}
       </div>
+      {% if show_settings_ntp_servers %}
+        <div class="alert warning">
+          Chrony is disabled. External NTP servers configured here will be applied through systemd-timesyncd.
+        </div>
+      {% endif %}
       <div class="settings-list">
         <div><span>Management interface</span><strong data-appliance-settings-management>{{ management_interface.name or "not found" }}{% if management_interface.ip %} / {{ management_interface.ip }}{% endif %}</strong></div>
         <div><span>Management UI</span><strong>{{ "HTTPS" if appliance_settings.management_https_enabled else "HTTP" }}{% if appliance_settings.management_https_enabled and management_https_cert_path %} / {{ management_https_cert_path }}{% endif %}</strong></div>

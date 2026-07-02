@@ -40,6 +40,7 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     root_docs = Path("README.md").read_text(encoding="utf-8")
 
     assert "tdnf -y install" in script and "nginx" in script
+    assert "tdnf -y install" in script and "chrony" in script
     assert "tdnf -y install" in script and "powershell" in script
     assert "tdnf -y install" in script and "ipxe" in script
     assert "tdnf -y install" in script and "syslinux" in script
