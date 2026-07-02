@@ -239,13 +239,13 @@
                         data-ip-address="{{ lease.ip_address }}"
                         data-mac-address="{{ lease.mac_address }}"
                       >Create reservation</button>
-                      <form action="/dhcp/leases/pxe-host" method="post">
-                        <input type="hidden" name="csrf" value="{{ csrf_token }}">
-                        <input type="hidden" name="hostname" value="{{ lease.hostname }}">
-                        <input type="hidden" name="ip_address" value="{{ lease.ip_address }}">
-                        <input type="hidden" name="mac_address" value="{{ lease.mac_address }}">
-                        <button type="submit">Create PXE entry</button>
-                      </form>
+                      <button
+                        type="button"
+                        data-dhcp-lease-pxe-host
+                        data-hostname="{{ lease.hostname }}"
+                        data-ip-address="{{ lease.ip_address }}"
+                        data-mac-address="{{ lease.mac_address }}"
+                      >Create PXE entry</button>
                       <form
                         action="/dhcp/leases/deny"
                         method="post"
@@ -292,6 +292,30 @@
             <div class="confirm-modal-actions">
               <button class="button secondary" type="button" data-dhcp-lease-modal-cancel>Cancel</button>
               <button class="button primary" type="submit">Create reservation</button>
+            </div>
+          </form>
+        </dialog>
+        <dialog id="dhcp-lease-pxe-modal" class="confirm-modal" aria-labelledby="dhcp-lease-pxe-title">
+          <form class="confirm-modal-panel" action="/dhcp/leases/pxe-host" method="post">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="mac_address" data-dhcp-lease-pxe-mac-input>
+            <input type="hidden" name="ip_address" data-dhcp-lease-pxe-ip-input>
+            <div class="confirm-modal-body">
+              <p class="kicker">DHCP lease</p>
+              <h2 id="dhcp-lease-pxe-title">Create PXE entry</h2>
+              <p class="muted">Create a desired-state ESXi PXE host entry from this live lease. The appliance changes only after global appliance apply.</p>
+              <div class="lease-reservation-summary">
+                <span>IP <strong data-dhcp-lease-pxe-ip></strong></span>
+                <span>MAC <strong data-dhcp-lease-pxe-mac></strong></span>
+              </div>
+              <label>
+                <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="LabFoundry proposes a hostname from the lease DNS name when present, otherwise from the MAC address. The PXE host entry and managed DNS record use this name.">i</button></span>
+                <input name="hostname" data-dhcp-lease-pxe-hostname required placeholder="esxi-client.labfoundry.internal">
+              </label>
+            </div>
+            <div class="confirm-modal-actions">
+              <button class="button secondary" type="button" data-dhcp-lease-pxe-cancel>Cancel</button>
+              <button class="button primary" type="submit">Create PXE entry</button>
             </div>
           </form>
         </dialog>

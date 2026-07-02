@@ -2944,15 +2944,19 @@ def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
     assert "dhcp-leases-table" in page.text
     assert "dhcp-leases-fallback" in page.text
     assert "data-leases=" in page.text
-    assert "data-lease-menu-toggle" in page.text
     assert "data-dhcp-lease-reservation" in page.text
+    assert "data-dhcp-lease-pxe-host" in page.text
     assert "dhcp-lease-reservation-modal" in page.text
+    assert "dhcp-lease-pxe-modal" in page.text
     assert "Create reservation" in page.text
     assert "Create PXE entry" in page.text
     assert "Deny DHCP for MAC" in page.text
     app_js = client.get("/static/app.js").text
     assert "initializeDhcpLeasesTable" in app_js
-    assert "openDhcpLeaseActionsMenu" in app_js
+    assert "rowContextMenu" in app_js
+    assert "openDhcpLeasePxeModal" in app_js
+    assert "dhcpLeaseActionFormatter" not in app_js
+    assert "openDhcpLeaseActionsMenu" not in app_js
     assert "Create PXE entry" in app_js
     assert "Deny DHCP for MAC" in app_js
     assert "initializeDhcpLeaseReservationActions" in app_js
@@ -5247,7 +5251,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "dhcp-lease-reservation-20260702-1" in page.text
+    assert "dhcp-lease-row-menu-20260702-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
