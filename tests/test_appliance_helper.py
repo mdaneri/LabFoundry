@@ -169,6 +169,7 @@ def esxi_pxe_manifest(http_root: Path, *, enabled: bool = True, stale_id: int = 
     http_base = http_root.parent
     image_path = http_base / "images" / image_key
     mac_key = "01-00-50-56-aa-bb-cc"
+    kickstart_url = f"{kickstart_url}?mac={mac_key}"
     return {
         "kind": "labfoundry-esxi-pxe",
         "schema_version": 2,
@@ -508,7 +509,11 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     pxelinux = (tftp_root / "pxelinux.cfg" / "01-00-50-56-aa-bb-cc").read_text(encoding="utf-8")
     assert "KERNEL images/" in pxelinux
     assert "IPAPPEND 2" in pxelinux
-    assert (tmp_path / "nginx" / "sites.d" / "esxi-pxe.conf").read_text(encoding="utf-8").count("listen 8080;") == 1
+    nginx_site = (tmp_path / "nginx" / "sites.d" / "esxi-pxe.conf").read_text(encoding="utf-8")
+    assert nginx_site.count("listen 8080;") == 1
+    assert "location /pxe/esxi/ks/" in nginx_site
+    assert "proxy_pass http://127.0.0.1:8000;" in nginx_site
+    assert f"alias {http_base}/;" in nginx_site
     assert not stale.exists()
 
     manifest["hosts"][0]["installer_iso_path"] = str(tmp_path / "escape.iso")

@@ -80,7 +80,10 @@ stampFile = open('/finished.stamp', mode='w')
 stampFile.write(time.asctime())
 """
 SECRET_KEYWORD_PATTERN = re.compile(r"(rootpw|password|passwd|token|secret|key|license|activation|credential)", re.IGNORECASE)
-TEMPLATE_PATTERN = re.compile(r"({[{%#].*?[}%]}|\$\{[^}]+\})")
+UNSUPPORTED_TEMPLATE_PATTERN = re.compile(r"({[%#].*?[}%]}|\$\{[^}]+\})")
+KICKSTART_VARIABLE_PATTERN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*\}\}")
+KICKSTART_TEMPLATE_EXPRESSION_PATTERN = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+CUSTOM_VARIABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SAFE_ISO_UPLOAD_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*\.iso$", re.IGNORECASE)
 
 
@@ -143,6 +146,74 @@ def kickstart_url(base_url: str, http_path: str) -> str:
     if not filename:
         return ""
     return f"{base_url}/ks/{filename}"
+
+
+def host_kickstart_url(base_url: str, http_path: str, mac_key: str) -> str:
+    url = kickstart_url(base_url, http_path)
+    return f"{url}?mac={mac_key}" if url and mac_key and mac_key != "default" else url
+
+
+def normalize_host_variables(value: Any) -> dict[str, str]:
+    if value in (None, ""):
+        return {}
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Host variables must be a JSON object.") from exc
+    if not isinstance(value, dict):
+        raise ValueError("Host variables must be a JSON object.")
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key or "").strip()
+        if key.startswith("custom."):
+            key = key.removeprefix("custom.")
+        if key.startswith(("host.", "dhcp.", "pxe.")):
+            raise ValueError(f"Host variable {raw_key} cannot override built-in variables.")
+        if not CUSTOM_VARIABLE_NAME_PATTERN.fullmatch(key):
+            raise ValueError(f"Host variable {raw_key} must use letters, numbers, and underscores.")
+        if len(key) > 80:
+            raise ValueError(f"Host variable {key} is too long.")
+        if raw_value is None:
+            normalized[key] = ""
+        elif isinstance(raw_value, (str, int, float, bool)):
+            normalized[key] = str(raw_value)
+        else:
+            raise ValueError(f"Host variable {key} value must be a string.")
+        if len(normalized[key]) > 2048:
+            raise ValueError(f"Host variable {key} value is too long.")
+    if len(normalized) > 64:
+        raise ValueError("Host variables are limited to 64 entries.")
+    return dict(sorted(normalized.items()))
+
+
+def host_variables_json(value: Any) -> str:
+    return json.dumps(normalize_host_variables(value), sort_keys=True)
+
+
+def host_variables(host: EsxiPxeHost) -> dict[str, str]:
+    try:
+        return normalize_host_variables(host.variables_json or "{}")
+    except ValueError:
+        return {}
+
+
+def kickstart_template_variables(content: str) -> tuple[set[str], list[str]]:
+    names = set(KICKSTART_VARIABLE_PATTERN.findall(content or ""))
+    invalid = [
+        match.group(1).strip()
+        for match in KICKSTART_TEMPLATE_EXPRESSION_PATTERN.finditer(content or "")
+        if not KICKSTART_VARIABLE_PATTERN.fullmatch(match.group(0))
+    ]
+    return names, invalid
+
+
+def kickstart_has_variables(content: str) -> bool:
+    names, invalid = kickstart_template_variables(content)
+    return bool(names or invalid)
 
 
 def ensure_installer_iso_root() -> Path:
@@ -243,7 +314,101 @@ def selected_dhcp_scope_payload(scope: DhcpScope) -> dict[str, Any]:
         "site_address": scope.site_address,
         "prefix_length": scope.prefix_length,
         "domain_name": scope.domain_name,
+        "dns_server": scope.dns_server,
+        "gateway": scope.site_address,
     }
+
+
+def _scope_network(scope: dict[str, Any]) -> Any:
+    try:
+        return ip_network(f"{scope.get('site_address')}/{scope.get('prefix_length')}", strict=False)
+    except ValueError:
+        return None
+
+
+def _dhcp_scope_for_host(host: EsxiPxeHost, boot_settings: dict[str, Any]) -> dict[str, Any]:
+    scopes = [scope for scope in boot_settings.get("dhcp_scopes") or [] if isinstance(scope, dict)]
+    host_ip = str(host.ip_address or "").strip()
+    if host_ip:
+        try:
+            address = ip_address(host_ip)
+        except ValueError:
+            address = None
+        if address is not None:
+            for scope in scopes:
+                network = _scope_network(scope)
+                if network is not None and address in network:
+                    return scope
+    return scopes[0] if scopes else {}
+
+
+def kickstart_variable_values(host: EsxiPxeHost, boot_settings: dict[str, Any]) -> dict[str, str]:
+    mac_key = normalize_pxe_mac(host.mac_address)
+    scope = _dhcp_scope_for_host(host, boot_settings)
+    network = _scope_network(scope)
+    dns_servers = str(scope.get("dns_server") or "").replace(",", "\n")
+    values = {
+        "host.hostname": host.hostname or "",
+        "host.mac": mac_key,
+        "host.ip_address": host.ip_address or "",
+        "dhcp.gateway": str(scope.get("gateway") or scope.get("site_address") or ""),
+        "dhcp.netmask": str(network.netmask) if network is not None and network.version == 4 else "",
+        "dhcp.prefix": str(scope.get("prefix_length") or ""),
+        "dhcp.dns_servers": " ".join(item.strip() for item in dns_servers.splitlines() if item.strip()),
+        "dhcp.domain": str(scope.get("domain_name") or ""),
+        "pxe.http_base_url": esxi_http_base_url(boot_settings),
+    }
+    for key, value in host_variables(host).items():
+        values[f"custom.{key}"] = value
+    return values
+
+
+def render_kickstart_for_host(content: str, host: EsxiPxeHost, boot_settings: dict[str, Any]) -> str:
+    names, invalid = kickstart_template_variables(content)
+    if invalid:
+        raise ValueError(f"Kickstart contains invalid variable marker: {invalid[0]}")
+    values = kickstart_variable_values(host, boot_settings)
+    missing = sorted(name for name in names if name not in values)
+    if missing:
+        raise ValueError(f"Kickstart variable {missing[0]} is not defined for host {host.hostname or host.mac_address}.")
+
+    def replace(match: re.Match[str]) -> str:
+        return values[match.group(1)]
+
+    return KICKSTART_VARIABLE_PATTERN.sub(replace, content)
+
+
+def kickstart_template_validation_errors(
+    kickstarts: list[EsxiKickstart],
+    hosts: list[EsxiPxeHost],
+    boot_settings: dict[str, Any],
+    default_host: dict[str, Any] | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    kickstart_by_id = {row.id: row for row in kickstarts if row.id is not None}
+    for row in kickstarts:
+        names, invalid = kickstart_template_variables(row.content)
+        for marker in invalid:
+            errors.append(f"{row.name}: variable marker {{{{{marker}}}}} is invalid.")
+        if any(not name.startswith(("host.", "dhcp.", "pxe.", "custom.")) for name in names):
+            bad = sorted(name for name in names if not name.startswith(("host.", "dhcp.", "pxe.", "custom.")))[0]
+            errors.append(f"{row.name}: variable {bad} must use host., dhcp., pxe., or custom.")
+    default_kickstart_id = (default_host or {}).get("kickstart_id")
+    default_kickstart = kickstart_by_id.get(int(default_kickstart_id)) if default_kickstart_id else None
+    if default_host and default_host.get("enabled") and default_host.get("installer_iso_path") and default_kickstart:
+        errors.append(f"Default ESXi PXE profile cannot use Kickstart {default_kickstart.name}; dynamic Kickstart rendering requires a defined host MAC.")
+    for host in hosts:
+        if host.enabled is False or not host.kickstart_id:
+            continue
+        kickstart = kickstart_by_id.get(host.kickstart_id)
+        if not kickstart or not kickstart.enabled:
+            continue
+        try:
+            normalize_host_variables(host.variables_json or "{}")
+            render_kickstart_for_host(kickstart.content, host, boot_settings)
+        except ValueError as exc:
+            errors.append(str(exc))
+    return list(dict.fromkeys(errors))
 
 
 def esxi_pxe_boot_settings(db: Session) -> dict[str, Any]:
@@ -608,6 +773,8 @@ def normalize_pxe_mac(value: str) -> str:
     if "." in raw and ":" not in raw:
         raw = raw.replace(".", "")
     octets = re.findall(r"[0-9a-f]{2}", raw)
+    if len(octets) == 7 and octets[0] == "01":
+        return "01-" + "-".join(octets[1:])
     if len(octets) != 6:
         return ""
     return "01-" + "-".join(octets)
@@ -736,6 +903,10 @@ def redacted_kickstart_preview(content: str) -> str:
     return "\n".join(lines)
 
 
+def redacted_host_variables(values: dict[str, str]) -> dict[str, str]:
+    return {key: "[redacted]" if SECRET_KEYWORD_PATTERN.search(key) else value for key, value in values.items()}
+
+
 def kickstart_validation(content: str, *, strict: bool, max_bytes: int) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -772,7 +943,7 @@ def kickstart_validation(content: str, *, strict: bool, max_bytes: int) -> tuple
         if SECRET_KEYWORD_PATTERN.search(line) and not line.startswith("#"):
             warnings.append("contains plaintext password or secret-looking value")
             break
-    if TEMPLATE_PATTERN.search(normalized):
+    if UNSUPPORTED_TEMPLATE_PATTERN.search(normalized):
         warnings.append("contains unsupported template variable")
     return errors, list(dict.fromkeys(warnings))
 
@@ -837,6 +1008,8 @@ def host_to_dict(host: EsxiPxeHost) -> dict[str, Any]:
         "kickstart_name": host.kickstart.name if host.kickstart else "",
         "installer_iso_path": iso_path,
         "installer_iso_name": Path(iso_path).name if iso_path else "",
+        "variables": host_variables(host),
+        "variables_json": json.dumps(host_variables(host), sort_keys=True),
         "enabled": host.enabled,
         "created_at": host.created_at.isoformat() if host.created_at else "",
         "updated_at": host.updated_at.isoformat() if host.updated_at else "",
@@ -944,7 +1117,7 @@ def _esxi_pxe_artifact(
         "image_generated_path": str(ESXI_PXE_IMAGE_HTTP_ROOT / image_key),
         "kickstart_id": kickstart_id,
         "kickstart_http_path": kickstart_path,
-        "kickstart_url": kickstart_url(base_url, kickstart_path),
+        "kickstart_url": host_kickstart_url(base_url, kickstart_path, mac_key) if not is_default else kickstart_url(base_url, kickstart_path),
         "pxelinux_config_path": pxelinux_config_path,
         "uefi_tftp_boot_cfg_path": uefi_tftp_boot_cfg_path,
         "http_boot_cfg_path": http_boot_cfg_path,
@@ -1095,6 +1268,7 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
                 "kickstart_id": host.kickstart_id,
                 "installer_iso_path": host.installer_iso_path or "",
                 "installer_iso_name": Path(host.installer_iso_path).name if host.installer_iso_path else "",
+                "variables": host_variables(host),
                 "enabled": host.enabled,
             }
             for host in hosts
@@ -1116,6 +1290,9 @@ def render_esxi_pxe_preview(kickstarts: list[EsxiKickstart], hosts: list[EsxiPxe
     payload = json.loads(render_esxi_pxe_manifest(kickstarts, hosts, boot_settings, default_host))
     for row in payload["kickstarts"]:
         row["content"] = redacted_kickstart_preview(str(row["content"]))
+    for host in payload.get("hosts", []):
+        if isinstance(host.get("variables"), dict):
+            host["variables"] = redacted_host_variables(host["variables"])
     return json.dumps(payload, indent=2, sort_keys=True)
 
 

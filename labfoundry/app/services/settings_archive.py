@@ -43,6 +43,7 @@ from labfoundry.app.models import (
 )
 from labfoundry.app.seed import SEED_EXAMPLES_SETTING_KEY, seed_initial_data
 from labfoundry.app.services.dnsmasq import DNS_CONDITIONAL_FORWARDERS_SETTING_KEY
+from labfoundry.app.services.esxi_pxe import host_variables_json, normalize_host_variables
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY
 from labfoundry.app.services.local_users import LOCAL_USERS_PASSWORD_POLICY_KEY
 
@@ -217,8 +218,9 @@ def _esxi_pxe_hosts_to_archive(db: Session) -> list[dict[str, Any]]:
     kickstarts = {row.id: row.name for row in db.execute(select(EsxiKickstart)).scalars().all()}
     rows = []
     for host in db.execute(select(EsxiPxeHost)).scalars().all():
-        payload = _row_to_dict(host, exclude={"kickstart_id"})
+        payload = _row_to_dict(host, exclude={"kickstart_id", "variables_json"})
         payload["kickstart_name"] = kickstarts.get(host.kickstart_id) if host.kickstart_id else ""
+        payload["variables"] = normalize_host_variables(host.variables_json or "{}")
         rows.append(payload)
     return rows
 
@@ -423,6 +425,7 @@ def _restore_esxi_pxe_hosts(db: Session, rows: list[dict[str, Any]]) -> int:
         payload = _model_kwargs(EsxiPxeHost, row, exclude={"kickstart_id"})
         kickstart_name = str(row.get("kickstart_name") or "")
         payload["kickstart_id"] = kickstarts.get(kickstart_name) if kickstart_name else None
+        payload["variables_json"] = host_variables_json(row.get("variables", row.get("variables_json", {})))
         db.add(EsxiPxeHost(**payload))
     db.flush()
     return len(rows)

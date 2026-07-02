@@ -236,7 +236,7 @@
             data-fallback-id="esxi-pxe-hosts-fallback"
           ></div>
           <table id="esxi-pxe-hosts-fallback" class="data-table compact dns-fallback-table">
-            <thead><tr><th>Host</th><th>MAC</th><th>IP address</th><th>Kickstart</th><th>Installer ISO</th><th>Enabled</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Host</th><th>MAC</th><th>IP address</th><th>Kickstart</th><th>Installer ISO</th><th>Variables JSON</th><th>Enabled</th><th>Actions</th></tr></thead>
             <tbody>
               <tr>
                 <form action="/esxi-pxe/default-host" method="post">
@@ -260,6 +260,7 @@
                       {% endfor %}
                     </select>
                   </td>
+                  <td></td>
                   <td><input type="checkbox" name="enabled" {{ "checked" if esxi_pxe_default_host.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}></td>
                   <td><button class="button tiny secondary" type="submit" {{ "disabled" if not esxi_can_write else "" }}>Update</button></td>
                 </form>
@@ -287,6 +288,7 @@
                         {% endfor %}
                       </select>
                     </td>
+                    <td><input name="variables" value="{{ host.variables_json or '{}' }}" {{ "disabled" if not esxi_can_write else "" }}></td>
                     <td><input type="checkbox" name="enabled" {{ "checked" if host.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}></td>
                     <td>
                       <button class="button tiny secondary" type="submit" {{ "disabled" if not esxi_can_write else "" }}>Update</button>

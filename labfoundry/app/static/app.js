@@ -1376,7 +1376,11 @@ async function postEsxiHostAction(url, data, csrf, options = {}) {
   const body = new FormData();
   body.set("csrf", csrf);
   for (const [key, value] of Object.entries(data)) {
-    if (key === "id" || key === "is_new" || key === "is_default" || key.endsWith("_name")) {
+    if (key === "id" || key === "is_new" || key === "is_default" || key === "variables" || key.endsWith("_name")) {
+      continue;
+    }
+    if (key === "variables_json") {
+      body.set("variables", value ?? "{}");
       continue;
     }
     if (key === "enabled") {
@@ -1411,6 +1415,7 @@ function newEsxiHostRow(defaultIsoPath = "") {
     kickstart_name: "",
     installer_iso_path: defaultIsoPath,
     installer_iso_name: "",
+    variables_json: "{}",
     enabled: true,
     is_new: true,
     is_default: false,
@@ -5052,6 +5057,20 @@ function initializeEsxiPxeHostsTable() {
           editorParams: { values: isoValues, autocomplete: true },
           formatter: (cell) => isoValues[cell.getValue()] || "No ISO selected",
           minWidth: 320,
+          cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
+        },
+        {
+          title: "Variables JSON",
+          field: "variables_json",
+          editor: canWrite ? "input" : false,
+          editable: (cell) => !cell.getRow().getData().is_default,
+          formatter: (cell) => {
+            if (cell.getRow().getData().is_default) {
+              return "";
+            }
+            return dnsAddRowHintFormatter(cell, '{"custom_name":"value"}');
+          },
+          minWidth: 240,
           cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
         },
         {
