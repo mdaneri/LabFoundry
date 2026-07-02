@@ -542,9 +542,9 @@ def validate_dhcp_scope(scope: DhcpScope) -> tuple[list[str], object | None]:
     if range_start and range_end and int(range_start) > int(range_end):
         errors.append(f"{label} range start must be less than or equal to range end.")
     if network and dns_server and dns_server not in network:
-        errors.append(f"{label} DNS server should be inside the zone subnet.")
+        errors.append(f"{label} DNS server {dns_server} is outside {network.with_prefixlen}. Bind DNS to {scope.interface_name} or leave the DNS server blank for this zone.")
     if network and ntp_server and ntp_server not in network:
-        errors.append(f"{label} NTP server should be inside the zone subnet.")
+        errors.append(f"{label} NTP server {ntp_server} is outside {network.with_prefixlen}. Bind Chrony to {scope.interface_name} or leave the NTP server blank for this zone.")
     return errors, network
 
 

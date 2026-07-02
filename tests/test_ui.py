@@ -2751,12 +2751,19 @@ def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
     payload = page.text.split("data-scope-defaults='", 1)[1].split("'", 1)[0]
     defaults = json.loads(html.unescape(payload))
     eth2 = next(item for item in defaults["interfaces"] if item["name"] == "eth2")
+    eth1_vlan = next(item for item in defaults["interfaces"] if item["name"] == "eth1.20")
     assert eth2["ipv4_address"] == "192.168.50.1"
     assert eth2["ipv4_prefix"] == 24
     assert eth2["dns_default"] == "192.168.50.1"
     assert eth2["ntp_default"] == "192.168.50.1"
+    assert eth1_vlan["dns_default"] == ""
+    assert eth1_vlan["ntp_default"] == ""
     assert "sitea" in defaults["existing_names"]
     assert defaults["default_domain"] == "labfoundry.internal"
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    assert 'rowData.dns_server = interfaceDefaults.dns_default || "";' in app_js.text
+    assert 'rowData.ntp_server = interfaceDefaults.ntp_default || "";' in app_js.text
 
 
 def test_dns_new_record_row_suggests_next_available_ipv4(client):
@@ -2806,25 +2813,28 @@ def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
     assert dns_record_suggested_ipv4(records, "labfoundry.internal", scopes, reservations) == "192.168.50.3"
 
 
-def test_dns_settings_badge_reflects_runtime_service_state(client):
+def test_dns_settings_badge_reflects_desired_state_not_runtime_state(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ServiceState
+    from labfoundry.app.models import DnsSettings, ServiceState
 
     login(client)
     with SessionLocal() as db:
+        settings = db.execute(select(DnsSettings)).scalar_one()
+        settings.enabled = True
         service = db.execute(select(ServiceState).where(ServiceState.service == "dns")).scalar_one()
-        service.enabled = True
-        service.running = True
-        service.health = "healthy"
+        service.enabled = False
+        service.running = False
+        service.health = "disabled"
         db.commit()
 
     page = client.get("/dns")
+    settings_panel = page.text.split("<h2>DNS Settings</h2>", 1)[1].split("</form>", 1)[0]
 
     assert page.status_code == 200
-    assert '<span class="status-pill good">live</span>' in page.text
-    assert '<span class="status-pill warn">dry-run</span>' not in page.text
+    assert '<span class="status-pill good">enabled</span>' in settings_panel
+    assert '<span class="status-pill muted">disabled</span>' not in settings_panel
 
 
 def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
@@ -3448,7 +3458,7 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert "updateVcfBackupValidation" in app_js.text
 
 
-def test_vcf_backups_settings_badge_reflects_live_adapter_mode(client, monkeypatch):
+def test_vcf_backups_settings_badge_reflects_desired_state(client, monkeypatch):
     from labfoundry.app.config import get_settings
 
     login(client)
@@ -3458,7 +3468,8 @@ def test_vcf_backups_settings_badge_reflects_live_adapter_mode(client, monkeypat
     page = client.get("/vcf-backups")
 
     assert page.status_code == 200
-    assert '<span class="status-pill good">live</span>' in page.text
+    settings_panel = page.text.split("<h2>SFTP Settings</h2>", 1)[1].split("</form>", 1)[0]
+    assert '<span class="status-pill muted">disabled</span>' in settings_panel
     assert '<span class="status-pill warn">dry-run</span>' not in page.text
 
 
@@ -5532,6 +5543,12 @@ def test_services_ui_records_dry_run_action(client):
     chrony_row = next(row for row in service_rows if row["service"] == "chronyd")
     assert chrony_row["display_name"] == "Chrony"
     assert chrony_row["detail"] == "chronyd.service / UDP 123"
+    ca_row = next(row for row in service_rows if row["service"] == "ca")
+    assert ca_row["running"] is False
+    assert ca_row["enabled"] is False
+    vcf_backup_row = next(row for row in service_rows if row["service"] == "vcf-backups")
+    assert vcf_backup_row["running"] is False
+    assert vcf_backup_row["enabled"] is False
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/services/firewall/restart", data={"csrf": csrf})
     assert response.status_code == 200
@@ -5555,6 +5572,7 @@ def test_services_ui_records_dry_run_action(client):
     assert "serviceActionsFormatter" not in js.text
     assert 'title: "Enabled"' in js.text
     assert 'editor: "tickCross"' in js.text
+    assert 'service-state muted">disabled' in js.text
     css = client.get("/static/app.css")
     assert css.status_code == 200
     assert ".service-name-cell" in css.text

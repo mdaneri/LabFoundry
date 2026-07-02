@@ -46,9 +46,9 @@ SERVICE_STATE_DEFAULTS = [
     {
         "service": "vcf-backups",
         "display_name": "VCF Backup SFTP",
-        "running": True,
-        "enabled": True,
-        "health": "healthy",
+        "running": False,
+        "enabled": False,
+        "health": "disabled",
         "detail": "/mnt/labfoundry-vcf-backups",
     },
     {"service": "ca", "display_name": "Certificate Authority", "running": False, "enabled": False, "health": "planned"},

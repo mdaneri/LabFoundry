@@ -793,10 +793,14 @@ function applyDhcpScopeInterfaceDefaults(rowData, defaults, options = {}) {
   if ((overwrite || !rowData.prefix_length) && Number.isInteger(prefix)) {
     rowData.prefix_length = prefix;
   }
-  if ((overwrite || !rowData.dns_server) && interfaceDefaults.dns_default) {
+  if (overwrite) {
+    rowData.dns_server = interfaceDefaults.dns_default || "";
+  } else if (!rowData.dns_server && interfaceDefaults.dns_default) {
     rowData.dns_server = interfaceDefaults.dns_default;
   }
-  if ((overwrite || !rowData.ntp_server) && interfaceDefaults.ntp_default) {
+  if (overwrite) {
+    rowData.ntp_server = interfaceDefaults.ntp_default || "";
+  } else if (!rowData.ntp_server && interfaceDefaults.ntp_default) {
     rowData.ntp_server = interfaceDefaults.ntp_default;
   }
   if ((overwrite || !rowData.domain_name) && defaults.default_domain) {
@@ -2181,6 +2185,10 @@ function initializeManagedFirewallRulesTable() {
 
 function serviceRuntimeFormatter(cell) {
   const running = Boolean(cell.getValue());
+  const data = cell.getRow().getData() || {};
+  if (!running && data.enabled === false) {
+    return '<span class="service-state muted">disabled</span>';
+  }
   return `<span class="service-state ${running ? "good" : "muted"}">${running ? "running" : "stopped"}</span>`;
 }
 

@@ -195,11 +195,13 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
 
     for retired_service in db.execute(select(ServiceState).where(ServiceState.service.in_(RETIRED_SERVICE_IDS))).scalars().all():
         db.delete(retired_service)
+    vcf_backup_settings = db.execute(select(VcfBackupSettings)).scalar_one_or_none()
+    vcf_backup_desired_enabled = bool(vcf_backup_settings and vcf_backup_settings.enabled)
     for service_state in SERVICE_STATE_DEFAULTS:
         existing_service = db.execute(select(ServiceState).where(ServiceState.service == service_state["service"])).scalar_one_or_none()
         if existing_service is None:
             db.add(ServiceState(**service_state))
-        elif service_state["service"] in {"chronyd", "repository"}:
+        elif service_state["service"] in {"chronyd", "repository", "vcf-backups"}:
             existing_service.display_name = service_state["display_name"]
             existing_service.detail = service_state["detail"]
             if existing_service.health == "healthy":
@@ -207,6 +209,10 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
             if service_state["service"] == "repository":
                 existing_service.enabled = service_state["enabled"]
                 existing_service.running = service_state["running"]
+            if service_state["service"] == "vcf-backups" and not vcf_backup_desired_enabled:
+                existing_service.enabled = service_state["enabled"]
+                existing_service.running = service_state["running"]
+                existing_service.health = service_state["health"]
 
     appliance_settings = db.execute(select(ApplianceSettings)).scalar_one_or_none()
     if appliance_settings is None:
