@@ -207,8 +207,15 @@ chown root:labfoundry /etc/labfoundry/labfoundry.env
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks"
+if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
+  install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-vmware-ovf-customize.py" "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py"
+  install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry-vmware-ovf-customize.service" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
+fi
 install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
 sed -i 's/\r$//' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" /etc/sudoers.d/labfoundry-helper
+if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
+  sed -i 's/\r$//' "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
+fi
 visudo -cf /etc/sudoers.d/labfoundry-helper
 
 chown -R root:root "$LABFOUNDRY_HOME"
@@ -335,6 +342,7 @@ if [ "$LABFOUNDRY_GUEST_PLATFORM" = "hyperv" ]; then
   systemctl enable --now hv_vss_daemon || true
 elif [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   systemctl enable --now vmtoolsd || true
+  systemctl enable labfoundry-vmware-ovf-customize.service
 fi
 systemctl enable labfoundry-data-disks.service
 systemctl enable labfoundry

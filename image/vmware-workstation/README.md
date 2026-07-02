@@ -7,6 +7,8 @@ the same LabFoundry control plane provisioning used by the Hyper-V image.
 
 - VMware Workstation Pro with `vmrun.exe` available under
   `C:\Program Files\VMware\VMware Workstation`.
+- VMware Workstation's bundled OVF Tool with `ovftool.exe` available under
+  `C:\Program Files\VMware\VMware Workstation\OVFTool` when exporting OVF/OVA artifacts.
 - Packer `>= 1.10`.
 - `qemu-img` when preparing the tiny Alpine lifecycle client VMDK.
 - Photon OS 5.0 ISO URL and checksum.
@@ -79,6 +81,39 @@ Create or adjust missing lifecycle vmnets in VMware Virtual Network Editor. The
 scripts intentionally do not rewrite global Workstation vmnet configuration
 because `vnetlib.exe` behavior is version-sensitive and can affect unrelated
 VMs.
+
+## OVF / OVA Export
+
+After a VMware image build, export a deployable OVF folder and OVA archive:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/vmware/export-ovf.ps1 `
+  -SourceVmxPath image/vmware-workstation/output/labfoundry-photon-vmware-workstation/LabFoundry-Photon-Builder-VMware.vmx `
+  -Name LabFoundry-Photon `
+  -Force
+```
+
+The export script runs OVF Tool, adds LabFoundry vApp properties to the OVF
+descriptor, regenerates the manifest, and packages the folder as an OVA unless
+`-NoOva` is passed. The OVF properties are intended for vSphere/ESXi import:
+
+| Property | Required | Description |
+| --- | --- | --- |
+| `labfoundry.cidr` | yes | Static management IPv4 CIDR for `eth0`, for example `192.168.10.10/24`. |
+| `labfoundry.gateway` | yes | IPv4 gateway for the management network. |
+| `labfoundry.fqdn` | yes | Appliance FQDN applied to Photon OS and LabFoundry desired state. |
+| `labfoundry.dns_servers` | yes | One or more resolver IPs separated by commas, spaces, or new lines. |
+| `labfoundry.ntp_servers` | no | Optional NTP names or IPs. Blank keeps the image defaults. |
+| `labfoundry.admin_password` | yes | Initial LabFoundry web `admin` password. |
+| `labfoundry.root_password` | yes | Photon root console password. Root SSH remains disabled by default. |
+
+On first boot from an OVF/OVA deployment, `labfoundry-vmware-ovf-customize`
+reads those properties through VMware Tools before LabFoundry starts. It writes
+the management network, resolver, hostname, root password, and bootstrap admin
+password once, then records a redacted marker under `/var/lib/labfoundry`.
+Passwords are consumed as deployment inputs and are not printed in the marker or
+customization log.
 
 ## Lifecycle
 

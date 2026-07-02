@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     api_token_ttl_days: int = 90
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: str = "labfoundry-admin"
+    appliance_fqdn: str = "labfoundry.labfoundry.internal"
+    appliance_management_cidr: str = "192.168.49.1/24"
+    appliance_external_dns_servers: str = "1.1.1.1\n9.9.9.9"
+    appliance_ntp_servers: str = "time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com"
     dry_run_system_adapters: bool = True
     management_source_cidr: str = "192.168.49.0/24"
     repository_path: Path = Path("/mnt/labfoundry-vcf-offline-depot")
