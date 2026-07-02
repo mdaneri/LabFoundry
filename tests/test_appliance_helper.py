@@ -159,6 +159,9 @@ def wan_config_text(
 
 def esxi_pxe_manifest(http_root: Path, *, enabled: bool = True, stale_id: int = 99, iso_root: Path | None = None) -> dict:
     content = "install\nnetwork --bootproto=dhcp\nrootpw VMware01!\nreboot\n%firstboot\n%end\n"
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    kickstart_http_path = f"/pxe/esxi/ks/{content_hash[:12]}.cfg"
+    kickstart_url = f"http://192.168.50.1:8080{kickstart_http_path}"
     iso_root = iso_root or http_root.parent / "iso"
     iso_path = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", iso_path.stem).strip("-._").lower()
@@ -188,9 +191,9 @@ def esxi_pxe_manifest(http_root: Path, *, enabled: bool = True, stale_id: int = 
                 "name": "ESXi install",
                 "enabled": enabled,
                 "content": content,
-                "content_hash": __import__("hashlib").sha256(content.encode("utf-8")).hexdigest(),
-                "http_path": "/pxe/esxi/ks/7.cfg",
-                "generated_path": str(http_root / "7.cfg"),
+                "content_hash": content_hash,
+                "http_path": kickstart_http_path,
+                "generated_path": str(http_root / f"{content_hash[:12]}.cfg"),
             }
         ],
         "hosts": [
@@ -217,8 +220,8 @@ def esxi_pxe_manifest(http_root: Path, *, enabled: bool = True, stale_id: int = 
                 "image_http_url": f"http://192.168.50.1:8080/pxe/esxi/images/{image_key}",
                 "image_generated_path": str(image_path),
                 "kickstart_id": 7 if enabled else None,
-                "kickstart_http_path": "/pxe/esxi/ks/7.cfg" if enabled else "",
-                "kickstart_url": "http://192.168.50.1:8080/pxe/esxi/ks/7.cfg" if enabled else "",
+                "kickstart_http_path": kickstart_http_path if enabled else "",
+                "kickstart_url": kickstart_url if enabled else "",
                 "pxelinux_config_path": str(http_root.parents[2] / "tftp" / "pxelinux.cfg" / mac_key),
                 "uefi_tftp_boot_cfg_path": str(http_root.parents[2] / "tftp" / mac_key / "boot.cfg"),
                 "http_boot_cfg_path": str(http_base / mac_key / "boot.cfg"),
@@ -473,7 +476,8 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     payload = helper._load_esxi_pxe_manifest(helper._validate_esxi_pxe_config_path(str(config_path)))
     assert helper._esxi_pxe_manifest_errors(payload) == []
     assert helper._apply_esxi_pxe_manifest(payload) == 0
-    assert (http_root / "7.cfg").read_text(encoding="utf-8") == manifest["kickstarts"][0]["content"]
+    generated_kickstart = Path(manifest["kickstarts"][0]["generated_path"])
+    assert generated_kickstart.read_text(encoding="utf-8") == manifest["kickstarts"][0]["content"]
     assert (tftp_root / "undionly.kpxe").read_bytes() == b"bios ipxe"
     assert (tftp_root / "snponly.efi").read_bytes() == b"uefi ipxe"
     assert (tftp_root / "pxelinux.0").read_bytes() == b"pxelinux"
@@ -495,10 +499,10 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert f"prefix={manifest['artifacts'][0]['image_http_url']}" in boot_cfg
     assert http_boot_cfg == boot_cfg
     assert "kernel=b.b00" in boot_cfg
-    assert "kernelopt=runweasel ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg BOOTIF=01-00-50-56-aa-bb-cc" in boot_cfg
+    assert f"kernelopt=runweasel ks={manifest['artifacts'][0]['kickstart_url']} BOOTIF=01-00-50-56-aa-bb-cc" in boot_cfg
     assert "modules=jumpstrt.gz---useropts.gz" in boot_cfg
     default_boot_cfg = (tftp_root / "boot.cfg").read_text(encoding="utf-8")
-    assert "kernelopt=runweasel ks=http://192.168.50.1:8080/pxe/esxi/ks/7.cfg netdevice=vmnic0" in default_boot_cfg
+    assert f"kernelopt=runweasel ks={manifest['artifacts'][0]['kickstart_url']} netdevice=vmnic0" in default_boot_cfg
     assert "BOOTIF=" not in default_boot_cfg
     assert (http_base / "boot.cfg").read_text(encoding="utf-8") == default_boot_cfg
     pxelinux = (tftp_root / "pxelinux.cfg" / "01-00-50-56-aa-bb-cc").read_text(encoding="utf-8")

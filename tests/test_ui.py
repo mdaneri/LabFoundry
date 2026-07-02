@@ -1187,7 +1187,7 @@ def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
     with SessionLocal() as db:
         kickstart = db.execute(select(EsxiKickstart).where(EsxiKickstart.id == kickstart_id)).scalar_one()
         assert "SuperSecret!" in kickstart.content
-        assert kickstart.http_path == f"/pxe/esxi/ks/{kickstart_id}.cfg"
+        assert kickstart.http_path == f"/pxe/esxi/ks/{kickstart.content_hash[:12]}.cfg"
 
     apply_page = client.get("/appliance-apply")
     assert 'value="esxi_pxe"' in apply_page.text
@@ -1374,6 +1374,7 @@ def test_esxi_pxe_default_host_settings_update_existing_rows(client, monkeypatch
         db.flush()
         first_kickstart_id = first_kickstart.id
         second_kickstart_id = second_kickstart.id
+        second_kickstart_hash = second_kickstart.content_hash
 
         first = esxi_pxe.save_esxi_pxe_default_host_settings(
             db,
@@ -1402,6 +1403,7 @@ def test_esxi_pxe_default_host_settings_update_existing_rows(client, monkeypatch
         "enabled": False,
         "kickstart_id": second_kickstart_id,
         "kickstart_name": "Second",
+        "kickstart_http_path": f"/pxe/esxi/ks/{second_kickstart_hash[:12]}.cfg",
         "installer_iso_path": str(second_iso),
         "installer_iso_name": "Second-ESXi.iso",
     }
@@ -1452,6 +1454,27 @@ def test_esxi_pxe_default_host_edit_marks_appliance_apply_pending(client):
     assert pending.json()["label"] == "Review appliance changes"
     with SessionLocal() as db:
         assert appliance_apply_status(db, "esxi_pxe")["changed"] is True
+
+
+def test_esxi_kickstart_validation_rejects_duplicate_install_directives(client):
+    from labfoundry.app.services.esxi_pxe import kickstart_validation
+
+    content = "\n".join(
+        [
+            "vmaccepteula",
+            "rootpw vmware01!",
+            "install --firstdisk --overwritevmfs",
+            "install --firstdisk --overwritevmfs --dpupcislots=<PCIeSlotID>",
+            "network --bootproto=dhcp --device=vmnic0",
+            "reboot",
+            "",
+        ]
+    )
+
+    errors, warnings = kickstart_validation(content, strict=False, max_bytes=8192)
+
+    assert "multiple install/upgrade directives on lines 3, 4; ESXi allows only one." in errors
+    assert "missing install or upgrade directive" not in warnings
 
 
 def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
@@ -1741,7 +1764,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
         from labfoundry.app.services.esxi_pxe import assign_kickstart_content, canonical_http_path
 
         assign_kickstart_content(kickstart, kickstart.content, max_bytes=262_144)
-        kickstart.http_path = canonical_http_path(kickstart.id)
+        kickstart.http_path = canonical_http_path(kickstart.id, kickstart.content_hash)
         db.add(
             EsxiPxeHost(
                 hostname="esxi-archive",
@@ -1798,9 +1821,9 @@ def test_esxi_pxe_drift_detection_uses_generated_filesystem_copy(client, monkeyp
         kickstart = EsxiKickstart(name="Drift ESXi", content=content, content_hash=esxi_pxe.content_hash(content), rendered_content=content, rendered_hash=esxi_pxe.content_hash(content), enabled=True)
         db.add(kickstart)
         db.flush()
-        kickstart.http_path = esxi_pxe.canonical_http_path(kickstart.id)
+        kickstart.http_path = esxi_pxe.canonical_http_path(kickstart.id, kickstart.content_hash)
         tmp_path.mkdir(parents=True, exist_ok=True)
-        (tmp_path / f"{kickstart.id}.cfg").write_text(content.replace("DriftSecret", "ChangedOnDisk"), encoding="utf-8")
+        (tmp_path / f"{kickstart.content_hash[:12]}.cfg").write_text(content.replace("DriftSecret", "ChangedOnDisk"), encoding="utf-8")
         db.commit()
         kickstart_id = kickstart.id
 

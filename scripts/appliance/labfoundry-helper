@@ -59,6 +59,7 @@ DNSMASQ_SERVICE_DROPIN_PATH = DNSMASQ_SERVICE_DROPIN_DIR / "labfoundry.conf"
 ESXI_PXE_APPLY_DIR = Path("/var/lib/labfoundry/apply/esxi-pxe")
 ESXI_PXE_HTTP_BASE = Path("/var/lib/labfoundry/pxe/http/esxi")
 ESXI_PXE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/ks")
+ESXI_KICKSTART_HTTP_PREFIX = "/pxe/esxi/ks"
 ESXI_PXE_IMAGE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/images")
 ESXI_IPXE_HTTP_SCRIPT_PATH = ESXI_PXE_HTTP_BASE / "boot.ipxe"
 ESXI_TFTP_ROOT = Path("/var/lib/labfoundry/pxe/tftp")
@@ -796,10 +797,6 @@ def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
         seen_ids.add(kickstart_id)
         if row.get("enabled"):
             enabled_ids.add(kickstart_id)
-        generated_path = Path(str(row.get("generated_path") or "")).resolve()
-        expected_path = (ESXI_PXE_HTTP_ROOT / f"{kickstart_id}.cfg").resolve()
-        if generated_path != expected_path:
-            errors.append(f"Kickstart {kickstart_id} generated_path must be {expected_path}.")
         content = str(row.get("content") or "")
         if row.get("enabled") and not content.strip():
             errors.append(f"Kickstart {kickstart_id} content is empty.")
@@ -807,6 +804,19 @@ def _esxi_pxe_manifest_errors(payload: dict) -> list[str]:
         actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if expected_hash and expected_hash != actual_hash:
             errors.append(f"Kickstart {kickstart_id} content hash does not match manifest content.")
+        generated_path = Path(str(row.get("generated_path") or "")).resolve()
+        resolved_root = ESXI_PXE_HTTP_ROOT.resolve()
+        if generated_path != resolved_root and resolved_root not in generated_path.parents:
+            errors.append(f"Kickstart {kickstart_id} generated_path must stay under {resolved_root}.")
+        elif generated_path.suffix != ".cfg":
+            errors.append(f"Kickstart {kickstart_id} generated_path must end in .cfg.")
+        http_path = str(row.get("http_path") or "").strip()
+        if not http_path.startswith(f"{ESXI_KICKSTART_HTTP_PREFIX}/") or not http_path.endswith(".cfg"):
+            errors.append(f"Kickstart {kickstart_id} http_path must stay under {ESXI_KICKSTART_HTTP_PREFIX}.")
+        elif generated_path.name != Path(http_path).name:
+            errors.append(f"Kickstart {kickstart_id} generated_path filename must match http_path.")
+        if expected_hash and generated_path.stem != expected_hash[:12]:
+            errors.append(f"Kickstart {kickstart_id} generated_path must use the content hash prefix {expected_hash[:12]}.")
     for host in payload.get("hosts", []):
         if not isinstance(host, dict):
             errors.append("ESXi PXE host entry must be an object.")
@@ -1113,21 +1123,20 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
         shutil.chown(ESXI_INSTALLER_ISO_ROOT, user="labfoundry", group="labfoundry")
     except (LookupError, PermissionError, OSError):
         pass
-    enabled_ids: set[str] = set()
     generated_files: list[str] = []
     generated_tftp_files: list[str] = []
     generated_images: list[str] = []
     boot = payload.get("boot") or {}
     for row in payload.get("kickstarts", []):
-        kickstart_id = str(int(row["id"]))
-        generated_path = ESXI_PXE_HTTP_ROOT / f"{kickstart_id}.cfg"
+        generated_path = Path(str(row["generated_path"])).resolve()
         if row.get("enabled"):
+            generated_path.parent.mkdir(parents=True, exist_ok=True)
             generated_path.write_text(str(row.get("content") or ""), encoding="utf-8")
             generated_path.chmod(0o644)
-            enabled_ids.add(kickstart_id)
             generated_files.append(str(generated_path))
+    generated_kickstart_paths = {Path(path).resolve() for path in generated_files}
     for path in ESXI_PXE_HTTP_ROOT.glob("*.cfg"):
-        if path.stem.isdigit() and path.stem not in enabled_ids:
+        if path.resolve() not in generated_kickstart_paths:
             path.unlink(missing_ok=True)
     if boot.get("enabled"):
         ESXI_TFTP_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1271,7 +1280,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
                 "generated_files": generated_files,
                 "generated_tftp_files": generated_tftp_files,
                 "generated_images": generated_images,
-                "enabled_kickstarts": len(enabled_ids),
+                "enabled_kickstarts": len(generated_kickstart_paths),
             },
             sort_keys=True,
         )

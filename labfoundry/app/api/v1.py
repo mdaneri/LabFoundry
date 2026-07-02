@@ -2296,7 +2296,6 @@ def create_esxi_kickstart(
     db.add(kickstart)
     db.flush()
     _assign_kickstart_payload(kickstart, payload, settings.esxi_kickstart_max_bytes)
-    kickstart.http_path = canonical_http_path(kickstart.id)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -2341,7 +2340,6 @@ def update_esxi_kickstart(
     if not kickstart:
         raise HTTPException(status_code=404, detail="Kickstart not found")
     _assign_kickstart_payload(kickstart, payload, settings.esxi_kickstart_max_bytes)
-    kickstart.http_path = canonical_http_path(kickstart.id)
     db.add(kickstart)
     try:
         db.commit()
@@ -2404,7 +2402,7 @@ def duplicate_esxi_kickstart(
     )
     db.add(duplicate)
     db.flush()
-    duplicate.http_path = canonical_http_path(duplicate.id)
+    duplicate.http_path = canonical_http_path(duplicate.id, duplicate.content_hash)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -2501,7 +2499,7 @@ async def upload_esxi_kickstart(
     kickstart = EsxiKickstart(name=normalize_kickstart_name(candidate_name), description=description or None, content=content, content_hash=content_hash(content), rendered_content=content, enabled=enabled)
     db.add(kickstart)
     db.flush()
-    kickstart.http_path = canonical_http_path(kickstart.id)
+    kickstart.http_path = canonical_http_path(kickstart.id, kickstart.content_hash)
     try:
         db.commit()
     except IntegrityError as exc:

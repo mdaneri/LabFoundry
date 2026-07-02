@@ -53,6 +53,7 @@ ESXI_PXE_UEFI_SECOND_STAGE_BOOTFILE = "mboot.efi"
 ESXI_PXE_NATIVE_UEFI_BOOTFILE = "mboot.efi"
 ESXI_PXE_DNS_RECORD_DESCRIPTION = "Created from ESXi PXE boot endpoint."
 ESXI_PXE_HOST_MANAGED_DESCRIPTION_PREFIX = "Managed by ESXi PXE host "
+ESXI_KICKSTART_HASH_PATH_LENGTH = 12
 DEFAULT_ESXI_KICKSTART_NAME = "ESXi install"
 DEFAULT_ESXI_KICKSTART_CONTENT = """#
 # Sample scripted installation file
@@ -120,12 +121,28 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def canonical_http_path(kickstart_id: int) -> str:
-    return f"{ESXI_KICKSTART_HTTP_PREFIX}/{kickstart_id}.cfg"
+def kickstart_http_stem(kickstart_id: int, content_hash_value: str | None = None) -> str:
+    normalized_hash = (content_hash_value or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{12,}", normalized_hash):
+        return normalized_hash[:ESXI_KICKSTART_HASH_PATH_LENGTH]
+    return str(kickstart_id)
 
 
-def generated_kickstart_path(kickstart_id: int) -> Path:
-    return ESXI_KICKSTART_HTTP_ROOT / f"{kickstart_id}.cfg"
+def canonical_http_path(kickstart_id: int, content_hash_value: str | None = None) -> str:
+    return f"{ESXI_KICKSTART_HTTP_PREFIX}/{kickstart_http_stem(kickstart_id, content_hash_value)}.cfg"
+
+
+def generated_kickstart_path(kickstart_id: int, content_hash_value: str | None = None) -> Path:
+    return ESXI_KICKSTART_HTTP_ROOT / f"{kickstart_http_stem(kickstart_id, content_hash_value)}.cfg"
+
+
+def kickstart_url(base_url: str, http_path: str) -> str:
+    if not base_url or not http_path:
+        return ""
+    filename = Path(http_path).name
+    if not filename:
+        return ""
+    return f"{base_url}/ks/{filename}"
 
 
 def ensure_installer_iso_root() -> Path:
@@ -693,7 +710,7 @@ def assign_kickstart_content(kickstart: EsxiKickstart, content: str, *, max_byte
     kickstart.content = normalized
     kickstart.content_hash = content_hash(normalized)
     kickstart.rendered_content = normalized
-    kickstart.http_path = canonical_http_path(kickstart.id) if kickstart.id else kickstart.http_path
+    kickstart.http_path = canonical_http_path(kickstart.id, kickstart.content_hash) if kickstart.id else kickstart.http_path
     kickstart.updated_at = utcnow()
 
 
@@ -742,6 +759,15 @@ def kickstart_validation(content: str, *, strict: bool, max_bytes: int) -> tuple
     else:
         warnings.extend(missing)
 
+    install_directive_lines = [
+        index
+        for index, line in enumerate(lines, start=1)
+        if re.match(r"^(install|upgrade)(\s|$)", line.lower())
+    ]
+    if len(install_directive_lines) > 1:
+        joined_lines = ", ".join(str(line) for line in install_directive_lines)
+        errors.append(f"multiple install/upgrade directives on lines {joined_lines}; ESXi allows only one.")
+
     for line in lines:
         if SECRET_KEYWORD_PATTERN.search(line) and not line.startswith("#"):
             warnings.append("contains plaintext password or secret-looking value")
@@ -766,7 +792,7 @@ def filesystem_hash(path: Path) -> str | None:
 
 
 def kickstart_drift_state(kickstart: EsxiKickstart) -> str:
-    path = generated_kickstart_path(kickstart.id)
+    path = generated_kickstart_path(kickstart.id, kickstart.content_hash)
     disk_hash = filesystem_hash(path)
     if not kickstart.rendered_hash and disk_hash is None:
         return "not_rendered"
@@ -786,7 +812,7 @@ def kickstart_to_dict(kickstart: EsxiKickstart, *, include_content: bool = False
         "description": kickstart.description or "",
         "content_hash": kickstart.content_hash,
         "rendered_hash": kickstart.rendered_hash or "",
-        "http_path": kickstart.http_path or canonical_http_path(kickstart.id),
+        "http_path": canonical_http_path(kickstart.id, kickstart.content_hash),
         "enabled": kickstart.enabled,
         "created_at": kickstart.created_at,
         "updated_at": kickstart.updated_at,
@@ -826,6 +852,7 @@ def esxi_pxe_default_host_settings(db: Session) -> dict[str, Any]:
         "enabled": rows.get(ESXI_PXE_DEFAULT_HOST_ENABLED_KEY, "false").strip().lower() in {"1", "true", "yes", "on"},
         "kickstart_id": kickstart.id if kickstart is not None else None,
         "kickstart_name": kickstart.name if kickstart is not None else "",
+        "kickstart_http_path": canonical_http_path(kickstart.id, kickstart.content_hash) if kickstart is not None else "",
         "installer_iso_path": iso_path,
         "installer_iso_name": Path(iso_path).name if iso_path else "",
     }
@@ -869,6 +896,7 @@ def default_host_to_dict(default_host: dict[str, Any]) -> dict[str, Any]:
         "ip_address": "",
         "kickstart_id": default_host.get("kickstart_id"),
         "kickstart_name": default_host.get("kickstart_name") or "",
+        "kickstart_http_path": default_host.get("kickstart_http_path") or "",
         "installer_iso_path": default_host.get("installer_iso_path") or "",
         "installer_iso_name": default_host.get("installer_iso_name") or "",
         "enabled": bool(default_host.get("enabled")),
@@ -886,12 +914,13 @@ def _esxi_pxe_artifact(
     iso_path: str,
     kickstart_id: int | None,
     boot_settings: dict[str, Any],
+    kickstart_http_path: str = "",
     is_default: bool = False,
 ) -> dict[str, Any]:
     base_url = esxi_http_base_url(boot_settings)
     image_key = installer_image_key(iso_path)
     image_http_path = f"{ESXI_PXE_IMAGE_HTTP_PREFIX}/{image_key}"
-    kickstart_path = canonical_http_path(kickstart_id) if kickstart_id else ""
+    kickstart_path = kickstart_http_path or (canonical_http_path(kickstart_id) if kickstart_id else "")
     if is_default:
         pxelinux_config_path = str(ESXI_TFTP_ROOT / "pxelinux.cfg" / "default")
         uefi_tftp_boot_cfg_path = str(ESXI_TFTP_ROOT / "boot.cfg")
@@ -915,16 +944,24 @@ def _esxi_pxe_artifact(
         "image_generated_path": str(ESXI_PXE_IMAGE_HTTP_ROOT / image_key),
         "kickstart_id": kickstart_id,
         "kickstart_http_path": kickstart_path,
-        "kickstart_url": f"{base_url}/ks/{kickstart_id}.cfg" if base_url and kickstart_id else "",
+        "kickstart_url": kickstart_url(base_url, kickstart_path),
         "pxelinux_config_path": pxelinux_config_path,
         "uefi_tftp_boot_cfg_path": uefi_tftp_boot_cfg_path,
         "http_boot_cfg_path": http_boot_cfg_path,
     }
 
 
-def esxi_pxe_host_artifacts(hosts: list[EsxiPxeHost], boot_settings: dict[str, Any], default_host: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def esxi_pxe_host_artifacts(
+    hosts: list[EsxiPxeHost],
+    boot_settings: dict[str, Any],
+    default_host: dict[str, Any] | None = None,
+    kickstart_paths: dict[int, str] | None = None,
+) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
+    paths = kickstart_paths or {}
     if default_host and default_host.get("enabled") and default_host.get("installer_iso_path"):
+        default_kickstart_id = default_host.get("kickstart_id")
+        default_kickstart_path = paths.get(int(default_kickstart_id)) if default_kickstart_id else ""
         artifacts.append(
             _esxi_pxe_artifact(
                 host_id=None,
@@ -933,7 +970,8 @@ def esxi_pxe_host_artifacts(hosts: list[EsxiPxeHost], boot_settings: dict[str, A
                 ip_address="",
                 mac_key="default",
                 iso_path=str(default_host.get("installer_iso_path") or ""),
-                kickstart_id=default_host.get("kickstart_id"),
+                kickstart_id=default_kickstart_id,
+                kickstart_http_path=default_kickstart_path or str(default_host.get("kickstart_http_path") or ""),
                 boot_settings=boot_settings,
                 is_default=True,
             )
@@ -945,6 +983,11 @@ def esxi_pxe_host_artifacts(hosts: list[EsxiPxeHost], boot_settings: dict[str, A
         if not iso_path:
             continue
         mac_key = normalize_pxe_mac(host.mac_address)
+        kickstart_path = ""
+        if host.kickstart_id:
+            kickstart_path = paths.get(host.kickstart_id, "")
+            if not kickstart_path and host.kickstart is not None:
+                kickstart_path = canonical_http_path(host.kickstart_id, host.kickstart.content_hash)
         artifacts.append(
             _esxi_pxe_artifact(
                 host_id=host.id,
@@ -954,6 +997,7 @@ def esxi_pxe_host_artifacts(hosts: list[EsxiPxeHost], boot_settings: dict[str, A
                 mac_key=mac_key,
                 iso_path=iso_path,
                 kickstart_id=host.kickstart_id,
+                kickstart_http_path=kickstart_path,
                 boot_settings=boot_settings,
             )
         )
@@ -1018,7 +1062,8 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
         "effective_native_uefi_http_url",
     }
     boot_manifest = {key: boot.get(key) for key in boot_manifest_keys}
-    artifacts = esxi_pxe_host_artifacts(hosts, boot, default_host)
+    kickstart_paths = {row.id: canonical_http_path(row.id, row.content_hash) for row in kickstarts if row.id is not None}
+    artifacts = esxi_pxe_host_artifacts(hosts, boot, default_host, kickstart_paths=kickstart_paths)
     payload = {
         "kind": "labfoundry-esxi-pxe",
         "schema_version": ESXI_PXE_SCHEMA_VERSION,
@@ -1036,8 +1081,8 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
                 "enabled": row.enabled,
                 "content": row.rendered_content if row.rendered_content is not None else row.content,
                 "content_hash": row.content_hash,
-                "http_path": row.http_path or canonical_http_path(row.id),
-                "generated_path": str(generated_kickstart_path(row.id)),
+                "http_path": canonical_http_path(row.id, row.content_hash),
+                "generated_path": str(generated_kickstart_path(row.id, row.content_hash)),
             }
             for row in kickstarts
         ],
@@ -1058,6 +1103,7 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
             "enabled": bool((default_host or {}).get("enabled")),
             "kickstart_id": (default_host or {}).get("kickstart_id"),
             "kickstart_name": (default_host or {}).get("kickstart_name") or "",
+            "kickstart_http_path": (default_host or {}).get("kickstart_http_path") or "",
             "installer_iso_path": (default_host or {}).get("installer_iso_path") or "",
             "installer_iso_name": (default_host or {}).get("installer_iso_name") or "",
         },
@@ -1080,4 +1126,4 @@ def mark_kickstarts_applied(kickstarts: list[EsxiKickstart]) -> None:
         row.rendered_hash = content_hash(rendered)
         row.last_rendered_at = timestamp
         row.last_applied_at = timestamp
-        row.http_path = canonical_http_path(row.id)
+        row.http_path = canonical_http_path(row.id, row.rendered_hash or row.content_hash)

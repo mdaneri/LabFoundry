@@ -4652,7 +4652,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         "validation_errors": unit["validation_errors"],
         "validation_warnings": unit["validation_warnings"],
         "removed_vlan_interfaces": unit.get("removed_vlan_interfaces", []),
-        "generated_files": [str(generated_kickstart_path(row.id)) for row in context.get("esxi_kickstarts", []) if row.enabled],
+        "generated_files": [str(generated_kickstart_path(row.id, row.content_hash)) for row in context.get("esxi_kickstarts", []) if row.enabled],
         "config_path": unit["config_path"],
         "config_preview": unit["config_preview"],
         "config_diff": unit["config_diff"],
@@ -9139,11 +9139,26 @@ def audit_log(
 def serve_esxi_kickstart_file(kickstart_file: str, db: Session = Depends(get_db)) -> FileResponse:
     if not kickstart_file.endswith(".cfg"):
         raise HTTPException(status_code=404, detail="Kickstart not found")
-    raw_id = kickstart_file.removesuffix(".cfg")
-    if not raw_id.isdigit():
+    stem = kickstart_file.removesuffix(".cfg").strip().lower()
+    if not re.fullmatch(r"(?:\d+|[0-9a-f]{12,64})", stem):
         raise HTTPException(status_code=404, detail="Kickstart not found")
-    kickstart = db.get(EsxiKickstart, int(raw_id))
-    path = generated_kickstart_path(int(raw_id))
+    if stem.isdigit():
+        kickstart = db.get(EsxiKickstart, int(stem))
+    else:
+        kickstart = next(
+            (
+                row
+                for row in db.execute(select(EsxiKickstart).where(EsxiKickstart.enabled.is_(True))).scalars().all()
+                if (row.content_hash or "").lower().startswith(stem)
+            ),
+            None,
+        )
+    if not kickstart or not kickstart.enabled:
+        raise HTTPException(status_code=404, detail="Kickstart not found")
+    path = generated_kickstart_path(kickstart.id, kickstart.content_hash)
+    legacy_path = generated_kickstart_path(kickstart.id)
+    if not path.is_file() and stem.isdigit() and legacy_path.is_file():
+        path = legacy_path
     if not kickstart or not kickstart.enabled or not path.is_file():
         raise HTTPException(status_code=404, detail="Kickstart not found")
     return FileResponse(path, media_type="text/plain; charset=utf-8")
@@ -9283,7 +9298,6 @@ def create_esxi_kickstart_from_ui(
         db.add(kickstart)
         db.flush()
         assign_kickstart_content(kickstart, content, max_bytes=get_settings().esxi_kickstart_max_bytes)
-        kickstart.http_path = canonical_http_path(kickstart.id)
         db.commit()
     except (ValueError, IntegrityError) as exc:
         db.rollback()
@@ -9323,7 +9337,6 @@ def update_esxi_kickstart_from_ui(
         kickstart.description = description or None
         kickstart.enabled = enabled
         assign_kickstart_content(kickstart, content, max_bytes=get_settings().esxi_kickstart_max_bytes)
-        kickstart.http_path = canonical_http_path(kickstart.id)
         db.add(kickstart)
         db.commit()
     except (ValueError, IntegrityError) as exc:
@@ -9365,7 +9378,7 @@ def duplicate_esxi_kickstart_from_ui(
     )
     db.add(duplicate)
     db.flush()
-    duplicate.http_path = canonical_http_path(duplicate.id)
+    duplicate.http_path = canonical_http_path(duplicate.id, duplicate.content_hash)
     db.commit()
     record_audit(db, actor=identity.username, action="duplicate_esxi_kickstart", resource_type="esxi_kickstart", resource_id=str(duplicate.id), detail=f"source_id={source.id} name={duplicate.name}", request_id=request.state.request_id)
     return RedirectResponse(f"/esxi-pxe?kickstart_id={duplicate.id}", status_code=303)
@@ -9463,7 +9476,7 @@ async def upload_esxi_kickstart_from_ui(
         )
         db.add(kickstart)
         db.flush()
-        kickstart.http_path = canonical_http_path(kickstart.id)
+        kickstart.http_path = canonical_http_path(kickstart.id, kickstart.content_hash)
         db.commit()
     except (ValueError, IntegrityError) as exc:
         db.rollback()
@@ -9573,7 +9586,7 @@ def import_esxi_kickstart_filesystem_copy(
     kickstart = db.get(EsxiKickstart, kickstart_id)
     if not kickstart:
         raise HTTPException(status_code=404, detail="Kickstart not found")
-    path = generated_kickstart_path(kickstart.id)
+    path = generated_kickstart_path(kickstart.id, kickstart.content_hash)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Generated Kickstart file not found")
     assign_kickstart_content(kickstart, normalize_kickstart_content(path.read_text(encoding="utf-8"), max_bytes=get_settings().esxi_kickstart_max_bytes), max_bytes=get_settings().esxi_kickstart_max_bytes)
