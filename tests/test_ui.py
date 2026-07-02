@@ -2679,6 +2679,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert 'data.record_type !== "A" && data.address === data.suggested_ipv4' in app_js.text
     assert "DNS_ACTIVE_ZONE_STORAGE_KEY" in app_js.text
     assert "initializeCodeMirrorEditors" in app_js.text
+    assert "installCodeMirrorPlainTextFallback" in app_js.text
+    assert 'textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart"' in app_js.text
     assert "LabFoundryCodeMirror.setValue" in app_js.text
     assert "rememberDnsActiveZone(data.domain)" in app_js.text
     assert "dnsZoneTabButtonForDomain(storedDomain)" in app_js.text

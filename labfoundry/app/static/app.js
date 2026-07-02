@@ -5077,10 +5077,44 @@ function initializeCodeMirrorEditors() {
     if (!(textarea instanceof HTMLTextAreaElement)) {
       return;
     }
-    window.LabFoundryCodeMirror.enhanceTextarea(textarea, {
+    const view = window.LabFoundryCodeMirror.enhanceTextarea(textarea, {
       language: textarea.dataset.codemirrorLanguage || "labfoundry-hosts",
     });
+    installCodeMirrorPlainTextFallback(textarea, view);
   });
+}
+
+function installCodeMirrorPlainTextFallback(textarea, view) {
+  if (!(textarea instanceof HTMLTextAreaElement) || !view || textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart") {
+    return;
+  }
+  const eventTarget = view.dom instanceof HTMLElement ? view.dom : view.contentDOM || view.dom?.querySelector?.(".cm-content");
+  if (!(eventTarget instanceof HTMLElement) || eventTarget.dataset.labfoundryPlainTextFallback === "1") {
+    return;
+  }
+  eventTarget.dataset.labfoundryPlainTextFallback = "1";
+  eventTarget.addEventListener(
+    "beforeinput",
+    (event) => {
+      if (event.defaultPrevented || event.isComposing || event.inputType !== "insertText" || typeof event.data !== "string" || event.data.length === 0) {
+        return;
+      }
+      const selection = view.state?.selection?.main;
+      if (!selection || typeof selection.from !== "number" || typeof selection.to !== "number") {
+        return;
+      }
+      event.preventDefault();
+      const cursor = selection.from + event.data.length;
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert: event.data },
+        selection: { anchor: cursor },
+        scrollIntoView: true,
+        userEvent: "input.type",
+      });
+      view.focus();
+    },
+    true
+  );
 }
 
 function initializeKickstartEditorDirtyState() {
