@@ -36,6 +36,7 @@ def init_db() -> None:
     _ensure_sqlite_dhcp_columns()
     _ensure_sqlite_user_sync_columns()
     _ensure_sqlite_appliance_settings_columns()
+    _ensure_sqlite_chrony_settings_columns()
     _ensure_sqlite_ca_columns()
     _ensure_sqlite_vcf_depot_columns()
     _ensure_sqlite_esxi_pxe_columns()
@@ -117,6 +118,28 @@ def _ensure_sqlite_appliance_settings_columns() -> None:
         for name, definition in columns.items():
             if name not in existing:
                 connection.execute(text(f"ALTER TABLE appliance_settings ADD COLUMN {name} {definition}"))
+
+
+def _ensure_sqlite_chrony_settings_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "chrony_settings" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("chrony_settings")}
+    columns = {
+        "hostname": "VARCHAR(180) DEFAULT 'ntp.labfoundry.internal'",
+        "listen_interface": "VARCHAR(240) DEFAULT ''",
+        "listen_address": "VARCHAR(240) DEFAULT ''",
+        "port": "INTEGER DEFAULT 123",
+        "upstream_servers": "TEXT DEFAULT 'time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com'",
+        "allow_clients": "TEXT DEFAULT 'any'",
+        "config_path": "VARCHAR(240) DEFAULT '/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf'",
+    }
+    with engine.begin() as connection:
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE chrony_settings ADD COLUMN {name} {definition}"))
 
 
 def _ensure_sqlite_ca_columns() -> None:

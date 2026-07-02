@@ -10,6 +10,7 @@ from labfoundry.app.models import (
     FirewallRule,
     FirewallSettings,
     KmsSettings,
+    ChronySettings,
     PhysicalInterface,
     VcfBackupSettings,
     VcfOfflineDepotSettings,
@@ -143,6 +144,7 @@ def managed_service_firewall_rules(
     dhcp_settings: DhcpSettings,
     dhcp_scopes: list[DhcpScope],
     kms_settings: KmsSettings,
+    chrony_settings: ChronySettings,
     vcf_backup_settings: VcfBackupSettings,
     vcf_depot_settings: VcfOfflineDepotSettings,
     vcf_registry_settings: VcfPrivateRegistrySettings,
@@ -177,6 +179,20 @@ def managed_service_firewall_rules(
                     protocol="tcp",
                     ports=str(kms_settings.port),
                     priority=60 + index,
+                )
+            )
+    if chrony_settings.enabled:
+        for index, interface_name in enumerate(split_interfaces(chrony_settings.listen_interface), start=1):
+            rule_name = f"chronyd-{interface_name}"
+            rules.append(
+                _service_firewall_rule(
+                    name=rule_name,
+                    service="Chrony",
+                    interface_name=interface_name,
+                    source=_managed_rule_source(rule_name, interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                    protocol="udp",
+                    ports=str(chrony_settings.port),
+                    priority=65 + index,
                 )
             )
     if vcf_backup_settings.enabled:

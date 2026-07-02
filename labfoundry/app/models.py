@@ -196,6 +196,21 @@ class ApplianceSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ChronySettings(Base):
+    __tablename__ = "chrony_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    hostname: Mapped[str] = mapped_column(String(180), default="ntp.labfoundry.internal")
+    listen_interface: Mapped[str] = mapped_column(String(240), default="")
+    listen_address: Mapped[str] = mapped_column(String(240), default="")
+    port: Mapped[int] = mapped_column(Integer, default=123)
+    upstream_servers: Mapped[str] = mapped_column(Text, default="time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com")
+    allow_clients: Mapped[str] = mapped_column(Text, default="any")
+    config_path: Mapped[str] = mapped_column(String(240), default="/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class FirewallSettings(Base):
     __tablename__ = "firewall_settings"
 

@@ -34,6 +34,7 @@ COMMANDS: dict[str, set[str]] = {
     "dnsmasq": {"validate", "apply", "reload", "leases"},
     "ca": {"validate", "apply"},
     "kms": {"validate", "apply"},
+    "chronyd": {"validate", "apply"},
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
     "vcf-offline-depot": {"validate", "stage-tool", "sync", "apply-https"},
@@ -87,6 +88,9 @@ PYKMIP_CONFIG_PATH = PYKMIP_CONFIG_DIR / "server.conf"
 PYKMIP_SERVER_VENV_PATH = Path("/opt/labfoundry/.venv/bin/pykmip-server")
 LABFOUNDRY_VENV_PYTHON_PATH = Path("/opt/labfoundry/.venv/bin/python")
 PYKMIP_COMPAT_SCRIPT_PATH = Path("/opt/labfoundry/labfoundry/app/services/pykmip_compat_server.py")
+CHRONY_APPLY_DIR = Path("/var/lib/labfoundry/apply/chronyd")
+CHRONY_CONFIG_PATH = Path("/etc/chrony.conf")
+CHRONY_STATE_DIR = Path("/var/lib/chrony")
 NETWORK_APPLY_DIR = Path("/var/lib/labfoundry/apply/network")
 WAN_APPLY_DIR = Path("/var/lib/labfoundry/apply/wan")
 APPLIANCE_UPDATE_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-update")
@@ -113,8 +117,6 @@ NETWORKD_DEFAULT_APPLIANCE_FILES = {
     "99-dhcp-en.network",
 }
 NETWORK_INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
-TIMESYNCD_DROPIN_DIR = Path("/etc/systemd/timesyncd.conf.d")
-TIMESYNCD_DROPIN_PATH = TIMESYNCD_DROPIN_DIR / "labfoundry.conf"
 LABFOUNDRY_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/labfoundry.service.d")
 LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH = LABFOUNDRY_SERVICE_DROPIN_DIR / "management-https.conf"
 LABFOUNDRY_UVICORN_COMMAND = "/opt/labfoundry/.venv/bin/python -m uvicorn labfoundry.app.main:app --host {host} --port {port}"
@@ -307,6 +309,17 @@ def _validate_kms_config_path(path_value: str) -> Path:
         raise ValueError(f"KMS config must be staged under {KMS_APPLY_DIR}")
     if not path.is_file():
         raise ValueError(f"KMS config does not exist: {path}")
+    return path
+
+
+def _validate_chronyd_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".conf":
+        raise ValueError("chronyd config path must end with .conf")
+    if not path.is_relative_to(CHRONY_APPLY_DIR.resolve()):
+        raise ValueError(f"chronyd config must be staged under {CHRONY_APPLY_DIR}")
+    if not path.exists():
+        raise ValueError(f"chronyd config does not exist: {path}")
     return path
 
 
@@ -1493,6 +1506,136 @@ def _handle_kms(action: str, args: list[str]) -> int:
     return 0
 
 
+def _chronyd_config_enabled(path: Path) -> bool:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip().lower()
+        if stripped.startswith("# labfoundry chrony enabled:"):
+            return stripped.split(":", 1)[1].strip() == "true"
+    return False
+
+
+def _chronyd_config_errors(path: Path) -> list[str]:
+    errors: list[str] = []
+    servers: list[str] = []
+    listen_addresses: list[str] = []
+    allow_entries: list[str] = []
+
+    def add_allow_entry(value: str) -> None:
+        normalized = value.strip().lower()
+        if normalized == "any":
+            normalized = "all"
+        if normalized and normalized not in allow_entries:
+            allow_entries.append(normalized)
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if lower.startswith("server "):
+            parts = line.split()
+            if len(parts) < 2:
+                errors.append("chronyd server lines must include a server.")
+            else:
+                servers.append(parts[1])
+        elif lower.startswith("bindaddress "):
+            parts = line.split()
+            if len(parts) < 2:
+                errors.append("chronyd bindaddress lines must include an address.")
+            else:
+                listen_addresses.append(parts[1])
+        elif lower.startswith("allow "):
+            parts = line.split()
+            if len(parts) >= 2:
+                add_allow_entry(parts[1])
+        elif lower.startswith("# labfoundry chrony client allow list:"):
+            for item in line.split(":", 1)[1].replace(",", "\n").splitlines():
+                add_allow_entry(item)
+    if not servers:
+        errors.append("chronyd config must include at least one server line.")
+    for server in servers:
+        try:
+            ip_address(server)
+            continue
+        except ValueError:
+            pass
+        normalized = server.strip().strip(".").lower()
+        if not HOSTNAME_PATTERN.fullmatch(normalized):
+            errors.append(f"chronyd server {server} must be a valid DNS name or IP address.")
+    if _chronyd_config_enabled(path) and not listen_addresses:
+        errors.append("enabled chronyd config must include at least one bindaddress.")
+    for address in listen_addresses:
+        try:
+            ip_address(address)
+        except ValueError:
+            errors.append(f"chronyd bindaddress {address} must be a valid IP address.")
+    if allow_entries:
+        if "all" in allow_entries and len(allow_entries) > 1:
+            errors.append("chronyd client allow list can use 'all' only by itself.")
+        for entry in allow_entries:
+            if entry == "all":
+                continue
+            try:
+                ip_network(entry, strict=False)
+            except ValueError:
+                errors.append(f"chronyd client allow entry {entry} must be 'all' or a valid IPv4/IPv6 CIDR.")
+    return errors
+
+
+def _install_chronyd_config(config_path: Path) -> None:
+    CHRONY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CHRONY_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_target = CHRONY_CONFIG_PATH.with_suffix(".conf.tmp")
+    shutil.copy2(config_path, tmp_target)
+    os.chmod(tmp_target, 0o644)
+    tmp_target.replace(CHRONY_CONFIG_PATH)
+
+
+def _handle_chronyd(action: str, args: list[str]) -> int:
+    if len(args) != 1:
+        print(f"chronyd {action} requires exactly one staged config path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _validate_chronyd_config_path(args[0])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    errors = _chronyd_config_errors(config_path)
+    enabled = _chronyd_config_enabled(config_path)
+    if action == "validate":
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 2
+        print(json.dumps({"chronyd": "validation ok", "enabled": enabled, "service": "chronyd.service"}, sort_keys=True))
+        return 0
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    if not enabled:
+        disable = _run(["systemctl", "disable", "--now", "chronyd.service"])
+        print(disable.stdout, end="")
+        print(disable.stderr, end="", file=sys.stderr)
+        if disable.returncode != 0:
+            return disable.returncode
+        print(json.dumps({"chronyd": "apply complete", "enabled": False, "service": "chronyd.service"}, sort_keys=True))
+        return 0
+    _install_chronyd_config(config_path)
+    for command in [
+        ["systemctl", "disable", "--now", "systemd-timesyncd"],
+        ["systemctl", "enable", "chronyd.service"],
+        ["systemctl", "restart", "chronyd.service"],
+    ]:
+        result = _run(command)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        if result.returncode != 0 and command[:3] != ["systemctl", "disable", "--now"]:
+            return result.returncode
+    print(json.dumps({"chronyd": "apply complete", "enabled": True, "config_path": str(CHRONY_CONFIG_PATH), "service": "chronyd.service"}, sort_keys=True))
+    return 0
+
+
 def _validate_appliance_settings_config_path(path_value: str) -> Path:
     path = Path(_validate_path(path_value)).resolve()
     if path.suffix != ".json":
@@ -1552,19 +1695,6 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
             ip_interface(f"{management_ip}/32" if ":" not in management_ip else f"{management_ip}/128")
         except ValueError:
             errors.append("management_ip must be a valid IP address.")
-
-    ntp_servers = [str(server).strip() for server in payload.get("ntp_servers") or [] if str(server).strip()]
-    if not ntp_servers:
-        errors.append("ntp_servers must include at least one server.")
-    for server in ntp_servers:
-        try:
-            ip_interface(f"{server}/32" if ":" not in server else f"{server}/128")
-            continue
-        except ValueError:
-            pass
-        normalized = server.strip().strip(".").lower()
-        if not HOSTNAME_PATTERN.fullmatch(normalized):
-            errors.append(f"ntp server {server} must be a valid DNS name or IP address.")
 
     management_http_port = payload.get("management_http_port", 8000)
     try:
@@ -2011,35 +2141,6 @@ def _configure_root_ssh(enabled: bool) -> int:
     return restart.returncode
 
 
-def _timesyncd_config(ntp_servers: list[str]) -> str:
-    return "\n".join(
-        [
-            "# Managed by LabFoundry. Local changes may be overwritten.",
-            "[Time]",
-            f"NTP={' '.join(ntp_servers)}",
-            "",
-        ]
-    )
-
-
-def _install_timesyncd_config(ntp_servers: list[str]) -> int:
-    TIMESYNCD_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
-    tmp_target = TIMESYNCD_DROPIN_PATH.with_suffix(".conf.tmp")
-    tmp_target.write_text(_timesyncd_config(ntp_servers), encoding="utf-8")
-    os.chmod(tmp_target, 0o644)
-    tmp_target.replace(TIMESYNCD_DROPIN_PATH)
-    for command in [
-        ["systemctl", "enable", "--now", "systemd-timesyncd"],
-        ["systemctl", "restart", "systemd-timesyncd"],
-    ]:
-        result = _run(command)
-        print(result.stdout, end="")
-        print(result.stderr, end="", file=sys.stderr)
-        if result.returncode != 0:
-            return result.returncode
-    return 0
-
-
 def _apply_hostname(fqdn: str) -> int:
     hostnamectl = shutil.which("hostnamectl")
     if hostnamectl is not None:
@@ -2085,7 +2186,7 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                     "management_https_enabled": bool(payload.get("management_https_enabled")),
                     "root_ssh_enabled": bool(payload.get("root_ssh_enabled")),
                     "management_interface": payload["management_interface"],
-                    "scope": "systemd-resolved, systemd-timesyncd, LabFoundry management UI, and root SSH login",
+                    "scope": "systemd-resolved, LabFoundry management UI, and root SSH login",
                 },
                 sort_keys=True,
             )
@@ -2102,9 +2203,6 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     resolver_mode = str(payload["resolver_mode"])
     resolver_servers = [str(server) for server in payload["resolver_servers"]]
     domains = ["~."] if resolver_mode == "local_dns" else []
-    timesyncd = _install_timesyncd_config([str(server) for server in payload["ntp_servers"]])
-    if timesyncd != 0:
-        return timesyncd
     hostname = _apply_hostname(fqdn)
     if hostname != 0:
         return hostname
@@ -2126,7 +2224,6 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                 "root_ssh_enabled": bool(payload.get("root_ssh_enabled")),
                 "resolver_mode": resolver_mode,
                 "resolver_servers": resolver_servers,
-                "timesyncd_dropin": str(TIMESYNCD_DROPIN_PATH),
             },
             sort_keys=True,
         )
@@ -4264,6 +4361,8 @@ def main(argv: list[str]) -> int:
         return _handle_ca(action, normalized_args)
     if group == "kms":
         return _handle_kms(action, normalized_args)
+    if group == "chronyd":
+        return _handle_chronyd(action, normalized_args)
     if group == "vcf-backups":
         return _handle_vcf_backups(action, normalized_args)
     if group == "vcf-offline-depot":

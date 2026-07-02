@@ -1733,8 +1733,32 @@ def appliance_settings_json(
             "management_upstream_port": 8000,
             "management_https_cert_path": management_https_cert_path,
             "management_https_key_path": management_https_key_path,
-            "ntp_servers": ["time1.google.com", "time2.google.com"],
         }
+    )
+
+
+def chronyd_config_text(*, enabled: bool = True, server: str = "time1.google.com", listen_address: str = "192.168.50.1", allow_clients: str = "192.168.50.0/24") -> str:
+    allow_directives = []
+    for entry in allow_clients.replace(",", "\n").splitlines():
+        value = entry.strip()
+        if value:
+            allow_directives.append(f"allow {value}")
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            f"# LabFoundry Chrony enabled: {str(enabled).lower()}",
+            "# LabFoundry Chrony hostname: ntp.labfoundry.internal",
+            "# LabFoundry Chrony listen interfaces: eth2.50",
+            f"# LabFoundry Chrony listen addresses: {listen_address if listen_address else 'none'}",
+            f"# LabFoundry Chrony client allow list: {allow_clients}",
+            "driftfile /var/lib/chrony/drift",
+            "makestep 1.0 3",
+            "rtcsync",
+            f"server {server} iburst",
+            *([f"bindaddress {listen_address}"] if listen_address else []),
+            *allow_directives,
+            "",
+        ]
     )
 
 
@@ -1770,7 +1794,6 @@ def test_appliance_settings_helper_rejects_invalid_json(tmp_path):
 
     assert "fqdn must be a valid fully qualified DNS name." in errors
     assert "resolver_mode must be local_dns or external." in errors
-    assert "ntp_servers must include at least one server." in errors
 
 
 def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tmp_path):
@@ -1789,7 +1812,6 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     sshd_config_dir = tmp_path / "ssh" / "sshd_config.d"
     sshd_root_login = sshd_config_dir / "labfoundry-root-login.conf"
     sshd_main = tmp_path / "ssh" / "sshd_config"
-    timesyncd_dir = tmp_path / "timesyncd.conf.d"
     apply_dir.mkdir(parents=True)
     cert_path.parent.mkdir(parents=True)
     nginx_main.parent.mkdir(parents=True)
@@ -1835,8 +1857,6 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
 
     monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
-    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
-    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
     monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
     monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
     monkeypatch.setattr(helper, "LABFOUNDRY_HTTP_REDIRECT_SCRIPT_PATH", redirect_script)
@@ -1899,7 +1919,6 @@ def test_appliance_settings_helper_writes_http_management_proxy_without_https(mo
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "appliance-settings"
     dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
-    timesyncd_dir = tmp_path / "timesyncd.conf.d"
     apply_dir.mkdir(parents=True)
     nginx_paths = patch_appliance_settings_nginx_paths(monkeypatch, helper, tmp_path)
     config_path = apply_dir / "labfoundry-settings.json"
@@ -1911,8 +1930,6 @@ def test_appliance_settings_helper_writes_http_management_proxy_without_https(mo
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
-    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
-    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
     monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
     monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
     monkeypatch.setattr(helper, "_run", fake_run)
@@ -1949,12 +1966,11 @@ def test_appliance_settings_helper_writes_http_management_proxy_without_https(mo
     assert any(command[:5] == ["/usr/bin/systemd-run", "--quiet", "--collect", "--on-active=3", "--unit=labfoundry-management-ui-restart"] for command in commands)
 
 
-def test_appliance_settings_helper_applies_local_resolver_and_timesyncd(monkeypatch, tmp_path):
+def test_appliance_settings_helper_applies_local_resolver_without_timesyncd(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "appliance-settings"
     networkd_dir = tmp_path / "etc" / "systemd" / "network"
     dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
-    timesyncd_dir = tmp_path / "etc" / "systemd" / "timesyncd.conf.d"
     apply_dir.mkdir(parents=True)
     networkd_dir.mkdir(parents=True)
     mgmt_network = networkd_dir / "00-labfoundry-mgmt.network"
@@ -1985,8 +2001,6 @@ def test_appliance_settings_helper_applies_local_resolver_and_timesyncd(monkeypa
     monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", mgmt_network)
     monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
     monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
-    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
-    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
     monkeypatch.setattr(helper, "_run", fake_run)
     monkeypatch.setattr(
         helper.shutil,
@@ -2003,14 +2017,12 @@ def test_appliance_settings_helper_applies_local_resolver_and_timesyncd(monkeypa
     assert ["/usr/bin/hostnamectl", "set-hostname", "labfoundry.labfoundry.internal"] in commands
     assert ["resolvectl", "dns", "eth0", "127.0.0.1"] in commands
     assert ["resolvectl", "domain", "eth0", "~."] in commands
-    assert ["systemctl", "enable", "--now", "systemd-timesyncd"] in commands
-    assert ["systemctl", "restart", "systemd-timesyncd"] in commands
+    assert ["systemctl", "enable", "--now", "systemd-timesyncd"] not in commands
+    assert ["systemctl", "restart", "systemd-timesyncd"] not in commands
     network_text = mgmt_network.read_text(encoding="utf-8")
     assert "DNS=1.1.1.1" not in network_text
     assert "DNS=127.0.0.1" in network_text
     assert "Domains=~." in network_text
-    timesyncd = (timesyncd_dir / "labfoundry.conf").read_text(encoding="utf-8")
-    assert "NTP=time1.google.com time2.google.com" in timesyncd
 
 
 def test_appliance_settings_helper_applies_external_resolver_without_catchall(monkeypatch, tmp_path):
@@ -2018,7 +2030,6 @@ def test_appliance_settings_helper_applies_external_resolver_without_catchall(mo
     apply_dir = tmp_path / "apply" / "appliance-settings"
     networkd_dir = tmp_path / "etc" / "systemd" / "network"
     dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
-    timesyncd_dir = tmp_path / "etc" / "systemd" / "timesyncd.conf.d"
     apply_dir.mkdir(parents=True)
     networkd_dir.mkdir(parents=True)
     mgmt_network = networkd_dir / "00-labfoundry-mgmt.network"
@@ -2042,8 +2053,6 @@ def test_appliance_settings_helper_applies_external_resolver_without_catchall(mo
     monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", mgmt_network)
     monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
     monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
-    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_DIR", timesyncd_dir)
-    monkeypatch.setattr(helper, "TIMESYNCD_DROPIN_PATH", timesyncd_dir / "labfoundry.conf")
     monkeypatch.setattr(helper, "_run", fake_run)
     monkeypatch.setattr(
         helper.shutil,
@@ -2065,6 +2074,73 @@ def test_appliance_settings_helper_applies_external_resolver_without_catchall(mo
     assert "Domains=~." not in network_text
     assert "DNS=1.1.1.1" in network_text
     assert "DNS=9.9.9.9" in network_text
+
+
+def test_chronyd_helper_rejects_invalid_staged_config(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "chronyd"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-chrony.conf"
+    config_path.write_text(chronyd_config_text(server="bad_name", listen_address="not-an-ip", allow_clients="all, 192.168.50.0/24"), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
+
+    errors = helper._chronyd_config_errors(config_path)
+
+    assert "chronyd server bad_name must be a valid DNS name or IP address." in errors
+    assert "chronyd bindaddress not-an-ip must be a valid IP address." in errors
+    assert "chronyd client allow list can use 'all' only by itself." in errors
+
+
+def test_chronyd_helper_apply_installs_config_and_switches_from_timesyncd(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "chronyd"
+    config_path = apply_dir / "labfoundry-chrony.conf"
+    chrony_conf = tmp_path / "etc" / "chrony.conf"
+    state_dir = tmp_path / "var" / "lib" / "chrony"
+    apply_dir.mkdir(parents=True)
+    config_path.write_text(chronyd_config_text(), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CHRONY_CONFIG_PATH", chrony_conf)
+    monkeypatch.setattr(helper, "CHRONY_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_chronyd("apply", [str(config_path)]) == 0
+
+    assert chrony_conf.read_text(encoding="utf-8") == config_path.read_text(encoding="utf-8")
+    assert state_dir.exists()
+    assert ["systemctl", "disable", "--now", "systemd-timesyncd"] in commands
+    assert ["systemctl", "enable", "chronyd.service"] in commands
+    assert ["systemctl", "restart", "chronyd.service"] in commands
+
+
+def test_chronyd_helper_disabled_apply_stops_chronyd_without_installing_config(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "chronyd"
+    config_path = apply_dir / "labfoundry-chrony.conf"
+    chrony_conf = tmp_path / "etc" / "chrony.conf"
+    apply_dir.mkdir(parents=True)
+    config_path.write_text(chronyd_config_text(enabled=False, listen_address="", allow_clients="all"), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CHRONY_CONFIG_PATH", chrony_conf)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_chronyd("apply", [str(config_path)]) == 0
+
+    assert not chrony_conf.exists()
+    assert commands == [["systemctl", "disable", "--now", "chronyd.service"]]
 
 
 def test_appliance_settings_hostname_fallback_writes_etc_hostname(monkeypatch, tmp_path):

@@ -53,6 +53,31 @@ ESXI_PXE_UEFI_SECOND_STAGE_BOOTFILE = "mboot.efi"
 ESXI_PXE_NATIVE_UEFI_BOOTFILE = "mboot.efi"
 ESXI_PXE_DNS_RECORD_DESCRIPTION = "Created from ESXi PXE boot endpoint."
 ESXI_PXE_HOST_MANAGED_DESCRIPTION_PREFIX = "Managed by ESXi PXE host "
+DEFAULT_ESXI_KICKSTART_NAME = "ESXi install"
+DEFAULT_ESXI_KICKSTART_CONTENT = """#
+# Sample scripted installation file
+#
+
+# Accept the VMware End User License Agreement
+vmaccepteula
+
+# Set the root password for the DCUI and Tech Support Mode
+rootpw vmware01!
+
+# Install on the first local disk available on machine
+install --firstdisk --overwritevmfs
+# In case your system has DPUs, you can also specify a PCI slot:
+# install --firstdisk --overwritevmfs --dpupcislots=<PCIeSlotID>
+
+# Set the network to DHCP on the first network adapter
+network --bootproto=dhcp --device=vmnic0
+
+# A sample post-install script
+%post --interpreter=python --ignorefailure=true
+import time
+stampFile = open('/finished.stamp', mode='w')
+stampFile.write(time.asctime())
+"""
 SECRET_KEYWORD_PATTERN = re.compile(r"(rootpw|password|passwd|token|secret|key|license|activation|credential)", re.IGNORECASE)
 TEMPLATE_PATTERN = re.compile(r"({[{%#].*?[}%]}|\$\{[^}]+\})")
 SAFE_ISO_UPLOAD_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*\.iso$", re.IGNORECASE)

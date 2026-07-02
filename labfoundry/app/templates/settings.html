@@ -34,10 +34,6 @@
           <textarea name="external_dns_servers" rows="4">{{ appliance_settings.external_dns_servers }}</textarea>
         </label>
       {% endif %}
-      <label>
-        <span class="field-label"><span>NTP servers</span><button class="help-icon" type="button" data-help="One appliance NTP client server per line. DHCP NTP options stay on the DHCP page, and systemd-timesyncd is configured only through global appliance apply.">i</button></span>
-        <textarea name="ntp_servers" rows="5">{{ appliance_settings.ntp_servers }}</textarea>
-      </label>
       <p id="appliance-settings-autosave-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
     </form>
 

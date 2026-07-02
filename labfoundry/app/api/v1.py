@@ -1,5 +1,6 @@
 from datetime import datetime
 from ipaddress import ip_address, ip_interface, ip_network
+import json
 from pathlib import Path
 import re
 import socket
@@ -34,6 +35,7 @@ from labfoundry.app.models import (
     Job,
     KmsSettings,
     NatRule,
+    ChronySettings,
     PhysicalInterface,
     Route,
     ServiceState,
@@ -110,6 +112,7 @@ from labfoundry.app.schemas import (
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY, firewall_interface_networks, firewall_source_group_state
 from labfoundry.app.services.networking import normalize_interface_mode
 from labfoundry.app.services.routes_wan import validate_nat_source
+from labfoundry.app.services.service_registry import SERVICE_STATE_IDS, SERVICE_SYSTEMD_UNITS
 from labfoundry.app.security import (
     Identity,
     ALL_SCOPES,
@@ -148,6 +151,7 @@ from labfoundry.app.services.appliance_settings import (
     render_appliance_settings_config,
     validate_appliance_settings,
 )
+from labfoundry.app.services.chrony import CHRONY_DEFAULT_UPSTREAM_SERVERS
 from labfoundry.app.services.firewall import (
     FIREWALL_ACTIONS,
     FIREWALL_DIRECTIONS,
@@ -205,21 +209,40 @@ from labfoundry.app.token_service import create_token_for_user, token_to_respons
 router = APIRouter(prefix="/api/v1")
 DNSMASQ_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundry.conf"
 
-APPROVED_SERVICES = {
-    "routing",
-    "firewall",
-    "dns",
-    "dhcp",
-    "kms",
-    "repository",
-    "esxi-pxe",
-    "vcf-offline-depot",
-    "vcf-private-registry",
-    "vcf-backups",
-    "ca",
-    "ldap",
-    "auth",
-}
+APPROVED_SERVICES = set(SERVICE_STATE_IDS) | {"vcf-offline-depot"}
+
+
+def service_state_response(row: ServiceState) -> ServiceStateResponse:
+    data = {
+        "id": row.id,
+        "service": row.service,
+        "display_name": row.display_name,
+        "running": row.running,
+        "enabled": row.enabled,
+        "health": row.health,
+        "detail": row.detail,
+    }
+    unit = SERVICE_SYSTEMD_UNITS.get(row.service)
+    if unit and not get_settings().dry_run_system_adapters:
+        result = SystemAdapter().service_status(unit)
+        if result.stdout:
+            try:
+                payload = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                payload = {}
+            active_state = str(payload.get("active") or "").strip()
+            enabled_state = str(payload.get("enabled") or "").strip()
+            if active_state:
+                data["running"] = active_state == "active"
+            if enabled_state:
+                data["enabled"] = enabled_state in {"enabled", "enabled-runtime"}
+            if data["running"] and data["enabled"]:
+                data["health"] = "healthy"
+            elif data["running"] or data["enabled"]:
+                data["health"] = "degraded"
+            else:
+                data["health"] = "disabled"
+    return ServiceStateResponse(**data)
 
 
 def validate_vlan_api_payload(payload: VlanCreate, db: Session) -> dict:
@@ -289,6 +312,17 @@ def get_kms_settings_row(db: Session) -> KmsSettings:
     return settings
 
 
+def get_chrony_settings(db: Session) -> ChronySettings:
+    settings = db.execute(select(ChronySettings)).scalar_one_or_none()
+    if settings is None:
+        appliance_settings = get_appliance_settings(db)
+        settings = ChronySettings(upstream_servers=appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS)
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
 def get_appliance_settings(db: Session) -> ApplianceSettings:
     settings = db.execute(select(ApplianceSettings)).scalar_one_or_none()
     if settings is None:
@@ -333,7 +367,6 @@ def appliance_settings_response(db: Session, app_settings: Settings) -> Settings
         management_https_cert_available=management_https_cert_available,
         root_ssh_enabled=desired.root_ssh_enabled,
         external_dns_servers=appliance_settings_to_dict(desired)["external_dns_servers"],
-        ntp_servers=appliance_settings_to_dict(desired)["ntp_servers"],
         appliance_settings_config_path=desired.config_path,
         local_dns_enabled=local_dns_enabled,
         management_interface=management["name"],
@@ -440,6 +473,7 @@ def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[Fir
         dhcp_settings=dhcp_settings,
         dhcp_scopes=dhcp_scopes,
         kms_settings=get_kms_settings_row(db),
+        chrony_settings=get_chrony_settings(db),
         vcf_backup_settings=get_vcf_backup_settings(db),
         vcf_depot_settings=get_vcf_offline_depot_settings(db),
         vcf_registry_settings=get_vcf_private_registry_settings(db),
@@ -1883,15 +1917,18 @@ def get_firewall_logs(identity: Annotated[Identity, Depends(require_scope("read:
 
 @router.get("/services", response_model=list[ServiceStateResponse], tags=["Services"], operation_id="listServices")
 def list_services(identity: Annotated[Identity, Depends(require_scope("read:services"))], db: Session = Depends(get_db)) -> list[ServiceStateResponse]:
-    return [ServiceStateResponse.model_validate(row) for row in db.execute(select(ServiceState).order_by(ServiceState.display_name)).scalars().all()]
+    rows = db.execute(select(ServiceState).where(ServiceState.service.in_(SERVICE_STATE_IDS)).order_by(ServiceState.display_name)).scalars().all()
+    return [service_state_response(row) for row in rows]
 
 
 @router.get("/services/{service}", response_model=ServiceStateResponse, tags=["Services"], operation_id="getService")
 def get_service(service: str, identity: Annotated[Identity, Depends(require_scope("read:services"))], db: Session = Depends(get_db)) -> ServiceStateResponse:
+    if service not in SERVICE_STATE_IDS:
+        raise HTTPException(status_code=404, detail="Service not found")
     row = db.execute(select(ServiceState).where(ServiceState.service == service)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Service not found")
-    return ServiceStateResponse.model_validate(row)
+    return service_state_response(row)
 
 
 def service_action(service: str, action: str, identity: Identity, db: Session) -> ServiceActionResponse:
@@ -2044,7 +2081,6 @@ def update_app_settings(
     desired.management_https_enabled = payload.management_https_enabled
     desired.root_ssh_enabled = payload.root_ssh_enabled
     desired.external_dns_servers = normalize_multiline_values("\n".join(payload.external_dns_servers))
-    desired.ntp_servers = normalize_multiline_values("\n".join(payload.ntp_servers))
     desired.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
     desired.updated_at = utcnow()
     db.add(desired)

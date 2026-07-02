@@ -176,7 +176,7 @@
                   <div class="form-grid">
                     <label>
                       <span class="field-label"><span>Name</span><button class="help-icon" type="button" data-help="Unique database name for the new Kickstart. The generated HTTP path uses the assigned ID.">i</button></span>
-                      <input name="name" value="ESXi install">
+                      <input name="name" value="{{ esxi_default_kickstart_name }}">
                     </label>
                     <label class="switch-field">
                       <span class="field-label"><span>Enabled</span><button class="help-icon" type="button" data-help="When enabled, global ESXi PXE apply writes this Kickstart to the generated HTTP boot directory.">i</button></span>
@@ -189,13 +189,7 @@
                   </label>
                   <label>
                     <span class="field-label"><span>Source content</span><button class="help-icon" type="button" data-help="Initial Kickstart source saved in the database. Generated files are created later through global appliance apply.">i</button></span>
-                    <textarea class="monospace-textarea" name="content" rows="10" data-codemirror-editor data-codemirror-language="labfoundry-kickstart">install --firstdisk --overwritevmfs
-network --bootproto=dhcp
-rootpw VMware01!
-reboot
-%firstboot --interpreter=busybox
-%end
-</textarea>
+                    <textarea class="monospace-textarea" name="content" rows="10" data-codemirror-editor data-codemirror-language="labfoundry-kickstart">{{ esxi_default_kickstart_content }}</textarea>
                   </label>
                   <button class="button secondary" type="submit">Create Kickstart</button>
                 </form>

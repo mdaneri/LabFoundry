@@ -33,6 +33,7 @@
       class="tabulator-shell dhcp-scopes-table"
       data-scopes='{{ dhcp_scope_rows | tojson }}'
       data-interface-options='{{ available_interfaces | map(attribute="name") | list | tojson }}'
+      data-scope-defaults='{{ dhcp_scope_grid_defaults | tojson }}'
       data-domain-options='{{ dns_domain_options | tojson }}'
       data-csrf="{{ csrf_token }}"
       data-fallback-id="dhcp-scopes-fallback"
@@ -209,7 +210,7 @@
         {% endif %}
         <table class="data-table compact">
           <thead>
-            <tr><th>Status</th><th>DNS name / FQDN</th><th>IP</th><th>MAC</th><th>Expires</th><th>Client ID</th></tr>
+            <tr><th>Status</th><th>DNS name / FQDN</th><th>IP</th><th>MAC</th><th>Expires</th><th>Client ID</th><th>Actions</th></tr>
           </thead>
           <tbody>
             {% for lease in dhcp_leases %}
@@ -220,12 +221,52 @@
                 <td>{{ lease.mac_address }}</td>
                 <td>{{ lease.expires_at.isoformat() if lease.expires_at else "never" }}</td>
                 <td>{{ lease.client_id or "-" }}</td>
+                <td class="lease-action-cell">
+                  <div class="lease-action-menu" data-lease-action-menu>
+                    <button class="row-menu-button" type="button" title="Lease actions" aria-label="Lease actions" data-lease-menu-toggle>...</button>
+                    <div class="lease-row-menu" hidden data-lease-menu>
+                      <button
+                        type="button"
+                        data-dhcp-lease-reservation
+                        data-hostname="{{ lease.hostname }}"
+                        data-ip-address="{{ lease.ip_address }}"
+                        data-mac-address="{{ lease.mac_address }}"
+                      >Create reservation</button>
+                    </div>
+                  </div>
+                </td>
               </tr>
             {% else %}
-              <tr><td colspan="6" class="muted">No DHCP leases reported.</td></tr>
+              <tr><td colspan="7" class="muted">No DHCP leases reported.</td></tr>
             {% endfor %}
           </tbody>
         </table>
+        <dialog id="dhcp-lease-reservation-modal" class="confirm-modal" aria-labelledby="dhcp-lease-reservation-title">
+          <form class="confirm-modal-panel" action="/dhcp/reservations" method="post">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="mac_address" data-dhcp-lease-modal-mac-input>
+            <input type="hidden" name="ip_address" data-dhcp-lease-modal-ip-input>
+            <input type="hidden" name="enabled" value="on">
+            <input type="hidden" name="description" data-dhcp-lease-modal-description-input>
+            <div class="confirm-modal-body">
+              <p class="kicker">DHCP lease</p>
+              <h2 id="dhcp-lease-reservation-title">Create reservation</h2>
+              <p class="muted">Create a desired-state DHCP reservation from this live lease. The appliance changes only after global appliance apply.</p>
+              <div class="lease-reservation-summary">
+                <span>IP <strong data-dhcp-lease-modal-ip></strong></span>
+                <span>MAC <strong data-dhcp-lease-modal-mac></strong></span>
+              </div>
+              <label>
+                <span class="field-label"><span>DNS name / FQDN</span><button class="help-icon" type="button" data-help="The reservation is stored with a DNS name. LabFoundry creates the matching managed DNS record from the reserved IP.">i</button></span>
+                <input name="hostname" data-dhcp-lease-modal-hostname required placeholder="client.labfoundry.internal">
+              </label>
+            </div>
+            <div class="confirm-modal-actions">
+              <button class="button secondary" type="button" data-dhcp-lease-modal-cancel>Cancel</button>
+              <button class="button primary" type="submit">Create reservation</button>
+            </div>
+          </form>
+        </dialog>
       </div>
     </div>
   </div>

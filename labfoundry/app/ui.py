@@ -49,6 +49,7 @@ from labfoundry.app.models import (
     KmsKey,
     KmsSettings,
     NatRule,
+    ChronySettings,
     PhysicalInterface,
     Role,
     Route,
@@ -181,6 +182,7 @@ from labfoundry.app.services.routes_wan import (
     validate_wan_state,
     wan_policy_to_dict,
 )
+from labfoundry.app.services.service_registry import SERVICE_STATE_IDS, SERVICE_SYSTEMD_UNITS
 from labfoundry.app.services.settings_archive import (
     archive_summary,
     desired_state_counts,
@@ -248,6 +250,16 @@ from labfoundry.app.services.kms import (
     render_kms_config,
     split_csv,
     validate_kms_state,
+)
+from labfoundry.app.services.chrony import (
+    CHRONY_DEFAULT_HOSTNAME,
+    CHRONY_DEFAULT_UPSTREAM_SERVERS,
+    CHRONY_STAGED_CONFIG_PATH,
+    join_allow_clients,
+    chrony_settings_to_dict,
+    render_chrony_config,
+    split_allow_clients,
+    validate_chrony_state,
 )
 from labfoundry.app.services.vcf_backups import (
     VCF_BACKUP_DEFAULT_VOLUME_MOUNT,
@@ -317,9 +329,13 @@ from labfoundry.app.services.vcf_offline_depot import (
     _safe_extract_tar_gz,
 )
 from labfoundry.app.services.esxi_pxe import (
+    DEFAULT_ESXI_KICKSTART_CONTENT,
+    DEFAULT_ESXI_KICKSTART_NAME,
     ESXI_PXE_DEFAULT_HOSTNAME,
     ESXI_PXE_DNS_RECORD_DESCRIPTION,
     ESXI_PXE_HTTP_PORT,
+    ESXI_PXE_LISTEN_ADDRESS_KEY,
+    ESXI_PXE_LISTEN_INTERFACE_KEY,
     ESXI_PXE_STAGED_CONFIG_PATH,
     ESXI_IPXE_HTTP_SCRIPT_PATH,
     assign_kickstart_content,
@@ -705,6 +721,21 @@ def get_kms_settings_row(db: Session) -> KmsSettings:
     return settings
 
 
+def get_chrony_settings_row(db: Session) -> ChronySettings:
+    settings = db.execute(select(ChronySettings)).scalar_one_or_none()
+    if settings is None:
+        appliance_settings = get_appliance_settings_row(db)
+        settings = ChronySettings(
+            hostname=CHRONY_DEFAULT_HOSTNAME,
+            upstream_servers=appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS,
+            config_path=CHRONY_STAGED_CONFIG_PATH,
+        )
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
 def get_firewall_settings_row(db: Session) -> FirewallSettings:
     settings = db.execute(select(FirewallSettings)).scalar_one_or_none()
     if settings is None:
@@ -771,6 +802,15 @@ def address_from_cidr(value: str | None) -> str:
         return ""
 
 
+def prefix_from_cidr(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(ip_interface(value).network.prefixlen)
+    except ValueError:
+        return None
+
+
 def cidr_for_family(value: str, version: int, label: str) -> Response | str:
     candidate = value.strip()
     if not candidate:
@@ -816,7 +856,9 @@ def service_bind_options(db: Session) -> list[dict]:
                 "address": addresses[0],
                 "addresses": addresses,
                 "ipv4_address": address_from_cidr(interface.ip_cidr),
+                "ipv4_prefix": prefix_from_cidr(interface.ip_cidr),
                 "ipv6_address": address_from_cidr(interface.ipv6_cidr),
+                "ipv6_prefix": prefix_from_cidr(interface.ipv6_cidr),
             }
         )
     for vlan in vlan_interfaces:
@@ -834,10 +876,246 @@ def service_bind_options(db: Session) -> list[dict]:
                 "address": addresses[0],
                 "addresses": addresses,
                 "ipv4_address": address_from_cidr(vlan.ip_cidr),
+                "ipv4_prefix": prefix_from_cidr(vlan.ip_cidr),
                 "ipv6_address": address_from_cidr(vlan.ipv6_cidr),
+                "ipv6_prefix": prefix_from_cidr(vlan.ipv6_cidr),
             }
         )
     return options
+
+
+def _network_from_cidr(value: str | None):
+    if not value:
+        return None
+    try:
+        return ip_network(value, strict=False)
+    except ValueError:
+        return None
+
+
+def _address_family_from_scope(scope: DhcpScope) -> int:
+    return 6 if str(scope.address_family or "").strip().lower() == "ipv6" else 4
+
+
+def _interface_option_by_name(db: Session) -> dict[str, dict[str, Any]]:
+    return {str(option.get("name")): option for option in service_bind_options(db)}
+
+
+def _derive_addresses_for_interfaces(selected_interfaces: list[str], options_by_name: dict[str, dict[str, Any]]) -> str:
+    derived: list[str] = []
+    for interface_name in selected_interfaces:
+        option = options_by_name.get(interface_name)
+        if not option:
+            continue
+        for address in option.get("addresses") or [option.get("address")]:
+            if address and address not in derived:
+                derived.append(address)
+    return join_addresses(derived)
+
+
+def _replace_interface_selection(raw_value: str | None, old_name: str, new_name: str) -> str:
+    interfaces = split_interfaces(raw_value)
+    if old_name != new_name:
+        interfaces = [new_name if item == old_name else item for item in interfaces]
+    return join_interfaces(interfaces)
+
+
+def _rebase_address_in_network(value: str, old_network, new_network) -> str:
+    if not value or old_network is None or new_network is None or old_network.version != new_network.version:
+        return value
+    try:
+        address = ip_address(value)
+    except ValueError:
+        return value
+    if address not in old_network:
+        return value
+    offset = int(address) - int(old_network.network_address)
+    if offset < 0 or offset >= new_network.num_addresses:
+        return value
+    return str(ip_address(int(new_network.network_address) + offset))
+
+
+def _address_in_network(value: str | None, network) -> bool:
+    if not value or network is None:
+        return False
+    try:
+        return ip_address(value) in network
+    except ValueError:
+        return False
+
+
+def refresh_interface_dependent_addresses(
+    db: Session,
+    *,
+    old_name: str,
+    new_name: str,
+    old_ip_cidr: str | None,
+    old_ipv6_cidr: str | None,
+    actor: str | None = None,
+) -> list[str]:
+    options_by_name = _interface_option_by_name(db)
+    previous_esxi_boot = esxi_pxe_boot_settings(db)
+    raw_esxi_listen_interface = db.execute(select(Setting).where(Setting.key == ESXI_PXE_LISTEN_INTERFACE_KEY)).scalar_one_or_none()
+    raw_esxi_listen_address = db.execute(select(Setting).where(Setting.key == ESXI_PXE_LISTEN_ADDRESS_KEY)).scalar_one_or_none()
+    old_addresses = {address for address in interface_addresses_from_cidrs(old_ip_cidr, old_ipv6_cidr) if address}
+    old_networks = {4: _network_from_cidr(old_ip_cidr), 6: _network_from_cidr(old_ipv6_cidr)}
+    new_option = options_by_name.get(new_name, {})
+    new_addresses = {
+        4: str(new_option.get("ipv4_address") or ""),
+        6: str(new_option.get("ipv6_address") or ""),
+    }
+    new_prefixes = {
+        4: new_option.get("ipv4_prefix"),
+        6: new_option.get("ipv6_prefix"),
+    }
+    new_networks = {
+        4: _network_from_cidr(f"{new_addresses[4]}/{new_prefixes[4]}") if new_addresses[4] and new_prefixes[4] else None,
+        6: _network_from_cidr(f"{new_addresses[6]}/{new_prefixes[6]}") if new_addresses[6] and new_prefixes[6] else None,
+    }
+    changed: list[str] = []
+
+    def update_listener_rows(model, label: str) -> None:
+        for row in db.execute(select(model)).scalars().all():
+            selected = split_interfaces(getattr(row, "listen_interface", ""))
+            if old_name not in selected and new_name not in selected:
+                continue
+            updated_interfaces = _replace_interface_selection(getattr(row, "listen_interface", ""), old_name, new_name)
+            updated_addresses = _derive_addresses_for_interfaces(split_interfaces(updated_interfaces), options_by_name)
+            if updated_interfaces != getattr(row, "listen_interface", "") or updated_addresses != (getattr(row, "listen_address", "") or ""):
+                row.listen_interface = updated_interfaces
+                row.listen_address = updated_addresses
+                if hasattr(row, "updated_at"):
+                    row.updated_at = utcnow()
+                db.add(row)
+                if label not in changed:
+                    changed.append(label)
+
+    for model, label in [
+        (DnsSettings, "DNS"),
+        (ChronySettings, "Chrony"),
+        (CaSettings, "Certificate Authority"),
+        (KmsSettings, "KMS"),
+        (VcfBackupSettings, "VCF Backups"),
+        (VcfOfflineDepotSettings, "VCF Offline Depot"),
+        (VcfPrivateRegistrySettings, "VCF Private Registry"),
+    ]:
+        update_listener_rows(model, label)
+
+    dns_settings = db.execute(select(DnsSettings)).scalar_one_or_none()
+    chrony_settings = db.execute(select(ChronySettings)).scalar_one_or_none()
+    dns_bound = bool(dns_settings and dns_settings.enabled and new_name in split_interfaces(dns_settings.listen_interface))
+    chrony_bound = bool(chrony_settings and chrony_settings.enabled and new_name in split_interfaces(chrony_settings.listen_interface))
+
+    def update_dhcp_scope(scope: DhcpScope | DhcpSettings, label: str) -> None:
+        if getattr(scope, "interface_name", "") != old_name:
+            return
+        family = _address_family_from_scope(scope) if isinstance(scope, DhcpScope) else 4
+        new_address = new_addresses[family]
+        if not new_address:
+            return
+        scope_site_address = getattr(scope, "site_address", "")
+        scope_prefix = getattr(scope, "prefix_length", None)
+        scope_network = _network_from_cidr(f"{scope_site_address}/{scope_prefix}") if scope_site_address and scope_prefix else None
+        old_network = old_networks[family]
+        if old_network is None or (scope_site_address and not _address_in_network(scope_site_address, old_network)):
+            old_network = scope_network
+        new_network = new_networks[family]
+        stale_addresses = {address for address in [*old_addresses, scope_site_address] if address}
+        before = (
+            getattr(scope, "interface_name", ""),
+            getattr(scope, "site_address", ""),
+            getattr(scope, "prefix_length", None),
+            getattr(scope, "range_start", ""),
+            getattr(scope, "range_end", ""),
+            getattr(scope, "dns_server", ""),
+            getattr(scope, "ntp_server", ""),
+        )
+        scope.interface_name = new_name
+        site_address_is_stale = bool(scope_site_address and new_network and not _address_in_network(scope_site_address, new_network))
+        if not getattr(scope, "site_address", "") or getattr(scope, "site_address", "") in stale_addresses or site_address_is_stale:
+            scope.site_address = new_address
+        if new_prefixes[family] and (not getattr(scope, "prefix_length", None) or getattr(scope, "prefix_length", None) == (old_network.prefixlen if old_network else None)):
+            scope.prefix_length = int(new_prefixes[family])
+        if family == 4:
+            scope.range_start = _rebase_address_in_network(getattr(scope, "range_start", ""), old_network, new_network)
+            scope.range_end = _rebase_address_in_network(getattr(scope, "range_end", ""), old_network, new_network)
+        if not getattr(scope, "dns_server", "") or getattr(scope, "dns_server", "") in stale_addresses or dns_bound:
+            scope.dns_server = new_address if dns_bound or getattr(scope, "dns_server", "") in stale_addresses else getattr(scope, "dns_server", "")
+        if isinstance(scope, DhcpScope) and (not scope.ntp_server or scope.ntp_server in stale_addresses or chrony_bound):
+            scope.ntp_server = new_address if chrony_bound or scope.ntp_server in stale_addresses else scope.ntp_server
+        if hasattr(scope, "updated_at"):
+            scope.updated_at = utcnow()
+        after = (
+            getattr(scope, "interface_name", ""),
+            getattr(scope, "site_address", ""),
+            getattr(scope, "prefix_length", None),
+            getattr(scope, "range_start", ""),
+            getattr(scope, "range_end", ""),
+            getattr(scope, "dns_server", ""),
+            getattr(scope, "ntp_server", ""),
+        )
+        if before != after:
+            db.add(scope)
+            if label not in changed:
+                changed.append(label)
+
+    for settings in db.execute(select(DhcpSettings)).scalars().all():
+        update_dhcp_scope(settings, "DHCP")
+    for scope in db.execute(select(DhcpScope)).scalars().all():
+        update_dhcp_scope(scope, "DHCP")
+
+    kms_settings = db.execute(select(KmsSettings)).scalar_one_or_none()
+    if kms_settings:
+        ensure_dns_for_kms(db, kms_settings, actor=actor, previous_hostname=kms_settings.hostname)
+    depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one_or_none()
+    if depot_settings:
+        ensure_dns_for_vcf_offline_depot(db, depot_settings, actor=actor or "system")
+    registry_settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one_or_none()
+    if registry_settings:
+        ensure_dns_for_vcf_registry(db, registry_settings, actor=actor or "system")
+
+    esxi_boot = esxi_pxe_boot_settings(db)
+    esxi_interfaces = split_interfaces(str(esxi_boot.get("listen_interface") or ""))
+    if old_name in esxi_interfaces or new_name in esxi_interfaces:
+        updated_interfaces = _replace_interface_selection(str(esxi_boot.get("listen_interface") or ""), old_name, new_name)
+        updated_addresses = _derive_addresses_for_interfaces(split_interfaces(updated_interfaces), options_by_name)
+        stale_boot_addresses = split_addresses(str(previous_esxi_boot.get("listen_address") or ""))
+        native_uefi_http_url = str(esxi_boot.get("native_uefi_http_url") or "")
+        replacement_address = primary_listen_address(updated_addresses)
+        if replacement_address:
+            for stale_address in stale_boot_addresses:
+                if stale_address and stale_address != replacement_address:
+                    native_uefi_http_url = native_uefi_http_url.replace(stale_address, replacement_address)
+        if (
+            updated_interfaces != str(esxi_boot.get("listen_interface") or "")
+            or updated_addresses != str(esxi_boot.get("listen_address") or "")
+            or updated_interfaces != str(previous_esxi_boot.get("listen_interface") or "")
+            or updated_addresses != str(previous_esxi_boot.get("listen_address") or "")
+            or updated_interfaces != (raw_esxi_listen_interface.value if raw_esxi_listen_interface else "")
+            or updated_addresses != (raw_esxi_listen_address.value if raw_esxi_listen_address else "")
+            or native_uefi_http_url != str(esxi_boot.get("native_uefi_http_url") or "")
+        ):
+            esxi_boot = save_esxi_pxe_boot_settings(
+                db,
+                enabled=bool(esxi_boot.get("enabled")),
+                hostname=str(esxi_boot.get("hostname") or ESXI_PXE_DEFAULT_HOSTNAME),
+                listen_interface=updated_interfaces,
+                listen_address=updated_addresses,
+                dhcp_scope_ids=list(esxi_boot.get("dhcp_scope_ids") or []),
+                tftp_root=str(esxi_boot.get("tftp_root") or ""),
+                http_port=int(esxi_boot.get("http_port") or ESXI_PXE_HTTP_PORT),
+                bios_bootfile=str(esxi_boot.get("bios_bootfile") or ""),
+                uefi_bootfile=str(esxi_boot.get("uefi_bootfile") or ""),
+                native_uefi_http_enabled=bool(esxi_boot.get("native_uefi_http_enabled")),
+                native_uefi_http_url=native_uefi_http_url,
+            )
+            if "ESXi PXE" not in changed:
+                changed.append("ESXi PXE")
+        dns_record_action = ensure_dns_for_esxi_pxe(db, esxi_boot, actor, previous_hostname=str(previous_esxi_boot.get("hostname") or ""))
+        if dns_record_action and "ESXi PXE" not in changed:
+            changed.append("ESXi PXE")
+
+    return changed
 
 
 def resolve_single_service_bind(db: Session, listen_interface: str, listen_address: str) -> tuple[str, str]:
@@ -925,6 +1203,26 @@ def vcf_backup_context(db: Session) -> dict:
         "vcf_backup_config_preview": config_preview,
         "vcf_backup_validation_errors": validation_errors,
         "vcf_backup_service_status": service_runtime_status(db, "vcf-backups"),
+    }
+
+
+def ntp_context(db: Session) -> dict:
+    settings = get_chrony_settings_row(db)
+    available_interfaces = service_bind_options(db)
+    config_preview = render_chrony_config(settings)
+    validation_errors = validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})
+    return {
+        "chrony_settings": settings,
+        "chrony_settings_json": chrony_settings_to_dict(settings),
+        "available_interfaces": available_interfaces,
+        "selected_ntp_interfaces": split_interfaces(settings.listen_interface),
+        "selected_ntp_addresses": split_addresses(settings.listen_address),
+        "available_ntp_addresses": available_service_listen_addresses(settings.listen_address, available_interfaces),
+        "ntp_primary_listen_address": primary_listen_address(settings.listen_address),
+        "ntp_bind_label": service_bind_label(settings.listen_interface, settings.listen_address),
+        "ntp_config_preview": config_preview,
+        "ntp_validation_errors": validation_errors,
+        "ntp_service_status": service_runtime_status(db, "chronyd"),
     }
 
 
@@ -1673,6 +1971,7 @@ def firewall_context(db: Session) -> dict:
         dhcp_settings=dhcp_settings,
         dhcp_scopes=dhcp_scopes,
         kms_settings=get_kms_settings_row(db),
+        chrony_settings=get_chrony_settings_row(db),
         vcf_backup_settings=get_vcf_backup_settings_row(db),
         vcf_depot_settings=get_vcf_offline_depot_settings_row(db),
         vcf_registry_settings=get_vcf_private_registry_settings_row(db),
@@ -2084,7 +2383,7 @@ def dnsmasq_context(db: Session) -> dict:
     reverse_zone_groups = reverse_records_by_zone(dns_reverse_records(dns_records))
     lease_result = SystemAdapter().read_dhcp_leases()
     dhcp_lease_error = lease_result.stderr.strip() if lease_result.returncode != 0 else ""
-    dhcp_leases = [] if dhcp_lease_error else parse_dnsmasq_leases(lease_result.stdout)
+    dhcp_leases = [] if dhcp_lease_error else filter_current_dhcp_leases(parse_dnsmasq_leases(lease_result.stdout), dhcp_scopes)
     return {
         "dns_settings": dns_settings,
         "dns_records": dns_records,
@@ -2093,6 +2392,13 @@ def dnsmasq_context(db: Session) -> dict:
         "dhcp_settings": dhcp_settings,
         "dhcp_scopes": dhcp_scopes,
         "dhcp_scope_rows": [dhcp_scope_to_dict(scope) for scope in dhcp_scopes],
+        "dhcp_scope_grid_defaults": dhcp_scope_grid_defaults(
+            available_interfaces=available_interfaces,
+            dns_settings=dns_settings,
+            chrony_settings=get_chrony_settings_row(db),
+            dhcp_scopes=dhcp_scopes,
+            dns_domains=dns_domains,
+        ),
         "dhcp_options": dhcp_options,
         "dhcp_option_rows": [dhcp_option_to_dict(option) for option in dhcp_options],
         "dhcp_option_scope_choices": dhcp_option_scope_choices(dhcp_scopes),
@@ -2118,6 +2424,59 @@ def dnsmasq_context(db: Session) -> dict:
         "dns_service_status": service_runtime_status(db, "dns"),
         "dhcp_service_status": service_runtime_status(db, "dhcp"),
     }
+
+
+def dhcp_scope_grid_defaults(
+    *,
+    available_interfaces: list[dict[str, Any]],
+    dns_settings: DnsSettings,
+    chrony_settings: ChronySettings,
+    dhcp_scopes: list[DhcpScope],
+    dns_domains: list[str],
+) -> dict[str, Any]:
+    dns_interfaces = set(split_interfaces(dns_settings.listen_interface)) if dns_settings.enabled else set()
+    chrony_interfaces = set(split_interfaces(chrony_settings.listen_interface)) if chrony_settings.enabled else set()
+    defaults: list[dict[str, Any]] = []
+    for interface in available_interfaces:
+        ipv4_address = str(interface.get("ipv4_address") or "")
+        ipv6_address = str(interface.get("ipv6_address") or "")
+        primary_address = ipv4_address or ipv6_address or str(interface.get("address") or "")
+        interface_name = str(interface.get("name") or "")
+        defaults.append(
+            {
+                "name": interface_name,
+                "address": primary_address,
+                "ipv4_address": ipv4_address,
+                "ipv4_prefix": interface.get("ipv4_prefix"),
+                "ipv6_address": ipv6_address,
+                "ipv6_prefix": interface.get("ipv6_prefix"),
+                "dns_default": primary_address if interface_name in dns_interfaces else "",
+                "ntp_default": primary_address if interface_name in chrony_interfaces else "",
+            }
+        )
+    return {
+        "interfaces": defaults,
+        "existing_names": [scope.name.strip().lower() for scope in dhcp_scopes if scope.name.strip()],
+        "default_domain": dns_domains[0] if dns_domains else "labfoundry.internal",
+    }
+
+
+def lease_matches_current_dhcp_scope(lease: dict[str, Any], scopes: list[DhcpScope]) -> bool:
+    try:
+        lease_address = ip_address(str(lease.get("ip_address") or ""))
+    except ValueError:
+        return False
+    for scope in scopes:
+        if scope.enabled is False:
+            continue
+        network = _network_from_cidr(f"{scope.site_address}/{scope.prefix_length}") if scope.site_address and scope.prefix_length else None
+        if network is not None and lease_address.version == network.version and lease_address in network:
+            return True
+    return False
+
+
+def filter_current_dhcp_leases(leases: list[dict[str, Any]], scopes: list[DhcpScope]) -> list[dict[str, Any]]:
+    return [lease for lease in leases if lease_matches_current_dhcp_scope(lease, scopes)]
 
 
 def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any], scopes: list[DhcpScope]) -> list[dict[str, str]]:
@@ -2930,6 +3289,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "esxi_pxe",
     "ca",
     "kms",
+    "chronyd",
     "vcf_backups",
     "vcf_offline_depot",
     "vcf_private_registry",
@@ -2982,7 +3342,37 @@ def load_appliance_apply_baselines(db: Session) -> dict[str, dict[str, Any]]:
         return {}
     if not isinstance(payload, dict):
         return {}
-    return {str(key): value for key, value in payload.items() if isinstance(value, dict)}
+    baselines = {str(key): value for key, value in payload.items() if isinstance(value, dict)}
+    normalize_legacy_appliance_settings_baseline(baselines)
+    return baselines
+
+
+def normalize_legacy_appliance_settings_baseline(baselines: dict[str, dict[str, Any]]) -> None:
+    baseline = baselines.get("appliance_settings")
+    if not isinstance(baseline, dict):
+        return
+    preview = baseline.get("config_preview")
+    if not isinstance(preview, str) or '"ntp_servers"' not in preview:
+        return
+    try:
+        payload = json.loads(preview)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, dict) or "ntp_servers" not in payload:
+        return
+    payload.pop("ntp_servers", None)
+    summary = [item for item in baseline.get("summary", []) if "NTP server" not in str(item)]
+    config_preview = json.dumps(payload, indent=2, sort_keys=True)
+    baseline["summary"] = summary
+    baseline["config_preview"] = config_preview
+    baseline["snapshot_hash"] = appliance_snapshot_hash(
+        {
+            "unit_id": "appliance_settings",
+            "summary": summary,
+            "config_path": baseline.get("config_path", APPLIANCE_SETTINGS_STAGED_CONFIG_PATH),
+            "config_preview": config_preview,
+        }
+    )
 
 
 def save_appliance_apply_baselines(db: Session, baselines: dict[str, dict[str, Any]]) -> None:
@@ -3334,6 +3724,8 @@ def esxi_pxe_context(db: Session) -> dict[str, Any]:
         "esxi_pxe_preview": render_esxi_pxe_preview(kickstarts, hosts, boot_settings, default_host),
         "esxi_pxe_config_path": ESXI_PXE_STAGED_CONFIG_PATH,
         "esxi_pxe_strict_validation": strict,
+        "esxi_default_kickstart_name": DEFAULT_ESXI_KICKSTART_NAME,
+        "esxi_default_kickstart_content": DEFAULT_ESXI_KICKSTART_CONTENT,
     }
 
 
@@ -3388,6 +3780,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     esxi_pxe = esxi_pxe_context(db)
     ca = ca_context(db)
     kms = kms_context(db)
+    ntp = ntp_context(db)
     vcf_backup = vcf_backup_context(db)
     vcf_depot = vcf_offline_depot_context(db)
     vcf_registry = vcf_private_registry_context(db)
@@ -3454,7 +3847,6 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
                 f"FQDN {appliance_settings['appliance_settings'].fqdn}",
                 f"resolver {'local DNS' if appliance_settings['local_dns_enabled'] else 'external DNS'}",
                 f"root SSH {'enabled' if appliance_settings['appliance_settings'].root_ssh_enabled else 'disabled'}",
-                f"{len(appliance_settings['appliance_settings_json']['ntp_servers'])} NTP servers",
             ],
             validation_errors=appliance_settings["appliance_settings_validation_errors"],
             validation_warnings=appliance_settings["appliance_settings_validation_warnings"],
@@ -3551,6 +3943,21 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             baseline=baselines.get("kms"),
         ),
         make_appliance_apply_unit(
+            unit_id="chronyd",
+            label="Chrony",
+            page_url="/chrony",
+            context=ntp,
+            summary=[
+                "service enabled" if ntp["chrony_settings"].enabled else "service disabled",
+                f"{len(ntp['chrony_settings_json']['upstream_servers'])} upstream servers",
+                f"{len(ntp['selected_ntp_interfaces'])} listen interfaces",
+            ],
+            validation_errors=ntp["ntp_validation_errors"],
+            config_path=CHRONY_STAGED_CONFIG_PATH,
+            config_preview=ntp["ntp_config_preview"],
+            baseline=baselines.get("chronyd"),
+        ),
+        make_appliance_apply_unit(
             unit_id="vcf_backups",
             label="VCF Backups",
             page_url="/vcf-backups",
@@ -3616,13 +4023,16 @@ def service_runtime_status(db: Session, service_id: str) -> dict[str, Any]:
     row = db.execute(select(ServiceState).where(ServiceState.service == service_id)).scalar_one_or_none()
     if row is None:
         return {"label": "unknown", "pill": "muted", "running": False, "enabled": False, "health": "unknown", "detail": ""}
-    if row.running and row.enabled:
+    service_row = service_state_status_row(row)
+    running = bool(service_row["running"])
+    enabled = bool(service_row["enabled"])
+    if running and enabled:
         label = "live"
         pill = "good"
-    elif row.running:
+    elif running:
         label = "running"
         pill = "warn"
-    elif row.enabled:
+    elif enabled:
         label = "stopped"
         pill = "warn"
     else:
@@ -3631,10 +4041,10 @@ def service_runtime_status(db: Session, service_id: str) -> dict[str, Any]:
     return {
         "label": label,
         "pill": pill,
-        "running": row.running,
-        "enabled": row.enabled,
-        "health": row.health,
-        "detail": row.detail or "",
+        "running": running,
+        "enabled": enabled,
+        "health": service_row["health"],
+        "detail": str(service_row["detail"]),
     }
 
 
@@ -4126,6 +4536,16 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
                 lambda: adapter.apply_kms_config(config_path),
             ]
         )
+    elif unit_id == "chronyd":
+        config_path = CHRONY_STAGED_CONFIG_PATH
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(CHRONY_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_chronyd_config(config_path),
+                lambda: adapter.apply_chronyd_config(config_path),
+            ]
+        )
     elif unit_id == "vcf_backups":
         settings = context["vcf_backup_settings"]
         config_path = settings.config_path
@@ -4322,7 +4742,7 @@ def dashboard(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    services = db.execute(select(ServiceState).order_by(ServiceState.display_name)).scalars().all()
+    services = db.execute(select(ServiceState).where(ServiceState.service.in_(SERVICE_STATE_IDS)).order_by(ServiceState.display_name)).scalars().all()
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     routes = db.execute(select(Route).options(selectinload(Route.wan_policy)).order_by(Route.destination_cidr)).scalars().all()
     audit_events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(8)).scalars().all()
@@ -5532,6 +5952,8 @@ def edit_physical_interface_from_ui(
     ipv6_value = cidr_for_family(ipv6_cidr, 6, "Interface IPv6 CIDR")
     if isinstance(ipv6_value, Response):
         return ipv6_value
+    old_ip_cidr = interface.ip_cidr
+    old_ipv6_cidr = interface.ipv6_cidr
     interface.role = role.strip()
     interface.mode = new_mode
     interface.ip_cidr = ip_value or None
@@ -5539,8 +5961,17 @@ def edit_physical_interface_from_ui(
     interface.mtu = mtu
     interface.admin_state = admin_state.strip()
     interface.desired_state_source = "user"
+    dependent_updates = refresh_interface_dependent_addresses(
+        db,
+        old_name=interface.name,
+        new_name=interface.name,
+        old_ip_cidr=old_ip_cidr,
+        old_ipv6_cidr=old_ipv6_cidr,
+        actor=identity.username,
+    )
     db.commit()
-    record_audit(db, actor=identity.username, action="update_physical_interface", resource_type="interface", resource_id=interface.name)
+    detail = f"Refreshed dependent desired-state addresses: {', '.join(dependent_updates)}." if dependent_updates else ""
+    record_audit(db, actor=identity.username, action="update_physical_interface", resource_type="interface", resource_id=interface.name, detail=detail)
     return RedirectResponse("/physical-interfaces", status_code=303)
 
 
@@ -5652,6 +6083,9 @@ def edit_vlan_interface_from_ui(
     if isinstance(parsed, Response):
         return parsed
     parent_name, parsed_vlan_id, ip_value, ipv6_value, parent_missing = parsed
+    old_name = vlan.name
+    old_ip_cidr = vlan.ip_cidr
+    old_ipv6_cidr = vlan.ipv6_cidr
     vlan.parent_interface = parent_name
     vlan.vlan_id = parsed_vlan_id
     vlan.name = f"{vlan.parent_interface}.{vlan.vlan_id}"
@@ -5660,6 +6094,14 @@ def edit_vlan_interface_from_ui(
     vlan.mtu = mtu
     vlan.role = role.strip()
     vlan.enabled = requested_enabled and not parent_missing
+    dependent_updates = refresh_interface_dependent_addresses(
+        db,
+        old_name=old_name,
+        new_name=vlan.name,
+        old_ip_cidr=old_ip_cidr,
+        old_ipv6_cidr=old_ipv6_cidr,
+        actor=identity.username,
+    )
     try:
         db.commit()
     except IntegrityError:
@@ -5670,7 +6112,8 @@ def edit_vlan_interface_from_ui(
             {"identity": identity, **network_context(db), "form_error": f"VLAN {vlan.name} already exists."},
             status_code=409,
         )
-    record_audit(db, actor=identity.username, action="update_vlan_interface", resource_type="vlan", resource_id=str(vlan.id))
+    detail = f"Refreshed dependent desired-state addresses: {', '.join(dependent_updates)}." if dependent_updates else ""
+    record_audit(db, actor=identity.username, action="update_vlan_interface", resource_type="vlan", resource_id=str(vlan.id), detail=detail)
     return RedirectResponse("/vlan-interfaces", status_code=303)
 
 
@@ -7003,6 +7446,81 @@ def update_kms_settings_from_ui(
     return RedirectResponse("/kms", status_code=303)
 
 
+@router.get("/chrony", response_class=HTMLResponse, response_model=None)
+def chrony_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(request, "chrony.html", {"identity": identity, **ntp_context(db), "appliance_apply_status": appliance_apply_status(db, "chronyd")})
+
+
+@router.post("/chrony/settings", response_model=None)
+def update_chrony_settings_from_ui(
+    request: Request,
+    enabled: str | None = Form(None),
+    hostname: str = Form(CHRONY_DEFAULT_HOSTNAME),
+    listen_interfaces: list[str] = Form(default_factory=list),
+    listen_addresses: list[str] = Form(default_factory=list),
+    listen_interfaces_present: str | None = Form(None),
+    listen_addresses_present: str | None = Form(None),
+    listen_interface: str = Form(""),
+    listen_address: str = Form(""),
+    port: int = Form(123),
+    upstream_servers: str = Form(""),
+    allow_clients: str = Form("any"),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    settings = get_chrony_settings_row(db)
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        [*listen_interfaces, listen_interface],
+        [*listen_addresses, listen_address],
+        current_interface=settings.listen_interface,
+        current_address=settings.listen_address,
+        listen_interfaces_present=listen_interfaces_present,
+        listen_addresses_present=listen_addresses_present,
+    )
+    settings.enabled = enabled == "on"
+    settings.hostname = normalize_dns_hostname(hostname.strip() or CHRONY_DEFAULT_HOSTNAME)
+    settings.listen_interface = selected_interfaces
+    settings.listen_address = selected_addresses
+    settings.port = port
+    settings.upstream_servers = join_servers(split_servers(upstream_servers))
+    settings.allow_clients = join_allow_clients(split_allow_clients(allow_clients))
+    settings.config_path = CHRONY_STAGED_CONFIG_PATH
+    settings.updated_at = utcnow()
+    db.add(settings)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_chrony_settings", resource_type="chronyd", resource_id=str(settings.id))
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = ntp_context(db)
+        saved_settings = context["chrony_settings"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": saved_settings.updated_at.isoformat(),
+                "enabled": saved_settings.enabled,
+                "hostname": saved_settings.hostname,
+                "listen_interface": primary_listen_interface(saved_settings.listen_interface),
+                "listen_address": primary_listen_address(saved_settings.listen_address),
+                "listen_interfaces": split_interfaces(saved_settings.listen_interface),
+                "listen_addresses": split_addresses(saved_settings.listen_address),
+                "port": saved_settings.port,
+                "upstream_servers": context["chrony_settings_json"]["upstream_servers"],
+                "allow_clients": saved_settings.allow_clients,
+                "valid": not context["ntp_validation_errors"],
+                "validation_errors": context["ntp_validation_errors"],
+                "config_path": saved_settings.config_path,
+                "config_preview": context["ntp_config_preview"],
+            }
+        )
+    return RedirectResponse("/chrony", status_code=303)
+
+
 def parse_kms_owner_client_id(raw_value: str | int | None) -> int | None:
     if raw_value in {None, "", "None", "unassigned"}:
         return None
@@ -8211,23 +8729,52 @@ def legacy_ldap_users_redirect() -> RedirectResponse:
     return RedirectResponse("/authentication", status_code=303)
 
 
-def service_state_to_grid_row(service: ServiceState) -> dict[str, object]:
-    return {
+def service_state_status_row(service: ServiceState) -> dict[str, object]:
+    row = {
         "id": service.id,
         "service": service.service,
         "display_name": service.display_name,
         "running": service.running,
         "enabled": service.enabled,
+        "health": service.health,
         "detail": service.detail or "native host service",
     }
+    unit = SERVICE_SYSTEMD_UNITS.get(service.service)
+    if unit and not get_settings().dry_run_system_adapters:
+        result = SystemAdapter().service_status(unit)
+        if result.stdout:
+            try:
+                status_payload = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                status_payload = {}
+            active_state = str(status_payload.get("active") or "").strip()
+            enabled_state = str(status_payload.get("enabled") or "").strip()
+            if active_state:
+                row["running"] = active_state == "active"
+            if enabled_state:
+                row["enabled"] = enabled_state in {"enabled", "enabled-runtime"}
+            if row["running"] and row["enabled"]:
+                row["health"] = "healthy"
+            elif row["running"] or row["enabled"]:
+                row["health"] = "degraded"
+            else:
+                row["health"] = "disabled"
+    return row
+
+
+def service_state_to_grid_row(service: ServiceState) -> dict[str, object]:
+    row = service_state_status_row(service)
+    row.pop("health", None)
+    return row
 
 
 def services_template_context(db: Session) -> dict[str, object]:
-    rows = db.execute(select(ServiceState).order_by(ServiceState.display_name)).scalars().all()
+    rows = db.execute(select(ServiceState).where(ServiceState.service.in_(SERVICE_STATE_IDS)).order_by(ServiceState.display_name)).scalars().all()
+    service_rows = [service_state_to_grid_row(row) for row in rows]
     system_adapter_dry_run = get_settings().dry_run_system_adapters
     return {
-        "services": rows,
-        "service_rows": [service_state_to_grid_row(row) for row in rows],
+        "services": service_rows,
+        "service_rows": service_rows,
         "system_adapter_dry_run": system_adapter_dry_run,
         "services_boundary_label": "dry-run" if system_adapter_dry_run else "live",
         "services_boundary_pill": "warn" if system_adapter_dry_run else "good",
@@ -8297,6 +8844,8 @@ def service_action_from_ui(
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     verify_csrf(request, csrf)
+    if service not in SERVICE_STATE_IDS:
+        raise HTTPException(status_code=404, detail="Service is not approved for control")
     row = db.execute(select(ServiceState).where(ServiceState.service == service)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Service not found")
@@ -8344,6 +8893,8 @@ def service_logs_from_ui(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
+    if service not in SERVICE_STATE_IDS:
+        raise HTTPException(status_code=404, detail="Log source is not approved")
     row = db.execute(select(ServiceState).where(ServiceState.service == service)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Service not found")
@@ -9129,7 +9680,6 @@ def update_settings_from_ui(
     management_https_enabled: bool = Form(False),
     root_ssh_enabled: bool = Form(False),
     external_dns_servers: str = Form(""),
-    ntp_servers: str = Form(""),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -9141,7 +9691,6 @@ def update_settings_from_ui(
     settings.management_https_enabled = bool(management_https_enabled)
     settings.root_ssh_enabled = bool(root_ssh_enabled)
     settings.external_dns_servers = normalize_multiline_values(external_dns_servers)
-    settings.ntp_servers = normalize_multiline_values(ntp_servers)
     settings.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
     settings.updated_at = utcnow()
     dns_settings = get_dns_settings_row(db)
@@ -9175,7 +9724,6 @@ def update_settings_from_ui(
                 "management_https_cert_available": context["management_https_cert_available"],
                 "root_ssh_enabled": saved.root_ssh_enabled,
                 "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
-                "ntp_servers": context["appliance_settings_json"]["ntp_servers"],
                 "local_dns_enabled": context["local_dns_enabled"],
                 "management_interface": context["management_interface"],
                 "dns_record_action": dns_record_action,

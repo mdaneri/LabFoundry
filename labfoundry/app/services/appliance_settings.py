@@ -9,7 +9,6 @@ from labfoundry.app.services.dnsmasq import split_servers
 
 APPLIANCE_SETTINGS_DEFAULT_FQDN = "labfoundry.labfoundry.internal"
 APPLIANCE_SETTINGS_DEFAULT_EXTERNAL_DNS_SERVERS = "1.1.1.1\n9.9.9.9"
-APPLIANCE_SETTINGS_DEFAULT_NTP_SERVERS = "time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com"
 APPLIANCE_SETTINGS_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json"
 APPLIANCE_DNS_RECORD_DESCRIPTION = "LabFoundry app-owned appliance FQDN record."
 MANAGEMENT_UI_PORT = 8000
@@ -27,7 +26,6 @@ def appliance_settings_to_dict(settings: ApplianceSettings) -> dict[str, Any]:
         "management_https_enabled": settings.management_https_enabled,
         "root_ssh_enabled": settings.root_ssh_enabled,
         "external_dns_servers": split_servers(settings.external_dns_servers),
-        "ntp_servers": split_servers(settings.ntp_servers),
         "config_path": settings.config_path,
         "updated_at": settings.updated_at.isoformat() if settings.updated_at else "",
     }
@@ -94,19 +92,6 @@ def validate_appliance_settings(
         except ValueError:
             errors.append(f"External DNS server {server} must be a valid IPv4 or IPv6 address.")
 
-    ntp_servers = split_servers(settings.ntp_servers)
-    if not ntp_servers:
-        errors.append("At least one appliance NTP server is required.")
-    for server in ntp_servers:
-        normalized = normalize_fqdn(server)
-        try:
-            ip_address(server)
-            continue
-        except ValueError:
-            pass
-        if not HOSTNAME_PATTERN.fullmatch(normalized):
-            errors.append(f"NTP server {server} must be a valid DNS name or IP address.")
-
     if local_dns_enabled and not management_interface.get("ip"):
         errors.append("Local DNS registration requires a management interface or eth0 with a valid IP CIDR.")
     if dns_record_conflict:
@@ -150,7 +135,6 @@ def appliance_settings_preview_payload(
         "management_upstream_port": MANAGEMENT_UI_PORT,
         "management_https_cert_path": management_https_cert_path if settings.management_https_enabled else "",
         "management_https_key_path": management_https_key_path if settings.management_https_enabled else "",
-        "ntp_servers": split_servers(settings.ntp_servers),
     }
 
 
