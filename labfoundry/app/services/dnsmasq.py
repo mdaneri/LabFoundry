@@ -6,6 +6,7 @@ from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSe
 
 DNS_CONDITIONAL_FORWARDERS_SETTING_KEY = "dns.conditional_forwarders"
 DNSMASQ_LEASE_FILE_PATH = "/var/lib/labfoundry/dnsmasq/dhcp.leases"
+DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX = "Deny DHCP for "
 
 
 def split_servers(raw: str | None) -> list[str]:
@@ -727,7 +728,9 @@ def render_dnsmasq_config(
             elif option.scope_id in scope_tags:
                 lines.append(f"dhcp-option=tag:{scope_tags[option.scope_id]},option:{option_code},{option_value}")
         for reservation in dhcp_reservations:
-            if reservation.enabled is not False:
+            if reservation.enabled is False and (reservation.description or "").startswith(DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX):
+                lines.append(f"dhcp-host={reservation.mac_address},ignore")
+            elif reservation.enabled is not False:
                 try:
                     reserved_ip = ip_address(reservation.ip_address)
                 except ValueError:

@@ -208,7 +208,14 @@
         {% if dhcp_lease_error %}
           <div class="alert error">{{ dhcp_lease_error }}</div>
         {% endif %}
-        <table class="data-table compact">
+        <div
+          id="dhcp-leases-table"
+          class="tabulator-shell dhcp-leases-table"
+          data-leases='{{ dhcp_lease_rows | tojson }}'
+          data-csrf="{{ csrf_token }}"
+          data-fallback-id="dhcp-leases-fallback"
+        ></div>
+        <table id="dhcp-leases-fallback" class="data-table compact">
           <thead>
             <tr><th>Status</th><th>DNS name / FQDN</th><th>IP</th><th>MAC</th><th>Expires</th><th>Client ID</th><th>Actions</th></tr>
           </thead>
@@ -232,6 +239,27 @@
                         data-ip-address="{{ lease.ip_address }}"
                         data-mac-address="{{ lease.mac_address }}"
                       >Create reservation</button>
+                      <form action="/dhcp/leases/pxe-host" method="post">
+                        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                        <input type="hidden" name="hostname" value="{{ lease.hostname }}">
+                        <input type="hidden" name="ip_address" value="{{ lease.ip_address }}">
+                        <input type="hidden" name="mac_address" value="{{ lease.mac_address }}">
+                        <button type="submit">Create PXE entry</button>
+                      </form>
+                      <form
+                        action="/dhcp/leases/deny"
+                        method="post"
+                        data-confirm-modal
+                        data-confirm-title="Deny DHCP for {{ lease.mac_address }}?"
+                        data-confirm-message="This adds a LabFoundry desired-state dnsmasq ignore rule for this MAC. It will not affect the appliance until global appliance apply runs."
+                        data-confirm-label="Deny DHCP"
+                      >
+                        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                        <input type="hidden" name="hostname" value="{{ lease.hostname }}">
+                        <input type="hidden" name="ip_address" value="{{ lease.ip_address }}">
+                        <input type="hidden" name="mac_address" value="{{ lease.mac_address }}">
+                        <button class="danger" type="submit">Deny DHCP for MAC</button>
+                      </form>
                     </div>
                   </div>
                 </td>

@@ -2384,6 +2384,10 @@ input[type="checkbox"] {
   cursor: pointer;
 }
 
+.lease-row-menu form {
+  display: contents;
+}
+
 .user-row-menu button:last-child,
 .service-row-menu button:last-child,
 .lease-row-menu button:last-child {

@@ -108,6 +108,7 @@ from labfoundry.app.security import (
     SESSION_APPLIANCE_INSTANCE_SESSION_KEY,
 )
 from labfoundry.app.services.dnsmasq import (
+    DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
     dhcp_bind_target_families,
     dns_domain_warnings,
@@ -357,6 +358,7 @@ from labfoundry.app.services.esxi_pxe import (
     normalize_kickstart_content,
     normalize_kickstart_name,
     normalize_installer_iso_path,
+    normalize_pxe_mac,
     render_esxi_pxe_manifest,
     render_esxi_pxe_preview,
     save_esxi_pxe_default_host_settings,
@@ -2413,6 +2415,7 @@ def dnsmasq_context(db: Session) -> dict:
         "dhcp_reservations": dhcp_reservations,
         "dhcp_reservation_rows": [dhcp_reservation_payload(item) for item in dhcp_reservations],
         "dhcp_leases": dhcp_leases,
+        "dhcp_lease_rows": [dhcp_lease_payload(lease) for lease in dhcp_leases],
         "dhcp_lease_dry_run": lease_result.dry_run,
         "dhcp_lease_command": " ".join(lease_result.command),
         "dhcp_lease_error": dhcp_lease_error,
@@ -2595,6 +2598,18 @@ def dhcp_reservation_payload(reservation: DhcpReservation) -> dict:
         "ip_address": reservation.ip_address,
         "description": reservation.description or "",
         "enabled": reservation.enabled,
+    }
+
+
+def dhcp_lease_payload(lease: dict[str, Any]) -> dict[str, str]:
+    expires_at = lease.get("expires_at")
+    return {
+        "status": str(lease.get("status") or ""),
+        "hostname": str(lease.get("hostname") or ""),
+        "ip_address": str(lease.get("ip_address") or ""),
+        "mac_address": str(lease.get("mac_address") or ""),
+        "expires_at": expires_at.isoformat() if hasattr(expires_at, "isoformat") else str(expires_at or "never"),
+        "client_id": str(lease.get("client_id") or ""),
     }
 
 
@@ -6921,6 +6936,101 @@ def create_dhcp_reservation_from_ui(
         )
     record_audit(db, actor=identity.username, action="create_dhcp_reservation", resource_type="dhcp_reservation", resource_id=str(reservation.id))
     return RedirectResponse("/dhcp", status_code=303)
+
+
+def _lease_hostname_or_default(hostname: str, mac_address: str, *, prefix: str = "lease") -> str:
+    normalized = hostname.strip().strip(".").lower()
+    if normalized and normalized != "-":
+        return normalized
+    mac_suffix = re.sub(r"[^0-9a-f]", "", mac_address.strip().lower())[-6:] or token_urlsafe(3).lower()
+    return f"{prefix}-{mac_suffix}.labfoundry.internal"
+
+
+@router.post("/dhcp/leases/pxe-host", response_model=None)
+def create_esxi_pxe_host_from_dhcp_lease(
+    request: Request,
+    hostname: str = Form(""),
+    mac_address: str = Form(...),
+    ip_address: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_esxi_pxe_write(identity)
+    verify_csrf(request, csrf)
+    normalized_mac = mac_address.strip().lower()
+    if not normalize_pxe_mac(normalized_mac):
+        raise HTTPException(status_code=400, detail="Lease MAC address is not valid for ESXi PXE.")
+    default_host = esxi_pxe_default_host_settings(db)
+    normalized_iso_path = normalize_installer_iso_path(str(default_host.get("installer_iso_path") or ""))
+    normalized_kickstart_id = parse_optional_esxi_kickstart_id(db, str(default_host.get("kickstart_id") or ""))
+    host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.mac_address == normalized_mac)).scalar_one_or_none()
+    if host is None:
+        host = EsxiPxeHost(mac_address=normalized_mac)
+    host.hostname = _lease_hostname_or_default(hostname, normalized_mac, prefix="esxi")
+    host.ip_address = ip_address.strip()
+    host.kickstart_id = normalized_kickstart_id
+    host.installer_iso_path = normalized_iso_path
+    host.enabled = True
+    host.updated_at = utcnow()
+    db.add(host)
+    try:
+        db.flush()
+        sync_esxi_pxe_host_network_records(db, host, esxi_pxe_boot_settings(db))
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"ESXi PXE host for {mac_address} already exists.") from exc
+    record_audit(
+        db,
+        actor=identity.username,
+        action="create_esxi_pxe_host_from_dhcp_lease",
+        resource_type="esxi_pxe_host",
+        resource_id=str(host.id),
+        detail=f"mac={host.mac_address} ip={host.ip_address}",
+        request_id=request.state.request_id,
+    )
+    return RedirectResponse("/esxi-pxe#esxi-pxe-hosts", status_code=303)
+
+
+@router.post("/dhcp/leases/deny", response_model=None)
+def deny_dhcp_lease_mac_from_ui(
+    request: Request,
+    hostname: str = Form(""),
+    mac_address: str = Form(...),
+    ip_address: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    normalized_mac = mac_address.strip().lower()
+    reservation = db.execute(select(DhcpReservation).where(DhcpReservation.mac_address == normalized_mac)).scalar_one_or_none()
+    if reservation is None:
+        reservation = DhcpReservation(mac_address=normalized_mac)
+    reservation.hostname = _lease_hostname_or_default(hostname, normalized_mac, prefix="deny")
+    reservation.ip_address = ip_address.strip()
+    reservation.enabled = False
+    reservation.description = f"{DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX}{normalized_mac}."
+    db.add(reservation)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"DHCP reservation already exists for MAC address {mac_address}.") from exc
+    record_audit(
+        db,
+        actor=identity.username,
+        action="deny_dhcp_lease_mac",
+        resource_type="dhcp_reservation",
+        resource_id=str(reservation.id),
+        detail=f"mac={normalized_mac}",
+        request_id=request.state.request_id,
+    )
+    return RedirectResponse("/dhcp#dhcp-actual-leases", status_code=303)
 
 
 @router.post("/dhcp/reservations/{reservation_id}/edit", response_model=None)

@@ -1085,9 +1085,9 @@ function closeDhcpLeaseMenus(exceptMenu = null) {
   });
 }
 
-function openDhcpLeaseReservationModal(button) {
+function openDhcpLeaseReservationModal(source) {
   const modal = document.getElementById("dhcp-lease-reservation-modal");
-  if (!(modal instanceof HTMLDialogElement) || !(button instanceof HTMLElement)) {
+  if (!(modal instanceof HTMLDialogElement)) {
     return;
   }
   const hostnameInput = modal.querySelector("[data-dhcp-lease-modal-hostname]");
@@ -1096,9 +1096,9 @@ function openDhcpLeaseReservationModal(button) {
   const descriptionInput = modal.querySelector("[data-dhcp-lease-modal-description-input]");
   const macText = modal.querySelector("[data-dhcp-lease-modal-mac]");
   const ipText = modal.querySelector("[data-dhcp-lease-modal-ip]");
-  const hostname = button.dataset.hostname || "";
-  const macAddress = button.dataset.macAddress || "";
-  const ipAddress = button.dataset.ipAddress || "";
+  const hostname = source instanceof HTMLElement ? source.dataset.hostname || "" : source?.hostname || "";
+  const macAddress = source instanceof HTMLElement ? source.dataset.macAddress || "" : source?.mac_address || "";
+  const ipAddress = source instanceof HTMLElement ? source.dataset.ipAddress || "" : source?.ip_address || "";
   if (hostnameInput instanceof HTMLInputElement) {
     hostnameInput.value = hostname;
   }
@@ -1126,6 +1126,135 @@ function openDhcpLeaseReservationModal(button) {
   if (hostnameInput instanceof HTMLInputElement) {
     hostnameInput.focus();
     hostnameInput.select();
+  }
+}
+
+function dhcpLeaseStatusFormatter(cell) {
+  const status = String(cell.getValue() || "");
+  return `<span class="status-pill ${status === "active" ? "good" : "muted"}">${escapeHtml(status || "unknown")}</span>`;
+}
+
+function dhcpLeaseActionFormatter() {
+  return '<button class="row-menu-button" type="button" title="Lease actions" aria-label="Lease actions">...</button>';
+}
+
+function submitDhcpLeaseAction(path, data, csrf) {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = path;
+  const values = {
+    csrf,
+    hostname: data.hostname || "",
+    mac_address: data.mac_address || "",
+    ip_address: data.ip_address || "",
+  };
+  Object.entries(values).forEach(([name, value]) => {
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = name;
+    input.value = value;
+    form.append(input);
+  });
+  document.body.append(form);
+  form.requestSubmit();
+}
+
+function closeFloatingDhcpLeaseMenu() {
+  document.querySelectorAll("[data-floating-dhcp-lease-menu]").forEach((menu) => menu.remove());
+}
+
+function addDhcpLeaseMenuButton(menu, label, onClick, className = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  if (className) {
+    button.className = className;
+  }
+  button.addEventListener("click", onClick);
+  menu.append(button);
+}
+
+function openDhcpLeaseActionsMenu(event, row, csrf) {
+  event.preventDefault();
+  event.stopPropagation();
+  const data = row.getData();
+  closeFloatingDhcpLeaseMenu();
+  const menu = document.createElement("div");
+  menu.className = "lease-row-menu";
+  menu.dataset.floatingDhcpLeaseMenu = "1";
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.top = `${event.clientY + 4}px`;
+  menu.style.left = `${event.clientX - 170}px`;
+  addDhcpLeaseMenuButton(menu, "Create reservation", () => {
+    closeFloatingDhcpLeaseMenu();
+    openDhcpLeaseReservationModal(data);
+  });
+  addDhcpLeaseMenuButton(menu, "Create PXE entry", () => {
+    closeFloatingDhcpLeaseMenu();
+    submitDhcpLeaseAction("/dhcp/leases/pxe-host", data, csrf);
+  });
+  addDhcpLeaseMenuButton(
+    menu,
+    "Deny DHCP for MAC",
+    async () => {
+      closeFloatingDhcpLeaseMenu();
+      const confirmed = await requestConfirmation({
+        title: `Deny DHCP for ${data.mac_address}?`,
+        message: "This adds a LabFoundry desired-state dnsmasq ignore rule for this MAC. It will not affect the appliance until global appliance apply runs.",
+        label: "Deny DHCP",
+      });
+      if (confirmed) {
+        submitDhcpLeaseAction("/dhcp/leases/deny", data, csrf);
+      }
+    },
+    "danger",
+  );
+  document.body.append(menu);
+}
+
+function initializeDhcpLeasesTable() {
+  const tableElement = document.getElementById("dhcp-leases-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  if (typeof Tabulator === "undefined") {
+    showDhcpReservationError("Tabulator did not load. Showing the fallback table.");
+    return;
+  }
+  const csrf = tableElement.dataset.csrf || "";
+  const rows = JSON.parse(tableElement.dataset.leases || "[]");
+  try {
+    new Tabulator(tableElement, {
+      data: rows,
+      layout: "fitColumns",
+      height: "300px",
+      rowHeight: 28,
+      placeholder: "No DHCP leases reported.",
+      reactiveData: false,
+      columns: [
+        { title: "Status", field: "status", formatter: dhcpLeaseStatusFormatter, width: 100 },
+        { title: "DNS name / FQDN", field: "hostname", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 190 },
+        { title: "IP", field: "ip_address", minWidth: 140 },
+        { title: "MAC", field: "mac_address", minWidth: 170 },
+        { title: "Expires", field: "expires_at", minWidth: 210 },
+        { title: "Client ID", field: "client_id", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 210 },
+        {
+          title: "Actions",
+          formatter: dhcpLeaseActionFormatter,
+          width: 90,
+          hozAlign: "center",
+          headerSort: false,
+          cellClick: (event, cell) => openDhcpLeaseActionsMenu(event, cell.getRow(), csrf),
+        },
+      ],
+    });
+    if (fallback) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    showDhcpReservationError(error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
   }
 }
 
@@ -1170,6 +1299,9 @@ function initializeDhcpLeaseReservationActions() {
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof HTMLElement) || !event.target.closest("[data-lease-action-menu]")) {
       closeDhcpLeaseMenus();
+    }
+    if (!(event.target instanceof HTMLElement) || !event.target.closest("[data-floating-dhcp-lease-menu], .row-menu-button")) {
+      closeFloatingDhcpLeaseMenu();
     }
   });
 }
@@ -7569,6 +7701,7 @@ document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpReservationsTable);
+document.addEventListener("DOMContentLoaded", initializeDhcpLeasesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpLeaseReservationActions);
 document.addEventListener("DOMContentLoaded", initializeEsxiPxeHostsTable);
 document.addEventListener("DOMContentLoaded", initializeCaProfilesTable);

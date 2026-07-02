@@ -2842,7 +2842,7 @@ def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
 
     from labfoundry.app.adapters.system import AdapterResult
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import DhcpReservation, DnsRecord
+    from labfoundry.app.models import DhcpReservation, DnsRecord, EsxiPxeHost
 
     def fake_read_dhcp_leases(self):
         return AdapterResult(
@@ -2865,11 +2865,21 @@ def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
     assert "live-client.labfoundry.internal" in page.text
     assert "stale-client.labfoundry.internal" not in page.text
     assert "192.168.1.110" not in page.text
+    assert "dhcp-leases-table" in page.text
+    assert "dhcp-leases-fallback" in page.text
+    assert "data-leases=" in page.text
     assert "data-lease-menu-toggle" in page.text
     assert "data-dhcp-lease-reservation" in page.text
     assert "dhcp-lease-reservation-modal" in page.text
     assert "Create reservation" in page.text
-    assert "initializeDhcpLeaseReservationActions" in client.get("/static/app.js").text
+    assert "Create PXE entry" in page.text
+    assert "Deny DHCP for MAC" in page.text
+    app_js = client.get("/static/app.js").text
+    assert "initializeDhcpLeasesTable" in app_js
+    assert "openDhcpLeaseActionsMenu" in app_js
+    assert "Create PXE entry" in app_js
+    assert "Deny DHCP for MAC" in app_js
+    assert "initializeDhcpLeaseReservationActions" in app_js
     assert '<span class="status-pill warn">dry-run</span>' not in page.text
 
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -2894,6 +2904,62 @@ def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
         assert reservation.enabled is True
         record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "live-client.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
         assert record.address == "192.168.50.140"
+
+    with SessionLocal() as db:
+        from labfoundry.app.models import DhcpScope
+        from labfoundry.app.services.esxi_pxe import save_esxi_pxe_boot_settings
+
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        save_esxi_pxe_boot_settings(
+            db,
+            enabled=True,
+            hostname="esxi-pxe.labfoundry.internal",
+            listen_interface="eth2",
+            listen_address="192.168.50.1",
+            dhcp_scope_id=str(scope.id),
+            dhcp_scope_ids=[str(scope.id)],
+            tftp_root="/var/lib/labfoundry/pxe/tftp",
+            http_port=8080,
+            bios_bootfile="undionly.kpxe",
+            uefi_bootfile="snponly.efi",
+            native_uefi_http_enabled=True,
+            native_uefi_http_url="",
+        )
+        db.commit()
+
+    pxe_response = client.post(
+        "/dhcp/leases/pxe-host",
+        data={
+            "hostname": "pxe-client.labfoundry.internal",
+            "mac_address": "02:15:5d:00:20:42",
+            "ip_address": "192.168.50.142",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert pxe_response.status_code == 303
+    assert pxe_response.headers["location"] == "/esxi-pxe#esxi-pxe-hosts"
+    with SessionLocal() as db:
+        host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.mac_address == "02:15:5d:00:20:42")).scalar_one()
+        assert host.hostname == "pxe-client.labfoundry.internal"
+        assert host.ip_address == "192.168.50.142"
+        assert host.enabled is True
+
+    deny_response = client.post(
+        "/dhcp/leases/deny",
+        data={
+            "hostname": "deny-client.labfoundry.internal",
+            "mac_address": "02:15:5d:00:20:43",
+            "ip_address": "192.168.50.143",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert deny_response.status_code == 303
+    with SessionLocal() as db:
+        deny = db.execute(select(DhcpReservation).where(DhcpReservation.mac_address == "02:15:5d:00:20:43")).scalar_one()
+        assert deny.enabled is False
+        assert deny.description == "Deny DHCP for 02:15:5d:00:20:43."
 
 
 def test_firewall_preview_derives_dns_dhcp_rule_from_dhcp_scope_vlan(client):
