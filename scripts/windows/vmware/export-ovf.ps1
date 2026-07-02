@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$SourceVmxPath,
+    [string]$SourceVmxPath = 'image/vmware-workstation/output/labfoundry-photon-vmware-workstation/LabFoundry-Photon-Builder-VMware.vmx',
     [string]$OutputDirectory = '',
     [string]$Name = 'LabFoundry-Photon',
     [string]$OvfToolPath = '',
@@ -22,7 +21,8 @@ function Resolve-OvfToolPath {
     if ($Path) {
         $candidate = if (Test-Path -LiteralPath $Path -PathType Container) {
             Join-Path $Path 'ovftool.exe'
-        } else {
+        }
+        else {
             $Path
         }
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
@@ -32,11 +32,11 @@ function Resolve-OvfToolPath {
     }
 
     foreach ($candidate in @(
-        'C:\Program Files\VMware\VMware Workstation\OVFTool\ovftool.exe',
-        'C:\Program Files (x86)\VMware\VMware Workstation\OVFTool\ovftool.exe',
-        'C:\Program Files\VMware\VMware OVF Tool\ovftool.exe',
-        'C:\Program Files (x86)\VMware\VMware OVF Tool\ovftool.exe'
-    )) {
+            'C:\Program Files\VMware\VMware Workstation\OVFTool\ovftool.exe',
+            'C:\Program Files (x86)\VMware\VMware Workstation\OVFTool\ovftool.exe',
+            'C:\Program Files\VMware\VMware OVF Tool\ovftool.exe',
+            'C:\Program Files (x86)\VMware\VMware OVF Tool\ovftool.exe'
+        )) {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
             return $candidate
         }
@@ -206,7 +206,8 @@ function Add-LabFoundryOvfProperties {
         $hardwareSection = $document.SelectSingleNode('//ovf:VirtualSystem/ovf:VirtualHardwareSection', $manager)
         if ($hardwareSection) {
             [void]$virtualSystem.InsertBefore($productSection, $hardwareSection)
-        } else {
+        }
+        else {
             [void]$virtualSystem.AppendChild($productSection)
         }
     }
@@ -230,7 +231,8 @@ function Add-LabFoundryOvfProperties {
     $writer = [System.Xml.XmlWriter]::Create($OvfPath, $settings)
     try {
         $document.Save($writer)
-    } finally {
+    }
+    finally {
         $writer.Close()
     }
 }
@@ -244,8 +246,8 @@ function Update-OvfManifest {
     }
     $manifest = Join-Path $OvfDirectory "$([System.IO.Path]::GetFileNameWithoutExtension($ovf.Name)).mf"
     $files = Get-ChildItem -LiteralPath $OvfDirectory -File |
-        Where-Object { $_.Extension -notin @('.mf', '.ova') } |
-        Sort-Object Name
+    Where-Object { $_.Extension -notin @('.mf', '.ova') } |
+    Sort-Object Name
     $lines = foreach ($file in $files) {
         $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         "SHA256($($file.Name))= $hash"
@@ -270,14 +272,31 @@ function New-OvaArchive {
         throw "Cannot package OVA because OVF or manifest is missing in $OvfDirectory"
     }
     $otherFiles = Get-ChildItem -LiteralPath $OvfDirectory -File |
-        Where-Object { $_.Name -notin @($ovf.Name, $manifest.Name) -and $_.Extension -ne '.ova' } |
-        Sort-Object Name |
-        ForEach-Object { $_.Name }
+    Where-Object { $_.Name -notin @($ovf.Name, $manifest.Name) -and $_.Extension -ne '.ova' } |
+    Sort-Object Name |
+    ForEach-Object { $_.Name }
     $arguments = @('-cf', $OvaPath, '-C', $OvfDirectory, $ovf.Name, $manifest.Name) + $otherFiles
     & $ResolvedTarPath @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "tar failed while creating OVA with exit code $LASTEXITCODE."
     }
+}
+
+function Get-OvfDescriptorPath {
+    param([string]$OutputDirectory)
+
+    $ovfFiles = @(Get-ChildItem -LiteralPath $OutputDirectory -Filter '*.ovf' -File)
+    if ($ovfFiles.Count -eq 0) {
+        $ovfFiles = @(Get-ChildItem -LiteralPath $OutputDirectory -Filter '*.ovf' -File -Recurse)
+    }
+    if ($ovfFiles.Count -eq 0) {
+        throw "ovftool did not produce an OVF descriptor under $OutputDirectory"
+    }
+    if ($ovfFiles.Count -gt 1) {
+        $paths = ($ovfFiles | ForEach-Object { $_.FullName }) -join ', '
+        throw "ovftool produced multiple OVF descriptors under $OutputDirectory`: $paths"
+    }
+    return $ovfFiles[0].FullName
 }
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -302,20 +321,19 @@ if ($LASTEXITCODE -ne 0) {
     throw "ovftool failed with exit code $LASTEXITCODE."
 }
 
-$ovfPath = (Get-ChildItem -LiteralPath $resolvedOutputDirectory -Filter '*.ovf' -File | Select-Object -First 1).FullName
-if (-not $ovfPath) {
-    throw "ovftool did not produce an OVF descriptor in $resolvedOutputDirectory"
-}
+$ovfPath = Get-OvfDescriptorPath -OutputDirectory $resolvedOutputDirectory
+$ovfPackageDirectory = Split-Path -Parent $ovfPath
 Add-LabFoundryOvfProperties -OvfPath $ovfPath
-$manifestPath = Update-OvfManifest -OvfDirectory $resolvedOutputDirectory
+$manifestPath = Update-OvfManifest -OvfDirectory $ovfPackageDirectory
 
 $ovaPath = ''
 if (-not $NoOva) {
     $ovaPath = Join-Path (Split-Path -Parent $resolvedOutputDirectory) "$Name.ova"
-    New-OvaArchive -OvfDirectory $resolvedOutputDirectory -OvaPath $ovaPath -ResolvedTarPath $resolvedTar
+    New-OvaArchive -OvfDirectory $ovfPackageDirectory -OvaPath $ovaPath -ResolvedTarPath $resolvedTar
 }
 
-Write-Host "LabFoundry OVF folder: $resolvedOutputDirectory"
+Write-Host "LabFoundry OVF export root: $resolvedOutputDirectory"
+Write-Host "LabFoundry OVF folder: $ovfPackageDirectory"
 Write-Host "LabFoundry OVF descriptor: $ovfPath"
 Write-Host "LabFoundry OVF manifest: $manifestPath"
 if ($ovaPath) {

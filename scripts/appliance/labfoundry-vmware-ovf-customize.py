@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -185,6 +186,10 @@ def quote_env_value(value: object) -> str:
     return f'"{escaped}"'
 
 
+def generate_secret_key() -> str:
+    return secrets.token_urlsafe(48)
+
+
 def read_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -305,6 +310,8 @@ def apply_customization(config: dict[str, object], *, dry_run: bool = False) -> 
         ENV_PATH,
         {
             "LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD": config["admin_password"],
+            "LABFOUNDRY_SECRET_KEY": generate_secret_key(),
+            "LABFOUNDRY_SECRETS_KEY": generate_secret_key(),
             "LABFOUNDRY_APPLIANCE_FQDN": config["fqdn"],
             "LABFOUNDRY_APPLIANCE_MANAGEMENT_CIDR": config["cidr"],
             "LABFOUNDRY_APPLIANCE_EXTERNAL_DNS_SERVERS": ",".join(config["dns_servers"]),

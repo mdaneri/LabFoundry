@@ -83,6 +83,44 @@ def test_vmware_ovf_customizer_renders_initial_firewall_for_ovf_subnet(tmp_path)
     assert "policy drop" in rendered
 
 
+def test_vmware_ovf_customizer_rotates_clone_specific_env_secrets(tmp_path):
+    customizer = load_customizer()
+    customizer.ENV_PATH = tmp_path / "labfoundry.env"
+    customizer.NETWORKD_PATH = tmp_path / "00-labfoundry-mgmt.network"
+    customizer.RESOLV_CONF_PATH = tmp_path / "resolv.conf"
+    customizer.NGINX_MANAGEMENT_PATH = tmp_path / "management.conf"
+    customizer.FIREWALL_CONFIG_PATH = tmp_path / "labfoundry.nft"
+    customizer.MARKER_PATH = tmp_path / "marker.json"
+    customizer.NGINX_MANAGEMENT_PATH.write_text("server_name labfoundry.internal _;\n", encoding="utf-8")
+    generated = iter(["rotated-secret-key", "rotated-secrets-key"])
+    customizer.generate_secret_key = lambda: next(generated)
+    customizer.set_password = lambda username, password: None
+    customizer.set_hostname = lambda fqdn: None
+    customizer.ENV_PATH.write_text(
+        "\n".join(
+            [
+                'LABFOUNDRY_SECRET_KEY="baked-secret"',
+                'LABFOUNDRY_SECRETS_KEY="baked-secrets-key"',
+                'LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME="admin"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    properties = customizer.parse_ovf_environment(OVF_ENV)
+    config = customizer.validate_properties(properties)
+
+    summary = customizer.apply_customization(config)
+
+    rendered = customizer.ENV_PATH.read_text(encoding="utf-8")
+    assert 'LABFOUNDRY_SECRET_KEY="rotated-secret-key"' in rendered
+    assert 'LABFOUNDRY_SECRETS_KEY="rotated-secrets-key"' in rendered
+    assert "baked-secret" not in rendered
+    assert "baked-secrets-key" not in rendered
+    assert "rotated-secret-key" not in str(summary)
+    assert "rotated-secrets-key" not in str(summary)
+
+
 def test_vmware_ovf_export_and_image_plumbing_are_present():
     export_script = Path("scripts/windows/vmware/export-ovf.ps1").read_text(encoding="utf-8")
     provision_script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
@@ -108,6 +146,10 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "Add-LabFoundryOvfProperties" in export_script
     assert "Update-OvfManifest" in export_script
     assert "New-OvaArchive" in export_script
+    assert "Get-OvfDescriptorPath" in export_script
+    assert "-Recurse" in export_script
+    assert "$ovfPackageDirectory = Split-Path -Parent $ovfPath" in export_script
+    assert "New-OvaArchive -OvfDirectory $ovfPackageDirectory" in export_script
     assert "'transport' -Value 'com.vmware.guestInfo'" in export_script
     assert "com.vmware.guestInfo" in export_script
     assert "vmw:password" not in docs
