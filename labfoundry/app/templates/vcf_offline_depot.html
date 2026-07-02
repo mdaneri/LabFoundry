@@ -216,14 +216,13 @@
             <span>Software depot ID</span>
             <span class="setting-inline-actions" data-vcf-depot-software-depot-cell>
               {% if vcf_depot_software_depot_id.id %}
-                <strong data-vcf-depot-software-depot-id>{{ vcf_depot_software_depot_id.id }}</strong>
-                <button class="button secondary icon-button" type="button" data-copy-value="{{ vcf_depot_software_depot_id.id }}" aria-label="Copy software depot ID" title="Copy software depot ID">⧉</button>
+                <input class="readonly-inline-value" type="text" value="{{ vcf_depot_software_depot_id.id }}" readonly data-vcf-depot-software-depot-id aria-label="Software depot ID">
                 <form class="inline-action-form" action="/vcf-offline-depot/software-depot-id/generate" method="post" data-vcf-depot-generate-id>
                   <input type="hidden" name="csrf" value="{{ csrf_token }}">
                   <button class="button secondary icon-button" type="submit" aria-label="Refresh software depot ID" title="Refresh software depot ID" data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>↻</button>
                 </form>
               {% else %}
-                <strong class="hidden" data-vcf-depot-software-depot-id></strong>
+                <input class="readonly-inline-value hidden" type="text" value="" readonly data-vcf-depot-software-depot-id aria-label="Software depot ID">
                 <form class="inline-action-form" action="/vcf-offline-depot/software-depot-id/generate" method="post" data-vcf-depot-generate-id>
                   <input type="hidden" name="csrf" value="{{ csrf_token }}">
                   <button class="button secondary compact-button" type="submit" data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Generate software depot ID</button>

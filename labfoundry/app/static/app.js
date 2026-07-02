@@ -596,24 +596,35 @@ function showTransientGridStatus(message) {
   }, 1400);
 }
 
+function copyTextWithTextareaFallback(value) {
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) {
+    throw new Error("Copy command failed.");
+  }
+}
+
 async function copyTextToClipboard(text, successMessage = "Copied") {
   const value = String(text || "");
   if (!value) {
     return;
   }
-  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-    await navigator.clipboard.writeText(value);
+  if (window.isSecureContext && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      copyTextWithTextareaFallback(value);
+    }
   } else {
-    const textarea = document.createElement("textarea");
-    textarea.value = value;
-    textarea.setAttribute("readonly", "");
-    textarea.style.position = "fixed";
-    textarea.style.left = "-9999px";
-    textarea.style.top = "0";
-    document.body.appendChild(textarea);
-    textarea.select();
-    document.execCommand("copy");
-    textarea.remove();
+    copyTextWithTextareaFallback(value);
   }
   showTransientGridStatus(successMessage);
 }
@@ -6939,24 +6950,12 @@ function updateVcfDepotSoftwareDepotId(payload = {}) {
   const softwareDepotCell = document.querySelector("[data-vcf-depot-software-depot-cell]");
   const softwareDepotMessage = document.querySelector("[data-vcf-depot-software-depot-message]");
   if (softwareDepotId instanceof HTMLElement && payload.software_depot_id !== undefined) {
-    softwareDepotId.textContent = payload.software_depot_id || "";
-    softwareDepotId.classList.toggle("hidden", !payload.software_depot_id);
-    let copyButton = softwareDepotCell?.querySelector("[data-copy-value]");
-    if (payload.software_depot_id) {
-      if (!(copyButton instanceof HTMLButtonElement)) {
-        copyButton = document.createElement("button");
-        copyButton.className = "button secondary icon-button";
-        copyButton.type = "button";
-        copyButton.textContent = "⧉";
-        copyButton.setAttribute("aria-label", "Copy software depot ID");
-        copyButton.setAttribute("title", "Copy software depot ID");
-        softwareDepotId.insertAdjacentElement("afterend", copyButton);
-      }
-      copyButton.dataset.copyValue = payload.software_depot_id;
-      initializeCopyValueButtons(softwareDepotCell || document);
-    } else if (copyButton instanceof HTMLButtonElement) {
-      copyButton.remove();
+    if (softwareDepotId instanceof HTMLInputElement) {
+      softwareDepotId.value = payload.software_depot_id || "";
+    } else {
+      softwareDepotId.textContent = payload.software_depot_id || "";
     }
+    softwareDepotId.classList.toggle("hidden", !payload.software_depot_id);
     const button = softwareDepotCell?.querySelector("[data-vcf-depot-generate-id] button[type='submit']");
     if (button instanceof HTMLButtonElement) {
       if (payload.software_depot_id) {

@@ -3898,6 +3898,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Listen addresses" in page.text
     assert "service-bind-editor" in page.text
     assert 'data-service-bind-address="192.168.50.1"' in page.text
+    assert '<input class="readonly-inline-value hidden" type="text" value="" readonly data-vcf-depot-software-depot-id aria-label="Software depot ID">' in page.text
     assert 'action="/vcf-offline-depot/settings"' in page.text
     assert 'data-autosave-status-id="vcf-depot-settings-status"' in page.text
     assert 'data-components=' in page.text
@@ -3927,7 +3928,9 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
     assert "initializeVcfDepotTokenPaste" in app_js.text
     assert "initializeCopyValueButtons" in app_js.text
-    assert "Copy software depot ID" in app_js.text
+    assert "copyTextWithTextareaFallback" in app_js.text
+    assert "window.isSecureContext" in app_js.text
+    assert "softwareDepotId instanceof HTMLInputElement" in app_js.text
     assert "setVcfDepotToolDependentActions" in app_js.text
     assert "startVcfDepotProfileDownload" in app_js.text
     assert 'label: "Start download"' in app_js.text
@@ -3939,6 +3942,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert ".tabulator-checklist-editor" in app_css.text
     assert ".inline-action-row" in app_css.text
     assert ".setting-inline-actions" in app_css.text
+    assert ".readonly-inline-value" in app_css.text
     assert ".icon-button" in app_css.text
 
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"

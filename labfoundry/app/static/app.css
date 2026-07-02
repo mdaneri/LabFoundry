@@ -1603,6 +1603,15 @@ textarea {
   white-space: nowrap;
 }
 
+.readonly-inline-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 9px;
+  background: #ffffff;
+  user-select: text;
+}
+
 .settings-subsection {
   display: grid;
   gap: 10px;
