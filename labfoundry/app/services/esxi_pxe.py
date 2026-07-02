@@ -1028,6 +1028,13 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
             }
             for host in hosts
         ],
+        "default_host": {
+            "enabled": bool((default_host or {}).get("enabled")),
+            "kickstart_id": (default_host or {}).get("kickstart_id"),
+            "kickstart_name": (default_host or {}).get("kickstart_name") or "",
+            "installer_iso_path": (default_host or {}).get("installer_iso_path") or "",
+            "installer_iso_name": (default_host or {}).get("installer_iso_name") or "",
+        },
         "artifacts": artifacts,
     }
     return json.dumps(payload, indent=2, sort_keys=True)

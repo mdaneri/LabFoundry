@@ -1351,6 +1351,8 @@ def test_esxi_pxe_iso_upload_and_host_selection(client, monkeypatch, tmp_path):
 
 
 def test_esxi_pxe_default_host_settings_update_existing_rows(client, monkeypatch, tmp_path):
+    import json
+
     from sqlalchemy import select
 
     import labfoundry.app.services.esxi_pxe as esxi_pxe
@@ -1389,18 +1391,67 @@ def test_esxi_pxe_default_host_settings_update_existing_rows(client, monkeypatch
         db.flush()
 
         rows = db.execute(select(Setting).where(Setting.key.like("esxi_pxe.default_host.%"))).scalars().all()
+        manifest = json.loads(esxi_pxe.render_esxi_pxe_manifest([], [], default_host=second))
 
     assert first["enabled"] is True
     assert first["kickstart_id"] == first_kickstart_id
     assert second["enabled"] is False
     assert second["kickstart_id"] == second_kickstart_id
     assert second["installer_iso_path"] == str(second_iso)
+    assert manifest["default_host"] == {
+        "enabled": False,
+        "kickstart_id": second_kickstart_id,
+        "kickstart_name": "Second",
+        "installer_iso_path": str(second_iso),
+        "installer_iso_name": "Second-ESXi.iso",
+    }
     assert len(rows) == 3
     assert {row.key for row in rows} == {
         esxi_pxe.ESXI_PXE_DEFAULT_HOST_ENABLED_KEY,
         esxi_pxe.ESXI_PXE_DEFAULT_HOST_KICKSTART_ID_KEY,
         esxi_pxe.ESXI_PXE_DEFAULT_HOST_INSTALLER_ISO_KEY,
     }
+
+
+def test_esxi_pxe_default_host_edit_marks_appliance_apply_pending(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart
+    from labfoundry.app.services import esxi_pxe
+    from labfoundry.app.ui import appliance_apply_status, appliance_apply_units, update_appliance_apply_baselines
+
+    login(client)
+    page = client.get("/esxi-pxe")
+    assert page.status_code == 200
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    with SessionLocal() as db:
+        kickstart = EsxiKickstart(name="Baseline ESXi", content="install", content_hash=esxi_pxe.content_hash("install"))
+        db.add(kickstart)
+        db.flush()
+        kickstart_id = kickstart.id
+        units = appliance_apply_units(db)
+        update_appliance_apply_baselines(db, units, {unit["id"] for unit in units})
+        db.commit()
+    with SessionLocal() as db:
+        assert appliance_apply_status(db, "esxi_pxe")["changed"] is False
+
+    current = client.get("/appliance-apply/status")
+    assert current.status_code == 200
+    current_pending_count = current.json()["pending_count"]
+
+    response = client.post(
+        "/esxi-pxe/default-host",
+        data={"csrf": csrf, "enabled": "on", "kickstart_id": str(kickstart_id), "installer_iso_path": ""},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    pending = client.get("/appliance-apply/status")
+    assert pending.status_code == 200
+    assert pending.json()["pending_count"] > current_pending_count
+    assert pending.json()["label"] == "Review appliance changes"
+    with SessionLocal() as db:
+        assert appliance_apply_status(db, "esxi_pxe")["changed"] is True
 
 
 def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
