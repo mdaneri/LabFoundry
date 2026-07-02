@@ -2,6 +2,8 @@
 
 Cleaned Markdown copy of the Broadcom Tech Docs content for ESX installation, kickstart, `boot.cfg`, PXELINUX, iPXE, and native UEFI HTTP boot.
 
+LabFoundry note: ESXi PXE host-specific `boot.cfg` artifacts should pass Kickstart URLs as `/pxe/esxi/ks/<file>.cfg?mac=<normalized-mac>`. The MAC query parameter is required so LabFoundry can render restricted `{{variable}}` Kickstart markers from the database source and the selected host's custom variable map. LabFoundry intentionally does not infer the host MAC from request source IP or dnsmasq leases.
+
 > Terminology note: Broadcom documentation uses **ESX** in these 9.x installation pages. Older VMware material often used **ESXi**.
 
 ---

@@ -207,6 +207,7 @@ def _ensure_sqlite_esxi_pxe_columns() -> None:
     columns = {
         "installer_iso_path": "VARCHAR(500) DEFAULT ''",
         "ip_address": "VARCHAR(64) DEFAULT ''",
+        "variables_json": "TEXT DEFAULT '{}'",
     }
     with engine.begin() as connection:
         for name, definition in columns.items():

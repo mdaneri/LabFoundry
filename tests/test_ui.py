@@ -1477,6 +1477,123 @@ def test_esxi_kickstart_validation_rejects_duplicate_install_directives(client):
     assert "missing install or upgrade directive" not in warnings
 
 
+def test_esxi_kickstart_host_variables_render_from_mac_endpoint(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope, EsxiKickstart, EsxiPxeHost
+    from labfoundry.app.services.esxi_pxe import (
+        assign_kickstart_content,
+        canonical_http_path,
+        content_hash,
+        host_variables_json,
+        save_esxi_pxe_boot_settings,
+    )
+
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        scope.ntp_server = "192.168.50.1"
+        kickstart = EsxiKickstart(name="Templated ESXi", content="", content_hash="", enabled=True)
+        db.add(kickstart)
+        db.flush()
+        assign_kickstart_content(
+            kickstart,
+            "install --firstdisk={{custom.disk}}\nnetwork --bootproto=static --ip={{host.ip_address}} --gateway={{dhcp.gateway}} --netmask={{dhcp.netmask}} --hostname={{host.hostname}} --nameserver={{dhcp.dns_servers}}\nntpserver {{dhcp.ntp_servers}}\nrootpw VMware01!\nreboot\n%firstboot\n%end\n",
+            max_bytes=262_144,
+        )
+        kickstart.http_path = canonical_http_path(kickstart.id, kickstart.content_hash)
+        host = EsxiPxeHost(
+            hostname="esx-vars",
+            mac_address="00:50:56:aa:bb:cc",
+            ip_address="192.168.50.150",
+            kickstart_id=kickstart.id,
+            variables_json=host_variables_json({"custom.disk": "mpx.vmhba0:C0:T0:L0"}),
+            enabled=True,
+        )
+        db.add(host)
+        save_esxi_pxe_boot_settings(
+            db,
+            enabled=True,
+            hostname="esxi-pxe.labfoundry.internal",
+            dhcp_scope_ids=[scope.id],
+            listen_interface="eth2",
+            listen_address="192.168.50.1",
+            tftp_root="/var/lib/labfoundry/pxe/tftp",
+            http_port="8080",
+            bios_bootfile="undionly.kpxe",
+            uefi_bootfile="snponly.efi",
+            native_uefi_http_enabled=True,
+        )
+        db.commit()
+        kickstart_file = f"{content_hash(kickstart.content)[:12]}.cfg"
+
+    rendered = client.get(f"/pxe/esxi/ks/{kickstart_file}?mac=01-00-50-56-aa-bb-cc")
+    assert rendered.status_code == 200, rendered.text
+    assert "install --firstdisk=mpx.vmhba0:C0:T0:L0" in rendered.text
+    assert "--ip=192.168.50.150" in rendered.text
+    assert "--gateway=192.168.50.1" in rendered.text
+    assert "--netmask=255.255.255.0" in rendered.text
+    assert "--nameserver=192.168.50.1" in rendered.text
+    assert "ntpserver 192.168.50.1" in rendered.text
+
+    assert client.get(f"/pxe/esxi/ks/{kickstart_file}").status_code == 400
+    assert client.get(f"/pxe/esxi/ks/{kickstart_file}?mac=not-a-mac").status_code == 400
+    assert client.get(f"/pxe/esxi/ks/{kickstart_file}?mac=01-00-50-56-aa-bb-dd").status_code == 404
+
+    with SessionLocal() as db:
+        host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.mac_address == "00:50:56:aa:bb:cc")).scalar_one()
+        host.variables_json = json.dumps({})
+        db.add(host)
+        db.commit()
+    unresolved = client.get(f"/pxe/esxi/ks/{kickstart_file}?mac=01-00-50-56-aa-bb-cc")
+    assert unresolved.status_code == 400
+    assert "custom.disk" in unresolved.text
+
+
+def test_esxi_pxe_host_variables_api_and_manifest(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxiKickstart, EsxiPxeHost
+    from labfoundry.app.services.esxi_pxe import content_hash, render_esxi_pxe_manifest
+
+    token = create_api_token(client, ["read:esxi-pxe", "write:esxi-pxe"])
+    created = client.post(
+        "/api/v1/esxi-pxe/hosts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "hostname": "api-esx",
+            "mac_address": "01-00-50-56-aa-bb-ee",
+            "variables": {"rack": "r12", "custom.install_disk": "firstdisk"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["mac_address"] == "00:50:56:aa:bb:ee"
+    assert created.json()["variables"] == {"install_disk": "firstdisk", "rack": "r12"}
+    invalid = client.post(
+        "/api/v1/esxi-pxe/hosts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"hostname": "bad-esx", "mac_address": "00:50:56:aa:bb:ef", "variables": {"host.hostname": "override"}},
+    )
+    assert invalid.status_code == 400
+
+    with SessionLocal() as db:
+        host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.hostname == "api-esx")).scalar_one()
+        assert host.mac_address == "00:50:56:aa:bb:ee"
+        assert json.loads(host.variables_json) == {"install_disk": "firstdisk", "rack": "r12"}
+        kickstart = EsxiKickstart(name="Vars", content="{{custom.install_disk}}\n", content_hash=content_hash("{{custom.install_disk}}\n"), enabled=True)
+        db.add(kickstart)
+        db.flush()
+        host.kickstart_id = kickstart.id
+        db.add(host)
+        manifest = json.loads(render_esxi_pxe_manifest([kickstart], [host]))
+    assert manifest["hosts"][0]["variables"] == {"install_disk": "firstdisk", "rack": "r12"}
+
+
 def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     import json
 
@@ -1505,6 +1622,10 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "<span>UEFI bootfile</span><strong>snponly.efi</strong>" in page.text
     assert "PXE HTTP port" in page.text
     assert "HTTP endpoint" in page.text
+    assert "Kickstart variables" in page.text
+    assert "{{host.hostname}}" in page.text
+    assert "{{dhcp.ntp_servers}}" in page.text
+    assert "{{custom.install_disk}}" in page.text
     assert 'class="left-stack"' in page.text
     assert page.text.index("<h2>Boot Service</h2>") < page.text.index("<h2>ESXi Kickstarts</h2>")
     css = client.get("/static/app.css").text
@@ -1662,7 +1783,7 @@ def test_esxi_pxe_multi_zone_host_reservations_and_grid_menu(client):
         data={
             "csrf": csrf,
             "hostname": "esx02",
-            "mac_address": "00:50:56:aa:bb:cd",
+            "mac_address": "01-00-50-56-aa-bb-cd",
             "ip_address": "10.1.1.150",
             "enabled": "on",
         },
@@ -1685,7 +1806,7 @@ def test_esxi_pxe_multi_zone_host_reservations_and_grid_menu(client):
         data={
             "csrf": csrf,
             "hostname": "esx02",
-            "mac_address": "00:50:56:aa:bb:cd",
+            "mac_address": "01-00-50-56-aa-bb-cd",
             "ip_address": "172.16.1.50",
             "enabled": "on",
         },
@@ -1718,6 +1839,7 @@ def test_esxi_pxe_multi_zone_host_reservations_and_grid_menu(client):
     assert "rowContextMenu" in host_grid_js
     assert "Delete host reference" in host_grid_js
     assert 'field: "ip_address"' in host_grid_js
+    assert 'field: "variables_json"' in host_grid_js
     assert "<button" not in host_grid_js
 
 
@@ -1772,6 +1894,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
                 ip_address="192.168.50.150",
                 kickstart_id=kickstart.id,
                 installer_iso_path="/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST/archive.iso",
+                variables_json='{"rack":"r42"}',
                 enabled=True,
             )
         )
@@ -1786,6 +1909,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
     assert payload["data"]["esxi_pxe_hosts"][0]["kickstart_name"] == "Archive ESXi"
     assert payload["data"]["esxi_pxe_hosts"][0]["ip_address"] == "192.168.50.150"
     assert payload["data"]["esxi_pxe_hosts"][0]["installer_iso_path"].endswith("/archive.iso")
+    assert payload["data"]["esxi_pxe_hosts"][0]["variables"] == {"rack": "r42"}
 
     with SessionLocal() as db:
         db.query(EsxiPxeHost).delete()
@@ -1805,6 +1929,7 @@ def test_esxi_kickstarts_round_trip_in_settings_archive(client):
         assert restored_host.kickstart_id == restored_kickstart.id
         assert restored_host.ip_address == "192.168.50.150"
         assert restored_host.installer_iso_path.endswith("/archive.iso")
+        assert restored_host.variables_json == '{"rack": "r42"}'
 
 
 def test_esxi_pxe_drift_detection_uses_generated_filesystem_copy(client, monkeypatch, tmp_path):
