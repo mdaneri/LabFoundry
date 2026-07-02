@@ -5125,30 +5125,52 @@ function installCodeMirrorPlainTextFallback(textarea, view) {
   if (!(textarea instanceof HTMLTextAreaElement) || !view || textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart") {
     return;
   }
-  const eventTarget = view.dom instanceof HTMLElement ? view.dom : view.contentDOM || view.dom?.querySelector?.(".cm-content");
-  if (!(eventTarget instanceof HTMLElement) || eventTarget.dataset.labfoundryPlainTextFallback === "1") {
+  const editorDom = view.dom instanceof HTMLElement ? view.dom : null;
+  const contentDom = view.contentDOM instanceof HTMLElement ? view.contentDOM : editorDom?.querySelector?.(".cm-content");
+  const eventTarget = editorDom || contentDom;
+  if (!(eventTarget instanceof HTMLElement) || !(contentDom instanceof HTMLElement) || eventTarget.dataset.labfoundryPlainTextFallback === "1") {
     return;
   }
   eventTarget.dataset.labfoundryPlainTextFallback = "1";
+  const insertTextAtSelection = (text) => {
+    const selection = view.state?.selection?.main;
+    if (!selection || typeof selection.from !== "number" || typeof selection.to !== "number") {
+      return false;
+    }
+    const cursor = selection.from + text.length;
+    view.dispatch({
+      changes: { from: selection.from, to: selection.to, insert: text },
+      selection: { anchor: cursor },
+      scrollIntoView: true,
+      userEvent: "input.type",
+    });
+    view.focus();
+    return true;
+  };
+  eventTarget.addEventListener("pointerdown", () => view.focus());
+  eventTarget.addEventListener("click", (event) => {
+    event.stopPropagation();
+    view.focus();
+  });
   eventTarget.addEventListener(
     "beforeinput",
     (event) => {
       if (event.defaultPrevented || event.isComposing || event.inputType !== "insertText" || typeof event.data !== "string" || event.data.length === 0) {
         return;
       }
-      const selection = view.state?.selection?.main;
-      if (!selection || typeof selection.from !== "number" || typeof selection.to !== "number") {
+      event.preventDefault();
+      insertTextAtSelection(event.data);
+    },
+    true
+  );
+  eventTarget.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1) {
         return;
       }
       event.preventDefault();
-      const cursor = selection.from + event.data.length;
-      view.dispatch({
-        changes: { from: selection.from, to: selection.to, insert: event.data },
-        selection: { anchor: cursor },
-        scrollIntoView: true,
-        userEvent: "input.type",
-      });
-      view.focus();
+      insertTextAtSelection(event.key);
     },
     true
   );

@@ -2681,6 +2681,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert "initializeCodeMirrorEditors" in app_js.text
     assert "installCodeMirrorPlainTextFallback" in app_js.text
     assert 'textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart"' in app_js.text
+    assert 'eventTarget.addEventListener("keydown"' in app_js.text
+    assert "event.stopPropagation()" in app_js.text
     assert "LabFoundryCodeMirror.setValue" in app_js.text
     assert "rememberDnsActiveZone(data.domain)" in app_js.text
     assert "dnsZoneTabButtonForDomain(storedDomain)" in app_js.text
@@ -5252,6 +5254,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
     assert "dhcp-lease-row-menu-20260702-1" in page.text
+    assert "kickstart-editor-keydown-20260702-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
