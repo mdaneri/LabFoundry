@@ -43,7 +43,7 @@ from labfoundry.app.models import (
 )
 from labfoundry.app.seed import SEED_EXAMPLES_SETTING_KEY, seed_initial_data
 from labfoundry.app.services.dnsmasq import DNS_CONDITIONAL_FORWARDERS_SETTING_KEY
-from labfoundry.app.services.esxi_pxe import host_variables_json, normalize_host_variables
+from labfoundry.app.services.esxi_pxe import host_variables_json, normalize_host_mac, normalize_host_variables
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY
 from labfoundry.app.services.local_users import LOCAL_USERS_PASSWORD_POLICY_KEY
 
@@ -425,6 +425,7 @@ def _restore_esxi_pxe_hosts(db: Session, rows: list[dict[str, Any]]) -> int:
         payload = _model_kwargs(EsxiPxeHost, row, exclude={"kickstart_id"})
         kickstart_name = str(row.get("kickstart_name") or "")
         payload["kickstart_id"] = kickstarts.get(kickstart_name) if kickstart_name else None
+        payload["mac_address"] = normalize_host_mac(str(row.get("mac_address") or ""))
         payload["variables_json"] = host_variables_json(row.get("variables", row.get("variables_json", {})))
         db.add(EsxiPxeHost(**payload))
     db.flush()

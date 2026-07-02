@@ -199,6 +199,7 @@ from labfoundry.app.services.esxi_pxe import (
     installer_iso_inventory,
     kickstart_to_dict,
     kickstart_validation,
+    normalize_host_mac,
     normalize_installer_iso_path,
     normalize_kickstart_name,
     redacted_kickstart_preview,
@@ -2574,13 +2575,16 @@ def create_esxi_pxe_host(
     if payload.kickstart_id and not db.get(EsxiKickstart, payload.kickstart_id):
         raise HTTPException(status_code=404, detail="Kickstart not found")
     try:
+        normalized_mac = normalize_host_mac(payload.mac_address)
+        if not normalized_mac:
+            raise ValueError("ESXi PXE host MAC address is invalid.")
         installer_iso_path = normalize_installer_iso_path(payload.installer_iso_path)
         variables_json = host_variables_json(payload.variables)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     host = EsxiPxeHost(
         hostname=payload.hostname.strip(),
-        mac_address=payload.mac_address.strip().lower(),
+        mac_address=normalized_mac,
         ip_address=payload.ip_address.strip(),
         kickstart_id=payload.kickstart_id,
         installer_iso_path=installer_iso_path,
@@ -2621,12 +2625,15 @@ def update_esxi_pxe_host(
     if payload.kickstart_id and not db.get(EsxiKickstart, payload.kickstart_id):
         raise HTTPException(status_code=404, detail="Kickstart not found")
     try:
+        normalized_mac = normalize_host_mac(payload.mac_address)
+        if not normalized_mac:
+            raise ValueError("ESXi PXE host MAC address is invalid.")
         installer_iso_path = normalize_installer_iso_path(payload.installer_iso_path)
         variables_json = host_variables_json(payload.variables)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     host.hostname = payload.hostname.strip()
-    host.mac_address = payload.mac_address.strip().lower()
+    host.mac_address = normalized_mac
     host.ip_address = payload.ip_address.strip()
     host.kickstart_id = payload.kickstart_id
     host.installer_iso_path = installer_iso_path

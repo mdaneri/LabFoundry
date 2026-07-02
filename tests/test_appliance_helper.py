@@ -438,6 +438,9 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
             "mac_address": "*",
             "mac_key": "default",
             "is_default": True,
+            "kickstart_id": None,
+            "kickstart_http_path": "",
+            "kickstart_url": "",
             "pxelinux_config_path": str(tftp_root / "pxelinux.cfg" / "default"),
             "uefi_tftp_boot_cfg_path": str(tftp_root / "boot.cfg"),
             "http_boot_cfg_path": str(http_base / "boot.cfg"),
@@ -503,7 +506,8 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert f"kernelopt=runweasel ks={manifest['artifacts'][0]['kickstart_url']} BOOTIF=01-00-50-56-aa-bb-cc" in boot_cfg
     assert "modules=jumpstrt.gz---useropts.gz" in boot_cfg
     default_boot_cfg = (tftp_root / "boot.cfg").read_text(encoding="utf-8")
-    assert f"kernelopt=runweasel ks={manifest['artifacts'][0]['kickstart_url']} netdevice=vmnic0" in default_boot_cfg
+    assert "kernelopt=runweasel netdevice=vmnic0" in default_boot_cfg
+    assert "ks=" not in default_boot_cfg
     assert "BOOTIF=" not in default_boot_cfg
     assert (http_base / "boot.cfg").read_text(encoding="utf-8") == default_boot_cfg
     pxelinux = (tftp_root / "pxelinux.cfg" / "01-00-50-56-aa-bb-cc").read_text(encoding="utf-8")
@@ -518,6 +522,78 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
 
     manifest["hosts"][0]["installer_iso_path"] = str(tmp_path / "escape.iso")
     assert any("installer ISO must be under" in error for error in helper._esxi_pxe_manifest_errors(manifest))
+
+
+def test_esxi_pxe_helper_does_not_copy_host_artifact_to_default_fallback(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    http_root = tmp_path / "pxe" / "http" / "esxi" / "ks"
+    http_base = http_root.parent
+    tftp_root = tmp_path / "pxe" / "tftp"
+    apply_dir = tmp_path / "apply" / "esxi-pxe"
+    iso_root = tmp_path / "vcf-depot" / "PROD" / "COMP" / "ESX_HOST"
+    ipxe_binary_dir = tmp_path / "bootloaders"
+    http_root.mkdir(parents=True)
+    http_base.mkdir(parents=True, exist_ok=True)
+    tftp_root.mkdir(parents=True)
+    (tftp_root / "pxelinux.cfg").mkdir(parents=True)
+    apply_dir.mkdir(parents=True)
+    iso_root.mkdir(parents=True)
+    ipxe_binary_dir.mkdir(parents=True)
+    (ipxe_binary_dir / "undionly.kpxe").write_bytes(b"bios ipxe")
+    (ipxe_binary_dir / "snponly.efi").write_bytes(b"uefi ipxe")
+    (ipxe_binary_dir / "pxelinux.0").write_bytes(b"pxelinux")
+    (tftp_root / "boot.cfg").write_text("stale default", encoding="utf-8")
+    (http_base / "boot.cfg").write_text("stale default", encoding="utf-8")
+    (tftp_root / "pxelinux.cfg" / "default").write_text("stale default", encoding="utf-8")
+    iso_tree = iso_root / "VMware-VMvisor-Installer-8.0U3.iso"
+    iso_tree.mkdir()
+    (iso_tree / "boot.cfg").write_text(
+        "kernel=b.b00\nkernelopt=runweasel\nmodules=jumpstrt.gz --- useropts.gz\n",
+        encoding="utf-8",
+    )
+    (iso_tree / "mboot.c32").write_bytes(b"mboot c32")
+    (iso_tree / "EFI" / "BOOT").mkdir(parents=True)
+    (iso_tree / "EFI" / "BOOT" / "BOOTX64.EFI").write_bytes(b"mboot efi")
+    manifest = esxi_pxe_manifest(http_root, iso_root=iso_root)
+    manifest["boot"] = {
+        "enabled": True,
+        "hostname": "esxi-pxe.labfoundry.internal",
+        "listen_interface": "eth1",
+        "listen_address": "192.168.50.1",
+        "tftp_root": str(tftp_root),
+        "bios_bootfile": "undionly.kpxe",
+        "uefi_bootfile": "snponly.efi",
+        "bios_second_stage_bootfile": "pxelinux.0",
+        "uefi_second_stage_bootfile": "mboot.efi",
+        "native_uefi_bootfile": "mboot.efi",
+        "http_port": 8080,
+        "http_base_url": "http://192.168.50.1:8080/pxe/esxi",
+        "native_uefi_http_enabled": True,
+        "effective_native_uefi_http_url": "http://192.168.50.1:8080/pxe/esxi/mboot.efi",
+    }
+    config_path = apply_dir / "labfoundry-esxi-pxe.json"
+    config_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_ROOT", http_root)
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_BASE", http_base)
+    monkeypatch.setattr(helper, "ESXI_PXE_IMAGE_HTTP_ROOT", http_base / "images")
+    monkeypatch.setattr(helper, "ESXI_IPXE_HTTP_SCRIPT_PATH", http_base / "boot.ipxe")
+    monkeypatch.setattr(helper, "ESXI_TFTP_ROOT", tftp_root)
+    monkeypatch.setattr(helper, "PXE_BOOT_BINARY_DIRS", [ipxe_binary_dir])
+    monkeypatch.setattr(helper, "ESXI_PXE_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "ESXI_INSTALLER_ISO_ROOT", iso_root)
+    monkeypatch.setattr(helper, "ESXI_PXE_NGINX_SITE_PATH", tmp_path / "nginx" / "sites.d" / "esxi-pxe.conf")
+    monkeypatch.setattr(helper, "_install_nginx_site", lambda path, text: (path.parent.mkdir(parents=True, exist_ok=True), path.write_text(text, encoding="utf-8"), 0)[2])
+
+    payload = helper._load_esxi_pxe_manifest(helper._validate_esxi_pxe_config_path(str(config_path)))
+    assert helper._esxi_pxe_manifest_errors(payload) == []
+    assert helper._apply_esxi_pxe_manifest(payload) == 0
+
+    assert not (tftp_root / "boot.cfg").exists()
+    assert not (http_base / "boot.cfg").exists()
+    assert not (tftp_root / "pxelinux.cfg" / "default").exists()
+    host_boot_cfg = (tftp_root / "01-00-50-56-aa-bb-cc" / "boot.cfg").read_text(encoding="utf-8")
+    assert "?mac=01-00-50-56-aa-bb-cc" in host_boot_cfg
 
 
 def test_esxi_pxe_helper_rejects_disabled_kickstart_references(monkeypatch, tmp_path):

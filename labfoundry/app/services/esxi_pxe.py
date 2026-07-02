@@ -783,6 +783,13 @@ def normalize_pxe_mac(value: str) -> str:
     return "01-" + "-".join(octets)
 
 
+def normalize_host_mac(value: str) -> str:
+    mac_key = normalize_pxe_mac(value)
+    if not mac_key:
+        return ""
+    return ":".join(mac_key.split("-")[1:])
+
+
 def dnsmasq_host_tag_for_pxe_mac(value: str) -> str:
     mac_key = normalize_pxe_mac(value)
     if not mac_key:

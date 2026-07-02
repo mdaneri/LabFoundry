@@ -1567,11 +1567,12 @@ def test_esxi_pxe_host_variables_api_and_manifest(client):
         headers={"Authorization": f"Bearer {token}"},
         json={
             "hostname": "api-esx",
-            "mac_address": "00:50:56:aa:bb:ee",
+            "mac_address": "01-00-50-56-aa-bb-ee",
             "variables": {"rack": "r12", "custom.install_disk": "firstdisk"},
         },
     )
     assert created.status_code == 201, created.text
+    assert created.json()["mac_address"] == "00:50:56:aa:bb:ee"
     assert created.json()["variables"] == {"install_disk": "firstdisk", "rack": "r12"}
     invalid = client.post(
         "/api/v1/esxi-pxe/hosts",
@@ -1582,6 +1583,7 @@ def test_esxi_pxe_host_variables_api_and_manifest(client):
 
     with SessionLocal() as db:
         host = db.execute(select(EsxiPxeHost).where(EsxiPxeHost.hostname == "api-esx")).scalar_one()
+        assert host.mac_address == "00:50:56:aa:bb:ee"
         assert json.loads(host.variables_json) == {"install_disk": "firstdisk", "rack": "r12"}
         kickstart = EsxiKickstart(name="Vars", content="{{custom.install_disk}}\n", content_hash=content_hash("{{custom.install_disk}}\n"), enabled=True)
         db.add(kickstart)
@@ -1781,7 +1783,7 @@ def test_esxi_pxe_multi_zone_host_reservations_and_grid_menu(client):
         data={
             "csrf": csrf,
             "hostname": "esx02",
-            "mac_address": "00:50:56:aa:bb:cd",
+            "mac_address": "01-00-50-56-aa-bb-cd",
             "ip_address": "10.1.1.150",
             "enabled": "on",
         },
@@ -1804,7 +1806,7 @@ def test_esxi_pxe_multi_zone_host_reservations_and_grid_menu(client):
         data={
             "csrf": csrf,
             "hostname": "esx02",
-            "mac_address": "00:50:56:aa:bb:cd",
+            "mac_address": "01-00-50-56-aa-bb-cd",
             "ip_address": "172.16.1.50",
             "enabled": "on",
         },

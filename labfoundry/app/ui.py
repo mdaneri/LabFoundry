@@ -361,6 +361,7 @@ from labfoundry.app.services.esxi_pxe import (
     kickstart_to_dict,
     kickstart_validation,
     mark_kickstarts_applied,
+    normalize_host_mac,
     normalize_kickstart_content,
     normalize_kickstart_name,
     normalize_installer_iso_path,
@@ -9637,13 +9638,16 @@ def create_esxi_pxe_host_from_ui(
     verify_csrf(request, csrf)
     normalized_kickstart_id = parse_optional_esxi_kickstart_id(db, kickstart_id)
     try:
+        normalized_mac = normalize_host_mac(mac_address)
+        if not normalized_mac:
+            raise ValueError("ESXi PXE host MAC address is invalid.")
         normalized_iso_path = normalize_installer_iso_path(installer_iso_path)
         normalized_variables_json = host_variables_json(variables)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     host = EsxiPxeHost(
         hostname=hostname.strip(),
-        mac_address=mac_address.strip().lower(),
+        mac_address=normalized_mac,
         ip_address=ip_address.strip(),
         kickstart_id=normalized_kickstart_id,
         installer_iso_path=normalized_iso_path,
@@ -9687,12 +9691,15 @@ def update_esxi_pxe_host_from_ui(
         raise HTTPException(status_code=404, detail="ESXi PXE host not found")
     normalized_kickstart_id = parse_optional_esxi_kickstart_id(db, kickstart_id)
     try:
+        normalized_mac = normalize_host_mac(mac_address)
+        if not normalized_mac:
+            raise ValueError("ESXi PXE host MAC address is invalid.")
         normalized_iso_path = normalize_installer_iso_path(installer_iso_path)
         normalized_variables_json = host_variables_json(variables)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     host.hostname = hostname.strip()
-    host.mac_address = mac_address.strip().lower()
+    host.mac_address = normalized_mac
     host.ip_address = ip_address.strip()
     host.kickstart_id = normalized_kickstart_id
     host.installer_iso_path = normalized_iso_path
