@@ -23,5 +23,6 @@ playwright-report/
 /image/vmware-workstation/packer_cache
 /image/vmware-workstation/output
 /image/vmware-workstation/clients
+/image/vmware-workstation/ovf
 /image/vmware-workstation/test-vms
 /dist

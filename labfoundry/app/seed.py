@@ -83,6 +83,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
         db.add(vcf_backup_user)
         db.flush()
 
+    management_cidr = settings.appliance_management_cidr or "192.168.49.1/24"
     if db.execute(select(PhysicalInterface)).first() is None:
         physical_interfaces = [
             PhysicalInterface(
@@ -90,10 +91,10 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
                 mac_address="02:15:5d:00:10:01",
                 driver="hv_netvsc",
                 speed="10 Gbps",
-                host_ip_cidr="192.168.49.1/24",
+                host_ip_cidr=management_cidr,
                 host_mtu=1500,
                 host_admin_state="up",
-                ip_cidr="192.168.49.1/24",
+                ip_cidr=management_cidr,
                 mtu=1500,
                 role="management",
                 mode="access",
@@ -216,7 +217,11 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
 
     appliance_settings = db.execute(select(ApplianceSettings)).scalar_one_or_none()
     if appliance_settings is None:
-        appliance_settings = ApplianceSettings()
+        appliance_settings = ApplianceSettings(
+            fqdn=normalize_fqdn(settings.appliance_fqdn) or "labfoundry.labfoundry.internal",
+            external_dns_servers=_settings_lines(settings.appliance_external_dns_servers),
+            ntp_servers=_settings_lines(settings.appliance_ntp_servers),
+        )
         db.add(appliance_settings)
         db.flush()
 
@@ -224,7 +229,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
     if chrony_settings is None:
         chrony_settings = ChronySettings(
             hostname=CHRONY_DEFAULT_HOSTNAME,
-            upstream_servers=appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS,
+            upstream_servers=_settings_lines(settings.appliance_ntp_servers) or appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS,
             config_path=CHRONY_STAGED_CONFIG_PATH,
         )
         db.add(chrony_settings)
@@ -238,7 +243,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
             listen_interface="eth2" if include_examples else "",
             listen_address="192.168.50.1" if include_examples else "",
             domain=appliance_dns_domain,
-            upstream_servers="1.1.1.1\n9.9.9.9",
+            upstream_servers=_settings_lines(settings.appliance_external_dns_servers),
         )
         db.add(dns_settings)
     else:
@@ -473,6 +478,11 @@ def _domain_from_fqdn(fqdn: str) -> str:
     normalized = normalize_fqdn(fqdn)
     parts = normalized.split(".", 1)
     return parts[1] if len(parts) == 2 else ""
+
+
+def _settings_lines(value: str) -> str:
+    parts = [part.strip() for part in value.replace(",", "\n").replace(";", "\n").splitlines() if part.strip()]
+    return "\n".join(parts)
 
 
 def _management_ip(db: Session) -> str:
