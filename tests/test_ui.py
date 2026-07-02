@@ -1494,12 +1494,13 @@ def test_esxi_kickstart_host_variables_render_from_mac_endpoint(client):
 
     with SessionLocal() as db:
         scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        scope.ntp_server = "192.168.50.1"
         kickstart = EsxiKickstart(name="Templated ESXi", content="", content_hash="", enabled=True)
         db.add(kickstart)
         db.flush()
         assign_kickstart_content(
             kickstart,
-            "install --firstdisk={{custom.disk}}\nnetwork --bootproto=static --ip={{host.ip_address}} --gateway={{dhcp.gateway}} --netmask={{dhcp.netmask}} --hostname={{host.hostname}}\nrootpw VMware01!\nreboot\n%firstboot\n%end\n",
+            "install --firstdisk={{custom.disk}}\nnetwork --bootproto=static --ip={{host.ip_address}} --gateway={{dhcp.gateway}} --netmask={{dhcp.netmask}} --hostname={{host.hostname}} --nameserver={{dhcp.dns_servers}}\nntpserver {{dhcp.ntp_servers}}\nrootpw VMware01!\nreboot\n%firstboot\n%end\n",
             max_bytes=262_144,
         )
         kickstart.http_path = canonical_http_path(kickstart.id, kickstart.content_hash)
@@ -1534,6 +1535,8 @@ def test_esxi_kickstart_host_variables_render_from_mac_endpoint(client):
     assert "--ip=192.168.50.150" in rendered.text
     assert "--gateway=192.168.50.1" in rendered.text
     assert "--netmask=255.255.255.0" in rendered.text
+    assert "--nameserver=192.168.50.1" in rendered.text
+    assert "ntpserver 192.168.50.1" in rendered.text
 
     assert client.get(f"/pxe/esxi/ks/{kickstart_file}").status_code == 400
     assert client.get(f"/pxe/esxi/ks/{kickstart_file}?mac=not-a-mac").status_code == 400
@@ -1619,6 +1622,7 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "HTTP endpoint" in page.text
     assert "Kickstart variables" in page.text
     assert "{{host.hostname}}" in page.text
+    assert "{{dhcp.ntp_servers}}" in page.text
     assert "{{custom.install_disk}}" in page.text
     assert 'class="left-stack"' in page.text
     assert page.text.index("<h2>Boot Service</h2>") < page.text.index("<h2>ESXi Kickstarts</h2>")

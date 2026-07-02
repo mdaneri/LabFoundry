@@ -315,6 +315,7 @@ def selected_dhcp_scope_payload(scope: DhcpScope) -> dict[str, Any]:
         "prefix_length": scope.prefix_length,
         "domain_name": scope.domain_name,
         "dns_server": scope.dns_server,
+        "ntp_server": scope.ntp_server,
         "gateway": scope.site_address,
     }
 
@@ -347,6 +348,7 @@ def kickstart_variable_values(host: EsxiPxeHost, boot_settings: dict[str, Any]) 
     scope = _dhcp_scope_for_host(host, boot_settings)
     network = _scope_network(scope)
     dns_servers = str(scope.get("dns_server") or "").replace(",", "\n")
+    ntp_servers = str(scope.get("ntp_server") or "").replace(",", "\n")
     values = {
         "host.hostname": host.hostname or "",
         "host.mac": mac_key,
@@ -355,6 +357,7 @@ def kickstart_variable_values(host: EsxiPxeHost, boot_settings: dict[str, Any]) 
         "dhcp.netmask": str(network.netmask) if network is not None and network.version == 4 else "",
         "dhcp.prefix": str(scope.get("prefix_length") or ""),
         "dhcp.dns_servers": " ".join(item.strip() for item in dns_servers.splitlines() if item.strip()),
+        "dhcp.ntp_servers": " ".join(item.strip() for item in ntp_servers.splitlines() if item.strip()),
         "dhcp.domain": str(scope.get("domain_name") or ""),
         "pxe.http_base_url": esxi_http_base_url(boot_settings),
     }
