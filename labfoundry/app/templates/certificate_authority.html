@@ -20,9 +20,9 @@
       <div><span>Expiring soon</span><strong>{{ ca_status_summary.expiring_count }}</strong></div>
     </div>
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="Certificate Authority views">
-      <button class="tab-button active" type="button" data-tab-target="ca-certificates-panel" aria-selected="true">Certificates</button>
-      <button class="tab-button" type="button" data-tab-target="ca-profiles-panel" aria-selected="false">Profiles</button>
-      <button class="tab-button" type="button" data-tab-target="ca-csr-panel" aria-selected="false">CSR Intake</button>
+      <button class="tab-button active" type="button" role="tab" data-tab-target="ca-certificates-panel" aria-controls="ca-certificates-panel" aria-selected="true">Certificates</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="ca-profiles-panel" aria-controls="ca-profiles-panel" aria-selected="false">Profiles</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="ca-csr-panel" aria-controls="ca-csr-panel" aria-selected="false">CSR Intake</button>
     </div>
 
     <div class="tab-panels">

@@ -14,9 +14,9 @@
       <div class="alert error">{{ form_error }}</div>
     {% endif %}
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="DHCP views">
-      <button class="tab-button active" type="button" data-tab-target="dhcp-desired-state" aria-selected="true">Desired State</button>
-      <button class="tab-button" type="button" data-tab-target="dhcp-generated-pxe" aria-selected="false">Generated PXE</button>
-      <button class="tab-button" type="button" data-tab-target="dhcp-actual-leases" aria-selected="false">Actual Leases</button>
+      <button class="tab-button active" type="button" role="tab" data-tab-target="dhcp-desired-state" aria-controls="dhcp-desired-state" aria-selected="true">Desired State</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="dhcp-generated-pxe" aria-controls="dhcp-generated-pxe" aria-selected="false">Generated PXE</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="dhcp-actual-leases" aria-controls="dhcp-actual-leases" aria-selected="false">Actual Leases</button>
     </div>
     <div class="tab-panels">
       <div id="dhcp-desired-state" class="tab-panel active" role="tabpanel">

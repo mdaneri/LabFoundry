@@ -1609,6 +1609,7 @@ textarea {
   min-height: 30px;
   padding: 5px 9px;
   background: #ffffff;
+  -webkit-user-select: text;
   user-select: text;
 }
 
@@ -1707,7 +1708,6 @@ textarea {
 }
 
 .fixed-value-field strong {
-  min-height: auto;
   border: 0;
   border-radius: 0;
   padding: 0;
@@ -2900,6 +2900,12 @@ textarea {
   font-size: 13px;
 }
 
+.error-list > [role="listitem"],
+.warning-list > [role="listitem"],
+.validation-list > [role="listitem"] {
+  display: list-item;
+}
+
 .confirm-modal {
   width: min(460px, calc(100vw - 32px));
   border: 0;
@@ -3453,7 +3459,7 @@ textarea {
   .firewall-main-panel,
   .services-workspace,
   .services-workspace > .wide-panel {
-    min-height: auto;
+    min-height: 0;
   }
 
   .firewall-managed-section,

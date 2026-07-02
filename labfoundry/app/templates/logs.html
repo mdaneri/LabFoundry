@@ -13,9 +13,13 @@
 
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="Log sources" data-tab-storage-key="labfoundry:logs:active-tab">
       {% for source in log_sources %}
-        <button class="tab-button {{ 'active' if loop.first else '' }}" type="button" data-tab-target="logs-{{ source.id }}-panel" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ source.label }}</button>
+        {% if loop.first %}
+          <button class="tab-button active" type="button" role="tab" data-tab-target="logs-{{ source.id }}-panel" aria-selected="true">{{ source.label }}</button>
+        {% else %}
+          <button class="tab-button" type="button" role="tab" data-tab-target="logs-{{ source.id }}-panel" aria-selected="false">{{ source.label }}</button>
+        {% endif %}
       {% endfor %}
-      <button class="tab-button" type="button" data-tab-target="logs-audit-panel" aria-selected="false">Audit Events</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="logs-audit-panel" aria-controls="logs-audit-panel" aria-selected="false">Audit Events</button>
     </div>
 
     <div class="tab-panels">

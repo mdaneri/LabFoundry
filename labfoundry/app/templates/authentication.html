@@ -24,7 +24,7 @@
     {% if raw_token %}
       <div class="alert success">
         <strong>Copy this bearer token now.</strong>
-        <textarea readonly rows="5">{{ raw_token }}</textarea>
+        <textarea readonly rows="5" aria-label="Generated bearer token">{{ raw_token }}</textarea>
       </div>
     {% endif %}
     <form class="form-stack" action="/authentication/api-tokens" method="post">

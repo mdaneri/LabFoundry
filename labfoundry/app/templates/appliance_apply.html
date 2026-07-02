@@ -93,6 +93,7 @@
     {% if changed_apply_units %}
       <div class="apply-unit-list">
         {% for unit in changed_apply_units %}
+          {% set unit_checked = selected_apply_unit_ids is not defined or unit.id in selected_apply_unit_ids %}
           <article class="panel apply-unit-card" data-apply-unit-card data-apply-unit-id="{{ unit.id }}" data-apply-unit-label="{{ unit.label }}">
             <div class="apply-unit-head">
               <label class="apply-unit-select">
@@ -101,7 +102,7 @@
                   name="selected_units"
                   value="{{ unit.id }}"
                   data-apply-unit-checkbox
-                  {% if selected_apply_unit_ids is not defined or unit.id in selected_apply_unit_ids %}checked{% endif %}
+                  {{ "checked" if unit_checked else "" }}
                   {{ "disabled" if unit.validation_errors else "" }}
                 >
                 <span>

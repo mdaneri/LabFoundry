@@ -110,10 +110,10 @@
     {% endif %}
 
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="ESXi PXE views" data-tab-storage-key="labfoundry:esxi-pxe:active-tab">
-      <button class="tab-button active" type="button" data-tab-target="esxi-pxe-editor-panel" aria-selected="true">Kickstart Editor</button>
-      <button class="tab-button" type="button" data-tab-target="esxi-pxe-hosts-panel" aria-selected="false">Host References</button>
-      <button class="tab-button" type="button" data-tab-target="esxi-pxe-isos-panel" aria-selected="false">Installer ISOs</button>
-      <button class="tab-button" type="button" data-tab-target="esxi-pxe-preview-panel" aria-selected="false">Preview</button>
+      <button class="tab-button active" type="button" role="tab" data-tab-target="esxi-pxe-editor-panel" aria-controls="esxi-pxe-editor-panel" aria-selected="true">Kickstart Editor</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="esxi-pxe-hosts-panel" aria-controls="esxi-pxe-hosts-panel" aria-selected="false">Host References</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="esxi-pxe-isos-panel" aria-controls="esxi-pxe-isos-panel" aria-selected="false">Installer ISOs</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="esxi-pxe-preview-panel" aria-controls="esxi-pxe-preview-panel" aria-selected="false">Preview</button>
     </div>
 
     <div class="tab-panels">
@@ -152,7 +152,7 @@
                 </label>
                 <div class="form-field">
                   <span class="field-label"><span>Source content</span><button class="help-icon" type="button" data-help="Editable database source of truth. Use &#123;&#123;host.*&#125;&#125;, &#123;&#123;dhcp.*&#125;&#125;, &#123;&#123;pxe.*&#125;&#125;, and &#123;&#123;custom.*&#125;&#125; markers for host-specific rendering; generated PXE files are overwritten later by global appliance apply.">i</button></span>
-                  <textarea class="monospace-textarea kickstart-code-editor" name="content" rows="22" data-codemirror-editor data-codemirror-language="labfoundry-kickstart">{{ esxi_selected_kickstart.content }}</textarea>
+                  <textarea class="monospace-textarea kickstart-code-editor" name="content" rows="22" data-codemirror-editor data-codemirror-language="labfoundry-kickstart" aria-label="Kickstart source content">{{ esxi_selected_kickstart.content }}</textarea>
                 </div>
                 <div class="editor-action-row">
                   <span class="dirty-state-indicator" data-kickstart-dirty-state>Saved</span>
@@ -427,10 +427,10 @@
         <div class="alert warning">Filesystem copy differs from database source. The next ESXi PXE apply will overwrite the filesystem copy from the database.</div>
       {% endif %}
       {% if esxi_selected_validation.errors %}
-        <ul class="error-list">{% for error in esxi_selected_validation.errors %}<li>{{ error }}</li>{% endfor %}</ul>
+        <div class="error-list" role="list">{% for error in esxi_selected_validation.errors %}<div role="listitem">{{ error }}</div>{% endfor %}</div>
       {% endif %}
       {% if esxi_selected_validation.warnings %}
-        <ul class="warning-list">{% for warning in esxi_selected_validation.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>
+        <div class="warning-list" role="list">{% for warning in esxi_selected_validation.warnings %}<div role="listitem">{{ warning }}</div>{% endfor %}</div>
       {% endif %}
       <div class="terminal-note">
         <strong>Redacted Kickstart preview</strong>

@@ -17,10 +17,14 @@
 
     <div class="tab-buttons zone-tabs" role="tablist" aria-label="DNS domains">
       {% for group in dns_record_groups %}
-        <button class="tab-button {{ 'active' if loop.first else '' }}" type="button" data-tab-target="dns-zone-{{ loop.index }}" data-domain="{{ group.domain }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ group.domain }}</button>
+        {% if loop.first %}
+          <button class="tab-button active" type="button" role="tab" data-tab-target="dns-zone-{{ loop.index }}" data-domain="{{ group.domain }}" aria-selected="true">{{ group.domain }}</button>
+        {% else %}
+          <button class="tab-button" type="button" role="tab" data-tab-target="dns-zone-{{ loop.index }}" data-domain="{{ group.domain }}" aria-selected="false">{{ group.domain }}</button>
+        {% endif %}
       {% endfor %}
-      <button class="tab-button" type="button" data-tab-target="dns-reverse-zones" aria-selected="false">Reverse Zones</button>
-      <button class="tab-button" type="button" data-tab-target="dns-zone-new" aria-selected="false">+ Domain</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="dns-reverse-zones" aria-controls="dns-reverse-zones" aria-selected="false">Reverse Zones</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="dns-zone-new" aria-controls="dns-zone-new" aria-selected="false">+ Domain</button>
     </div>
 
     <div class="tab-panels">
@@ -53,21 +57,21 @@
               Use a domain such as <code>{{ group.domain[:-6] }}.internal</code>. VMware Cloud Foundation does not work reliably with <code>.local</code> domains.
               <span class="standards-note">
                 <code>.local</code> is reserved for multicast DNS/link-local naming by
-                <a href="https://datatracker.ietf.org/doc/html/rfc6762" target="_blank" rel="noreferrer">RFC 6762</a>
+                <a href="https://datatracker.ietf.org/doc/html/rfc6762" target="_blank" rel="noopener noreferrer">RFC 6762</a>
                 and appears in the
-                <a href="https://www.iana.org/assignments/special-use-domain-names" target="_blank" rel="noreferrer">IANA Special-Use Domain Names registry</a>
-                created by <a href="https://datatracker.ietf.org/doc/html/rfc6761" target="_blank" rel="noreferrer">RFC 6761</a>.
+                <a href="https://www.iana.org/assignments/special-use-domain-names" target="_blank" rel="noopener noreferrer">IANA Special-Use Domain Names registry</a>
+                created by <a href="https://datatracker.ietf.org/doc/html/rfc6761" target="_blank" rel="noopener noreferrer">RFC 6761</a>.
                 <code>.internal</code> is the
-                <a href="https://www.icann.org/en/announcements/details/icann-seeks-feedback-on-proposed-top-level-domain-string-for-private-use-24-01-2024-en" target="_blank" rel="noreferrer">ICANN/IANA private-use TLD selection</a>
+                <a href="https://www.icann.org/en/announcements/details/icann-seeks-feedback-on-proposed-top-level-domain-string-for-private-use-24-01-2024-en" target="_blank" rel="noopener noreferrer">ICANN/IANA private-use TLD selection</a>
                 for internal networks, not an mDNS name.
               </span>
             </div>
           {% endif %}
 
           <div class="tab-buttons tool-tabs" role="tablist" aria-label="{{ group.domain }} tools">
-            <button class="tab-button active" type="button" data-tab-target="dns-zone-{{ loop.index }}-records" aria-selected="true">Records</button>
-            <button class="tab-button" type="button" data-tab-target="dns-zone-{{ loop.index }}-hosts" aria-selected="false">Import Hosts</button>
-            <button class="tab-button" type="button" data-tab-target="dns-zone-{{ loop.index }}-file" aria-selected="false">Import Zone File</button>
+            <button class="tab-button active" type="button" role="tab" data-tab-target="dns-zone-{{ loop.index }}-records" aria-selected="true">Records</button>
+            <button class="tab-button" type="button" role="tab" data-tab-target="dns-zone-{{ loop.index }}-hosts" aria-selected="false">Import Hosts</button>
+            <button class="tab-button" type="button" role="tab" data-tab-target="dns-zone-{{ loop.index }}-file" aria-selected="false">Import Zone File</button>
           </div>
 
           <div class="tab-panels zone-tool-panels">
@@ -88,15 +92,15 @@
                 <tbody>
                   {% for record in group.records %}
                     <tr>
-                      <td><input class="table-input" name="hostname" value="{{ record.host_label }}" form="dns-record-edit-{{ record.id }}"></td>
+                      <td><input class="table-input" name="hostname" value="{{ record.host_label }}" form="dns-record-edit-{{ record.id }}" aria-label="Host label for {{ record.host_label or record.hostname or 'DNS record' }}"></td>
                       <td>
-                        <select class="table-input short" name="record_type" form="dns-record-edit-{{ record.id }}">
+                        <select class="table-input short" name="record_type" form="dns-record-edit-{{ record.id }}" aria-label="Record type for {{ record.host_label or record.hostname or 'DNS record' }}">
                           <option value="A" {{ "selected" if record.record_type == "A" else "" }}>A (IPv4)</option>
                           <option value="AAAA" {{ "selected" if record.record_type == "AAAA" else "" }}>AAAA (IPv6)</option>
                           <option value="CNAME" {{ "selected" if record.record_type == "CNAME" else "" }}>CNAME (alias)</option>
                         </select>
                       </td>
-                      <td><input class="table-input" name="address" value="{{ record.address }}" form="dns-record-edit-{{ record.id }}"></td>
+                      <td><input class="table-input" name="address" value="{{ record.address }}" form="dns-record-edit-{{ record.id }}" aria-label="Record value for {{ record.host_label or record.hostname or 'DNS record' }}"></td>
                       <td>
                         {% if record.reverse_status == "generated" %}
                           <span class="reverse-status good" title="{{ record.reverse_ptr }}">{{ record.reverse_ptr }}</span>
@@ -110,11 +114,11 @@
                       </td>
                       <td>
                         <label class="inline-check">
-                          <input class="switch-input" type="checkbox" name="enabled" form="dns-record-edit-{{ record.id }}" {{ "checked" if record.enabled else "" }}>
+                          <input class="switch-input" type="checkbox" name="enabled" form="dns-record-edit-{{ record.id }}" aria-label="Enable {{ record.host_label or record.hostname or 'DNS record' }}" {{ "checked" if record.enabled else "" }}>
                           <span class="switch-track" aria-hidden="true"></span>
                         </label>
                       </td>
-                      <td><input class="table-input" name="description" value="{{ record.description or '' }}" form="dns-record-edit-{{ record.id }}"></td>
+                      <td><input class="table-input" name="description" value="{{ record.description or '' }}" form="dns-record-edit-{{ record.id }}" aria-label="Description for {{ record.host_label or record.hostname or 'DNS record' }}"></td>
                       <td class="button-row">
                         <form id="dns-record-edit-{{ record.id }}" action="/dns/records/{{ record.id }}/edit" method="post">
                           <input type="hidden" name="csrf" value="{{ csrf_token }}">

@@ -35,8 +35,8 @@
     </div>
 
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="VCF Offline Depot views" data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab">
-      <button class="tab-button active" type="button" data-tab-target="vcf-depot-profiles-panel" aria-selected="true">Download Profiles</button>
-      <button class="tab-button" type="button" data-tab-target="vcf-depot-preview-panel" aria-selected="false">Preview</button>
+      <button class="tab-button active" type="button" role="tab" data-tab-target="vcf-depot-profiles-panel" aria-controls="vcf-depot-profiles-panel" aria-selected="true">Download Profiles</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="vcf-depot-preview-panel" aria-controls="vcf-depot-preview-panel" aria-selected="false">Preview</button>
     </div>
 
     <div class="tab-panels">
@@ -257,19 +257,19 @@
         <span class="status-pill {{ 'good' if not vcf_depot_validation_errors else 'warn' }}" data-vcf-depot-validation-status>{{ "valid" if not vcf_depot_validation_errors else "needs attention" }}</span>
       </div>
       {% if vcf_depot_validation_errors %}
-        <ul class="error-list" data-vcf-depot-validation-errors>
+        <div class="error-list" role="list" data-vcf-depot-validation-errors>
           {% for error in vcf_depot_validation_errors %}
-            <li>{{ error }}</li>
+            <div role="listitem">{{ error }}</div>
           {% endfor %}
-        </ul>
+        </div>
       {% else %}
         <p class="muted" data-vcf-depot-validation-message>The desired VCF Offline Depot state passes LabFoundry validation. Appliance validation still runs through the allowlisted depot helper before apply.</p>
       {% endif %}
-      <ul class="warning-list {{ 'hidden' if not vcf_depot_validation_warnings else '' }}" data-vcf-depot-validation-warnings>
+      <div class="warning-list {{ 'hidden' if not vcf_depot_validation_warnings else '' }}" role="list" data-vcf-depot-validation-warnings>
         {% for warning in vcf_depot_validation_warnings %}
-          <li>{{ warning }}</li>
+          <div role="listitem">{{ warning }}</div>
         {% endfor %}
-      </ul>
+      </div>
       <div class="terminal-note">
         <strong data-vcf-depot-config-path>{{ vcf_depot_settings.config_path }}</strong>
         <code data-vcf-depot-https-preview>{{ vcf_depot_https_config_preview }}</code>

@@ -209,19 +209,19 @@
         <span class="status-pill {{ 'good' if not vcf_registry_validation_errors else 'warn' }}" data-vcf-registry-validation-status>{{ "valid" if not vcf_registry_validation_errors else "needs attention" }}</span>
       </div>
       {% if vcf_registry_validation_errors %}
-        <ul class="error-list" data-vcf-registry-validation-errors>
+        <div class="error-list" role="list" data-vcf-registry-validation-errors>
           {% for error in vcf_registry_validation_errors %}
-            <li>{{ error }}</li>
+            <div role="listitem">{{ error }}</div>
           {% endfor %}
-        </ul>
+        </div>
       {% else %}
         <p class="muted" data-vcf-registry-validation-message>The desired VCF private registry state passes LabFoundry validation. Appliance validation still runs through the allowlisted Harbor helper before apply.</p>
       {% endif %}
-      <ul class="warning-list {{ 'hidden' if not vcf_registry_validation_warnings else '' }}" data-vcf-registry-validation-warnings>
+      <div class="warning-list {{ 'hidden' if not vcf_registry_validation_warnings else '' }}" role="list" data-vcf-registry-validation-warnings>
         {% for warning in vcf_registry_validation_warnings %}
-          <li>{{ warning }}</li>
+          <div role="listitem">{{ warning }}</div>
         {% endfor %}
-      </ul>
+      </div>
       <div class="terminal-note">
         <strong data-vcf-registry-config-path>{{ vcf_registry_settings.config_path }}</strong>
         <code data-vcf-registry-harbor-preview>{{ vcf_registry_harbor_config_preview }}</code>
