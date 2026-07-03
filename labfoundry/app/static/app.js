@@ -7419,6 +7419,10 @@ function initializeVcfDepotPropertiesEditor() {
     button.addEventListener("click", () => {
       if (modal instanceof HTMLDialogElement) {
         modal.showModal();
+        const textarea = modal.querySelector("[data-vcf-depot-properties-textarea]");
+        if (window.LabFoundryCodeMirror && typeof window.LabFoundryCodeMirror.focus === "function" && textarea instanceof HTMLTextAreaElement) {
+          window.LabFoundryCodeMirror.focus(textarea);
+        }
       }
     });
   });

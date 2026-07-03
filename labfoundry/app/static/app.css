@@ -2961,6 +2961,29 @@ textarea {
   white-space: pre;
 }
 
+#vcf-depot-properties-modal .confirm-modal-panel {
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+#vcf-depot-properties-modal .confirm-modal-body {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.code-editor-textarea + .cm-editor {
+  height: min(520px, 52vh);
+  max-height: min(520px, 52vh);
+}
+
+.code-editor-textarea + .cm-editor .cm-scroller {
+  overflow: auto;
+}
+
+.code-editor-textarea + .cm-editor .cm-content {
+  min-height: 100%;
+}
+
 .preview-modal {
   width: min(1040px, calc(100vw - 32px));
   max-height: min(840px, calc(100vh - 32px));

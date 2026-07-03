@@ -73,7 +73,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v10" in service_worker.text
+    assert "labfoundry-pwa-v12" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-depot-controls-20260703-1" in offline.text
+    assert "/static/app.css?v=vcf-depot-codemirror-20260703-2" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -4090,6 +4090,9 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert ".readonly-inline-value" in app_css.text
     assert ".icon-button" in app_css.text
     assert ".code-editor-textarea" in app_css.text
+    assert ".code-editor-textarea + .cm-editor" in app_css.text
+    assert "#vcf-depot-properties-modal .confirm-modal-panel" in app_css.text
+    assert 'data-codemirror-editor data-codemirror-language="labfoundry-hosts" data-vcf-depot-properties-textarea' in page.text
 
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     make_vcfdt_archive(archive_path)
@@ -5506,8 +5509,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "dhcp-lease-row-menu-20260702-1" in page.text
-    assert "vcf-depot-controls-20260703-1" in page.text
+    assert "vcf-depot-codemirror-20260703-2" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
