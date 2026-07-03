@@ -63,7 +63,7 @@ def test_vcf_depot_application_properties_prefers_uploaded_tool_archive(tmp_path
 
     content, source = vcf_depot_application_properties_from_tool(settings)
 
-    assert source == "uploaded tool"
+    assert source == "VCFDT default"
     assert "archive.example.test" in content
 
 

@@ -176,14 +176,14 @@ def vcf_depot_application_properties_from_tool(settings: VcfOfflineDepotSettings
     if settings.tool_archive_path:
         archive_text = _read_properties_from_archive(settings.tool_archive_path)
         if archive_text:
-            return archive_text, "uploaded tool"
+            return archive_text, "VCFDT default"
         for candidate in [
             VCF_DEPOT_EXTRACT_DIR / "conf" / VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
             VCF_DEPOT_EXTRACT_DIR / VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
         ]:
             if candidate.is_file():
                 try:
-                    return candidate.read_text(encoding="utf-8"), "uploaded tool"
+                    return candidate.read_text(encoding="utf-8"), "VCFDT default"
                 except OSError:
                     pass
     return default_vcf_depot_application_properties(), "LabFoundry default"

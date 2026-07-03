@@ -73,7 +73,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v12" in service_worker.text
+    assert "labfoundry-pwa-v13" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-depot-codemirror-20260703-2" in offline.text
+    assert "/static/app.css?v=vcf-depot-config-copy-20260703-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -3977,7 +3977,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "VCF Download Tool" in page.text
     assert "Choose VCFDT tool" in page.text
     assert "Stage download token" in page.text
-    assert "Stage token" in page.text
+    assert ">Token</button>" in page.text
     assert 'data-vcf-depot-token-modal-open data-vcf-depot-requires-tool disabled' in page.text
     assert "Choose a token file or paste token text." in page.text
     assert 'action="/vcf-offline-depot/download-token"' in page.text
@@ -3986,15 +3986,18 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert 'name="download_token_file"' in page.text
     assert 'name="download_token_text"' in page.text
     assert "Stage activation code" in page.text
-    assert "Stage code" in page.text
+    assert ">Code</button>" in page.text
     assert 'action="/vcf-offline-depot/activation-code"' in page.text
     assert "vcf-depot-activation-modal" in page.text
     assert 'data-vcf-depot-activation-modal-open' in page.text
     assert 'name="activation_code_file"' in page.text
     assert 'name="activation_code_text"' in page.text
     assert "Edit application-prodv2.properties" in page.text
+    assert ">Edit</button>" in page.text
+    assert 'data-vcf-depot-properties-modal-open data-vcf-depot-requires-tool disabled' in page.text
     assert 'action="/vcf-offline-depot/application-properties"' in page.text
     assert 'name="application_properties"' in page.text
+    assert "Save configuration" in page.text
     assert "lcm.depot.adapter.host=dl.broadcom.com" in page.text
     assert "/vcf-offline-depot/profiles/" in page.text
     assert "Start" in page.text
@@ -4126,7 +4129,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "vcf-download-tool executable" in payload["software_depot_id_error"]
     assert payload["download_token_present"] is True
     assert payload["application_properties_present"] is True
-    assert payload["application_properties_source"] == "uploaded tool"
+    assert payload["application_properties_source"] == "VCFDT default"
     assert payload["valid"] is True
     assert payload["dns_record_action"] == "created"
     assert "listen 192.168.50.1:443 ssl;" in payload["https_config_preview"]
@@ -5509,7 +5512,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "vcf-depot-codemirror-20260703-2" in page.text
+    assert "vcf-depot-config-copy-20260703-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
