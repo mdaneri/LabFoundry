@@ -2807,116 +2807,255 @@ def desired_dns_records_for_listen_addresses(raw_addresses: str | None) -> dict[
     return desired
 
 
-def ensure_dns_for_vcf_registry(db: Session, settings: VcfPrivateRegistrySettings, actor: str) -> str | None:
-    hostname = normalize_dns_hostname(settings.hostname)
-    desired_records = desired_dns_records_for_listen_addresses(settings.listen_address)
-    if not hostname or not desired_records:
-        return None
-    settings.hostname = hostname
-    actions: list[str] = []
-    for record_type, address in desired_records.items():
-        if validate_dns_record(hostname, record_type, address):
+VCF_DEPOT_DNS_DESCRIPTION = "Created from VCF Offline Depot endpoint."
+VCF_REGISTRY_DNS_DESCRIPTION = "Created from VCF private registry endpoint."
+
+
+def service_interface_hostname(hostname: str, interface_name: str) -> str:
+    normalized = normalize_dns_hostname(hostname)
+    if "." not in normalized:
+        return normalized
+    label, domain = normalized.split(".", 1)
+    safe_interface = re.sub(r"[^a-z0-9]+", "-", interface_name.strip().lower()).strip("-")
+    safe_interface = safe_interface or "interface"
+    return f"{label}-{safe_interface}.{domain}"
+
+
+def service_interface_dns_targets(
+    db: Session,
+    *,
+    hostname: str,
+    listen_interface: str,
+    listen_address: str | None,
+    bind_options: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    selected_addresses = split_addresses(listen_address)
+    if not selected_addresses:
+        return []
+    selected_address_set = set(selected_addresses)
+    options_by_name = {option["name"]: option for option in (bind_options if bind_options is not None else service_bind_options(db))}
+    targets: list[dict[str, str]] = []
+    consumed: set[str] = set()
+    for interface_name in split_interfaces(listen_interface):
+        option = options_by_name.get(interface_name)
+        if not option:
             continue
-        existing = db.execute(
-            select(DnsRecord).where(
-                DnsRecord.hostname == hostname,
-                DnsRecord.record_type == record_type,
+        interface_addresses = [address for address in (option or {}).get("addresses", []) if address in selected_address_set]
+        target_hostname = service_interface_hostname(hostname, interface_name)
+        for address in interface_addresses:
+            try:
+                parsed_address = ip_address(address)
+            except ValueError:
+                continue
+            consumed.add(address)
+            targets.append(
+                {
+                    "hostname": target_hostname,
+                    "interface": interface_name,
+                    "record_type": "AAAA" if parsed_address.version == 6 else "A",
+                    "address": str(parsed_address),
+                }
             )
-        ).scalar_one_or_none()
+    return targets
+
+
+def summarize_dns_actions(actions: list[str]) -> str | None:
+    if not actions:
+        return None
+    if "conflict" in actions:
+        return "conflict"
+    primary = "unchanged"
+    for candidate in ["created", "updated"]:
+        if candidate in actions:
+            primary = candidate
+            break
+    if any(action in {"removed-old", "removed-stale"} for action in actions):
+        return f"{primary}+removed-old" if primary != "unchanged" else "removed-old"
+    return primary
+
+
+def ensure_interface_dns_alias(
+    db: Session,
+    *,
+    hostname: str,
+    listen_interface: str,
+    listen_address: str | None,
+    description: str,
+    actor: str | None,
+    audit_prefix: str,
+    previous_hostname: str | None = None,
+    enabled: bool = True,
+    bind_options: list[dict[str, Any]] | None = None,
+) -> str | None:
+    normalized_hostname = normalize_dns_hostname(hostname)
+    if not enabled:
+        return remove_interface_dns_alias(db, hostname=previous_hostname or normalized_hostname, description=description, actor=actor, audit_prefix=audit_prefix)
+    targets = service_interface_dns_targets(db, hostname=normalized_hostname, listen_interface=listen_interface, listen_address=listen_address, bind_options=bind_options)
+    if not normalized_hostname or not targets:
+        return None
+    actions: list[str] = []
+    target_hostnames = {target["hostname"] for target in targets}
+    desired_keys = {(target["hostname"], target["record_type"], target["address"]) for target in targets}
+    canonical_target = targets[0]["hostname"]
+    label_prefix = f"{normalized_hostname.split('.', 1)[0]}-"
+
+    canonical_records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == normalized_hostname,
+            DnsRecord.record_type.in_(["A", "AAAA", "CNAME"]),
+        )
+    ).scalars().all()
+    canonical_conflict = any(record.description != description for record in canonical_records)
+    if canonical_conflict:
+        actions.append("conflict")
+
+    owned_records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.description == description,
+            DnsRecord.record_type.in_(["A", "AAAA", "CNAME"]),
+        )
+    ).scalars().all()
+    for record in owned_records:
+        if record.hostname == normalized_hostname and record.record_type in {"A", "AAAA"}:
+            db.delete(record)
+            actions.append("removed-old")
+            if actor:
+                record_audit(db, actor=actor, action=f"delete_dns_record_from_{audit_prefix}_cname", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type}")
+            continue
+        if record.hostname.startswith(label_prefix) and record.hostname not in target_hostnames:
+            db.delete(record)
+            actions.append("removed-old")
+            if actor:
+                record_audit(db, actor=actor, action=f"delete_dns_record_from_{audit_prefix}_stale_interface", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type}")
+            continue
+        if record.hostname in target_hostnames and record.record_type in {"A", "AAAA"} and (record.hostname, record.record_type, record.address) not in desired_keys:
+            db.delete(record)
+            actions.append("removed-stale")
+            if actor:
+                record_audit(db, actor=actor, action=f"delete_dns_record_from_{audit_prefix}_stale_address", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type} -> {record.address}")
+
+    if not canonical_conflict and not validate_dns_record(normalized_hostname, "CNAME", canonical_target):
+        existing_cname = next((record for record in canonical_records if record.record_type == "CNAME"), None)
+        if existing_cname:
+            if existing_cname.address == canonical_target and existing_cname.enabled:
+                actions.append("unchanged")
+            else:
+                existing_cname.address = canonical_target
+                existing_cname.enabled = True
+                existing_cname.description = description
+                db.flush()
+                actions.append("updated")
+                if actor:
+                    record_audit(db, actor=actor, action=f"update_dns_record_from_{audit_prefix}_cname", resource_type="dns_record", resource_id=str(existing_cname.id), detail=f"{normalized_hostname} CNAME -> {canonical_target}")
+        else:
+            record = DnsRecord(hostname=normalized_hostname, record_type="CNAME", address=canonical_target, description=description, enabled=True)
+            db.add(record)
+            db.flush()
+            actions.append("created")
+            if actor:
+                record_audit(db, actor=actor, action=f"create_dns_record_from_{audit_prefix}_cname", resource_type="dns_record", resource_id=str(record.id), detail=f"{normalized_hostname} CNAME -> {canonical_target}")
+
+    for target in targets:
+        record_type = target["record_type"]
+        address = target["address"]
+        target_hostname = target["hostname"]
+        if validate_dns_record(target_hostname, record_type, address):
+            continue
+        existing = db.execute(select(DnsRecord).where(DnsRecord.hostname == target_hostname, DnsRecord.record_type == record_type)).scalar_one_or_none()
+        if existing and existing.description != description:
+            actions.append("conflict")
+            continue
         if existing:
             if existing.address == address and existing.enabled:
                 actions.append("unchanged")
                 continue
             existing.address = address
             existing.enabled = True
-            if not existing.description:
-                existing.description = "Created from VCF private registry endpoint."
+            existing.description = description
             db.flush()
-            record_audit(
-                db,
-                actor=actor,
-                action="update_dns_record_from_vcf_registry",
-                resource_type="dns_record",
-                resource_id=str(existing.id),
-                detail=f"{hostname} {record_type} -> {address}",
-            )
             actions.append("updated")
+            if actor:
+                record_audit(db, actor=actor, action=f"update_dns_record_from_{audit_prefix}", resource_type="dns_record", resource_id=str(existing.id), detail=f"{target_hostname} {record_type} -> {address}")
             continue
-        record = DnsRecord(
-            hostname=hostname,
-            record_type=record_type,
-            address=address,
-            description="Created from VCF private registry endpoint.",
-            enabled=True,
-        )
+        record = DnsRecord(hostname=target_hostname, record_type=record_type, address=address, description=description, enabled=True)
         db.add(record)
         db.flush()
-        record_audit(
-            db,
-            actor=actor,
-            action="create_dns_record_from_vcf_registry",
-            resource_type="dns_record",
-            resource_id=str(record.id),
-            detail=f"{hostname} {record_type} -> {address}",
-        )
         actions.append("created")
-    return "+".join(actions) if actions else None
+        if actor:
+            record_audit(db, actor=actor, action=f"create_dns_record_from_{audit_prefix}", resource_type="dns_record", resource_id=str(record.id), detail=f"{target_hostname} {record_type} -> {address}")
+
+    previous = normalize_dns_hostname(previous_hostname or "")
+    if previous and previous != normalized_hostname:
+        removed = remove_interface_dns_alias(db, hostname=previous, description=description, actor=actor, audit_prefix=audit_prefix)
+        if removed:
+            actions.append("removed-old")
+    if actions:
+        db.flush()
+    return summarize_dns_actions(actions)
 
 
-def ensure_dns_for_vcf_offline_depot(db: Session, settings: VcfOfflineDepotSettings, actor: str) -> str | None:
+def remove_interface_dns_alias(
+    db: Session,
+    *,
+    hostname: str,
+    description: str,
+    actor: str | None,
+    audit_prefix: str,
+) -> str | None:
+    normalized_hostname = normalize_dns_hostname(hostname)
+    if not normalized_hostname:
+        return None
+    label_prefix = f"{normalized_hostname.split('.', 1)[0]}-"
+    records = db.execute(select(DnsRecord).where(DnsRecord.description == description, DnsRecord.record_type.in_(["A", "AAAA", "CNAME"]))).scalars().all()
+    removed = 0
+    for record in records:
+        if record.hostname != normalized_hostname and not record.hostname.startswith(label_prefix):
+            continue
+        db.delete(record)
+        removed += 1
+        if actor:
+            record_audit(db, actor=actor, action=f"delete_dns_record_from_{audit_prefix}", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type}")
+    if removed:
+        db.flush()
+        return "removed-old"
+    return None
+
+
+def ensure_dns_for_vcf_registry(db: Session, settings: VcfPrivateRegistrySettings, actor: str, *, previous_hostname: str | None = None) -> str | None:
     hostname = normalize_dns_hostname(settings.hostname)
-    desired_records = desired_dns_records_for_listen_addresses(settings.listen_address)
-    if not hostname or not desired_records:
+    if not hostname:
         return None
     settings.hostname = hostname
-    actions: list[str] = []
-    for record_type, address in desired_records.items():
-        if validate_dns_record(hostname, record_type, address):
-            continue
-        existing = db.execute(
-            select(DnsRecord).where(
-                DnsRecord.hostname == hostname,
-                DnsRecord.record_type == record_type,
-            )
-        ).scalar_one_or_none()
-        if existing:
-            if existing.address == address and existing.enabled:
-                actions.append("unchanged")
-                continue
-            existing.address = address
-            existing.enabled = True
-            if not existing.description:
-                existing.description = "Created from VCF Offline Depot endpoint."
-            db.flush()
-            record_audit(
-                db,
-                actor=actor,
-                action="update_dns_record_from_vcf_offline_depot",
-                resource_type="dns_record",
-                resource_id=str(existing.id),
-                detail=f"{hostname} {record_type} -> {address}",
-            )
-            actions.append("updated")
-            continue
-        record = DnsRecord(
-            hostname=hostname,
-            record_type=record_type,
-            address=address,
-            description="Created from VCF Offline Depot endpoint.",
-            enabled=True,
-        )
-        db.add(record)
-        db.flush()
-        record_audit(
-            db,
-            actor=actor,
-            action="create_dns_record_from_vcf_offline_depot",
-            resource_type="dns_record",
-            resource_id=str(record.id),
-            detail=f"{hostname} {record_type} -> {address}",
-        )
-        actions.append("created")
-    return "+".join(actions) if actions else None
+    return ensure_interface_dns_alias(
+        db,
+        hostname=hostname,
+        listen_interface=settings.listen_interface,
+        listen_address=settings.listen_address,
+        description=VCF_REGISTRY_DNS_DESCRIPTION,
+        actor=actor,
+        audit_prefix="vcf_registry",
+        previous_hostname=previous_hostname,
+        enabled=settings.enabled,
+    )
+
+
+def ensure_dns_for_vcf_offline_depot(db: Session, settings: VcfOfflineDepotSettings, actor: str, *, previous_hostname: str | None = None) -> str | None:
+    hostname = normalize_dns_hostname(settings.hostname)
+    if not hostname:
+        return None
+    settings.hostname = hostname
+    return ensure_interface_dns_alias(
+        db,
+        hostname=hostname,
+        listen_interface=settings.listen_interface,
+        listen_address=settings.listen_address,
+        description=VCF_DEPOT_DNS_DESCRIPTION,
+        actor=actor,
+        audit_prefix="vcf_offline_depot",
+        previous_hostname=previous_hostname,
+        enabled=settings.enabled,
+        bind_options=vcf_depot_service_bind_options(db),
+    )
 
 
 def kms_dns_record_conflict(db: Session, hostname: str) -> bool:
@@ -2926,7 +3065,7 @@ def kms_dns_record_conflict(db: Session, hostname: str) -> bool:
     records = db.execute(
         select(DnsRecord).where(
             DnsRecord.hostname == normalized,
-            DnsRecord.record_type.in_(["A", "AAAA"]),
+            DnsRecord.record_type.in_(["A", "AAAA", "CNAME"]),
         )
     ).scalars().all()
     return any(record.description != KMS_DNS_RECORD_DESCRIPTION for record in records)
@@ -2934,138 +3073,30 @@ def kms_dns_record_conflict(db: Session, hostname: str) -> bool:
 
 def ensure_dns_for_kms(db: Session, settings: KmsSettings, actor: str | None, *, previous_hostname: str | None = None) -> str | None:
     hostname = normalize_dns_hostname(settings.hostname)
-    desired_records = desired_dns_records_for_listen_addresses(settings.listen_address)
-    if not hostname or not desired_records:
+    if not hostname:
         return None
     settings.hostname = hostname
-    actions: list[str] = []
-    for record_type, address in desired_records.items():
-        if validate_dns_record(hostname, record_type, address):
-            continue
-        existing = db.execute(
-            select(DnsRecord).where(
-                DnsRecord.hostname == hostname,
-                DnsRecord.record_type == record_type,
-            )
-        ).scalar_one_or_none()
-        if existing and existing.description != KMS_DNS_RECORD_DESCRIPTION:
-            actions.append("conflict")
-        elif existing:
-            if existing.address != address or not existing.enabled:
-                existing.address = address
-                existing.enabled = True
-                existing.description = KMS_DNS_RECORD_DESCRIPTION
-                db.flush()
-                if actor:
-                    record_audit(
-                        db,
-                        actor=actor,
-                        action="update_dns_record_from_kms",
-                        resource_type="dns_record",
-                        resource_id=str(existing.id),
-                        detail=f"{hostname} {record_type} -> {address}",
-                    )
-                actions.append("updated")
-            else:
-                actions.append("unchanged")
-        else:
-            record = DnsRecord(
-                hostname=hostname,
-                record_type=record_type,
-                address=address,
-                description=KMS_DNS_RECORD_DESCRIPTION,
-                enabled=True,
-            )
-            db.add(record)
-            db.flush()
-            if actor:
-                record_audit(
-                    db,
-                    actor=actor,
-                    action="create_dns_record_from_kms",
-                    resource_type="dns_record",
-                    resource_id=str(record.id),
-                    detail=f"{hostname} {record_type} -> {address}",
-                )
-            actions.append("created")
-
-    stale_records = db.execute(
-        select(DnsRecord).where(
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type.in_(["A", "AAAA"]),
-            DnsRecord.record_type.notin_(list(desired_records)),
-        )
-    ).scalars().all()
-    for record in stale_records:
-        if record.description != KMS_DNS_RECORD_DESCRIPTION:
-            continue
-        db.delete(record)
-        if actor:
-            record_audit(
-                db,
-                actor=actor,
-                action="delete_dns_record_from_kms_ip_family_change",
-                resource_type="dns_record",
-                resource_id=str(record.id),
-                detail=f"{record.hostname} {record.record_type}",
-            )
-        actions.append("removed-stale")
-
-    previous = normalize_dns_hostname(previous_hostname or "")
-    if previous and previous != hostname:
-        old_records = db.execute(
-            select(DnsRecord).where(
-                DnsRecord.hostname == previous,
-                DnsRecord.record_type.in_(["A", "AAAA"]),
-            )
-        ).scalars().all()
-        for record in old_records:
-            if record.description != KMS_DNS_RECORD_DESCRIPTION:
-                continue
-            db.delete(record)
-            if actor:
-                record_audit(
-                    db,
-                    actor=actor,
-                    action="delete_dns_record_from_kms_rename",
-                    resource_type="dns_record",
-                    resource_id=str(record.id),
-                    detail=f"{record.hostname} {record.record_type}",
-                )
-            actions.append("removed-old")
-    if actions:
-        db.flush()
-    return "+".join(actions) if actions else None
+    return ensure_interface_dns_alias(
+        db,
+        hostname=hostname,
+        listen_interface=settings.listen_interface,
+        listen_address=settings.listen_address,
+        description=KMS_DNS_RECORD_DESCRIPTION,
+        actor=actor,
+        audit_prefix="kms",
+        previous_hostname=previous_hostname,
+        enabled=settings.enabled,
+    )
 
 
 def remove_dns_for_vcf_offline_depot_hostname(db: Session, hostname: str, actor: str) -> str | None:
-    normalized_hostname = normalize_dns_hostname(hostname)
-    if not normalized_hostname:
-        return None
-    records = db.execute(
-        select(DnsRecord).where(
-            DnsRecord.hostname == normalized_hostname,
-            DnsRecord.record_type.in_(["A", "AAAA"]),
-        )
-    ).scalars().all()
-    removed = 0
-    for record in records:
-        if record.description and "VCF Offline Depot endpoint" not in record.description:
-            continue
-        db.delete(record)
-        removed += 1
-        record_audit(
-            db,
-            actor=actor,
-            action="delete_dns_record_from_vcf_offline_depot_rename",
-            resource_type="dns_record",
-            resource_id=str(record.id),
-            detail=f"{record.hostname} {record.record_type}",
-        )
-    if removed:
-        db.flush()
-        return "removed-old"
-    return None
+    return remove_interface_dns_alias(
+        db,
+        hostname=hostname,
+        description=VCF_DEPOT_DNS_DESCRIPTION,
+        actor=actor,
+        audit_prefix="vcf_offline_depot",
+    )
 
 
 def esxi_pxe_dns_record_conflict(db: Session, hostname: str) -> bool:
@@ -3075,94 +3106,56 @@ def esxi_pxe_dns_record_conflict(db: Session, hostname: str) -> bool:
     records = db.execute(
         select(DnsRecord).where(
             DnsRecord.hostname == normalized,
-            DnsRecord.record_type.in_(["A", "AAAA"]),
+            DnsRecord.record_type.in_(["A", "AAAA", "CNAME"]),
         )
     ).scalars().all()
     return any(record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION for record in records)
 
 
 def remove_dns_for_esxi_pxe_hostname(db: Session, hostname: str, actor: str | None) -> str | None:
-    normalized_hostname = normalize_dns_hostname(hostname)
-    if not normalized_hostname:
-        return None
-    records = db.execute(
-        select(DnsRecord).where(
-            DnsRecord.hostname == normalized_hostname,
-            DnsRecord.record_type.in_(["A", "AAAA"]),
-        )
-    ).scalars().all()
-    removed = 0
-    for record in records:
-        if record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
-            continue
-        db.delete(record)
-        removed += 1
-        if actor:
-            record_audit(db, actor=actor, action="delete_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type}")
-    if removed:
-        db.flush()
-        return "removed"
-    return None
+    return remove_interface_dns_alias(
+        db,
+        hostname=hostname,
+        description=ESXI_PXE_DNS_RECORD_DESCRIPTION,
+        actor=actor,
+        audit_prefix="esxi_pxe",
+    )
 
 
 def ensure_dns_for_esxi_pxe(db: Session, boot: dict[str, Any], actor: str | None, *, previous_hostname: str | None = None) -> str | None:
     hostname = normalize_dns_hostname(str(boot.get("hostname") or ESXI_PXE_DEFAULT_HOSTNAME))
-    desired_records = desired_dns_records_for_listen_addresses(str(boot.get("listen_address") or ""))
     if not bool(boot.get("enabled")):
         return remove_dns_for_esxi_pxe_hostname(db, previous_hostname or hostname, actor)
-    if not hostname or not desired_records:
+    if not hostname:
         return None
-    actions: list[str] = []
-    for record_type, address in desired_records.items():
-        if validate_dns_record(hostname, record_type, address):
-            continue
-        existing = db.execute(
-            select(DnsRecord).where(
-                DnsRecord.hostname == hostname,
-                DnsRecord.record_type == record_type,
-            )
-        ).scalar_one_or_none()
-        if existing and existing.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
-            actions.append("conflict")
-        elif existing:
-            if existing.address != address or not existing.enabled:
-                existing.address = address
-                existing.enabled = True
-                existing.description = ESXI_PXE_DNS_RECORD_DESCRIPTION
-                db.flush()
-                if actor:
-                    record_audit(db, actor=actor, action="update_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(existing.id), detail=f"{hostname} {record_type} -> {address}")
-                actions.append("updated")
-            else:
-                actions.append("unchanged")
-        else:
-            record = DnsRecord(hostname=hostname, record_type=record_type, address=address, description=ESXI_PXE_DNS_RECORD_DESCRIPTION, enabled=True)
-            db.add(record)
-            db.flush()
-            if actor:
-                record_audit(db, actor=actor, action="create_dns_record_from_esxi_pxe", resource_type="dns_record", resource_id=str(record.id), detail=f"{hostname} {record_type} -> {address}")
-            actions.append("created")
-    for record in db.execute(
-        select(DnsRecord).where(
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type.in_(["A", "AAAA"]),
-            DnsRecord.record_type.notin_(list(desired_records)),
-        )
-    ).scalars().all():
-        if record.description != ESXI_PXE_DNS_RECORD_DESCRIPTION:
-            continue
-        db.delete(record)
-        if actor:
-            record_audit(db, actor=actor, action="delete_dns_record_from_esxi_pxe_ip_family_change", resource_type="dns_record", resource_id=str(record.id), detail=f"{record.hostname} {record.record_type}")
-        actions.append("removed-stale")
-    previous = normalize_dns_hostname(previous_hostname or "")
-    if previous and previous != hostname:
-        removed = remove_dns_for_esxi_pxe_hostname(db, previous, actor)
-        if removed:
-            actions.append("removed-old")
-    if actions:
-        db.flush()
-    return "+".join(actions) if actions else None
+    return ensure_interface_dns_alias(
+        db,
+        hostname=hostname,
+        listen_interface=str(boot.get("listen_interface") or ""),
+        listen_address=str(boot.get("listen_address") or ""),
+        description=ESXI_PXE_DNS_RECORD_DESCRIPTION,
+        actor=actor,
+        audit_prefix="esxi_pxe",
+        previous_hostname=previous_hostname,
+        enabled=bool(boot.get("enabled")),
+    )
+
+
+def reconcile_service_dns_aliases(db: Session, actor: str | None = None) -> list[str]:
+    changed: list[str] = []
+    kms_settings = db.execute(select(KmsSettings)).scalar_one_or_none()
+    if kms_settings and ensure_dns_for_kms(db, kms_settings, actor=actor, previous_hostname=kms_settings.hostname):
+        changed.append("KMS")
+    depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one_or_none()
+    if depot_settings and ensure_dns_for_vcf_offline_depot(db, depot_settings, actor=actor or "system", previous_hostname=depot_settings.hostname):
+        changed.append("VCF Offline Depot")
+    registry_settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one_or_none()
+    if registry_settings and ensure_dns_for_vcf_registry(db, registry_settings, actor=actor or "system", previous_hostname=registry_settings.hostname):
+        changed.append("VCF Private Registry")
+    esxi_action = ensure_dns_for_esxi_pxe(db, esxi_pxe_boot_settings(db), actor, previous_hostname=str(esxi_pxe_boot_settings(db).get("hostname") or ""))
+    if esxi_action:
+        changed.append("ESXi PXE")
+    return changed
 
 
 def available_dns_listen_addresses(
@@ -6182,9 +6175,23 @@ def forget_missing_physical_interface_from_ui(
     for vlan in disabled_vlans:
         db.delete(vlan)
     old_name = interface.name
+    dependent_updates = refresh_interface_dependent_addresses(
+        db,
+        old_name=old_name,
+        new_name="",
+        old_ip_cidr=interface.ip_cidr,
+        old_ipv6_cidr=interface.ipv6_cidr,
+        actor=identity.username,
+    )
     db.delete(interface)
+    dns_updates = reconcile_service_dns_aliases(db, actor=identity.username)
     db.commit()
-    detail = f"Forgot missing interface {old_name}; removed {len(disabled_vlans)} disabled dependent VLAN row{'s' if len(disabled_vlans) != 1 else ''}."
+    details = [f"Forgot missing interface {old_name}; removed {len(disabled_vlans)} disabled dependent VLAN row{'s' if len(disabled_vlans) != 1 else ''}."]
+    if dependent_updates:
+        details.append(f"Refreshed dependent desired-state addresses: {', '.join(dependent_updates)}.")
+    if dns_updates:
+        details.append(f"Reconciled service DNS aliases: {', '.join(dns_updates)}.")
+    detail = " ".join(details)
     record_audit(db, actor=identity.username, action="forget_missing_physical_interface", resource_type="interface", resource_id=old_name, detail=detail)
     return RedirectResponse("/physical-interfaces", status_code=303)
 
@@ -6313,9 +6320,24 @@ def delete_vlan_interface_from_ui(
     vlan = db.get(VlanInterface, vlan_id)
     if not vlan:
         raise HTTPException(status_code=404, detail="VLAN interface not found")
+    old_name = vlan.name
+    dependent_updates = refresh_interface_dependent_addresses(
+        db,
+        old_name=old_name,
+        new_name="",
+        old_ip_cidr=vlan.ip_cidr,
+        old_ipv6_cidr=vlan.ipv6_cidr,
+        actor=identity.username,
+    )
     db.delete(vlan)
+    dns_updates = reconcile_service_dns_aliases(db, actor=identity.username)
     db.commit()
-    record_audit(db, actor=identity.username, action="delete_vlan_interface", resource_type="vlan", resource_id=str(vlan_id))
+    details: list[str] = []
+    if dependent_updates:
+        details.append(f"Refreshed dependent desired-state addresses: {', '.join(dependent_updates)}.")
+    if dns_updates:
+        details.append(f"Reconciled service DNS aliases: {', '.join(dns_updates)}.")
+    record_audit(db, actor=identity.username, action="delete_vlan_interface", resource_type="vlan", resource_id=str(vlan_id), detail=" ".join(details))
     return RedirectResponse("/vlan-interfaces", status_code=303)
 
 
@@ -8070,12 +8092,7 @@ def update_vcf_offline_depot_settings_from_ui(
         action="upload_vcf_depot_activation_code",
     )
     settings.updated_at = utcnow()
-    dns_record_action = ensure_dns_for_vcf_offline_depot(db, settings, identity.username)
-    old_dns_record_action = None
-    if normalize_dns_hostname(previous_hostname) != normalize_dns_hostname(settings.hostname):
-        old_dns_record_action = remove_dns_for_vcf_offline_depot_hostname(db, previous_hostname, identity.username)
-    dns_actions = [action for action in [dns_record_action, old_dns_record_action] if action]
-    dns_record_action = "+".join(dns_actions) if dns_actions else None
+    dns_record_action = ensure_dns_for_vcf_offline_depot(db, settings, identity.username, previous_hostname=previous_hostname)
     db.commit()
     if uploaded_token_name or uploaded_activation_name:
         stage_vcf_depot_runtime_secrets_after_upload(db)
@@ -8580,6 +8597,7 @@ def update_vcf_private_registry_settings_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_vcf_private_registry_settings_row(db)
+    previous_hostname = settings.hostname
     selected_interfaces, selected_addresses = resolve_service_bind_targets(
         db,
         [*listen_interfaces, listen_interface],
@@ -8604,7 +8622,7 @@ def update_vcf_private_registry_settings_from_ui(
     settings.robot_account = robot_account.strip() or f"robot${settings.harbor_project}"
     settings.relocation_dry_run = relocation_dry_run == "on"
     settings.updated_at = utcnow()
-    dns_record_action = ensure_dns_for_vcf_registry(db, settings, identity.username)
+    dns_record_action = ensure_dns_for_vcf_registry(db, settings, identity.username, previous_hostname=previous_hostname)
     db.commit()
     record_audit(db, actor=identity.username, action="update_vcf_private_registry_settings", resource_type="vcf_private_registry", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave") == "1":

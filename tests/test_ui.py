@@ -230,6 +230,69 @@ def test_forget_missing_physical_interface_deletes_only_stale_rows(client):
         assert db.get(PhysicalInterface, active_id) is not None
 
 
+def test_forget_missing_first_service_interface_moves_dns_alias_to_next_target(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord, PhysicalInterface
+    from labfoundry.app.ui import ensure_dns_for_vcf_registry, get_vcf_private_registry_settings_row
+
+    login(client)
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                PhysicalInterface(
+                    name="eth7",
+                    mac_address="00:50:56:00:00:17",
+                    role="access",
+                    mode="access",
+                    ip_cidr="10.7.0.1/24",
+                    admin_state="up",
+                    oper_state="up",
+                ),
+                PhysicalInterface(
+                    name="eth8",
+                    mac_address="00:50:56:00:00:18",
+                    role="access",
+                    mode="access",
+                    ip_cidr="10.8.0.1/24",
+                    admin_state="up",
+                    oper_state="up",
+                ),
+            ]
+        )
+        settings = get_vcf_private_registry_settings_row(db)
+        settings.enabled = True
+        settings.hostname = "registry.labfoundry.internal"
+        settings.listen_interface = "eth7\neth8"
+        settings.listen_address = "10.7.0.1\n10.8.0.1"
+        ensure_dns_for_vcf_registry(db, settings, "admin")
+        db.commit()
+        eth7_id = db.execute(select(PhysicalInterface.id).where(PhysicalInterface.name == "eth7")).scalar_one()
+        eth7 = db.get(PhysicalInterface, eth7_id)
+        eth7.oper_state = "missing"
+        db.commit()
+
+    page = client.get("/physical-interfaces")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(f"/physical-interfaces/{eth7_id}/forget", data={"csrf": csrf}, follow_redirects=False)
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        settings = get_vcf_private_registry_settings_row(db)
+        assert settings.listen_interface == "eth8"
+        assert settings.listen_address == "10.8.0.1"
+        canonical = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert canonical.address == "registry-eth8.labfoundry.internal"
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-eth7.labfoundry.internal")).scalar_one_or_none() is None
+        target = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-eth8.labfoundry.internal", DnsRecord.record_type == "A")
+        ).scalar_one()
+        assert target.address == "10.8.0.1"
+
+
 def test_stage_appliance_apply_config_repairs_staging_permission(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -1669,8 +1732,14 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         assert boot["http_port"] == 8080
         assert boot["effective_native_uefi_http_url"] == "http://192.168.50.1:8080/pxe/esxi/mboot.efi"
         assert boot["native_uefi_http_enabled"] is True
-        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe.labfoundry.internal")).scalar_one()
-        assert record.address == "192.168.50.1"
+        record = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert record.address == "esxi-pxe-eth2.labfoundry.internal"
+        interface_record = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-eth2.labfoundry.internal", DnsRecord.record_type == "A")
+        ).scalar_one()
+        assert interface_record.address == "192.168.50.1"
         dhcp = db.execute(select(DhcpSettings)).scalar_one()
         dhcp.enabled = True
         db.add(dhcp)
@@ -3596,9 +3665,11 @@ def test_kms_settings_autosave_returns_json(client):
     assert "10.0.0.99" not in refreshed.text
 
     with SessionLocal() as db:
-        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
-        assert record.address == "192.168.50.1"
-        assert "KMS/KMIP endpoint" in (record.description or "")
+        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "CNAME")).scalar_one()
+        assert record.address == "kms-eth2.labfoundry.internal"
+        interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms-eth2.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert interface_record.address == "192.168.50.1"
+        assert "KMS/KMIP endpoint" in (interface_record.description or "")
 
 
 def test_kms_settings_accept_multiple_listen_targets(client):
@@ -3828,11 +3899,18 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
         dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "registry.labfoundry.internal",
+                DnsRecord.record_type == "CNAME",
+            )
+        ).scalar_one()
+        assert dns_record.address == "registry-eth2.labfoundry.internal"
+        assert dns_record.enabled is True
+        interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "registry-eth2.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
-        assert dns_record.address == "192.168.50.1"
-        assert dns_record.enabled is True
+        assert interface_record.address == "192.168.50.1"
 
     multi_response = client.post(
         "/vcf-private-registry/settings",
@@ -3875,16 +3953,23 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
     )
     assert moved_response.status_code == 200
     assert moved_response.json()["listen_address"] == "192.168.49.1"
-    assert moved_response.json()["dns_record_action"] == "updated"
+    assert moved_response.json()["dns_record_action"] == "updated+removed-old"
     assert moved_response.json()["ca_bundle_source"] == "uploaded"
     with SessionLocal() as db:
         dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "registry.labfoundry.internal",
+                DnsRecord.record_type == "CNAME",
+            )
+        ).scalar_one()
+        assert dns_record.address == "registry-eth0.labfoundry.internal"
+        interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "registry-eth0.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
-        assert dns_record.address == "192.168.49.1"
+        assert interface_record.address == "192.168.49.1"
 
     bundle_response = client.post(
         "/vcf-private-registry/bundles",
@@ -3905,16 +3990,7 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
     assert "imgpkg copy -b projects.registry.vmware.com/sample/supervisor-service:1.0.0" in refreshed.text
     assert "registry.labfoundry.internal/vcf-supervisor-services/supervisor-service" in refreshed.text
 
-    token_page = client.post(
-        "/authentication/api-tokens",
-        data={
-            "name": "vcf-registry-status-test",
-            "description": "",
-            "scopes": "read:vcf-registry",
-            "csrf": csrf,
-        },
-    )
-    raw_token = token_page.text.split('<textarea readonly rows="5">', 1)[1].split("</textarea>", 1)[0]
+    raw_token = create_api_token(client, ["read:vcf-registry"])
     status = client.get("/api/v1/vcf-private-registry/status", headers={"Authorization": f"Bearer {raw_token}"})
     assert status.status_code == 200
     assert status.json()["hostname"] == "registry.labfoundry.internal"
@@ -4021,7 +4097,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Activation code" in page.text
     assert "Choose activation file" in page.text
     assert "Choose VCFDT archive" not in page.text
-    assert "DNS record follows the selected listen address." in page.text
+    assert "DNS alias follows the first selected service interface." in page.text
     assert "Server certificate" not in page.text
     assert 'name="server_certificate"' not in page.text
     assert "Telemetry choice" not in page.text
@@ -4073,8 +4149,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "vcfDepotRememberActiveTab" in app_js.text
     assert "tabulator-checklist-option" in app_js.text
     assert "tool staged" in app_js.text
-    assert "DNS record created for this endpoint." in app_js.text
-    assert "Old endpoint DNS record removed." in app_js.text
+    assert "DNS alias and interface records created for this endpoint." in app_js.text
+    assert "Old endpoint DNS alias and interface records removed." in app_js.text
     assert "updateVcfDepotHttpsPreview" in app_js.text
     assert "updateVcfDepotValidation" in app_js.text
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
@@ -4179,13 +4255,20 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "depot.labfoundry.internal",
+                DnsRecord.record_type == "CNAME",
+            )
+        ).scalar_one()
+        interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "depot-eth2.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
         assert token_secret.value == "super-secret-token"
         assert "vcf-download-tool executable" in software_id_error.value
-        assert dns_record.address == "192.168.49.1"
+        assert dns_record.address == "depot-eth2.labfoundry.internal"
         assert dns_record.enabled is True
+        assert interface_record.address == "192.168.50.1"
 
     moved_response = client.post(
         "/vcf-offline-depot/settings",
@@ -4211,17 +4294,31 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         old_dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "depot.labfoundry.internal",
-                DnsRecord.record_type == "A",
+                DnsRecord.record_type == "CNAME",
             )
         ).scalar_one_or_none()
         new_dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "offline-depot.labfoundry.internal",
+                DnsRecord.record_type == "CNAME",
+            )
+        ).scalar_one()
+        old_interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "depot-eth2.labfoundry.internal",
+                DnsRecord.record_type == "A",
+            )
+        ).scalar_one_or_none()
+        new_interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "offline-depot-eth2.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
         assert old_dns_record is None
-        assert new_dns_record.address == "192.168.50.1"
+        assert old_interface_record is None
+        assert new_dns_record.address == "offline-depot-eth2.labfoundry.internal"
+        assert new_interface_record.address == "192.168.50.1"
 
     properties_response = client.post(
         "/vcf-offline-depot/application-properties",
@@ -4758,16 +4855,7 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
     assert "ForceCommand internal-sftp -d /backups" in response.json()["config_preview"]
     assert "enabled" in client.get("/vcf-backups").text
 
-    token_page = client.post(
-        "/authentication/api-tokens",
-        data={
-            "name": "vcf-status-test",
-            "description": "",
-            "scopes": "read:vcf-backups",
-            "csrf": csrf,
-        },
-    )
-    raw_token = token_page.text.split('<textarea readonly rows="5">', 1)[1].split("</textarea>", 1)[0]
+    raw_token = create_api_token(client, ["read:vcf-backups"])
     status = client.get("/api/v1/vcf-backups/status", headers={"Authorization": f"Bearer {raw_token}"})
     assert status.status_code == 200
     assert status.json()["listen_interface"] == "eth2"
@@ -5139,14 +5227,18 @@ def test_physical_interface_edit_updates_desired_state(client):
         assert scope.range_end == "192.168.70.200"
         assert scope.dns_server == "192.168.70.1"
         assert scope.ntp_server == "192.168.70.1"
-        kms_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
-        assert kms_record.address == "192.168.70.1"
+        kms_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "CNAME")).scalar_one()
+        assert kms_record.address == "kms-eth2.labfoundry.internal"
+        kms_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms-eth2.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert kms_interface_record.address == "192.168.70.1"
         boot = esxi_pxe_boot_settings(db)
         assert boot["listen_interface"] == "eth2"
         assert boot["listen_address"] == "192.168.70.1"
         assert boot["effective_native_uefi_http_url"] == "http://192.168.70.1:8080/pxe/esxi/mboot.efi"
-        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "A")).scalar_one()
-        assert pxe_record.address == "192.168.70.1"
+        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "CNAME")).scalar_one()
+        assert pxe_record.address == "esxi-pxe-eth2.labfoundry.internal"
+        pxe_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-eth2.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert pxe_interface_record.address == "192.168.70.1"
 
 
 def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refresh(client):
@@ -5228,8 +5320,10 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
         assert scope.range_end == "192.168.50.120"
         assert scope.dns_server == "192.168.50.1"
         assert scope.ntp_server == "192.168.50.1"
-        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "A")).scalar_one()
-        assert pxe_record.address == "192.168.50.1"
+        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "CNAME")).scalar_one()
+        assert pxe_record.address == "esxi-pxe-eth2.labfoundry.internal"
+        pxe_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-eth2.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert pxe_interface_record.address == "192.168.50.1"
         pxe_listen = db.execute(select(Setting).where(Setting.key == ESXI_PXE_LISTEN_ADDRESS_KEY)).scalar_one()
         assert pxe_listen.value == "192.168.50.1"
         pxe_listen.value = "192.168.1.1"

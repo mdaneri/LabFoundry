@@ -20,7 +20,7 @@
           <input class="switch-input" type="checkbox" name="enabled" {{ "checked" if esxi_pxe_boot.enabled else "" }} {{ "disabled" if not esxi_can_write else "" }}><span class="switch-track" aria-hidden="true"></span>
         </label>
         <label>
-          <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="FQDN used as the ESXi PXE/TFTP service name. When enabled, LabFoundry creates or updates the matching managed DNS A/AAAA record for the selected listen address.">i</button></span>
+          <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="FQDN used as the ESXi PXE/TFTP service name. When enabled, LabFoundry creates a canonical CNAME to the first selected interface and per-interface A/AAAA records.">i</button></span>
           <input name="hostname" value="{{ esxi_pxe_boot.hostname }}" {{ "disabled" if not esxi_can_write else "" }}>
         </label>
       </div>

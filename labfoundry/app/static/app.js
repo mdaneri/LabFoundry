@@ -6997,15 +6997,15 @@ function updateVcfDepotSummary(form, payload = {}) {
   updateVcfDepotSoftwareDepotId(payload);
   if (dnsStatus instanceof HTMLElement && payload.dns_record_action !== undefined) {
     const dnsMessages = {
-      created: "DNS record created for this endpoint.",
-      updated: "DNS record updated for this endpoint.",
-      unchanged: "DNS record already matches this endpoint.",
-      "created+removed-old": "DNS record created and old endpoint record removed.",
-      "updated+removed-old": "DNS record updated and old endpoint record removed.",
-      "unchanged+removed-old": "Old endpoint DNS record removed.",
-      "removed-old": "Old endpoint DNS record removed.",
+      created: "DNS alias and interface records created for this endpoint.",
+      updated: "DNS alias and interface records updated for this endpoint.",
+      unchanged: "DNS alias already matches this endpoint.",
+      "created+removed-old": "DNS alias created and old endpoint records removed.",
+      "updated+removed-old": "DNS alias updated and old endpoint records removed.",
+      "unchanged+removed-old": "Old endpoint DNS alias and interface records removed.",
+      "removed-old": "Old endpoint DNS alias and interface records removed.",
     };
-    dnsStatus.textContent = dnsMessages[payload.dns_record_action] || "DNS record follows the selected listen address.";
+    dnsStatus.textContent = dnsMessages[payload.dns_record_action] || "DNS alias follows the first selected service interface.";
   }
   const livePreviewPayload = {
     ...payload,

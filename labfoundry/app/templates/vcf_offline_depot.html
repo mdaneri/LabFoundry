@@ -143,9 +143,9 @@
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats the VCF Offline Depot as enabled desired state. Host services are not changed until global appliance apply runs.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if vcf_depot_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label>
-          <span class="field-label"><span>Depot hostname</span><button class="help-icon" type="button" data-help="FQDN VCF components use for the offline depot HTTPS endpoint. LabFoundry creates or updates the matching DNS A/AAAA record and removes the old service-owned record when this name changes.">i</button></span>
+          <span class="field-label"><span>Depot hostname</span><button class="help-icon" type="button" data-help="FQDN VCF components use for the offline depot HTTPS endpoint. LabFoundry creates a canonical CNAME to the first selected interface and per-interface A/AAAA records.">i</button></span>
           <input name="hostname" value="{{ vcf_depot_settings.hostname }}">
-          <small class="muted" data-vcf-depot-dns-status>DNS record follows the selected listen address.</small>
+          <small class="muted" data-vcf-depot-dns-status>DNS alias follows the first selected service interface.</small>
         </label>
         <input type="hidden" name="listen_interfaces_present" value="1">
         <div class="service-bind-editor stacked-service-bind-editor" data-service-bind>
