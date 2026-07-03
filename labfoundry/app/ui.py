@@ -870,6 +870,7 @@ def service_bind_options(db: Session) -> list[dict]:
             {
                 "name": interface.name,
                 "label": f"{interface.name} - {interface.role} / {mode} / {address_label}",
+                "role": interface.role,
                 "address": addresses[0],
                 "addresses": addresses,
                 "ipv4_address": address_from_cidr(interface.ip_cidr),
@@ -890,6 +891,7 @@ def service_bind_options(db: Session) -> list[dict]:
             {
                 "name": vlan.name,
                 "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {vlan.role} / {address_label}",
+                "role": vlan.role,
                 "address": addresses[0],
                 "addresses": addresses,
                 "ipv4_address": address_from_cidr(vlan.ip_cidr),
@@ -899,6 +901,10 @@ def service_bind_options(db: Session) -> list[dict]:
             }
         )
     return options
+
+
+def vcf_depot_service_bind_options(db: Session) -> list[dict[str, Any]]:
+    return [option for option in service_bind_options(db) if str(option.get("role") or "").strip().lower() != "management"]
 
 
 def _network_from_cidr(value: str | None):
@@ -1816,7 +1822,13 @@ def vcf_private_registry_context(db: Session) -> dict:
 def vcf_offline_depot_context(db: Session) -> dict:
     settings = get_vcf_offline_depot_settings_row(db)
     profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
-    available_interfaces = service_bind_options(db)
+    all_service_interfaces = service_bind_options(db)
+    available_interfaces = vcf_depot_service_bind_options(db)
+    management_interface_names = {
+        str(interface["name"])
+        for interface in all_service_interfaces
+        if str(interface.get("role") or "").strip().lower() == "management"
+    }
     secrets = vcf_depot_secret_context(db)
     software_depot_id = vcf_depot_software_depot_id_context(db)
     application_properties = vcf_depot_application_properties_context(db, settings)
@@ -1826,6 +1838,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         {interface["name"] for interface in available_interfaces},
         bool(secrets["download_token_present"]),
         bool(secrets["activation_code_present"]),
+        management_interface_names,
     )
     depot_cert_path, depot_key_path, _depot_chain_path = ca_managed_certificate_paths(db, "vcf_offline_depot:https")
     if settings.enabled and get_ca_settings_row(db).enabled and not ca_certificate_available(db, "vcf_offline_depot:https"):
@@ -8444,12 +8457,19 @@ def start_vcf_depot_profile_download_from_ui(
     if not profile.enabled:
         raise HTTPException(status_code=400, detail="Enable the VCFDT download profile before starting a download.")
     secrets = vcf_depot_secret_context(db)
+    all_service_interfaces = service_bind_options(db)
+    management_interface_names = {
+        str(interface["name"])
+        for interface in all_service_interfaces
+        if str(interface.get("role") or "").strip().lower() == "management"
+    }
     validation_errors, validation_warnings = validate_vcf_depot_state(
         settings,
         [profile],
-        {interface["name"] for interface in service_bind_options(db)},
+        {interface["name"] for interface in vcf_depot_service_bind_options(db)},
         bool(secrets["download_token_present"]),
         bool(secrets["activation_code_present"]),
+        management_interface_names,
     )
     if validation_errors:
         raise HTTPException(status_code=400, detail=" ".join(validation_errors))

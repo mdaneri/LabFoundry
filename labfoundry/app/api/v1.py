@@ -2165,11 +2165,19 @@ def build_vcf_offline_depot_status(db: Session) -> VcfOfflineDepotStatusResponse
     row = db.execute(select(ServiceState).where(ServiceState.service == "repository")).scalar_one_or_none()
     download_token_present, activation_code_present = vcf_depot_secret_status(db)
     application_properties = setting_value(db, VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY)
+    management_interface_names = {
+        interface.name
+        for interface in db.execute(select(PhysicalInterface).where(PhysicalInterface.role == "management")).scalars().all()
+    }
+    management_interface_names.update(
+        vlan.name for vlan in db.execute(select(VlanInterface).where(VlanInterface.role == "management")).scalars().all()
+    )
     validation_errors, _warnings = validate_vcf_depot_state(
         settings,
         profiles,
         download_token_present=download_token_present,
         activation_code_present=activation_code_present,
+        management_interface_names=management_interface_names,
     )
     payload = vcf_depot_settings_to_dict(settings)
     return VcfOfflineDepotStatusResponse(

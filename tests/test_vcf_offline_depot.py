@@ -185,6 +185,25 @@ def test_vcf_depot_validation_allows_https_only_without_vcfdt_upload():
     assert warnings == []
 
 
+def test_vcf_depot_validation_rejects_management_role_interfaces():
+    settings = VcfOfflineDepotSettings(
+        enabled=True,
+        hostname="depot.labfoundry.internal",
+        listen_interface="eth0",
+        listen_address="192.168.49.1",
+        port=443,
+        server_certificate="depot.labfoundry.internal",
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        telemetry_choice="DISABLE",
+        config_path="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf",
+    )
+
+    errors, warnings = validate_vcf_depot_state(settings, [], {"eth2"}, management_interface_names={"eth0"})
+
+    assert warnings == []
+    assert any("Listen interface eth0 uses the management role" in error for error in errors)
+
+
 def test_vcf_depot_parses_generated_software_depot_id():
     assert parse_software_depot_id("Software Depot ID: 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n") == "8c9506c6-7bdf-44d5-b2e9-50d829d66b99"
     assert parse_software_depot_id("Use activation code for software depot id LF-DEPOT-9-1-001\n") == "LF-DEPOT-9-1-001"
@@ -312,7 +331,14 @@ def test_vcf_depot_nginx_preview_uses_ca_paths_and_static_file_directives():
     )
 
     assert "listen 192.168.50.1:443 ssl;" in preview
-    assert "root /mnt/labfoundry-vcf-offline-depot;" in preview
+    assert "# VCF endpoint: https://depot.labfoundry.internal/PROD/" in preview
+    assert "root /mnt/labfoundry-vcf-offline-depot;" not in preview
+    assert "location = /PROD" in preview
+    assert "return 301 /PROD/;" in preview
+    assert "location ^~ /PROD/" in preview
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in preview
+    assert "location /" in preview
+    assert "return 404;" in preview
     assert "sendfile on;" in preview
     assert "default_type application/octet-stream;" in preview
     assert "ssl_certificate /etc/labfoundry/vcf-offline-depot/certs/depot.crt;" in preview

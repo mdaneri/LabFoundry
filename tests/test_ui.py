@@ -4041,6 +4041,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Depot store volume" in page.text
     assert page.text.count("fixed-value-field") >= 1
     assert "depot.labfoundry.internal" in page.text
+    assert "eth0 - management / access" not in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
     assert "Listen interfaces" in page.text
@@ -4143,6 +4144,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["valid"] is True
     assert payload["dns_record_action"] == "created"
     assert "listen 192.168.50.1:443 ssl;" in payload["https_config_preview"]
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in payload["https_config_preview"]
+    assert "root /mnt/labfoundry-vcf-offline-depot;" not in payload["https_config_preview"]
     assert "--depot-store=/mnt/labfoundry-vcf-offline-depot" in payload["command_preview"]
     assert "super-secret-token" not in response.text
     assert "archive.example.test" not in response.text
@@ -4165,6 +4168,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     multi_payload = multi_response.json()
     assert multi_payload["listen_interfaces"] == ["eth0", "eth2"]
     assert multi_payload["listen_addresses"] == ["192.168.49.1", "192.168.50.1"]
+    assert multi_payload["valid"] is False
+    assert any("Listen interface eth0 uses the management role" in error for error in multi_payload["validation_errors"])
     assert "listen 192.168.49.1:443 ssl;" in multi_payload["https_config_preview"]
     assert "listen 192.168.50.1:443 ssl;" in multi_payload["https_config_preview"]
 
@@ -4187,7 +4192,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         data={
             "enabled": "on",
             "hostname": "offline-depot.labfoundry.internal",
-            "listen_interface": "eth0",
+            "listen_interface": "eth2",
             "port": "443",
             "telemetry_enabled": "on",
             "csrf": csrf,
@@ -4199,7 +4204,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert moved_payload["hostname"] == "offline-depot.labfoundry.internal"
     assert moved_payload["server_certificate"] == "offline-depot.labfoundry.internal"
     assert moved_payload["telemetry_choice"] == "ENABLE"
-    assert moved_payload["listen_address"] == "192.168.49.1"
+    assert moved_payload["listen_address"] == "192.168.50.1"
+    assert moved_payload["valid"] is True
     assert moved_payload["dns_record_action"] == "created+removed-old"
     with SessionLocal() as db:
         old_dns_record = db.execute(
@@ -4215,7 +4221,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
             )
         ).scalar_one()
         assert old_dns_record is None
-        assert new_dns_record.address == "192.168.49.1"
+        assert new_dns_record.address == "192.168.50.1"
 
     properties_response = client.post(
         "/vcf-offline-depot/application-properties",

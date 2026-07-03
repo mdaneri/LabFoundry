@@ -397,7 +397,7 @@ def render_nginx_depot_config(
         "# Managed by LabFoundry. Local changes may be overwritten.",
         "# Desired HTTPS endpoint for the VCF Offline Depot.",
         f"# Depot store: {settings.depot_store_path}",
-        f"# VCF endpoint: https://{vcf_depot_endpoint(settings)}/",
+        f"# VCF endpoint: https://{vcf_depot_endpoint(settings)}/PROD/",
         f"# Listen interfaces: {', '.join(split_interfaces(settings.listen_interface)) or 'none'}",
         f"# Listen addresses: {', '.join(split_addresses(settings.listen_address)) or 'none'}",
         "",
@@ -407,15 +407,26 @@ def render_nginx_depot_config(
             for address in (split_addresses(settings.listen_address) or ["0.0.0.0"])
         ],
         f"  server_name {settings.hostname};",
-        f"  root {settings.depot_store_path};",
-        "  sendfile on;",
-        "  tcp_nopush on;",
-        "  directio 8m;",
-        "  autoindex on;",
-        "  types { }",
-        "  default_type application/octet-stream;",
         f"  ssl_certificate {certificate_path};",
         f"  ssl_certificate_key {key_path};",
+        "",
+        "  location = /PROD {",
+        "    return 301 /PROD/;",
+        "  }",
+        "",
+        "  location ^~ /PROD/ {",
+        f"    alias {settings.depot_store_path.rstrip('/')}/PROD/;",
+        "    sendfile on;",
+        "    tcp_nopush on;",
+        "    directio 8m;",
+        "    autoindex on;",
+        "    types { }",
+        "    default_type application/octet-stream;",
+        "  }",
+        "",
+        "  location / {",
+        "    return 404;",
+        "  }",
         "}",
     ]
     return "\n".join(lines).strip() + "\n"
@@ -583,6 +594,7 @@ def validate_vcf_depot_state(
     interface_names: set[str] | None = None,
     download_token_present: bool = False,
     activation_code_present: bool = False,
+    management_interface_names: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -597,9 +609,11 @@ def validate_vcf_depot_state(
         listen_addresses = split_addresses(settings.listen_address)
         if not listen_interfaces:
             errors.append("Listen interface is required.")
-        elif interface_names is not None:
+        else:
             for interface in listen_interfaces:
-                if interface not in interface_names:
+                if management_interface_names and interface in management_interface_names:
+                    errors.append(f"Listen interface {interface} uses the management role. Choose a non-management service interface for VCF Offline Depot.")
+                elif interface_names is not None and interface not in interface_names:
                     errors.append(f"Listen interface {interface} is not configured as an access physical or VLAN interface with an IP address.")
         if not listen_addresses:
             errors.append("Listen address is required.")
