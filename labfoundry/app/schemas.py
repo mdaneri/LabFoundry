@@ -159,6 +159,9 @@ class VcfOfflineDepotStatusResponse(BaseModel):
     software_depot_id_error: str
     download_token_present: bool
     activation_code_present: bool
+    application_properties_present: bool
+    application_properties_source: str
+    application_properties_updated_at: str
     profile_count: int
     config_path: str
     valid: bool

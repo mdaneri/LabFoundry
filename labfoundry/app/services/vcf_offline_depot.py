@@ -19,6 +19,11 @@ VCF_DEPOT_LEGACY_STORE_PATH = "/srv/repository"
 VCF_DEPOT_DEFAULT_STORE_PATH = "/mnt/labfoundry-vcf-offline-depot"
 VCF_DEPOT_DEFAULT_CONFIG_PATH = "/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf"
 VCF_DEPOT_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/vcf-offline-depot/labfoundry-vcf-offline-depot.conf"
+VCF_DEPOT_APPLICATION_PROPERTIES_NAME = "application-prodv2.properties"
+VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY = "vcf_depot_application_properties_content"
+VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY = "vcf_depot_application_properties_source"
+VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY = "vcf_depot_application_properties_updated_at"
+VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH = f"/var/lib/labfoundry/apply/vcf-offline-depot/{VCF_DEPOT_APPLICATION_PROPERTIES_NAME}"
 VCF_DEPOT_STAGED_TOOL_DIR = "/opt/labfoundry/vcf-download-tool"
 VCF_DEPOT_RUNTIME_TOOL_DIR = "/var/lib/labfoundry/vcfDownloadTool/active-tool"
 VCF_DEPOT_UPLOAD_DIR = Path("vcfDownloadTool")
@@ -127,6 +132,61 @@ def detect_vcf_download_tool_version(archive_path: str | Path) -> str:
             return version_file.read(200).decode("utf-8", errors="replace").strip()
     except (EOFError, tarfile.TarError, OSError):
         return ""
+
+
+def _read_properties_from_archive(archive_path: str | Path) -> str:
+    path = Path(archive_path)
+    if not path.exists():
+        return ""
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            for member_name in [
+                f"conf/{VCF_DEPOT_APPLICATION_PROPERTIES_NAME}",
+                VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+            ]:
+                member = archive.extractfile(member_name)
+                if member is not None:
+                    return member.read(512 * 1024).decode("utf-8", errors="replace")
+    except (EOFError, tarfile.TarError, OSError):
+        return ""
+    return ""
+
+
+def default_vcf_depot_application_properties() -> str:
+    default_path = Path(__file__).resolve().parents[1] / "static" / "defaults" / VCF_DEPOT_APPLICATION_PROPERTIES_NAME
+    try:
+        return default_path.read_text(encoding="utf-8")
+    except OSError:
+        return "\n".join(
+            [
+                "spring.profiles.active=depot",
+                "spring.main.web-environment=false",
+                "",
+                "lcm.bundle.download.root.dir=${user.home}",
+                "lcm.depot.adapter.host=dl.broadcom.com",
+                "lcm.depot.adapter.remote.v2.rootDir=/PROD",
+                "lcm.depot.adapter.remote.repoDir=/COMP/SDDC_MANAGER_VCF",
+                "lcm.depot.download.tool.name=vcf-download-tool",
+                "",
+            ]
+        )
+
+
+def vcf_depot_application_properties_from_tool(settings: VcfOfflineDepotSettings) -> tuple[str, str]:
+    if settings.tool_archive_path:
+        archive_text = _read_properties_from_archive(settings.tool_archive_path)
+        if archive_text:
+            return archive_text, "uploaded tool"
+        for candidate in [
+            VCF_DEPOT_EXTRACT_DIR / "conf" / VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+            VCF_DEPOT_EXTRACT_DIR / VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+        ]:
+            if candidate.is_file():
+                try:
+                    return candidate.read_text(encoding="utf-8"), "uploaded tool"
+                except OSError:
+                    pass
+    return default_vcf_depot_application_properties(), "LabFoundry default"
 
 
 def safe_archive_upload_name(filename: str) -> str:

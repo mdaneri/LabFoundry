@@ -10,6 +10,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     render_nginx_depot_config,
     render_vcfdt_command_preview,
     validate_vcf_depot_state,
+    vcf_depot_application_properties_from_tool,
 )
 
 
@@ -49,6 +50,21 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
         activation_code_present=True,
     )
     assert errors == []
+
+
+def test_vcf_depot_application_properties_prefers_uploaded_tool_archive(tmp_path):
+    archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    properties = b"spring.profiles.active=depot\nlcm.depot.adapter.host=archive.example.test\n"
+    with tarfile.open(archive, "w:gz") as bundle:
+        info = tarfile.TarInfo("conf/application-prodv2.properties")
+        info.size = len(properties)
+        bundle.addfile(info, io.BytesIO(properties))
+    settings = VcfOfflineDepotSettings(tool_archive_path=str(archive))
+
+    content, source = vcf_depot_application_properties_from_tool(settings)
+
+    assert source == "uploaded tool"
+    assert "archive.example.test" in content
 
 
 def test_vcf_depot_validation_uses_documented_component_catalog(tmp_path):

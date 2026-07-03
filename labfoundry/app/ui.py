@@ -293,6 +293,10 @@ from labfoundry.app.services.vcf_private_registry import (
 from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_ACTIVATION_NAME_KEY,
     VCF_DEPOT_ACTIVATION_VALUE_KEY,
+    VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY,
+    VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+    VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY,
+    VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY,
     VCF_DEPOT_ARCHIVE_PATTERN,
     VCF_DEPOT_BINARY_TYPES,
     VCF_DEPOT_COMPONENTS,
@@ -309,6 +313,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
+    VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH,
     VCF_DEPOT_STAGED_CONFIG_PATH,
     VCF_DEPOT_STAGED_TOKEN_FILE,
     VCF_DEPOT_STAGED_TOOL_DIR,
@@ -323,6 +328,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     render_vcfdt_command_preview,
     safe_archive_upload_name,
     setting_secret_state,
+    vcf_depot_application_properties_from_tool,
     validate_vcf_depot_state,
     validate_vcf_download_tool_archive,
     vcf_depot_endpoint,
@@ -1656,6 +1662,30 @@ def vcf_depot_secret_context(db: Session) -> dict[str, object]:
     }
 
 
+def vcf_depot_application_properties_context(db: Session, settings: VcfOfflineDepotSettings) -> dict[str, str | bool]:
+    content_setting = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY)).scalar_one_or_none()
+    if content_setting and content_setting.value.strip():
+        source = setting_value(db, VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY) or "operator saved"
+        updated_at = setting_value(db, VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY)
+        return {
+            "present": True,
+            "filename": VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+            "content": content_setting.value,
+            "source": source,
+            "updated_at": updated_at or (content_setting.updated_at.isoformat() if content_setting.updated_at else ""),
+            "staged_path": VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH,
+        }
+    content, source = vcf_depot_application_properties_from_tool(settings)
+    return {
+        "present": bool(content.strip()),
+        "filename": VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+        "content": content,
+        "source": source,
+        "updated_at": "",
+        "staged_path": VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH,
+    }
+
+
 def vcf_depot_download_job_rows(db: Session) -> list[dict[str, str]]:
     jobs = (
         db.execute(
@@ -1759,6 +1789,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
     available_interfaces = service_bind_options(db)
     secrets = vcf_depot_secret_context(db)
     software_depot_id = vcf_depot_software_depot_id_context(db)
+    application_properties = vcf_depot_application_properties_context(db, settings)
     validation_errors, validation_warnings = validate_vcf_depot_state(
         settings,
         profiles,
@@ -1788,6 +1819,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         "vcf_depot_https_cert_path": depot_cert_path,
         "vcf_depot_https_key_path": depot_key_path,
         "vcf_depot_command_preview": command_preview,
+        "vcf_depot_application_properties": application_properties,
         "vcf_depot_download_jobs": vcf_depot_download_job_rows(db),
         "vcf_depot_validation_errors": validation_errors,
         "vcf_depot_validation_warnings": validation_warnings,
@@ -1823,6 +1855,22 @@ def vcf_depot_secret_snapshot(context: dict[str, Any]) -> str:
             f"# Download input updated: {token_state.updated_at or 'never'}",
             f"# ESX input file: {'staged' if activation_state.present else 'not staged'}",
             f"# ESX input updated: {activation_state.updated_at or 'never'}",
+        ]
+    )
+
+
+def vcf_depot_application_properties_snapshot(context: dict[str, Any]) -> str:
+    properties = context["vcf_depot_application_properties"]
+    content = str(properties.get("content") or "").strip()
+    if not content:
+        content = "# No application-prodv2.properties desired state is available."
+    return "\n".join(
+        [
+            f"# VCFDT {VCF_DEPOT_APPLICATION_PROPERTIES_NAME}",
+            f"# Source: {properties.get('source') or 'unknown'}",
+            f"# Updated: {properties.get('updated_at') or 'not saved'}",
+            f"# Staged path: {VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH}",
+            content,
         ]
     )
 
@@ -3371,7 +3419,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "vcf_private_registry",
 }
 SECRET_LINE_PATTERN = re.compile(
-    r"(rootpw|password|passwd|token|secret|credential|private[_-]?key|robot[_-]?account|ca[_-]?bundle[_-]?pem|activation[_-]?code|license|ipxe[_-]?script)",
+    r"(rootpw|password|passwd|token|secret|credential|private[_.-]?key|robot[_.-]?account|ca[_.-]?bundle[_.-]?pem|activation[_.-]?code|license|ipxe[_.-]?script)",
     re.IGNORECASE,
 )
 PRIVATE_KEY_BEGIN_PATTERN = re.compile(r"-----BEGIN .*PRIVATE KEY-----")
@@ -4061,7 +4109,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             validation_errors=vcf_depot["vcf_depot_validation_errors"],
             validation_warnings=vcf_depot["vcf_depot_validation_warnings"],
             config_path=vcf_depot["vcf_depot_settings"].config_path,
-            config_preview=f"{vcf_depot['vcf_depot_https_config_preview']}\n\n{vcf_depot_secret_snapshot(vcf_depot)}\n\n# VCFDT command preview\n{vcf_depot['vcf_depot_command_preview']}",
+            config_preview=f"{vcf_depot['vcf_depot_https_config_preview']}\n\n{vcf_depot_secret_snapshot(vcf_depot)}\n\n{vcf_depot_application_properties_snapshot(vcf_depot)}\n\n# VCFDT command preview\n{vcf_depot['vcf_depot_command_preview']}",
             baseline=baselines.get("vcf_offline_depot"),
         ),
         make_appliance_apply_unit(
@@ -4641,15 +4689,27 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
     elif unit_id == "vcf_offline_depot":
         settings = context["vcf_depot_settings"]
         config_path = settings.config_path
+        properties_path = VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(VCF_DEPOT_STAGED_CONFIG_PATH, context["vcf_depot_https_config_preview"])
-        steps = [
-            lambda: adapter.validate_vcf_offline_depot_config(config_path),
-            lambda: adapter.sync_vcf_offline_depot(config_path),
-            lambda: adapter.apply_vcf_offline_depot_https_config(config_path),
-        ]
+            properties_path = stage_appliance_apply_config(
+                VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH,
+                str(context["vcf_depot_application_properties"].get("content") or ""),
+            )
+        steps = [lambda: adapter.validate_vcf_offline_depot_config(config_path)]
         if settings.tool_archive_path:
-            steps.insert(1, lambda: adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path))
+            steps.extend(
+                [
+                    lambda: adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path),
+                    lambda: adapter.apply_vcf_offline_depot_application_properties(properties_path),
+                ]
+            )
+        steps.extend(
+            [
+                lambda: adapter.sync_vcf_offline_depot(config_path),
+                lambda: adapter.apply_vcf_offline_depot_https_config(config_path),
+            ]
+        )
         results = run_adapter_steps(steps)
     elif unit_id == "vcf_private_registry":
         settings = context["vcf_registry_settings"]
@@ -7985,6 +8045,7 @@ def update_vcf_offline_depot_settings_from_ui(
         validation_warnings = context["vcf_depot_validation_warnings"]
         token_state = context["vcf_depot_download_token"]
         activation_state = context["vcf_depot_activation_code"]
+        application_properties = context["vcf_depot_application_properties"]
         software_depot_id = context["vcf_depot_software_depot_id"]
         software_depot_id_payload = software_depot_id_result or software_depot_id
         return JSONResponse(
@@ -8011,6 +8072,9 @@ def update_vcf_offline_depot_settings_from_ui(
                 "activation_code_present": activation_state.present,
                 "activation_code_name": uploaded_activation_name or activation_state.filename,
                 "activation_code_updated_at": activation_state.updated_at,
+                "application_properties_present": application_properties["present"],
+                "application_properties_source": application_properties["source"],
+                "application_properties_updated_at": application_properties["updated_at"],
                 "telemetry_choice": saved_settings.telemetry_choice,
                 "dns_record_action": dns_record_action,
                 "config_path": saved_settings.config_path,
@@ -8065,6 +8129,107 @@ def paste_vcf_depot_download_token_from_ui(
                 "download_token_present": token_state.present,
                 "download_token_name": display_name,
                 "download_token_updated_at": token_state.updated_at,
+                "valid": not validation_errors,
+                "validation_errors": validation_errors,
+                "validation_warnings": validation_warnings,
+                "config_path": context["vcf_depot_settings"].config_path,
+                "https_config_preview": context["vcf_depot_https_config_preview"],
+                "command_preview": context["vcf_depot_command_preview"],
+            }
+        )
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+@router.post("/vcf-offline-depot/activation-code", response_model=None)
+def paste_vcf_depot_activation_code_from_ui(
+    request: Request,
+    activation_code_text: str = Form(""),
+    activation_code_file: UploadFile | None = File(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    display_name = store_uploaded_vcf_depot_secret(
+        db,
+        activation_code_file,
+        name_key=VCF_DEPOT_ACTIVATION_NAME_KEY,
+        value_key=VCF_DEPOT_ACTIVATION_VALUE_KEY,
+        actor=identity.username,
+        action="upload_vcf_depot_activation_code",
+    )
+    if not display_name:
+        display_name = store_pasted_vcf_depot_secret(
+            db,
+            activation_code_text,
+            name_key=VCF_DEPOT_ACTIVATION_NAME_KEY,
+            value_key=VCF_DEPOT_ACTIVATION_VALUE_KEY,
+            display_name="pasted activation code",
+            actor=identity.username,
+            action="paste_vcf_depot_activation_code",
+        )
+    db.commit()
+    stage_vcf_depot_runtime_secrets_after_upload(db)
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = vcf_offline_depot_context(db)
+        activation_state = context["vcf_depot_activation_code"]
+        validation_errors = context["vcf_depot_validation_errors"]
+        validation_warnings = context["vcf_depot_validation_warnings"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "activation_code_present": activation_state.present,
+                "activation_code_name": display_name,
+                "activation_code_updated_at": activation_state.updated_at,
+                "valid": not validation_errors,
+                "validation_errors": validation_errors,
+                "validation_warnings": validation_warnings,
+                "config_path": context["vcf_depot_settings"].config_path,
+                "https_config_preview": context["vcf_depot_https_config_preview"],
+                "command_preview": context["vcf_depot_command_preview"],
+            }
+        )
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+@router.post("/vcf-offline-depot/application-properties", response_model=None)
+def save_vcf_depot_application_properties_from_ui(
+    request: Request,
+    application_properties: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    content = application_properties.replace("\r\n", "\n").replace("\r", "\n")
+    if len(content.encode("utf-8")) > 512 * 1024:
+        raise HTTPException(status_code=400, detail="application-prodv2.properties must be 512 KB or smaller.")
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="application-prodv2.properties cannot be empty.")
+    updated_at = utcnow().isoformat()
+    content_setting = set_setting_value(db, VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY, content)
+    set_setting_value(db, VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY, "operator saved")
+    set_setting_value(db, VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY, updated_at)
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_vcf_depot_application_properties",
+        resource_type="setting",
+        resource_id=str(content_setting.id),
+        detail=VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+    )
+    db.commit()
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = vcf_offline_depot_context(db)
+        properties = context["vcf_depot_application_properties"]
+        validation_errors = context["vcf_depot_validation_errors"]
+        validation_warnings = context["vcf_depot_validation_warnings"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "application_properties_present": properties["present"],
+                "application_properties_source": properties["source"],
+                "application_properties_updated_at": properties["updated_at"],
                 "valid": not validation_errors,
                 "validation_errors": validation_errors,
                 "validation_warnings": validation_warnings,

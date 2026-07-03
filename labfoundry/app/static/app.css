@@ -2914,6 +2914,10 @@ textarea {
   background: transparent;
 }
 
+.confirm-modal.wide-modal {
+  width: min(920px, calc(100vw - 32px));
+}
+
 .confirm-modal::backdrop {
   background: rgba(15, 23, 42, 0.32);
 }
@@ -2947,6 +2951,14 @@ textarea {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.code-editor-textarea {
+  min-height: min(520px, 58vh);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
 }
 
 .preview-modal {

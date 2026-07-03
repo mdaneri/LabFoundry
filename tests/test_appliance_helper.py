@@ -1743,6 +1743,32 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert str(extracted) in wrapper.read_text(encoding="utf-8")
 
 
+def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "vcf-offline-depot"
+    properties_path = apply_dir / "application-prodv2.properties"
+    apply_dir.mkdir(parents=True)
+    properties_path.write_text("spring.profiles.active=depot\nlcm.depot.adapter.host=stage.example.test\n", encoding="utf-8")
+    tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
+    tool_bin = tool_dir / "extracted" / "vcfdt" / "bin" / "vcf-download-tool"
+    tool_bin.parent.mkdir(parents=True)
+    tool_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+
+    assert helper._handle_vcf_offline_depot("apply-properties", [str(properties_path)]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["vcf_offline_depot"] == "application properties apply complete"
+    target = tool_dir / "extracted" / "vcfdt" / "conf" / "application-prodv2.properties"
+    assert target.read_text(encoding="utf-8") == properties_path.read_text(encoding="utf-8")
+
+    outside_path = tmp_path / "application-prodv2.properties"
+    outside_path.write_text("spring.profiles.active=depot\n", encoding="utf-8")
+    assert helper._handle_vcf_offline_depot("apply-properties", [str(outside_path)]) == 2
+
+
 def test_vcf_offline_depot_helper_removes_disabled_nginx_site(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "vcf-offline-depot"

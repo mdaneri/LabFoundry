@@ -3943,6 +3943,10 @@ def make_vcfdt_archive(path, version="9.1.0.0100.25429019"):
         info = tarfile.TarInfo("conf/tool-version.txt")
         info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
+        properties_payload = b"spring.profiles.active=depot\nlcm.depot.adapter.host=archive.example.test\n"
+        properties_info = tarfile.TarInfo("conf/application-prodv2.properties")
+        properties_info.size = len(properties_payload)
+        archive.addfile(properties_info, io.BytesIO(properties_payload))
 
 
 def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_path, monkeypatch):
@@ -3951,6 +3955,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import DnsRecord, Job, Setting
     from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY,
         VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
         VCF_DEPOT_TOKEN_VALUE_KEY,
     )
@@ -3980,6 +3985,17 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert 'data-vcf-depot-token-modal-open' in page.text
     assert 'name="download_token_file"' in page.text
     assert 'name="download_token_text"' in page.text
+    assert "Stage activation code" in page.text
+    assert "Stage code" in page.text
+    assert 'action="/vcf-offline-depot/activation-code"' in page.text
+    assert "vcf-depot-activation-modal" in page.text
+    assert 'data-vcf-depot-activation-modal-open' in page.text
+    assert 'name="activation_code_file"' in page.text
+    assert 'name="activation_code_text"' in page.text
+    assert "Edit application-prodv2.properties" in page.text
+    assert 'action="/vcf-offline-depot/application-properties"' in page.text
+    assert 'name="application_properties"' in page.text
+    assert "lcm.depot.adapter.host=dl.broadcom.com" in page.text
     assert "/vcf-offline-depot/profiles/" in page.text
     assert "Start" in page.text
     assert page.text.index("<th>Name</th>") < page.text.index("<th>Start</th>") < page.text.index("<th>Type</th>")
@@ -3991,9 +4007,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Staged VCFDT inputs" not in page.text
     assert page.text.index("<h2>Depot Settings</h2>") < page.text.index("VCFDT staging") < page.text.index("Choose VCFDT tool") < page.text.index("Software depot ID")
     assert '<span class="status-pill warn">dry-run</span>' not in page.text
-    assert "Activation code" not in page.text
-    assert "activation_code_file" not in page.text
-    assert "Choose activation file" not in page.text
+    assert "Activation code" in page.text
+    assert "Choose activation file" in page.text
     assert "Choose VCFDT archive" not in page.text
     assert "DNS record follows the selected listen address." in page.text
     assert "Server certificate" not in page.text
@@ -4052,6 +4067,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "updateVcfDepotValidation" in app_js.text
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
     assert "initializeVcfDepotTokenPaste" in app_js.text
+    assert "initializeVcfDepotActivationPaste" in app_js.text
+    assert "initializeVcfDepotPropertiesEditor" in app_js.text
     assert "initializeCopyValueButtons" in app_js.text
     assert "clearSelectedFileInputs" in app_js.text
     assert "Uploaded ${payload.tool_archive_name" in app_js.text
@@ -4072,6 +4089,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert ".setting-inline-actions" in app_css.text
     assert ".readonly-inline-value" in app_css.text
     assert ".icon-button" in app_css.text
+    assert ".code-editor-textarea" in app_css.text
 
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     make_vcfdt_archive(archive_path)
@@ -4104,11 +4122,14 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["software_depot_id"] == ""
     assert "vcf-download-tool executable" in payload["software_depot_id_error"]
     assert payload["download_token_present"] is True
+    assert payload["application_properties_present"] is True
+    assert payload["application_properties_source"] == "uploaded tool"
     assert payload["valid"] is True
     assert payload["dns_record_action"] == "created"
     assert "listen 192.168.50.1:443 ssl;" in payload["https_config_preview"]
     assert "--depot-store=/mnt/labfoundry-vcf-offline-depot" in payload["command_preview"]
     assert "super-secret-token" not in response.text
+    assert "archive.example.test" not in response.text
 
     multi_response = client.post(
         "/vcf-offline-depot/settings",
@@ -4180,16 +4201,25 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         assert old_dns_record is None
         assert new_dns_record.address == "192.168.49.1"
 
-    token_page = client.post(
-        "/authentication/api-tokens",
+    properties_response = client.post(
+        "/vcf-offline-depot/application-properties",
         data={
-            "name": "vcf-depot-status-test",
-            "description": "",
-            "scopes": "read:repository",
+            "application_properties": "spring.profiles.active=depot\nlcm.depot.adapter.host=stage.example.test\nactivation.code=secret-activation-property\n",
             "csrf": csrf,
         },
+        headers={"X-LabFoundry-Autosave": "1"},
     )
-    raw_token = token_page.text.split('<textarea readonly rows="5">', 1)[1].split("</textarea>", 1)[0]
+    assert properties_response.status_code == 200
+    properties_payload = properties_response.json()
+    assert properties_payload["application_properties_present"] is True
+    assert properties_payload["application_properties_source"] == "operator saved"
+    assert properties_payload["application_properties_updated_at"]
+    assert "secret-activation-property" not in properties_response.text
+    with SessionLocal() as db:
+        properties_setting = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY)).scalar_one()
+        assert "stage.example.test" in properties_setting.value
+
+    raw_token = create_api_token(client, ["read:repository"])
     status = client.get("/api/v1/vcf-offline-depot/status", headers={"Authorization": f"Bearer {raw_token}"})
     assert status.status_code == 200
     assert status.json()["hostname"] == "offline-depot.labfoundry.internal"
@@ -4198,7 +4228,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "vcf-download-tool executable" in status.json()["software_depot_id_error"]
     assert status.json()["download_token_present"] is True
     assert status.json()["activation_code_present"] is False
+    assert status.json()["application_properties_present"] is True
+    assert status.json()["application_properties_source"] == "operator saved"
     assert "super-secret" not in status.text
+    assert "secret-activation-property" not in status.text
     alias = client.get("/api/v1/repository/status", headers={"Authorization": f"Bearer {raw_token}"})
     assert alias.status_code == 200
     assert alias.json()["endpoint"] == status.json()["endpoint"]
@@ -4212,15 +4245,19 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         assert "labfoundry-helper" in (job.result or "")
         assert "vcf-offline-depot" in (job.result or "")
         assert "stage-tool" in (job.result or "")
+        assert "apply-properties" in (job.result or "")
         assert "vcf-download-tool binaries download" in (job.result or "")
     assert "super-secret-token" not in (job.result or "")
+    assert "secret-activation-property" not in (job.result or "")
 
 
-def test_vcf_offline_depot_rejects_truncated_vcfdt_upload(client):
+def test_vcf_offline_depot_rejects_truncated_vcfdt_upload(client, monkeypatch):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import VcfOfflineDepotSettings
+
+    monkeypatch.setattr("labfoundry.app.ui.find_local_vcf_download_tool_archive", lambda: None)
 
     login(client)
     page = client.get("/vcf-offline-depot")
@@ -4247,7 +4284,7 @@ def test_vcf_offline_depot_rejects_truncated_vcfdt_upload(client):
         assert settings.tool_archive_path == ""
 
 
-def test_vcf_offline_depot_accepts_pasted_download_token(client, tmp_path, monkeypatch):
+def test_vcf_offline_depot_accepts_pasted_download_token_and_activation_code(client, tmp_path, monkeypatch):
     from pathlib import PurePosixPath
 
     from sqlalchemy import select
@@ -4255,12 +4292,15 @@ def test_vcf_offline_depot_accepts_pasted_download_token(client, tmp_path, monke
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import Setting
     from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_ACTIVATION_NAME_KEY,
+        VCF_DEPOT_ACTIVATION_VALUE_KEY,
         VCF_DEPOT_TOKEN_NAME_KEY,
         VCF_DEPOT_TOKEN_VALUE_KEY,
     )
 
     runtime_log = tmp_path / "active-tool" / "log" / "vdt.log"
     runtime_token = tmp_path / "active-tool" / "secrets" / "download-token.txt"
+    runtime_activation = tmp_path / "active-tool" / "secrets" / "activation-code.txt"
     monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_VDT_LOG_PATH", PurePosixPath(runtime_log.as_posix()))
 
     login(client)
@@ -4308,10 +4348,52 @@ def test_vcf_offline_depot_accepts_pasted_download_token(client, tmp_path, monke
         assert token_name.value == "download-token.txt"
         assert token_secret.value == "uploaded-secret-token"
 
+    activation_response = client.post(
+        "/vcf-offline-depot/activation-code",
+        data={"activation_code_text": "pasted-secret-activation-code", "csrf": csrf},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert activation_response.status_code == 200
+    activation_payload = activation_response.json()
+    assert activation_payload["activation_code_present"] is True
+    assert activation_payload["activation_code_name"] == "pasted activation code"
+    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in activation_payload["command_preview"]
+    assert "pasted-secret-activation-code" not in activation_response.text
+    assert runtime_activation.read_text(encoding="utf-8") == "pasted-secret-activation-code"
+
+    with SessionLocal() as db:
+        activation_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_NAME_KEY)).scalar_one()
+        activation_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_VALUE_KEY)).scalar_one()
+        assert activation_name.value == "pasted activation code"
+        assert activation_secret.value == "pasted-secret-activation-code"
+
+    activation_upload_response = client.post(
+        "/vcf-offline-depot/activation-code",
+        data={"activation_code_text": "", "csrf": csrf},
+        files={"activation_code_file": ("activation-code.txt", "uploaded-secret-activation-code", "text/plain")},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert activation_upload_response.status_code == 200
+    activation_upload_payload = activation_upload_response.json()
+    assert activation_upload_payload["activation_code_present"] is True
+    assert activation_upload_payload["activation_code_name"] == "activation-code.txt"
+    assert "uploaded-secret-activation-code" not in activation_upload_response.text
+    assert runtime_activation.read_text(encoding="utf-8") == "uploaded-secret-activation-code"
+
+    with SessionLocal() as db:
+        activation_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_NAME_KEY)).scalar_one()
+        activation_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_VALUE_KEY)).scalar_one()
+        assert activation_name.value == "activation-code.txt"
+        assert activation_secret.value == "uploaded-secret-activation-code"
+
     apply_page = client.get("/appliance-apply")
     assert apply_page.status_code == 200
     assert "Download input file: staged" in apply_page.text
+    assert "ESX input file: staged" in apply_page.text
     assert "pasted-secret-token" not in apply_page.text
+    assert "uploaded-secret-token" not in apply_page.text
+    assert "pasted-secret-activation-code" not in apply_page.text
+    assert "uploaded-secret-activation-code" not in apply_page.text
 
 
 def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, monkeypatch):

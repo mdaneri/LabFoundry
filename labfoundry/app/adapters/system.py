@@ -178,6 +178,14 @@ class SystemAdapter:
     def sync_vcf_offline_depot(self, config_path: str) -> AdapterResult:
         return self._helper_result("vcf-offline-depot", "sync", config_path, dry_run_message="dry-run: VCF Offline Depot sync command recorded")
 
+    def apply_vcf_offline_depot_application_properties(self, properties_path: str) -> AdapterResult:
+        return self._helper_result(
+            "vcf-offline-depot",
+            "apply-properties",
+            properties_path,
+            dry_run_message="dry-run: VCF Download Tool application properties apply command recorded",
+        )
+
     def apply_vcf_offline_depot_https_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("vcf-offline-depot", "apply-https", config_path, dry_run_message="dry-run: VCF Offline Depot HTTPS apply command recorded")
 
