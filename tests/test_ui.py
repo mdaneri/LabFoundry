@@ -2942,6 +2942,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert "rowHeight: 28" in app_js.text
     assert 'field: "host_label"' in app_js.text
     assert "dnsAddRowHintFormatter" in app_js.text
+    assert "dnsRecordCellEditable" in app_js.text
+    assert app_js.text.count("editable: dnsRecordCellEditable") >= 5
     assert "+ Add record here" in app_js.text
     assert "initializeZoneEditors" in app_js.text
     assert "A (IPv4)" in app_js.text
@@ -2952,11 +2954,12 @@ def test_dns_and_dhcp_pages_render(client):
     assert 'newDnsRecordRow(domain, tableElement.dataset.suggestedIpv4 || "")' in app_js.text
     assert "suggested_ipv4: suggestedAddress" in app_js.text
     assert 'data.record_type !== "A" && data.address === data.suggested_ipv4' in app_js.text
+    assert 'cell.getField() === "host_label"' in app_js.text
     assert "DNS_ACTIVE_ZONE_STORAGE_KEY" in app_js.text
     assert "initializeCodeMirrorEditors" in app_js.text
     assert "installCodeMirrorPlainTextFallback" in app_js.text
     assert 'textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart"' in app_js.text
-    assert 'eventTarget.addEventListener("keydown"' in app_js.text
+    assert 'addEventListener("keydown"' in app_js.text
     assert "event.stopPropagation()" in app_js.text
     assert "LabFoundryCodeMirror.setValue" in app_js.text
     assert "rememberDnsActiveZone(data.domain)" in app_js.text

@@ -4,7 +4,7 @@ const LABFOUNDRY_ASSETS = [
   "/favicon.ico",
   "/static/offline.html",
   "/static/app.css?v=vcf-depot-tool-reset-20260703-1",
-  "/static/app.js?v=service-dns-target-naming-20260703-1",
+  "/static/app.js?v=dns-new-row-lock-20260703-1",
   "/static/pwa.js",
   "/static/brand/labfoundry-mark.svg",
   "/static/brand/labfoundry-appliance-graphic.svg",

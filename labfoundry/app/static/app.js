@@ -405,6 +405,17 @@ function dnsAddRowHintFormatter(cell, emptyText) {
   return escapeHtml(value);
 }
 
+function dnsRecordCellEditable(cell) {
+  const data = cell.getRow().getData();
+  if (!data.is_new) {
+    return true;
+  }
+  if (cell.getField() === "host_label") {
+    return true;
+  }
+  return Boolean(String(data.host_label ?? "").trim());
+}
+
 function ipv4ReversePointer(value) {
   const parts = String(value ?? "").trim().split(".");
   if (parts.length !== 4) {
@@ -4575,6 +4586,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           title: "Host",
           field: "host_label",
           editor: "input",
+          editable: dnsRecordCellEditable,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add record here"),
           minWidth: 180,
           cellEdited: (cell) => autoSaveDnsRecord(cell, csrf),
@@ -4584,6 +4596,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           title: "Family",
           field: "record_type",
           editor: "list",
+          editable: dnsRecordCellEditable,
           editorParams: { values: { A: "A (IPv4)", AAAA: "AAAA (IPv6)", CNAME: "CNAME (alias)" } },
           formatter: (cell) => dnsRecordTypeLabel(cell.getValue()),
           width: 130,
@@ -4594,6 +4607,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           title: "Value",
           field: "address",
           editor: "input",
+          editable: dnsRecordCellEditable,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "enter value..."),
           minWidth: 170,
           cellEdited: (cell) => autoSaveDnsRecord(cell, csrf),
@@ -4610,6 +4624,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           field: "enabled",
           formatter: "tickCross",
           editor: "tickCross",
+          editable: dnsRecordCellEditable,
           hozAlign: "center",
           width: 110,
           headerSort: false,
@@ -4619,6 +4634,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           title: "Description",
           field: "description",
           editor: "input",
+          editable: dnsRecordCellEditable,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "optional note..."),
           minWidth: 220,
           cellEdited: (cell) => autoSaveDnsRecord(cell, csrf),
