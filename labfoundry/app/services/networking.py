@@ -7,7 +7,7 @@ from ipaddress import ip_interface
 from pathlib import Path
 import subprocess
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
 from labfoundry.app.models import (
@@ -501,6 +501,39 @@ def _rename_interface(
     renames[old_name] = new_name
 
 
+def _physical_interface_name_changes(interfaces: list[PhysicalInterface]) -> list[tuple[PhysicalInterface, str, str]]:
+    changes: list[tuple[PhysicalInterface, str, str]] = []
+    for interface in interfaces:
+        state = inspect(interface)
+        if not state.persistent:
+            continue
+        history = state.attrs.name.history
+        if not history.has_changes() or not history.deleted:
+            continue
+        old_name = str(history.deleted[0])
+        new_name = str(interface.name)
+        if old_name != new_name:
+            changes.append((interface, old_name, new_name))
+    return changes
+
+
+def _flush_physical_interface_name_changes(db: Session, changes: list[tuple[PhysicalInterface, str, str]]) -> None:
+    if not changes:
+        return
+    used_names = {new_name for _interface, _old_name, new_name in changes}
+    staged: list[tuple[PhysicalInterface, str]] = []
+    for index, (interface, _old_name, final_name) in enumerate(changes, start=1):
+        temp_name = f"__renaming_{interface.id}_{index}"
+        while temp_name in used_names:
+            temp_name = f"{temp_name}_"
+        interface.name = temp_name
+        used_names.add(temp_name)
+        staged.append((interface, final_name))
+    db.flush()
+    for interface, final_name in staged:
+        interface.name = final_name
+
+
 def reconcile_host_physical_interfaces(
     interfaces: list[PhysicalInterface],
     discovered: list[HostPhysicalInterface],
@@ -603,12 +636,14 @@ def sync_host_physical_interfaces(db: Session) -> tuple[list[PhysicalInterface],
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     renames: dict[str, str] = {}
     reconciled = reconcile_host_physical_interfaces(interfaces, discovered, renames=renames)
-    missing_renames = {old: new for old, new in renames.items() if new.startswith("missing_")}
+    name_changes = _physical_interface_name_changes(reconciled)
+    final_renames = {old: new for _interface, old, new in name_changes}
+    missing_renames = {old: new for old, new in final_renames.items() if new.startswith("missing_")}
     for interface in reconciled:
         if interface.oper_state == "missing":
             missing_renames.setdefault(interface.name, interface.name)
     _cleanup_missing_interface_references(db, missing_renames)
-    live_renames = {old: new for old, new in renames.items() if old not in missing_renames and new not in set(missing_renames.values())}
+    live_renames = {old: new for old, new in final_renames.items() if old not in missing_renames and new not in set(missing_renames.values())}
     _retarget_interface_references(db, live_renames)
     if discovered:
         discovered_names = {interface.name for interface in discovered}
@@ -633,6 +668,7 @@ def sync_host_physical_interfaces(db: Session) -> tuple[list[PhysicalInterface],
             reconciled = [interface for interface in reconciled if interface.name not in removed_names]
     for interface in reconciled:
         db.add(interface)
+    _flush_physical_interface_name_changes(db, name_changes)
     db.commit()
     return db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all(), len(discovered)
 

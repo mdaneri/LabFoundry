@@ -309,6 +309,98 @@ def test_sync_host_inventory_cleans_removed_nic_bindings_and_retargets_survivors
     get_settings.cache_clear()
 
 
+def test_sync_host_inventory_commits_two_nic_name_swap(monkeypatch, tmp_path):
+    from sqlalchemy import select
+
+    import labfoundry.app.database as database
+    from labfoundry.app.config import get_settings
+
+    db_path = tmp_path / "labfoundry-swap.db"
+    monkeypatch.setenv("LABFOUNDRY_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("LABFOUNDRY_SECRET_KEY", "test-secret-key-with-enough-length")
+    monkeypatch.setenv("LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD", "labfoundry-admin")
+    get_settings.cache_clear()
+    database.engine.dispose()
+    database.engine = database.create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    database.SessionLocal.configure(bind=database.engine)
+    database.init_db()
+
+    mac_a = "00:15:5d:01:1d:14"
+    mac_b = "00:15:5d:01:1d:15"
+
+    def fake_discover():
+        return [
+            HostPhysicalInterface(
+                name="eth1",
+                mac_address=mac_b,
+                driver="vmxnet3",
+                speed="10000 Mbps",
+                host_ip_cidr="10.0.10.1/24",
+                host_mtu=1500,
+                host_admin_state="up",
+                oper_state="up",
+            ),
+            HostPhysicalInterface(
+                name="eth2",
+                mac_address=mac_a,
+                driver="vmxnet3",
+                speed="10000 Mbps",
+                host_ip_cidr=None,
+                host_mtu=1500,
+                host_admin_state="up",
+                oper_state="up",
+            ),
+        ]
+
+    monkeypatch.setattr("labfoundry.app.services.networking.discover_host_physical_interfaces", fake_discover)
+
+    with database.SessionLocal() as db:
+        db.add_all(
+            [
+                PhysicalInterface(
+                    name="eth1",
+                    mac_address=mac_a,
+                    role="access",
+                    mode="trunk",
+                    inventory_source="host",
+                    desired_state_source="user",
+                ),
+                PhysicalInterface(
+                    name="eth2",
+                    mac_address=mac_b,
+                    role="access",
+                    mode="access",
+                    ip_cidr="10.0.10.1/24",
+                    inventory_source="host",
+                    desired_state_source="user",
+                ),
+                VlanInterface(parent_interface="eth2", name="eth2.50", vlan_id=50, ip_cidr="192.168.50.1/24"),
+                Route(destination_cidr="10.50.0.0/24", interface_name="eth2.50"),
+            ]
+        )
+        db.commit()
+
+        sync_host_physical_interfaces(db)
+
+        nic_a = db.execute(select(PhysicalInterface).where(PhysicalInterface.mac_address == mac_a)).scalar_one()
+        nic_b = db.execute(select(PhysicalInterface).where(PhysicalInterface.mac_address == mac_b)).scalar_one()
+        assert nic_a.name == "eth2"
+        assert nic_a.oper_state == "up"
+        assert nic_b.name == "eth1"
+        assert nic_b.host_ip_cidr == "10.0.10.1/24"
+        vlan = db.execute(select(VlanInterface).where(VlanInterface.vlan_id == 50)).scalar_one()
+        assert vlan.parent_interface == "eth1"
+        assert vlan.name == "eth1.50"
+        route = db.execute(select(Route).where(Route.destination_cidr == "10.50.0.0/24")).scalar_one()
+        assert route.interface_name == "eth1.50"
+        assert db.execute(select(Setting).where(Setting.key == NETWORK_INVENTORY_CLEANUP_WARNING_KEY)).scalar_one_or_none() is None
+
+    get_settings.cache_clear()
+
+
 def test_startup_host_inventory_refreshes_appliance_seed_without_apply_job(monkeypatch, tmp_path):
     from sqlalchemy import select
 
