@@ -80,7 +80,9 @@ from labfoundry.app.services.appliance_settings import (
     management_interface_context,
     normalize_fqdn,
     normalize_multiline_values,
+    normalize_service_dns_target_naming,
     render_appliance_settings_config,
+    SERVICE_DNS_TARGET_NAMING_CHOICES,
     validate_appliance_settings,
 )
 from labfoundry.app.services.appliance_update import (
@@ -572,6 +574,9 @@ def get_appliance_settings_row(db: Session) -> ApplianceSettings:
         db.add(settings)
         db.commit()
         db.refresh(settings)
+    normalized_naming = normalize_service_dns_target_naming(settings.service_dns_target_naming)
+    if settings.service_dns_target_naming != normalized_naming:
+        settings.service_dns_target_naming = normalized_naming
     return settings
 
 
@@ -1484,6 +1489,7 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "runtime_hostname": socket.gethostname(),
         "appliance_settings": settings,
         "appliance_settings_json": appliance_settings_to_dict(settings, include_ntp_servers=show_settings_ntp_servers),
+        "service_dns_target_naming_choices": SERVICE_DNS_TARGET_NAMING_CHOICES,
         "local_dns_enabled": local_dns_enabled,
         "chrony_enabled": chrony_enabled,
         "show_settings_ntp_servers": show_settings_ntp_servers,
@@ -2811,14 +2817,37 @@ VCF_DEPOT_DNS_DESCRIPTION = "Created from VCF Offline Depot endpoint."
 VCF_REGISTRY_DNS_DESCRIPTION = "Created from VCF private registry endpoint."
 
 
-def service_interface_hostname(hostname: str, interface_name: str) -> str:
+def service_dns_target_token(strategy: str, interface_name: str, address: str) -> str:
+    if strategy == "ip":
+        try:
+            parsed = ip_address(address)
+        except ValueError:
+            return re.sub(r"[^a-z0-9]+", "-", address.strip().lower()).strip("-") or "address"
+        if parsed.version == 4:
+            return str(parsed).replace(".", "-")
+        return "-".join(format(int(group, 16), "x") for group in parsed.exploded.split(":"))
+    safe_interface = re.sub(r"[^a-z0-9]+", "-", interface_name.strip().lower()).strip("-")
+    return safe_interface or "interface"
+
+
+def service_target_hostname(hostname: str, target_token: str) -> str:
     normalized = normalize_dns_hostname(hostname)
     if "." not in normalized:
         return normalized
     label, domain = normalized.split(".", 1)
-    safe_interface = re.sub(r"[^a-z0-9]+", "-", interface_name.strip().lower()).strip("-")
-    safe_interface = safe_interface or "interface"
-    return f"{label}-{safe_interface}.{domain}"
+    safe_token = re.sub(r"[^a-z0-9]+", "-", target_token.strip().lower()).strip("-") or "target"
+    suffix = f"-{safe_token}"
+    if len(label) + len(suffix) <= 63:
+        target_label = f"{label}{suffix}"
+    else:
+        digest = hashlib.sha1(f"{label}{suffix}".encode("utf-8")).hexdigest()[:8]
+        hash_suffix = f"-{digest}"
+        max_label_len = 63 - len(suffix) - len(hash_suffix)
+        if max_label_len >= 1:
+            target_label = f"{label[:max_label_len].rstrip('-')}{suffix}{hash_suffix}"
+        else:
+            target_label = f"{safe_token[: max(1, 63 - len(hash_suffix))].rstrip('-')}{hash_suffix}"
+    return f"{target_label}.{domain}"
 
 
 def service_interface_dns_targets(
@@ -2832,22 +2861,22 @@ def service_interface_dns_targets(
     selected_addresses = split_addresses(listen_address)
     if not selected_addresses:
         return []
+    naming_strategy = normalize_service_dns_target_naming(get_appliance_settings_row(db).service_dns_target_naming)
     selected_address_set = set(selected_addresses)
     options_by_name = {option["name"]: option for option in (bind_options if bind_options is not None else service_bind_options(db))}
     targets: list[dict[str, str]] = []
-    consumed: set[str] = set()
     for interface_name in split_interfaces(listen_interface):
         option = options_by_name.get(interface_name)
         if not option:
             continue
         interface_addresses = [address for address in (option or {}).get("addresses", []) if address in selected_address_set]
-        target_hostname = service_interface_hostname(hostname, interface_name)
         for address in interface_addresses:
             try:
                 parsed_address = ip_address(address)
             except ValueError:
                 continue
-            consumed.add(address)
+            target_token = service_dns_target_token(naming_strategy, interface_name, str(parsed_address))
+            target_hostname = service_target_hostname(hostname, target_token)
             targets.append(
                 {
                     "hostname": target_hostname,
@@ -10204,6 +10233,7 @@ def update_settings_from_ui(
     fqdn: str = Form("labfoundry.labfoundry.internal"),
     management_https_enabled: bool = Form(False),
     root_ssh_enabled: bool = Form(False),
+    service_dns_target_naming: str = Form("ip"),
     external_dns_servers: str = Form(""),
     ntp_servers: str | None = Form(None),
     csrf: str = Form(...),
@@ -10213,9 +10243,11 @@ def update_settings_from_ui(
     verify_csrf(request, csrf)
     settings = get_appliance_settings_row(db)
     previous_fqdn = settings.fqdn
+    previous_service_dns_target_naming = normalize_service_dns_target_naming(settings.service_dns_target_naming)
     settings.fqdn = normalize_fqdn(fqdn) or "labfoundry.labfoundry.internal"
     settings.management_https_enabled = bool(management_https_enabled)
     settings.root_ssh_enabled = bool(root_ssh_enabled)
+    settings.service_dns_target_naming = normalize_service_dns_target_naming(service_dns_target_naming)
     settings.external_dns_servers = normalize_multiline_values(external_dns_servers)
     chrony_settings = get_chrony_settings_row(db)
     chrony_enabled = bool(chrony_settings.enabled)
@@ -10240,6 +10272,8 @@ def update_settings_from_ui(
     dns_record_action = None
     if not validation_errors:
         dns_record_action = ensure_dns_for_appliance_settings(db, settings, previous_fqdn=previous_fqdn, actor=identity.username)
+        if previous_service_dns_target_naming != settings.service_dns_target_naming:
+            reconcile_service_dns_aliases(db, actor=identity.username)
     db.add(settings)
     db.commit()
     record_audit(db, actor=identity.username, action="update_appliance_settings", resource_type="settings", resource_id=str(settings.id))
@@ -10254,6 +10288,7 @@ def update_settings_from_ui(
                 "management_https_enabled": saved.management_https_enabled,
                 "management_https_cert_available": context["management_https_cert_available"],
                 "root_ssh_enabled": saved.root_ssh_enabled,
+                "service_dns_target_naming": normalize_service_dns_target_naming(saved.service_dns_target_naming),
                 "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
                 **({"ntp_servers": context["appliance_settings_json"]["ntp_servers"]} if context["show_settings_ntp_servers"] else {}),
                 "local_dns_enabled": context["local_dns_enabled"],

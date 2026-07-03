@@ -285,12 +285,86 @@ def test_forget_missing_first_service_interface_moves_dns_alias_to_next_target(c
         canonical = db.execute(
             select(DnsRecord).where(DnsRecord.hostname == "registry.labfoundry.internal", DnsRecord.record_type == "CNAME")
         ).scalar_one()
-        assert canonical.address == "registry-eth8.labfoundry.internal"
-        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-eth7.labfoundry.internal")).scalar_one_or_none() is None
+        assert canonical.address == "registry-10-8-0-1.labfoundry.internal"
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-10-7-0-1.labfoundry.internal")).scalar_one_or_none() is None
         target = db.execute(
-            select(DnsRecord).where(DnsRecord.hostname == "registry-eth8.labfoundry.internal", DnsRecord.record_type == "A")
+            select(DnsRecord).where(DnsRecord.hostname == "registry-10-8-0-1.labfoundry.internal", DnsRecord.record_type == "A")
         ).scalar_one()
         assert target.address == "10.8.0.1"
+
+
+def test_service_dns_target_naming_converts_owned_records_between_ip_and_interface(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, DnsRecord, PhysicalInterface
+    from labfoundry.app.ui import ensure_dns_for_vcf_registry, get_vcf_private_registry_settings_row
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(
+            PhysicalInterface(
+                name="eth9",
+                mac_address="00:50:56:00:00:19",
+                role="access",
+                mode="access",
+                ip_cidr="192.168.90.1/24",
+                ipv6_cidr="2001:db8::1/64",
+                admin_state="up",
+                oper_state="up",
+            )
+        )
+        db.flush()
+        settings = get_vcf_private_registry_settings_row(db)
+        settings.enabled = True
+        settings.hostname = "registry.labfoundry.internal"
+        settings.listen_interface = "eth9"
+        settings.listen_address = "192.168.90.1\n2001:db8::1"
+        ensure_dns_for_vcf_registry(db, settings, "admin")
+        db.commit()
+
+        canonical = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert canonical.address == "registry-192-168-90-1.labfoundry.internal"
+        ipv4_target = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-192-168-90-1.labfoundry.internal", DnsRecord.record_type == "A")
+        ).scalar_one()
+        assert ipv4_target.address == "192.168.90.1"
+        ipv6_target = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-2001-db8-0-0-0-0-0-1.labfoundry.internal", DnsRecord.record_type == "AAAA")
+        ).scalar_one()
+        assert ipv6_target.address == "2001:db8::1"
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-eth9.labfoundry.internal")).scalar_one_or_none() is None
+
+        appliance_settings = db.execute(select(ApplianceSettings)).scalar_one()
+        appliance_settings.service_dns_target_naming = "interface"
+        ensure_dns_for_vcf_registry(db, settings, "admin")
+        db.commit()
+
+        canonical = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert canonical.address == "registry-eth9.labfoundry.internal"
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-192-168-90-1.labfoundry.internal")).scalar_one_or_none() is None
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-2001-db8-0-0-0-0-0-1.labfoundry.internal")).scalar_one_or_none() is None
+        interface_targets = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-eth9.labfoundry.internal").order_by(DnsRecord.record_type)
+        ).scalars().all()
+        assert [(record.record_type, record.address) for record in interface_targets] == [("A", "192.168.90.1"), ("AAAA", "2001:db8::1")]
+
+        appliance_settings.service_dns_target_naming = "ip"
+        ensure_dns_for_vcf_registry(db, settings, "admin")
+        db.commit()
+
+        canonical = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert canonical.address == "registry-192-168-90-1.labfoundry.internal"
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-eth9.labfoundry.internal")).scalar_one_or_none() is None
+        assert db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-2001-db8-0-0-0-0-0-1.labfoundry.internal", DnsRecord.record_type == "AAAA")
+        ).scalar_one().address == "2001:db8::1"
 
 
 def test_stage_appliance_apply_config_repairs_staging_permission(monkeypatch, tmp_path):
@@ -467,6 +541,9 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "labfoundry.labfoundry.internal" in response.text
     assert "Management UI HTTPS" in response.text
     assert "Root SSH login" in response.text
+    assert "Service DNS target names" in response.text
+    assert 'select name="service_dns_target_naming"' in response.text
+    assert '<option value="ip" selected>IP address</option>' in response.text
     assert "Operational Logging" in response.text
     assert "External NTP servers" in response.text
     assert 'textarea name="ntp_servers"' in response.text
@@ -626,6 +703,7 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
         data={
             "fqdn": "console.labfoundry.internal",
             "root_ssh_enabled": "on",
+            "service_dns_target_naming": "interface",
             "external_dns_servers": "8.8.8.8\n1.1.1.1",
             "csrf": csrf,
         },
@@ -637,6 +715,7 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     assert payload["status"] == "saved"
     assert payload["fqdn"] == "console.labfoundry.internal"
     assert payload["root_ssh_enabled"] is True
+    assert payload["service_dns_target_naming"] == "interface"
     assert payload["external_dns_servers"] == ["8.8.8.8", "1.1.1.1"]
     assert "ntp_servers" not in payload
     assert payload["dns_record_action"] in {"created", "updated", "unchanged", "created+removed-old", "updated+removed-old"}
@@ -645,12 +724,14 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     assert '"resolver_servers": [' in payload["config_preview"]
     assert '"127.0.0.1"' in payload["config_preview"]
     assert '"root_ssh_enabled": true' in payload["config_preview"]
+    assert '"service_dns_target_naming": "interface"' in payload["config_preview"]
     assert "ntp_servers" not in payload["config_preview"]
 
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
         assert settings.fqdn == "console.labfoundry.internal"
         assert settings.root_ssh_enabled is True
+        assert settings.service_dns_target_naming == "interface"
         record = db.execute(
             select(DnsRecord).where(DnsRecord.hostname == "console.labfoundry.internal", DnsRecord.record_type == "A")
         ).scalar_one()
@@ -1735,9 +1816,9 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         record = db.execute(
             select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe.labfoundry.internal", DnsRecord.record_type == "CNAME")
         ).scalar_one()
-        assert record.address == "esxi-pxe-eth2.labfoundry.internal"
+        assert record.address == "esxi-pxe-192-168-50-1.labfoundry.internal"
         interface_record = db.execute(
-            select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-eth2.labfoundry.internal", DnsRecord.record_type == "A")
+            select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-192-168-50-1.labfoundry.internal", DnsRecord.record_type == "A")
         ).scalar_one()
         assert interface_record.address == "192.168.50.1"
         dhcp = db.execute(select(DhcpSettings)).scalar_one()
@@ -3666,8 +3747,8 @@ def test_kms_settings_autosave_returns_json(client):
 
     with SessionLocal() as db:
         record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "CNAME")).scalar_one()
-        assert record.address == "kms-eth2.labfoundry.internal"
-        interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms-eth2.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert record.address == "kms-192-168-50-1.labfoundry.internal"
+        interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms-192-168-50-1.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
         assert interface_record.address == "192.168.50.1"
         assert "KMS/KMIP endpoint" in (interface_record.description or "")
 
@@ -3902,11 +3983,11 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
                 DnsRecord.record_type == "CNAME",
             )
         ).scalar_one()
-        assert dns_record.address == "registry-eth2.labfoundry.internal"
+        assert dns_record.address == "registry-192-168-50-1.labfoundry.internal"
         assert dns_record.enabled is True
         interface_record = db.execute(
             select(DnsRecord).where(
-                DnsRecord.hostname == "registry-eth2.labfoundry.internal",
+                DnsRecord.hostname == "registry-192-168-50-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
@@ -3962,10 +4043,10 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
                 DnsRecord.record_type == "CNAME",
             )
         ).scalar_one()
-        assert dns_record.address == "registry-eth0.labfoundry.internal"
+        assert dns_record.address == "registry-192-168-49-1.labfoundry.internal"
         interface_record = db.execute(
             select(DnsRecord).where(
-                DnsRecord.hostname == "registry-eth0.labfoundry.internal",
+                DnsRecord.hostname == "registry-192-168-49-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
@@ -4097,7 +4178,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Activation code" in page.text
     assert "Choose activation file" in page.text
     assert "Choose VCFDT archive" not in page.text
-    assert "DNS alias follows the first selected service interface." in page.text
+    assert "DNS alias follows the first selected service listener." in page.text
     assert "Server certificate" not in page.text
     assert 'name="server_certificate"' not in page.text
     assert "Telemetry choice" not in page.text
@@ -4149,8 +4230,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "vcfDepotRememberActiveTab" in app_js.text
     assert "tabulator-checklist-option" in app_js.text
     assert "tool staged" in app_js.text
-    assert "DNS alias and interface records created for this endpoint." in app_js.text
-    assert "Old endpoint DNS alias and interface records removed." in app_js.text
+    assert "DNS alias and target records created for this endpoint." in app_js.text
+    assert "Old endpoint DNS alias and target records removed." in app_js.text
     assert "updateVcfDepotHttpsPreview" in app_js.text
     assert "updateVcfDepotValidation" in app_js.text
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
@@ -4260,13 +4341,13 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         ).scalar_one()
         interface_record = db.execute(
             select(DnsRecord).where(
-                DnsRecord.hostname == "depot-eth2.labfoundry.internal",
+                DnsRecord.hostname == "depot-192-168-50-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
         assert token_secret.value == "super-secret-token"
         assert "vcf-download-tool executable" in software_id_error.value
-        assert dns_record.address == "depot-eth2.labfoundry.internal"
+        assert dns_record.address == "depot-192-168-50-1.labfoundry.internal"
         assert dns_record.enabled is True
         assert interface_record.address == "192.168.50.1"
 
@@ -4305,19 +4386,19 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         ).scalar_one()
         old_interface_record = db.execute(
             select(DnsRecord).where(
-                DnsRecord.hostname == "depot-eth2.labfoundry.internal",
+                DnsRecord.hostname == "depot-192-168-50-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one_or_none()
         new_interface_record = db.execute(
             select(DnsRecord).where(
-                DnsRecord.hostname == "offline-depot-eth2.labfoundry.internal",
+                DnsRecord.hostname == "offline-depot-192-168-50-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
         assert old_dns_record is None
         assert old_interface_record is None
-        assert new_dns_record.address == "offline-depot-eth2.labfoundry.internal"
+        assert new_dns_record.address == "offline-depot-192-168-50-1.labfoundry.internal"
         assert new_interface_record.address == "192.168.50.1"
 
     properties_response = client.post(
@@ -5228,16 +5309,16 @@ def test_physical_interface_edit_updates_desired_state(client):
         assert scope.dns_server == "192.168.70.1"
         assert scope.ntp_server == "192.168.70.1"
         kms_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "CNAME")).scalar_one()
-        assert kms_record.address == "kms-eth2.labfoundry.internal"
-        kms_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms-eth2.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert kms_record.address == "kms-192-168-70-1.labfoundry.internal"
+        kms_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms-192-168-70-1.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
         assert kms_interface_record.address == "192.168.70.1"
         boot = esxi_pxe_boot_settings(db)
         assert boot["listen_interface"] == "eth2"
         assert boot["listen_address"] == "192.168.70.1"
         assert boot["effective_native_uefi_http_url"] == "http://192.168.70.1:8080/pxe/esxi/mboot.efi"
         pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "CNAME")).scalar_one()
-        assert pxe_record.address == "esxi-pxe-eth2.labfoundry.internal"
-        pxe_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-eth2.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert pxe_record.address == "esxi-pxe-192-168-70-1.labfoundry.internal"
+        pxe_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-192-168-70-1.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
         assert pxe_interface_record.address == "192.168.70.1"
 
 
@@ -5321,8 +5402,8 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
         assert scope.dns_server == "192.168.50.1"
         assert scope.ntp_server == "192.168.50.1"
         pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "CNAME")).scalar_one()
-        assert pxe_record.address == "esxi-pxe-eth2.labfoundry.internal"
-        pxe_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-eth2.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert pxe_record.address == "esxi-pxe-192-168-50-1.labfoundry.internal"
+        pxe_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-192-168-50-1.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
         assert pxe_interface_record.address == "192.168.50.1"
         pxe_listen = db.execute(select(Setting).where(Setting.key == ESXI_PXE_LISTEN_ADDRESS_KEY)).scalar_one()
         assert pxe_listen.value == "192.168.50.1"

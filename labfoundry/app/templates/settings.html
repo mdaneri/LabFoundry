@@ -26,6 +26,13 @@
         <input class="switch-input" type="checkbox" name="root_ssh_enabled" {{ "checked" if appliance_settings.root_ssh_enabled else "" }}>
         <span class="switch-track" aria-hidden="true"></span>
       </label>
+      <label>
+        <span class="field-label"><span>Service DNS target names</span><button class="help-icon" type="button" data-help="Controls generated per-listener service DNS names. IP-derived names are clearer for clients on specific networks; interface-derived names preserve the previous eth-style convention.">i</button></span>
+        <select name="service_dns_target_naming">
+          <option value="ip" {{ "selected" if appliance_settings.service_dns_target_naming == "ip" else "" }}>IP address</option>
+          <option value="interface" {{ "selected" if appliance_settings.service_dns_target_naming == "interface" else "" }}>Interface name</option>
+        </select>
+      </label>
       {% if local_dns_enabled %}
         <input type="hidden" name="external_dns_servers" value="{{ appliance_settings.external_dns_servers }}">
       {% else %}
@@ -138,6 +145,7 @@
         <div><span>Management interface</span><strong data-appliance-settings-management>{{ management_interface.name or "not found" }}{% if management_interface.ip %} / {{ management_interface.ip }}{% endif %}</strong></div>
         <div><span>Management UI</span><strong>{{ "HTTPS" if appliance_settings.management_https_enabled else "HTTP" }}{% if appliance_settings.management_https_enabled and management_https_cert_path %} / {{ management_https_cert_path }}{% endif %}</strong></div>
         <div><span>Root SSH</span><strong data-appliance-settings-root-ssh>{{ "enabled" if appliance_settings.root_ssh_enabled else "disabled" }}</strong></div>
+        <div><span>Service DNS targets</span><strong>{{ "IP address" if appliance_settings.service_dns_target_naming == "ip" else "Interface name" }}</strong></div>
         <div><span>Config path</span><strong data-appliance-settings-config-path>{{ appliance_settings.config_path }}</strong></div>
       </div>
       <div data-appliance-settings-errors class="validation-list {{ 'hidden' if not appliance_settings_validation_errors else '' }}" role="list">
