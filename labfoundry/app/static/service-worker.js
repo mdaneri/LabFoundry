@@ -3,7 +3,7 @@ const LABFOUNDRY_ASSETS = [
   "/manifest.webmanifest",
   "/favicon.ico",
   "/static/offline.html",
-  "/static/app.css?v=network-dualstack-20260701-2",
+  "/static/app.css?v=template-accessibility-20260703-1",
   "/static/app.js?v=network-dualstack-20260701-2",
   "/static/pwa.js",
   "/static/brand/labfoundry-mark.svg",

@@ -5866,8 +5866,12 @@ function updateValidationList(list, items = []) {
     return;
   }
   list.innerHTML = "";
+  const useRoleListItems = list.getAttribute("role") === "list";
   items.forEach((message) => {
-    const item = document.createElement("li");
+    const item = document.createElement(useRoleListItems ? "div" : "li");
+    if (useRoleListItems) {
+      item.setAttribute("role", "listitem");
+    }
     item.textContent = message;
     list.append(item);
   });

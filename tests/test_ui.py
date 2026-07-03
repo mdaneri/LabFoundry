@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=network-dualstack-20260701-2" in offline.text
+    assert "/static/app.css?v=template-accessibility-20260703-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
