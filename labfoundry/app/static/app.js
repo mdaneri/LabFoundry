@@ -6920,6 +6920,10 @@ function updateVcfDepotSummary(form, payload = {}) {
   const storePaths = document.querySelectorAll("[data-vcf-depot-store]");
   const toolVersions = document.querySelectorAll("[data-vcf-depot-tool-version]");
   const toolStatuses = document.querySelectorAll("[data-vcf-depot-tool-status]");
+  const toolArchiveNames = document.querySelectorAll("[data-vcf-depot-tool-archive-name]");
+  const toolUploadActions = document.querySelectorAll("[data-vcf-depot-tool-upload-action]");
+  const toolUploadNames = document.querySelectorAll("[data-vcf-depot-tool-upload-name]");
+  const toolResetPanels = document.querySelectorAll("[data-vcf-depot-tool-reset-panel], [data-vcf-depot-tool-reset-action]");
   const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
   const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
   const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
@@ -6939,17 +6943,38 @@ function updateVcfDepotSummary(form, payload = {}) {
     });
   }
   if (payload.tool_archive_name !== undefined) {
+    const toolAvailable = Boolean(payload.tool_archive_name);
     toolStatuses.forEach((toolStatus) => {
       if (toolStatus instanceof HTMLElement) {
-        toolStatus.textContent = payload.tool_archive_name ? "tool staged" : "upload required";
+        toolStatus.textContent = toolAvailable ? "tool staged" : "upload required";
+      }
+    });
+    toolArchiveNames.forEach((toolArchiveName) => {
+      if (toolArchiveName instanceof HTMLElement) {
+        toolArchiveName.textContent = payload.tool_archive_name || "no package staged";
+      }
+    });
+    toolUploadActions.forEach((toolUploadAction) => {
+      if (toolUploadAction instanceof HTMLElement) {
+        toolUploadAction.textContent = toolAvailable ? "Update" : "Add";
+      }
+    });
+    toolUploadNames.forEach((toolUploadName) => {
+      if (toolUploadName instanceof HTMLElement) {
+        toolUploadName.textContent = payload.tool_archive_name || "vcf-download-tool-*.tar.gz";
+      }
+    });
+    toolResetPanels.forEach((toolResetPanel) => {
+      if (toolResetPanel instanceof HTMLElement) {
+        toolResetPanel.classList.toggle("hidden", !toolAvailable);
       }
     });
     softwareDepotGenerateButtons.forEach((softwareDepotGenerateButton) => {
       if (softwareDepotGenerateButton instanceof HTMLButtonElement) {
-        softwareDepotGenerateButton.disabled = !payload.tool_archive_name;
+        softwareDepotGenerateButton.disabled = !toolAvailable;
       }
     });
-    setVcfDepotToolDependentActions(Boolean(payload.tool_archive_name));
+    setVcfDepotToolDependentActions(toolAvailable);
   }
   if (payload.tool_version !== undefined) {
     toolVersions.forEach((toolVersion) => {
@@ -7223,6 +7248,30 @@ function initializeVcfDepotSoftwareDepotIdGenerator() {
         if (button instanceof HTMLButtonElement) {
           button.disabled = false;
         }
+      }
+    });
+  });
+}
+
+function initializeVcfDepotToolResetModal() {
+  const modal = document.getElementById("vcf-depot-tool-reset-modal");
+  document.querySelectorAll("[data-vcf-depot-tool-reset-modal-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.showModal();
+      }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-tool-reset-modal-cancel]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.close("cancel");
       }
     });
   });
@@ -8068,6 +8117,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSoftwareDepotIdGenerator);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotToolResetModal);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTokenPaste);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotActivationPaste);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotPropertiesEditor);

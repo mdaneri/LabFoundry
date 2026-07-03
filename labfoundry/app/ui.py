@@ -1623,6 +1623,36 @@ def store_uploaded_vcf_depot_archive(settings: VcfOfflineDepotSettings, archive_
     return archive_name
 
 
+def reset_vcf_depot_tool_staging(db: Session, settings: VcfOfflineDepotSettings, *, reset_application_properties: bool) -> None:
+    archive_path = Path(settings.tool_archive_path) if settings.tool_archive_path else None
+    if archive_path is not None:
+        try:
+            upload_root = VCF_DEPOT_UPLOAD_DIR.resolve()
+            resolved_archive = archive_path.resolve()
+            if resolved_archive.is_relative_to(upload_root) and resolved_archive.is_file():
+                resolved_archive.unlink(missing_ok=True)
+        except OSError:
+            pass
+    settings.tool_archive_path = ""
+    settings.tool_version = ""
+    settings.updated_at = utcnow()
+    keys = [
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
+    ]
+    if reset_application_properties:
+        keys.extend(
+            [
+                VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY,
+                VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY,
+                VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY,
+            ]
+        )
+    for setting in db.execute(select(Setting).where(Setting.key.in_(keys))).scalars().all():
+        db.delete(setting)
+
+
 def vcf_depot_software_depot_id_context(db: Session) -> dict[str, str]:
     software_id = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY)).scalar_one_or_none()
     generated_at = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY)).scalar_one_or_none()
@@ -8085,6 +8115,30 @@ def update_vcf_offline_depot_settings_from_ui(
                 "command_preview": context["vcf_depot_command_preview"],
             }
         )
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+@router.post("/vcf-offline-depot/tool/reset", response_model=None)
+def reset_vcf_depot_tool_from_ui(
+    request: Request,
+    reset_application_properties: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    settings = get_vcf_offline_depot_settings_row(db)
+    reset_properties = reset_application_properties == "on"
+    reset_vcf_depot_tool_staging(db, settings, reset_application_properties=reset_properties)
+    record_audit(
+        db,
+        actor=identity.username,
+        action="reset_vcf_depot_tool",
+        resource_type="vcf_offline_depot",
+        resource_id=str(settings.id),
+        detail="VCFDT package reset; application properties reset." if reset_properties else "VCFDT package reset.",
+    )
+    db.commit()
     return RedirectResponse("/vcf-offline-depot", status_code=303)
 
 

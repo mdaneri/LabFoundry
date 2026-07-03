@@ -73,7 +73,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v13" in service_worker.text
+    assert "labfoundry-pwa-v14" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-depot-config-copy-20260703-1" in offline.text
+    assert "/static/app.css?v=vcf-depot-tool-reset-20260703-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -3975,7 +3975,13 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Tool & Credentials" not in page.text
     assert "Review appliance changes" in page.text
     assert "VCF Download Tool" in page.text
-    assert "Choose VCFDT tool" in page.text
+    assert "Add or update the VCF Download Tool package" in page.text
+    assert "no package staged" in page.text
+    assert ">Add</strong>" in page.text
+    assert "Reset VCFDT package" in page.text
+    assert "Also reset saved application-prodv2.properties configuration" in page.text
+    assert 'data-vcf-depot-tool-reset-action>Reset</button>' in page.text
+    assert 'button danger compact-button hidden' in page.text
     assert "Stage download token" in page.text
     assert ">Token</button>" in page.text
     assert 'data-vcf-depot-token-modal-open data-vcf-depot-requires-tool disabled' in page.text
@@ -4008,7 +4014,9 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Software depot ID" in page.text
     assert "VCFDT staging" in page.text
     assert "Staged VCFDT inputs" not in page.text
-    assert page.text.index("<h2>Depot Settings</h2>") < page.text.index("VCFDT staging") < page.text.index("Choose VCFDT tool") < page.text.index("Software depot ID")
+    depot_settings_index = page.text.index("<h2>Depot Settings</h2>")
+    vcfdt_staging_index = page.text.index("VCFDT staging")
+    assert depot_settings_index < vcfdt_staging_index < page.text.index("VCF Download Tool", vcfdt_staging_index) < page.text.index("Software depot ID")
     assert '<span class="status-pill warn">dry-run</span>' not in page.text
     assert "Activation code" in page.text
     assert "Choose activation file" in page.text
@@ -4095,6 +4103,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert ".code-editor-textarea" in app_css.text
     assert ".code-editor-textarea + .cm-editor" in app_css.text
     assert "#vcf-depot-properties-modal .confirm-modal-panel" in app_css.text
+    assert ".vcfdt-tool-manager" in app_css.text
+    assert ".compact-file-upload" in app_css.text
     assert 'data-codemirror-editor data-codemirror-language="labfoundry-hosts" data-vcf-depot-properties-textarea' in page.text
 
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
@@ -4288,6 +4298,96 @@ def test_vcf_offline_depot_rejects_truncated_vcfdt_upload(client, monkeypatch):
     with SessionLocal() as db:
         settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
         assert settings.tool_archive_path == ""
+
+
+def test_vcf_offline_depot_tool_reset_can_preserve_or_clear_configuration(client, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting, VcfOfflineDepotSettings
+    from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY,
+        VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY,
+        VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
+    )
+
+    monkeypatch.setattr("labfoundry.app.ui.find_local_vcf_download_tool_archive", lambda: None)
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    make_vcfdt_archive(archive_path)
+    login(client)
+    page = client.get("/vcf-offline-depot")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    upload = client.post(
+        "/vcf-offline-depot/settings",
+        data={"hostname": "depot.labfoundry.internal", "listen_interface": "eth2", "port": "443", "csrf": csrf},
+        files={"tool_archive_file": ("vcf-download-tool-9.1.0.test.tar.gz", archive_path.read_bytes(), "application/gzip")},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert upload.status_code == 200
+    assert upload.json()["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
+
+    refreshed = client.get("/vcf-offline-depot")
+    assert ">Update</strong>" in refreshed.text
+    assert 'data-vcf-depot-tool-reset-action>Reset</button>' in refreshed.text
+    assert 'button danger compact-button hidden' not in refreshed.text
+
+    properties = client.post(
+        "/vcf-offline-depot/application-properties",
+        data={"csrf": csrf, "application_properties": "spring.profiles.active=depot\ncustom.setting=true\n"},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert properties.status_code == 200
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        stored_archive = Path(settings.tool_archive_path)
+        assert stored_archive.exists()
+        assert settings.tool_version == "9.1.0.0100.25429019"
+
+    reset = client.post("/vcf-offline-depot/tool/reset", data={"csrf": csrf}, follow_redirects=False)
+    assert reset.status_code == 303
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        assert settings.tool_archive_path == ""
+        assert settings.tool_version == ""
+        assert not stored_archive.exists()
+        for key in [VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY, VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY, VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY]:
+            assert db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none() is None
+        properties_setting = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY)).scalar_one()
+        assert "custom.setting=true" in properties_setting.value
+
+    reset_page = client.get("/vcf-offline-depot")
+    assert "no package staged" in reset_page.text
+    assert "operator saved · saved" in reset_page.text
+    assert 'data-vcf-depot-properties-modal-open data-vcf-depot-requires-tool disabled' in reset_page.text
+
+    upload_again = client.post(
+        "/vcf-offline-depot/settings",
+        data={"hostname": "depot.labfoundry.internal", "listen_interface": "eth2", "port": "443", "csrf": csrf},
+        files={"tool_archive_file": ("vcf-download-tool-9.1.0.test.tar.gz", archive_path.read_bytes(), "application/gzip")},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert upload_again.status_code == 200
+
+    reset_with_configuration = client.post(
+        "/vcf-offline-depot/tool/reset",
+        data={"csrf": csrf, "reset_application_properties": "on"},
+        follow_redirects=False,
+    )
+    assert reset_with_configuration.status_code == 303
+    with SessionLocal() as db:
+        for key in [
+            VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY,
+            VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY,
+            VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY,
+        ]:
+            assert db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none() is None
 
 
 def test_vcf_offline_depot_accepts_pasted_download_token_and_activation_code(client, tmp_path, monkeypatch):
@@ -5512,7 +5612,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "vcf-depot-config-copy-20260703-1" in page.text
+    assert "vcf-depot-tool-reset-20260703-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

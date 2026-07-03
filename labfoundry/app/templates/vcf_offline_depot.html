@@ -197,16 +197,24 @@
         <div class="settings-subsection">
           <div>
             <h3>VCFDT staging</h3>
-            <p class="muted">Upload the VCF Download Tool before staging the download token or generating the software depot ID.</p>
+            <p class="muted">Add or update the VCF Download Tool package before staging credentials or generating the software depot ID.</p>
           </div>
-          <label>
-            <span class="field-label"><span>VCF Download Tool</span><button class="help-icon" type="button" data-help="Upload the proprietary VCF Download Tool file. The file stays outside git and global appliance apply stages it through the appliance helper.">i</button></span>
-            <span class="file-upload-control">
+          <div class="vcfdt-tool-manager">
+            <div>
+              <span class="field-label"><span>VCF Download Tool</span><button class="help-icon" type="button" data-help="Add or update the proprietary VCF Download Tool package. The package stays outside git and global appliance apply stages it through the appliance helper.">i</button></span>
+              <strong data-vcf-depot-tool-archive-name>{{ vcf_depot_settings_json.tool_archive_name or "no package staged" }}</strong>
+              <small class="muted">Expected file: {{ vcf_depot_archive_pattern }}</small>
+            </div>
+            <span class="file-upload-control compact-file-upload">
               <input class="file-upload-input" type="file" name="tool_archive_file" accept=".gz,application/gzip,application/x-gzip" data-file-upload-input>
-              <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose VCFDT tool</strong><small data-file-upload-name>{{ vcf_depot_settings_json.tool_archive_name or vcf_depot_archive_pattern }}</small></span></span>
+              <span class="file-upload-surface"><span class="file-upload-copy"><strong data-vcf-depot-tool-upload-action>{{ "Update" if vcf_depot_settings.tool_archive_path else "Add" }}</strong><small data-file-upload-name data-vcf-depot-tool-upload-name>{{ vcf_depot_settings_json.tool_archive_name or vcf_depot_archive_pattern }}</small></span></span>
             </span>
+          </div>
+          <button class="button danger compact-button {{ '' if vcf_depot_settings.tool_archive_path else 'hidden' }}" type="button" data-vcf-depot-tool-reset-modal-open data-vcf-depot-tool-reset-action>Reset</button>
+          <div class="vcfdt-tool-reset-note {{ '' if vcf_depot_settings.tool_archive_path else 'hidden' }}" data-vcf-depot-tool-reset-panel>
+            <small class="muted">Reset clears the staged VCFDT package and generated software depot metadata. Appliance files are changed only by the global apply workflow.</small>
+          </div>
             <progress class="upload-progress" value="0" max="100" data-autosave-upload-progress hidden></progress>
-          </label>
         </div>
         <p id="vcf-depot-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
       </form>
@@ -291,6 +299,24 @@
     </div>
   </aside>
 </section>
+<dialog id="vcf-depot-tool-reset-modal" class="confirm-modal" aria-labelledby="vcf-depot-tool-reset-modal-title">
+  <form class="confirm-modal-panel form-stack" action="/vcf-offline-depot/tool/reset" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="confirm-modal-body">
+      <p class="kicker">VCF Offline Depot</p>
+      <h2 id="vcf-depot-tool-reset-modal-title">Reset VCFDT package</h2>
+      <p class="muted">This removes the staged VCF Download Tool package and generated software depot metadata from LabFoundry desired state. It does not mutate appliance runtime files until a later global apply or job updates them.</p>
+      <label class="checkbox-row">
+        <input type="checkbox" name="reset_application_properties">
+        <span>Also reset saved application-prodv2.properties configuration</span>
+      </label>
+    </div>
+    <div class="confirm-modal-actions">
+      <button class="button ghost" value="cancel" type="button" data-vcf-depot-tool-reset-modal-cancel>Cancel</button>
+      <button class="button danger" type="submit">Reset package</button>
+    </div>
+  </form>
+</dialog>
 <dialog id="vcf-depot-token-modal" class="confirm-modal" aria-labelledby="vcf-depot-token-modal-title">
   <form class="confirm-modal-panel form-stack" action="/vcf-offline-depot/download-token" method="post" enctype="multipart/form-data" data-vcf-depot-token-paste>
     <input type="hidden" name="csrf" value="{{ csrf_token }}">
