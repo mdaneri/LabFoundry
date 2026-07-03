@@ -140,14 +140,18 @@ def _read_properties_from_archive(archive_path: str | Path) -> str:
         return ""
     try:
         with tarfile.open(path, "r:gz") as archive:
-            for member_name in [
+            members = [member for member in archive.getmembers() if member.isfile()]
+            for suffix in [
                 f"conf/{VCF_DEPOT_APPLICATION_PROPERTIES_NAME}",
                 VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
             ]:
-                member = archive.extractfile(member_name)
-                if member is not None:
-                    return member.read(512 * 1024).decode("utf-8", errors="replace")
-    except (EOFError, tarfile.TarError, OSError):
+                for archive_member in members:
+                    member_name = archive_member.name.replace("\\", "/").strip("/")
+                    if member_name == suffix or member_name.endswith(f"/{suffix}"):
+                        member = archive.extractfile(archive_member)
+                        if member is not None:
+                            return member.read(512 * 1024).decode("utf-8", errors="replace")
+    except (EOFError, KeyError, tarfile.TarError, OSError):
         return ""
     return ""
 

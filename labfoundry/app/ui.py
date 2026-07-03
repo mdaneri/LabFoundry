@@ -1984,6 +1984,13 @@ def write_vcf_depot_runtime_file(path: Path, value: str) -> None:
     path.chmod(0o600)
 
 
+def stage_vcf_depot_runtime_application_properties(db: Session, settings: VcfOfflineDepotSettings, tool_home: Path) -> None:
+    properties = vcf_depot_application_properties_context(db, settings)
+    content = str(properties.get("content") or "")
+    if content.strip():
+        write_vcf_depot_runtime_file(tool_home / "conf" / VCF_DEPOT_APPLICATION_PROPERTIES_NAME, content)
+
+
 def stage_vcf_depot_runtime_secrets(db: Session) -> None:
     token = setting_value(db, VCF_DEPOT_TOKEN_VALUE_KEY)
     if token.strip():
@@ -2011,6 +2018,7 @@ def prepare_vcf_depot_runtime(settings: VcfOfflineDepotSettings, db: Session) ->
     vdt_log_path.parent.mkdir(parents=True, exist_ok=True)
     vdt_log_path.touch(exist_ok=True)
     stage_vcf_depot_runtime_secrets(db)
+    stage_vcf_depot_runtime_application_properties(db, settings, tool_home)
     telemetry_choice = settings.telemetry_choice if settings.telemetry_choice in VCF_DEPOT_TELEMETRY_CHOICES else "DISABLE"
     if telemetry_choice != "NOT_PROVIDED":
         telemetry_file = tool_home / "conf" / "telemetry" / "telemetry.flag"

@@ -67,6 +67,37 @@ def test_vcf_depot_application_properties_prefers_uploaded_tool_archive(tmp_path
     assert "archive.example.test" in content
 
 
+def test_vcf_depot_application_properties_finds_archive_members_under_top_level_directory(tmp_path):
+    archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    properties = b"spring.profiles.active=depot\nlcm.depot.adapter.host=nested-archive.example.test\n"
+    with tarfile.open(archive, "w:gz") as bundle:
+        info = tarfile.TarInfo("vcf-download-tool-9.1.0/conf/application-prodv2.properties")
+        info.size = len(properties)
+        bundle.addfile(info, io.BytesIO(properties))
+    settings = VcfOfflineDepotSettings(tool_archive_path=str(archive))
+
+    content, source = vcf_depot_application_properties_from_tool(settings)
+
+    assert source == "VCFDT default"
+    assert "nested-archive.example.test" in content
+
+
+def test_vcf_depot_application_properties_falls_back_when_archive_member_is_missing(tmp_path, monkeypatch):
+    archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        payload = b"9.1.0"
+        info = tarfile.TarInfo("vcf-download-tool-9.1.0/conf/tool-version.txt")
+        info.size = len(payload)
+        bundle.addfile(info, io.BytesIO(payload))
+    settings = VcfOfflineDepotSettings(tool_archive_path=str(archive))
+    monkeypatch.setattr("labfoundry.app.services.vcf_offline_depot.VCF_DEPOT_EXTRACT_DIR", tmp_path / "missing-extract")
+
+    content, source = vcf_depot_application_properties_from_tool(settings)
+
+    assert source == "LabFoundry default"
+    assert "lcm.depot.adapter.host=dl.broadcom.com" in content
+
+
 def test_vcf_depot_validation_uses_documented_component_catalog(tmp_path):
     archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     archive.write_bytes(b"not-a-real-archive")

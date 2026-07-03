@@ -4753,6 +4753,51 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
         assert profile and profile.status == "ready"
 
 
+def test_vcf_offline_depot_prepare_runtime_stages_saved_application_properties(client, tmp_path, monkeypatch):
+    import io
+    import tarfile
+    from pathlib import PurePosixPath
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting, VcfOfflineDepotSettings
+    from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY, VCF_DEPOT_APPLICATION_PROPERTIES_NAME
+    from labfoundry.app.ui import prepare_vcf_depot_runtime
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    archive_properties = b"spring.profiles.active=depot\nlcm.depot.adapter.host=archive.example.test\n"
+    tool_binary = b"#!/bin/sh\nexit 0\n"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        binary_info = tarfile.TarInfo("vcf-download-tool-9.1.0/bin/vcf-download-tool")
+        binary_info.size = len(tool_binary)
+        binary_info.mode = 0o755
+        archive.addfile(binary_info, io.BytesIO(tool_binary))
+        properties_info = tarfile.TarInfo("vcf-download-tool-9.1.0/conf/application-prodv2.properties")
+        properties_info.size = len(archive_properties)
+        archive.addfile(properties_info, io.BytesIO(archive_properties))
+
+    runtime_dir = tmp_path / "active-tool"
+    monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_EXTRACT_DIR", runtime_dir)
+    monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_VDT_LOG_PATH", PurePosixPath((runtime_dir / "log" / "vdt.log").as_posix()))
+
+    saved_properties = "spring.profiles.active=depot\nlcm.depot.adapter.host=operator.example.test\ncustom.setting=true\n"
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        settings.tool_archive_path = str(archive_path)
+        settings.depot_store_path = str(tmp_path / "depot")
+        db.add(Setting(key=VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY, value=saved_properties))
+        db.commit()
+
+        tool_path = prepare_vcf_depot_runtime(settings, db)
+
+    expected_tool_home = runtime_dir / "vcf-download-tool-9.1.0"
+    assert tool_path == expected_tool_home / "bin" / "vcf-download-tool"
+    staged_properties = expected_tool_home / "conf" / VCF_DEPOT_APPLICATION_PROPERTIES_NAME
+    assert staged_properties.read_text(encoding="utf-8") == saved_properties
+    assert "archive.example.test" not in staged_properties.read_text(encoding="utf-8")
+
+
 def test_vcf_offline_depot_generates_software_depot_id(client, tmp_path, monkeypatch):
     from sqlalchemy import select
 
