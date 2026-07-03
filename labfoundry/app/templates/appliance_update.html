@@ -51,13 +51,14 @@
       </div>
       <div class="apply-unit-list compact-list">
         {% for stream in update_streams %}
+          {% set stream_checked = selected_update_stream_ids is not defined or stream.id in selected_update_stream_ids %}
           <label class="apply-unit-card update-stream-card">
             <span class="apply-unit-select">
               <input
                 type="checkbox"
                 name="selected_streams"
                 value="{{ stream.id }}"
-                {% if selected_update_stream_ids is not defined or stream.id in selected_update_stream_ids %}checked{% endif %}
+                {{ "checked" if stream_checked else "" }}
               >
               <span>
                 <strong>{{ stream.label }}</strong>

@@ -110,11 +110,11 @@
         <span class="status-pill {{ 'good' if not ntp_validation_errors else 'warn' }}" data-ntp-validation-status>{{ "valid" if not ntp_validation_errors else "needs attention" }}</span>
       </div>
       {% if ntp_validation_errors %}
-        <ul class="error-list" data-ntp-validation-errors>
+        <div class="error-list" role="list" data-ntp-validation-errors>
           {% for error in ntp_validation_errors %}
-            <li>{{ error }}</li>
+            <div role="listitem">{{ error }}</div>
           {% endfor %}
-        </ul>
+        </div>
       {% else %}
         <p class="muted" data-ntp-validation-message>The desired Chrony state passes LabFoundry validation. Appliance validation still runs through the allowlisted Chrony helper before apply.</p>
       {% endif %}

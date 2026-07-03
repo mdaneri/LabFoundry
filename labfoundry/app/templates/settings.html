@@ -140,16 +140,16 @@
         <div><span>Root SSH</span><strong data-appliance-settings-root-ssh>{{ "enabled" if appliance_settings.root_ssh_enabled else "disabled" }}</strong></div>
         <div><span>Config path</span><strong data-appliance-settings-config-path>{{ appliance_settings.config_path }}</strong></div>
       </div>
-      <ul data-appliance-settings-errors class="validation-list {{ 'hidden' if not appliance_settings_validation_errors else '' }}">
+      <div data-appliance-settings-errors class="validation-list {{ 'hidden' if not appliance_settings_validation_errors else '' }}" role="list">
         {% for error in appliance_settings_validation_errors %}
-          <li>{{ error }}</li>
+          <div role="listitem">{{ error }}</div>
         {% endfor %}
-      </ul>
-      <ul data-appliance-settings-warnings class="validation-list {{ 'hidden' if not appliance_settings_validation_warnings else '' }}">
+      </div>
+      <div data-appliance-settings-warnings class="validation-list {{ 'hidden' if not appliance_settings_validation_warnings else '' }}" role="list">
         {% for warning in appliance_settings_validation_warnings %}
-          <li>{{ warning }}</li>
+          <div role="listitem">{{ warning }}</div>
         {% endfor %}
-      </ul>
+      </div>
       <div class="config-preview">
         <div class="preview-head">
           <span>Rendered config preview</span>

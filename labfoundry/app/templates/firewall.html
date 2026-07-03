@@ -181,7 +181,7 @@
                   <button class="button secondary compact-button" type="button" data-source-group-add-cidr>Add CIDR</button>
                 </div>
                 <div class="inline-add-control source-group-add-ref-control">
-                  <select data-source-group-ref-select>
+                  <select data-source-group-ref-select aria-label="Source group reference">
                     <option value="">Select group</option>
                     {% for other in firewall_source_groups %}
                       {% if other.id != group.id and not other.builtin %}
@@ -238,11 +238,11 @@
         <span class="status-pill {{ 'good' if not firewall_validation_errors else 'warn' }}" data-firewall-validation-status>{{ "valid" if not firewall_validation_errors else "needs attention" }}</span>
       </div>
       {% if firewall_validation_errors %}
-        <ul class="error-list" data-firewall-validation-errors>
+        <div class="error-list" role="list" data-firewall-validation-errors>
           {% for error in firewall_validation_errors %}
-            <li>{{ error }}</li>
+            <div role="listitem">{{ error }}</div>
           {% endfor %}
-        </ul>
+        </div>
       {% else %}
         <p class="muted" data-firewall-validation-message>The desired firewall state passes LabFoundry validation. Appliance validation still runs through the allowlisted nftables helper before apply.</p>
       {% endif %}
