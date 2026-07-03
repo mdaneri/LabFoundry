@@ -3496,11 +3496,140 @@ textarea {
   gap: 12px;
 }
 
+.monitor-page {
+  display: grid;
+  gap: 14px;
+}
+
+.monitor-metrics {
+  margin-bottom: 0;
+}
+
+.monitor-vm-panel {
+  margin-bottom: 0;
+}
+
+.monitor-vm-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.monitor-vm-grid div {
+  min-width: 0;
+}
+
+.monitor-vm-grid span {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.monitor-vm-grid strong {
+  display: block;
+  font-size: 13px;
+  margin-top: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.monitor-toolbar {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.monitor-toolbar .tool-tabs {
+  margin-bottom: 0;
+}
+
+.monitor-range-control .tab-button {
+  min-width: 44px;
+}
+
+.monitor-status-line {
+  font-size: 12px;
+  text-align: right;
+}
+
+.monitor-chart-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.monitor-chart-panel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 0;
+  min-width: 0;
+}
+
+.monitor-chart {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  height: 240px;
+  overflow: hidden;
+  position: relative;
+}
+
+.monitor-chart canvas {
+  display: block;
+  height: 100%;
+  width: 100%;
+}
+
+.monitor-table-scroll {
+  max-height: 260px;
+  overflow: auto;
+}
+
+.monitor-table-scroll .data-table {
+  margin-bottom: 0;
+}
+
+.monitor-usage-cell {
+  display: grid;
+  gap: 5px;
+  min-width: 120px;
+}
+
+.monitor-usage-bar {
+  background: #e2e8f0;
+  border-radius: 999px;
+  height: 7px;
+  overflow: hidden;
+}
+
+.monitor-usage-fill {
+  background: #2563eb;
+  display: block;
+  height: 100%;
+  min-width: 2px;
+}
+
+.monitor-usage-fill.warn {
+  background: #d97706;
+}
+
+.monitor-usage-fill.danger {
+  background: #dc2626;
+}
+
 @media (max-width: 1100px) {
   .app-shell,
   .split-workspace,
   .two-column,
   .metric-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .monitor-chart-grid,
+  .monitor-vm-grid {
     grid-template-columns: 1fr;
   }
 
@@ -3589,5 +3718,14 @@ textarea {
   .policy-row,
   .settings-list div {
     grid-template-columns: 1fr;
+  }
+
+  .monitor-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .monitor-status-line {
+    text-align: left;
   }
 }

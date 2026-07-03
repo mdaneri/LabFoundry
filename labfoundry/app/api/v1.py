@@ -91,6 +91,7 @@ from labfoundry.app.schemas import (
     FirewallStatusResponse,
     IdentityResponse,
     JobResponse,
+    MonitorResponse,
     NatRuleCreate,
     NatRuleResponse,
     PhysicalInterfaceResponse,
@@ -110,6 +111,7 @@ from labfoundry.app.schemas import (
     WanStatusResponse,
 )
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY, firewall_interface_networks, firewall_source_group_state
+from labfoundry.app.services.monitoring import monitor_payload
 from labfoundry.app.services.networking import normalize_interface_mode
 from labfoundry.app.services.routes_wan import validate_nat_source
 from labfoundry.app.services.service_registry import SERVICE_STATE_IDS, SERVICE_SYSTEMD_UNITS
@@ -723,6 +725,15 @@ def get_dashboard(
             for event in audit_events
         ],
     )
+
+
+@router.get("/monitor", response_model=MonitorResponse, tags=["Monitor"], operation_id="getMonitor")
+def get_monitor(
+    identity: Annotated[Identity, Depends(require_scope("read:monitoring"))],
+    db: Session = Depends(get_db),
+    hours: int = Query(default=6, ge=1, le=6),
+) -> MonitorResponse:
+    return MonitorResponse(**monitor_payload(db, hours=hours))
 
 
 @router.get(

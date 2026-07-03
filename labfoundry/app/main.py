@@ -15,6 +15,7 @@ from labfoundry.app.database import SessionLocal, init_db
 from labfoundry.app.operational_logging import configure_operational_logging
 from labfoundry.app.problem import install_problem_handlers
 from labfoundry.app.seed import seed_initial_data
+from labfoundry.app.services.monitoring import start_monitor_sampler
 from labfoundry.app.services.networking import sync_host_physical_interfaces
 from labfoundry.app.ui import initialize_factory_appliance_apply_baseline
 from labfoundry.app.ui import router as ui_router
@@ -43,7 +44,12 @@ async def lifespan(app: FastAPI):
         seed_initial_data(db, include_examples=settings.environment != "appliance")
         refresh_startup_host_inventory(db, environment=settings.environment)
         initialize_factory_appliance_apply_baseline(db)
-    yield
+    monitor_sampler = start_monitor_sampler()
+    try:
+        yield
+    finally:
+        if monitor_sampler:
+            monitor_sampler.stop()
 
 
 def create_app() -> FastAPI:

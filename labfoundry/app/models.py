@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from labfoundry.app.database import Base
@@ -181,6 +181,72 @@ class ServiceState(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     health: Mapped[str] = mapped_column(String(40), default="unknown")
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MonitorSample(Base):
+    __tablename__ = "monitor_samples"
+    __table_args__ = (Index("ix_monitor_samples_sampled_at_id", "sampled_at", "id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    cpu_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cpu_count: Mapped[int] = mapped_column(Integer, default=0)
+    cpu_total_jiffies: Mapped[int] = mapped_column(Integer, default=0)
+    cpu_idle_jiffies: Mapped[int] = mapped_column(Integer, default=0)
+    load1: Mapped[float | None] = mapped_column(Float, nullable=True)
+    load5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    load15: Mapped[float | None] = mapped_column(Float, nullable=True)
+    memory_total_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    memory_available_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    memory_used_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    swap_total_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    swap_used_bytes: Mapped[int] = mapped_column(Integer, default=0)
+
+    network_samples: Mapped[list["MonitorNetworkSample"]] = relationship(back_populates="sample", cascade="all, delete-orphan")
+    disk_samples: Mapped[list["MonitorDiskSample"]] = relationship(back_populates="sample", cascade="all, delete-orphan")
+
+
+class MonitorNetworkSample(Base):
+    __tablename__ = "monitor_network_samples"
+    __table_args__ = (Index("ix_monitor_network_sample_interface", "sample_id", "interface_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sample_id: Mapped[int] = mapped_column(ForeignKey("monitor_samples.id"), index=True)
+    interface_name: Mapped[str] = mapped_column(String(80), index=True)
+    rx_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    tx_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    rx_bytes_per_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tx_bytes_per_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rx_packets: Mapped[int] = mapped_column(Integer, default=0)
+    tx_packets: Mapped[int] = mapped_column(Integer, default=0)
+    rx_errors: Mapped[int] = mapped_column(Integer, default=0)
+    tx_errors: Mapped[int] = mapped_column(Integer, default=0)
+    rx_dropped: Mapped[int] = mapped_column(Integer, default=0)
+    tx_dropped: Mapped[int] = mapped_column(Integer, default=0)
+    oper_state: Mapped[str] = mapped_column(String(40), default="unknown")
+
+    sample: Mapped[MonitorSample] = relationship(back_populates="network_samples")
+
+
+class MonitorDiskSample(Base):
+    __tablename__ = "monitor_disk_samples"
+    __table_args__ = (Index("ix_monitor_disk_sample_mount", "sample_id", "mount_point"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sample_id: Mapped[int] = mapped_column(ForeignKey("monitor_samples.id"), index=True)
+    mount_point: Mapped[str] = mapped_column(String(240), index=True)
+    device: Mapped[str] = mapped_column(String(160), default="")
+    filesystem: Mapped[str] = mapped_column(String(60), default="")
+    total_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    used_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    free_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    used_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    read_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    write_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    read_bytes_per_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    write_bytes_per_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    sample: Mapped[MonitorSample] = relationship(back_populates="disk_samples")
 
 
 class ApplianceSettings(Base):

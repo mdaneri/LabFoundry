@@ -522,6 +522,22 @@ class DashboardResponse(BaseModel):
     recent_audit_events: list[dict[str, Any]]
 
 
+class MonitorResponse(BaseModel):
+    window_hours: int
+    sample_interval_seconds: int
+    generated_at: str
+    last_sample_at: str | None
+    sample_count: int
+    summary: dict[str, Any]
+    virtualization: dict[str, Any]
+    cpu: list[dict[str, Any]]
+    memory: list[dict[str, Any]]
+    network_totals: list[dict[str, Any]]
+    networks: list[dict[str, Any]]
+    disk_io: list[dict[str, Any]]
+    disks: list[dict[str, Any]]
+
+
 class AuditEventResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
