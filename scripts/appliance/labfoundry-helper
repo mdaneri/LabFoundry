@@ -37,7 +37,7 @@ COMMANDS: dict[str, set[str]] = {
     "chronyd": {"validate", "apply"},
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
-    "vcf-offline-depot": {"validate", "stage-tool", "sync", "apply-https"},
+    "vcf-offline-depot": {"validate", "stage-tool", "sync", "apply-https", "apply-properties"},
     "esxi-pxe": {"validate", "apply"},
     "appliance-update": {"check", "apply", "restart-service"},
     "wan": {"validate", "apply"},
@@ -135,6 +135,8 @@ SSHD_ROOT_LOGIN_CONFIG_PATH = SSHD_CONFIG_DIR / "labfoundry-root-login.conf"
 VCF_DEPOT_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-offline-depot")
 VCF_DEPOT_SITE_PATH = NGINX_SITES_DIR / "vcf-offline-depot.conf"
 VCF_DEPOT_TOOL_DIR = Path("/opt/labfoundry/vcf-download-tool")
+VCF_DEPOT_STORE_PATH = Path("/mnt/labfoundry-vcf-offline-depot")
+VCF_DEPOT_PROD_PATH = VCF_DEPOT_STORE_PATH / "PROD"
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 VCF_BACKUPS_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-backups")
 VCF_BACKUPS_CONFIG_DIR = Path("/etc/ssh/sshd_config.d")
@@ -3934,11 +3936,28 @@ def _vcf_depot_config_errors(path: Path) -> list[str]:
         except ValueError as exc:
             errors.append(str(exc))
     roots = _nginx_directive(text, "root")
-    if not roots:
-        errors.append("VCF Offline Depot nginx config must include root.")
+    if roots:
+        errors.append("VCF Offline Depot nginx config must not expose the depot store as a broad server root.")
+    aliases = _nginx_directive(text, "alias")
+    if not aliases:
+        errors.append("VCF Offline Depot nginx config must include a /PROD/ alias.")
     else:
-        if not roots[0].startswith("/"):
-            errors.append("VCF Offline Depot root must be an absolute path.")
+        prod_alias = aliases[0]
+        if not prod_alias.startswith("/"):
+            errors.append("VCF Offline Depot /PROD/ alias must be an absolute path.")
+        if not prod_alias.rstrip("/").endswith("/PROD"):
+            errors.append("VCF Offline Depot /PROD/ alias must point at the depot store PROD directory.")
+        if Path(prod_alias.rstrip("/")) != VCF_DEPOT_PROD_PATH:
+            errors.append(f"VCF Offline Depot /PROD/ alias must point at {VCF_DEPOT_PROD_PATH}.")
+    for required in [
+        "location = /PROD",
+        "return 301 /PROD/;",
+        "location ^~ /PROD/",
+        "location /",
+        "return 404;",
+    ]:
+        if required not in text:
+            errors.append(f"VCF Offline Depot nginx config must include {required}.")
     for directive, label, private in [
         ("ssl_certificate", "VCF Offline Depot certificate", False),
         ("ssl_certificate_key", "VCF Offline Depot private key", True),
@@ -3960,6 +3979,28 @@ def _vcf_depot_config_errors(path: Path) -> list[str]:
     if "default_type application/octet-stream;" not in text:
         errors.append("VCF Offline Depot nginx config must set default_type application/octet-stream.")
     return errors
+
+
+def _prepare_vcf_depot_web_tree(text: str) -> None:
+    for alias in _nginx_directive(text, "alias"):
+        path = Path(alias.rstrip("/"))
+        if path != VCF_DEPOT_PROD_PATH:
+            continue
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(path.stat().st_mode | 0o755)
+        for root, dirs, files in os.walk(path):
+            root_path = Path(root)
+            if root_path.is_symlink():
+                continue
+            root_path.chmod(root_path.stat().st_mode | 0o755)
+            for dirname in dirs:
+                child = root_path / dirname
+                if not child.is_symlink():
+                    child.chmod(child.stat().st_mode | 0o755)
+            for filename in files:
+                child = root_path / filename
+                if not child.is_symlink():
+                    child.chmod(child.stat().st_mode | 0o644)
 
 
 def _safe_extract_archive(archive_path: Path, destination: Path) -> None:
@@ -4020,6 +4061,50 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
     return 0
 
 
+def _vcf_download_tool_home(tool_path: Path) -> Path:
+    return tool_path.parent.parent if tool_path.parent.name == "bin" else tool_path.parent
+
+
+def _validate_vcf_depot_properties_path(raw_path: str) -> Path:
+    path = Path(raw_path).resolve()
+    apply_dir = VCF_DEPOT_APPLY_DIR.resolve()
+    if not path.is_relative_to(apply_dir):
+        raise ValueError(f"VCF Download Tool application properties must be staged under {VCF_DEPOT_APPLY_DIR}")
+    if path.name != "application-prodv2.properties":
+        raise ValueError("VCF Download Tool application properties must be named application-prodv2.properties")
+    if not path.is_file():
+        raise ValueError(f"VCF Download Tool application properties file does not exist: {path}")
+    return path
+
+
+def _apply_vcf_download_tool_properties(properties_path: Path) -> int:
+    extraction_dir = VCF_DEPOT_TOOL_DIR / "extracted"
+    try:
+        tool_path = _find_vcf_download_tool_binary(extraction_dir)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    text = properties_path.read_text(encoding="utf-8")
+    if not text.strip():
+        print("VCF Download Tool application properties cannot be empty.", file=sys.stderr)
+        return 2
+    target_dir = _vcf_download_tool_home(tool_path) / "conf"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / "application-prodv2.properties"
+    target_path.write_text(text, encoding="utf-8")
+    os.chmod(target_path, 0o640)
+    print(
+        json.dumps(
+            {
+                "vcf_offline_depot": "application properties apply complete",
+                "config_path": str(target_path),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def shlex_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -4037,6 +4122,17 @@ def _handle_vcf_offline_depot(action: str, args: list[str]) -> int:
             print("VCF Download Tool archive must be named vcf-download-tool-*.tar.gz.", file=sys.stderr)
             return 2
         return _stage_vcf_download_tool_archive(archive_path)
+
+    if action == "apply-properties":
+        if len(args) != 1:
+            print("vcf-offline-depot apply-properties requires exactly one staged application properties path", file=sys.stderr)
+            return 2
+        try:
+            properties_path = _validate_vcf_depot_properties_path(args[0])
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        return _apply_vcf_download_tool_properties(properties_path)
 
     if len(args) != 1:
         print(f"vcf-offline-depot {action} requires exactly one staged nginx config path", file=sys.stderr)
@@ -4073,6 +4169,7 @@ def _handle_vcf_offline_depot(action: str, args: list[str]) -> int:
         if disabled:
             result = _remove_nginx_site(VCF_DEPOT_SITE_PATH)
         else:
+            _prepare_vcf_depot_web_tree(text)
             result = _install_nginx_site(VCF_DEPOT_SITE_PATH, text)
         if result != 0:
             return result

@@ -405,6 +405,17 @@ function dnsAddRowHintFormatter(cell, emptyText) {
   return escapeHtml(value);
 }
 
+function dnsRecordCellEditable(cell) {
+  const data = cell.getRow().getData();
+  if (!data.is_new) {
+    return true;
+  }
+  if (cell.getField() === "host_label") {
+    return true;
+  }
+  return Boolean(String(data.host_label ?? "").trim());
+}
+
 function ipv4ReversePointer(value) {
   const parts = String(value ?? "").trim().split(".");
   if (parts.length !== 4) {
@@ -4575,6 +4586,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           title: "Host",
           field: "host_label",
           editor: "input",
+          editable: dnsRecordCellEditable,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add record here"),
           minWidth: 180,
           cellEdited: (cell) => autoSaveDnsRecord(cell, csrf),
@@ -4584,6 +4596,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           title: "Family",
           field: "record_type",
           editor: "list",
+          editable: dnsRecordCellEditable,
           editorParams: { values: { A: "A (IPv4)", AAAA: "AAAA (IPv6)", CNAME: "CNAME (alias)" } },
           formatter: (cell) => dnsRecordTypeLabel(cell.getValue()),
           width: 130,
@@ -4594,6 +4607,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           title: "Value",
           field: "address",
           editor: "input",
+          editable: dnsRecordCellEditable,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "enter value..."),
           minWidth: 170,
           cellEdited: (cell) => autoSaveDnsRecord(cell, csrf),
@@ -4610,6 +4624,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           field: "enabled",
           formatter: "tickCross",
           editor: "tickCross",
+          editable: dnsRecordCellEditable,
           hozAlign: "center",
           width: 110,
           headerSort: false,
@@ -4619,6 +4634,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           title: "Description",
           field: "description",
           editor: "input",
+          editable: dnsRecordCellEditable,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "optional note..."),
           minWidth: 220,
           cellEdited: (cell) => autoSaveDnsRecord(cell, csrf),
@@ -6920,9 +6936,14 @@ function updateVcfDepotSummary(form, payload = {}) {
   const storePaths = document.querySelectorAll("[data-vcf-depot-store]");
   const toolVersions = document.querySelectorAll("[data-vcf-depot-tool-version]");
   const toolStatuses = document.querySelectorAll("[data-vcf-depot-tool-status]");
+  const toolArchiveNames = document.querySelectorAll("[data-vcf-depot-tool-archive-name]");
+  const toolUploadActions = document.querySelectorAll("[data-vcf-depot-tool-upload-action]");
+  const toolUploadNames = document.querySelectorAll("[data-vcf-depot-tool-upload-name]");
+  const toolResetPanels = document.querySelectorAll("[data-vcf-depot-tool-reset-panel], [data-vcf-depot-tool-reset-action]");
   const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
   const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
   const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
+  const propertiesStatus = document.querySelector("[data-vcf-depot-properties-status]");
   const softwareDepotGenerateButtons = document.querySelectorAll("[data-vcf-depot-generate-id] button[type='submit']");
   if (endpoint instanceof HTMLElement) {
     endpoint.textContent = endpointValue || "depot hostname required";
@@ -6938,17 +6959,38 @@ function updateVcfDepotSummary(form, payload = {}) {
     });
   }
   if (payload.tool_archive_name !== undefined) {
+    const toolAvailable = Boolean(payload.tool_archive_name);
     toolStatuses.forEach((toolStatus) => {
       if (toolStatus instanceof HTMLElement) {
-        toolStatus.textContent = payload.tool_archive_name ? "tool staged" : "upload required";
+        toolStatus.textContent = toolAvailable ? "tool staged" : "upload required";
+      }
+    });
+    toolArchiveNames.forEach((toolArchiveName) => {
+      if (toolArchiveName instanceof HTMLElement) {
+        toolArchiveName.textContent = payload.tool_archive_name || "no package staged";
+      }
+    });
+    toolUploadActions.forEach((toolUploadAction) => {
+      if (toolUploadAction instanceof HTMLElement) {
+        toolUploadAction.textContent = toolAvailable ? "Update" : "Add";
+      }
+    });
+    toolUploadNames.forEach((toolUploadName) => {
+      if (toolUploadName instanceof HTMLElement) {
+        toolUploadName.textContent = payload.tool_archive_name || "vcf-download-tool-*.tar.gz";
+      }
+    });
+    toolResetPanels.forEach((toolResetPanel) => {
+      if (toolResetPanel instanceof HTMLElement) {
+        toolResetPanel.classList.toggle("hidden", !toolAvailable);
       }
     });
     softwareDepotGenerateButtons.forEach((softwareDepotGenerateButton) => {
       if (softwareDepotGenerateButton instanceof HTMLButtonElement) {
-        softwareDepotGenerateButton.disabled = !payload.tool_archive_name;
+        softwareDepotGenerateButton.disabled = !toolAvailable;
       }
     });
-    setVcfDepotToolDependentActions(Boolean(payload.tool_archive_name));
+    setVcfDepotToolDependentActions(toolAvailable);
   }
   if (payload.tool_version !== undefined) {
     toolVersions.forEach((toolVersion) => {
@@ -6963,18 +7005,23 @@ function updateVcfDepotSummary(form, payload = {}) {
   if (activationStatus instanceof HTMLElement && payload.activation_code_present !== undefined) {
     activationStatus.textContent = payload.activation_code_present ? payload.activation_code_name || "uploaded" : "not uploaded";
   }
+  if (propertiesStatus instanceof HTMLElement && payload.application_properties_source !== undefined) {
+    propertiesStatus.textContent = payload.application_properties_updated_at
+      ? `${payload.application_properties_source || "operator saved"} · saved`
+      : payload.application_properties_source || "LabFoundry default";
+  }
   updateVcfDepotSoftwareDepotId(payload);
   if (dnsStatus instanceof HTMLElement && payload.dns_record_action !== undefined) {
     const dnsMessages = {
-      created: "DNS record created for this endpoint.",
-      updated: "DNS record updated for this endpoint.",
-      unchanged: "DNS record already matches this endpoint.",
-      "created+removed-old": "DNS record created and old endpoint record removed.",
-      "updated+removed-old": "DNS record updated and old endpoint record removed.",
-      "unchanged+removed-old": "Old endpoint DNS record removed.",
-      "removed-old": "Old endpoint DNS record removed.",
+      created: "DNS alias and target records created for this endpoint.",
+      updated: "DNS alias and target records updated for this endpoint.",
+      unchanged: "DNS alias already matches this endpoint.",
+      "created+removed-old": "DNS alias created and old endpoint records removed.",
+      "updated+removed-old": "DNS alias updated and old endpoint records removed.",
+      "unchanged+removed-old": "Old endpoint DNS alias and target records removed.",
+      "removed-old": "Old endpoint DNS alias and target records removed.",
     };
-    dnsStatus.textContent = dnsMessages[payload.dns_record_action] || "DNS record follows the selected listen address.";
+    dnsStatus.textContent = dnsMessages[payload.dns_record_action] || "DNS alias follows the first selected service listener.";
   }
   const livePreviewPayload = {
     ...payload,
@@ -7222,6 +7269,30 @@ function initializeVcfDepotSoftwareDepotIdGenerator() {
   });
 }
 
+function initializeVcfDepotToolResetModal() {
+  const modal = document.getElementById("vcf-depot-tool-reset-modal");
+  document.querySelectorAll("[data-vcf-depot-tool-reset-modal-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.showModal();
+      }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-tool-reset-modal-cancel]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.close("cancel");
+      }
+    });
+  });
+}
+
 function initializeVcfDepotTokenPaste() {
   const modal = document.getElementById("vcf-depot-token-modal");
   document.querySelectorAll("[data-vcf-depot-token-modal-open]").forEach((button) => {
@@ -7302,6 +7373,183 @@ function initializeVcfDepotTokenPaste() {
       } catch (error) {
         if (status instanceof HTMLElement) {
           status.textContent = error instanceof Error ? error.message : "Download token could not be staged.";
+          status.classList.add("error-text");
+        }
+      } finally {
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = false;
+        }
+      }
+    });
+  });
+}
+
+function initializeVcfDepotActivationPaste() {
+  const modal = document.getElementById("vcf-depot-activation-modal");
+  document.querySelectorAll("[data-vcf-depot-activation-modal-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.showModal();
+      }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-activation-modal-cancel]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.close("cancel");
+      }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-activation-paste]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const button = form.querySelector("button[type='submit']");
+    const textarea = form.querySelector('textarea[name="activation_code_text"]');
+    const fileInput = form.querySelector('input[name="activation_code_file"]');
+    const status = form.querySelector("[data-vcf-depot-activation-paste-status]");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const hasPastedCode = textarea instanceof HTMLTextAreaElement && Boolean(textarea.value.trim());
+      const hasCodeFile = fileInput instanceof HTMLInputElement && Boolean(fileInput.files?.length);
+      if (!hasPastedCode && !hasCodeFile) {
+        if (status instanceof HTMLElement) {
+          status.textContent = "Choose an activation file or paste activation-code text.";
+          status.classList.add("error-text");
+        }
+        return;
+      }
+      if (button instanceof HTMLButtonElement) {
+        button.disabled = true;
+      }
+      if (status instanceof HTMLElement) {
+        status.textContent = "Staging activation-code file...";
+        status.classList.remove("error-text");
+      }
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: new FormData(form),
+          credentials: "same-origin",
+          headers: { "X-LabFoundry-Autosave": "1" },
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || "Activation code could not be staged.");
+        }
+        const settingsForm = document.querySelector("[data-vcf-depot-settings]");
+        if (settingsForm instanceof HTMLFormElement) {
+          updateVcfDepotSummary(settingsForm, payload);
+        }
+        updateVcfDepotValidation(payload);
+        if (textarea instanceof HTMLTextAreaElement) {
+          textarea.value = "";
+        }
+        if (fileInput instanceof HTMLInputElement) {
+          fileInput.value = "";
+        }
+        if (status instanceof HTMLElement) {
+          status.textContent = "Activation-code file staged. Contents are hidden.";
+          status.classList.remove("error-text");
+        }
+        if (modal instanceof HTMLDialogElement && modal.open) {
+          modal.close("saved");
+        }
+      } catch (error) {
+        if (status instanceof HTMLElement) {
+          status.textContent = error instanceof Error ? error.message : "Activation code could not be staged.";
+          status.classList.add("error-text");
+        }
+      } finally {
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = false;
+        }
+      }
+    });
+  });
+}
+
+function initializeVcfDepotPropertiesEditor() {
+  const modal = document.getElementById("vcf-depot-properties-modal");
+  document.querySelectorAll("[data-vcf-depot-properties-modal-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.showModal();
+        const textarea = modal.querySelector("[data-vcf-depot-properties-textarea]");
+        if (window.LabFoundryCodeMirror && typeof window.LabFoundryCodeMirror.focus === "function" && textarea instanceof HTMLTextAreaElement) {
+          window.LabFoundryCodeMirror.focus(textarea);
+        }
+      }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-properties-modal-cancel]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.close("cancel");
+      }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-properties-editor]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const button = form.querySelector("button[type='submit']");
+    const textarea = form.querySelector("[data-vcf-depot-properties-textarea]");
+    const status = form.querySelector("[data-vcf-depot-properties-save-status]");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!(textarea instanceof HTMLTextAreaElement) || !textarea.value.trim()) {
+        if (status instanceof HTMLElement) {
+          status.textContent = "application-prodv2.properties cannot be empty.";
+          status.classList.add("error-text");
+        }
+        return;
+      }
+      if (button instanceof HTMLButtonElement) {
+        button.disabled = true;
+      }
+      if (status instanceof HTMLElement) {
+        status.textContent = "Saving application properties...";
+        status.classList.remove("error-text");
+      }
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: new FormData(form),
+          credentials: "same-origin",
+          headers: { "X-LabFoundry-Autosave": "1" },
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || "Application properties could not be saved.");
+        }
+        const settingsForm = document.querySelector("[data-vcf-depot-settings]");
+        if (settingsForm instanceof HTMLFormElement) {
+          updateVcfDepotSummary(settingsForm, payload);
+        }
+        updateVcfDepotValidation(payload);
+        if (status instanceof HTMLElement) {
+          status.textContent = "Application properties saved as desired state.";
+          status.classList.remove("error-text");
+        }
+        if (modal instanceof HTMLDialogElement && modal.open) {
+          modal.close("saved");
+        }
+      } catch (error) {
+        if (status instanceof HTMLElement) {
+          status.textContent = error instanceof Error ? error.message : "Application properties could not be saved.";
           status.classList.add("error-text");
         }
       } finally {
@@ -7885,7 +8133,10 @@ document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSoftwareDepotIdGenerator);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotToolResetModal);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTokenPaste);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotActivationPaste);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotPropertiesEditor);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
 document.addEventListener("DOMContentLoaded", initializeEsxiIsoUploadForms);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);

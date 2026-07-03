@@ -177,6 +177,9 @@ from labfoundry.app.services.vcf_private_registry import (
 )
 from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_ACTIVATION_VALUE_KEY,
+    VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY,
+    VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY,
+    VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY,
     VCF_DEPOT_DEFAULT_STORE_PATH,
     VCF_DEPOT_LEGACY_STORE_PATH,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
@@ -2161,11 +2164,20 @@ def build_vcf_offline_depot_status(db: Session) -> VcfOfflineDepotStatusResponse
     profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
     row = db.execute(select(ServiceState).where(ServiceState.service == "repository")).scalar_one_or_none()
     download_token_present, activation_code_present = vcf_depot_secret_status(db)
+    application_properties = setting_value(db, VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY)
+    management_interface_names = {
+        interface.name
+        for interface in db.execute(select(PhysicalInterface).where(PhysicalInterface.role == "management")).scalars().all()
+    }
+    management_interface_names.update(
+        vlan.name for vlan in db.execute(select(VlanInterface).where(VlanInterface.role == "management")).scalars().all()
+    )
     validation_errors, _warnings = validate_vcf_depot_state(
         settings,
         profiles,
         download_token_present=download_token_present,
         activation_code_present=activation_code_present,
+        management_interface_names=management_interface_names,
     )
     payload = vcf_depot_settings_to_dict(settings)
     return VcfOfflineDepotStatusResponse(
@@ -2184,6 +2196,9 @@ def build_vcf_offline_depot_status(db: Session) -> VcfOfflineDepotStatusResponse
         software_depot_id_error=setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY),
         download_token_present=download_token_present,
         activation_code_present=activation_code_present,
+        application_properties_present=bool(application_properties.strip()),
+        application_properties_source=setting_value(db, VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY),
+        application_properties_updated_at=setting_value(db, VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY),
         profile_count=len([profile for profile in profiles if profile.enabled]),
         config_path=str(payload["config_path"]),
         valid=not validation_errors,

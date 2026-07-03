@@ -1936,6 +1936,49 @@ input[type="checkbox"] {
   display: block;
 }
 
+.vcfdt-tool-manager {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.vcfdt-tool-manager > div {
+  min-width: 0;
+}
+
+.vcfdt-tool-manager strong,
+.vcfdt-tool-manager small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-file-upload {
+  min-width: 92px;
+}
+
+.compact-file-upload .file-upload-surface {
+  min-height: 30px;
+  justify-content: center;
+  padding: 4px 10px;
+}
+
+.compact-file-upload .file-upload-copy small {
+  display: none;
+}
+
+.vcfdt-tool-reset-note {
+  margin-top: -4px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .upload-progress {
   width: 100%;
   height: 8px;
@@ -2914,6 +2957,10 @@ textarea {
   background: transparent;
 }
 
+.confirm-modal.wide-modal {
+  width: min(920px, calc(100vw - 32px));
+}
+
 .confirm-modal::backdrop {
   background: rgba(15, 23, 42, 0.32);
 }
@@ -2947,6 +2994,37 @@ textarea {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.code-editor-textarea {
+  min-height: min(520px, 58vh);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+#vcf-depot-properties-modal .confirm-modal-panel {
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+#vcf-depot-properties-modal .confirm-modal-body {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.code-editor-textarea + .cm-editor {
+  height: min(520px, 52vh);
+  max-height: min(520px, 52vh);
+}
+
+.code-editor-textarea + .cm-editor .cm-scroller {
+  overflow: auto;
+}
+
+.code-editor-textarea + .cm-editor .cm-content {
+  min-height: 100%;
 }
 
 .preview-modal {

@@ -19,6 +19,11 @@ VCF_DEPOT_LEGACY_STORE_PATH = "/srv/repository"
 VCF_DEPOT_DEFAULT_STORE_PATH = "/mnt/labfoundry-vcf-offline-depot"
 VCF_DEPOT_DEFAULT_CONFIG_PATH = "/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf"
 VCF_DEPOT_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/vcf-offline-depot/labfoundry-vcf-offline-depot.conf"
+VCF_DEPOT_APPLICATION_PROPERTIES_NAME = "application-prodv2.properties"
+VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY = "vcf_depot_application_properties_content"
+VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY = "vcf_depot_application_properties_source"
+VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY = "vcf_depot_application_properties_updated_at"
+VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH = f"/var/lib/labfoundry/apply/vcf-offline-depot/{VCF_DEPOT_APPLICATION_PROPERTIES_NAME}"
 VCF_DEPOT_STAGED_TOOL_DIR = "/opt/labfoundry/vcf-download-tool"
 VCF_DEPOT_RUNTIME_TOOL_DIR = "/var/lib/labfoundry/vcfDownloadTool/active-tool"
 VCF_DEPOT_UPLOAD_DIR = Path("vcfDownloadTool")
@@ -127,6 +132,65 @@ def detect_vcf_download_tool_version(archive_path: str | Path) -> str:
             return version_file.read(200).decode("utf-8", errors="replace").strip()
     except (EOFError, tarfile.TarError, OSError):
         return ""
+
+
+def _read_properties_from_archive(archive_path: str | Path) -> str:
+    path = Path(archive_path)
+    if not path.exists():
+        return ""
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            members = [member for member in archive.getmembers() if member.isfile()]
+            for suffix in [
+                f"conf/{VCF_DEPOT_APPLICATION_PROPERTIES_NAME}",
+                VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+            ]:
+                for archive_member in members:
+                    member_name = archive_member.name.replace("\\", "/").strip("/")
+                    if member_name == suffix or member_name.endswith(f"/{suffix}"):
+                        member = archive.extractfile(archive_member)
+                        if member is not None:
+                            return member.read(512 * 1024).decode("utf-8", errors="replace")
+    except (EOFError, KeyError, tarfile.TarError, OSError):
+        return ""
+    return ""
+
+
+def default_vcf_depot_application_properties() -> str:
+    default_path = Path(__file__).resolve().parents[1] / "static" / "defaults" / VCF_DEPOT_APPLICATION_PROPERTIES_NAME
+    try:
+        return default_path.read_text(encoding="utf-8")
+    except OSError:
+        return "\n".join(
+            [
+                "spring.profiles.active=depot",
+                "spring.main.web-environment=false",
+                "",
+                "lcm.bundle.download.root.dir=${user.home}",
+                "lcm.depot.adapter.host=dl.broadcom.com",
+                "lcm.depot.adapter.remote.v2.rootDir=/PROD",
+                "lcm.depot.adapter.remote.repoDir=/COMP/SDDC_MANAGER_VCF",
+                "lcm.depot.download.tool.name=vcf-download-tool",
+                "",
+            ]
+        )
+
+
+def vcf_depot_application_properties_from_tool(settings: VcfOfflineDepotSettings) -> tuple[str, str]:
+    if settings.tool_archive_path:
+        archive_text = _read_properties_from_archive(settings.tool_archive_path)
+        if archive_text:
+            return archive_text, "VCFDT default"
+        for candidate in [
+            VCF_DEPOT_EXTRACT_DIR / "conf" / VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+            VCF_DEPOT_EXTRACT_DIR / VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
+        ]:
+            if candidate.is_file():
+                try:
+                    return candidate.read_text(encoding="utf-8"), "VCFDT default"
+                except OSError:
+                    pass
+    return default_vcf_depot_application_properties(), "LabFoundry default"
 
 
 def safe_archive_upload_name(filename: str) -> str:
@@ -337,7 +401,7 @@ def render_nginx_depot_config(
         "# Managed by LabFoundry. Local changes may be overwritten.",
         "# Desired HTTPS endpoint for the VCF Offline Depot.",
         f"# Depot store: {settings.depot_store_path}",
-        f"# VCF endpoint: https://{vcf_depot_endpoint(settings)}/",
+        f"# VCF endpoint: https://{vcf_depot_endpoint(settings)}/PROD/",
         f"# Listen interfaces: {', '.join(split_interfaces(settings.listen_interface)) or 'none'}",
         f"# Listen addresses: {', '.join(split_addresses(settings.listen_address)) or 'none'}",
         "",
@@ -347,15 +411,26 @@ def render_nginx_depot_config(
             for address in (split_addresses(settings.listen_address) or ["0.0.0.0"])
         ],
         f"  server_name {settings.hostname};",
-        f"  root {settings.depot_store_path};",
-        "  sendfile on;",
-        "  tcp_nopush on;",
-        "  directio 8m;",
-        "  autoindex on;",
-        "  types { }",
-        "  default_type application/octet-stream;",
         f"  ssl_certificate {certificate_path};",
         f"  ssl_certificate_key {key_path};",
+        "",
+        "  location = /PROD {",
+        "    return 301 /PROD/;",
+        "  }",
+        "",
+        "  location ^~ /PROD/ {",
+        f"    alias {settings.depot_store_path.rstrip('/')}/PROD/;",
+        "    sendfile on;",
+        "    tcp_nopush on;",
+        "    directio 8m;",
+        "    autoindex on;",
+        "    types { }",
+        "    default_type application/octet-stream;",
+        "  }",
+        "",
+        "  location / {",
+        "    return 404;",
+        "  }",
         "}",
     ]
     return "\n".join(lines).strip() + "\n"
@@ -523,6 +598,7 @@ def validate_vcf_depot_state(
     interface_names: set[str] | None = None,
     download_token_present: bool = False,
     activation_code_present: bool = False,
+    management_interface_names: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -537,9 +613,11 @@ def validate_vcf_depot_state(
         listen_addresses = split_addresses(settings.listen_address)
         if not listen_interfaces:
             errors.append("Listen interface is required.")
-        elif interface_names is not None:
+        else:
             for interface in listen_interfaces:
-                if interface not in interface_names:
+                if management_interface_names and interface in management_interface_names:
+                    errors.append(f"Listen interface {interface} uses the management role. Choose a non-management service interface for VCF Offline Depot.")
+                elif interface_names is not None and interface not in interface_names:
                     errors.append(f"Listen interface {interface} is not configured as an access physical or VLAN interface with an IP address.")
         if not listen_addresses:
             errors.append("Listen address is required.")

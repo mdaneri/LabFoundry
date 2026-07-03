@@ -1680,11 +1680,22 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
                 "server {",
                 "  listen 192.168.50.1:443 ssl;",
                 "  server_name depot.labfoundry.internal;",
-                "  root /mnt/labfoundry-vcf-offline-depot;",
-                "  sendfile on;",
-                "  default_type application/octet-stream;",
                 f"  ssl_certificate {cert_path};",
                 f"  ssl_certificate_key {key_path};",
+                "",
+                "  location = /PROD {",
+                "    return 301 /PROD/;",
+                "  }",
+                "",
+                "  location ^~ /PROD/ {",
+                "    alias /mnt/labfoundry-vcf-offline-depot/PROD/;",
+                "    sendfile on;",
+                "    default_type application/octet-stream;",
+                "  }",
+                "",
+                "  location / {",
+                "    return 404;",
+                "  }",
                 "}",
                 "",
             ]
@@ -1702,6 +1713,7 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
     monkeypatch.setattr(helper, "NGINX_CONF_INCLUDE_PATH", nginx_include)
     monkeypatch.setattr(helper, "NGINX_SITES_DIR", site_dir)
     monkeypatch.setattr(helper, "VCF_DEPOT_SITE_PATH", site_dir / "vcf-offline-depot.conf")
+    monkeypatch.setattr(helper, "_prepare_vcf_depot_web_tree", lambda text: None)
     monkeypatch.setattr(helper, "_run", fake_run)
     monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/nginx" if command == "nginx" else None)
 
@@ -1710,10 +1722,69 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
 
     site_text = (site_dir / "vcf-offline-depot.conf").read_text(encoding="utf-8")
     assert "server_name depot.labfoundry.internal;" in site_text
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in site_text
+    assert "root /mnt/labfoundry-vcf-offline-depot;" not in site_text
     assert "sendfile on;" in site_text
     assert nginx_include.read_text(encoding="utf-8").strip().endswith(f"include {site_dir}/*.conf;")
     assert ["/usr/sbin/nginx", "-t"] in commands
     assert ["systemctl", "enable", "--now", "nginx"] in commands
+
+
+def test_vcf_offline_depot_helper_prepares_prod_tree_permissions(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    prod_path = tmp_path / "depot" / "PROD"
+    nested_dir = prod_path / "COMP"
+    nested_file = nested_dir / "artifact.json"
+    nested_dir.mkdir(parents=True)
+    nested_file.write_text("{}", encoding="utf-8")
+    prod_path.chmod(0o750)
+    nested_dir.chmod(0o750)
+    nested_file.chmod(0o640)
+    monkeypatch.setattr(helper, "VCF_DEPOT_PROD_PATH", prod_path)
+
+    helper._prepare_vcf_depot_web_tree(f"alias {prod_path}/;\n")
+
+    assert prod_path.stat().st_mode & 0o005 == 0o005
+    assert nested_dir.stat().st_mode & 0o005 == 0o005
+    assert nested_file.stat().st_mode & 0o004 == 0o004
+
+
+def test_vcf_offline_depot_helper_rejects_broad_nginx_root(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "vcf-offline-depot"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    cert_path = managed_root / "vcf-offline-depot" / "certs" / "depot.crt"
+    key_path = managed_root / "vcf-offline-depot" / "certs" / "depot.key"
+    apply_dir.mkdir(parents=True)
+    cert_path.parent.mkdir(parents=True)
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    config_path = apply_dir / "labfoundry-vcf-offline-depot.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "server {",
+                "  listen 192.168.50.1:443 ssl;",
+                "  server_name depot.labfoundry.internal;",
+                "  root /mnt/labfoundry-vcf-offline-depot;",
+                "  sendfile on;",
+                "  default_type application/octet-stream;",
+                f"  ssl_certificate {cert_path};",
+                f"  ssl_certificate_key {key_path};",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+
+    assert helper._handle_vcf_offline_depot("validate", [str(config_path)]) == 2
+    captured = capsys.readouterr()
+    assert "must not expose the depot store as a broad server root" in captured.err
+    assert "must include a /PROD/ alias" in captured.err
 
 
 def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, capsys):
@@ -1741,6 +1812,32 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert os.access(wrapper, os.X_OK)
     assert os.access(extracted, os.X_OK)
     assert str(extracted) in wrapper.read_text(encoding="utf-8")
+
+
+def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "vcf-offline-depot"
+    properties_path = apply_dir / "application-prodv2.properties"
+    apply_dir.mkdir(parents=True)
+    properties_path.write_text("spring.profiles.active=depot\nlcm.depot.adapter.host=stage.example.test\n", encoding="utf-8")
+    tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
+    tool_bin = tool_dir / "extracted" / "vcfdt" / "bin" / "vcf-download-tool"
+    tool_bin.parent.mkdir(parents=True)
+    tool_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+
+    assert helper._handle_vcf_offline_depot("apply-properties", [str(properties_path)]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["vcf_offline_depot"] == "application properties apply complete"
+    target = tool_dir / "extracted" / "vcfdt" / "conf" / "application-prodv2.properties"
+    assert target.read_text(encoding="utf-8") == properties_path.read_text(encoding="utf-8")
+
+    outside_path = tmp_path / "application-prodv2.properties"
+    outside_path.write_text("spring.profiles.active=depot\n", encoding="utf-8")
+    assert helper._handle_vcf_offline_depot("apply-properties", [str(outside_path)]) == 2
 
 
 def test_vcf_offline_depot_helper_removes_disabled_nginx_site(monkeypatch, tmp_path):

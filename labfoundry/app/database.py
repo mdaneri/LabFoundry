@@ -113,6 +113,7 @@ def _ensure_sqlite_appliance_settings_columns() -> None:
     columns = {
         "management_https_enabled": "BOOLEAN DEFAULT 0",
         "root_ssh_enabled": "BOOLEAN DEFAULT 0",
+        "service_dns_target_naming": "VARCHAR(20) DEFAULT 'ip'",
     }
     with engine.begin() as connection:
         for name, definition in columns.items():

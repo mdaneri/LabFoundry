@@ -190,6 +190,7 @@ class ApplianceSettings(Base):
     fqdn: Mapped[str] = mapped_column(String(180), default="labfoundry.labfoundry.internal")
     management_https_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     root_ssh_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    service_dns_target_naming: Mapped[str] = mapped_column(String(20), default="ip")
     external_dns_servers: Mapped[str] = mapped_column(Text, default="1.1.1.1\n9.9.9.9")
     ntp_servers: Mapped[str] = mapped_column(Text, default="time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com")
     config_path: Mapped[str] = mapped_column(String(240), default="/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json")

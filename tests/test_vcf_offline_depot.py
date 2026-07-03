@@ -10,6 +10,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     render_nginx_depot_config,
     render_vcfdt_command_preview,
     validate_vcf_depot_state,
+    vcf_depot_application_properties_from_tool,
 )
 
 
@@ -49,6 +50,52 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
         activation_code_present=True,
     )
     assert errors == []
+
+
+def test_vcf_depot_application_properties_prefers_uploaded_tool_archive(tmp_path):
+    archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    properties = b"spring.profiles.active=depot\nlcm.depot.adapter.host=archive.example.test\n"
+    with tarfile.open(archive, "w:gz") as bundle:
+        info = tarfile.TarInfo("conf/application-prodv2.properties")
+        info.size = len(properties)
+        bundle.addfile(info, io.BytesIO(properties))
+    settings = VcfOfflineDepotSettings(tool_archive_path=str(archive))
+
+    content, source = vcf_depot_application_properties_from_tool(settings)
+
+    assert source == "VCFDT default"
+    assert "archive.example.test" in content
+
+
+def test_vcf_depot_application_properties_finds_archive_members_under_top_level_directory(tmp_path):
+    archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    properties = b"spring.profiles.active=depot\nlcm.depot.adapter.host=nested-archive.example.test\n"
+    with tarfile.open(archive, "w:gz") as bundle:
+        info = tarfile.TarInfo("vcf-download-tool-9.1.0/conf/application-prodv2.properties")
+        info.size = len(properties)
+        bundle.addfile(info, io.BytesIO(properties))
+    settings = VcfOfflineDepotSettings(tool_archive_path=str(archive))
+
+    content, source = vcf_depot_application_properties_from_tool(settings)
+
+    assert source == "VCFDT default"
+    assert "nested-archive.example.test" in content
+
+
+def test_vcf_depot_application_properties_falls_back_when_archive_member_is_missing(tmp_path, monkeypatch):
+    archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        payload = b"9.1.0"
+        info = tarfile.TarInfo("vcf-download-tool-9.1.0/conf/tool-version.txt")
+        info.size = len(payload)
+        bundle.addfile(info, io.BytesIO(payload))
+    settings = VcfOfflineDepotSettings(tool_archive_path=str(archive))
+    monkeypatch.setattr("labfoundry.app.services.vcf_offline_depot.VCF_DEPOT_EXTRACT_DIR", tmp_path / "missing-extract")
+
+    content, source = vcf_depot_application_properties_from_tool(settings)
+
+    assert source == "LabFoundry default"
+    assert "lcm.depot.adapter.host=dl.broadcom.com" in content
 
 
 def test_vcf_depot_validation_uses_documented_component_catalog(tmp_path):
@@ -167,6 +214,25 @@ def test_vcf_depot_validation_allows_https_only_without_vcfdt_upload():
 
     assert errors == []
     assert warnings == []
+
+
+def test_vcf_depot_validation_rejects_management_role_interfaces():
+    settings = VcfOfflineDepotSettings(
+        enabled=True,
+        hostname="depot.labfoundry.internal",
+        listen_interface="eth0",
+        listen_address="192.168.49.1",
+        port=443,
+        server_certificate="depot.labfoundry.internal",
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        telemetry_choice="DISABLE",
+        config_path="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf",
+    )
+
+    errors, warnings = validate_vcf_depot_state(settings, [], {"eth2"}, management_interface_names={"eth0"})
+
+    assert warnings == []
+    assert any("Listen interface eth0 uses the management role" in error for error in errors)
 
 
 def test_vcf_depot_parses_generated_software_depot_id():
@@ -296,7 +362,14 @@ def test_vcf_depot_nginx_preview_uses_ca_paths_and_static_file_directives():
     )
 
     assert "listen 192.168.50.1:443 ssl;" in preview
-    assert "root /mnt/labfoundry-vcf-offline-depot;" in preview
+    assert "# VCF endpoint: https://depot.labfoundry.internal/PROD/" in preview
+    assert "root /mnt/labfoundry-vcf-offline-depot;" not in preview
+    assert "location = /PROD" in preview
+    assert "return 301 /PROD/;" in preview
+    assert "location ^~ /PROD/" in preview
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in preview
+    assert "location /" in preview
+    assert "return 404;" in preview
     assert "sendfile on;" in preview
     assert "default_type application/octet-stream;" in preview
     assert "ssl_certificate /etc/labfoundry/vcf-offline-depot/certs/depot.crt;" in preview

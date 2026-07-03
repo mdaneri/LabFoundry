@@ -11,6 +11,8 @@ APPLIANCE_SETTINGS_DEFAULT_FQDN = "labfoundry.labfoundry.internal"
 APPLIANCE_SETTINGS_DEFAULT_EXTERNAL_DNS_SERVERS = "1.1.1.1\n9.9.9.9"
 APPLIANCE_SETTINGS_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json"
 APPLIANCE_DNS_RECORD_DESCRIPTION = "LabFoundry app-owned appliance FQDN record."
+SERVICE_DNS_TARGET_NAMING_CHOICES = ("ip", "interface")
+SERVICE_DNS_TARGET_NAMING_DEFAULT = "ip"
 MANAGEMENT_UI_PORT = 8000
 MANAGEMENT_UI_PUBLIC_HTTP_PORT = 80
 MANAGEMENT_UI_PUBLIC_HTTPS_PORT = 443
@@ -25,6 +27,7 @@ def appliance_settings_to_dict(settings: ApplianceSettings, *, include_ntp_serve
         "fqdn": settings.fqdn,
         "management_https_enabled": settings.management_https_enabled,
         "root_ssh_enabled": settings.root_ssh_enabled,
+        "service_dns_target_naming": normalize_service_dns_target_naming(settings.service_dns_target_naming),
         "external_dns_servers": split_servers(settings.external_dns_servers),
         "config_path": settings.config_path,
         "updated_at": settings.updated_at.isoformat() if settings.updated_at else "",
@@ -40,6 +43,13 @@ def normalize_fqdn(value: str) -> str:
 
 def normalize_multiline_values(value: str) -> str:
     return "\n".join(split_servers(value))
+
+
+def normalize_service_dns_target_naming(value: str | None) -> str:
+    normalized = (value or "").strip().lower().replace("_", "-")
+    if normalized in SERVICE_DNS_TARGET_NAMING_CHOICES:
+        return normalized
+    return SERVICE_DNS_TARGET_NAMING_DEFAULT
 
 
 def is_app_owned_appliance_dns_record(description: str | None) -> bool:
@@ -120,6 +130,9 @@ def validate_appliance_settings(
             errors.append("Management UI HTTPS requires an issued CA-managed appliance HTTPS certificate. Apply the CA unit first.")
     if not settings.config_path.startswith("/"):
         errors.append("Appliance settings config path must be absolute.")
+    raw_target_naming = (settings.service_dns_target_naming or "").strip().lower().replace("_", "-")
+    if raw_target_naming and raw_target_naming not in SERVICE_DNS_TARGET_NAMING_CHOICES:
+        errors.append("Service DNS target names must be generated from either IP addresses or interface names.")
     if local_dns_enabled:
         warnings.append("Local DNS is enabled, so appliance resolver apply will point management DNS at 127.0.0.1.")
     return errors, warnings
@@ -146,6 +159,7 @@ def appliance_settings_preview_payload(
         "management_ip_cidr": management_interface.get("ip_cidr", ""),
         "management_https_enabled": bool(settings.management_https_enabled),
         "root_ssh_enabled": bool(settings.root_ssh_enabled),
+        "service_dns_target_naming": normalize_service_dns_target_naming(settings.service_dns_target_naming),
         "management_http_port": MANAGEMENT_UI_PORT,
         "management_public_http_port": MANAGEMENT_UI_PUBLIC_HTTP_PORT,
         "management_public_https_port": MANAGEMENT_UI_PUBLIC_HTTPS_PORT,

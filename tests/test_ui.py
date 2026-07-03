@@ -73,7 +73,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v9" in service_worker.text
+    assert "labfoundry-pwa-v14" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -86,7 +86,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=template-accessibility-20260703-1" in offline.text
+    assert "/static/app.css?v=vcf-depot-tool-reset-20260703-1" in offline.text
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -228,6 +228,143 @@ def test_forget_missing_physical_interface_deletes_only_stale_rows(client):
         assert db.get(PhysicalInterface, missing_id) is None
         assert db.query(VlanInterface).filter(VlanInterface.parent_interface == "missing_eth7").count() == 0
         assert db.get(PhysicalInterface, active_id) is not None
+
+
+def test_forget_missing_first_service_interface_moves_dns_alias_to_next_target(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord, PhysicalInterface
+    from labfoundry.app.ui import ensure_dns_for_vcf_registry, get_vcf_private_registry_settings_row
+
+    login(client)
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                PhysicalInterface(
+                    name="eth7",
+                    mac_address="00:50:56:00:00:17",
+                    role="access",
+                    mode="access",
+                    ip_cidr="10.7.0.1/24",
+                    admin_state="up",
+                    oper_state="up",
+                ),
+                PhysicalInterface(
+                    name="eth8",
+                    mac_address="00:50:56:00:00:18",
+                    role="access",
+                    mode="access",
+                    ip_cidr="10.8.0.1/24",
+                    admin_state="up",
+                    oper_state="up",
+                ),
+            ]
+        )
+        settings = get_vcf_private_registry_settings_row(db)
+        settings.enabled = True
+        settings.hostname = "registry.labfoundry.internal"
+        settings.listen_interface = "eth7\neth8"
+        settings.listen_address = "10.7.0.1\n10.8.0.1"
+        ensure_dns_for_vcf_registry(db, settings, "admin")
+        db.commit()
+        eth7_id = db.execute(select(PhysicalInterface.id).where(PhysicalInterface.name == "eth7")).scalar_one()
+        eth7 = db.get(PhysicalInterface, eth7_id)
+        eth7.oper_state = "missing"
+        db.commit()
+
+    page = client.get("/physical-interfaces")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(f"/physical-interfaces/{eth7_id}/forget", data={"csrf": csrf}, follow_redirects=False)
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        settings = get_vcf_private_registry_settings_row(db)
+        assert settings.listen_interface == "eth8"
+        assert settings.listen_address == "10.8.0.1"
+        canonical = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert canonical.address == "registry-10-8-0-1.labfoundry.internal"
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-10-7-0-1.labfoundry.internal")).scalar_one_or_none() is None
+        target = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-10-8-0-1.labfoundry.internal", DnsRecord.record_type == "A")
+        ).scalar_one()
+        assert target.address == "10.8.0.1"
+
+
+def test_service_dns_target_naming_converts_owned_records_between_ip_and_interface(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, DnsRecord, PhysicalInterface
+    from labfoundry.app.ui import ensure_dns_for_vcf_registry, get_vcf_private_registry_settings_row
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(
+            PhysicalInterface(
+                name="eth9",
+                mac_address="00:50:56:00:00:19",
+                role="access",
+                mode="access",
+                ip_cidr="192.168.90.1/24",
+                ipv6_cidr="2001:db8::1/64",
+                admin_state="up",
+                oper_state="up",
+            )
+        )
+        db.flush()
+        settings = get_vcf_private_registry_settings_row(db)
+        settings.enabled = True
+        settings.hostname = "registry.labfoundry.internal"
+        settings.listen_interface = "eth9"
+        settings.listen_address = "192.168.90.1\n2001:db8::1"
+        ensure_dns_for_vcf_registry(db, settings, "admin")
+        db.commit()
+
+        canonical = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert canonical.address == "registry-192-168-90-1.labfoundry.internal"
+        ipv4_target = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-192-168-90-1.labfoundry.internal", DnsRecord.record_type == "A")
+        ).scalar_one()
+        assert ipv4_target.address == "192.168.90.1"
+        ipv6_target = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-2001-db8-0-0-0-0-0-1.labfoundry.internal", DnsRecord.record_type == "AAAA")
+        ).scalar_one()
+        assert ipv6_target.address == "2001:db8::1"
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-eth9.labfoundry.internal")).scalar_one_or_none() is None
+
+        appliance_settings = db.execute(select(ApplianceSettings)).scalar_one()
+        appliance_settings.service_dns_target_naming = "interface"
+        ensure_dns_for_vcf_registry(db, settings, "admin")
+        db.commit()
+
+        canonical = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert canonical.address == "registry-eth9.labfoundry.internal"
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-192-168-90-1.labfoundry.internal")).scalar_one_or_none() is None
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-2001-db8-0-0-0-0-0-1.labfoundry.internal")).scalar_one_or_none() is None
+        interface_targets = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-eth9.labfoundry.internal").order_by(DnsRecord.record_type)
+        ).scalars().all()
+        assert [(record.record_type, record.address) for record in interface_targets] == [("A", "192.168.90.1"), ("AAAA", "2001:db8::1")]
+
+        appliance_settings.service_dns_target_naming = "ip"
+        ensure_dns_for_vcf_registry(db, settings, "admin")
+        db.commit()
+
+        canonical = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert canonical.address == "registry-192-168-90-1.labfoundry.internal"
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "registry-eth9.labfoundry.internal")).scalar_one_or_none() is None
+        assert db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "registry-2001-db8-0-0-0-0-0-1.labfoundry.internal", DnsRecord.record_type == "AAAA")
+        ).scalar_one().address == "2001:db8::1"
 
 
 def test_stage_appliance_apply_config_repairs_staging_permission(monkeypatch, tmp_path):
@@ -404,6 +541,9 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "labfoundry.labfoundry.internal" in response.text
     assert "Management UI HTTPS" in response.text
     assert "Root SSH login" in response.text
+    assert "Service DNS target names" in response.text
+    assert 'select name="service_dns_target_naming"' in response.text
+    assert '<option value="ip" selected>IP address</option>' in response.text
     assert "Operational Logging" in response.text
     assert "External NTP servers" in response.text
     assert 'textarea name="ntp_servers"' in response.text
@@ -563,6 +703,7 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
         data={
             "fqdn": "console.labfoundry.internal",
             "root_ssh_enabled": "on",
+            "service_dns_target_naming": "interface",
             "external_dns_servers": "8.8.8.8\n1.1.1.1",
             "csrf": csrf,
         },
@@ -574,6 +715,7 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     assert payload["status"] == "saved"
     assert payload["fqdn"] == "console.labfoundry.internal"
     assert payload["root_ssh_enabled"] is True
+    assert payload["service_dns_target_naming"] == "interface"
     assert payload["external_dns_servers"] == ["8.8.8.8", "1.1.1.1"]
     assert "ntp_servers" not in payload
     assert payload["dns_record_action"] in {"created", "updated", "unchanged", "created+removed-old", "updated+removed-old"}
@@ -582,12 +724,14 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     assert '"resolver_servers": [' in payload["config_preview"]
     assert '"127.0.0.1"' in payload["config_preview"]
     assert '"root_ssh_enabled": true' in payload["config_preview"]
+    assert '"service_dns_target_naming": "interface"' in payload["config_preview"]
     assert "ntp_servers" not in payload["config_preview"]
 
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
         assert settings.fqdn == "console.labfoundry.internal"
         assert settings.root_ssh_enabled is True
+        assert settings.service_dns_target_naming == "interface"
         record = db.execute(
             select(DnsRecord).where(DnsRecord.hostname == "console.labfoundry.internal", DnsRecord.record_type == "A")
         ).scalar_one()
@@ -1669,8 +1813,14 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
         assert boot["http_port"] == 8080
         assert boot["effective_native_uefi_http_url"] == "http://192.168.50.1:8080/pxe/esxi/mboot.efi"
         assert boot["native_uefi_http_enabled"] is True
-        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe.labfoundry.internal")).scalar_one()
-        assert record.address == "192.168.50.1"
+        record = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe.labfoundry.internal", DnsRecord.record_type == "CNAME")
+        ).scalar_one()
+        assert record.address == "esxi-pxe-192-168-50-1.labfoundry.internal"
+        interface_record = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-192-168-50-1.labfoundry.internal", DnsRecord.record_type == "A")
+        ).scalar_one()
+        assert interface_record.address == "192.168.50.1"
         dhcp = db.execute(select(DhcpSettings)).scalar_one()
         dhcp.enabled = True
         db.add(dhcp)
@@ -2792,6 +2942,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert "rowHeight: 28" in app_js.text
     assert 'field: "host_label"' in app_js.text
     assert "dnsAddRowHintFormatter" in app_js.text
+    assert "dnsRecordCellEditable" in app_js.text
+    assert app_js.text.count("editable: dnsRecordCellEditable") >= 5
     assert "+ Add record here" in app_js.text
     assert "initializeZoneEditors" in app_js.text
     assert "A (IPv4)" in app_js.text
@@ -2802,11 +2954,12 @@ def test_dns_and_dhcp_pages_render(client):
     assert 'newDnsRecordRow(domain, tableElement.dataset.suggestedIpv4 || "")' in app_js.text
     assert "suggested_ipv4: suggestedAddress" in app_js.text
     assert 'data.record_type !== "A" && data.address === data.suggested_ipv4' in app_js.text
+    assert 'cell.getField() === "host_label"' in app_js.text
     assert "DNS_ACTIVE_ZONE_STORAGE_KEY" in app_js.text
     assert "initializeCodeMirrorEditors" in app_js.text
     assert "installCodeMirrorPlainTextFallback" in app_js.text
     assert 'textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart"' in app_js.text
-    assert 'eventTarget.addEventListener("keydown"' in app_js.text
+    assert 'addEventListener("keydown"' in app_js.text
     assert "event.stopPropagation()" in app_js.text
     assert "LabFoundryCodeMirror.setValue" in app_js.text
     assert "rememberDnsActiveZone(data.domain)" in app_js.text
@@ -3596,9 +3749,11 @@ def test_kms_settings_autosave_returns_json(client):
     assert "10.0.0.99" not in refreshed.text
 
     with SessionLocal() as db:
-        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
-        assert record.address == "192.168.50.1"
-        assert "KMS/KMIP endpoint" in (record.description or "")
+        record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "CNAME")).scalar_one()
+        assert record.address == "kms-192-168-50-1.labfoundry.internal"
+        interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms-192-168-50-1.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert interface_record.address == "192.168.50.1"
+        assert "KMS/KMIP endpoint" in (interface_record.description or "")
 
 
 def test_kms_settings_accept_multiple_listen_targets(client):
@@ -3828,11 +3983,18 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
         dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "registry.labfoundry.internal",
+                DnsRecord.record_type == "CNAME",
+            )
+        ).scalar_one()
+        assert dns_record.address == "registry-192-168-50-1.labfoundry.internal"
+        assert dns_record.enabled is True
+        interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "registry-192-168-50-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
-        assert dns_record.address == "192.168.50.1"
-        assert dns_record.enabled is True
+        assert interface_record.address == "192.168.50.1"
 
     multi_response = client.post(
         "/vcf-private-registry/settings",
@@ -3875,16 +4037,23 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
     )
     assert moved_response.status_code == 200
     assert moved_response.json()["listen_address"] == "192.168.49.1"
-    assert moved_response.json()["dns_record_action"] == "updated"
+    assert moved_response.json()["dns_record_action"] == "updated+removed-old"
     assert moved_response.json()["ca_bundle_source"] == "uploaded"
     with SessionLocal() as db:
         dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "registry.labfoundry.internal",
+                DnsRecord.record_type == "CNAME",
+            )
+        ).scalar_one()
+        assert dns_record.address == "registry-192-168-49-1.labfoundry.internal"
+        interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "registry-192-168-49-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
-        assert dns_record.address == "192.168.49.1"
+        assert interface_record.address == "192.168.49.1"
 
     bundle_response = client.post(
         "/vcf-private-registry/bundles",
@@ -3905,16 +4074,7 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
     assert "imgpkg copy -b projects.registry.vmware.com/sample/supervisor-service:1.0.0" in refreshed.text
     assert "registry.labfoundry.internal/vcf-supervisor-services/supervisor-service" in refreshed.text
 
-    token_page = client.post(
-        "/authentication/api-tokens",
-        data={
-            "name": "vcf-registry-status-test",
-            "description": "",
-            "scopes": "read:vcf-registry",
-            "csrf": csrf,
-        },
-    )
-    raw_token = token_page.text.split('<textarea readonly rows="5">', 1)[1].split("</textarea>", 1)[0]
+    raw_token = create_api_token(client, ["read:vcf-registry"])
     status = client.get("/api/v1/vcf-private-registry/status", headers={"Authorization": f"Bearer {raw_token}"})
     assert status.status_code == 200
     assert status.json()["hostname"] == "registry.labfoundry.internal"
@@ -3943,6 +4103,10 @@ def make_vcfdt_archive(path, version="9.1.0.0100.25429019"):
         info = tarfile.TarInfo("conf/tool-version.txt")
         info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
+        properties_payload = b"spring.profiles.active=depot\nlcm.depot.adapter.host=archive.example.test\n"
+        properties_info = tarfile.TarInfo("conf/application-prodv2.properties")
+        properties_info.size = len(properties_payload)
+        archive.addfile(properties_info, io.BytesIO(properties_payload))
 
 
 def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_path, monkeypatch):
@@ -3951,6 +4115,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import DnsRecord, Job, Setting
     from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY,
         VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
         VCF_DEPOT_TOKEN_VALUE_KEY,
     )
@@ -3970,9 +4135,15 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Tool & Credentials" not in page.text
     assert "Review appliance changes" in page.text
     assert "VCF Download Tool" in page.text
-    assert "Choose VCFDT tool" in page.text
+    assert "Add or update the VCF Download Tool package" in page.text
+    assert "no package staged" in page.text
+    assert ">Add</strong>" in page.text
+    assert "Reset VCFDT package" in page.text
+    assert "Also reset saved application-prodv2.properties configuration" in page.text
+    assert 'data-vcf-depot-tool-reset-action>Reset</button>' in page.text
+    assert 'button danger compact-button hidden' in page.text
     assert "Stage download token" in page.text
-    assert "Stage token" in page.text
+    assert ">Token</button>" in page.text
     assert 'data-vcf-depot-token-modal-open data-vcf-depot-requires-tool disabled' in page.text
     assert "Choose a token file or paste token text." in page.text
     assert 'action="/vcf-offline-depot/download-token"' in page.text
@@ -3980,6 +4151,20 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert 'data-vcf-depot-token-modal-open' in page.text
     assert 'name="download_token_file"' in page.text
     assert 'name="download_token_text"' in page.text
+    assert "Stage activation code" in page.text
+    assert ">Code</button>" in page.text
+    assert 'action="/vcf-offline-depot/activation-code"' in page.text
+    assert "vcf-depot-activation-modal" in page.text
+    assert 'data-vcf-depot-activation-modal-open' in page.text
+    assert 'name="activation_code_file"' in page.text
+    assert 'name="activation_code_text"' in page.text
+    assert "Edit application-prodv2.properties" in page.text
+    assert ">Edit</button>" in page.text
+    assert 'data-vcf-depot-properties-modal-open data-vcf-depot-requires-tool disabled' in page.text
+    assert 'action="/vcf-offline-depot/application-properties"' in page.text
+    assert 'name="application_properties"' in page.text
+    assert "Save configuration" in page.text
+    assert "lcm.depot.adapter.host=dl.broadcom.com" in page.text
     assert "/vcf-offline-depot/profiles/" in page.text
     assert "Start" in page.text
     assert page.text.index("<th>Name</th>") < page.text.index("<th>Start</th>") < page.text.index("<th>Type</th>")
@@ -3989,13 +4174,14 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Software depot ID" in page.text
     assert "VCFDT staging" in page.text
     assert "Staged VCFDT inputs" not in page.text
-    assert page.text.index("<h2>Depot Settings</h2>") < page.text.index("VCFDT staging") < page.text.index("Choose VCFDT tool") < page.text.index("Software depot ID")
+    depot_settings_index = page.text.index("<h2>Depot Settings</h2>")
+    vcfdt_staging_index = page.text.index("VCFDT staging")
+    assert depot_settings_index < vcfdt_staging_index < page.text.index("VCF Download Tool", vcfdt_staging_index) < page.text.index("Software depot ID")
     assert '<span class="status-pill warn">dry-run</span>' not in page.text
-    assert "Activation code" not in page.text
-    assert "activation_code_file" not in page.text
-    assert "Choose activation file" not in page.text
+    assert "Activation code" in page.text
+    assert "Choose activation file" in page.text
     assert "Choose VCFDT archive" not in page.text
-    assert "DNS record follows the selected listen address." in page.text
+    assert "DNS alias follows the first selected service listener." in page.text
     assert "Server certificate" not in page.text
     assert 'name="server_certificate"' not in page.text
     assert "Telemetry choice" not in page.text
@@ -4015,6 +4201,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Depot store volume" in page.text
     assert page.text.count("fixed-value-field") >= 1
     assert "depot.labfoundry.internal" in page.text
+    assert "eth0 - management / access" not in page.text
     assert "eth1 - access / trunk" not in page.text
     assert "eth2 - access / access / 192.168.50.1" in page.text
     assert "Listen interfaces" in page.text
@@ -4046,12 +4233,14 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "vcfDepotRememberActiveTab" in app_js.text
     assert "tabulator-checklist-option" in app_js.text
     assert "tool staged" in app_js.text
-    assert "DNS record created for this endpoint." in app_js.text
-    assert "Old endpoint DNS record removed." in app_js.text
+    assert "DNS alias and target records created for this endpoint." in app_js.text
+    assert "Old endpoint DNS alias and target records removed." in app_js.text
     assert "updateVcfDepotHttpsPreview" in app_js.text
     assert "updateVcfDepotValidation" in app_js.text
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
     assert "initializeVcfDepotTokenPaste" in app_js.text
+    assert "initializeVcfDepotActivationPaste" in app_js.text
+    assert "initializeVcfDepotPropertiesEditor" in app_js.text
     assert "initializeCopyValueButtons" in app_js.text
     assert "clearSelectedFileInputs" in app_js.text
     assert "Uploaded ${payload.tool_archive_name" in app_js.text
@@ -4072,6 +4261,12 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert ".setting-inline-actions" in app_css.text
     assert ".readonly-inline-value" in app_css.text
     assert ".icon-button" in app_css.text
+    assert ".code-editor-textarea" in app_css.text
+    assert ".code-editor-textarea + .cm-editor" in app_css.text
+    assert "#vcf-depot-properties-modal .confirm-modal-panel" in app_css.text
+    assert ".vcfdt-tool-manager" in app_css.text
+    assert ".compact-file-upload" in app_css.text
+    assert 'data-codemirror-editor data-codemirror-language="labfoundry-hosts" data-vcf-depot-properties-textarea' in page.text
 
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     make_vcfdt_archive(archive_path)
@@ -4104,11 +4299,16 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["software_depot_id"] == ""
     assert "vcf-download-tool executable" in payload["software_depot_id_error"]
     assert payload["download_token_present"] is True
+    assert payload["application_properties_present"] is True
+    assert payload["application_properties_source"] == "VCFDT default"
     assert payload["valid"] is True
     assert payload["dns_record_action"] == "created"
     assert "listen 192.168.50.1:443 ssl;" in payload["https_config_preview"]
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in payload["https_config_preview"]
+    assert "root /mnt/labfoundry-vcf-offline-depot;" not in payload["https_config_preview"]
     assert "--depot-store=/mnt/labfoundry-vcf-offline-depot" in payload["command_preview"]
     assert "super-secret-token" not in response.text
+    assert "archive.example.test" not in response.text
 
     multi_response = client.post(
         "/vcf-offline-depot/settings",
@@ -4128,6 +4328,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     multi_payload = multi_response.json()
     assert multi_payload["listen_interfaces"] == ["eth0", "eth2"]
     assert multi_payload["listen_addresses"] == ["192.168.49.1", "192.168.50.1"]
+    assert multi_payload["valid"] is False
+    assert any("Listen interface eth0 uses the management role" in error for error in multi_payload["validation_errors"])
     assert "listen 192.168.49.1:443 ssl;" in multi_payload["https_config_preview"]
     assert "listen 192.168.50.1:443 ssl;" in multi_payload["https_config_preview"]
 
@@ -4137,20 +4339,27 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "depot.labfoundry.internal",
+                DnsRecord.record_type == "CNAME",
+            )
+        ).scalar_one()
+        interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "depot-192-168-50-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
         assert token_secret.value == "super-secret-token"
         assert "vcf-download-tool executable" in software_id_error.value
-        assert dns_record.address == "192.168.49.1"
+        assert dns_record.address == "depot-192-168-50-1.labfoundry.internal"
         assert dns_record.enabled is True
+        assert interface_record.address == "192.168.50.1"
 
     moved_response = client.post(
         "/vcf-offline-depot/settings",
         data={
             "enabled": "on",
             "hostname": "offline-depot.labfoundry.internal",
-            "listen_interface": "eth0",
+            "listen_interface": "eth2",
             "port": "443",
             "telemetry_enabled": "on",
             "csrf": csrf,
@@ -4162,34 +4371,58 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert moved_payload["hostname"] == "offline-depot.labfoundry.internal"
     assert moved_payload["server_certificate"] == "offline-depot.labfoundry.internal"
     assert moved_payload["telemetry_choice"] == "ENABLE"
-    assert moved_payload["listen_address"] == "192.168.49.1"
+    assert moved_payload["listen_address"] == "192.168.50.1"
+    assert moved_payload["valid"] is True
     assert moved_payload["dns_record_action"] == "created+removed-old"
     with SessionLocal() as db:
         old_dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "depot.labfoundry.internal",
-                DnsRecord.record_type == "A",
+                DnsRecord.record_type == "CNAME",
             )
         ).scalar_one_or_none()
         new_dns_record = db.execute(
             select(DnsRecord).where(
                 DnsRecord.hostname == "offline-depot.labfoundry.internal",
+                DnsRecord.record_type == "CNAME",
+            )
+        ).scalar_one()
+        old_interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "depot-192-168-50-1.labfoundry.internal",
+                DnsRecord.record_type == "A",
+            )
+        ).scalar_one_or_none()
+        new_interface_record = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == "offline-depot-192-168-50-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
         ).scalar_one()
         assert old_dns_record is None
-        assert new_dns_record.address == "192.168.49.1"
+        assert old_interface_record is None
+        assert new_dns_record.address == "offline-depot-192-168-50-1.labfoundry.internal"
+        assert new_interface_record.address == "192.168.50.1"
 
-    token_page = client.post(
-        "/authentication/api-tokens",
+    properties_response = client.post(
+        "/vcf-offline-depot/application-properties",
         data={
-            "name": "vcf-depot-status-test",
-            "description": "",
-            "scopes": "read:repository",
+            "application_properties": "spring.profiles.active=depot\nlcm.depot.adapter.host=stage.example.test\nactivation.code=secret-activation-property\n",
             "csrf": csrf,
         },
+        headers={"X-LabFoundry-Autosave": "1"},
     )
-    raw_token = token_page.text.split('<textarea readonly rows="5">', 1)[1].split("</textarea>", 1)[0]
+    assert properties_response.status_code == 200
+    properties_payload = properties_response.json()
+    assert properties_payload["application_properties_present"] is True
+    assert properties_payload["application_properties_source"] == "operator saved"
+    assert properties_payload["application_properties_updated_at"]
+    assert "secret-activation-property" not in properties_response.text
+    with SessionLocal() as db:
+        properties_setting = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY)).scalar_one()
+        assert "stage.example.test" in properties_setting.value
+
+    raw_token = create_api_token(client, ["read:repository"])
     status = client.get("/api/v1/vcf-offline-depot/status", headers={"Authorization": f"Bearer {raw_token}"})
     assert status.status_code == 200
     assert status.json()["hostname"] == "offline-depot.labfoundry.internal"
@@ -4198,7 +4431,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "vcf-download-tool executable" in status.json()["software_depot_id_error"]
     assert status.json()["download_token_present"] is True
     assert status.json()["activation_code_present"] is False
+    assert status.json()["application_properties_present"] is True
+    assert status.json()["application_properties_source"] == "operator saved"
     assert "super-secret" not in status.text
+    assert "secret-activation-property" not in status.text
     alias = client.get("/api/v1/repository/status", headers={"Authorization": f"Bearer {raw_token}"})
     assert alias.status_code == 200
     assert alias.json()["endpoint"] == status.json()["endpoint"]
@@ -4212,15 +4448,19 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         assert "labfoundry-helper" in (job.result or "")
         assert "vcf-offline-depot" in (job.result or "")
         assert "stage-tool" in (job.result or "")
+        assert "apply-properties" in (job.result or "")
         assert "vcf-download-tool binaries download" in (job.result or "")
     assert "super-secret-token" not in (job.result or "")
+    assert "secret-activation-property" not in (job.result or "")
 
 
-def test_vcf_offline_depot_rejects_truncated_vcfdt_upload(client):
+def test_vcf_offline_depot_rejects_truncated_vcfdt_upload(client, monkeypatch):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import VcfOfflineDepotSettings
+
+    monkeypatch.setattr("labfoundry.app.ui.find_local_vcf_download_tool_archive", lambda: None)
 
     login(client)
     page = client.get("/vcf-offline-depot")
@@ -4247,7 +4487,97 @@ def test_vcf_offline_depot_rejects_truncated_vcfdt_upload(client):
         assert settings.tool_archive_path == ""
 
 
-def test_vcf_offline_depot_accepts_pasted_download_token(client, tmp_path, monkeypatch):
+def test_vcf_offline_depot_tool_reset_can_preserve_or_clear_configuration(client, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting, VcfOfflineDepotSettings
+    from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY,
+        VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY,
+        VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
+    )
+
+    monkeypatch.setattr("labfoundry.app.ui.find_local_vcf_download_tool_archive", lambda: None)
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    make_vcfdt_archive(archive_path)
+    login(client)
+    page = client.get("/vcf-offline-depot")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    upload = client.post(
+        "/vcf-offline-depot/settings",
+        data={"hostname": "depot.labfoundry.internal", "listen_interface": "eth2", "port": "443", "csrf": csrf},
+        files={"tool_archive_file": ("vcf-download-tool-9.1.0.test.tar.gz", archive_path.read_bytes(), "application/gzip")},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert upload.status_code == 200
+    assert upload.json()["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
+
+    refreshed = client.get("/vcf-offline-depot")
+    assert ">Update</strong>" in refreshed.text
+    assert 'data-vcf-depot-tool-reset-action>Reset</button>' in refreshed.text
+    assert 'button danger compact-button hidden' not in refreshed.text
+
+    properties = client.post(
+        "/vcf-offline-depot/application-properties",
+        data={"csrf": csrf, "application_properties": "spring.profiles.active=depot\ncustom.setting=true\n"},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert properties.status_code == 200
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        stored_archive = Path(settings.tool_archive_path)
+        assert stored_archive.exists()
+        assert settings.tool_version == "9.1.0.0100.25429019"
+
+    reset = client.post("/vcf-offline-depot/tool/reset", data={"csrf": csrf}, follow_redirects=False)
+    assert reset.status_code == 303
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        assert settings.tool_archive_path == ""
+        assert settings.tool_version == ""
+        assert not stored_archive.exists()
+        for key in [VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY, VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY, VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY]:
+            assert db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none() is None
+        properties_setting = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY)).scalar_one()
+        assert "custom.setting=true" in properties_setting.value
+
+    reset_page = client.get("/vcf-offline-depot")
+    assert "no package staged" in reset_page.text
+    assert "operator saved · saved" in reset_page.text
+    assert 'data-vcf-depot-properties-modal-open data-vcf-depot-requires-tool disabled' in reset_page.text
+
+    upload_again = client.post(
+        "/vcf-offline-depot/settings",
+        data={"hostname": "depot.labfoundry.internal", "listen_interface": "eth2", "port": "443", "csrf": csrf},
+        files={"tool_archive_file": ("vcf-download-tool-9.1.0.test.tar.gz", archive_path.read_bytes(), "application/gzip")},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert upload_again.status_code == 200
+
+    reset_with_configuration = client.post(
+        "/vcf-offline-depot/tool/reset",
+        data={"csrf": csrf, "reset_application_properties": "on"},
+        follow_redirects=False,
+    )
+    assert reset_with_configuration.status_code == 303
+    with SessionLocal() as db:
+        for key in [
+            VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY,
+            VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY,
+            VCF_DEPOT_APPLICATION_PROPERTIES_UPDATED_AT_KEY,
+        ]:
+            assert db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none() is None
+
+
+def test_vcf_offline_depot_accepts_pasted_download_token_and_activation_code(client, tmp_path, monkeypatch):
     from pathlib import PurePosixPath
 
     from sqlalchemy import select
@@ -4255,12 +4585,15 @@ def test_vcf_offline_depot_accepts_pasted_download_token(client, tmp_path, monke
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import Setting
     from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_ACTIVATION_NAME_KEY,
+        VCF_DEPOT_ACTIVATION_VALUE_KEY,
         VCF_DEPOT_TOKEN_NAME_KEY,
         VCF_DEPOT_TOKEN_VALUE_KEY,
     )
 
     runtime_log = tmp_path / "active-tool" / "log" / "vdt.log"
     runtime_token = tmp_path / "active-tool" / "secrets" / "download-token.txt"
+    runtime_activation = tmp_path / "active-tool" / "secrets" / "activation-code.txt"
     monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_VDT_LOG_PATH", PurePosixPath(runtime_log.as_posix()))
 
     login(client)
@@ -4308,10 +4641,52 @@ def test_vcf_offline_depot_accepts_pasted_download_token(client, tmp_path, monke
         assert token_name.value == "download-token.txt"
         assert token_secret.value == "uploaded-secret-token"
 
+    activation_response = client.post(
+        "/vcf-offline-depot/activation-code",
+        data={"activation_code_text": "pasted-secret-activation-code", "csrf": csrf},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert activation_response.status_code == 200
+    activation_payload = activation_response.json()
+    assert activation_payload["activation_code_present"] is True
+    assert activation_payload["activation_code_name"] == "pasted activation code"
+    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in activation_payload["command_preview"]
+    assert "pasted-secret-activation-code" not in activation_response.text
+    assert runtime_activation.read_text(encoding="utf-8") == "pasted-secret-activation-code"
+
+    with SessionLocal() as db:
+        activation_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_NAME_KEY)).scalar_one()
+        activation_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_VALUE_KEY)).scalar_one()
+        assert activation_name.value == "pasted activation code"
+        assert activation_secret.value == "pasted-secret-activation-code"
+
+    activation_upload_response = client.post(
+        "/vcf-offline-depot/activation-code",
+        data={"activation_code_text": "", "csrf": csrf},
+        files={"activation_code_file": ("activation-code.txt", "uploaded-secret-activation-code", "text/plain")},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert activation_upload_response.status_code == 200
+    activation_upload_payload = activation_upload_response.json()
+    assert activation_upload_payload["activation_code_present"] is True
+    assert activation_upload_payload["activation_code_name"] == "activation-code.txt"
+    assert "uploaded-secret-activation-code" not in activation_upload_response.text
+    assert runtime_activation.read_text(encoding="utf-8") == "uploaded-secret-activation-code"
+
+    with SessionLocal() as db:
+        activation_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_NAME_KEY)).scalar_one()
+        activation_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_ACTIVATION_VALUE_KEY)).scalar_one()
+        assert activation_name.value == "activation-code.txt"
+        assert activation_secret.value == "uploaded-secret-activation-code"
+
     apply_page = client.get("/appliance-apply")
     assert apply_page.status_code == 200
     assert "Download input file: staged" in apply_page.text
+    assert "ESX input file: staged" in apply_page.text
     assert "pasted-secret-token" not in apply_page.text
+    assert "uploaded-secret-token" not in apply_page.text
+    assert "pasted-secret-activation-code" not in apply_page.text
+    assert "uploaded-secret-activation-code" not in apply_page.text
 
 
 def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, monkeypatch):
@@ -4379,6 +4754,51 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
         assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in (job.result or "")
         assert "manual-secret-token" not in (job.result or "")
         assert profile and profile.status == "ready"
+
+
+def test_vcf_offline_depot_prepare_runtime_stages_saved_application_properties(client, tmp_path, monkeypatch):
+    import io
+    import tarfile
+    from pathlib import PurePosixPath
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Setting, VcfOfflineDepotSettings
+    from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY, VCF_DEPOT_APPLICATION_PROPERTIES_NAME
+    from labfoundry.app.ui import prepare_vcf_depot_runtime
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    archive_properties = b"spring.profiles.active=depot\nlcm.depot.adapter.host=archive.example.test\n"
+    tool_binary = b"#!/bin/sh\nexit 0\n"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        binary_info = tarfile.TarInfo("vcf-download-tool-9.1.0/bin/vcf-download-tool")
+        binary_info.size = len(tool_binary)
+        binary_info.mode = 0o755
+        archive.addfile(binary_info, io.BytesIO(tool_binary))
+        properties_info = tarfile.TarInfo("vcf-download-tool-9.1.0/conf/application-prodv2.properties")
+        properties_info.size = len(archive_properties)
+        archive.addfile(properties_info, io.BytesIO(archive_properties))
+
+    runtime_dir = tmp_path / "active-tool"
+    monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_EXTRACT_DIR", runtime_dir)
+    monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_VDT_LOG_PATH", PurePosixPath((runtime_dir / "log" / "vdt.log").as_posix()))
+
+    saved_properties = "spring.profiles.active=depot\nlcm.depot.adapter.host=operator.example.test\ncustom.setting=true\n"
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        settings.tool_archive_path = str(archive_path)
+        settings.depot_store_path = str(tmp_path / "depot")
+        db.add(Setting(key=VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY, value=saved_properties))
+        db.commit()
+
+        tool_path = prepare_vcf_depot_runtime(settings, db)
+
+    expected_tool_home = runtime_dir / "vcf-download-tool-9.1.0"
+    assert tool_path == expected_tool_home / "bin" / "vcf-download-tool"
+    staged_properties = expected_tool_home / "conf" / VCF_DEPOT_APPLICATION_PROPERTIES_NAME
+    assert staged_properties.read_text(encoding="utf-8") == saved_properties
+    assert "archive.example.test" not in staged_properties.read_text(encoding="utf-8")
 
 
 def test_vcf_offline_depot_generates_software_depot_id(client, tmp_path, monkeypatch):
@@ -4564,16 +4984,7 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
     assert "ForceCommand internal-sftp -d /backups" in response.json()["config_preview"]
     assert "enabled" in client.get("/vcf-backups").text
 
-    token_page = client.post(
-        "/authentication/api-tokens",
-        data={
-            "name": "vcf-status-test",
-            "description": "",
-            "scopes": "read:vcf-backups",
-            "csrf": csrf,
-        },
-    )
-    raw_token = token_page.text.split('<textarea readonly rows="5">', 1)[1].split("</textarea>", 1)[0]
+    raw_token = create_api_token(client, ["read:vcf-backups"])
     status = client.get("/api/v1/vcf-backups/status", headers={"Authorization": f"Bearer {raw_token}"})
     assert status.status_code == 200
     assert status.json()["listen_interface"] == "eth2"
@@ -4945,14 +5356,18 @@ def test_physical_interface_edit_updates_desired_state(client):
         assert scope.range_end == "192.168.70.200"
         assert scope.dns_server == "192.168.70.1"
         assert scope.ntp_server == "192.168.70.1"
-        kms_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
-        assert kms_record.address == "192.168.70.1"
+        kms_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "CNAME")).scalar_one()
+        assert kms_record.address == "kms-192-168-70-1.labfoundry.internal"
+        kms_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms-192-168-70-1.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert kms_interface_record.address == "192.168.70.1"
         boot = esxi_pxe_boot_settings(db)
         assert boot["listen_interface"] == "eth2"
         assert boot["listen_address"] == "192.168.70.1"
         assert boot["effective_native_uefi_http_url"] == "http://192.168.70.1:8080/pxe/esxi/mboot.efi"
-        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "A")).scalar_one()
-        assert pxe_record.address == "192.168.70.1"
+        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "CNAME")).scalar_one()
+        assert pxe_record.address == "esxi-pxe-192-168-70-1.labfoundry.internal"
+        pxe_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-192-168-70-1.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert pxe_interface_record.address == "192.168.70.1"
 
 
 def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refresh(client):
@@ -5034,8 +5449,10 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
         assert scope.range_end == "192.168.50.120"
         assert scope.dns_server == "192.168.50.1"
         assert scope.ntp_server == "192.168.50.1"
-        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "A")).scalar_one()
-        assert pxe_record.address == "192.168.50.1"
+        pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "CNAME")).scalar_one()
+        assert pxe_record.address == "esxi-pxe-192-168-50-1.labfoundry.internal"
+        pxe_interface_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "esxi-pxe-192-168-50-1.labfoundry.internal", DnsRecord.record_type == "A")).scalar_one()
+        assert pxe_interface_record.address == "192.168.50.1"
         pxe_listen = db.execute(select(Setting).where(Setting.key == ESXI_PXE_LISTEN_ADDRESS_KEY)).scalar_one()
         assert pxe_listen.value == "192.168.50.1"
         pxe_listen.value = "192.168.1.1"
@@ -5424,8 +5841,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "dhcp-lease-row-menu-20260702-1" in page.text
-    assert "kickstart-editor-keydown-20260702-1" in page.text
+    assert "vcf-depot-tool-reset-20260703-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
