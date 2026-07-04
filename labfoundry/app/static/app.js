@@ -8430,6 +8430,21 @@ function initializeMonitorPage() {
   window.setInterval(load, 5000);
 }
 
+function initializeHistoryBackButtons() {
+  document.querySelectorAll("[data-history-back]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (window.history.length > 1) {
+        window.history.back();
+        return;
+      }
+      window.location.assign(button.dataset.historyFallback || "/");
+    });
+  });
+}
+
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
@@ -8486,6 +8501,7 @@ document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);
 document.addEventListener("DOMContentLoaded", initializeApplianceApplyProgress);
 document.addEventListener("DOMContentLoaded", initializeMonitorPage);
+document.addEventListener("DOMContentLoaded", initializeHistoryBackButtons);
 document.addEventListener("DOMContentLoaded", () => {
   registerLabFoundryPrismLanguages();
   highlightConfigPreviews();

@@ -152,6 +152,52 @@ textarea {
   margin-top: 14px;
 }
 
+.ca-trust-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) minmax(120px, 0.7fr) minmax(120px, 0.7fr);
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.ca-trust-grid > div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+}
+
+.ca-trust-grid span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.ca-trust-grid strong {
+  display: block;
+  min-width: 0;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.ca-fingerprint-block {
+  grid-column: 1 / -1;
+}
+
+.ca-fingerprint-block strong {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .public-portal-shell {
   min-height: 100vh;
 }
@@ -168,6 +214,17 @@ textarea {
 
 .public-portal-header .brand {
   padding: 0;
+}
+
+.public-portal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.public-portal-actions form {
+  margin: 0;
 }
 
 .public-portal-main {
@@ -3690,8 +3747,13 @@ textarea {
   .app-shell,
   .split-workspace,
   .two-column,
-  .metric-grid {
+  .metric-grid,
+  .ca-trust-grid {
     grid-template-columns: 1fr;
+  }
+
+  .ca-fingerprint-block {
+    grid-column: auto;
   }
 
   .monitor-chart-grid,

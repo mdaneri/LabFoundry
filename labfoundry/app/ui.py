@@ -7686,9 +7686,75 @@ def certificate_authority_page(
 @router.get("/ca", response_class=HTMLResponse, response_model=None)
 def public_ca_page(
     request: Request,
+    identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "ca_public.html", public_ca_context(db))
+    return render(request, "ca_public.html", {"identity": identity, **public_ca_context(db)})
+
+
+def ca_public_login_response(request: Request, *, error: str | None = None, status_code: int = 200) -> HTMLResponse:
+    return render(
+        request,
+        "ca_request_login.html",
+        {
+            "error": error,
+            "return_to": "/ca",
+            "login_action": "/ca/login",
+            "portal_title": "LabFoundry CA",
+            "portal_subtitle": "Public trust portal",
+            "login_heading": "Sign in to the CA portal",
+            "login_copy": "Use a certificate operator account to access request actions from the public CA portal.",
+            "back_href": "/ca",
+            "back_label": "Back to public CA",
+        },
+        status_code=status_code,
+    )
+
+
+def authenticate_ca_portal_session(
+    request: Request,
+    db: Session,
+    *,
+    username: str,
+    password: str,
+    csrf: str,
+    next_path: str,
+    failure_response,
+) -> RedirectResponse | HTMLResponse:
+    verify_csrf(request, csrf)
+    user = authenticate_user(db, username, password)
+    if not user:
+        record_audit(db, actor=username, action="ca_request_portal_login_failed", resource_type="auth", success=False)
+        return failure_response(request, error="Invalid username or password", status_code=401)
+    request.session["user_id"] = user.id
+    request.session[SESSION_APPLIANCE_INSTANCE_SESSION_KEY] = ensure_appliance_instance_id(db)
+    record_audit(db, actor=user.username, action="ca_request_portal_login", resource_type="auth")
+    return RedirectResponse(next_path, status_code=303)
+
+
+@router.get("/ca/login", response_class=HTMLResponse, response_model=None)
+def ca_public_login_page(request: Request) -> HTMLResponse:
+    return ca_public_login_response(request)
+
+
+@router.post("/ca/login", response_model=None)
+def ca_public_login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    csrf: str = Form(...),
+    next: str = Form("/ca"),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    return authenticate_ca_portal_session(
+        request,
+        db,
+        username=username,
+        password=password,
+        csrf=csrf,
+        next_path="/ca" if next != "/ca" else next,
+        failure_response=ca_public_login_response,
+    )
 
 
 def public_root_ca_response(db: Session, *, bundle: bool = False) -> Response:
@@ -7752,22 +7818,22 @@ def ca_request_portal_login(
     next: str = Form("/requests"),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse:
-    verify_csrf(request, csrf)
-    user = authenticate_user(db, username, password)
-    if not user:
-        record_audit(db, actor=username, action="ca_request_portal_login_failed", resource_type="auth", success=False)
-        return ca_request_portal_login_response(request, error="Invalid username or password", status_code=401)
-    request.session["user_id"] = user.id
-    request.session[SESSION_APPLIANCE_INSTANCE_SESSION_KEY] = ensure_appliance_instance_id(db)
-    record_audit(db, actor=user.username, action="ca_request_portal_login", resource_type="auth")
-    return RedirectResponse("/requests" if next != "/requests" else next, status_code=303)
+    return authenticate_ca_portal_session(
+        request,
+        db,
+        username=username,
+        password=password,
+        csrf=csrf,
+        next_path="/requests" if next != "/requests" else next,
+        failure_response=ca_request_portal_login_response,
+    )
 
 
 @router.post("/requests/logout", response_model=None)
-def ca_request_portal_logout(request: Request, csrf: str = Form(...)) -> RedirectResponse:
+def ca_request_portal_logout(request: Request, csrf: str = Form(...), next: str = Form("/requests")) -> RedirectResponse:
     verify_csrf(request, csrf)
     request.session.clear()
-    return RedirectResponse("/requests", status_code=303)
+    return RedirectResponse("/ca" if next == "/ca" else "/requests", status_code=303)
 
 
 def _stage_ca_certificate_request(

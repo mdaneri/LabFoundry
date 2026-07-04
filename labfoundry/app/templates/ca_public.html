@@ -1,45 +1,98 @@
-{% extends "base.html" %}
-{% block page_title %}Certificate Authority{% endblock %}
-{% block content %}
-<section class="ca-home-layout">
-  <div class="panel ca-home-hero">
-    <div class="panel-head">
-      <div>
-        <p class="kicker">LabFoundry Certificate Authority</p>
-        <h2>{{ ca_settings.root_common_name }}</h2>
-        <p class="muted">Trust anchor and certificate request portal for this LabFoundry appliance.</p>
-      </div>
-      <span class="status-pill {{ 'good' if root_available else 'warn' }}">{{ "available" if root_available else "not available" }}</span>
-    </div>
-    <div class="metric-grid">
-      <div><span>Portal hostname</span><strong>{{ portal_hostname }}</strong></div>
-      <div><span>Fingerprint</span><strong>{{ root_fingerprint or "not generated" }}</strong></div>
-      <div><span>Issued</span><strong>{{ root_issued_at.strftime("%Y-%m-%d") if root_issued_at else "not generated" }}</strong></div>
-      <div><span>Expires</span><strong>{{ root_expires_at.strftime("%Y-%m-%d") if root_expires_at else "not generated" }}</strong></div>
-    </div>
-    <div class="button-row">
-      <a class="button primary {{ 'disabled' if not root_available else '' }}" href="/ca/downloads/root-ca.pem">Download root CA</a>
-      <a class="button secondary {{ 'disabled' if not root_available else '' }}" href="/ca/downloads/ca-bundle.pem">Download CA bundle</a>
-      <a class="button ghost" href="/requests">Request certificate</a>
-    </div>
-  </div>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LabFoundry - Certificate Authority</title>
+    <meta name="theme-color" content="#1f4f7a">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/static/brand/labfoundry-mark.svg">
+    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+    <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/app.css?v=ca-portal-20260704-2">
+  </head>
+  <body>
+    <div class="public-portal-shell">
+      <header class="public-portal-header">
+        <a class="brand" href="/ca">
+          {% include "partials/brand_mark.html" %}
+          <span>
+            <strong>LabFoundry CA</strong>
+            <small>Public trust portal</small>
+          </span>
+        </a>
+        <div class="public-portal-actions">
+          <button class="button ghost" type="button" data-history-back data-history-fallback="/">Back</button>
+          {% if identity %}
+            <form action="/requests/logout" method="post">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="next" value="/ca">
+              <button class="button ghost" type="submit">Sign out</button>
+            </form>
+          {% else %}
+            <a class="button secondary" href="/ca/login">Sign in</a>
+          {% endif %}
+        </div>
+      </header>
 
-  <div class="content-grid two-column">
-    <div class="panel">
-      <div class="panel-head">
-        <h2>Trust Material</h2>
-        <span class="status-pill muted">public</span>
-      </div>
-      <p class="muted">Install the root CA or CA bundle on clients that need to trust LabFoundry-managed service certificates. Private keys are never exposed from this portal.</p>
+      <main class="public-portal-main">
+        <div class="topbar public-portal-title">
+          <div>
+            <p class="kicker">Public certificate authority</p>
+            <h1>Certificate Authority</h1>
+          </div>
+          <span class="status-pill {{ 'good' if root_available else 'warn' }}">{{ "available" if root_available else "not available" }}</span>
+        </div>
+
+        <section class="ca-home-layout">
+          <div class="panel ca-home-hero">
+            <div class="panel-head">
+              <div>
+                <p class="kicker">LabFoundry Certificate Authority</p>
+                <h2>{{ ca_settings.root_common_name }}</h2>
+                <p class="muted">Download public trust material for LabFoundry-managed service certificates. Private keys are never exposed from this portal.</p>
+              </div>
+            </div>
+            <div class="ca-trust-grid">
+              <div>
+                <span>Portal hostname</span>
+                <strong>{{ portal_hostname }}</strong>
+              </div>
+              <div>
+                <span>Issued</span>
+                <strong>{{ root_issued_at.strftime("%Y-%m-%d") if root_issued_at else "not generated" }}</strong>
+              </div>
+              <div>
+                <span>Expires</span>
+                <strong>{{ root_expires_at.strftime("%Y-%m-%d") if root_expires_at else "not generated" }}</strong>
+              </div>
+              <div class="ca-fingerprint-block">
+                <span>Fingerprint</span>
+                <strong>{{ root_fingerprint or "not generated" }}</strong>
+              </div>
+            </div>
+            <div class="button-row">
+              <a class="button primary {{ 'disabled' if not root_available else '' }}" href="/ca/downloads/root-ca.pem">Download root CA</a>
+              <a class="button secondary {{ 'disabled' if not root_available else '' }}" href="/ca/downloads/ca-bundle.pem">Download CA bundle</a>
+              <a class="button ghost" href="/requests">Request certificate</a>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Certificate Requests</h2>
+                <p class="muted">Certificate operators can submit new certificate requests and revoke issued certificates from the independent request portal.</p>
+              </div>
+              <span class="status-pill {{ 'good' if identity else 'warn' }}">{{ "signed in" if identity else "sign-in required" }}</span>
+            </div>
+            <a class="button secondary" href="/requests">Open request portal</a>
+          </div>
+        </section>
+      </main>
     </div>
-    <div class="panel">
-      <div class="panel-head">
-        <h2>Certificate Requests</h2>
-        <span class="status-pill warn">sign-in required</span>
-      </div>
-      <p class="muted">Authenticated certificate operators can submit new certificate requests and revoke issued certificates from the CA request portal.</p>
-      <a class="button secondary" href="/requests">Open request portal</a>
-    </div>
-  </div>
-</section>
-{% endblock %}
+
+    <script src="/static/app.js?v=ca-portal-20260704-2"></script>
+    <script src="/static/pwa.js?v=pwa-20260627-1"></script>
+  </body>
+</html>

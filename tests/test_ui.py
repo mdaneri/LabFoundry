@@ -3710,13 +3710,43 @@ def test_public_ca_root_page_is_unauthenticated(client):
     page = client.get("/ca")
     assert page.status_code == 200
     assert "LabFoundry Certificate Authority" in page.text
+    assert "LabFoundry CA" in page.text
+    assert "Public trust portal" in page.text
     assert "LabFoundry Internal Root CA" in page.text
     assert "abc123" in page.text
+    assert "ca-fingerprint-block" in page.text
     assert "ca.labfoundry.internal" in page.text
     assert "/ca/downloads/root-ca.pem" in page.text
     assert 'href="/requests"' in page.text
+    assert 'href="/ca/login"' in page.text
+    assert 'data-history-back' in page.text
+    assert "Trust Material" not in page.text
     assert "/certificate-authority" not in page.text
     assert "/appliance-apply" not in page.text
+
+    login_page = client.get("/ca/login")
+    assert login_page.status_code == 200
+    assert "Sign in to the CA portal" in login_page.text
+    assert 'action="/ca/login"' in login_page.text
+    assert 'name="next" value="/ca"' in login_page.text
+    assert 'data-history-back' in login_page.text
+    csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    login_response = client.post(
+        "/ca/login",
+        data={"username": "admin", "password": "labfoundry-admin", "csrf": csrf, "next": "/ca"},
+        follow_redirects=False,
+    )
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/ca"
+
+    signed_in_page = client.get("/ca")
+    assert signed_in_page.status_code == 200
+    assert "Sign out" in signed_in_page.text
+    assert 'name="next" value="/ca"' in signed_in_page.text
+    csrf = signed_in_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    logout_response = client.post("/requests/logout", data={"csrf": csrf, "next": "/ca"}, follow_redirects=False)
+    assert logout_response.status_code == 303
+    assert logout_response.headers["location"] == "/ca"
 
     ca_host_home = client.get("/", headers={"host": "ca.labfoundry.internal"})
     assert ca_host_home.status_code == 200
@@ -3874,6 +3904,7 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
     assert 'action="/requests/login"' in login_page.text
     assert 'action="/login"' not in login_page.text
     assert 'name="next" value="/requests"' in login_page.text
+    assert 'data-history-back' in login_page.text
     csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     login_response = client.post(
         "/requests/login",
@@ -3901,6 +3932,8 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
     assert "Certificate Request Portal" in portal_page.text
     assert 'action="/requests"' in portal_page.text
     assert 'action="/requests/logout"' in portal_page.text
+    assert 'data-history-back' in portal_page.text
+    assert 'name="next" value="/requests"' in portal_page.text
     assert f'action="/requests/certificates/{certificate_id}/revoke"' in portal_page.text
     assert 'class="app-shell"' not in portal_page.text
     assert 'class="sidebar"' not in portal_page.text
