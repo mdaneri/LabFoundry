@@ -74,7 +74,7 @@ case "$LABFOUNDRY_GUEST_PLATFORM" in
     exit 2
     ;;
 esac
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow e2fsprogs $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony ipxe syslinux nginx powershell
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony ipxe syslinux nginx powershell
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update

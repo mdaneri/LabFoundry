@@ -236,6 +236,7 @@ from labfoundry.app.services.firewall import (
     FIREWALL_SOURCE_GROUPS_SETTING_KEY,
     FIREWALL_STAGED_CONFIG_PATH,
     LABFOUNDRY_DHCP_FIREWALL_RULE_MARKER,
+    ca_portal_firewall_interfaces,
     firewall_interface_networks,
     firewall_rule_to_dict,
     firewall_settings_to_dict,
@@ -2208,6 +2209,8 @@ def firewall_context(db: Session) -> dict:
         dns_settings=dns_settings,
         dhcp_settings=dhcp_settings,
         dhcp_scopes=dhcp_scopes,
+        ca_settings=get_ca_settings_row(db),
+        ca_portal_interfaces=ca_portal_firewall_interfaces(physical_interfaces, vlan_interfaces, interface_networks),
         kms_settings=get_kms_settings_row(db),
         chrony_settings=get_chrony_settings_row(db),
         vcf_backup_settings=get_vcf_backup_settings_row(db),
@@ -2400,10 +2403,47 @@ def request_host_name(request: Request) -> str:
     return (request.headers.get("host") or "").split(":", 1)[0].strip().strip(".").lower()
 
 
+def interface_address(raw_cidr: str | None) -> str:
+    if not raw_cidr:
+        return ""
+    try:
+        return str(ip_interface(raw_cidr.strip()).ip).lower()
+    except ValueError:
+        return ""
+
+
+def request_host_interface_role(request_host: str, db: Session) -> str:
+    if not request_host:
+        return ""
+    for interface in db.execute(select(PhysicalInterface)).scalars().all():
+        addresses = {
+            interface_address(interface.ip_cidr),
+            interface_address(interface.host_ip_cidr),
+            interface_address(interface.ipv6_cidr),
+            interface_address(interface.host_ipv6_cidr),
+        }
+        if request_host in addresses:
+            return normalize_interface_role(interface.role)
+    for vlan in db.execute(select(VlanInterface).where(VlanInterface.enabled.is_(True))).scalars().all():
+        addresses = {interface_address(vlan.ip_cidr), interface_address(vlan.ipv6_cidr)}
+        if request_host in addresses:
+            return normalize_interface_role(vlan.role)
+    return ""
+
+
 def is_ca_portal_host(request: Request, db: Session) -> bool:
     settings = get_ca_settings_row(db)
+    request_host = request_host_name(request)
     portal_hostname = normalize_dns_hostname(settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
-    return bool(portal_hostname and request_host_name(request) == portal_hostname)
+    if portal_hostname and request_host == portal_hostname:
+        return True
+    interface_role = request_host_interface_role(request_host, db)
+    if interface_role == "management":
+        return False
+    if interface_role:
+        return True
+    listen_addresses = {address.lower() for address in split_addresses(settings.listen_address)}
+    return bool(request_host and request_host in listen_addresses)
 
 
 def ca_request_context(db: Session) -> dict:
