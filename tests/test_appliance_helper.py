@@ -236,6 +236,7 @@ def ca_payload_text(root_dir: Path) -> str:
     root_cert = "-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----\n"
     cert = "-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n"
     key = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n"
+    crl = "-----BEGIN X509 CRL-----\ncrl\n-----END X509 CRL-----\n"
     return json.dumps(
         {
             "enabled": True,
@@ -246,6 +247,8 @@ def ca_payload_text(root_dir: Path) -> str:
                 "root_cert_path": str(root_dir / "ca" / "root-ca.pem"),
                 "legacy_root_cert_path": str(root_dir / "ca" / "root.crt"),
                 "ca_bundle_path": str(root_dir / "ca" / "ca-bundle.pem"),
+                "crl_path": str(root_dir / "ca" / "labfoundry-ca.crl"),
+                "crl_pem": crl,
             },
             "certificates": [
                 {
@@ -703,8 +706,10 @@ def test_ca_helper_validates_and_writes_managed_files(monkeypatch, tmp_path):
     assert helper._handle_ca("apply", [str(config_path)]) == 0
 
     root_ca = managed_root / "ca" / "root-ca.pem"
+    crl_path = managed_root / "ca" / "labfoundry-ca.crl"
     key_path = managed_root / "kms" / "certs" / "kms.labfoundry.internal.key"
     assert root_ca.read_text(encoding="utf-8").startswith("-----BEGIN CERTIFICATE-----")
+    assert crl_path.read_text(encoding="utf-8").startswith("-----BEGIN X509 CRL-----")
     assert key_path.read_text(encoding="utf-8").startswith("-----BEGIN PRIVATE KEY-----")
     if os.name != "nt":
         assert oct(key_path.stat().st_mode & 0o777) == "0o600"

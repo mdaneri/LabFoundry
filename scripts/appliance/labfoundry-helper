@@ -364,6 +364,14 @@ def _pem_errors(value: str, label: str, *, private_key: bool = False) -> list[st
     return []
 
 
+def _crl_errors(value: str, label: str) -> list[str]:
+    if not value:
+        return []
+    if "-----BEGIN X509 CRL-----" not in value or "-----END X509 CRL-----" not in value:
+        return [f"{label} must contain a PEM X509 CRL block."]
+    return []
+
+
 def _openssl_public_key(value: str, *, private_key: bool) -> str | None:
     openssl = shutil.which("openssl")
     if openssl is None:
@@ -413,11 +421,14 @@ def _ca_payload_errors(path: Path) -> list[str]:
     errors.extend(_pem_errors(root_cert, "root certificate"))
     if enabled:
         errors.extend(_pem_errors(root_key, "root private key", private_key=True))
-    for label in ["root_cert_path", "legacy_root_cert_path", "ca_bundle_path"]:
+    for label in ["root_cert_path", "legacy_root_cert_path", "ca_bundle_path", "crl_path"]:
+        if label == "crl_path" and not root.get(label):
+            continue
         try:
             _ca_managed_path(str(root.get(label) or ""), label)
         except ValueError as exc:
             errors.append(str(exc))
+    errors.extend(_crl_errors(str(root.get("crl_pem") or ""), "CA CRL"))
     certificates = payload.get("certificates")
     if not isinstance(certificates, list):
         errors.append("CA certificates must be a list.")
@@ -477,10 +488,16 @@ def _handle_ca(action: str, args: list[str]) -> int:
     root_cert_path = _ca_managed_path(str(root["root_cert_path"]), "root_cert_path")
     legacy_root_path = _ca_managed_path(str(root["legacy_root_cert_path"]), "legacy_root_cert_path")
     bundle_path = _ca_managed_path(str(root["ca_bundle_path"]), "ca_bundle_path")
+    crl_path_value = str(root.get("crl_path") or "")
+    crl_pem = str(root.get("crl_pem") or "")
     _write_secret_file(root_cert_path, root_cert, 0o644)
     _write_secret_file(legacy_root_path, root_cert, 0o644)
     _write_secret_file(bundle_path, root_cert, 0o644)
     written = [str(root_cert_path), str(legacy_root_path), str(bundle_path)]
+    if crl_path_value and crl_pem:
+        crl_path = _ca_managed_path(crl_path_value, "crl_path")
+        _write_secret_file(crl_path, crl_pem, 0o644)
+        written.append(str(crl_path))
     for certificate in payload["certificates"]:
         cert_path_value = str(certificate.get("cert_path") or "")
         key_path_value = str(certificate.get("key_path") or "")

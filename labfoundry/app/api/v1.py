@@ -120,7 +120,6 @@ from labfoundry.app.security import (
     ALL_SCOPES,
     authenticate_user,
     require_scope,
-    role_allows_scopes,
     scopes_from_string,
 )
 from labfoundry.app.services.dnsmasq import (
@@ -602,6 +601,7 @@ def get_me(identity: Annotated[Identity, Depends(require_scope("read:dashboard")
     return IdentityResponse(
         username=identity.username,
         role=identity.role,
+        roles=identity.roles,
         scopes=sorted(identity.scopes),
         auth_type=identity.auth_type,
     )
@@ -613,7 +613,7 @@ def list_api_tokens(
     db: Session = Depends(get_db),
 ) -> list[ApiTokenResponse]:
     query = select(ApiToken).order_by(desc(ApiToken.created_at))
-    if identity.role != "admin":
+    if not identity.has_role("admin"):
         query = query.where(ApiToken.owner_user_id == identity.user_id)
     return [token_to_response(token) for token in db.execute(query).scalars().all()]
 
@@ -644,7 +644,7 @@ def get_api_token(
     db: Session = Depends(get_db),
 ) -> ApiTokenResponse:
     token = db.get(ApiToken, token_id)
-    if not token or (identity.role != "admin" and token.owner_user_id != identity.user_id):
+    if not token or (not identity.has_role("admin") and token.owner_user_id != identity.user_id):
         raise HTTPException(status_code=404, detail="API token not found")
     return token_to_response(token)
 
@@ -674,7 +674,7 @@ def delete_api_token(
     db: Session = Depends(get_db),
 ) -> Response:
     token = db.get(ApiToken, token_id)
-    if not token or (identity.role != "admin" and token.owner_user_id != identity.user_id):
+    if not token or (not identity.has_role("admin") and token.owner_user_id != identity.user_id):
         raise HTTPException(status_code=404, detail="API token not found")
     revoke_token(db, token, identity)
     return Response(status_code=204)
@@ -687,7 +687,7 @@ def revoke_api_token(
     db: Session = Depends(get_db),
 ) -> ApiTokenResponse:
     token = db.get(ApiToken, token_id)
-    if not token or (identity.role != "admin" and token.owner_user_id != identity.user_id):
+    if not token or (not identity.has_role("admin") and token.owner_user_id != identity.user_id):
         raise HTTPException(status_code=404, detail="API token not found")
     return revoke_token(db, token, identity)
 

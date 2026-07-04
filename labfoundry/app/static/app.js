@@ -2523,7 +2523,11 @@ async function postUserAction(url, data, csrf, options = {}) {
     ) {
       continue;
     }
-    body.set(key, value ?? "");
+    if (Array.isArray(value)) {
+      value.forEach((item) => body.append(key, item ?? ""));
+    } else {
+      body.set(key, value ?? "");
+    }
   }
 
   const response = await fetch(url, {
@@ -2646,6 +2650,9 @@ function newUserRow() {
     id: "__new__",
     username: "",
     role: "viewer",
+    roles: ["viewer"],
+    roles_label: "viewer",
+    roles_text: "viewer",
     shell: "/sbin/nologin",
     enabled: false,
     created_at: "",
@@ -2706,7 +2713,6 @@ function initializeUsersTable() {
     return;
   }
   const csrf = tableElement.dataset.csrf || "";
-  const roles = roleValues(JSON.parse(tableElement.dataset.roles || "[]"));
   const shells = JSON.parse(tableElement.dataset.shells || '["/sbin/nologin","/bin/bash","/bin/sh"]');
   const rows = [...JSON.parse(tableElement.dataset.users || "[]"), newUserRow()];
   try {
@@ -2755,11 +2761,12 @@ function initializeUsersTable() {
           cellEdited: (cell) => autoSaveUser(cell, csrf),
         },
         {
-          title: "Role",
-          field: "role",
-          editor: "list",
-          editorParams: { values: roles },
+          title: "Roles",
+          field: "roles_text",
+          editor: "input",
+          formatter: (cell) => escapeHtml(cell.getValue() || "viewer"),
           cellEdited: (cell) => autoSaveUser(cell, csrf),
+          minWidth: 190,
         },
         {
           title: "Shell",

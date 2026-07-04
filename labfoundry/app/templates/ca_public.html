@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block page_title %}Root Certificate{% endblock %}
+{% block content %}
+<section class="content-grid two-column">
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>LabFoundry Root CA</h2>
+        <p class="muted">Download the public root certificate used by this LabFoundry appliance.</p>
+      </div>
+      <span class="status-pill {{ 'good' if root_available else 'warn' }}">{{ "available" if root_available else "not available" }}</span>
+    </div>
+    <div class="settings-list">
+      <div><span>Common name</span><strong>{{ ca_settings.root_common_name }}</strong></div>
+      <div><span>Fingerprint</span><strong>{{ root_fingerprint or "not generated" }}</strong></div>
+      <div><span>Issued</span><strong>{{ root_issued_at.strftime("%Y-%m-%d") if root_issued_at else "not generated" }}</strong></div>
+      <div><span>Expires</span><strong>{{ root_expires_at.strftime("%Y-%m-%d") if root_expires_at else "not generated" }}</strong></div>
+    </div>
+    <div class="button-row">
+      <a class="button primary {{ 'disabled' if not root_available else '' }}" href="/ca/downloads/root-ca.pem">Download root CA</a>
+      <a class="button secondary {{ 'disabled' if not root_available else '' }}" href="/ca/downloads/ca-bundle.pem">Download CA bundle</a>
+    </div>
+  </div>
+</section>
+{% endblock %}

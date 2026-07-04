@@ -106,7 +106,12 @@ from labfoundry.app.security import (
     authenticate_user,
     ensure_appliance_instance_id,
     get_session_identity,
+    normalize_roles,
+    primary_role,
     require_session_identity,
+    role_label,
+    roles_to_json,
+    user_roles,
     SESSION_APPLIANCE_INSTANCE_SESSION_KEY,
 )
 from labfoundry.app.services.dnsmasq import (
@@ -439,8 +444,23 @@ def render(request: Request, template: str, context: dict, status_code: int = 20
 
 
 def require_admin_identity(identity: Identity) -> None:
-    if identity.role != "admin":
+    if not identity.has_role("admin"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator role required")
+
+
+def require_certificate_workflow_identity(identity: Identity) -> None:
+    if not (identity.has_role(Role.ADMIN.value) or identity.has_role(Role.CERTIFICATE_OPERATOR.value)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Certificate operator role required")
+
+
+def roles_from_form(primary_role_value: str = "", roles: list[str] | None = None, roles_text: str = "") -> list[str]:
+    values: list[str] = []
+    for value in roles or []:
+        values.extend(str(value).replace(",", "\n").splitlines())
+    values.extend(roles_text.replace(",", "\n").splitlines())
+    if not values and primary_role_value:
+        values.append(primary_role_value)
+    return normalize_roles(values)
 
 
 def require_monitoring_read(identity: Identity) -> None:
@@ -489,7 +509,11 @@ def user_to_dict(user: User, current_user_id: int | None = None, os_status: dict
     return {
         "id": user.id,
         "username": user.username,
-        "role": user.role,
+        "role": primary_role(user_roles(user)),
+        "roles": user_roles(user),
+        "roles_label": role_label(user_roles(user)),
+        "roles_text": ", ".join(user_roles(user)),
+        "auth_provider": user.auth_provider or "local",
         "shell": normalize_user_shell(user.shell),
         "enabled": user.enabled,
         "created_at": user.created_at.strftime("%Y-%m-%d"),
@@ -525,15 +549,14 @@ def users_context(db: Session, identity: Identity) -> dict:
 
 
 def enabled_admin_count(db: Session) -> int:
-    return db.execute(
-        select(func.count(User.id)).where(User.role == Role.ADMIN.value, User.enabled.is_(True))
-    ).scalar_one()
+    users = db.execute(select(User).where(User.enabled.is_(True))).scalars().all()
+    return len([user for user in users if Role.ADMIN.value in user_roles(user)])
 
 
-def protect_last_admin(db: Session, user: User, *, next_role: str | None = None, next_enabled: bool | None = None) -> None:
-    role = next_role if next_role is not None else user.role
+def protect_last_admin(db: Session, user: User, *, next_roles: list[str] | None = None, next_enabled: bool | None = None) -> None:
+    roles = normalize_roles(next_roles) if next_roles is not None else user_roles(user)
     enabled = next_enabled if next_enabled is not None else user.enabled
-    if user.role == Role.ADMIN.value and user.enabled and (role != Role.ADMIN.value or not enabled) and enabled_admin_count(db) <= 1:
+    if Role.ADMIN.value in user_roles(user) and user.enabled and (Role.ADMIN.value not in roles or not enabled) and enabled_admin_count(db) <= 1:
         raise HTTPException(status_code=400, detail="At least one enabled local administrator must remain.")
 
 
@@ -1474,7 +1497,6 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
     local_dns_enabled = bool(dns_settings.enabled)
     chrony_settings = get_chrony_settings_row(db)
     chrony_enabled = bool(chrony_settings.enabled)
-    show_settings_ntp_servers = not chrony_enabled
     management = appliance_settings_management_context(db)
     ca_settings = get_ca_settings_row(db)
     management_https_cert_path, management_https_key_path, _management_https_chain_path = ca_managed_certificate_paths(db, "appliance:https")
@@ -1494,11 +1516,10 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "app_settings": get_settings(),
         "runtime_hostname": socket.gethostname(),
         "appliance_settings": settings,
-        "appliance_settings_json": appliance_settings_to_dict(settings, include_ntp_servers=show_settings_ntp_servers),
+        "appliance_settings_json": appliance_settings_to_dict(settings),
         "service_dns_target_naming_choices": SERVICE_DNS_TARGET_NAMING_CHOICES,
         "local_dns_enabled": local_dns_enabled,
         "chrony_enabled": chrony_enabled,
-        "show_settings_ntp_servers": show_settings_ntp_servers,
         "ca_enabled": bool(ca_settings.enabled),
         "management_https_cert_available": management_https_cert_available,
         "management_https_cert_path": management_https_cert_path,
@@ -1513,7 +1534,6 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
             management_interface=management,
             management_https_cert_path=management_https_cert_path,
             management_https_key_path=management_https_key_path,
-            include_ntp_servers=show_settings_ntp_servers,
         ),
     }
 
@@ -2302,6 +2322,33 @@ def ca_context(db: Session) -> dict:
             "secrets_key_source": key_status.source,
             "secrets_key_dedicated": key_status.dedicated,
         },
+    }
+
+
+def public_ca_context(db: Session) -> dict:
+    settings = get_ca_settings_row(db)
+    return {
+        "ca_settings": settings,
+        "root_available": bool(settings.root_certificate_pem),
+        "root_fingerprint": settings.root_fingerprint,
+        "root_issued_at": settings.root_issued_at,
+        "root_expires_at": settings.root_expires_at,
+    }
+
+
+def ca_request_context(db: Session) -> dict:
+    if ensure_default_ca_profiles(db):
+        db.commit()
+    profiles = db.execute(select(CaProfile).order_by(CaProfile.name)).scalars().all()
+    certificates = (
+        db.execute(select(CaCertificate).options(selectinload(CaCertificate.profile)).order_by(CaCertificate.common_name))
+        .scalars()
+        .all()
+    )
+    return {
+        "ca_profiles": profiles,
+        "ca_profile_choices": [{"id": profile.id, "label": profile.name} for profile in profiles if profile.enabled],
+        "ca_certificates": certificates,
     }
 
 
@@ -7347,6 +7394,114 @@ def certificate_authority_page(
     return render(request, "certificate_authority.html", {"identity": identity, **ca_context(db), "appliance_apply_status": appliance_apply_status(db, "ca")})
 
 
+@router.get("/ca", response_class=HTMLResponse, response_model=None)
+def public_ca_page(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(request, "ca_public.html", public_ca_context(db))
+
+
+def public_root_ca_response(db: Session, *, bundle: bool = False) -> Response:
+    settings = get_ca_settings_row(db)
+    if not settings.root_certificate_pem:
+        raise HTTPException(status_code=404, detail="Root CA certificate is not available")
+    filename = "labfoundry-ca-bundle.pem" if bundle else "labfoundry-root-ca.pem"
+    return Response(
+        settings.root_certificate_pem.encode("utf-8"),
+        media_type="application/x-pem-file",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/ca/downloads/root-ca.pem", response_model=None)
+def download_public_root_ca(
+    db: Session = Depends(get_db),
+) -> Response:
+    return public_root_ca_response(db)
+
+
+@router.get("/ca/downloads/ca-bundle.pem", response_model=None)
+def download_public_ca_bundle(
+    db: Session = Depends(get_db),
+) -> Response:
+    return public_root_ca_response(db, bundle=True)
+
+
+@router.get("/ca/requests", response_class=HTMLResponse, response_model=None)
+def ca_requests_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    require_certificate_workflow_identity(identity)
+    return render(request, "ca_requests.html", {"identity": identity, **ca_request_context(db)})
+
+
+@router.post("/ca/requests", response_model=None)
+def submit_ca_request_from_portal(
+    request: Request,
+    common_name: str = Form(...),
+    profile_id: str = Form(""),
+    subject_alt_names: str = Form(""),
+    ip_addresses: str = Form(""),
+    description: str = Form(""),
+    csr_text: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_certificate_workflow_identity(identity)
+    verify_csrf(request, csrf)
+    if not common_name.strip():
+        return render(
+            request,
+            "ca_requests.html",
+            {"identity": identity, **ca_request_context(db), "form_error": "Common name is required."},
+            status_code=422,
+        )
+    certificate = CaCertificate(
+        common_name=common_name.strip(),
+        profile_id=parse_ca_profile_id(profile_id),
+        subject_alt_names=join_multiline(split_multiline(subject_alt_names)),
+        ip_addresses=join_multiline(split_multiline(ip_addresses)),
+        status="csr-staged" if csr_text.strip() else "planned",
+        description=description or None,
+        csr_text=csr_text.strip() or None,
+        enabled=True,
+    )
+    db.add(certificate)
+    db.commit()
+    record_audit(db, actor=identity.username, action="submit_ca_certificate_request", resource_type="ca_certificate", resource_id=str(certificate.id))
+    return RedirectResponse("/ca/requests", status_code=303)
+
+
+@router.post("/ca/certificates/{certificate_id}/revoke", response_model=None)
+def revoke_ca_certificate_from_portal(
+    request: Request,
+    certificate_id: int,
+    reason: str = Form("operator requested"),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_certificate_workflow_identity(identity)
+    verify_csrf(request, csrf)
+    certificate = db.get(CaCertificate, certificate_id)
+    if not certificate:
+        raise HTTPException(status_code=404, detail="CA certificate not found")
+    if certificate.status != "issued" or not certificate.serial_number:
+        raise HTTPException(status_code=400, detail="Only issued certificates with a serial number can be revoked.")
+    certificate.status = "revoked"
+    certificate.revoked_at = utcnow()
+    certificate.revoked_by = identity.username
+    certificate.revocation_reason = reason.strip() or "operator requested"
+    db.add(certificate)
+    db.commit()
+    record_audit(db, actor=identity.username, action="revoke_ca_certificate", resource_type="ca_certificate", resource_id=str(certificate.id))
+    return RedirectResponse("/ca/requests", status_code=303)
+
+
 @router.get("/certificate-authority/downloads/root-ca.pem", response_model=None)
 def download_root_ca(
     identity: Identity = Depends(require_session_identity),
@@ -8927,7 +9082,10 @@ def authentication(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    tokens = db.execute(select(ApiToken).order_by(desc(ApiToken.created_at))).scalars().all()
+    query = select(ApiToken).order_by(desc(ApiToken.created_at))
+    if not identity.has_role(Role.ADMIN.value):
+        query = query.where(ApiToken.owner_user_id == identity.user_id)
+    tokens = db.execute(query).scalars().all()
     return render(request, "authentication.html", {"identity": identity, "tokens": tokens, "raw_token": None})
 
 
@@ -8952,7 +9110,10 @@ def create_token_from_ui(
         settings=get_settings(),
         actor=identity.username,
     )
-    tokens = db.execute(select(ApiToken).order_by(desc(ApiToken.created_at))).scalars().all()
+    query = select(ApiToken).order_by(desc(ApiToken.created_at))
+    if not identity.has_role(Role.ADMIN.value):
+        query = query.where(ApiToken.owner_user_id == identity.user_id)
+    tokens = db.execute(query).scalars().all()
     return render(
         request,
         "authentication.html",
@@ -8970,7 +9131,7 @@ def revoke_token_from_ui(
 ) -> RedirectResponse:
     verify_csrf(request, csrf)
     token = db.get(ApiToken, token_id)
-    if not token:
+    if not token or (not identity.has_role(Role.ADMIN.value) and token.owner_user_id != identity.user_id):
         raise HTTPException(status_code=404, detail="API token not found")
     token.enabled = False
     token.revoked_at = utcnow()
@@ -9038,6 +9199,8 @@ def create_user_from_ui(
     request: Request,
     username: str = Form(...),
     role: str = Form(Role.VIEWER.value),
+    roles: list[str] = Form(default=[]),
+    roles_text: str = Form(""),
     shell: str = Form(DEFAULT_LOCAL_USER_SHELL),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -9048,14 +9211,13 @@ def create_user_from_ui(
     username = username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required.")
-    if role not in {item.value for item in Role}:
-        raise HTTPException(status_code=400, detail="Unknown role.")
+    next_roles = roles_from_form(role, roles, roles_text)
     if not is_valid_user_shell(shell):
         raise HTTPException(status_code=400, detail=f"Shell must be one of {', '.join(LOCAL_USER_SHELLS)}.")
     shell = normalize_user_shell(shell)
     if db.execute(select(User).where(User.username == username)).scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"User {username} already exists.")
-    user = User(username=username, role=role, shell=shell, enabled=False)
+    user = User(username=username, role=primary_role(next_roles), roles_json=roles_to_json(next_roles), shell=shell, enabled=False)
     db.add(user)
     db.commit()
     record_audit(db, actor=identity.username, action="create_local_user", resource_type="user", resource_id=str(user.id))
@@ -9068,6 +9230,8 @@ def update_user_from_ui(
     request: Request,
     username: str = Form(...),
     role: str = Form(Role.VIEWER.value),
+    roles: list[str] = Form(default=[]),
+    roles_text: str = Form(""),
     shell: str = Form(DEFAULT_LOCAL_USER_SHELL),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -9081,19 +9245,19 @@ def update_user_from_ui(
     username = username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required.")
-    if role not in {item.value for item in Role}:
-        raise HTTPException(status_code=400, detail="Unknown role.")
+    next_roles = roles_from_form(role, roles, roles_text)
     if not is_valid_user_shell(shell):
         raise HTTPException(status_code=400, detail=f"Shell must be one of {', '.join(LOCAL_USER_SHELLS)}.")
     shell = normalize_user_shell(shell)
     next_enabled = user.enabled
-    protect_last_admin(db, user, next_role=role, next_enabled=next_enabled)
+    protect_last_admin(db, user, next_roles=next_roles, next_enabled=next_enabled)
     existing = db.execute(select(User).where(User.username == username, User.id != user.id)).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail=f"User {username} already exists.")
     old_username = user.username
     user.username = username
-    user.role = role
+    user.role = primary_role(next_roles)
+    user.roles_json = roles_to_json(next_roles)
     shell_changed = user.shell != shell
     user.shell = shell
     if old_username != username:
@@ -10268,7 +10432,6 @@ def update_settings_from_ui(
     root_ssh_enabled: bool = Form(False),
     service_dns_target_naming: str = Form("ip"),
     external_dns_servers: str = Form(""),
-    ntp_servers: str | None = Form(None),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -10284,8 +10447,6 @@ def update_settings_from_ui(
     settings.external_dns_servers = normalize_multiline_values(external_dns_servers)
     chrony_settings = get_chrony_settings_row(db)
     chrony_enabled = bool(chrony_settings.enabled)
-    if not chrony_enabled and ntp_servers is not None:
-        settings.ntp_servers = normalize_multiline_values(ntp_servers)
     settings.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
     settings.updated_at = utcnow()
     dns_settings = get_dns_settings_row(db)
@@ -10323,7 +10484,6 @@ def update_settings_from_ui(
                 "root_ssh_enabled": saved.root_ssh_enabled,
                 "service_dns_target_naming": normalize_service_dns_target_naming(saved.service_dns_target_naming),
                 "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
-                **({"ntp_servers": context["appliance_settings_json"]["ntp_servers"]} if context["show_settings_ntp_servers"] else {}),
                 "local_dns_enabled": context["local_dns_enabled"],
                 "chrony_enabled": context["chrony_enabled"],
                 "management_interface": context["management_interface"],

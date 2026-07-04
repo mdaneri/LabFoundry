@@ -17,6 +17,7 @@ class ProblemDetails(BaseModel):
 class IdentityResponse(BaseModel):
     username: str
     role: str
+    roles: list[str] = Field(default_factory=list)
     scopes: list[str]
     auth_type: str
 
@@ -39,6 +40,7 @@ class ApiTokenResponse(BaseModel):
     owner_username: str
     token_type: str
     role: str
+    roles: list[str] = Field(default_factory=list)
     scopes: list[str]
     created_at: datetime
     expires_at: datetime

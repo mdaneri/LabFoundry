@@ -15,6 +15,7 @@ class Role(StrEnum):
     ADMIN = "admin"
     NETWORK_ADMIN = "network-admin"
     SERVICE_ADMIN = "service-admin"
+    CERTIFICATE_OPERATOR = "certificate-operator"
     VIEWER = "viewer"
 
 
@@ -32,6 +33,12 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     role: Mapped[str] = mapped_column(String(50), default=Role.ADMIN.value)
+    roles_json: Mapped[str] = mapped_column(Text, default="")
+    auth_provider: Mapped[str] = mapped_column(String(40), default="local")
+    external_subject: Mapped[str] = mapped_column(String(240), default="")
+    external_display_name: Mapped[str] = mapped_column(String(180), default="")
+    external_email: Mapped[str] = mapped_column(String(240), default="")
+    role_override_json: Mapped[str] = mapped_column(Text, default="")
     shell: Mapped[str] = mapped_column(String(80), default="/sbin/nologin")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     os_password_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -483,6 +490,9 @@ class CaCertificate(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    revocation_reason: Mapped[str] = mapped_column(String(120), default="")
 
     profile: Mapped[CaProfile | None] = relationship(back_populates="certificates")
 

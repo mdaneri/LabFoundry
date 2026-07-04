@@ -570,8 +570,8 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert 'select name="service_dns_target_naming"' in response.text
     assert '<option value="ip" selected>IP address</option>' in response.text
     assert "Operational Logging" in response.text
-    assert "External NTP servers" in response.text
-    assert 'textarea name="ntp_servers"' in response.text
+    assert "External NTP servers" not in response.text
+    assert 'textarea name="ntp_servers"' not in response.text
     assert 'action="/settings/logging"' in response.text
     assert 'select name="level"' in response.text
     assert 'input class="switch-input" type="checkbox" name="syslog_enabled"' in response.text
@@ -703,7 +703,7 @@ def test_settings_page_hides_ntp_editor_when_chrony_is_enabled(client):
     assert response.status_code == 200
     assert "External NTP servers" not in response.text
     assert 'textarea name="ntp_servers"' not in response.text
-    assert 'input type="hidden" name="ntp_servers"' in response.text
+    assert 'input type="hidden" name="ntp_servers"' not in response.text
     assert '  "ntp_servers": [' not in response.text
 
 
@@ -764,11 +764,12 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     assert "app-owned appliance FQDN" in (record.description or "")
 
 
-def test_settings_autosave_updates_ntp_servers_when_chrony_is_disabled(client):
+def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import ApplianceSettings, ChronySettings, DnsSettings
+    from labfoundry.app.ui import appliance_apply_status
 
     login(client)
     with SessionLocal() as db:
@@ -780,7 +781,8 @@ def test_settings_autosave_updates_ntp_servers_when_chrony_is_disabled(client):
         db.commit()
 
     page = client.get("/settings")
-    assert 'textarea name="ntp_servers"' in page.text
+    assert "External NTP servers" not in page.text
+    assert 'textarea name="ntp_servers"' not in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
         "/settings",
@@ -796,14 +798,23 @@ def test_settings_autosave_updates_ntp_servers_when_chrony_is_disabled(client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["chrony_enabled"] is False
-    assert payload["ntp_servers"] == ["time.cloudflare.com", "192.0.2.10"]
-    assert '"time_sync_mode": "systemd-timesyncd"' in payload["config_preview"]
-    assert '"ntp_servers": [' in payload["config_preview"]
+    assert "ntp_servers" not in payload
+    assert '"time_sync_mode": "systemd-timesyncd"' not in payload["config_preview"]
+    assert '"ntp_servers": [' not in payload["config_preview"]
     assert payload["valid"] is True
 
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
-        assert settings.ntp_servers == "time.cloudflare.com\n192.0.2.10"
+        assert settings.ntp_servers != "time.cloudflare.com\n192.0.2.10"
+
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
+    assert apply_response.status_code == 200
+    assert "Appliance apply task succeeded" in apply_response.text
+
+    with SessionLocal() as db:
+        status = appliance_apply_status(db, "appliance_settings")
+        assert status["changed"] is False
+        assert "ntp_servers" not in status["config_preview"]
 
 
 def test_chrony_page_autosave_updates_desired_state_and_preview(client):
@@ -3583,6 +3594,100 @@ def test_certificate_authority_downloads_public_pems(client):
     assert bundle.status_code == 200
     assert bundle.headers["content-disposition"] == 'attachment; filename="labfoundry-ca-bundle.pem"'
     assert "BEGIN CERTIFICATE" in bundle.text
+
+
+def test_public_ca_root_page_is_unauthenticated(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings
+
+    with SessionLocal() as db:
+        settings = db.execute(select(CaSettings)).scalar_one()
+        settings.root_certificate_pem = "-----BEGIN CERTIFICATE-----\npublic-root\n-----END CERTIFICATE-----\n"
+        settings.root_fingerprint = "abc123"
+        db.add(settings)
+        db.commit()
+
+    page = client.get("/ca")
+    assert page.status_code == 200
+    assert "LabFoundry Root CA" in page.text
+    assert "abc123" in page.text
+    assert "/ca/downloads/root-ca.pem" in page.text
+    assert "/certificate-authority" not in page.text
+    assert "/appliance-apply" not in page.text
+
+    root = client.get("/ca/downloads/root-ca.pem")
+    assert root.status_code == 200
+    assert "public-root" in root.text
+    assert "PRIVATE KEY" not in root.text
+
+
+def test_certificate_operator_uses_request_page_without_console_access(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaCertificate, Role, User, utcnow
+    from labfoundry.app.security import roles_to_json
+
+    with SessionLocal() as db:
+        admin = db.execute(select(User).where(User.username == "admin")).scalar_one()
+        admin.role = Role.CERTIFICATE_OPERATOR.value
+        admin.roles_json = roles_to_json([Role.CERTIFICATE_OPERATOR.value])
+        db.add(
+            CaCertificate(
+                common_name="issued.labfoundry.internal",
+                status="issued",
+                serial_number="10",
+                certificate_pem="-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n",
+                enabled=True,
+                issued_at=utcnow(),
+            )
+        )
+        db.commit()
+
+    login(client)
+    console = client.get("/certificate-authority")
+    assert console.status_code == 403
+
+    page = client.get("/ca/requests")
+    assert page.status_code == 200
+    assert "Certificate Requests" in page.text
+    assert "Submit Request" in page.text
+    assert "CA Settings" not in page.text
+    assert "labfoundry-ca.json" not in page.text
+    assert "/certificate-authority" not in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    submitted = client.post(
+        "/ca/requests",
+        data={
+            "csrf": csrf,
+            "common_name": "operator-request.labfoundry.internal",
+            "subject_alt_names": "operator-request.labfoundry.internal",
+            "description": "operator request",
+        },
+        follow_redirects=False,
+    )
+    assert submitted.status_code == 303
+
+    with SessionLocal() as db:
+        request_row = db.execute(select(CaCertificate).where(CaCertificate.common_name == "operator-request.labfoundry.internal")).scalar_one()
+        issued = db.execute(select(CaCertificate).where(CaCertificate.common_name == "issued.labfoundry.internal")).scalar_one()
+        assert request_row.status == "planned"
+        certificate_id = issued.id
+
+    revoked = client.post(
+        f"/ca/certificates/{certificate_id}/revoke",
+        data={"csrf": csrf, "reason": "rotation"},
+        follow_redirects=False,
+    )
+    assert revoked.status_code == 303
+    with SessionLocal() as db:
+        issued = db.get(CaCertificate, certificate_id)
+        assert issued.status == "revoked"
+        assert issued.revoked_by == "admin"
+        assert issued.revocation_reason == "rotation"
 
 
 def test_ca_apply_payload_leaves_csr_private_key_empty():

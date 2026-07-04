@@ -90,6 +90,12 @@ def _ensure_sqlite_user_sync_columns() -> None:
         return
     existing = {column["name"] for column in inspector.get_columns("users")}
     columns = {
+        "roles_json": "TEXT DEFAULT ''",
+        "auth_provider": "VARCHAR(40) DEFAULT 'local'",
+        "external_subject": "VARCHAR(240) DEFAULT ''",
+        "external_display_name": "VARCHAR(180) DEFAULT ''",
+        "external_email": "VARCHAR(240) DEFAULT ''",
+        "role_override_json": "TEXT DEFAULT ''",
         "shell": "VARCHAR(80) DEFAULT '/sbin/nologin'",
         "os_password_applied_at": "DATETIME",
         "os_sync_applied_at": "DATETIME",
@@ -101,6 +107,7 @@ def _ensure_sqlite_user_sync_columns() -> None:
         for name, definition in columns.items():
             if name not in existing:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {name} {definition}"))
+        connection.execute(text("""UPDATE users SET roles_json = '["' || role || '"]' WHERE COALESCE(roles_json, '') = ''"""))
 
 
 def _ensure_sqlite_appliance_settings_columns() -> None:
@@ -176,6 +183,9 @@ def _ensure_sqlite_ca_columns() -> None:
                 "cert_path": "VARCHAR(300) DEFAULT ''",
                 "key_path": "VARCHAR(300) DEFAULT ''",
                 "chain_path": "VARCHAR(300) DEFAULT ''",
+                "revoked_at": "DATETIME",
+                "revoked_by": "VARCHAR(100)",
+                "revocation_reason": "VARCHAR(120) DEFAULT ''",
             }
             for name, definition in columns.items():
                 if name not in existing:
