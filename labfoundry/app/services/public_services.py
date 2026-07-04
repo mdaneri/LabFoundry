@@ -152,6 +152,12 @@ def render_public_services_nginx_config(
                 "  client_max_body_size 1g;",
                 "",
                 *_proxy_location("= /", upstream_host, upstream_port),
+                "",
+                *_proxy_location("^~ /static/", upstream_host, upstream_port),
+                "",
+                *_proxy_location("= /favicon.ico", upstream_host, upstream_port),
+                "",
+                *_proxy_location("= /manifest.webmanifest", upstream_host, upstream_port),
             ]
         )
         if "ca" in services:
