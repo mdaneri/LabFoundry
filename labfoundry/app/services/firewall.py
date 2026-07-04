@@ -7,6 +7,7 @@ from labfoundry.app.models import (
     DhcpScope,
     DhcpSettings,
     DnsSettings,
+    CaSettings,
     FirewallRule,
     FirewallSettings,
     KmsSettings,
@@ -143,6 +144,8 @@ def managed_service_firewall_rules(
     dns_settings: DnsSettings,
     dhcp_settings: DhcpSettings,
     dhcp_scopes: list[DhcpScope],
+    ca_settings: CaSettings,
+    ca_portal_interfaces: list[str] | None = None,
     kms_settings: KmsSettings,
     chrony_settings: ChronySettings,
     vcf_backup_settings: VcfBackupSettings,
@@ -168,6 +171,19 @@ def managed_service_firewall_rules(
     ]
     rules.extend(dns_firewall_rules(dns_settings, interface_networks, source_groups_by_id, source_group_assignments))
     rules.extend(dhcp_firewall_rules(dhcp_settings, dhcp_scopes))
+    ca_interfaces = ca_portal_interfaces if ca_portal_interfaces is not None else split_interfaces(ca_settings.listen_interface)
+    for index, interface_name in enumerate(ca_interfaces, start=1):
+        rules.append(
+            _service_firewall_rule(
+                name=f"ca-portal-{interface_name}",
+                service="CA portal",
+                interface_name=interface_name,
+                source=_managed_rule_source("ca-portal", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                protocol="tcp",
+                ports="80,443",
+                priority=55 + index,
+            )
+        )
     if kms_settings.enabled:
         for index, interface_name in enumerate(split_interfaces(kms_settings.listen_interface), start=1):
             rules.append(
@@ -351,6 +367,27 @@ def firewall_interface_networks(interfaces: list[PhysicalInterface], vlans: list
         if vlan_networks:
             networks[vlan.name] = vlan_networks
     return networks
+
+
+def ca_portal_firewall_interfaces(
+    interfaces: list[PhysicalInterface],
+    vlans: list[VlanInterface],
+    interface_networks: dict[str, list[str]],
+) -> list[str]:
+    targets: list[str] = []
+    for interface in interfaces:
+        if interface.oper_state == "missing" or interface.name not in interface_networks:
+            continue
+        if (interface.role or "").strip().lower() == "management":
+            continue
+        targets.append(interface.name)
+    for vlan in vlans:
+        if not vlan.enabled or vlan.name not in interface_networks:
+            continue
+        if (vlan.role or "").strip().lower() == "management":
+            continue
+        targets.append(vlan.name)
+    return targets
 
 
 def effective_firewall_rules(

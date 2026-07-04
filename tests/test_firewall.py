@@ -2,15 +2,24 @@ from labfoundry.app.models import (
     DhcpScope,
     DhcpSettings,
     DnsSettings,
+    CaSettings,
     FirewallRule,
     FirewallSettings,
     KmsSettings,
     ChronySettings,
+    PhysicalInterface,
     VcfBackupSettings,
     VcfOfflineDepotSettings,
     VcfPrivateRegistrySettings,
+    VlanInterface,
 )
-from labfoundry.app.services.firewall import dhcp_firewall_rules, managed_service_firewall_rules, render_nftables_config, validate_firewall_state
+from labfoundry.app.services.firewall import (
+    ca_portal_firewall_interfaces,
+    dhcp_firewall_rules,
+    managed_service_firewall_rules,
+    render_nftables_config,
+    validate_firewall_state,
+)
 
 
 def test_dhcp_firewall_rules_follow_scope_interface_and_replace_legacy_rule():
@@ -98,6 +107,32 @@ def test_default_management_firewall_source_cidr_can_follow_image_network():
     assert "192.168.49.0/24" not in config
 
 
+def test_ca_portal_firewall_interfaces_include_non_management_addresses_only():
+    interfaces = [
+        PhysicalInterface(name="eth0", role="management", ip_cidr="192.168.167.10/24", mac_address="00:50:56:00:00:10"),
+        PhysicalInterface(name="eth1", role="access", ip_cidr="192.168.65.1/24", mac_address="00:50:56:00:00:11"),
+        PhysicalInterface(name="eth2", role="services", ip_cidr="192.168.87.32/24", mac_address="00:50:56:00:00:12"),
+    ]
+    vlans = [
+        VlanInterface(name="eth3.10", parent_interface="eth3", vlan_id=10, role="access", ip_cidr="172.20.1.1/24", enabled=True),
+        VlanInterface(name="eth3.20", parent_interface="eth3", vlan_id=20, role="management", ip_cidr="172.20.2.1/24", enabled=True),
+    ]
+
+    targets = ca_portal_firewall_interfaces(
+        interfaces,
+        vlans,
+        {
+            "eth0": ["192.168.167.0/24"],
+            "eth1": ["192.168.65.0/24"],
+            "eth2": ["192.168.87.0/24"],
+            "eth3.10": ["172.20.1.0/24"],
+            "eth3.20": ["172.20.2.0/24"],
+        },
+    )
+
+    assert targets == ["eth1", "eth2", "eth3.10"]
+
+
 def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     rules = managed_service_firewall_rules(
         dns_settings=DnsSettings(enabled=True, listen_interface="eth2.50"),
@@ -111,6 +146,7 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
                 enabled=True,
             )
         ],
+        ca_settings=CaSettings(enabled=True, listen_interface="eth2.50"),
         kms_settings=KmsSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=5696),
         chrony_settings=ChronySettings(enabled=True, listen_interface="eth2.50\neth3.60", port=123),
         vcf_backup_settings=VcfBackupSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=22),
@@ -129,6 +165,7 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     assert by_name["sitea-dns-dhcp"].source == "any"
     assert by_name["sitea-dns-dhcp"].destination_port == "67"
     assert by_name["mgmt-console"].source == "any"
+    assert by_name["ca-portal-eth2.50"].destination_port == "80,443"
     assert by_name["vcf-backups-sftp-eth2.50"].source == "any"
     assert by_name["kms-kmip-eth2.50"].destination_port == "5696"
     assert by_name["kms-kmip-eth3.60"].interface_name == "eth3.60"
@@ -152,6 +189,7 @@ def test_managed_service_firewall_rules_use_assigned_source_group():
         dns_settings=DnsSettings(enabled=False),
         dhcp_settings=DhcpSettings(enabled=False),
         dhcp_scopes=[],
+        ca_settings=CaSettings(enabled=False),
         kms_settings=KmsSettings(enabled=False),
         chrony_settings=ChronySettings(enabled=False),
         vcf_backup_settings=VcfBackupSettings(enabled=True, listen_interface="eth2.50", port=22),
