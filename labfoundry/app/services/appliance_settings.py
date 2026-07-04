@@ -21,8 +21,8 @@ MANAGEMENT_UI_UPSTREAM_HOST = "127.0.0.1"
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
-def appliance_settings_to_dict(settings: ApplianceSettings, *, include_ntp_servers: bool = False) -> dict[str, Any]:
-    payload = {
+def appliance_settings_to_dict(settings: ApplianceSettings) -> dict[str, Any]:
+    return {
         "id": settings.id,
         "fqdn": settings.fqdn,
         "management_https_enabled": settings.management_https_enabled,
@@ -32,9 +32,6 @@ def appliance_settings_to_dict(settings: ApplianceSettings, *, include_ntp_serve
         "config_path": settings.config_path,
         "updated_at": settings.updated_at.isoformat() if settings.updated_at else "",
     }
-    if include_ntp_servers:
-        payload["ntp_servers"] = split_servers(settings.ntp_servers)
-    return payload
 
 
 def normalize_fqdn(value: str) -> str:
@@ -106,19 +103,6 @@ def validate_appliance_settings(
         except ValueError:
             errors.append(f"External DNS server {server} must be a valid IPv4 or IPv6 address.")
 
-    ntp_servers = split_servers(settings.ntp_servers)
-    if not chrony_enabled:
-        if not ntp_servers:
-            errors.append("External NTP servers are required when Chrony is disabled.")
-        for server in ntp_servers:
-            try:
-                ip_address(server)
-                continue
-            except ValueError:
-                pass
-            if not HOSTNAME_PATTERN.fullmatch(normalize_fqdn(server)):
-                errors.append(f"External NTP server {server} must be a valid DNS name or IP address.")
-
     if local_dns_enabled and not management_interface.get("ip"):
         errors.append("Local DNS registration requires a management interface or eth0 with a valid IP CIDR.")
     if dns_record_conflict:
@@ -145,7 +129,6 @@ def appliance_settings_preview_payload(
     management_interface: dict[str, str],
     management_https_cert_path: str = "",
     management_https_key_path: str = "",
-    include_ntp_servers: bool = False,
 ) -> dict[str, Any]:
     resolver_mode = "local_dns" if local_dns_enabled else "external"
     resolver_servers = ["127.0.0.1"] if local_dns_enabled else split_servers(settings.external_dns_servers)
@@ -168,9 +151,6 @@ def appliance_settings_preview_payload(
         "management_https_cert_path": management_https_cert_path if settings.management_https_enabled else "",
         "management_https_key_path": management_https_key_path if settings.management_https_enabled else "",
     }
-    if include_ntp_servers:
-        payload["time_sync_mode"] = "systemd-timesyncd"
-        payload["ntp_servers"] = split_servers(settings.ntp_servers)
     return payload
 
 
@@ -181,7 +161,6 @@ def render_appliance_settings_config(
     management_interface: dict[str, str],
     management_https_cert_path: str = "",
     management_https_key_path: str = "",
-    include_ntp_servers: bool = False,
 ) -> str:
     payload = appliance_settings_preview_payload(
         settings,
@@ -189,6 +168,5 @@ def render_appliance_settings_config(
         management_interface=management_interface,
         management_https_cert_path=management_https_cert_path,
         management_https_key_path=management_https_key_path,
-        include_ntp_servers=include_ntp_servers,
     )
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"

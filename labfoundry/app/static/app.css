@@ -357,6 +357,7 @@ textarea {
 }
 
 .role-chip,
+.server-time-chip,
 .user-chip,
 .status-pill {
   display: inline-flex;
@@ -373,6 +374,12 @@ textarea {
 .role-chip {
   background: #dbeafe;
   color: #1d4ed8;
+}
+
+.server-time-chip {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #475569;
 }
 
 .status-pill.good,

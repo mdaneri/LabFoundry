@@ -33,6 +33,10 @@ def test_login_and_dashboard_render(client):
     assert "Users" in response.text
     assert "LDAP / Users" not in response.text
     assert 'href="/monitor"' in response.text
+    assert response.text.index('href="/settings"') < response.text.index('href="/monitor"')
+    assert 'data-server-time' in response.text
+    assert 'title="Roles: admin">User admin</span>' in response.text
+    assert '<span class="role-chip">admin</span>' not in response.text
     assert 'href="/logs"' in response.text
     assert 'href="/audit-log"' not in response.text
     assert "cdn.tailwindcss.com" not in response.text
@@ -499,6 +503,7 @@ def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(c
             "management_upstream_port": 8000,
             "management_https_cert_path": "",
             "management_https_key_path": "",
+            "time_sync_mode": "systemd-timesyncd",
             "ntp_servers": ["time1.google.com", "time2.google.com"],
         },
         indent=2,
@@ -536,6 +541,7 @@ def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(c
     assert page.status_code == 200
     assert "2 NTP servers" not in page.text
     assert "ntp_servers" not in page.text
+    assert "time_sync_mode" not in page.text
 
 
 def test_settings_page_renders_autosave_validation_and_preview(client, monkeypatch):
@@ -3018,6 +3024,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert "LABFOUNDRY_MUTATING_METHODS" in app_js.text
     assert "scheduleApplianceApplySidebarRefresh" in app_js.text
     assert 'fetch("/appliance-apply/status"' in app_js.text
+    assert "function updateServerTime" in app_js.text
+    assert "window.setInterval(load, 5000)" in app_js.text
     assert "initializeApplianceApplyProgress" in app_js.text
     assert "Submitting appliance changes" in app_js.text
     assert "Waiting for result" in app_js.text
@@ -3729,8 +3737,8 @@ def test_certificate_authority_issues_encrypted_managed_certs_and_exports(client
     with SessionLocal() as db:
         settings = db.execute(select(CaSettings)).scalar_one()
         settings.enabled = True
-        settings.listen_interface = "eth0"
-        settings.listen_address = "192.168.49.1"
+        settings.listen_interface = "eth2"
+        settings.listen_address = "192.168.50.1"
         db.commit()
 
     login(client)
@@ -3911,10 +3919,10 @@ def test_kms_settings_accept_multiple_listen_targets(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["listen_interfaces"] == ["eth2", "eth0"]
-    assert payload["listen_addresses"] == ["192.168.50.1", "192.168.49.1"]
-    assert "# LabFoundry KMS listen interfaces: eth2, eth0" in payload["config_preview"]
-    assert "# LabFoundry KMS listen addresses: 192.168.50.1, 192.168.49.1" in payload["config_preview"]
+    assert payload["listen_interfaces"] == ["eth2"]
+    assert payload["listen_addresses"] == ["192.168.50.1"]
+    assert "# LabFoundry KMS listen interfaces: eth2" in payload["config_preview"]
+    assert "# LabFoundry KMS listen addresses: 192.168.50.1" in payload["config_preview"]
 
 
 def test_kms_enable_autocreates_ca_managed_certificate_rows(client):
@@ -4145,9 +4153,9 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
         headers={"X-LabFoundry-Autosave": "1"},
     )
     assert multi_response.status_code == 200
-    assert multi_response.json()["listen_interfaces"] == ["eth2", "eth0"]
-    assert multi_response.json()["listen_addresses"] == ["192.168.50.1", "192.168.49.1"]
-    assert "labfoundry_listen_interfaces: ['eth2', 'eth0']" in multi_response.json()["harbor_config_preview"]
+    assert multi_response.json()["listen_interfaces"] == ["eth2"]
+    assert multi_response.json()["listen_addresses"] == ["192.168.50.1"]
+    assert "labfoundry_listen_interfaces: ['eth2']" in multi_response.json()["harbor_config_preview"]
 
     moved_response = client.post(
         "/vcf-private-registry/settings",
@@ -4166,8 +4174,11 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
         headers={"X-LabFoundry-Autosave": "1"},
     )
     assert moved_response.status_code == 200
-    assert moved_response.json()["listen_address"] == "192.168.49.1"
-    assert moved_response.json()["dns_record_action"] == "updated+removed-old"
+    assert moved_response.json()["listen_interface"] == ""
+    assert moved_response.json()["listen_address"] == ""
+    assert moved_response.json()["listen_interfaces"] == []
+    assert moved_response.json()["listen_addresses"] == []
+    assert moved_response.json()["dns_record_action"] == "removed-old"
     assert moved_response.json()["ca_bundle_source"] == "uploaded"
     with SessionLocal() as db:
         dns_record = db.execute(
@@ -4175,15 +4186,34 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
                 DnsRecord.hostname == "registry.labfoundry.internal",
                 DnsRecord.record_type == "CNAME",
             )
-        ).scalar_one()
-        assert dns_record.address == "registry-192-168-49-1.labfoundry.internal"
+        ).scalar_one_or_none()
+        assert dns_record is None
         interface_record = db.execute(
             select(DnsRecord).where(
-                DnsRecord.hostname == "registry-192-168-49-1.labfoundry.internal",
+                DnsRecord.hostname == "registry-192-168-50-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
-        ).scalar_one()
-        assert interface_record.address == "192.168.49.1"
+        ).scalar_one_or_none()
+        assert interface_record is None
+
+    restore_response = client.post(
+        "/vcf-private-registry/settings",
+        data={
+            "enabled": "on",
+            "hostname": "registry.labfoundry.internal",
+            "listen_interface": "eth2",
+            "port": "443",
+            "harbor_project": "vcf-supervisor-services",
+            "ca_bundle_path": "/etc/labfoundry/ca/ca-bundle.pem",
+            "server_certificate": "registry.labfoundry.internal",
+            "robot_account": "robot$vcf-supervisor-services",
+            "relocation_dry_run": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert restore_response.status_code == 200
+    assert restore_response.json()["listen_address"] == "192.168.50.1"
 
     bundle_response = client.post(
         "/vcf-private-registry/bundles",
@@ -4456,11 +4486,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     )
     assert multi_response.status_code == 200
     multi_payload = multi_response.json()
-    assert multi_payload["listen_interfaces"] == ["eth0", "eth2"]
-    assert multi_payload["listen_addresses"] == ["192.168.49.1", "192.168.50.1"]
-    assert multi_payload["valid"] is False
-    assert any("Listen interface eth0 uses the management role" in error for error in multi_payload["validation_errors"])
-    assert "listen 192.168.49.1:443 ssl;" in multi_payload["https_config_preview"]
+    assert multi_payload["listen_interfaces"] == ["eth2"]
+    assert multi_payload["listen_addresses"] == ["192.168.50.1"]
+    assert multi_payload["valid"] is True
+    assert "listen 192.168.49.1:443 ssl;" not in multi_payload["https_config_preview"]
     assert "listen 192.168.50.1:443 ssl;" in multi_payload["https_config_preview"]
 
     with SessionLocal() as db:
@@ -5152,10 +5181,10 @@ def test_vcf_backups_settings_accept_multiple_listen_targets(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["listen_interfaces"] == ["eth0", "eth2"]
-    assert payload["listen_addresses"] == ["192.168.49.1", "192.168.50.1"]
-    assert "# Listen interfaces: eth0, eth2" in payload["config_preview"]
-    assert "# Service listener targets: 192.168.49.1:22, 192.168.50.1:22" in payload["config_preview"]
+    assert payload["listen_interfaces"] == ["eth2"]
+    assert payload["listen_addresses"] == ["192.168.50.1"]
+    assert "# Listen interfaces: eth2" in payload["config_preview"]
+    assert "# Service listener targets: 192.168.50.1:22" in payload["config_preview"]
 
 
 def test_vcf_backups_disabled_disables_default_backup_user(client):
@@ -5446,7 +5475,7 @@ def test_physical_interface_edit_updates_desired_state(client):
     response = client.post(
         f"/physical-interfaces/{interface_id}/edit",
         data={
-            "role": "wan",
+            "role": "route",
             "mode": "access",
             "ip_cidr": "192.168.70.1/24",
             "mtu": "1400",
@@ -5458,7 +5487,7 @@ def test_physical_interface_edit_updates_desired_state(client):
     assert response.status_code == 303
 
     refreshed = client.get("/physical-interfaces")
-    assert '"role": "wan"' in refreshed.text
+    assert '"role": "route"' in refreshed.text
     assert '"mode": "access"' in refreshed.text
     assert '"ip_cidr": "192.168.70.1/24"' in refreshed.text
     assert '"mtu": 1400' in refreshed.text
@@ -5745,7 +5774,7 @@ def test_vlan_page_prefers_real_trunk_parent_when_inventory_has_eth2(client):
                 PhysicalInterface(
                     name="eth3",
                     mac_address="00:15:5d:01:1d:1d",
-                    role="wan",
+                    role="route",
                     mode="access",
                     inventory_source="host",
                     desired_state_source="user",
@@ -6757,8 +6786,8 @@ def test_ca_live_apply_stages_decrypted_private_keys_without_leaking_job_output(
     with SessionLocal() as db:
         settings = db.execute(select(CaSettings)).scalar_one()
         settings.enabled = True
-        settings.listen_interface = "eth0"
-        settings.listen_address = "192.168.49.1"
+        settings.listen_interface = "eth2"
+        settings.listen_address = "192.168.50.1"
         db.commit()
 
     login(client)
@@ -6816,9 +6845,9 @@ def test_dns_settings_accept_multiple_listen_interfaces(client):
     assert response.status_code == 303
 
     refreshed = client.get("/dns")
-    assert "interface=eth0" in refreshed.text
+    assert "interface=eth0" not in refreshed.text
     assert "interface=eth2" in refreshed.text
-    assert "listen-address=192.168.49.1" in refreshed.text
+    assert "listen-address=192.168.49.1" not in refreshed.text
     assert "listen-address=192.168.50.1" in refreshed.text
     assert "listen-address=192.168.60.1" not in refreshed.text
     assert "domain=labfoundry.internal" in refreshed.text

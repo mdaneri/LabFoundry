@@ -174,6 +174,7 @@ from labfoundry.app.services.networking import (
     NETWORK_INVENTORY_CLEANUP_WARNING_KEY,
     VLAN_ROLES,
     normalize_interface_mode,
+    normalize_interface_role,
     physical_interface_to_dict,
     render_network_config,
     sync_host_physical_interfaces,
@@ -437,6 +438,7 @@ def render(request: Request, template: str, context: dict, status_code: int = 20
             "app_name": "LabFoundry",
             "identity": identity,
             "csrf_token": csrf_token(request),
+            "server_time": utcnow(),
             **context,
         },
         status_code=status_code,
@@ -896,15 +898,16 @@ def service_bind_options(db: Session) -> list[dict]:
         if interface.oper_state == "missing":
             continue
         mode = normalize_interface_mode(interface.mode)
+        role = normalize_interface_role(interface.role)
         addresses = interface_addresses_from_cidrs(interface.ip_cidr, interface.ipv6_cidr)
-        if mode == "trunk" or not addresses:
+        if role == "management" or mode == "trunk" or not addresses:
             continue
         address_label = " / ".join(addresses)
         options.append(
             {
                 "name": interface.name,
-                "label": f"{interface.name} - {interface.role} / {mode} / {address_label}",
-                "role": interface.role,
+                "label": f"{interface.name} - {role} / {mode} / {address_label}",
+                "role": role,
                 "address": addresses[0],
                 "addresses": addresses,
                 "ipv4_address": address_from_cidr(interface.ip_cidr),
@@ -917,15 +920,16 @@ def service_bind_options(db: Session) -> list[dict]:
         parent = interfaces_by_name.get(vlan.parent_interface)
         if parent and parent.oper_state == "missing":
             continue
+        role = normalize_interface_role(vlan.role)
         addresses = interface_addresses_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
-        if not addresses:
+        if role == "management" or not addresses:
             continue
         address_label = " / ".join(addresses)
         options.append(
             {
                 "name": vlan.name,
-                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {vlan.role} / {address_label}",
-                "role": vlan.role,
+                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {role} / {address_label}",
+                "role": role,
                 "address": addresses[0],
                 "addresses": addresses,
                 "ipv4_address": address_from_cidr(vlan.ip_cidr),
@@ -938,7 +942,7 @@ def service_bind_options(db: Session) -> list[dict]:
 
 
 def vcf_depot_service_bind_options(db: Session) -> list[dict[str, Any]]:
-    return [option for option in service_bind_options(db) if str(option.get("role") or "").strip().lower() != "management"]
+    return service_bind_options(db)
 
 
 def _network_from_cidr(value: str | None):
@@ -1189,6 +1193,27 @@ def resolve_single_service_bind(db: Session, listen_interface: str, listen_addre
     return selected_interface, ""
 
 
+def normalize_service_bind_settings(db: Session, settings: Any) -> bool:
+    selected_interfaces, selected_addresses = resolve_service_bind_targets(
+        db,
+        [],
+        [],
+        current_interface=str(getattr(settings, "listen_interface", "") or ""),
+        current_address=str(getattr(settings, "listen_address", "") or ""),
+        listen_addresses_present="1",
+    )
+    changed = False
+    if selected_interfaces != (getattr(settings, "listen_interface", "") or ""):
+        settings.listen_interface = selected_interfaces
+        changed = True
+    if selected_addresses != (getattr(settings, "listen_address", "") or ""):
+        settings.listen_address = selected_addresses
+        changed = True
+    if changed and hasattr(settings, "updated_at"):
+        settings.updated_at = utcnow()
+    return changed
+
+
 def resolve_service_bind_targets(
     db: Session,
     listen_interfaces: list[str],
@@ -1258,6 +1283,9 @@ def backing_systemd_unit_active(unit: str) -> bool | None:
 
 def vcf_backup_context(db: Session) -> dict:
     settings = get_vcf_backup_settings_row(db)
+    if normalize_service_bind_settings(db, settings):
+        db.commit()
+        db.refresh(settings)
     users = db.execute(select(User).order_by(User.username)).scalars().all()
     available_interfaces = service_bind_options(db)
     config_preview = render_vcf_backup_config(settings)
@@ -1281,6 +1309,9 @@ def vcf_backup_context(db: Session) -> dict:
 
 def ntp_context(db: Session) -> dict:
     settings = get_chrony_settings_row(db)
+    if normalize_service_bind_settings(db, settings):
+        db.commit()
+        db.refresh(settings)
     available_interfaces = service_bind_options(db)
     config_preview = render_chrony_config(settings)
     validation_errors = validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})
@@ -1811,6 +1842,9 @@ def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
 
 def vcf_private_registry_context(db: Session) -> dict:
     settings = get_vcf_private_registry_settings_row(db)
+    if normalize_service_bind_settings(db, settings):
+        db.commit()
+        db.refresh(settings)
     bundles = db.execute(select(VcfRegistryBundle).order_by(VcfRegistryBundle.name)).scalars().all()
     available_interfaces = service_bind_options(db)
     ca_bundle_context = vcf_registry_ca_bundle_context(db)
@@ -1853,6 +1887,9 @@ def vcf_private_registry_context(db: Session) -> dict:
 
 def vcf_offline_depot_context(db: Session) -> dict:
     settings = get_vcf_offline_depot_settings_row(db)
+    if normalize_service_bind_settings(db, settings):
+        db.commit()
+        db.refresh(settings)
     profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
     all_service_interfaces = service_bind_options(db)
     available_interfaces = vcf_depot_service_bind_options(db)
@@ -2267,6 +2304,9 @@ def managed_replaced_firewall_rule_row(rule: FirewallRule) -> dict:
 def ca_context(db: Session) -> dict:
     state_errors = ensure_ca_state(db)
     settings = get_ca_settings_row(db)
+    if normalize_service_bind_settings(db, settings):
+        db.commit()
+        db.refresh(settings)
     available_interfaces = service_bind_options(db)
     available_names = {option["name"] for option in available_interfaces}
     profiles = db.execute(select(CaProfile).order_by(CaProfile.name)).scalars().all()
@@ -2356,17 +2396,7 @@ def kms_context(db: Session) -> dict:
     settings = get_kms_settings_row(db)
     available_interfaces = service_bind_options(db)
     changed = False
-    normalized_interfaces, normalized_addresses = resolve_service_bind_targets(
-        db,
-        [],
-        [],
-        current_interface=settings.listen_interface,
-        current_address=settings.listen_address,
-    )
-    if normalized_interfaces != settings.listen_interface or normalized_addresses != settings.listen_address:
-        settings.listen_interface = normalized_interfaces
-        settings.listen_address = normalized_addresses
-        changed = True
+    changed = normalize_service_bind_settings(db, settings) or changed
     normalized_hostname = normalize_dns_hostname(settings.hostname)
     if normalized_hostname and settings.hostname != normalized_hostname:
         settings.hostname = normalized_hostname
@@ -2475,6 +2505,7 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
         if interface.oper_state == "missing":
             continue
         mode = normalize_interface_mode(interface.mode)
+        role = normalize_interface_role(interface.role)
         addresses = interface_addresses_from_cidrs(interface.ip_cidr, interface.ipv6_cidr)
         if mode == "trunk" or not addresses:
             continue
@@ -2483,15 +2514,16 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
             {
                 "name": interface.name,
                 "kind": "physical",
-                "role": interface.role,
+                "role": role,
                 "ip_cidr": interface.ip_cidr or "",
                 "ipv6_cidr": interface.ipv6_cidr or "",
                 "addresses": addresses,
-                "wan": interface.role == "wan",
-                "label": f"{interface.name} - physical / {interface.role} / {address_label}",
+                "wan": role == "route",
+                "label": f"{interface.name} - physical / {role} / {address_label}",
             }
         )
     for vlan in vlans:
+        role = normalize_interface_role(vlan.role)
         addresses = interface_addresses_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
         if not vlan.enabled or not addresses:
             continue
@@ -2500,12 +2532,12 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
             {
                 "name": vlan.name,
                 "kind": "vlan",
-                "role": vlan.role,
+                "role": role,
                 "ip_cidr": vlan.ip_cidr or "",
                 "ipv6_cidr": vlan.ipv6_cidr or "",
                 "addresses": addresses,
-                "wan": vlan.role == "wan",
-                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {vlan.role} / {address_label}",
+                "wan": role == "route",
+                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {role} / {address_label}",
             }
         )
     return targets
@@ -2553,6 +2585,9 @@ def routes_wan_context(db: Session) -> dict:
 
 def dnsmasq_context(db: Session) -> dict:
     dns_settings = get_dns_settings_row(db)
+    if normalize_service_bind_settings(db, dns_settings):
+        db.commit()
+        db.refresh(dns_settings)
     appliance_settings = get_appliance_settings_row(db)
     if ensure_dns_for_appliance_settings(db, appliance_settings, previous_fqdn=appliance_settings.fqdn, actor=None):
         db.commit()
@@ -2981,8 +3016,10 @@ def ensure_interface_dns_alias(
     if not enabled:
         return remove_interface_dns_alias(db, hostname=previous_hostname or normalized_hostname, description=description, actor=actor, audit_prefix=audit_prefix)
     targets = service_interface_dns_targets(db, hostname=normalized_hostname, listen_interface=listen_interface, listen_address=listen_address, bind_options=bind_options)
-    if not normalized_hostname or not targets:
+    if not normalized_hostname:
         return None
+    if not targets:
+        return remove_interface_dns_alias(db, hostname=previous_hostname or normalized_hostname, description=description, actor=actor, audit_prefix=audit_prefix)
     actions: list[str] = []
     target_hostnames = {target["hostname"] for target in targets}
     desired_keys = {(target["hostname"], target["record_type"], target["address"]) for target in targets}
@@ -3602,16 +3639,21 @@ def normalize_legacy_appliance_settings_baseline(baselines: dict[str, dict[str, 
     if not isinstance(baseline, dict):
         return
     preview = baseline.get("config_preview")
-    if not isinstance(preview, str) or '"ntp_servers"' not in preview:
+    if not isinstance(preview, str) or ('"ntp_servers"' not in preview and '"time_sync_mode"' not in preview):
         return
     try:
         payload = json.loads(preview)
     except json.JSONDecodeError:
         return
-    if not isinstance(payload, dict) or "ntp_servers" not in payload:
+    if not isinstance(payload, dict) or ("ntp_servers" not in payload and "time_sync_mode" not in payload):
         return
     payload.pop("ntp_servers", None)
-    summary = [item for item in baseline.get("summary", []) if "NTP server" not in str(item)]
+    payload.pop("time_sync_mode", None)
+    summary = [
+        item
+        for item in baseline.get("summary", [])
+        if "NTP server" not in str(item) and "time sync" not in str(item).lower() and "timesyncd" not in str(item).lower()
+    ]
     config_preview = json.dumps(payload, indent=2, sort_keys=True)
     baseline["summary"] = summary
     baseline["config_preview"] = config_preview
@@ -6240,7 +6282,7 @@ def edit_physical_interface_from_ui(
         return ipv6_value
     old_ip_cidr = interface.ip_cidr
     old_ipv6_cidr = interface.ipv6_cidr
-    interface.role = role.strip()
+    interface.role = normalize_interface_role(role)
     interface.mode = new_mode
     interface.ip_cidr = ip_value or None
     interface.ipv6_cidr = ipv6_value or None
@@ -6392,7 +6434,7 @@ def edit_vlan_interface_from_ui(
     vlan.ip_cidr = ip_value
     vlan.ipv6_cidr = ipv6_value
     vlan.mtu = mtu
-    vlan.role = role.strip()
+    vlan.role = normalize_interface_role(role)
     vlan.enabled = requested_enabled and not parent_missing
     dependent_updates = refresh_interface_dependent_addresses(
         db,

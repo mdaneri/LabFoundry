@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=dns-new-row-lock-monitor-20260703-1">
+    <link rel="stylesheet" href="/static/app.css?v=monitor-refresh-time-20260704-1">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -28,7 +28,6 @@
         <nav class="nav-stack" aria-label="Primary">
           {% set nav = [
             ("Dashboard", "/dashboard", "read:dashboard"),
-            ("Monitor", "/monitor", "read:monitoring"),
             ("Physical Interfaces", "/physical-interfaces", "read:interfaces"),
             ("VLAN Interfaces", "/vlan-interfaces", "read:vlans"),
             ("Routes & WAN Simulation", "/routes-wan", "read:routes"),
@@ -49,7 +48,8 @@
             ("Logs", "/logs", "read:logs"),
             ("Appliance Update", "/appliance-update", "admin:all"),
             ("Backup / Restore", "/backup-restore", "admin:all"),
-            ("Settings", "/settings", "admin:all")
+            ("Settings", "/settings", "admin:all"),
+            ("Monitor", "/monitor", "read:monitoring")
           ] %}
           {% for label, href, scope in nav %}
             {% if identity and identity.can(scope) %}
@@ -79,8 +79,8 @@
           </div>
           {% if identity %}
             <div class="topbar-actions">
-              <span class="role-chip">{{ identity.roles|join(", ") }}</span>
-              <span class="user-chip">{{ identity.username }}</span>
+              <span class="server-time-chip" data-server-time data-server-time-iso="{{ server_time.isoformat() }}">{{ server_time.strftime("Server %H:%M:%S UTC") }}</span>
+              <span class="user-chip" title="Roles: {{ identity.roles|join(', ') }}">User {{ identity.username }}</span>
               <form action="/logout" method="post">
                 <input type="hidden" name="csrf" value="{{ csrf_token }}">
                 <button class="button ghost" type="submit">Sign out</button>
@@ -140,7 +140,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=rbac-ca-operator-20260703-1"></script>
+    <script src="/static/app.js?v=monitor-refresh-time-20260704-1"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

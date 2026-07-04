@@ -8137,6 +8137,27 @@ function monitorSetText(root, selector, value) {
   }
 }
 
+function formatServerTime(value) {
+  if (!value) {
+    return "Server --:--:-- UTC";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Server --:--:-- UTC";
+  }
+  const pad = (part) => String(part).padStart(2, "0");
+  return `Server ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} UTC`;
+}
+
+function updateServerTime(value) {
+  const node = document.querySelector("[data-server-time]");
+  if (!(node instanceof HTMLElement)) {
+    return;
+  }
+  node.dataset.serverTimeIso = value || "";
+  node.textContent = formatServerTime(value);
+}
+
 function monitorSeriesPoints(rows, fields) {
   return (Array.isArray(rows) ? rows : []).map((row) => {
     const point = { time: new Date(row.sampled_at || 0).getTime() };
@@ -8327,6 +8348,7 @@ function renderMonitorPage(root, payload) {
   if (payload.enabled === false) {
     monitorSetText(root, "[data-monitor-sample-count]", "disabled");
   }
+  updateServerTime(payload.server_time || payload.generated_at);
 
   drawMonitorChart(root.querySelector('[data-monitor-chart="cpu"]'), payload.cpu, [{ field: "percent", label: "CPU", color: "#2563eb" }], { min: 0, max: 100, formatY: formatMonitorPercent });
   drawMonitorChart(root.querySelector('[data-monitor-chart="memory"]'), payload.memory, [{ field: "used_percent", label: "Memory", color: "#0f766e" }], { min: 0, max: 100, formatY: formatMonitorPercent });
@@ -8359,6 +8381,7 @@ function initializeMonitorPage() {
   }
   let hours = 6;
   let latestPayload = null;
+  let loading = false;
   const status = root.querySelector("[data-monitor-status]");
   const buttons = Array.from(root.querySelectorAll("[data-monitor-range]")).filter((button) => button instanceof HTMLButtonElement);
   const setStatus = (value) => {
@@ -8367,6 +8390,10 @@ function initializeMonitorPage() {
     }
   };
   const load = async () => {
+    if (loading) {
+      return;
+    }
+    loading = true;
     setStatus("Refreshing metrics");
     try {
       const response = await fetch(`/monitor/data?hours=${hours}`, { credentials: "same-origin" });
@@ -8383,6 +8410,8 @@ function initializeMonitorPage() {
       setStatus(sampleTime ? `Last sample ${sampleTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Waiting for samples");
     } catch (error) {
       setStatus(`Monitor unavailable: ${error.message}`);
+    } finally {
+      loading = false;
     }
   };
   buttons.forEach((button) => {
@@ -8398,7 +8427,7 @@ function initializeMonitorPage() {
     }
   });
   load();
-  window.setInterval(load, 30000);
+  window.setInterval(load, 5000);
 }
 
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);

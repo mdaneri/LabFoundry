@@ -17,7 +17,7 @@ def test_render_wan_config_uses_ipv6_route_commands():
             {
                 "name": "eth2.50",
                 "kind": "vlan",
-                "role": "wan",
+                "role": "route",
                 "ip_cidr": "192.168.50.1/24",
                 "ipv6_cidr": "2001:db8:50::1/64",
                 "wan": True,
