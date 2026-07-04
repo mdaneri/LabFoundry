@@ -523,6 +523,7 @@ class DashboardResponse(BaseModel):
 
 
 class MonitorResponse(BaseModel):
+    enabled: bool = True
     window_hours: int
     sample_interval_seconds: int
     generated_at: str

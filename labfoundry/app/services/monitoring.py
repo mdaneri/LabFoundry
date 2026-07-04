@@ -475,8 +475,11 @@ def ensure_recent_monitor_sample(db: Session, *, collector: SystemMetricsCollect
 def monitor_payload(db: Session, *, hours: int = 6, collector: SystemMetricsCollector | None = None) -> dict[str, Any]:
     settings = get_settings()
     hours = max(1, min(6, int(hours)))
-    collector = collector or SystemMetricsCollector(settings=settings)
-    ensure_recent_monitor_sample(db, collector=collector)
+    if settings.monitor_enabled:
+        collector = collector or SystemMetricsCollector(settings=settings)
+        ensure_recent_monitor_sample(db, collector=collector)
+    else:
+        collector = None
     cutoff = utcnow() - timedelta(hours=hours)
     samples = db.execute(
         select(MonitorSample)
@@ -486,13 +489,14 @@ def monitor_payload(db: Session, *, hours: int = 6, collector: SystemMetricsColl
     ).scalars().all()
     latest = samples[-1] if samples else None
     return {
+        "enabled": settings.monitor_enabled,
         "window_hours": hours,
         "sample_interval_seconds": settings.monitor_sample_interval_seconds,
         "generated_at": utcnow().isoformat(),
         "last_sample_at": latest.sampled_at.isoformat() if latest else None,
         "sample_count": len(samples),
         "summary": _summary(samples),
-        "virtualization": collector.collect_virtualization(),
+        "virtualization": collector.collect_virtualization() if collector else {"detected": "disabled"},
         "cpu": [
             {"sampled_at": sample.sampled_at.isoformat(), "percent": sample.cpu_percent, "load1": sample.load1, "load5": sample.load5, "load15": sample.load15}
             for sample in samples

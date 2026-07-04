@@ -1,6 +1,10 @@
 from datetime import timedelta
 
 from labfoundry.app.models import utcnow
+from sqlalchemy import select
+
+from labfoundry.app.config import get_settings
+from labfoundry.app.models import MonitorSample
 from labfoundry.app.services.monitoring import (
     CpuCounters,
     DiskUsage,
@@ -55,7 +59,7 @@ def test_monitor_parsers_handle_linux_proc_shapes():
     assert disks["sda"].write_bytes == 8192
 
 
-def test_monitor_samples_persist_rates_and_payload(client):
+def test_monitor_samples_persist_rates_and_payload(client, monkeypatch):
     from labfoundry.app.database import SessionLocal
 
     now = utcnow()
@@ -96,6 +100,7 @@ def test_monitor_samples_persist_rates_and_payload(client):
         assert second.network_samples[0].rx_bytes_per_sec == 30.0
         assert second.disk_samples[0].write_bytes_per_sec == 40.0
 
+        monkeypatch.setattr(get_settings(), "monitor_enabled", True)
         payload = monitor_payload(db, hours=6, collector=FakeMonitorCollector([]))
 
     assert payload["summary"]["cpu"]["current_percent"] == 50.0
@@ -103,3 +108,16 @@ def test_monitor_samples_persist_rates_and_payload(client):
     assert payload["summary"]["network"]["rx_bytes_per_sec"] == 30.0
     assert payload["summary"]["disk"]["highest_used_mount"] == "/"
     assert payload["virtualization"]["detected"] == "vmware"
+
+
+def test_monitor_payload_disabled_does_not_collect_or_write(client):
+    from labfoundry.app.database import SessionLocal
+
+    with SessionLocal() as db:
+        payload = monitor_payload(db, hours=6, collector=FakeMonitorCollector([]))
+        sample_count = db.execute(select(MonitorSample)).scalars().all()
+
+    assert payload["enabled"] is False
+    assert payload["sample_count"] == 0
+    assert payload["virtualization"]["detected"] == "disabled"
+    assert sample_count == []

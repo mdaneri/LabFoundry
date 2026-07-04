@@ -43,6 +43,18 @@ there with sensitive values redacted. The Settings page controls local file
 verbosity and can also forward the same operational events to an external
 syslog receiver.
 
+The `Monitor` page is an operator-facing, read-only runtime view for appliance
+resource health. It charts CPU, memory, network throughput, and disk activity
+over the last one, three, or six hours, and shows compact per-interface,
+per-mount, and virtual-machine context. The sampler records one row about every
+30 seconds and keeps the six-hour window plus a small buffer. Collection uses
+Linux `/proc`, `/sys`, filesystem usage, DMI data, `systemd-detect-virt`, and
+`vmtoolsd` when present; it does not call privileged helpers or mutate host
+services. Set `LABFOUNDRY_MONITOR_ENABLED=false` to disable both the background
+sampler and request-time collection from `/monitor/data` or `/api/v1/monitor`.
+When disabled, LabFoundry may read existing monitor rows but it does not probe
+the host or create new `monitor_samples` rows.
+
 Photon OS 5.0 GA shipped with Python 3.11, but the current Photon 5.0 updates
 stream has moved beyond that baseline. On June 21, 2026, live repository
 metadata showed `python3` as `3.14.5-2.ph5`. LabFoundry keeps
@@ -305,6 +317,7 @@ Initial resource areas:
 - Auth
 - API Tokens
 - Dashboard
+- Monitor
 - Interfaces
 - VLANs
 - Routes
@@ -332,6 +345,7 @@ curl -s \
     "name": "development token",
     "scopes": [
       "read:dashboard",
+      "read:monitoring",
       "read:routes",
       "read:wan",
       "write:wan",
@@ -403,6 +417,7 @@ Supported initial scopes:
 
 ```text
 read:dashboard
+read:monitoring
 read:interfaces
 write:interfaces
 read:vlans

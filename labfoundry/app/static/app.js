@@ -8317,6 +8317,9 @@ function renderMonitorPage(root, payload) {
   monitorSetText(root, "[data-monitor-virt-tools]", virt.vmtools_version || "--");
   monitorSetText(root, "[data-monitor-virt-hostname]", virt.hostname || "--");
   monitorSetText(root, "[data-monitor-sample-count]", `${payload.sample_count || 0} samples`);
+  if (payload.enabled === false) {
+    monitorSetText(root, "[data-monitor-sample-count]", "disabled");
+  }
 
   drawMonitorChart(root.querySelector('[data-monitor-chart="cpu"]'), payload.cpu, [{ field: "percent", label: "CPU", color: "#2563eb" }], { min: 0, max: 100, formatY: formatMonitorPercent });
   drawMonitorChart(root.querySelector('[data-monitor-chart="memory"]'), payload.memory, [{ field: "used_percent", label: "Memory", color: "#0f766e" }], { min: 0, max: 100, formatY: formatMonitorPercent });
@@ -8365,6 +8368,10 @@ function initializeMonitorPage() {
       }
       latestPayload = await response.json();
       renderMonitorPage(root, latestPayload);
+      if (latestPayload.enabled === false) {
+        setStatus("Monitoring disabled");
+        return;
+      }
       const sampleTime = latestPayload.last_sample_at ? new Date(latestPayload.last_sample_at) : null;
       setStatus(sampleTime ? `Last sample ${sampleTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Waiting for samples");
     } catch (error) {
