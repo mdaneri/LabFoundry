@@ -149,6 +149,7 @@ from labfoundry.app.services.dnsmasq import (
 )
 from labfoundry.app.services.ca import (
     CA_CLIENT_PROFILE_NAME,
+    CA_DEFAULT_PORTAL_HOSTNAME,
     CA_SERVER_PROFILE_NAME,
     CA_STAGED_CONFIG_PATH,
     ManagedCertificateSpec,
@@ -457,9 +458,11 @@ def require_certificate_workflow_identity(identity: Identity) -> None:
 
 def roles_from_form(primary_role_value: str = "", roles: list[str] | None = None, roles_text: str = "") -> list[str]:
     values: list[str] = []
-    for value in roles or []:
-        values.extend(str(value).replace(",", "\n").splitlines())
-    values.extend(roles_text.replace(",", "\n").splitlines())
+    if roles_text.strip():
+        values.extend(roles_text.replace(",", "\n").splitlines())
+    else:
+        for value in roles or []:
+            values.extend(str(value).replace(",", "\n").splitlines())
     if not values and primary_role_value:
         values.append(primary_role_value)
     return normalize_roles(values)
@@ -748,6 +751,10 @@ def ensure_ca_state(db: Session) -> list[str]:
     try:
         changed = ensure_default_ca_profiles(db)
         profiles = db.execute(select(CaProfile).order_by(CaProfile.name)).scalars().all()
+        normalized_portal_hostname = normalize_dns_hostname(settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
+        if normalized_portal_hostname != settings.portal_hostname:
+            settings.portal_hostname = normalized_portal_hostname
+            changed = True
         changed = ensure_root_ca_material(settings) or changed
         changed = ensure_managed_certificate_rows(db, settings=settings, profiles=profiles, specs=managed_ca_certificate_specs(db)) or changed
         certificates = (
@@ -1134,6 +1141,9 @@ def refresh_interface_dependent_addresses(
     registry_settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one_or_none()
     if registry_settings:
         ensure_dns_for_vcf_registry(db, registry_settings, actor=actor or "system")
+    ca_settings = db.execute(select(CaSettings)).scalar_one_or_none()
+    if ca_settings:
+        ensure_dns_for_ca_portal(db, ca_settings, actor=actor, previous_hostname=ca_settings.portal_hostname)
 
     esxi_boot = esxi_pxe_boot_settings(db)
     esxi_interfaces = split_interfaces(str(esxi_boot.get("listen_interface") or ""))
@@ -2369,11 +2379,31 @@ def public_ca_context(db: Session) -> dict:
     settings = get_ca_settings_row(db)
     return {
         "ca_settings": settings,
+        "portal_hostname": settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME,
         "root_available": bool(settings.root_certificate_pem),
         "root_fingerprint": settings.root_fingerprint,
         "root_issued_at": settings.root_issued_at,
         "root_expires_at": settings.root_expires_at,
     }
+
+
+def safe_login_next(value: str | None) -> str:
+    target = (value or "").strip()
+    if not target.startswith("/") or target.startswith("//") or "\\" in target:
+        return "/"
+    if target.startswith("/static/") or target in {"/login", "/logout"}:
+        return "/"
+    return target
+
+
+def request_host_name(request: Request) -> str:
+    return (request.headers.get("host") or "").split(":", 1)[0].strip().strip(".").lower()
+
+
+def is_ca_portal_host(request: Request, db: Session) -> bool:
+    settings = get_ca_settings_row(db)
+    portal_hostname = normalize_dns_hostname(settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
+    return bool(portal_hostname and request_host_name(request) == portal_hostname)
 
 
 def ca_request_context(db: Session) -> dict:
@@ -2911,6 +2941,7 @@ def desired_dns_records_for_listen_addresses(raw_addresses: str | None) -> dict[
 
 VCF_DEPOT_DNS_DESCRIPTION = "Created from VCF Offline Depot endpoint."
 VCF_REGISTRY_DNS_DESCRIPTION = "Created from VCF private registry endpoint."
+CA_PORTAL_DNS_DESCRIPTION = "Created from Certificate Authority portal endpoint."
 
 
 def service_dns_target_token(strategy: str, interface_name: str, address: str) -> str:
@@ -3185,6 +3216,24 @@ def ensure_dns_for_vcf_offline_depot(db: Session, settings: VcfOfflineDepotSetti
     )
 
 
+def ensure_dns_for_ca_portal(db: Session, settings: CaSettings, actor: str | None, *, previous_hostname: str | None = None) -> str | None:
+    hostname = normalize_dns_hostname(settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
+    if not hostname:
+        return None
+    settings.portal_hostname = hostname
+    return ensure_interface_dns_alias(
+        db,
+        hostname=hostname,
+        listen_interface=settings.listen_interface,
+        listen_address=settings.listen_address,
+        description=CA_PORTAL_DNS_DESCRIPTION,
+        actor=actor,
+        audit_prefix="ca_portal",
+        previous_hostname=previous_hostname,
+        enabled=settings.enabled,
+    )
+
+
 def kms_dns_record_conflict(db: Session, hostname: str) -> bool:
     normalized = normalize_dns_hostname(hostname)
     if not normalized:
@@ -3279,6 +3328,9 @@ def reconcile_service_dns_aliases(db: Session, actor: str | None = None) -> list
     registry_settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one_or_none()
     if registry_settings and ensure_dns_for_vcf_registry(db, registry_settings, actor=actor or "system", previous_hostname=registry_settings.hostname):
         changed.append("VCF Private Registry")
+    ca_settings = db.execute(select(CaSettings)).scalar_one_or_none()
+    if ca_settings and ensure_dns_for_ca_portal(db, ca_settings, actor=actor, previous_hostname=ca_settings.portal_hostname):
+        changed.append("Certificate Authority")
     esxi_action = ensure_dns_for_esxi_pxe(db, esxi_pxe_boot_settings(db), actor, previous_hostname=str(esxi_pxe_boot_settings(db).get("hostname") or ""))
     if esxi_action:
         changed.append("ESXi PXE")
@@ -5006,17 +5058,28 @@ def service_worker() -> FileResponse:
 
 
 @router.get("/", response_class=HTMLResponse, response_model=None)
-def root(request: Request, identity: Identity | None = Depends(get_session_identity)) -> HTMLResponse | RedirectResponse:
+def root(
+    request: Request,
+    identity: Identity | None = Depends(get_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse | RedirectResponse:
+    if is_ca_portal_host(request, db):
+        return render(request, "ca_public.html", public_ca_context(db))
     if not identity:
         return RedirectResponse("/login", status_code=303)
     return RedirectResponse("/dashboard", status_code=303)
 
 
 @router.get("/login", response_class=HTMLResponse, response_model=None)
-def login_page(request: Request, identity: Identity | None = Depends(get_session_identity)) -> HTMLResponse | RedirectResponse:
+def login_page(
+    request: Request,
+    next: str = Query(""),
+    identity: Identity | None = Depends(get_session_identity),
+) -> HTMLResponse | RedirectResponse:
+    return_to = safe_login_next(next)
     if identity:
-        return RedirectResponse("/", status_code=303)
-    return render(request, "login.html", {"error": None})
+        return RedirectResponse(return_to, status_code=303)
+    return render(request, "login.html", {"error": None, "return_to": return_to})
 
 
 @router.post("/login", response_model=None)
@@ -5024,18 +5087,20 @@ def login(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
+    next: str = Form(""),
     csrf: str = Form(...),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
+    return_to = safe_login_next(next)
     user = authenticate_user(db, username, password)
     if not user:
         record_audit(db, actor=username, action="ui_login_failed", resource_type="auth", success=False)
-        return render(request, "login.html", {"error": "Invalid username or password"})
+        return render(request, "login.html", {"error": "Invalid username or password", "return_to": return_to})
     request.session["user_id"] = user.id
     request.session[SESSION_APPLIANCE_INSTANCE_SESSION_KEY] = ensure_appliance_instance_id(db)
     record_audit(db, actor=user.username, action="ui_login", resource_type="auth")
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse(return_to, status_code=303)
 
 
 @router.post("/logout", response_model=None)
@@ -7480,6 +7545,56 @@ def ca_requests_page(
     return render(request, "ca_requests.html", {"identity": identity, **ca_request_context(db)})
 
 
+@router.get("/requests", response_class=HTMLResponse, response_model=None)
+def ca_portal_requests_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    require_certificate_workflow_identity(identity)
+    return render(request, "ca_requests.html", {"identity": identity, **ca_request_context(db), "ca_portal_path": "/requests"})
+
+
+def _stage_ca_certificate_request(
+    db: Session,
+    *,
+    common_name: str,
+    profile_id: str,
+    subject_alt_names: str,
+    ip_addresses: str,
+    description: str,
+    csr_text: str,
+) -> CaCertificate:
+    certificate = CaCertificate(
+        common_name=common_name.strip(),
+        profile_id=parse_ca_profile_id(profile_id),
+        subject_alt_names=join_multiline(split_multiline(subject_alt_names)),
+        ip_addresses=join_multiline(split_multiline(ip_addresses)),
+        status="csr-staged" if csr_text.strip() else "planned",
+        description=description or None,
+        csr_text=csr_text.strip() or None,
+        enabled=True,
+    )
+    db.add(certificate)
+    db.commit()
+    return certificate
+
+
+def _revoke_ca_certificate(db: Session, *, certificate_id: int, actor: str, reason: str) -> CaCertificate:
+    certificate = db.get(CaCertificate, certificate_id)
+    if not certificate:
+        raise HTTPException(status_code=404, detail="CA certificate not found")
+    if certificate.status != "issued" or not certificate.serial_number:
+        raise HTTPException(status_code=400, detail="Only issued certificates with a serial number can be revoked.")
+    certificate.status = "revoked"
+    certificate.revoked_at = utcnow()
+    certificate.revoked_by = actor
+    certificate.revocation_reason = reason.strip() or "operator requested"
+    db.add(certificate)
+    db.commit()
+    return certificate
+
+
 @router.post("/ca/requests", response_model=None)
 def submit_ca_request_from_portal(
     request: Request,
@@ -7502,20 +7617,52 @@ def submit_ca_request_from_portal(
             {"identity": identity, **ca_request_context(db), "form_error": "Common name is required."},
             status_code=422,
         )
-    certificate = CaCertificate(
-        common_name=common_name.strip(),
-        profile_id=parse_ca_profile_id(profile_id),
-        subject_alt_names=join_multiline(split_multiline(subject_alt_names)),
-        ip_addresses=join_multiline(split_multiline(ip_addresses)),
-        status="csr-staged" if csr_text.strip() else "planned",
-        description=description or None,
-        csr_text=csr_text.strip() or None,
-        enabled=True,
+    certificate = _stage_ca_certificate_request(
+        db,
+        common_name=common_name,
+        profile_id=profile_id,
+        subject_alt_names=subject_alt_names,
+        ip_addresses=ip_addresses,
+        description=description,
+        csr_text=csr_text,
     )
-    db.add(certificate)
-    db.commit()
     record_audit(db, actor=identity.username, action="submit_ca_certificate_request", resource_type="ca_certificate", resource_id=str(certificate.id))
     return RedirectResponse("/ca/requests", status_code=303)
+
+
+@router.post("/requests", response_model=None)
+def submit_ca_request_from_portal_alias(
+    request: Request,
+    common_name: str = Form(...),
+    profile_id: str = Form(""),
+    subject_alt_names: str = Form(""),
+    ip_addresses: str = Form(""),
+    description: str = Form(""),
+    csr_text: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    require_certificate_workflow_identity(identity)
+    verify_csrf(request, csrf)
+    if not common_name.strip():
+        return render(
+            request,
+            "ca_requests.html",
+            {"identity": identity, **ca_request_context(db), "form_error": "Common name is required.", "ca_portal_path": "/requests"},
+            status_code=422,
+        )
+    certificate = _stage_ca_certificate_request(
+        db,
+        common_name=common_name,
+        profile_id=profile_id,
+        subject_alt_names=subject_alt_names,
+        ip_addresses=ip_addresses,
+        description=description,
+        csr_text=csr_text,
+    )
+    record_audit(db, actor=identity.username, action="submit_ca_certificate_request", resource_type="ca_certificate", resource_id=str(certificate.id))
+    return RedirectResponse("/requests", status_code=303)
 
 
 @router.post("/ca/certificates/{certificate_id}/revoke", response_model=None)
@@ -7529,19 +7676,25 @@ def revoke_ca_certificate_from_portal(
 ) -> RedirectResponse:
     require_certificate_workflow_identity(identity)
     verify_csrf(request, csrf)
-    certificate = db.get(CaCertificate, certificate_id)
-    if not certificate:
-        raise HTTPException(status_code=404, detail="CA certificate not found")
-    if certificate.status != "issued" or not certificate.serial_number:
-        raise HTTPException(status_code=400, detail="Only issued certificates with a serial number can be revoked.")
-    certificate.status = "revoked"
-    certificate.revoked_at = utcnow()
-    certificate.revoked_by = identity.username
-    certificate.revocation_reason = reason.strip() or "operator requested"
-    db.add(certificate)
-    db.commit()
+    certificate = _revoke_ca_certificate(db, certificate_id=certificate_id, actor=identity.username, reason=reason)
     record_audit(db, actor=identity.username, action="revoke_ca_certificate", resource_type="ca_certificate", resource_id=str(certificate.id))
     return RedirectResponse("/ca/requests", status_code=303)
+
+
+@router.post("/certificates/{certificate_id}/revoke", response_model=None)
+def revoke_ca_certificate_from_portal_alias(
+    request: Request,
+    certificate_id: int,
+    reason: str = Form("operator requested"),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    require_certificate_workflow_identity(identity)
+    verify_csrf(request, csrf)
+    certificate = _revoke_ca_certificate(db, certificate_id=certificate_id, actor=identity.username, reason=reason)
+    record_audit(db, actor=identity.username, action="revoke_ca_certificate", resource_type="ca_certificate", resource_id=str(certificate.id))
+    return RedirectResponse("/requests", status_code=303)
 
 
 @router.get("/certificate-authority/downloads/root-ca.pem", response_model=None)
@@ -7648,6 +7801,7 @@ def download_ca_certificate_private_key(
 def update_ca_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
+    portal_hostname: str = Form(CA_DEFAULT_PORTAL_HOSTNAME),
     listen_interfaces: list[str] = Form(default_factory=list),
     listen_addresses: list[str] = Form(default_factory=list),
     listen_interfaces_present: str | None = Form(None),
@@ -7671,6 +7825,7 @@ def update_ca_settings_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_ca_settings_row(db)
+    previous_portal_hostname = settings.portal_hostname
     selected_interfaces, selected_addresses = resolve_service_bind_targets(
         db,
         listen_interfaces,
@@ -7681,6 +7836,7 @@ def update_ca_settings_from_ui(
         listen_addresses_present=listen_addresses_present,
     )
     settings.enabled = enabled == "on"
+    settings.portal_hostname = normalize_dns_hostname(portal_hostname.strip() or CA_DEFAULT_PORTAL_HOSTNAME)
     settings.listen_interface = selected_interfaces
     settings.listen_address = selected_addresses
     settings.root_common_name = root_common_name.strip()
@@ -7698,6 +7854,7 @@ def update_ca_settings_from_ui(
     settings.ocsp_enabled = ocsp_enabled == "on"
     settings.storage_path = settings.storage_path.strip() or "/etc/labfoundry/ca"
     settings.updated_at = utcnow()
+    ensure_dns_for_ca_portal(db, settings, identity.username, previous_hostname=previous_portal_hostname)
     db.commit()
     record_audit(db, actor=identity.username, action="update_ca_settings", resource_type="ca", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave") == "1":
@@ -7708,6 +7865,7 @@ def update_ca_settings_from_ui(
                 "status": "saved",
                 "updated_at": settings.updated_at.isoformat(),
                 "enabled": settings.enabled,
+                "portal_hostname": settings.portal_hostname,
                 "listen_interfaces": split_interfaces(settings.listen_interface),
                 "listen_addresses": split_addresses(settings.listen_address),
                 "validation_errors": context["ca_validation_errors"],

@@ -28,7 +28,7 @@
             <td>
               {% if certificate.status == "issued" and certificate.serial_number %}
                 <form
-                  action="/ca/certificates/{{ certificate.id }}/revoke"
+                  action="{{ '/certificates/' ~ certificate.id ~ '/revoke' if ca_portal_path|default('/ca/requests') == '/requests' else '/ca/certificates/' ~ certificate.id ~ '/revoke' }}"
                   method="post"
                   data-confirm-modal
                   data-confirm-title="Revoke {{ certificate.common_name }}?"
@@ -53,7 +53,7 @@
         <h2>Submit Request</h2>
         <span class="status-pill good">scoped</span>
       </div>
-      <form class="form-stack" action="/ca/requests" method="post">
+      <form class="form-stack" action="{{ ca_portal_path|default('/ca/requests') }}" method="post">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <label>
           <span class="field-label"><span>Common name</span><button class="help-icon" type="button" data-help="Primary certificate subject name. For service certificates, use the FQDN clients will connect to.">i</button></span>

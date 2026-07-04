@@ -420,6 +420,7 @@ class CaSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    portal_hostname: Mapped[str] = mapped_column(String(180), default="ca.labfoundry.internal")
     root_common_name: Mapped[str] = mapped_column(String(180), default="LabFoundry Internal Root CA")
     organization: Mapped[str] = mapped_column(String(180), default="LabFoundry")
     organizational_unit: Mapped[str] = mapped_column(String(180), default="Lab Infrastructure")

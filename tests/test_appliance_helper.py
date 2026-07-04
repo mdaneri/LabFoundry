@@ -715,6 +715,28 @@ def test_ca_helper_validates_and_writes_managed_files(monkeypatch, tmp_path):
         assert oct(key_path.stat().st_mode & 0o777) == "0o600"
 
 
+def test_ca_helper_removes_stale_crl_when_publication_is_empty(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "ca"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    apply_dir.mkdir(parents=True)
+    payload = json.loads(ca_payload_text(managed_root))
+    crl_path = managed_root / "ca" / "labfoundry-ca.crl"
+    crl_path.parent.mkdir(parents=True)
+    crl_path.write_text("-----BEGIN X509 CRL-----\nstale\n-----END X509 CRL-----\n", encoding="utf-8")
+    payload["root"]["crl_pem"] = ""
+    config_path = apply_dir / "labfoundry-ca.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "CA_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "_ca_key_matches_certificate", lambda certificate_pem, private_key_pem: True)
+
+    assert helper._handle_ca("validate", [str(config_path)]) == 0
+    assert helper._handle_ca("apply", [str(config_path)]) == 0
+    assert not crl_path.exists()
+
+
 def test_ca_helper_allows_csr_certificate_without_private_key(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "ca"

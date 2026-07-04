@@ -494,10 +494,15 @@ def _handle_ca(action: str, args: list[str]) -> int:
     _write_secret_file(legacy_root_path, root_cert, 0o644)
     _write_secret_file(bundle_path, root_cert, 0o644)
     written = [str(root_cert_path), str(legacy_root_path), str(bundle_path)]
-    if crl_path_value and crl_pem:
+    removed: list[str] = []
+    if crl_path_value:
         crl_path = _ca_managed_path(crl_path_value, "crl_path")
-        _write_secret_file(crl_path, crl_pem, 0o644)
-        written.append(str(crl_path))
+        if crl_pem:
+            _write_secret_file(crl_path, crl_pem, 0o644)
+            written.append(str(crl_path))
+        elif crl_path.exists():
+            crl_path.unlink()
+            removed.append(str(crl_path))
     for certificate in payload["certificates"]:
         cert_path_value = str(certificate.get("cert_path") or "")
         key_path_value = str(certificate.get("key_path") or "")
@@ -514,7 +519,7 @@ def _handle_ca(action: str, args: list[str]) -> int:
             key_path = _ca_managed_path(key_path_value, "key_path")
             _write_secret_file(key_path, str(certificate["private_key_pem"]), 0o600)
             written.append(str(key_path))
-    print(json.dumps({"ca": "apply complete", "config_path": str(config_path), "written_files": written}, sort_keys=True))
+    print(json.dumps({"ca": "apply complete", "config_path": str(config_path), "written_files": written, "removed_files": removed}, sort_keys=True))
     return 0
 
 

@@ -1,4 +1,5 @@
 from uuid import uuid4
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -43,7 +44,10 @@ def install_problem_handlers(app: FastAPI) -> None:
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse | RedirectResponse:
         if should_redirect_to_login(request, exc):
-            return RedirectResponse("/login", status_code=303)
+            target = request.url.path
+            if request.url.query:
+                target = f"{target}?{request.url.query}"
+            return RedirectResponse(f"/login?next={quote(target, safe='/?=&%')}", status_code=303)
         title = "Unauthorized" if exc.status_code == 401 else "Request failed"
         return problem_response(
             status_code=exc.status_code,

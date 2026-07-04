@@ -159,6 +159,7 @@ def _ensure_sqlite_ca_columns() -> None:
         if "ca_settings" in table_names:
             existing = {column["name"] for column in inspector.get_columns("ca_settings")}
             columns = {
+                "portal_hostname": "VARCHAR(180) DEFAULT 'ca.labfoundry.internal'",
                 "root_certificate_pem": "TEXT DEFAULT ''",
                 "root_private_key_encrypted": "TEXT DEFAULT ''",
                 "root_serial_number": "VARCHAR(120) DEFAULT ''",

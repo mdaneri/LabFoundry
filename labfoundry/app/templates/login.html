@@ -11,7 +11,7 @@
     <link rel="apple-touch-icon" href="/static/brand/labfoundry-mark.svg">
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/static/app.css?v=monitor-refresh-time-20260704-1">
+    <link rel="stylesheet" href="/static/app.css?v=sidebar-ca-portal-20260704-1">
   </head>
   <body>
     <main class="login-shell">
@@ -31,6 +31,7 @@
         {% endif %}
         <form class="form-stack" action="/login" method="post">
           <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="next" value="{{ return_to or '/' }}">
           <label>
             <span>Username</span>
             <input name="username" autocomplete="username" required autofocus>

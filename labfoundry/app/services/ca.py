@@ -20,6 +20,7 @@ from labfoundry.app.secrets import decrypt_secret, encrypt_secret, secret_key_st
 
 
 CA_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/ca/labfoundry-ca.json"
+CA_DEFAULT_PORTAL_HOSTNAME = "ca.labfoundry.internal"
 CA_SERVER_PROFILE_NAME = "VCF service TLS"
 CA_CLIENT_PROFILE_NAME = "VCF KMIP client"
 CA_STATUS_VALUES = {"planned", "csr-staged", "issued", "revoked"}
@@ -482,8 +483,10 @@ def render_ca_config(
     payload = {
         "managed_by": "LabFoundry",
         "enabled": settings.enabled,
+        "portal_hostname": settings.portal_hostname,
         "storage_path": settings.storage_path,
         "publication": {
+            "portal_hostname": settings.portal_hostname,
             "listen_interfaces": settings.listen_interface,
             "listen_addresses": settings.listen_address,
         },
@@ -527,8 +530,10 @@ def render_ca_apply_payload(settings: CaSettings, certificates: list[CaCertifica
     crl_pem = generate_crl_pem(settings, certificates) if settings.publish_crl else ""
     payload = {
         "enabled": settings.enabled,
+        "portal_hostname": settings.portal_hostname,
         "storage_path": settings.storage_path,
         "publication": {
+            "portal_hostname": settings.portal_hostname,
             "listen_interfaces": settings.listen_interface,
             "listen_addresses": settings.listen_address,
         },
@@ -578,6 +583,10 @@ def validate_ca_state(
     errors: list[str] = []
     if settings.enabled and not secret_key_status(get_settings()).dedicated and get_settings().environment not in {"development", "test"}:
         errors.append("LABFOUNDRY_SECRETS_KEY is required before enabling the CA outside development.")
+    if not settings.portal_hostname.strip() or "." not in settings.portal_hostname.strip():
+        errors.append("CA portal hostname must be a fully qualified DNS name.")
+    elif not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+", settings.portal_hostname.strip().lower()):
+        errors.append("CA portal hostname must be a valid DNS name.")
     if not settings.root_common_name.strip():
         errors.append("CA root common name is required.")
     if settings.country and len(settings.country.strip()) != 2:

@@ -33,7 +33,39 @@ def test_login_and_dashboard_render(client):
     assert "Users" in response.text
     assert "LDAP / Users" not in response.text
     assert 'href="/monitor"' in response.text
-    assert response.text.index('href="/settings"') < response.text.index('href="/monitor"')
+    nav = response.text.split('<nav class="nav-stack"', 1)[1].split("</nav>", 1)[0]
+    for section in ["Overview", "Appliance Setup", "Core Services", "Identity &amp; Trust", "VCF Workflows", "Operations"]:
+        assert section in nav
+    expected_nav_order = [
+        "/dashboard",
+        "/monitor",
+        "/settings",
+        "/physical-interfaces",
+        "/vlan-interfaces",
+        "/routes-wan",
+        "/firewall",
+        "/dns",
+        "/dhcp",
+        "/chrony",
+        "/authentication",
+        "/users",
+        "/certificate-authority",
+        "/kms",
+        "/esxi-pxe",
+        "/vcf-offline-depot",
+        "/vcf-private-registry",
+        "/vcf-backups",
+        "/services",
+        "/logs",
+        "/appliance-update",
+        "/backup-restore",
+    ]
+    position = -1
+    for href in expected_nav_order:
+        next_position = nav.index(f'href="{href}"')
+        assert next_position > position
+        position = next_position
+    assert "/ca/requests" not in nav
     assert 'data-server-time' in response.text
     assert 'title="Roles: admin">User admin</span>' in response.text
     assert '<span class="role-chip">admin</span>' not in response.text
@@ -1347,6 +1379,13 @@ def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
     assert page.status_code == 200
     assert "ESXi Kickstarts" in page.text
     assert 'data-codemirror-language="labfoundry-kickstart"' in page.text
+    host_tab = page.text.index('data-tab-target="esxi-pxe-hosts-panel"')
+    kickstart_tab = page.text.index('data-tab-target="esxi-pxe-editor-panel"')
+    iso_tab = page.text.index('data-tab-target="esxi-pxe-isos-panel"')
+    assert host_tab < kickstart_tab < iso_tab
+    assert '<button class="tab-button active" type="button" role="tab" data-tab-target="esxi-pxe-hosts-panel"' in page.text
+    assert 'id="esxi-pxe-hosts-panel" class="tab-panel active" role="tabpanel">' in page.text
+    assert 'id="esxi-pxe-editor-panel" class="tab-panel" role="tabpanel" hidden' in page.text
     assert "# Sample scripted installation file" in page.text
     assert "vmaccepteula" in page.text
     assert "rootpw vmware01!" in page.text
@@ -1808,6 +1847,12 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "<span>UEFI bootfile</span><strong>snponly.efi</strong>" in page.text
     assert "PXE HTTP port" in page.text
     assert "HTTP endpoint" in page.text
+    host_tab = 'data-tab-target="esxi-pxe-hosts-panel" aria-controls="esxi-pxe-hosts-panel" aria-selected="true">Host References</button>'
+    kickstart_tab = 'data-tab-target="esxi-pxe-editor-panel" aria-controls="esxi-pxe-editor-panel" aria-selected="false">Kickstart Editor</button>'
+    iso_tab = 'data-tab-target="esxi-pxe-isos-panel" aria-controls="esxi-pxe-isos-panel" aria-selected="false">Installer ISOs</button>'
+    assert page.text.index(host_tab) < page.text.index(kickstart_tab) < page.text.index(iso_tab)
+    assert 'id="esxi-pxe-hosts-panel" class="tab-panel active" role="tabpanel"' in page.text
+    assert 'id="esxi-pxe-editor-panel" class="tab-panel" role="tabpanel" hidden' in page.text
     assert "Kickstart variables" in page.text
     assert "{{host.hostname}}" in page.text
     assert "{{dhcp.ntp_servers}}" in page.text
@@ -2560,6 +2605,37 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "operator" in created.text
     assert "/bin/bash" in created.text
     assert "disabled" in created.text
+    stale_role_created = client.post(
+        "/users",
+        data={"username": "demote-me", "role": "viewer", "roles": "admin", "shell": "/sbin/nologin", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert stale_role_created.status_code == 303
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import User
+
+    with SessionLocal() as db:
+        demote_user = db.execute(select(User).where(User.username == "demote-me")).scalar_one()
+        assert "admin" in demote_user.roles_json
+        demote_user_id = demote_user.id
+    demoted = client.post(
+        f"/users/{demote_user_id}/edit",
+        data={
+            "username": "demote-me",
+            "role": "viewer",
+            "roles": "admin",
+            "roles_text": "viewer",
+            "shell": "/sbin/nologin",
+            "csrf": csrf,
+        },
+    )
+    assert demoted.status_code == 200
+    assert demoted.json()["user"]["roles"] == ["viewer"]
+    with SessionLocal() as db:
+        demote_user = db.execute(select(User).where(User.username == "demote-me")).scalar_one()
+        assert demote_user.roles_json == '["viewer"]'
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "userActionsFormatter" not in app_js.text
@@ -3559,6 +3635,10 @@ def test_certificate_authority_page_renders(client):
     assert 'data-autosave-status-id="ca-settings-autosave-status"' in ca.text
     assert "Listen interfaces" in ca.text
     assert "Listen addresses" in ca.text
+    assert "Portal hostname" in ca.text
+    assert "ca.labfoundry.internal" in ca.text
+    assert "Open request portal" in ca.text
+    assert 'href="/requests"' in ca.text
     assert 'name="listen_interfaces_present"' in ca.text
     assert 'name="listen_interfaces"' in ca.text
     assert 'data-derived-listen-addresses' in ca.text
@@ -3619,11 +3699,19 @@ def test_public_ca_root_page_is_unauthenticated(client):
 
     page = client.get("/ca")
     assert page.status_code == 200
-    assert "LabFoundry Root CA" in page.text
+    assert "LabFoundry Certificate Authority" in page.text
+    assert "LabFoundry Internal Root CA" in page.text
     assert "abc123" in page.text
+    assert "ca.labfoundry.internal" in page.text
     assert "/ca/downloads/root-ca.pem" in page.text
+    assert 'href="/requests"' in page.text
     assert "/certificate-authority" not in page.text
     assert "/appliance-apply" not in page.text
+
+    ca_host_home = client.get("/", headers={"host": "ca.labfoundry.internal"})
+    assert ca_host_home.status_code == 200
+    assert "LabFoundry Certificate Authority" in ca_host_home.text
+    assert "/certificate-authority" not in ca_host_home.text
 
     root = client.get("/ca/downloads/root-ca.pem")
     assert root.status_code == 200
@@ -3654,7 +3742,21 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
         )
         db.commit()
 
-    login(client)
+    redirect = client.get("/requests", follow_redirects=False)
+    assert redirect.status_code == 303
+    assert redirect.headers["location"] == "/login?next=/requests"
+    login_page = client.get(redirect.headers["location"])
+    assert login_page.status_code == 200
+    assert 'name="next" value="/requests"' in login_page.text
+    csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    login_response = client.post(
+        "/login",
+        data={"username": "admin", "password": "labfoundry-admin", "csrf": csrf, "next": "/requests"},
+        follow_redirects=False,
+    )
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/requests"
+
     console = client.get("/certificate-authority")
     assert console.status_code == 403
 
@@ -3665,10 +3767,14 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
     assert "CA Settings" not in page.text
     assert "labfoundry-ca.json" not in page.text
     assert "/certificate-authority" not in page.text
+    portal_page = client.get("/requests", headers={"host": "ca.labfoundry.internal"})
+    assert portal_page.status_code == 200
+    assert 'action="/requests"' in portal_page.text
+    assert "/certificate-authority" not in portal_page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     submitted = client.post(
-        "/ca/requests",
+        "/requests",
         data={
             "csrf": csrf,
             "common_name": "operator-request.labfoundry.internal",
@@ -3678,6 +3784,7 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
         follow_redirects=False,
     )
     assert submitted.status_code == 303
+    assert submitted.headers["location"] == "/requests"
 
     with SessionLocal() as db:
         request_row = db.execute(select(CaCertificate).where(CaCertificate.common_name == "operator-request.labfoundry.internal")).scalar_one()

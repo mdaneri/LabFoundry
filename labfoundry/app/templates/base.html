@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=monitor-refresh-time-20260704-1">
+    <link rel="stylesheet" href="/static/app.css?v=sidebar-ca-portal-20260704-1">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -26,35 +26,53 @@
           </span>
         </a>
         <nav class="nav-stack" aria-label="Primary">
-          {% set nav = [
-            ("Dashboard", "/dashboard", "read:dashboard"),
-            ("Physical Interfaces", "/physical-interfaces", "read:interfaces"),
-            ("VLAN Interfaces", "/vlan-interfaces", "read:vlans"),
-            ("Routes & WAN Simulation", "/routes-wan", "read:routes"),
-            ("Firewall", "/firewall", "read:firewall"),
-            ("DNS", "/dns", "read:dns"),
-            ("DHCP", "/dhcp", "read:dhcp"),
-            ("Authentication", "/authentication", "read:dashboard"),
-            ("Users", "/users", "admin:all"),
-            ("Certificate Authority", "/certificate-authority", "admin:all"),
-            ("Certificate Requests", "/ca/requests", "write:ca-requests"),
-            ("KMS / KMIP", "/kms", "read:kms"),
-            ("Chrony", "/chrony", "read:services"),
-            ("ESXi PXE", "/esxi-pxe", "read:esxi-pxe"),
-            ("VCF Offline Depot", "/vcf-offline-depot", "read:repository"),
-            ("VCF Private Registry", "/vcf-private-registry", "read:vcf-registry"),
-            ("VCF Backups", "/vcf-backups", "read:vcf-backups"),
-            ("Services", "/services", "read:services"),
-            ("Logs", "/logs", "read:logs"),
-            ("Appliance Update", "/appliance-update", "admin:all"),
-            ("Backup / Restore", "/backup-restore", "admin:all"),
-            ("Settings", "/settings", "admin:all"),
-            ("Monitor", "/monitor", "read:monitoring")
+          {% set nav_groups = [
+            ("Overview", [
+              ("Dashboard", "/dashboard", "read:dashboard"),
+              ("Monitor", "/monitor", "read:monitoring")
+            ]),
+            ("Appliance Setup", [
+              ("Settings", "/settings", "admin:all"),
+              ("Physical Interfaces", "/physical-interfaces", "read:interfaces"),
+              ("VLAN Interfaces", "/vlan-interfaces", "read:vlans"),
+              ("Routes & WAN Simulation", "/routes-wan", "read:routes"),
+              ("Firewall", "/firewall", "read:firewall")
+            ]),
+            ("Core Services", [
+              ("DNS", "/dns", "read:dns"),
+              ("DHCP", "/dhcp", "read:dhcp"),
+              ("Chrony", "/chrony", "read:services")
+            ]),
+            ("Identity & Trust", [
+              ("Authentication", "/authentication", "read:dashboard"),
+              ("Users", "/users", "admin:all"),
+              ("Certificate Authority", "/certificate-authority", "admin:all"),
+              ("KMS / KMIP", "/kms", "read:kms")
+            ]),
+            ("VCF Workflows", [
+              ("ESXi PXE", "/esxi-pxe", "read:esxi-pxe"),
+              ("VCF Offline Depot", "/vcf-offline-depot", "read:repository"),
+              ("VCF Private Registry", "/vcf-private-registry", "read:vcf-registry"),
+              ("VCF Backups", "/vcf-backups", "read:vcf-backups")
+            ]),
+            ("Operations", [
+              ("Services", "/services", "read:services"),
+              ("Logs", "/logs", "read:logs"),
+              ("Appliance Update", "/appliance-update", "admin:all"),
+              ("Backup / Restore", "/backup-restore", "admin:all")
+            ])
           ] %}
-          {% for label, href, scope in nav %}
-            {% if identity and identity.can(scope) %}
-              <a class="nav-link {% if request.url.path == href %}active{% endif %}" href="{{ href }}">{{ label }}</a>
-            {% endif %}
+          {% for group_label, links in nav_groups %}
+            {% set group = namespace(rendered=false) %}
+            {% for label, href, scope in links %}
+              {% if identity and identity.can(scope) %}
+                {% if not group.rendered %}
+                  <span class="nav-section-label">{{ group_label }}</span>
+                  {% set group.rendered = true %}
+                {% endif %}
+                <a class="nav-link {% if request.url.path == href %}active{% endif %}" href="{{ href }}">{{ label }}</a>
+              {% endif %}
+            {% endfor %}
           {% endfor %}
         </nav>
         {% if identity %}
