@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block page_title %}Monitor{% endblock %}
+{% block content %}
+<section class="monitor-page" data-monitor-page>
+  <div class="metric-grid monitor-metrics">
+    <article class="metric">
+      <span>CPU</span>
+      <strong data-monitor-cpu-current>--</strong>
+      <small data-monitor-cpu-detail>Load --</small>
+    </article>
+    <article class="metric">
+      <span>Memory</span>
+      <strong data-monitor-memory-current>--</strong>
+      <small data-monitor-memory-detail>Available --</small>
+    </article>
+    <article class="metric">
+      <span>Network</span>
+      <strong data-monitor-network-current>--</strong>
+      <small data-monitor-network-detail>-- interfaces</small>
+    </article>
+    <article class="metric">
+      <span>Disks</span>
+      <strong data-monitor-disk-current>--</strong>
+      <small data-monitor-disk-detail>-- mounts</small>
+    </article>
+  </div>
+
+  <section class="panel monitor-vm-panel">
+    <div class="panel-head compact">
+      <h2>Virtual Machine</h2>
+      <span class="status-pill muted" data-monitor-sample-count>waiting</span>
+    </div>
+    <div class="monitor-vm-grid">
+      <div>
+        <span>Detected</span>
+        <strong data-monitor-virt-detected>--</strong>
+      </div>
+      <div>
+        <span>Product</span>
+        <strong data-monitor-virt-product>--</strong>
+      </div>
+      <div>
+        <span>VM Tools</span>
+        <strong data-monitor-virt-tools>--</strong>
+      </div>
+      <div>
+        <span>Host</span>
+        <strong data-monitor-virt-hostname>--</strong>
+      </div>
+    </div>
+  </section>
+
+  <div class="monitor-toolbar">
+    <div class="tab-buttons tool-tabs monitor-range-control" role="group" aria-label="Monitor history range">
+      <button class="tab-button" type="button" data-monitor-range="1">1h</button>
+      <button class="tab-button" type="button" data-monitor-range="3">3h</button>
+      <button class="tab-button active" type="button" data-monitor-range="6">6h</button>
+    </div>
+    <span class="muted monitor-status-line" data-monitor-status>Loading metrics</span>
+  </div>
+
+  <section class="monitor-chart-grid">
+    <article class="panel monitor-chart-panel">
+      <div class="panel-head compact">
+        <h2>CPU Utilization</h2>
+        <span class="status-pill muted" data-monitor-cpu-peak>peak --</span>
+      </div>
+      <div class="monitor-chart"><canvas data-monitor-chart="cpu" aria-label="CPU utilization trend"></canvas></div>
+    </article>
+
+    <article class="panel monitor-chart-panel">
+      <div class="panel-head compact">
+        <h2>Memory Pressure</h2>
+        <span class="status-pill muted" data-monitor-memory-peak>peak --</span>
+      </div>
+      <div class="monitor-chart"><canvas data-monitor-chart="memory" aria-label="Memory pressure trend"></canvas></div>
+    </article>
+
+    <article class="panel monitor-chart-panel">
+      <div class="panel-head compact">
+        <h2>Network Throughput</h2>
+        <span class="status-pill muted">RX / TX</span>
+      </div>
+      <div class="monitor-chart"><canvas data-monitor-chart="network" aria-label="Network throughput trend"></canvas></div>
+      <div class="monitor-table-scroll">
+        <table class="data-table compact">
+          <thead>
+            <tr><th>Interface</th><th>State</th><th>RX/s</th><th>TX/s</th><th>Errors</th><th>Drops</th></tr>
+          </thead>
+          <tbody data-monitor-network-table>
+            <tr><td colspan="6" class="muted">Loading interfaces</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="panel monitor-chart-panel">
+      <div class="panel-head compact">
+        <h2>Disk Activity</h2>
+        <span class="status-pill muted">Read / write</span>
+      </div>
+      <div class="monitor-chart"><canvas data-monitor-chart="disk" aria-label="Disk activity trend"></canvas></div>
+      <div class="monitor-table-scroll">
+        <table class="data-table compact">
+          <thead>
+            <tr><th>Mount</th><th>Device</th><th>Used</th><th>Free</th><th>Read/s</th><th>Write/s</th></tr>
+          </thead>
+          <tbody data-monitor-disk-table>
+            <tr><td colspan="6" class="muted">Loading disks</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+</section>
+{% endblock %}

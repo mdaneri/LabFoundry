@@ -15,7 +15,7 @@ from secrets import token_urlsafe
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, func, select
@@ -176,6 +176,7 @@ from labfoundry.app.services.networking import (
     validate_network_state,
     vlan_interface_to_dict,
 )
+from labfoundry.app.services.monitoring import monitor_payload
 from labfoundry.app.services.routes_wan import (
     WAN_CONFIG_PATH,
     WAN_MODES,
@@ -440,6 +441,11 @@ def render(request: Request, template: str, context: dict, status_code: int = 20
 def require_admin_identity(identity: Identity) -> None:
     if identity.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator role required")
+
+
+def require_monitoring_read(identity: Identity) -> None:
+    if not identity.can("read:monitoring"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Monitoring read permission required")
 
 
 def local_user_os_statuses(users: list[User], policy: dict[str, bool | int]) -> dict[str, dict[str, Any]]:
@@ -4971,6 +4977,25 @@ def dashboard(
             "audit_events": audit_events,
         },
     )
+
+
+@router.get("/monitor", response_class=HTMLResponse, response_model=None)
+def monitor_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+) -> HTMLResponse:
+    require_monitoring_read(identity)
+    return render(request, "monitor.html", {"identity": identity})
+
+
+@router.get("/monitor/data", response_class=JSONResponse, response_model=None)
+def monitor_data(
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+    hours: int = Query(default=6, ge=1, le=6),
+) -> JSONResponse:
+    require_monitoring_read(identity)
+    return JSONResponse(monitor_payload(db, hours=hours))
 
 
 @router.get("/appliance-update", response_class=HTMLResponse, response_model=None)

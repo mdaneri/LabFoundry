@@ -8088,6 +8088,312 @@ function initializeApplianceApplyProgress() {
   });
 }
 
+function monitorFinite(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatMonitorPercent(value) {
+  const number = monitorFinite(value);
+  return number === null ? "--" : `${number.toFixed(number >= 10 ? 0 : 1)}%`;
+}
+
+function formatMonitorBytes(value) {
+  const number = monitorFinite(value);
+  if (number === null) {
+    return "--";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = Math.max(0, number);
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function formatMonitorRate(value) {
+  const number = monitorFinite(value);
+  return number === null ? "--" : `${formatMonitorBytes(number)}/s`;
+}
+
+function formatMonitorNumber(value) {
+  const number = monitorFinite(value);
+  return number === null ? "--" : number.toLocaleString();
+}
+
+function monitorSetText(root, selector, value) {
+  const node = root.querySelector(selector);
+  if (node instanceof HTMLElement) {
+    node.textContent = value;
+  }
+}
+
+function monitorSeriesPoints(rows, fields) {
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const point = { time: new Date(row.sampled_at || 0).getTime() };
+    fields.forEach((field) => {
+      point[field] = monitorFinite(row[field]);
+    });
+    return point;
+  }).filter((point) => Number.isFinite(point.time));
+}
+
+function drawMonitorChart(canvas, rows, lines, options = {}) {
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    return;
+  }
+  const bounds = canvas.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(bounds.width || canvas.clientWidth || 640));
+  const height = Math.max(180, Math.floor(bounds.height || canvas.clientHeight || 240));
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * ratio);
+  canvas.height = Math.floor(height * ratio);
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return;
+  }
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, width, height);
+
+  const padding = { top: 18, right: 18, bottom: 30, left: 44 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const points = monitorSeriesPoints(rows, lines.map((line) => line.field));
+  const values = points.flatMap((point) => lines.map((line) => point[line.field])).filter((value) => value !== null);
+  if (!points.length || !values.length) {
+    context.fillStyle = "#64748b";
+    context.font = "13px system-ui, sans-serif";
+    context.fillText("Waiting for samples", padding.left, padding.top + 24);
+    return;
+  }
+
+  const minTime = Math.min(...points.map((point) => point.time));
+  const maxTime = Math.max(...points.map((point) => point.time));
+  const rawMax = Math.max(...values, options.max || 0);
+  const maxValue = options.max ? options.max : Math.max(1, rawMax * 1.12);
+  const minValue = options.min || 0;
+  const timeSpan = Math.max(1, maxTime - minTime);
+  const valueSpan = Math.max(1, maxValue - minValue);
+  const xFor = (time) => padding.left + ((time - minTime) / timeSpan) * plotWidth;
+  const yFor = (value) => padding.top + plotHeight - ((value - minValue) / valueSpan) * plotHeight;
+
+  context.strokeStyle = "#e2e8f0";
+  context.lineWidth = 1;
+  context.fillStyle = "#64748b";
+  context.font = "11px system-ui, sans-serif";
+  for (let index = 0; index <= 4; index += 1) {
+    const y = padding.top + (plotHeight * index) / 4;
+    context.beginPath();
+    context.moveTo(padding.left, y);
+    context.lineTo(width - padding.right, y);
+    context.stroke();
+    const labelValue = maxValue - ((maxValue - minValue) * index) / 4;
+    const label = options.formatY ? options.formatY(labelValue) : labelValue.toFixed(0);
+    context.fillText(label, 8, y + 4);
+  }
+
+  lines.forEach((line) => {
+    context.strokeStyle = line.color;
+    context.lineWidth = 2;
+    context.beginPath();
+    let hasPoint = false;
+    points.forEach((point) => {
+      const value = point[line.field];
+      if (value === null) {
+        return;
+      }
+      const x = xFor(point.time);
+      const y = yFor(value);
+      if (!hasPoint) {
+        context.moveTo(x, y);
+        hasPoint = true;
+      } else {
+        context.lineTo(x, y);
+      }
+    });
+    if (hasPoint) {
+      context.stroke();
+    }
+  });
+
+  const start = new Date(minTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const end = new Date(maxTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  context.fillStyle = "#64748b";
+  context.fillText(start, padding.left, height - 10);
+  context.textAlign = "right";
+  context.fillText(end, width - padding.right, height - 10);
+  context.textAlign = "left";
+
+  let legendX = padding.left;
+  lines.forEach((line) => {
+    context.fillStyle = line.color;
+    context.fillRect(legendX, 8, 10, 3);
+    context.fillStyle = "#334155";
+    context.fillText(line.label, legendX + 14, 12);
+    legendX += context.measureText(line.label).width + 42;
+  });
+}
+
+function renderMonitorNetworkTable(tbody, rows) {
+  if (!(tbody instanceof HTMLElement)) {
+    return;
+  }
+  const networks = Array.isArray(rows) ? rows : [];
+  if (!networks.length) {
+    tbody.replaceChildren(Object.assign(document.createElement("tr"), { innerHTML: '<td colspan="6" class="muted">No interfaces sampled</td>' }));
+    return;
+  }
+  tbody.replaceChildren(...networks.map((network) => {
+    const row = document.createElement("tr");
+    const errors = Number(network.rx_errors || 0) + Number(network.tx_errors || 0);
+    const drops = Number(network.rx_dropped || 0) + Number(network.tx_dropped || 0);
+    [network.name || "--", network.oper_state || "unknown", formatMonitorRate(network.rx_bytes_per_sec), formatMonitorRate(network.tx_bytes_per_sec), formatMonitorNumber(errors), formatMonitorNumber(drops)].forEach((value) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    });
+    return row;
+  }));
+}
+
+function renderMonitorDiskTable(tbody, rows) {
+  if (!(tbody instanceof HTMLElement)) {
+    return;
+  }
+  const disks = Array.isArray(rows) ? rows : [];
+  if (!disks.length) {
+    tbody.replaceChildren(Object.assign(document.createElement("tr"), { innerHTML: '<td colspan="6" class="muted">No disks sampled</td>' }));
+    return;
+  }
+  tbody.replaceChildren(...disks.map((disk) => {
+    const row = document.createElement("tr");
+    const mountCell = document.createElement("td");
+    mountCell.textContent = disk.mount_point || "--";
+    const deviceCell = document.createElement("td");
+    deviceCell.textContent = disk.device || "--";
+    const usedCell = document.createElement("td");
+    usedCell.className = "monitor-usage-cell";
+    const percent = monitorFinite(disk.used_percent) || 0;
+    const label = document.createElement("span");
+    label.textContent = formatMonitorPercent(percent);
+    const bar = document.createElement("span");
+    bar.className = "monitor-usage-bar";
+    const fill = document.createElement("span");
+    fill.className = `monitor-usage-fill ${percent >= 90 ? "danger" : percent >= 75 ? "warn" : ""}`.trim();
+    fill.style.width = `${Math.max(2, Math.min(100, percent))}%`;
+    bar.append(fill);
+    usedCell.append(label, bar);
+    [mountCell, deviceCell, usedCell].forEach((cell) => row.append(cell));
+    [formatMonitorBytes(disk.free_bytes), formatMonitorRate(disk.read_bytes_per_sec), formatMonitorRate(disk.write_bytes_per_sec)].forEach((value) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    });
+    return row;
+  }));
+}
+
+function renderMonitorPage(root, payload) {
+  const summary = payload.summary || {};
+  const cpu = summary.cpu || {};
+  const memory = summary.memory || {};
+  const network = summary.network || {};
+  const disk = summary.disk || {};
+  const virt = payload.virtualization || {};
+  monitorSetText(root, "[data-monitor-cpu-current]", formatMonitorPercent(cpu.current_percent));
+  monitorSetText(root, "[data-monitor-cpu-detail]", `Load ${cpu.load1 ?? "--"} on ${cpu.cpu_count || "--"} vCPU`);
+  monitorSetText(root, "[data-monitor-cpu-peak]", `peak ${formatMonitorPercent(cpu.peak_percent)}`);
+  monitorSetText(root, "[data-monitor-memory-current]", formatMonitorPercent(memory.current_percent));
+  monitorSetText(root, "[data-monitor-memory-detail]", `${formatMonitorBytes(memory.available_bytes)} available`);
+  monitorSetText(root, "[data-monitor-memory-peak]", `peak ${formatMonitorPercent(memory.peak_percent)}`);
+  monitorSetText(root, "[data-monitor-network-current]", `${formatMonitorRate(network.rx_bytes_per_sec)} down`);
+  monitorSetText(root, "[data-monitor-network-detail]", `${formatMonitorRate(network.tx_bytes_per_sec)} up, ${network.interface_count || 0} interfaces`);
+  monitorSetText(root, "[data-monitor-disk-current]", formatMonitorPercent(disk.highest_used_percent));
+  monitorSetText(root, "[data-monitor-disk-detail]", `${disk.highest_used_mount || "--"} across ${disk.mount_count || 0} mounts`);
+  monitorSetText(root, "[data-monitor-virt-detected]", virt.detected || "unknown");
+  monitorSetText(root, "[data-monitor-virt-product]", [virt.sys_vendor, virt.product_name].filter(Boolean).join(" / ") || "--");
+  monitorSetText(root, "[data-monitor-virt-tools]", virt.vmtools_version || "--");
+  monitorSetText(root, "[data-monitor-virt-hostname]", virt.hostname || "--");
+  monitorSetText(root, "[data-monitor-sample-count]", `${payload.sample_count || 0} samples`);
+  if (payload.enabled === false) {
+    monitorSetText(root, "[data-monitor-sample-count]", "disabled");
+  }
+
+  drawMonitorChart(root.querySelector('[data-monitor-chart="cpu"]'), payload.cpu, [{ field: "percent", label: "CPU", color: "#2563eb" }], { min: 0, max: 100, formatY: formatMonitorPercent });
+  drawMonitorChart(root.querySelector('[data-monitor-chart="memory"]'), payload.memory, [{ field: "used_percent", label: "Memory", color: "#0f766e" }], { min: 0, max: 100, formatY: formatMonitorPercent });
+  drawMonitorChart(
+    root.querySelector('[data-monitor-chart="network"]'),
+    payload.network_totals,
+    [
+      { field: "rx_bytes_per_sec", label: "RX", color: "#2563eb" },
+      { field: "tx_bytes_per_sec", label: "TX", color: "#d97706" },
+    ],
+    { min: 0, formatY: formatMonitorBytes },
+  );
+  drawMonitorChart(
+    root.querySelector('[data-monitor-chart="disk"]'),
+    payload.disk_io,
+    [
+      { field: "read_bytes_per_sec", label: "Read", color: "#0f766e" },
+      { field: "write_bytes_per_sec", label: "Write", color: "#9333ea" },
+    ],
+    { min: 0, formatY: formatMonitorBytes },
+  );
+  renderMonitorNetworkTable(root.querySelector("[data-monitor-network-table]"), payload.networks);
+  renderMonitorDiskTable(root.querySelector("[data-monitor-disk-table]"), payload.disks);
+}
+
+function initializeMonitorPage() {
+  const root = document.querySelector("[data-monitor-page]");
+  if (!(root instanceof HTMLElement)) {
+    return;
+  }
+  let hours = 6;
+  let latestPayload = null;
+  const status = root.querySelector("[data-monitor-status]");
+  const buttons = Array.from(root.querySelectorAll("[data-monitor-range]")).filter((button) => button instanceof HTMLButtonElement);
+  const setStatus = (value) => {
+    if (status instanceof HTMLElement) {
+      status.textContent = value;
+    }
+  };
+  const load = async () => {
+    setStatus("Refreshing metrics");
+    try {
+      const response = await fetch(`/monitor/data?hours=${hours}`, { credentials: "same-origin" });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      latestPayload = await response.json();
+      renderMonitorPage(root, latestPayload);
+      if (latestPayload.enabled === false) {
+        setStatus("Monitoring disabled");
+        return;
+      }
+      const sampleTime = latestPayload.last_sample_at ? new Date(latestPayload.last_sample_at) : null;
+      setStatus(sampleTime ? `Last sample ${sampleTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Waiting for samples");
+    } catch (error) {
+      setStatus(`Monitor unavailable: ${error.message}`);
+    }
+  };
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => {
+      hours = Number(button.dataset.monitorRange || 6);
+      buttons.forEach((candidate) => candidate.classList.toggle("active", candidate === button));
+      load();
+    });
+  });
+  window.addEventListener("resize", () => {
+    if (latestPayload) {
+      renderMonitorPage(root, latestPayload);
+    }
+  });
+  load();
+  window.setInterval(load, 30000);
+}
+
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
@@ -8143,6 +8449,7 @@ document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);
 document.addEventListener("DOMContentLoaded", initializeApplianceApplyProgress);
+document.addEventListener("DOMContentLoaded", initializeMonitorPage);
 document.addEventListener("DOMContentLoaded", () => {
   registerLabFoundryPrismLanguages();
   highlightConfigPreviews();

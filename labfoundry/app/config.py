@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     app_log_path: Path = Path("/var/log/labfoundry/labfoundry.log")
     esxi_kickstart_max_bytes: int = 262_144
     esxi_installer_iso_max_bytes: int = 1024 * 1024 * 1024
+    monitor_enabled: bool = True
+    monitor_sample_interval_seconds: int = 30
+    monitor_retention_hours: int = 6
 
     model_config = SettingsConfigDict(
         env_prefix="LABFOUNDRY_",

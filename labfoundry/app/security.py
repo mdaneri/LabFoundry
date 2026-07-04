@@ -16,6 +16,7 @@ from labfoundry.app.models import ApiToken, Role, Setting, User, utcnow
 
 ALL_SCOPES = {
     "read:dashboard",
+    "read:monitoring",
     "read:interfaces",
     "write:interfaces",
     "read:vlans",
@@ -54,6 +55,7 @@ ROLE_SCOPES = {
     Role.ADMIN.value: ALL_SCOPES,
     Role.NETWORK_ADMIN.value: {
         "read:dashboard",
+        "read:monitoring",
         "read:interfaces",
         "write:interfaces",
         "read:vlans",
@@ -69,6 +71,7 @@ ROLE_SCOPES = {
     },
     Role.SERVICE_ADMIN.value: {
         "read:dashboard",
+        "read:monitoring",
         "read:dns",
         "write:dns",
         "read:dhcp",
@@ -92,6 +95,7 @@ ROLE_SCOPES = {
     },
     Role.VIEWER.value: {
         "read:dashboard",
+        "read:monitoring",
         "read:interfaces",
         "read:vlans",
         "read:routes",
