@@ -7727,14 +7727,47 @@ def ca_requests_page(
     return render(request, "ca_requests.html", {"identity": identity, **ca_request_context(db)})
 
 
+def ca_request_portal_login_response(request: Request, *, error: str | None = None, status_code: int = 200) -> HTMLResponse:
+    return render(request, "ca_request_login.html", {"error": error, "return_to": "/requests"}, status_code=status_code)
+
+
 @router.get("/requests", response_class=HTMLResponse, response_model=None)
 def ca_portal_requests_page(
     request: Request,
-    identity: Identity = Depends(require_session_identity),
+    identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
+    if identity is None:
+        return ca_request_portal_login_response(request)
     require_certificate_workflow_identity(identity)
-    return render(request, "ca_requests.html", {"identity": identity, **ca_request_context(db), "ca_portal_path": "/requests"})
+    return render(request, "ca_request_portal.html", {"identity": identity, **ca_request_context(db)})
+
+
+@router.post("/requests/login", response_model=None)
+def ca_request_portal_login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    csrf: str = Form(...),
+    next: str = Form("/requests"),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    verify_csrf(request, csrf)
+    user = authenticate_user(db, username, password)
+    if not user:
+        record_audit(db, actor=username, action="ca_request_portal_login_failed", resource_type="auth", success=False)
+        return ca_request_portal_login_response(request, error="Invalid username or password", status_code=401)
+    request.session["user_id"] = user.id
+    request.session[SESSION_APPLIANCE_INSTANCE_SESSION_KEY] = ensure_appliance_instance_id(db)
+    record_audit(db, actor=user.username, action="ca_request_portal_login", resource_type="auth")
+    return RedirectResponse("/requests" if next != "/requests" else next, status_code=303)
+
+
+@router.post("/requests/logout", response_model=None)
+def ca_request_portal_logout(request: Request, csrf: str = Form(...)) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    request.session.clear()
+    return RedirectResponse("/requests", status_code=303)
 
 
 def _stage_ca_certificate_request(
@@ -7822,16 +7855,18 @@ def submit_ca_request_from_portal_alias(
     description: str = Form(""),
     csr_text: str = Form(""),
     csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
+    identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse:
+    if identity is None:
+        return ca_request_portal_login_response(request, status_code=401)
     require_certificate_workflow_identity(identity)
     verify_csrf(request, csrf)
     if not common_name.strip():
         return render(
             request,
-            "ca_requests.html",
-            {"identity": identity, **ca_request_context(db), "form_error": "Common name is required.", "ca_portal_path": "/requests"},
+            "ca_request_portal.html",
+            {"identity": identity, **ca_request_context(db), "form_error": "Common name is required."},
             status_code=422,
         )
     certificate = _stage_ca_certificate_request(
@@ -7863,15 +7898,18 @@ def revoke_ca_certificate_from_portal(
     return RedirectResponse("/ca/requests", status_code=303)
 
 
+@router.post("/requests/certificates/{certificate_id}/revoke", response_model=None)
 @router.post("/certificates/{certificate_id}/revoke", response_model=None)
 def revoke_ca_certificate_from_portal_alias(
     request: Request,
     certificate_id: int,
     reason: str = Form("operator requested"),
     csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
+    identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
-) -> RedirectResponse:
+) -> RedirectResponse | HTMLResponse:
+    if identity is None:
+        return ca_request_portal_login_response(request, status_code=401)
     require_certificate_workflow_identity(identity)
     verify_csrf(request, csrf)
     certificate = _revoke_ca_certificate(db, certificate_id=certificate_id, actor=identity.username, reason=reason)

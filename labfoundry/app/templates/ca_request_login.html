@@ -3,10 +3,8 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>LabFoundry - Sign in</title>
+    <title>LabFoundry - Certificate Request Portal</title>
     <meta name="theme-color" content="#1f4f7a">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-title" content="LabFoundry">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/static/brand/labfoundry-mark.svg">
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
@@ -19,19 +17,18 @@
         <div class="brand login-brand">
           {% include "partials/brand_mark.html" %}
           <span>
-            <strong>LabFoundry</strong>
-            <small>Infrastructure appliance</small>
+            <strong>Certificate Request Portal</strong>
+            <small>LabFoundry Certificate Authority</small>
           </span>
         </div>
-        <img class="login-graphic" src="/static/brand/labfoundry-appliance-graphic.svg" alt="">
-        <h1>Sign in to the appliance</h1>
-        <p class="muted">Local admin access is enabled for the MVP scaffold. OIDC provider wiring is scaffolded for a later slice.</p>
+        <h1>Sign in to request certificates</h1>
+        <p class="muted">Use a certificate operator account to submit certificate requests and manage request revocation.</p>
         {% if error %}
           <div class="alert error">{{ error }}</div>
         {% endif %}
-        <form class="form-stack" action="/login" method="post">
+        <form class="form-stack" action="/requests/login" method="post">
           <input type="hidden" name="csrf" value="{{ csrf_token }}">
-          <input type="hidden" name="next" value="{{ return_to or '/' }}">
+          <input type="hidden" name="next" value="{{ return_to or '/requests' }}">
           <label>
             <span>Username</span>
             <input name="username" autocomplete="username" required autofocus>
@@ -42,7 +39,7 @@
           </label>
           <button class="button primary" type="submit">Sign in</button>
         </form>
-        <p class="hint">Development default: admin / labfoundry-admin. Appliance images use the bootstrap admin password set during image build.</p>
+        <p><a class="text-link" href="/ca">Back to trust material</a></p>
       </section>
     </main>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>

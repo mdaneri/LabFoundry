@@ -164,6 +164,10 @@ def render_public_services_nginx_config(
             lines.extend(
                 [
                     "",
+                    *_proxy_location("= /requests/login", upstream_host, upstream_port),
+                    "",
+                    *_proxy_location("= /requests/logout", upstream_host, upstream_port),
+                    "",
                     *_proxy_location("/ca", upstream_host, upstream_port),
                     "",
                     *_proxy_location("/requests", upstream_host, upstream_port),

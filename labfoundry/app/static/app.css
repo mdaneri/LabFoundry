@@ -152,6 +152,32 @@ textarea {
   margin-top: 14px;
 }
 
+.public-portal-shell {
+  min-height: 100vh;
+}
+
+.public-portal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  padding: 14px 22px;
+  background: #f8fafc;
+}
+
+.public-portal-header .brand {
+  padding: 0;
+}
+
+.public-portal-main {
+  padding: 22px;
+}
+
+.public-portal-title {
+  margin-bottom: 18px;
+}
+
 .sidebar-apply-link:hover,
 .sidebar-apply-link.active {
   border-color: #bfdbfe;
@@ -3727,6 +3753,15 @@ textarea {
 @media (max-width: 640px) {
   .main-pane {
     padding: 14px;
+  }
+
+  .public-portal-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .public-portal-main {
+    padding: 16px;
   }
 
   .topbar {

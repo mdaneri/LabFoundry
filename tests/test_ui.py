@@ -3866,15 +3866,17 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
         )
         db.commit()
 
-    redirect = client.get("/requests", follow_redirects=False)
-    assert redirect.status_code == 303
-    assert redirect.headers["location"] == "/login?next=/requests"
-    login_page = client.get(redirect.headers["location"])
+    login_page = client.get("/requests")
     assert login_page.status_code == 200
+    assert "Certificate Request Portal" in login_page.text
+    assert "Sign in to request certificates" in login_page.text
+    assert "Sign in to the appliance" not in login_page.text
+    assert 'action="/requests/login"' in login_page.text
+    assert 'action="/login"' not in login_page.text
     assert 'name="next" value="/requests"' in login_page.text
     csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     login_response = client.post(
-        "/login",
+        "/requests/login",
         data={"username": "admin", "password": "labfoundry-admin", "csrf": csrf, "next": "/requests"},
         follow_redirects=False,
     )
@@ -3891,11 +3893,20 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
     assert "CA Settings" not in page.text
     assert "labfoundry-ca.json" not in page.text
     assert "/certificate-authority" not in page.text
+    with SessionLocal() as db:
+        issued = db.execute(select(CaCertificate).where(CaCertificate.common_name == "issued.labfoundry.internal")).scalar_one()
+        certificate_id = issued.id
     portal_page = client.get("/requests", headers={"host": "ca.labfoundry.internal"})
     assert portal_page.status_code == 200
+    assert "Certificate Request Portal" in portal_page.text
     assert 'action="/requests"' in portal_page.text
+    assert 'action="/requests/logout"' in portal_page.text
+    assert f'action="/requests/certificates/{certificate_id}/revoke"' in portal_page.text
+    assert 'class="app-shell"' not in portal_page.text
+    assert 'class="sidebar"' not in portal_page.text
+    assert "Unprivileged control plane" not in portal_page.text
     assert "/certificate-authority" not in portal_page.text
-    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    csrf = portal_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     submitted = client.post(
         "/requests",
@@ -3912,16 +3923,15 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
 
     with SessionLocal() as db:
         request_row = db.execute(select(CaCertificate).where(CaCertificate.common_name == "operator-request.labfoundry.internal")).scalar_one()
-        issued = db.execute(select(CaCertificate).where(CaCertificate.common_name == "issued.labfoundry.internal")).scalar_one()
         assert request_row.status == "planned"
-        certificate_id = issued.id
 
     revoked = client.post(
-        f"/ca/certificates/{certificate_id}/revoke",
+        f"/requests/certificates/{certificate_id}/revoke",
         data={"csrf": csrf, "reason": "rotation"},
         follow_redirects=False,
     )
     assert revoked.status_code == 303
+    assert revoked.headers["location"] == "/requests"
     with SessionLocal() as db:
         issued = db.get(CaCertificate, certificate_id)
         assert issued.status == "revoked"

@@ -61,6 +61,10 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "location ^~ /static/ {" in config
     assert "location = /favicon.ico {" in config
     assert "location = /manifest.webmanifest {" in config
+    assert "location = /requests/login {" in config
+    assert "location = /requests/logout {" in config
+    assert "\n  location = /login {" not in config
+    assert "\n  location = /logout {" not in config
     assert "location /ca {" in config
     assert "location /requests {" in config
     assert "location /pxe/esxi/ks/" in config
@@ -71,6 +75,8 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "/registry" not in config
 
     registry_block = config.split("listen 192.168.88.32:80;", 1)[1]
+    assert "location = /requests/login {" not in registry_block
+    assert "location = /requests/logout {" not in registry_block
     assert "location /ca {" not in registry_block
     assert "location = /PROD" not in registry_block
     assert "location /pxe/esxi/" not in registry_block
