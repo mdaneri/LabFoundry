@@ -2063,7 +2063,7 @@ def _public_services_config_errors(path: Path) -> list[str]:
         errors.append("Public services nginx config must not expose a broad server root.")
     if "/registry" in text:
         errors.append("Public services nginx config must not add registry proxy locations.")
-    if "location ^~ /PROD/" in text:
+    if "location /PROD/" in text:
         aliases = _nginx_directive(text, "alias")
         prod_aliases = [alias for alias in aliases if alias.rstrip("/").endswith("/PROD")]
         if not prod_aliases:
@@ -2071,7 +2071,15 @@ def _public_services_config_errors(path: Path) -> list[str]:
         for alias in prod_aliases:
             if Path(alias.rstrip("/")) != VCF_DEPOT_PROD_PATH:
                 errors.append(f"Public services /PROD/ alias must point at {VCF_DEPOT_PROD_PATH}.")
-        for required in ["location = /PROD", "return 301 /PROD/;", "sendfile on;", "default_type application/octet-stream;"]:
+        for required in [
+            "location = /PROD",
+            "return 301 /PROD/;",
+            "location = /PROD/",
+            "location ~ ^/PROD/.*/$",
+            "sendfile on;",
+            "autoindex off;",
+            "default_type application/octet-stream;",
+        ]:
             if required not in text:
                 errors.append(f"Public services depot location must include {required}.")
     esxi_http_alias = ESXI_PXE_HTTP_BASE.as_posix().rstrip("/")

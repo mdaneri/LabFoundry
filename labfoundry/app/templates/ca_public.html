@@ -9,12 +9,12 @@
     <link rel="apple-touch-icon" href="/static/brand/labfoundry-mark.svg">
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/static/app.css?v=ca-portal-20260704-2">
+    <link rel="stylesheet" href="/static/app.css?v=ca-portal-20260704-6">
   </head>
   <body>
     <div class="public-portal-shell">
       <header class="public-portal-header">
-        <a class="brand" href="/ca">
+        <a class="brand" href="/">
           {% include "partials/brand_mark.html" %}
           <span>
             <strong>LabFoundry CA</strong>
@@ -68,13 +68,19 @@
               </div>
               <div class="ca-fingerprint-block">
                 <span>Fingerprint</span>
-                <strong>{{ root_fingerprint or "not generated" }}</strong>
+                <div class="ca-fingerprint-value">
+                  <strong>{{ root_fingerprint or "not generated" }}</strong>
+                  {% if root_fingerprint %}
+                    <button class="button secondary icon-button" type="button" data-copy-value="{{ root_fingerprint }}" aria-label="Copy fingerprint" title="Copy fingerprint">
+                      <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                  {% endif %}
+                </div>
               </div>
             </div>
             <div class="button-row">
               <a class="button primary {{ 'disabled' if not root_available else '' }}" href="/ca/downloads/root-ca.pem">Download root CA</a>
               <a class="button secondary {{ 'disabled' if not root_available else '' }}" href="/ca/downloads/ca-bundle.pem">Download CA bundle</a>
-              <a class="button ghost" href="/requests">Request certificate</a>
             </div>
           </div>
 
@@ -92,7 +98,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=ca-portal-20260704-2"></script>
+    <script src="/static/app.js?v=ca-portal-20260704-6"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
   </body>
 </html>

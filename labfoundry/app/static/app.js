@@ -615,7 +615,9 @@ function copyTextWithTextareaFallback(value) {
   textarea.style.left = "-9999px";
   textarea.style.top = "0";
   document.body.appendChild(textarea);
+  textarea.focus({ preventScroll: true });
   textarea.select();
+  textarea.setSelectionRange(0, value.length);
   const copied = document.execCommand("copy");
   textarea.remove();
   if (!copied) {
@@ -640,6 +642,27 @@ async function copyTextToClipboard(text, successMessage = "Copied") {
   showTransientGridStatus(successMessage);
 }
 
+function selectCopyButtonFallbackText(button) {
+  const valueElement = button.closest(".ca-fingerprint-value")?.querySelector("strong") || button;
+  const selection = window.getSelection();
+  if (!selection || !valueElement) {
+    return false;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(valueElement);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return !selection.isCollapsed;
+}
+
+async function copyValueButtonText(button) {
+  try {
+    await copyTextToClipboard(button.dataset.copyValue || button.textContent || "");
+  } catch {
+    showTransientGridStatus(selectCopyButtonFallbackText(button) ? "Selected" : "Copy failed");
+  }
+}
+
 function initializeCopyValueButtons(root = document) {
   if (!(root instanceof Document || root instanceof HTMLElement)) {
     return;
@@ -649,15 +672,22 @@ function initializeCopyValueButtons(root = document) {
       return;
     }
     button.dataset.copyInitialized = "1";
-    button.addEventListener("click", async () => {
-      try {
-        await copyTextToClipboard(button.dataset.copyValue || button.textContent || "");
-      } catch {
-        showTransientGridStatus("Copy failed");
-      }
-    });
+    button.addEventListener("click", () => copyValueButtonText(button));
   });
 }
+
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  const button = target.closest("[data-copy-value]");
+  if (!(button instanceof HTMLButtonElement) || button.dataset.copyInitialized === "1") {
+    return;
+  }
+  event.preventDefault();
+  copyValueButtonText(button);
+});
 
 function showDhcpReservationError(message) {
   showDhcpReservationMessage(message, "error");

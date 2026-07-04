@@ -71,7 +71,11 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "alias /var/lib/labfoundry/pxe/http/esxi/;" in config
     assert "location = /PROD" in config
     assert "return 301 /PROD/;" in config
+    assert "location = /PROD/ {" in config
+    assert "location ~ ^/PROD/.*/$ {" in config
+    assert "location /PROD/ {" in config
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in config
+    assert "autoindex off;" in config
     assert "/registry" not in config
 
     registry_block = config.split("listen 192.168.88.32:80;", 1)[1]

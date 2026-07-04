@@ -13,6 +13,7 @@ from ipaddress import IPv4Address, IPv4Network, ip_address, ip_interface, ip_net
 from pathlib import Path, PurePosixPath
 from secrets import token_urlsafe
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
@@ -2542,7 +2543,18 @@ def public_service_directory_context(db: Session, binding: dict[str, str]) -> di
         "public_interface": binding,
         "public_services": services,
         "public_service_count": len(services),
+        "public_ca_service_available": any(service.get("id") == "ca" for service in services),
+        "public_github_url": "https://github.com/mdaneri/LabFoundry",
+        "current_version_info": current_version_info(),
     }
+
+
+def request_allows_public_service(db: Session, request: Request, service_id: str) -> bool:
+    binding = request_host_interface_binding(request_host_name(request), db)
+    if not binding or binding.get("role") == "management":
+        return False
+    services = public_service_directory_context(db, binding)["public_services"]
+    return any(service.get("id") == service_id for service in services)
 
 
 def is_ca_portal_host(request: Request, db: Session) -> bool:
@@ -5246,10 +5258,84 @@ def root(
 ) -> HTMLResponse | RedirectResponse:
     binding = request_host_interface_binding(request_host_name(request), db)
     if binding and binding.get("role") != "management":
-        return render(request, "public_service_home.html", public_service_directory_context(db, binding))
+        return render(request, "public_service_home.html", {"identity": identity, **public_service_directory_context(db, binding)})
     if not identity:
         return RedirectResponse("/login", status_code=303)
     return RedirectResponse("/dashboard", status_code=303)
+
+
+def _format_file_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+def _depot_browser_context(db: Session, depot_path: str = "") -> dict[str, Any]:
+    settings = get_vcf_offline_depot_settings_row(db)
+    root = (Path(settings.depot_store_path) / "PROD").resolve(strict=False)
+    relative_parts = [part for part in PurePosixPath(depot_path or "").parts if part not in {"", "."}]
+    if any(part == ".." for part in relative_parts):
+        raise HTTPException(status_code=404, detail="Depot path not found")
+    current = root.joinpath(*relative_parts).resolve(strict=False)
+    try:
+        current.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Depot path not found") from exc
+    if not current.exists() or not current.is_dir():
+        raise HTTPException(status_code=404, detail="Depot path not found")
+
+    entries: list[dict[str, str]] = []
+    for child in sorted(current.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+        child_relative = child.relative_to(root).as_posix()
+        is_dir = child.is_dir()
+        href = "/PROD/" + quote(child_relative, safe="/")
+        if is_dir:
+            href += "/"
+        stat = child.stat()
+        modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        entries.append(
+            {
+                "name": child.name + ("/" if is_dir else ""),
+                "href": href,
+                "kind": "Directory" if is_dir else "File",
+                "pill": "muted" if is_dir else "good",
+                "size": "-" if is_dir else _format_file_size(stat.st_size),
+                "modified": modified.strftime("%Y-%m-%d %H:%M UTC"),
+            }
+        )
+
+    relative_path = PurePosixPath(*relative_parts).as_posix() if relative_parts else ""
+    parent_href = ""
+    if relative_parts:
+        parent_path = PurePosixPath(*relative_parts[:-1]).as_posix() if len(relative_parts) > 1 else ""
+        parent_href = "/PROD/" + (quote(parent_path, safe="/") + "/" if parent_path else "")
+    return {
+        "depot_path": "/PROD/" + (relative_path + "/" if relative_path else ""),
+        "depot_entries": entries,
+        "depot_parent_href": parent_href,
+    }
+
+
+@router.get("/PROD", response_model=None)
+def public_depot_redirect() -> RedirectResponse:
+    return RedirectResponse("/PROD/", status_code=301)
+
+
+@router.get("/PROD/", response_class=HTMLResponse, response_model=None)
+@router.get("/PROD/{depot_path:path}", response_class=HTMLResponse, response_model=None)
+def public_depot_browser(
+    request: Request,
+    depot_path: str = "",
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    if not request_allows_public_service(db, request, "vcf_offline_depot"):
+        raise HTTPException(status_code=404, detail="Depot path not found")
+    if depot_path and not depot_path.endswith("/"):
+        raise HTTPException(status_code=404, detail="Depot path not found")
+    return render(request, "depot_browser.html", _depot_browser_context(db, depot_path.rstrip("/")))
 
 
 @router.get("/login", response_class=HTMLResponse, response_model=None)
@@ -7833,7 +7919,7 @@ def ca_request_portal_login(
 def ca_request_portal_logout(request: Request, csrf: str = Form(...), next: str = Form("/requests")) -> RedirectResponse:
     verify_csrf(request, csrf)
     request.session.clear()
-    return RedirectResponse("/ca" if next == "/ca" else "/requests", status_code=303)
+    return RedirectResponse(next if next in {"/", "/ca"} else "/requests", status_code=303)
 
 
 def _stage_ca_certificate_request(

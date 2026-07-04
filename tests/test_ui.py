@@ -3712,15 +3712,22 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert "LabFoundry Certificate Authority" in page.text
     assert "LabFoundry CA" in page.text
     assert "Public trust portal" in page.text
+    assert 'class="brand" href="/"' in page.text
     assert "LabFoundry Internal Root CA" in page.text
     assert "abc123" in page.text
     assert "ca-fingerprint-block" in page.text
+    assert 'data-copy-value="abc123"' in page.text
+    assert "Copy fingerprint" in page.text
     assert "ca.labfoundry.internal" in page.text
     assert "/ca/downloads/root-ca.pem" in page.text
     assert 'href="/requests"' in page.text
+    assert page.text.count('href="/requests"') == 1
     assert 'href="/ca/login"' in page.text
     assert 'data-history-back' in page.text
     assert "Trust Material" not in page.text
+    assert "Appliance Information" not in page.text
+    assert "https://github.com/mdaneri/LabFoundry" not in page.text
+    assert 'href="/openapi.json"' not in page.text
     assert "/certificate-authority" not in page.text
     assert "/appliance-apply" not in page.text
 
@@ -3752,6 +3759,9 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert ca_host_home.status_code == 200
     assert "LabFoundry Public Services" in ca_host_home.text
     assert "Certificate Authority" in ca_host_home.text
+    assert 'class="public-portal-shell"' in ca_host_home.text
+    assert 'class="app-shell"' not in ca_host_home.text
+    assert 'class="sidebar"' not in ca_host_home.text
     assert "/certificate-authority" not in ca_host_home.text
 
     ca_ip_home = client.get("/", headers={"host": "192.168.87.32"})
@@ -3759,6 +3769,18 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert "LabFoundry Public Services" in ca_ip_home.text
     assert "Certificate Authority" in ca_ip_home.text
     assert "/ca/downloads/root-ca.pem" not in ca_ip_home.text
+    assert "Appliance Information" not in ca_ip_home.text
+    assert 'href="/ca/login"' in ca_ip_home.text
+    assert ">Login<" in ca_ip_home.text
+    assert "https://github.com/mdaneri/LabFoundry" in ca_ip_home.text
+    assert 'href="/openapi.json"' in ca_ip_home.text
+    assert 'href="/requests"' not in ca_ip_home.text
+    assert "Request certificate" not in ca_ip_home.text
+    assert ca_ip_home.text.index("https://github.com/mdaneri/LabFoundry") > ca_ip_home.text.index('href="/ca/login"')
+    assert ca_ip_home.text.index("https://github.com/mdaneri/LabFoundry") > ca_ip_home.text.index("Public Services")
+    assert 'class="public-portal-shell"' in ca_ip_home.text
+    assert 'class="app-shell"' not in ca_ip_home.text
+    assert 'class="sidebar"' not in ca_ip_home.text
     assert "/certificate-authority" not in ca_ip_home.text
 
     ca_ipv6_home = client.get("/", headers={"host": "[fd00:87::32]"})
@@ -3777,11 +3799,17 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert "PRIVATE KEY" not in root.text
 
 
-def test_public_service_home_is_scoped_to_called_ip(client):
+def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import CaSettings, PhysicalInterface, Setting, VcfOfflineDepotSettings, VcfPrivateRegistrySettings
+
+    depot_store = tmp_path / "depot"
+    prod_root = depot_store / "PROD"
+    component_dir = prod_root / "COMP"
+    component_dir.mkdir(parents=True)
+    (component_dir / "manifest.json").write_text('{"depot": true}\n', encoding="utf-8")
 
     with SessionLocal() as db:
         eth0 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
@@ -3810,6 +3838,7 @@ def test_public_service_home_is_scoped_to_called_ip(client):
         depot_settings.enabled = True
         depot_settings.listen_interface = "eth2"
         depot_settings.listen_address = "192.168.87.32"
+        depot_settings.depot_store_path = str(depot_store)
 
         registry_settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one()
         registry_settings.enabled = True
@@ -3840,6 +3869,16 @@ def test_public_service_home_is_scoped_to_called_ip(client):
     assert "ESXi PXE" in page.text
     assert 'href="/PROD/"' in page.text
     assert 'href="/pxe/esxi/"' in page.text
+    assert "Appliance Information" not in page.text
+    assert 'href="/ca/login"' in page.text
+    assert ">Login<" in page.text
+    assert "https://github.com/mdaneri/LabFoundry" in page.text
+    assert 'href="/openapi.json"' in page.text
+    assert 'href="/requests"' not in page.text
+    assert "Request certificate" not in page.text
+    assert 'class="public-portal-shell"' in page.text
+    assert 'class="app-shell"' not in page.text
+    assert 'class="sidebar"' not in page.text
     assert "VCF Private Registry" not in page.text
     assert "/registry" not in page.text
 
@@ -3849,6 +3888,24 @@ def test_public_service_home_is_scoped_to_called_ip(client):
     assert 'href="https://registry.labfoundry.internal:9443"' in registry_page.text
     assert "Certificate Authority" not in registry_page.text
     assert "VCF Offline Depot" not in registry_page.text
+
+    depot_browser = client.get("/PROD/", headers={"host": "192.168.87.32"})
+    assert depot_browser.status_code == 200
+    assert "VCF Offline Depot" in depot_browser.text
+    assert "Index of /PROD/" not in depot_browser.text
+    assert 'class="public-portal-shell"' in depot_browser.text
+    assert 'href="/PROD/COMP/"' in depot_browser.text
+
+    depot_subdir = client.get("/PROD/COMP/", headers={"host": "192.168.87.32"})
+    assert depot_subdir.status_code == 200
+    assert 'href="/PROD/COMP/manifest.json"' in depot_subdir.text
+    assert "../" in depot_subdir.text
+
+    depot_file = client.get("/PROD/COMP/manifest.json", headers={"host": "192.168.87.32"})
+    assert depot_file.status_code == 404
+
+    unrelated_depot = client.get("/PROD/", headers={"host": "192.168.88.32"})
+    assert unrelated_depot.status_code == 404
 
     management_ip_home = client.get("/", headers={"host": "192.168.167.10"}, follow_redirects=False)
     assert management_ip_home.status_code == 303
@@ -3871,6 +3928,9 @@ def test_public_service_home_empty_state_for_non_management_ip(client):
     page = client.get("/", headers={"host": "192.168.87.32"})
     assert page.status_code == 200
     assert "No public services on this interface" in page.text
+    assert 'class="public-portal-shell"' in page.text
+    assert 'class="app-shell"' not in page.text
+    assert ">Login<" not in page.text
 
 
 def test_certificate_operator_uses_request_page_without_console_access(client):
@@ -3930,6 +3990,7 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
     portal_page = client.get("/requests", headers={"host": "ca.labfoundry.internal"})
     assert portal_page.status_code == 200
     assert "Certificate Request Portal" in portal_page.text
+    assert 'class="brand" href="/"' in portal_page.text
     assert 'action="/requests"' in portal_page.text
     assert 'action="/requests/logout"' in portal_page.text
     assert 'data-history-back' in portal_page.text

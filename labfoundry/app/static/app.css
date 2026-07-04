@@ -152,6 +152,10 @@ textarea {
   margin-top: 14px;
 }
 
+.ca-home-hero .button-row {
+  margin-top: 14px;
+}
+
 .ca-trust-grid {
   display: grid;
   grid-template-columns: minmax(220px, 1.4fr) minmax(120px, 0.7fr) minmax(120px, 0.7fr);
@@ -190,12 +194,24 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.ca-fingerprint-value {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .ca-fingerprint-block strong {
+  flex: 1 1 auto;
   font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 13px;
   font-weight: 700;
+  min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.ca-fingerprint-block .icon-button {
+  flex: 0 0 auto;
 }
 
 .public-portal-shell {
@@ -227,12 +243,68 @@ textarea {
   margin: 0;
 }
 
+.button-icon {
+  display: block;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .public-portal-main {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 67px);
   padding: 22px;
 }
 
 .public-portal-title {
   margin-bottom: 18px;
+}
+
+.public-info-footnote {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding: 22px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.public-info-footnote a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #475569;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.public-info-footnote a:hover,
+.public-info-footnote a:focus-visible {
+  color: var(--accent-dark);
+}
+
+.public-info-link-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.public-info-link-icon path:not(:first-child) {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .sidebar-apply-link:hover,
