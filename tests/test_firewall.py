@@ -133,6 +133,28 @@ def test_ca_portal_firewall_interfaces_include_non_management_addresses_only():
     assert targets == ["eth1", "eth2", "eth3.10"]
 
 
+def test_ca_portal_firewall_interfaces_exclude_trunk_parents():
+    interfaces = [
+        PhysicalInterface(name="eth1", role="access", mode="trunk", ip_cidr="192.168.65.1/24", mac_address="00:50:56:00:00:11"),
+        PhysicalInterface(name="eth2", role="access", mode="access", ip_cidr="192.168.87.32/24", mac_address="00:50:56:00:00:12"),
+    ]
+    vlans = [
+        VlanInterface(name="eth1.50", parent_interface="eth1", vlan_id=50, role="access", ip_cidr="192.168.50.1/24", enabled=True),
+    ]
+
+    targets = ca_portal_firewall_interfaces(
+        interfaces,
+        vlans,
+        {
+            "eth1": ["192.168.65.0/24"],
+            "eth2": ["192.168.87.0/24"],
+            "eth1.50": ["192.168.50.0/24"],
+        },
+    )
+
+    assert targets == ["eth2", "eth1.50"]
+
+
 def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     rules = managed_service_firewall_rules(
         dns_settings=DnsSettings(enabled=True, listen_interface="eth2.50"),
@@ -182,6 +204,24 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     assert by_name["esxi-pxe-tftp-eth2.50"].destination_port == "69"
     assert by_name["esxi-pxe-http-eth2.50"].protocol == "tcp"
     assert by_name["esxi-pxe-http-eth2.50"].destination_port == "8080"
+
+
+def test_managed_service_firewall_rules_skip_ca_portal_when_ca_disabled():
+    rules = managed_service_firewall_rules(
+        dns_settings=DnsSettings(enabled=False),
+        dhcp_settings=DhcpSettings(enabled=False),
+        dhcp_scopes=[],
+        ca_settings=CaSettings(enabled=False, listen_interface="eth2"),
+        ca_portal_interfaces=["eth2", "eth3.50"],
+        kms_settings=KmsSettings(enabled=False),
+        chrony_settings=ChronySettings(enabled=False),
+        vcf_backup_settings=VcfBackupSettings(enabled=False),
+        vcf_depot_settings=VcfOfflineDepotSettings(enabled=False),
+        vcf_registry_settings=VcfPrivateRegistrySettings(enabled=False),
+        interface_networks={"eth0": "192.168.49.0/24", "eth2": "192.168.87.0/24", "eth3.50": "192.168.50.0/24"},
+    )
+
+    assert {rule.name for rule in rules} == {"mgmt-console"}
 
 
 def test_managed_service_firewall_rules_use_assigned_source_group():

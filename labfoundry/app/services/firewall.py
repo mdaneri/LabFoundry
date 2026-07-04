@@ -19,6 +19,7 @@ from labfoundry.app.models import (
     VlanInterface,
 )
 from labfoundry.app.services.dnsmasq import dhcp_scope_address_family, split_interfaces
+from labfoundry.app.services.networking import normalize_interface_mode
 
 
 FIREWALL_DIRECTIONS = ["input", "forward", "output"]
@@ -171,19 +172,20 @@ def managed_service_firewall_rules(
     ]
     rules.extend(dns_firewall_rules(dns_settings, interface_networks, source_groups_by_id, source_group_assignments))
     rules.extend(dhcp_firewall_rules(dhcp_settings, dhcp_scopes))
-    ca_interfaces = ca_portal_interfaces if ca_portal_interfaces is not None else split_interfaces(ca_settings.listen_interface)
-    for index, interface_name in enumerate(ca_interfaces, start=1):
-        rules.append(
-            _service_firewall_rule(
-                name=f"ca-portal-{interface_name}",
-                service="CA portal",
-                interface_name=interface_name,
-                source=_managed_rule_source("ca-portal", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
-                protocol="tcp",
-                ports="80,443",
-                priority=55 + index,
+    if ca_settings.enabled:
+        ca_interfaces = ca_portal_interfaces if ca_portal_interfaces is not None else split_interfaces(ca_settings.listen_interface)
+        for index, interface_name in enumerate(ca_interfaces, start=1):
+            rules.append(
+                _service_firewall_rule(
+                    name=f"ca-portal-{interface_name}",
+                    service="CA portal",
+                    interface_name=interface_name,
+                    source=_managed_rule_source("ca-portal", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                    protocol="tcp",
+                    ports="80,443",
+                    priority=55 + index,
+                )
             )
-        )
     if kms_settings.enabled:
         for index, interface_name in enumerate(split_interfaces(kms_settings.listen_interface), start=1):
             rules.append(
@@ -378,7 +380,7 @@ def ca_portal_firewall_interfaces(
     for interface in interfaces:
         if interface.oper_state == "missing" or interface.name not in interface_networks:
             continue
-        if (interface.role or "").strip().lower() == "management":
+        if normalize_interface_mode(interface.mode) == "trunk" or (interface.role or "").strip().lower() == "management":
             continue
         targets.append(interface.name)
     for vlan in vlans:

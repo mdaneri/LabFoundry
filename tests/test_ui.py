@@ -3695,7 +3695,7 @@ def test_public_ca_root_page_is_unauthenticated(client):
         settings.root_certificate_pem = "-----BEGIN CERTIFICATE-----\npublic-root\n-----END CERTIFICATE-----\n"
         settings.root_fingerprint = "abc123"
         settings.listen_interface = "eth2"
-        settings.listen_address = "192.168.87.32"
+        settings.listen_address = "192.168.87.32\nfd00:87::32"
         db.add(settings)
         eth0 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
         eth0.role = "management"
@@ -3703,6 +3703,7 @@ def test_public_ca_root_page_is_unauthenticated(client):
         eth2 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
         eth2.role = "access"
         eth2.ip_cidr = "192.168.87.32/24"
+        eth2.ipv6_cidr = "fd00:87::32/64"
         db.commit()
 
     page = client.get("/ca")
@@ -3725,6 +3726,11 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert ca_ip_home.status_code == 200
     assert "LabFoundry Certificate Authority" in ca_ip_home.text
     assert "/certificate-authority" not in ca_ip_home.text
+
+    ca_ipv6_home = client.get("/", headers={"host": "[fd00:87::32]"})
+    assert ca_ipv6_home.status_code == 200
+    assert "LabFoundry Certificate Authority" in ca_ipv6_home.text
+    assert "/certificate-authority" not in ca_ipv6_home.text
 
     management_ip_home = client.get("/", headers={"host": "192.168.167.10"}, follow_redirects=False)
     assert management_ip_home.status_code == 303

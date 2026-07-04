@@ -2400,7 +2400,12 @@ def safe_login_next(value: str | None) -> str:
 
 
 def request_host_name(request: Request) -> str:
-    return (request.headers.get("host") or "").split(":", 1)[0].strip().strip(".").lower()
+    raw_host = (request.headers.get("host") or "").strip().lower()
+    if raw_host.startswith("["):
+        closing_bracket = raw_host.find("]")
+        if closing_bracket != -1:
+            return raw_host[1:closing_bracket].strip().strip(".")
+    return raw_host.split(":", 1)[0].strip().strip(".")
 
 
 def interface_address(raw_cidr: str | None) -> str:
