@@ -6964,9 +6964,19 @@ function initializeVcfDepotProfilesTable() {
 function updateVcfDepotSummary(form, payload = {}) {
   const portInput = form.querySelector('input[name="port"]');
   const hostnameInput = form.querySelector('input[name="hostname"]');
+  const userSelect = form.querySelector('select[name="http_user_id"]');
+  const unauthenticatedInput = form.querySelector('input[name="allow_unauthenticated_access"]');
   const { interfaceLabel: bindInterfaceLabel, address, addressLabel, addresses } = serviceBindSelection(form, payload);
   const port = payload.port || portInput?.value || "443";
   const hostname = payload.hostname || hostnameInput?.value || "";
+  const selectedUsername =
+    userSelect instanceof HTMLSelectElement
+      ? (userSelect.selectedOptions[0]?.textContent || "").replace(/\s+\(disabled\)\s*$/, "").trim()
+      : "";
+  const allowUnauthenticated =
+    payload.allow_unauthenticated_access !== undefined
+      ? Boolean(payload.allow_unauthenticated_access)
+      : unauthenticatedInput instanceof HTMLInputElement && unauthenticatedInput.checked;
   const endpointValue = payload.endpoint || (port === "443" || port === 443 ? hostname : `${hostname}:${port}`);
   const endpoint = document.querySelector("[data-vcf-depot-endpoint]");
   const interfaceLabel = document.querySelector("[data-vcf-depot-interface]");
@@ -6977,6 +6987,7 @@ function updateVcfDepotSummary(form, payload = {}) {
   const toolUploadActions = document.querySelectorAll("[data-vcf-depot-tool-upload-action]");
   const toolUploadNames = document.querySelectorAll("[data-vcf-depot-tool-upload-name]");
   const toolResetPanels = document.querySelectorAll("[data-vcf-depot-tool-reset-panel], [data-vcf-depot-tool-reset-action]");
+  const accessLabel = document.querySelector("[data-vcf-depot-access]");
   const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
   const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
   const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
@@ -6994,6 +7005,9 @@ function updateVcfDepotSummary(form, payload = {}) {
         storePath.textContent = payload.depot_store_path;
       }
     });
+  }
+  if (accessLabel instanceof HTMLElement && (payload.allow_unauthenticated_access !== undefined || payload.http_username !== undefined || selectedUsername)) {
+    accessLabel.textContent = allowUnauthenticated ? "unauthenticated" : payload.http_username || selectedUsername || "user required";
   }
   if (payload.tool_archive_name !== undefined) {
     const toolAvailable = Boolean(payload.tool_archive_name);
@@ -7067,6 +7081,8 @@ function updateVcfDepotSummary(form, payload = {}) {
     listen_address: address,
     listen_addresses: addresses,
     port,
+    http_username: payload.http_username || selectedUsername,
+    allow_unauthenticated_access: allowUnauthenticated,
     server_certificate: payload.server_certificate || hostname,
   };
   updateVcfDepotHttpsPreview(livePreviewPayload);
@@ -7144,24 +7160,45 @@ function updateVcfDepotHttpsPreview(payload = {}) {
   const listenLines = (listenAddresses.length ? listenAddresses : ["0.0.0.0"]).map((listenAddress) => `  listen ${listenAddress}:${port} ssl;`);
   const depotStorePath = payload.depot_store_path || document.querySelector("[data-vcf-depot-store]")?.textContent || "/mnt/labfoundry-vcf-offline-depot";
   const certificateName = payload.server_certificate || hostname;
+  const username = payload.http_username || "vcf-depot";
+  const authLines = payload.allow_unauthenticated_access
+    ? []
+    : [
+        '    auth_basic "LabFoundry VCF Offline Depot";',
+        "    auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;",
+      ];
   httpsPreview.textContent = [
     "# Managed by LabFoundry. Local changes may be overwritten.",
     "# Dry-run preview of desired HTTPS endpoint for the VCF Offline Depot.",
     `# Depot store: ${depotStorePath}`,
-    `# VCF endpoint: https://${endpoint}/`,
+    `# VCF endpoint: https://${endpoint}/PROD/`,
+    `# LabFoundry VCF Offline Depot unauthenticated access: ${payload.allow_unauthenticated_access ? "true" : "false"}`,
+    `# LabFoundry VCF Offline Depot user: ${payload.allow_unauthenticated_access ? "none" : username}`,
     "",
     "server {",
     ...listenLines,
     `  server_name ${hostname};`,
-    `  root ${depotStorePath};`,
-    "  sendfile on;",
-    "  tcp_nopush on;",
-    "  directio 8m;",
-    "  autoindex on;",
-    "  types { }",
-    "  default_type application/octet-stream;",
     `  ssl_certificate /etc/labfoundry/vcf-offline-depot/certs/${certificateName}.crt;`,
     `  ssl_certificate_key /etc/labfoundry/vcf-offline-depot/certs/${certificateName}.key;`,
+    "",
+    "  location = /PROD {",
+    "    return 301 /PROD/;",
+    "  }",
+    "",
+    "  location ^~ /PROD/ {",
+    ...authLines,
+    `    alias ${depotStorePath.replace(/\/+$/, "")}/PROD/;`,
+    "    sendfile on;",
+    "    tcp_nopush on;",
+    "    directio 8m;",
+    "    autoindex on;",
+    "    types { }",
+    "    default_type application/octet-stream;",
+    "  }",
+    "",
+    "  location / {",
+    "    return 404;",
+    "  }",
     "}",
   ].join("\n") + "\n";
   highlightConfigPreviewElement(httpsPreview);

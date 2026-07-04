@@ -322,6 +322,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_DEFAULT_CONFIG_PATH,
     VCF_DEPOT_DEFAULT_HOSTNAME,
     VCF_DEPOT_DEFAULT_STORE_PATH,
+    VCF_DEPOT_DEFAULT_USERNAME,
     VCF_DEPOT_ESX_DISABLED_PLATFORMS,
     VCF_DEPOT_EXTRACT_DIR,
     VCF_DEPOT_LEGACY_STORE_PATH,
@@ -600,6 +601,21 @@ def disable_default_vcf_backup_user_when_service_off(db: Session, settings: VcfB
     return True
 
 
+def disable_default_vcf_depot_user_when_service_off(db: Session, settings: VcfOfflineDepotSettings, *, actor: str | None = None) -> bool:
+    if settings.enabled or not settings.http_user_id:
+        return False
+    user = db.get(User, settings.http_user_id)
+    if user is None or user.username != VCF_DEPOT_DEFAULT_USERNAME or not user.enabled:
+        return False
+    user.enabled = False
+    user.os_sync_status = "pending"
+    user.os_unlock_requested_at = None
+    if actor:
+        revoke_user_tokens(db, user, actor)
+    db.add(user)
+    return True
+
+
 def get_dns_settings_row(db: Session) -> DnsSettings:
     settings = db.execute(select(DnsSettings)).scalar_one_or_none()
     if settings is None:
@@ -839,11 +855,20 @@ def get_vcf_private_registry_settings_row(db: Session) -> VcfPrivateRegistrySett
     return settings
 
 
-def get_vcf_offline_depot_settings_row(db: Session) -> VcfOfflineDepotSettings:
-    settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one_or_none()
+def get_vcf_offline_depot_settings_row(db: Session, *, reconcile_default_user: bool = True) -> VcfOfflineDepotSettings:
+    settings = db.execute(select(VcfOfflineDepotSettings).options(selectinload(VcfOfflineDepotSettings.http_user))).scalar_one_or_none()
+    default_user = db.execute(select(User).where(User.username == VCF_DEPOT_DEFAULT_USERNAME).order_by(User.username)).scalar_one_or_none()
     if settings is None:
-        settings = VcfOfflineDepotSettings()
+        settings = VcfOfflineDepotSettings(http_user_id=default_user.id if default_user else None)
         db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    elif not settings.http_user_id and default_user is not None:
+        settings.http_user_id = default_user.id
+        settings.updated_at = utcnow()
+        db.commit()
+        db.refresh(settings)
+    if reconcile_default_user and disable_default_vcf_depot_user_when_service_off(db, settings):
         db.commit()
         db.refresh(settings)
     if settings.depot_store_path == VCF_DEPOT_LEGACY_STORE_PATH:
@@ -1910,6 +1935,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         db.commit()
         db.refresh(settings)
     profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
+    users = db.execute(select(User).order_by(User.username)).scalars().all()
     all_service_interfaces = service_bind_options(db)
     available_interfaces = vcf_depot_service_bind_options(db)
     management_interface_names = {
@@ -1927,6 +1953,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         bool(secrets["download_token_present"]),
         bool(secrets["activation_code_present"]),
         management_interface_names,
+        users=users,
     )
     depot_cert_path, depot_key_path, _depot_chain_path = ca_managed_certificate_paths(db, "vcf_offline_depot:https")
     if settings.enabled and get_ca_settings_row(db).enabled and not ca_certificate_available(db, "vcf_offline_depot:https"):
@@ -1936,6 +1963,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
     return {
         "vcf_depot_settings": settings,
         "vcf_depot_settings_json": vcf_depot_settings_to_dict(settings),
+        "vcf_depot_users": users,
         "vcf_depot_profiles": profiles,
         "vcf_depot_profile_rows": [vcf_depot_profile_to_dict(profile) for profile in profiles],
         "vcf_depot_available_interfaces": available_interfaces,
@@ -8825,6 +8853,8 @@ def update_vcf_offline_depot_settings_from_ui(
     listen_interface: str = Form(""),
     listen_address: str = Form(""),
     port: int = Form(443),
+    http_user_id: str = Form(""),
+    allow_unauthenticated_access: str | None = Form(None),
     server_certificate: str | None = Form(None),
     telemetry_choice: str | None = Form(None),
     telemetry_enabled: str | None = Form(None),
@@ -8836,8 +8866,11 @@ def update_vcf_offline_depot_settings_from_ui(
     db: Session = Depends(get_db),
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
-    settings = get_vcf_offline_depot_settings_row(db)
+    settings = get_vcf_offline_depot_settings_row(db, reconcile_default_user=False)
     previous_hostname = settings.hostname
+    user_id = int(http_user_id) if str(http_user_id).strip() else None
+    if user_id and not db.get(User, user_id):
+        raise HTTPException(status_code=400, detail="Selected VCF Offline Depot HTTP user does not exist.")
     selected_interfaces, selected_addresses = resolve_service_bind_targets(
         db,
         [*listen_interfaces, listen_interface],
@@ -8853,6 +8886,8 @@ def update_vcf_offline_depot_settings_from_ui(
     settings.listen_interface = selected_interfaces
     settings.listen_address = selected_addresses
     settings.port = port
+    settings.http_user_id = user_id
+    settings.allow_unauthenticated_access = allow_unauthenticated_access == "on"
     settings.server_certificate = settings.hostname
     settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
     settings.config_path = VCF_DEPOT_DEFAULT_CONFIG_PATH
@@ -8881,11 +8916,26 @@ def update_vcf_offline_depot_settings_from_ui(
         action="upload_vcf_depot_activation_code",
     )
     settings.updated_at = utcnow()
+    selected_user = db.get(User, user_id) if user_id else None
+    if settings.enabled and selected_user and selected_user.username == VCF_DEPOT_DEFAULT_USERNAME and not selected_user.enabled:
+        if has_pending_os_password(selected_user) or selected_user.os_password_applied_at:
+            selected_user.enabled = True
+            selected_user.os_sync_status = "pending"
+            db.add(selected_user)
+    disabled_default_user = disable_default_vcf_depot_user_when_service_off(db, settings, actor=identity.username)
     dns_record_action = ensure_dns_for_vcf_offline_depot(db, settings, identity.username, previous_hostname=previous_hostname)
     db.commit()
     if uploaded_token_name or uploaded_activation_name:
         stage_vcf_depot_runtime_secrets_after_upload(db)
     record_audit(db, actor=identity.username, action="update_vcf_offline_depot_settings", resource_type="vcf_offline_depot", resource_id=str(settings.id))
+    if disabled_default_user:
+        record_audit(
+            db,
+            actor=identity.username,
+            action="disable_vcf_depot_default_user",
+            resource_type="user",
+            resource_id=str(user_id or ""),
+        )
 
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         context = vcf_offline_depot_context(db)
@@ -8908,6 +8958,8 @@ def update_vcf_offline_depot_settings_from_ui(
                 "listen_interfaces": split_interfaces(saved_settings.listen_interface),
                 "listen_addresses": split_addresses(saved_settings.listen_address),
                 "port": saved_settings.port,
+                "http_username": saved_settings.http_user.username if saved_settings.http_user else "",
+                "allow_unauthenticated_access": saved_settings.allow_unauthenticated_access,
                 "server_certificate": saved_settings.server_certificate,
                 "depot_store_path": saved_settings.depot_store_path,
                 "tool_archive_name": uploaded_archive_name or Path(saved_settings.tool_archive_path).name if saved_settings.tool_archive_path else "",
@@ -9276,6 +9328,7 @@ def start_vcf_depot_profile_download_from_ui(
         bool(secrets["download_token_present"]),
         bool(secrets["activation_code_present"]),
         management_interface_names,
+        users=db.execute(select(User).order_by(User.username)).scalars().all(),
     )
     if validation_errors:
         raise HTTPException(status_code=400, detail=" ".join(validation_errors))

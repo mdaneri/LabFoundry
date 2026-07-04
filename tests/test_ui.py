@@ -2595,6 +2595,7 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "Temp Password" not in users.text
     assert "admin" in users.text
     assert "vcf-backup" in users.text
+    assert "vcf-depot" in users.text
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
@@ -4605,6 +4606,8 @@ def make_vcfdt_archive(path, version="9.1.0.0100.25429019"):
 
 
 def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_path, monkeypatch):
+    import re
+
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -4683,6 +4686,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "<span>Telemetry</span>" in page.text
     assert 'name="telemetry_enabled"' in page.text
     assert 'name="telemetry_choice"' not in page.text
+    assert "<span>HTTP user</span>" in page.text
+    assert "vcf-depot (disabled)" in page.text
+    assert "<span>Unauthenticated access</span>" in page.text
+    assert 'name="allow_unauthenticated_access"' in page.text
     assert "stacked-service-bind-editor" in page.text
     assert "depot-port-telemetry-row" not in page.text
     assert 'data-vcf-depot-software-depot-cell' in page.text
@@ -4766,6 +4773,12 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     make_vcfdt_archive(archive_path)
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    depot_user_id = re.search(r'<option value="(\d+)" selected>vcf-depot(?: \(disabled\))?</option>', page.text).group(1)
+    reset = client.post(
+        f"/users/{depot_user_id}/password",
+        data={"password": "Depot-user1!", "confirm_password": "Depot-user1!", "csrf": csrf},
+    )
+    assert reset.status_code in {200, 303}
     response = client.post(
         "/vcf-offline-depot/settings",
         data={
@@ -4773,6 +4786,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
             "hostname": "depot.labfoundry.internal",
             "listen_interface": "eth2",
             "port": "443",
+            "http_user_id": depot_user_id,
             "csrf": csrf,
         },
         files={
@@ -4788,6 +4802,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["listen_addresses"] == ["192.168.50.1"]
     assert payload["endpoint"] == "depot.labfoundry.internal"
     assert payload["server_certificate"] == "depot.labfoundry.internal"
+    assert payload["http_username"] == "vcf-depot"
+    assert payload["allow_unauthenticated_access"] is False
     assert payload["telemetry_choice"] == "DISABLE"
     assert payload["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
     assert payload["tool_version"] == "9.1.0.0100.25429019"
@@ -4799,6 +4815,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["valid"] is True
     assert payload["dns_record_action"] == "created"
     assert "listen 192.168.50.1:443 ssl;" in payload["https_config_preview"]
+    assert 'auth_basic "LabFoundry VCF Offline Depot";' in payload["https_config_preview"]
+    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in payload["https_config_preview"]
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in payload["https_config_preview"]
     assert "root /mnt/labfoundry-vcf-offline-depot;" not in payload["https_config_preview"]
     assert "--depot-store=/mnt/labfoundry-vcf-offline-depot" in payload["command_preview"]
@@ -4815,6 +4833,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
             "listen_interfaces": ["eth0", "eth2"],
             "listen_addresses": ["192.168.49.1", "192.168.50.1"],
             "port": "443",
+            "allow_unauthenticated_access": "on",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -4824,6 +4843,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert multi_payload["listen_interfaces"] == ["eth2"]
     assert multi_payload["listen_addresses"] == ["192.168.50.1"]
     assert multi_payload["valid"] is True
+    assert multi_payload["allow_unauthenticated_access"] is True
+    assert "auth_basic" not in multi_payload["https_config_preview"]
     assert "listen 192.168.49.1:443 ssl;" not in multi_payload["https_config_preview"]
     assert "listen 192.168.50.1:443 ssl;" in multi_payload["https_config_preview"]
 
@@ -4855,6 +4876,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
             "hostname": "offline-depot.labfoundry.internal",
             "listen_interface": "eth2",
             "port": "443",
+            "http_user_id": depot_user_id,
             "telemetry_enabled": "on",
             "csrf": csrf,
         },
@@ -4867,6 +4889,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert moved_payload["telemetry_choice"] == "ENABLE"
     assert moved_payload["listen_address"] == "192.168.50.1"
     assert moved_payload["valid"] is True
+    assert moved_payload["http_username"] == "vcf-depot"
     assert moved_payload["dns_record_action"] == "created+removed-old"
     with SessionLocal() as db:
         old_dns_record = db.execute(
@@ -4927,6 +4950,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert status.json()["activation_code_present"] is False
     assert status.json()["application_properties_present"] is True
     assert status.json()["application_properties_source"] == "operator saved"
+    assert status.json()["http_username"] == "vcf-depot"
+    assert status.json()["allow_unauthenticated_access"] is False
     assert "super-secret" not in status.text
     assert "secret-activation-property" not in status.text
     alias = client.get("/api/v1/repository/status", headers={"Authorization": f"Bearer {raw_token}"})

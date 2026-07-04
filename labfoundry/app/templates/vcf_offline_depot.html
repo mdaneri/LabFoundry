@@ -23,6 +23,11 @@
         <small>fixed volume mount</small>
       </div>
       <div class="metric">
+        <span>Access</span>
+        <strong data-vcf-depot-access>{{ "unauthenticated" if vcf_depot_settings.allow_unauthenticated_access else (vcf_depot_settings.http_user.username if vcf_depot_settings.http_user else "user required") }}</strong>
+        <small>{{ "open mirror" if vcf_depot_settings.allow_unauthenticated_access else "HTTP Basic Auth" }}</small>
+      </div>
+      <div class="metric">
         <span>VCF Download Tool</span>
         <strong data-vcf-depot-tool-version>{{ vcf_depot_settings.tool_version or "not uploaded" }}</strong>
         <small data-vcf-depot-tool-status>{{ "tool staged" if vcf_depot_settings_json.tool_archive_name else "upload required" }}</small>
@@ -189,6 +194,16 @@
           <span class="field-label"><span>HTTPS port</span><button class="help-icon" type="button" data-help="TLS port exposed for the offline depot. Port 443 is the default endpoint for VCF clients.">i</button></span>
           <input type="number" name="port" value="{{ vcf_depot_settings.port }}" min="1" max="65535">
         </label>
+        <label>
+          <span class="field-label"><span>HTTP user</span><button class="help-icon" type="button" data-help="Local LabFoundry user used for VCF Offline Depot HTTP Basic Auth. Apply Local Users after setting or resetting this user's OS password, then apply VCF Offline Depot.">i</button></span>
+          <select name="http_user_id">
+            <option value="">Select a user</option>
+            {% for user in vcf_depot_users %}
+              <option value="{{ user.id }}" {{ "selected" if vcf_depot_settings.http_user_id == user.id else "" }}>{{ user.username }}{% if not user.enabled %} (disabled){% endif %}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="switch-field"><span class="field-label"><span>Unauthenticated access</span><button class="help-icon" type="button" data-help="Serves /PROD/ without HTTP Basic Auth. Leave off for normal VCF depot access; enable only for an isolated open mirror. Host services are not changed until global appliance apply runs.">i</button></span><input class="switch-input" type="checkbox" name="allow_unauthenticated_access" {{ "checked" if vcf_depot_settings.allow_unauthenticated_access else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>Telemetry</span><button class="help-icon" type="button" data-help="When enabled, LabFoundry stages the VCF Download Tool telemetry flag as ENABLE. When off, it stages DISABLE. Host commands still run only through global appliance apply or manual profile jobs.">i</button></span><input class="switch-input" type="checkbox" name="telemetry_enabled" {{ "checked" if vcf_depot_settings.telemetry_choice == "ENABLE" else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <div class="derived-field fixed-value-field">
           <span class="field-label"><span>Depot store volume</span><button class="help-icon" type="button" data-help="Fixed appliance volume mount used as the VCFDT --depot-store and HTTPS document root. Attach or size this disk separately from the root filesystem.">i</button></span>

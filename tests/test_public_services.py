@@ -74,6 +74,8 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "location = /PROD/ {" in config
     assert "location ~ ^/PROD/.*/$ {" in config
     assert "location /PROD/ {" in config
+    assert 'auth_basic "LabFoundry VCF Offline Depot";' in config
+    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in config
     assert "autoindex off;" in config
     assert "/registry" not in config
@@ -84,3 +86,20 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "location /ca {" not in registry_block
     assert "location = /PROD" not in registry_block
     assert "location /pxe/esxi/" not in registry_block
+
+
+def test_public_services_nginx_config_respects_unauthenticated_depot_access():
+    config = render_public_services_nginx_config(
+        [
+            {
+                "interface": "eth2",
+                "role": "access",
+                "address": "192.168.87.32",
+                "services": [{"id": "vcf_offline_depot", "allow_unauthenticated_access": True}],
+            },
+        ],
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+    )
+
+    assert "location /PROD/ {" in config
+    assert "auth_basic" not in config

@@ -6,7 +6,7 @@ from typing import Any
 from labfoundry.app.models import CaSettings, PhysicalInterface, VcfOfflineDepotSettings, VcfPrivateRegistrySettings, VlanInterface
 from labfoundry.app.services.dnsmasq import split_addresses
 from labfoundry.app.services.networking import normalize_interface_role
-from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_DEFAULT_STORE_PATH, vcf_depot_endpoint
+from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_DEFAULT_STORE_PATH, VCF_DEPOT_HTPASSWD_PATH, vcf_depot_endpoint
 from labfoundry.app.services.vcf_private_registry import vcf_registry_endpoint
 
 
@@ -38,7 +38,7 @@ def public_services_for_address(
     esxi_pxe_boot: dict[str, Any] | None,
     vcf_depot_settings: VcfOfflineDepotSettings,
     vcf_registry_settings: VcfPrivateRegistrySettings,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     normalized = _normalize_address(address)
     services: list[dict[str, str]] = []
     if ca_settings.enabled and normalized in _normalized_addresses(ca_settings.listen_address):
@@ -66,6 +66,7 @@ def public_services_for_address(
                 "secondary_label": "",
                 "status": "enabled",
                 "pill": "good",
+                "allow_unauthenticated_access": vcf_depot_settings.allow_unauthenticated_access,
             }
         )
     if vcf_depot_settings.enabled and normalized in _normalized_addresses(vcf_depot_settings.listen_address):
@@ -140,7 +141,17 @@ def render_public_services_nginx_config(
     ]
     for entry in sorted(entries, key=lambda item: (str(item.get("interface") or ""), str(item.get("address") or ""))):
         address = str(entry.get("address") or "").strip()
-        services = {str(service.get("id")) for service in entry.get("services") or []}
+        service_rows = entry.get("services") or []
+        services = {str(service.get("id")) for service in service_rows}
+        vcf_depot_service = next((service for service in service_rows if str(service.get("id")) == "vcf_offline_depot"), {})
+        vcf_depot_auth_lines = (
+            []
+            if bool(vcf_depot_service.get("allow_unauthenticated_access"))
+            else [
+                '    auth_basic "LabFoundry VCF Offline Depot";',
+                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
+            ]
+        )
         if not address:
             continue
         lines.extend(
@@ -193,11 +204,12 @@ def render_public_services_nginx_config(
                     "    return 301 /PROD/;",
                     "  }",
                     "",
-                    *_proxy_location("= /PROD/", upstream_host, upstream_port),
+                    *_proxy_location("= /PROD/", upstream_host, upstream_port, extra_directives=vcf_depot_auth_lines),
                     "",
-                    *_proxy_location("~ ^/PROD/.*/$", upstream_host, upstream_port),
+                    *_proxy_location("~ ^/PROD/.*/$", upstream_host, upstream_port, extra_directives=vcf_depot_auth_lines),
                     "",
                     "  location /PROD/ {",
+                    *vcf_depot_auth_lines,
                     f"    alias {depot_store_path.rstrip('/')}/PROD/;",
                     "    sendfile on;",
                     "    tcp_nopush on;",
@@ -256,9 +268,10 @@ def _nginx_listen(address: str, port: int) -> str:
     return f"[{normalized}]:{port}" if ":" in normalized else f"{normalized}:{port}"
 
 
-def _proxy_location(path: str, upstream_host: str, upstream_port: int) -> list[str]:
+def _proxy_location(path: str, upstream_host: str, upstream_port: int, *, extra_directives: list[str] | None = None) -> list[str]:
     return [
         f"  location {path} {{",
+        *(extra_directives or []),
         f"    proxy_pass http://{upstream_host}:{upstream_port};",
         "    proxy_http_version 1.1;",
         "    proxy_set_header Host $host;",

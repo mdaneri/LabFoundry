@@ -197,16 +197,25 @@ def _ensure_sqlite_vcf_depot_columns() -> None:
     if not str(engine.url).startswith("sqlite"):
         return
     inspector = inspect(engine)
-    if "vcf_depot_download_profiles" not in inspector.get_table_names():
-        return
-    existing = {column["name"] for column in inspector.get_columns("vcf_depot_download_profiles")}
-    columns = {
-        "patches_only": "BOOLEAN DEFAULT 0",
-    }
+    table_names = inspector.get_table_names()
     with engine.begin() as connection:
-        for name, definition in columns.items():
-            if name not in existing:
-                connection.execute(text(f"ALTER TABLE vcf_depot_download_profiles ADD COLUMN {name} {definition}"))
+        if "vcf_depot_download_profiles" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("vcf_depot_download_profiles")}
+            columns = {
+                "patches_only": "BOOLEAN DEFAULT 0",
+            }
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE vcf_depot_download_profiles ADD COLUMN {name} {definition}"))
+        if "vcf_offline_depot_settings" in table_names:
+            depot_existing = {column["name"] for column in inspector.get_columns("vcf_offline_depot_settings")}
+            depot_columns = {
+                "http_user_id": "INTEGER",
+                "allow_unauthenticated_access": "BOOLEAN DEFAULT 0",
+            }
+            for name, definition in depot_columns.items():
+                if name not in depot_existing:
+                    connection.execute(text(f"ALTER TABLE vcf_offline_depot_settings ADD COLUMN {name} {definition}"))
 
 
 def _ensure_sqlite_esxi_pxe_columns() -> None:

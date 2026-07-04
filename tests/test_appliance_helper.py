@@ -1884,6 +1884,78 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
     assert ["systemctl", "enable", "--now", "nginx"] in commands
 
 
+def test_vcf_offline_depot_helper_writes_htpasswd_for_authenticated_site(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "vcf-offline-depot"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    site_dir = managed_root / "nginx" / "sites.d"
+    cert_path = managed_root / "vcf-offline-depot" / "certs" / "depot.crt"
+    key_path = managed_root / "vcf-offline-depot" / "certs" / "depot.key"
+    htpasswd_path = managed_root / "nginx" / "htpasswd" / "vcf-offline-depot.htpasswd"
+    shadow_path = tmp_path / "shadow"
+    nginx_include = tmp_path / "nginx" / "conf.d" / "labfoundry.conf"
+    apply_dir.mkdir(parents=True)
+    cert_path.parent.mkdir(parents=True)
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    shadow_path.write_text("vcf-depot:$6$rounds=5000$salty$hashvalue:19000:0:99999:7:::\n", encoding="utf-8")
+    config_path = apply_dir / "labfoundry-vcf-offline-depot.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "# Managed by LabFoundry. Local changes may be overwritten.",
+                "# LabFoundry VCF Offline Depot unauthenticated access: false",
+                "# LabFoundry VCF Offline Depot user: vcf-depot",
+                "server {",
+                "  listen 192.168.50.1:443 ssl;",
+                "  server_name depot.labfoundry.internal;",
+                f"  ssl_certificate {cert_path};",
+                f"  ssl_certificate_key {key_path};",
+                "",
+                "  location = /PROD {",
+                "    return 301 /PROD/;",
+                "  }",
+                "",
+                "  location ^~ /PROD/ {",
+                '    auth_basic "LabFoundry VCF Offline Depot";',
+                f"    auth_basic_user_file {htpasswd_path};",
+                "    alias /mnt/labfoundry-vcf-offline-depot/PROD/;",
+                "    sendfile on;",
+                "    default_type application/octet-stream;",
+                "  }",
+                "",
+                "  location / {",
+                "    return 404;",
+                "  }",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "NGINX_CONF_INCLUDE_PATH", nginx_include)
+    monkeypatch.setattr(helper, "NGINX_SITES_DIR", site_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_SITE_PATH", site_dir / "vcf-offline-depot.conf")
+    monkeypatch.setattr(helper, "VCF_DEPOT_HTPASSWD_PATH", htpasswd_path)
+    monkeypatch.setattr(helper, "VCF_DEPOT_SHADOW_PATH", shadow_path)
+    monkeypatch.setattr(helper, "_prepare_vcf_depot_web_tree", lambda text: None)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/nginx" if command == "nginx" else None)
+    monkeypatch.setattr(helper.shutil, "chown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda username: object())
+    monkeypatch.setattr(helper.grp, "getgrnam", lambda group: (_ for _ in ()).throw(KeyError(group)))
+    monkeypatch.setattr(helper, "_run", lambda command: subprocess.CompletedProcess(command, 0, "", ""))
+
+    assert helper._handle_vcf_offline_depot("apply-https", [str(config_path)]) == 0
+
+    assert htpasswd_path.read_text(encoding="utf-8") == "vcf-depot:$6$rounds=5000$salty$hashvalue\n"
+    site_text = (site_dir / "vcf-offline-depot.conf").read_text(encoding="utf-8")
+    assert 'auth_basic "LabFoundry VCF Offline Depot";' in site_text
+    assert f"auth_basic_user_file {htpasswd_path};" in site_text
+
+
 def test_vcf_offline_depot_helper_prepares_prod_tree_permissions(monkeypatch, tmp_path):
     helper = load_helper_module()
     prod_path = tmp_path / "depot" / "PROD"
