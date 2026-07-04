@@ -1134,6 +1134,16 @@ textarea {
   font-size: 12px;
 }
 
+.public-service-card {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.public-service-card > div:first-child {
+  min-width: 0;
+  flex: 1;
+}
+
 .service-control-grid {
   display: grid;
   gap: 8px;

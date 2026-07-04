@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block page_title %}Public Services{% endblock %}
+{% block content %}
+<section class="ca-home-layout">
+  <div class="panel ca-home-hero">
+    <div class="panel-head">
+      <div>
+        <p class="kicker">LabFoundry Public Services</p>
+        <h2>{{ public_interface.address }}</h2>
+        <p class="muted">{{ public_interface.interface }} / {{ public_interface.role }}</p>
+      </div>
+      <span class="status-pill {{ 'good' if public_service_count else 'muted' }}">{{ public_service_count }} {{ "service" if public_service_count == 1 else "services" }}</span>
+    </div>
+  </div>
+
+  {% if public_services %}
+    <div class="service-grid">
+      {% for service in public_services %}
+        <div class="service-card public-service-card">
+          <div>
+            <strong>{{ service.name }}</strong>
+            <small>{{ service.summary }}</small>
+          </div>
+          <span class="status-pill {{ service.pill }}">{{ service.status }}</span>
+          <div class="button-row">
+            <a class="button secondary compact-button" href="{{ service.href }}">Open</a>
+            {% if service.secondary_href %}
+              <a class="button ghost compact-button" href="{{ service.secondary_href }}">{{ service.secondary_label }}</a>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="panel empty-state">
+      <h2>No public services on this interface</h2>
+      <p class="muted">This non-management address is reachable, but no enabled public service is bound to it.</p>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

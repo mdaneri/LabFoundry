@@ -226,6 +226,29 @@ def managed_service_firewall_rules(
                     priority=70 + index,
                 )
             )
+    public_service_interfaces: list[str] = []
+    if ca_settings.enabled:
+        public_service_interfaces.extend(ca_portal_interfaces if ca_portal_interfaces is not None else split_interfaces(ca_settings.listen_interface))
+    if vcf_depot_settings.enabled:
+        public_service_interfaces.extend(split_interfaces(vcf_depot_settings.listen_interface))
+    if vcf_registry_settings.enabled:
+        public_service_interfaces.extend(split_interfaces(vcf_registry_settings.listen_interface))
+    if esxi_pxe_boot and esxi_pxe_boot.get("enabled"):
+        public_service_interfaces.extend(split_interfaces(str(esxi_pxe_boot.get("listen_interface") or "")))
+    for index, interface_name in enumerate(_ordered_unique(public_service_interfaces), start=1):
+        if interface_name not in interface_networks:
+            continue
+        rules.append(
+            _service_firewall_rule(
+                name=f"public-services-{interface_name}",
+                service="Public service directory",
+                interface_name=interface_name,
+                source=_managed_rule_source("public-services", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                protocol="tcp",
+                ports="80,443",
+                priority=75 + index,
+            )
+        )
     if vcf_depot_settings.enabled:
         for index, interface_name in enumerate(split_interfaces(vcf_depot_settings.listen_interface), start=1):
             rules.append(
@@ -737,6 +760,14 @@ def _networks_from_cidrs(*values: str | None) -> list[str]:
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "dhcp-scope"
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    ordered: list[str] = []
+    for value in values:
+        if value and value not in ordered:
+            ordered.append(value)
+    return ordered
 
 
 def _source_group(group_id: str, name: str, entries: list[str], description: str, *, builtin: bool = False) -> dict:

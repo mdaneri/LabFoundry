@@ -98,6 +98,112 @@ def network_config_text(
     return "\n".join(lines)
 
 
+def public_services_config_text() -> str:
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "# IP-scoped public service front door for non-management interfaces.",
+            "server {",
+            "  listen 192.168.87.32:80;",
+            "  server_name _;",
+            "  location = / {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "  }",
+            "  location /ca {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "  }",
+            "  location /requests {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "  }",
+            "  location /pxe/esxi/ks/ {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "  }",
+            "  location /pxe/esxi/ {",
+            "    alias /var/lib/labfoundry/pxe/http/esxi/;",
+            "    autoindex off;",
+            "  }",
+            "  location = /PROD {",
+            "    return 301 /PROD/;",
+            "  }",
+            "  location ^~ /PROD/ {",
+            "    alias /mnt/labfoundry-vcf-offline-depot/PROD/;",
+            "    sendfile on;",
+            "    tcp_nopush on;",
+            "    directio 8m;",
+            "    autoindex on;",
+            "    types { }",
+            "    default_type application/octet-stream;",
+            "  }",
+            "  location / {",
+            "    return 404;",
+            "  }",
+            "}",
+            "",
+        ]
+    )
+
+
+def test_public_services_helper_validates_staged_nginx_config(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "public-services"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-public-services.conf"
+    config_path.write_text(public_services_config_text(), encoding="utf-8")
+    monkeypatch.setattr(helper, "PUBLIC_SERVICES_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_PROD_PATH", Path("/mnt/labfoundry-vcf-offline-depot/PROD"))
+
+    result = helper._handle_public_services("validate", [str(config_path)])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "validation ok" in captured.out
+
+
+def test_public_services_helper_rejects_broad_root_and_registry_proxy(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "public-services"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-public-services.conf"
+    config_path.write_text(
+        public_services_config_text().replace("  location / {", "  root /mnt/labfoundry-vcf-offline-depot;\n  location /registry {\n    proxy_pass http://127.0.0.1:8080;\n  }\n  location / {"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(helper, "PUBLIC_SERVICES_APPLY_DIR", apply_dir)
+
+    result = helper._handle_public_services("validate", [str(config_path)])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "must not expose a broad server root" in captured.err
+    assert "must not add registry proxy locations" in captured.err
+
+
+def test_public_services_helper_apply_installs_site(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "public-services"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-public-services.conf"
+    config_text = public_services_config_text()
+    config_path.write_text(config_text, encoding="utf-8")
+    site_path = tmp_path / "sites" / "public-services.conf"
+    calls: list[tuple[Path, str]] = []
+
+    def fake_install(path, text):
+        calls.append((path, text))
+        return 0
+
+    monkeypatch.setattr(helper, "PUBLIC_SERVICES_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "NGINX_PUBLIC_SERVICES_SITE_PATH", site_path)
+    monkeypatch.setattr(helper, "_install_nginx_site", fake_install)
+
+    result = helper._handle_public_services("apply", [str(config_path)])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert calls == [(site_path, config_text)]
+    assert "apply complete" in captured.out
+
+
 def wan_config_text(
     *,
     bad_nat_source: bool = False,

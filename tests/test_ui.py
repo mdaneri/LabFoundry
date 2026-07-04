@@ -3692,6 +3692,7 @@ def test_public_ca_root_page_is_unauthenticated(client):
 
     with SessionLocal() as db:
         settings = db.execute(select(CaSettings)).scalar_one()
+        settings.enabled = True
         settings.root_certificate_pem = "-----BEGIN CERTIFICATE-----\npublic-root\n-----END CERTIFICATE-----\n"
         settings.root_fingerprint = "abc123"
         settings.listen_interface = "eth2"
@@ -3719,17 +3720,21 @@ def test_public_ca_root_page_is_unauthenticated(client):
 
     ca_host_home = client.get("/", headers={"host": "ca.labfoundry.internal"})
     assert ca_host_home.status_code == 200
-    assert "LabFoundry Certificate Authority" in ca_host_home.text
+    assert "LabFoundry Public Services" in ca_host_home.text
+    assert "Certificate Authority" in ca_host_home.text
     assert "/certificate-authority" not in ca_host_home.text
 
     ca_ip_home = client.get("/", headers={"host": "192.168.87.32"})
     assert ca_ip_home.status_code == 200
-    assert "LabFoundry Certificate Authority" in ca_ip_home.text
+    assert "LabFoundry Public Services" in ca_ip_home.text
+    assert "Certificate Authority" in ca_ip_home.text
+    assert "/ca/downloads/root-ca.pem" not in ca_ip_home.text
     assert "/certificate-authority" not in ca_ip_home.text
 
     ca_ipv6_home = client.get("/", headers={"host": "[fd00:87::32]"})
     assert ca_ipv6_home.status_code == 200
-    assert "LabFoundry Certificate Authority" in ca_ipv6_home.text
+    assert "LabFoundry Public Services" in ca_ipv6_home.text
+    assert "Certificate Authority" in ca_ipv6_home.text
     assert "/certificate-authority" not in ca_ipv6_home.text
 
     management_ip_home = client.get("/", headers={"host": "192.168.167.10"}, follow_redirects=False)
@@ -3740,6 +3745,102 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert root.status_code == 200
     assert "public-root" in root.text
     assert "PRIVATE KEY" not in root.text
+
+
+def test_public_service_home_is_scoped_to_called_ip(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings, PhysicalInterface, Setting, VcfOfflineDepotSettings, VcfPrivateRegistrySettings
+
+    with SessionLocal() as db:
+        eth0 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
+        eth0.role = "management"
+        eth0.ip_cidr = "192.168.167.10/24"
+        eth2 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
+        eth2.role = "access"
+        eth2.mode = "access"
+        eth2.ip_cidr = "192.168.87.32/24"
+        eth3 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth3")).scalar_one_or_none()
+        if eth3 is None:
+            eth3 = PhysicalInterface(name="eth3", mac_address="00:15:5d:00:00:33", role="access", mode="access", ip_cidr="192.168.88.32/24")
+            db.add(eth3)
+        else:
+            eth3.role = "access"
+            eth3.mode = "access"
+            eth3.ip_cidr = "192.168.88.32/24"
+
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        ca_settings.enabled = True
+        ca_settings.root_certificate_pem = "-----BEGIN CERTIFICATE-----\npublic-root\n-----END CERTIFICATE-----\n"
+        ca_settings.listen_interface = "eth2"
+        ca_settings.listen_address = "192.168.87.32"
+
+        depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        depot_settings.enabled = True
+        depot_settings.listen_interface = "eth2"
+        depot_settings.listen_address = "192.168.87.32"
+
+        registry_settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one()
+        registry_settings.enabled = True
+        registry_settings.hostname = "registry.labfoundry.internal"
+        registry_settings.listen_interface = "eth3"
+        registry_settings.listen_address = "192.168.88.32"
+        registry_settings.port = 9443
+
+        for key, value in {
+            "esxi_pxe.boot.enabled": "true",
+            "esxi_pxe.boot.hostname": "esxi-pxe.labfoundry.internal",
+            "esxi_pxe.boot.listen_interface": "eth2",
+            "esxi_pxe.boot.listen_address": "192.168.87.32",
+        }.items():
+            row = db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none()
+            if row is None:
+                row = Setting(key=key, value=value)
+            else:
+                row.value = value
+            db.add(row)
+        db.commit()
+
+    page = client.get("/", headers={"host": "192.168.87.32"})
+    assert page.status_code == 200
+    assert "LabFoundry Public Services" in page.text
+    assert "Certificate Authority" in page.text
+    assert "VCF Offline Depot" in page.text
+    assert "ESXi PXE" in page.text
+    assert 'href="/PROD/"' in page.text
+    assert 'href="/pxe/esxi/"' in page.text
+    assert "VCF Private Registry" not in page.text
+    assert "/registry" not in page.text
+
+    registry_page = client.get("/", headers={"host": "192.168.88.32"})
+    assert registry_page.status_code == 200
+    assert "VCF Private Registry" in registry_page.text
+    assert 'href="https://registry.labfoundry.internal:9443"' in registry_page.text
+    assert "Certificate Authority" not in registry_page.text
+    assert "VCF Offline Depot" not in registry_page.text
+
+    management_ip_home = client.get("/", headers={"host": "192.168.167.10"}, follow_redirects=False)
+    assert management_ip_home.status_code == 303
+    assert management_ip_home.headers["location"] == "/login"
+
+
+def test_public_service_home_empty_state_for_non_management_ip(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+
+    with SessionLocal() as db:
+        eth2 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
+        eth2.role = "access"
+        eth2.mode = "access"
+        eth2.ip_cidr = "192.168.87.32/24"
+        db.commit()
+
+    page = client.get("/", headers={"host": "192.168.87.32"})
+    assert page.status_code == 200
+    assert "No public services on this interface" in page.text
 
 
 def test_certificate_operator_uses_request_page_without_console_access(client):

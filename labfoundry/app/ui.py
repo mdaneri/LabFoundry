@@ -183,6 +183,13 @@ from labfoundry.app.services.networking import (
     validate_network_state,
     vlan_interface_to_dict,
 )
+from labfoundry.app.services.public_services import (
+    PUBLIC_SERVICES_STAGED_CONFIG_PATH,
+    public_service_entries,
+    public_service_interface_entries,
+    public_services_for_address,
+    render_public_services_nginx_config,
+)
 from labfoundry.app.services.monitoring import monitor_payload
 from labfoundry.app.services.routes_wan import (
     WAN_CONFIG_PATH,
@@ -2378,6 +2385,31 @@ def ca_context(db: Session) -> dict:
     }
 
 
+def public_services_context(db: Session) -> dict[str, Any]:
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlans = db.execute(select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    ca_settings = get_ca_settings_row(db)
+    depot_settings = get_vcf_offline_depot_settings_row(db)
+    registry_settings = get_vcf_private_registry_settings_row(db)
+    esxi_boot = esxi_pxe_boot_settings(db)
+    entries = public_service_entries(
+        interfaces=interfaces,
+        vlans=vlans,
+        ca_settings=ca_settings,
+        esxi_pxe_boot=esxi_boot,
+        vcf_depot_settings=depot_settings,
+        vcf_registry_settings=registry_settings,
+    )
+    config_preview = render_public_services_nginx_config(entries, depot_store_path=depot_settings.depot_store_path)
+    return {
+        "public_service_entries": entries,
+        "public_service_config_preview": config_preview,
+        "public_service_config_path": PUBLIC_SERVICES_STAGED_CONFIG_PATH,
+        "public_service_validation_errors": [],
+        "public_service_validation_warnings": [],
+    }
+
+
 def public_ca_context(db: Session) -> dict:
     settings = get_ca_settings_row(db)
     return {
@@ -2434,6 +2466,83 @@ def request_host_interface_role(request_host: str, db: Session) -> str:
         if request_host in addresses:
             return normalize_interface_role(vlan.role)
     return ""
+
+
+def request_host_interface_binding(request_host: str, db: Session) -> dict[str, str] | None:
+    if not request_host:
+        return None
+    entries = public_service_interface_entries(
+        db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all(),
+        db.execute(select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all(),
+    )
+    by_address = {entry["address"].lower(): entry for entry in entries}
+    try:
+        parsed_host = str(ip_address(request_host.strip("[]"))).lower()
+    except ValueError:
+        parsed_host = ""
+    if parsed_host and parsed_host in by_address:
+        return by_address[parsed_host]
+
+    hostname = normalize_dns_hostname(request_host)
+    candidate_addresses: list[str] = []
+    if hostname:
+        records = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.enabled.is_(True),
+                DnsRecord.hostname == hostname,
+                DnsRecord.record_type.in_(["A", "AAAA"]),
+            )
+        ).scalars()
+        candidate_addresses.extend(record.address for record in records)
+
+        appliance_settings = get_appliance_settings_row(db)
+        if hostname == normalize_dns_hostname(appliance_settings.fqdn):
+            management = management_interface_context(db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all())
+            candidate_addresses.append(management.get("ip", ""))
+
+        ca_settings = get_ca_settings_row(db)
+        if hostname == normalize_dns_hostname(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME):
+            candidate_addresses.extend(split_addresses(ca_settings.listen_address))
+
+        depot_settings = get_vcf_offline_depot_settings_row(db)
+        if hostname == normalize_dns_hostname(depot_settings.hostname):
+            candidate_addresses.extend(split_addresses(depot_settings.listen_address))
+
+        registry_settings = get_vcf_private_registry_settings_row(db)
+        if hostname == normalize_dns_hostname(registry_settings.hostname):
+            candidate_addresses.extend(split_addresses(registry_settings.listen_address))
+
+        esxi_boot = esxi_pxe_boot_settings(db)
+        if hostname == normalize_dns_hostname(str(esxi_boot.get("hostname") or "")):
+            candidate_addresses.extend(split_addresses(str(esxi_boot.get("listen_address") or "")))
+
+    for candidate in candidate_addresses:
+        try:
+            normalized = str(ip_address(candidate)).lower()
+        except ValueError:
+            continue
+        if normalized in by_address:
+            return by_address[normalized]
+    return None
+
+
+def public_service_directory_context(db: Session, binding: dict[str, str]) -> dict[str, Any]:
+    ca_settings = get_ca_settings_row(db)
+    depot_settings = get_vcf_offline_depot_settings_row(db)
+    registry_settings = get_vcf_private_registry_settings_row(db)
+    esxi_boot = esxi_pxe_boot_settings(db)
+    services = public_services_for_address(
+        binding["address"],
+        ca_settings=ca_settings,
+        esxi_pxe_boot=esxi_boot,
+        vcf_depot_settings=depot_settings,
+        vcf_registry_settings=registry_settings,
+    )
+    return {
+        "public_interface": binding,
+        "public_services": services,
+        "public_service_count": len(services),
+    }
 
 
 def is_ca_portal_host(request: Request, db: Session) -> bool:
@@ -3677,6 +3786,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "vcf_backups",
     "vcf_offline_depot",
     "vcf_private_registry",
+    "public_services",
 }
 SECRET_LINE_PATTERN = re.compile(
     r"(rootpw|password|passwd|token|secret|credential|private[_.-]?key|robot[_.-]?account|ca[_.-]?bundle[_.-]?pem|activation[_.-]?code|license|ipxe[_.-]?script)",
@@ -4178,6 +4288,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     vcf_backup = vcf_backup_context(db)
     vcf_depot = vcf_offline_depot_context(db)
     vcf_registry = vcf_private_registry_context(db)
+    public_services = public_services_context(db)
 
     network_baseline = baselines.get("network")
     network_removed_vlans = removed_network_vlan_entries(
@@ -4391,6 +4502,21 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             config_path=vcf_registry["vcf_registry_settings"].config_path,
             config_preview=f"{vcf_registry['vcf_registry_harbor_config_preview']}\n\n# Bundle relocation preview\n{vcf_registry['vcf_registry_relocation_preview']}",
             baseline=baselines.get("vcf_private_registry"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="public_services",
+            label="Public Services",
+            page_url="/appliance-apply",
+            context=public_services,
+            summary=[
+                f"{len(public_services['public_service_entries'])} non-management addresses",
+                f"{sum(len(entry['services']) for entry in public_services['public_service_entries'])} public service bindings",
+            ],
+            validation_errors=public_services["public_service_validation_errors"],
+            validation_warnings=public_services["public_service_validation_warnings"],
+            config_path=public_services["public_service_config_path"],
+            config_preview=public_services["public_service_config_preview"],
+            baseline=baselines.get("public_services"),
         ),
     ]
 
@@ -4985,6 +5111,16 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
                 lambda: adapter.relocate_vcf_private_registry_bundles(settings.config_path),
             ]
         )
+    elif unit_id == "public_services":
+        config_path = context["public_service_config_path"]
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(PUBLIC_SERVICES_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_public_services_config(config_path),
+                lambda: adapter.apply_public_services_config(config_path),
+            ]
+        )
     else:
         raise HTTPException(status_code=400, detail=f"Unknown apply unit {unit_id}.")
 
@@ -5108,8 +5244,9 @@ def root(
     identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse | RedirectResponse:
-    if is_ca_portal_host(request, db):
-        return render(request, "ca_public.html", public_ca_context(db))
+    binding = request_host_interface_binding(request_host_name(request), db)
+    if binding and binding.get("role") != "management":
+        return render(request, "public_service_home.html", public_service_directory_context(db, binding))
     if not identity:
         return RedirectResponse("/login", status_code=303)
     return RedirectResponse("/dashboard", status_code=303)
