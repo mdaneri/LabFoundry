@@ -32,9 +32,9 @@ from labfoundry.app.models import utcnow
 
 LOGGER = logging.getLogger("labfoundry.networking")
 NETWORK_INVENTORY_CLEANUP_WARNING_KEY = "network.inventory_cleanup.warning"
-INTERFACE_ROLES = ["management", "access", "wan", "unused"]
+INTERFACE_ROLES = ["management", "access", "route", "unused"]
 INTERFACE_MODES = ["access", "trunk", "unused"]
-VLAN_ROLES = ["access", "management", "services", "storage", "wan"]
+VLAN_ROLES = ["access", "management", "services", "storage", "route"]
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,17 @@ def normalize_interface_mode(mode: str | None) -> str:
     return "unused"
 
 
+def normalize_interface_role(role: str | None) -> str:
+    value = (role or "unused").strip().lower()
+    if value == "wan":
+        return "route"
+    if value in {"management", "access", "route", "services", "storage", "unused"}:
+        return value
+    return "unused"
+
+
 def physical_interface_to_dict(interface: PhysicalInterface, vlan_count: int = 0) -> dict:
+    role = normalize_interface_role(interface.role)
     return {
         "id": interface.id,
         "name": interface.name,
@@ -76,7 +86,7 @@ def physical_interface_to_dict(interface: PhysicalInterface, vlan_count: int = 0
         "admin_state": interface.admin_state,
         "admin_up": interface.admin_state == "up",
         "oper_state": interface.oper_state,
-        "role": interface.role,
+        "role": role,
         "mode": normalize_interface_mode(interface.mode),
         "inventory_source": interface.inventory_source,
         "desired_state_source": interface.desired_state_source,
@@ -87,6 +97,7 @@ def physical_interface_to_dict(interface: PhysicalInterface, vlan_count: int = 0
 
 
 def vlan_interface_to_dict(vlan: VlanInterface, parent_missing: bool = False) -> dict:
+    role = normalize_interface_role(vlan.role)
     return {
         "id": vlan.id,
         "name": vlan.name,
@@ -95,14 +106,14 @@ def vlan_interface_to_dict(vlan: VlanInterface, parent_missing: bool = False) ->
         "ip_cidr": vlan.ip_cidr or "",
         "ipv6_cidr": vlan.ipv6_cidr or "",
         "mtu": vlan.mtu,
-        "role": vlan.role,
+        "role": role,
         "enabled": False if parent_missing else vlan.enabled,
         "parent_missing": parent_missing,
     }
 
 
 def trunk_parent_option(interface: PhysicalInterface) -> dict[str, str]:
-    label_parts = [interface.name, interface.role, "trunk"]
+    label_parts = [interface.name, normalize_interface_role(interface.role), "trunk"]
     if interface.inventory_source == "host":
         label_parts.append("host NIC")
     if interface.mac_address:
@@ -688,10 +699,11 @@ def render_network_config(
         if interface.oper_state == "missing":
             continue
         mode = normalize_interface_mode(interface.mode)
+        role = normalize_interface_role(interface.role)
         lines.extend(
             [
                 f"interface={interface.name}",
-                f"  role={interface.role}",
+                f"  role={role}",
                 f"  mode={mode}",
                 f"  ip_cidr={interface.ip_cidr or ''}",
                 f"  ipv6_cidr={interface.ipv6_cidr or ''}",
@@ -703,6 +715,7 @@ def render_network_config(
     for vlan in vlans:
         if not vlan.enabled:
             continue
+        role = normalize_interface_role(vlan.role)
         lines.extend(
             [
                 f"vlan={vlan.name}",
@@ -711,7 +724,7 @@ def render_network_config(
                 f"  ip_cidr={vlan.ip_cidr or ''}",
                 f"  ipv6_cidr={vlan.ipv6_cidr or ''}",
                 f"  mtu={vlan.mtu}",
-                f"  role={vlan.role}",
+                f"  role={role}",
             ]
         )
     return "\n".join(lines).strip() + "\n"
@@ -727,7 +740,8 @@ def validate_network_state(
     for interface in interfaces:
         if interface.oper_state == "missing":
             continue
-        if interface.role not in INTERFACE_ROLES:
+        role = normalize_interface_role(interface.role)
+        if role not in INTERFACE_ROLES:
             errors.append(f"Interface {interface.name} role {interface.role} is not supported.")
         mode = normalize_interface_mode(interface.mode)
         if mode not in INTERFACE_MODES:
@@ -759,7 +773,8 @@ def validate_network_state(
             errors.append(f"VLAN {vlan.name} ID must be between 1 and 4094.")
         if vlan.mtu < 576 or vlan.mtu > 9000:
             errors.append(f"VLAN {vlan.name} MTU must be between 576 and 9000.")
-        if vlan.role not in VLAN_ROLES:
+        role = normalize_interface_role(vlan.role)
+        if role not in VLAN_ROLES:
             errors.append(f"VLAN {vlan.name} role {vlan.role} is not supported.")
         if not vlan.ip_cidr and not vlan.ipv6_cidr:
             errors.append(f"VLAN {vlan.name} must include IPv4 CIDR, IPv6 CIDR, or both.")

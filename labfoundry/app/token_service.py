@@ -9,7 +9,10 @@ from labfoundry.app.security import (
     create_jwt,
     default_expiration,
     hash_token,
-    role_allows_scopes,
+    primary_role,
+    roles_allow_scopes,
+    user_roles,
+    normalize_roles,
     scopes_from_string,
 )
 from fastapi import HTTPException
@@ -26,6 +29,7 @@ def token_to_response(token: ApiToken) -> ApiTokenResponse:
         owner_username=token.owner_username,
         token_type=token.token_type,
         role=token.role,
+        roles=normalize_roles([token.role]),
         scopes=sorted(scopes_from_string(token.scopes)),
         created_at=token.created_at,
         expires_at=token.expires_at,
@@ -49,7 +53,8 @@ def create_token_for_user(
     unknown_scopes = requested - ALL_SCOPES
     if unknown_scopes:
         raise HTTPException(status_code=422, detail=f"Unknown scopes: {', '.join(sorted(unknown_scopes))}")
-    if not role_allows_scopes(user.role, requested):
+    roles = user_roles(user)
+    if not roles_allow_scopes(roles, requested):
         raise HTTPException(status_code=403, detail="Requested scopes exceed the user's role")
     expires_at = create.expires_at or default_expiration(settings)
     if expires_at <= utcnow():
@@ -57,7 +62,8 @@ def create_token_for_user(
     jti = uuid4().hex
     raw_token = create_jwt(
         subject=user.username,
-        role=user.role,
+        role=primary_role(roles),
+        roles=roles,
         scopes=sorted(requested),
         jti=jti,
         expires_at=expires_at,
@@ -69,7 +75,7 @@ def create_token_for_user(
         description=create.description,
         owner_user_id=user.id,
         owner_username=user.username,
-        role=user.role,
+        role=primary_role(roles),
         scopes=" ".join(sorted(requested)),
         expires_at=expires_at,
         token_hash=hash_token(raw_token),

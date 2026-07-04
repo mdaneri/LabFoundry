@@ -33,6 +33,42 @@ def test_login_and_dashboard_render(client):
     assert "Users" in response.text
     assert "LDAP / Users" not in response.text
     assert 'href="/monitor"' in response.text
+    nav = response.text.split('<nav class="nav-stack"', 1)[1].split("</nav>", 1)[0]
+    for section in ["Overview", "Appliance Setup", "Core Services", "Identity &amp; Trust", "VCF Workflows", "Operations"]:
+        assert section in nav
+    expected_nav_order = [
+        "/dashboard",
+        "/monitor",
+        "/settings",
+        "/physical-interfaces",
+        "/vlan-interfaces",
+        "/routes-wan",
+        "/firewall",
+        "/dns",
+        "/dhcp",
+        "/chrony",
+        "/authentication",
+        "/users",
+        "/certificate-authority",
+        "/kms",
+        "/esxi-pxe",
+        "/vcf-offline-depot",
+        "/vcf-private-registry",
+        "/vcf-backups",
+        "/services",
+        "/logs",
+        "/appliance-update",
+        "/backup-restore",
+    ]
+    position = -1
+    for href in expected_nav_order:
+        next_position = nav.index(f'href="{href}"')
+        assert next_position > position
+        position = next_position
+    assert "/ca/requests" not in nav
+    assert 'data-server-time' in response.text
+    assert 'title="Roles: admin">User admin</span>' in response.text
+    assert '<span class="role-chip">admin</span>' not in response.text
     assert 'href="/logs"' in response.text
     assert 'href="/audit-log"' not in response.text
     assert "cdn.tailwindcss.com" not in response.text
@@ -499,6 +535,7 @@ def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(c
             "management_upstream_port": 8000,
             "management_https_cert_path": "",
             "management_https_key_path": "",
+            "time_sync_mode": "systemd-timesyncd",
             "ntp_servers": ["time1.google.com", "time2.google.com"],
         },
         indent=2,
@@ -536,6 +573,7 @@ def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(c
     assert page.status_code == 200
     assert "2 NTP servers" not in page.text
     assert "ntp_servers" not in page.text
+    assert "time_sync_mode" not in page.text
 
 
 def test_settings_page_renders_autosave_validation_and_preview(client, monkeypatch):
@@ -570,8 +608,8 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert 'select name="service_dns_target_naming"' in response.text
     assert '<option value="ip" selected>IP address</option>' in response.text
     assert "Operational Logging" in response.text
-    assert "External NTP servers" in response.text
-    assert 'textarea name="ntp_servers"' in response.text
+    assert "External NTP servers" not in response.text
+    assert 'textarea name="ntp_servers"' not in response.text
     assert 'action="/settings/logging"' in response.text
     assert 'select name="level"' in response.text
     assert 'input class="switch-input" type="checkbox" name="syslog_enabled"' in response.text
@@ -703,7 +741,7 @@ def test_settings_page_hides_ntp_editor_when_chrony_is_enabled(client):
     assert response.status_code == 200
     assert "External NTP servers" not in response.text
     assert 'textarea name="ntp_servers"' not in response.text
-    assert 'input type="hidden" name="ntp_servers"' in response.text
+    assert 'input type="hidden" name="ntp_servers"' not in response.text
     assert '  "ntp_servers": [' not in response.text
 
 
@@ -764,11 +802,12 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     assert "app-owned appliance FQDN" in (record.description or "")
 
 
-def test_settings_autosave_updates_ntp_servers_when_chrony_is_disabled(client):
+def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import ApplianceSettings, ChronySettings, DnsSettings
+    from labfoundry.app.ui import appliance_apply_status
 
     login(client)
     with SessionLocal() as db:
@@ -780,7 +819,8 @@ def test_settings_autosave_updates_ntp_servers_when_chrony_is_disabled(client):
         db.commit()
 
     page = client.get("/settings")
-    assert 'textarea name="ntp_servers"' in page.text
+    assert "External NTP servers" not in page.text
+    assert 'textarea name="ntp_servers"' not in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
         "/settings",
@@ -796,14 +836,23 @@ def test_settings_autosave_updates_ntp_servers_when_chrony_is_disabled(client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["chrony_enabled"] is False
-    assert payload["ntp_servers"] == ["time.cloudflare.com", "192.0.2.10"]
-    assert '"time_sync_mode": "systemd-timesyncd"' in payload["config_preview"]
-    assert '"ntp_servers": [' in payload["config_preview"]
+    assert "ntp_servers" not in payload
+    assert '"time_sync_mode": "systemd-timesyncd"' not in payload["config_preview"]
+    assert '"ntp_servers": [' not in payload["config_preview"]
     assert payload["valid"] is True
 
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
-        assert settings.ntp_servers == "time.cloudflare.com\n192.0.2.10"
+        assert settings.ntp_servers != "time.cloudflare.com\n192.0.2.10"
+
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
+    assert apply_response.status_code == 200
+    assert "Appliance apply task succeeded" in apply_response.text
+
+    with SessionLocal() as db:
+        status = appliance_apply_status(db, "appliance_settings")
+        assert status["changed"] is False
+        assert "ntp_servers" not in status["config_preview"]
 
 
 def test_chrony_page_autosave_updates_desired_state_and_preview(client):
@@ -1330,6 +1379,13 @@ def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
     assert page.status_code == 200
     assert "ESXi Kickstarts" in page.text
     assert 'data-codemirror-language="labfoundry-kickstart"' in page.text
+    host_tab = page.text.index('data-tab-target="esxi-pxe-hosts-panel"')
+    kickstart_tab = page.text.index('data-tab-target="esxi-pxe-editor-panel"')
+    iso_tab = page.text.index('data-tab-target="esxi-pxe-isos-panel"')
+    assert host_tab < kickstart_tab < iso_tab
+    assert '<button class="tab-button active" type="button" role="tab" data-tab-target="esxi-pxe-hosts-panel"' in page.text
+    assert 'id="esxi-pxe-hosts-panel" class="tab-panel active" role="tabpanel">' in page.text
+    assert 'id="esxi-pxe-editor-panel" class="tab-panel" role="tabpanel" hidden' in page.text
     assert "# Sample scripted installation file" in page.text
     assert "vmaccepteula" in page.text
     assert "rootpw vmware01!" in page.text
@@ -1791,6 +1847,12 @@ def test_esxi_pxe_boot_settings_update_dnsmasq_and_apply_manifest(client):
     assert "<span>UEFI bootfile</span><strong>snponly.efi</strong>" in page.text
     assert "PXE HTTP port" in page.text
     assert "HTTP endpoint" in page.text
+    host_tab = 'data-tab-target="esxi-pxe-hosts-panel" aria-controls="esxi-pxe-hosts-panel" aria-selected="true">Host References</button>'
+    kickstart_tab = 'data-tab-target="esxi-pxe-editor-panel" aria-controls="esxi-pxe-editor-panel" aria-selected="false">Kickstart Editor</button>'
+    iso_tab = 'data-tab-target="esxi-pxe-isos-panel" aria-controls="esxi-pxe-isos-panel" aria-selected="false">Installer ISOs</button>'
+    assert page.text.index(host_tab) < page.text.index(kickstart_tab) < page.text.index(iso_tab)
+    assert 'id="esxi-pxe-hosts-panel" class="tab-panel active" role="tabpanel"' in page.text
+    assert 'id="esxi-pxe-editor-panel" class="tab-panel" role="tabpanel" hidden' in page.text
     assert "Kickstart variables" in page.text
     assert "{{host.hostname}}" in page.text
     assert "{{dhcp.ntp_servers}}" in page.text
@@ -2543,6 +2605,37 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "operator" in created.text
     assert "/bin/bash" in created.text
     assert "disabled" in created.text
+    stale_role_created = client.post(
+        "/users",
+        data={"username": "demote-me", "role": "viewer", "roles": "admin", "shell": "/sbin/nologin", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert stale_role_created.status_code == 303
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import User
+
+    with SessionLocal() as db:
+        demote_user = db.execute(select(User).where(User.username == "demote-me")).scalar_one()
+        assert "admin" in demote_user.roles_json
+        demote_user_id = demote_user.id
+    demoted = client.post(
+        f"/users/{demote_user_id}/edit",
+        data={
+            "username": "demote-me",
+            "role": "viewer",
+            "roles": "admin",
+            "roles_text": "viewer",
+            "shell": "/sbin/nologin",
+            "csrf": csrf,
+        },
+    )
+    assert demoted.status_code == 200
+    assert demoted.json()["user"]["roles"] == ["viewer"]
+    with SessionLocal() as db:
+        demote_user = db.execute(select(User).where(User.username == "demote-me")).scalar_one()
+        assert demote_user.roles_json == '["viewer"]'
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "userActionsFormatter" not in app_js.text
@@ -3007,6 +3100,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert "LABFOUNDRY_MUTATING_METHODS" in app_js.text
     assert "scheduleApplianceApplySidebarRefresh" in app_js.text
     assert 'fetch("/appliance-apply/status"' in app_js.text
+    assert "function updateServerTime" in app_js.text
+    assert "window.setInterval(load, 5000)" in app_js.text
     assert "initializeApplianceApplyProgress" in app_js.text
     assert "Submitting appliance changes" in app_js.text
     assert "Waiting for result" in app_js.text
@@ -3540,6 +3635,10 @@ def test_certificate_authority_page_renders(client):
     assert 'data-autosave-status-id="ca-settings-autosave-status"' in ca.text
     assert "Listen interfaces" in ca.text
     assert "Listen addresses" in ca.text
+    assert "Portal hostname" in ca.text
+    assert "ca.labfoundry.internal" in ca.text
+    assert "Open request portal" in ca.text
+    assert 'href="/requests"' in ca.text
     assert 'name="listen_interfaces_present"' in ca.text
     assert 'name="listen_interfaces"' in ca.text
     assert 'data-derived-listen-addresses' in ca.text
@@ -3585,6 +3684,127 @@ def test_certificate_authority_downloads_public_pems(client):
     assert "BEGIN CERTIFICATE" in bundle.text
 
 
+def test_public_ca_root_page_is_unauthenticated(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings
+
+    with SessionLocal() as db:
+        settings = db.execute(select(CaSettings)).scalar_one()
+        settings.root_certificate_pem = "-----BEGIN CERTIFICATE-----\npublic-root\n-----END CERTIFICATE-----\n"
+        settings.root_fingerprint = "abc123"
+        db.add(settings)
+        db.commit()
+
+    page = client.get("/ca")
+    assert page.status_code == 200
+    assert "LabFoundry Certificate Authority" in page.text
+    assert "LabFoundry Internal Root CA" in page.text
+    assert "abc123" in page.text
+    assert "ca.labfoundry.internal" in page.text
+    assert "/ca/downloads/root-ca.pem" in page.text
+    assert 'href="/requests"' in page.text
+    assert "/certificate-authority" not in page.text
+    assert "/appliance-apply" not in page.text
+
+    ca_host_home = client.get("/", headers={"host": "ca.labfoundry.internal"})
+    assert ca_host_home.status_code == 200
+    assert "LabFoundry Certificate Authority" in ca_host_home.text
+    assert "/certificate-authority" not in ca_host_home.text
+
+    root = client.get("/ca/downloads/root-ca.pem")
+    assert root.status_code == 200
+    assert "public-root" in root.text
+    assert "PRIVATE KEY" not in root.text
+
+
+def test_certificate_operator_uses_request_page_without_console_access(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaCertificate, Role, User, utcnow
+    from labfoundry.app.security import roles_to_json
+
+    with SessionLocal() as db:
+        admin = db.execute(select(User).where(User.username == "admin")).scalar_one()
+        admin.role = Role.CERTIFICATE_OPERATOR.value
+        admin.roles_json = roles_to_json([Role.CERTIFICATE_OPERATOR.value])
+        db.add(
+            CaCertificate(
+                common_name="issued.labfoundry.internal",
+                status="issued",
+                serial_number="10",
+                certificate_pem="-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n",
+                enabled=True,
+                issued_at=utcnow(),
+            )
+        )
+        db.commit()
+
+    redirect = client.get("/requests", follow_redirects=False)
+    assert redirect.status_code == 303
+    assert redirect.headers["location"] == "/login?next=/requests"
+    login_page = client.get(redirect.headers["location"])
+    assert login_page.status_code == 200
+    assert 'name="next" value="/requests"' in login_page.text
+    csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    login_response = client.post(
+        "/login",
+        data={"username": "admin", "password": "labfoundry-admin", "csrf": csrf, "next": "/requests"},
+        follow_redirects=False,
+    )
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/requests"
+
+    console = client.get("/certificate-authority")
+    assert console.status_code == 403
+
+    page = client.get("/ca/requests")
+    assert page.status_code == 200
+    assert "Certificate Requests" in page.text
+    assert "Submit Request" in page.text
+    assert "CA Settings" not in page.text
+    assert "labfoundry-ca.json" not in page.text
+    assert "/certificate-authority" not in page.text
+    portal_page = client.get("/requests", headers={"host": "ca.labfoundry.internal"})
+    assert portal_page.status_code == 200
+    assert 'action="/requests"' in portal_page.text
+    assert "/certificate-authority" not in portal_page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    submitted = client.post(
+        "/requests",
+        data={
+            "csrf": csrf,
+            "common_name": "operator-request.labfoundry.internal",
+            "subject_alt_names": "operator-request.labfoundry.internal",
+            "description": "operator request",
+        },
+        follow_redirects=False,
+    )
+    assert submitted.status_code == 303
+    assert submitted.headers["location"] == "/requests"
+
+    with SessionLocal() as db:
+        request_row = db.execute(select(CaCertificate).where(CaCertificate.common_name == "operator-request.labfoundry.internal")).scalar_one()
+        issued = db.execute(select(CaCertificate).where(CaCertificate.common_name == "issued.labfoundry.internal")).scalar_one()
+        assert request_row.status == "planned"
+        certificate_id = issued.id
+
+    revoked = client.post(
+        f"/ca/certificates/{certificate_id}/revoke",
+        data={"csrf": csrf, "reason": "rotation"},
+        follow_redirects=False,
+    )
+    assert revoked.status_code == 303
+    with SessionLocal() as db:
+        issued = db.get(CaCertificate, certificate_id)
+        assert issued.status == "revoked"
+        assert issued.revoked_by == "admin"
+        assert issued.revocation_reason == "rotation"
+
+
 def test_ca_apply_payload_leaves_csr_private_key_empty():
     import json
 
@@ -3624,8 +3844,8 @@ def test_certificate_authority_issues_encrypted_managed_certs_and_exports(client
     with SessionLocal() as db:
         settings = db.execute(select(CaSettings)).scalar_one()
         settings.enabled = True
-        settings.listen_interface = "eth0"
-        settings.listen_address = "192.168.49.1"
+        settings.listen_interface = "eth2"
+        settings.listen_address = "192.168.50.1"
         db.commit()
 
     login(client)
@@ -3806,10 +4026,10 @@ def test_kms_settings_accept_multiple_listen_targets(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["listen_interfaces"] == ["eth2", "eth0"]
-    assert payload["listen_addresses"] == ["192.168.50.1", "192.168.49.1"]
-    assert "# LabFoundry KMS listen interfaces: eth2, eth0" in payload["config_preview"]
-    assert "# LabFoundry KMS listen addresses: 192.168.50.1, 192.168.49.1" in payload["config_preview"]
+    assert payload["listen_interfaces"] == ["eth2"]
+    assert payload["listen_addresses"] == ["192.168.50.1"]
+    assert "# LabFoundry KMS listen interfaces: eth2" in payload["config_preview"]
+    assert "# LabFoundry KMS listen addresses: 192.168.50.1" in payload["config_preview"]
 
 
 def test_kms_enable_autocreates_ca_managed_certificate_rows(client):
@@ -4040,9 +4260,9 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
         headers={"X-LabFoundry-Autosave": "1"},
     )
     assert multi_response.status_code == 200
-    assert multi_response.json()["listen_interfaces"] == ["eth2", "eth0"]
-    assert multi_response.json()["listen_addresses"] == ["192.168.50.1", "192.168.49.1"]
-    assert "labfoundry_listen_interfaces: ['eth2', 'eth0']" in multi_response.json()["harbor_config_preview"]
+    assert multi_response.json()["listen_interfaces"] == ["eth2"]
+    assert multi_response.json()["listen_addresses"] == ["192.168.50.1"]
+    assert "labfoundry_listen_interfaces: ['eth2']" in multi_response.json()["harbor_config_preview"]
 
     moved_response = client.post(
         "/vcf-private-registry/settings",
@@ -4061,8 +4281,11 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
         headers={"X-LabFoundry-Autosave": "1"},
     )
     assert moved_response.status_code == 200
-    assert moved_response.json()["listen_address"] == "192.168.49.1"
-    assert moved_response.json()["dns_record_action"] == "updated+removed-old"
+    assert moved_response.json()["listen_interface"] == ""
+    assert moved_response.json()["listen_address"] == ""
+    assert moved_response.json()["listen_interfaces"] == []
+    assert moved_response.json()["listen_addresses"] == []
+    assert moved_response.json()["dns_record_action"] == "removed-old"
     assert moved_response.json()["ca_bundle_source"] == "uploaded"
     with SessionLocal() as db:
         dns_record = db.execute(
@@ -4070,15 +4293,34 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
                 DnsRecord.hostname == "registry.labfoundry.internal",
                 DnsRecord.record_type == "CNAME",
             )
-        ).scalar_one()
-        assert dns_record.address == "registry-192-168-49-1.labfoundry.internal"
+        ).scalar_one_or_none()
+        assert dns_record is None
         interface_record = db.execute(
             select(DnsRecord).where(
-                DnsRecord.hostname == "registry-192-168-49-1.labfoundry.internal",
+                DnsRecord.hostname == "registry-192-168-50-1.labfoundry.internal",
                 DnsRecord.record_type == "A",
             )
-        ).scalar_one()
-        assert interface_record.address == "192.168.49.1"
+        ).scalar_one_or_none()
+        assert interface_record is None
+
+    restore_response = client.post(
+        "/vcf-private-registry/settings",
+        data={
+            "enabled": "on",
+            "hostname": "registry.labfoundry.internal",
+            "listen_interface": "eth2",
+            "port": "443",
+            "harbor_project": "vcf-supervisor-services",
+            "ca_bundle_path": "/etc/labfoundry/ca/ca-bundle.pem",
+            "server_certificate": "registry.labfoundry.internal",
+            "robot_account": "robot$vcf-supervisor-services",
+            "relocation_dry_run": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert restore_response.status_code == 200
+    assert restore_response.json()["listen_address"] == "192.168.50.1"
 
     bundle_response = client.post(
         "/vcf-private-registry/bundles",
@@ -4351,11 +4593,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     )
     assert multi_response.status_code == 200
     multi_payload = multi_response.json()
-    assert multi_payload["listen_interfaces"] == ["eth0", "eth2"]
-    assert multi_payload["listen_addresses"] == ["192.168.49.1", "192.168.50.1"]
-    assert multi_payload["valid"] is False
-    assert any("Listen interface eth0 uses the management role" in error for error in multi_payload["validation_errors"])
-    assert "listen 192.168.49.1:443 ssl;" in multi_payload["https_config_preview"]
+    assert multi_payload["listen_interfaces"] == ["eth2"]
+    assert multi_payload["listen_addresses"] == ["192.168.50.1"]
+    assert multi_payload["valid"] is True
+    assert "listen 192.168.49.1:443 ssl;" not in multi_payload["https_config_preview"]
     assert "listen 192.168.50.1:443 ssl;" in multi_payload["https_config_preview"]
 
     with SessionLocal() as db:
@@ -5047,10 +5288,10 @@ def test_vcf_backups_settings_accept_multiple_listen_targets(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["listen_interfaces"] == ["eth0", "eth2"]
-    assert payload["listen_addresses"] == ["192.168.49.1", "192.168.50.1"]
-    assert "# Listen interfaces: eth0, eth2" in payload["config_preview"]
-    assert "# Service listener targets: 192.168.49.1:22, 192.168.50.1:22" in payload["config_preview"]
+    assert payload["listen_interfaces"] == ["eth2"]
+    assert payload["listen_addresses"] == ["192.168.50.1"]
+    assert "# Listen interfaces: eth2" in payload["config_preview"]
+    assert "# Service listener targets: 192.168.50.1:22" in payload["config_preview"]
 
 
 def test_vcf_backups_disabled_disables_default_backup_user(client):
@@ -5341,7 +5582,7 @@ def test_physical_interface_edit_updates_desired_state(client):
     response = client.post(
         f"/physical-interfaces/{interface_id}/edit",
         data={
-            "role": "wan",
+            "role": "route",
             "mode": "access",
             "ip_cidr": "192.168.70.1/24",
             "mtu": "1400",
@@ -5353,7 +5594,7 @@ def test_physical_interface_edit_updates_desired_state(client):
     assert response.status_code == 303
 
     refreshed = client.get("/physical-interfaces")
-    assert '"role": "wan"' in refreshed.text
+    assert '"role": "route"' in refreshed.text
     assert '"mode": "access"' in refreshed.text
     assert '"ip_cidr": "192.168.70.1/24"' in refreshed.text
     assert '"mtu": 1400' in refreshed.text
@@ -5640,7 +5881,7 @@ def test_vlan_page_prefers_real_trunk_parent_when_inventory_has_eth2(client):
                 PhysicalInterface(
                     name="eth3",
                     mac_address="00:15:5d:01:1d:1d",
-                    role="wan",
+                    role="route",
                     mode="access",
                     inventory_source="host",
                     desired_state_source="user",
@@ -6652,8 +6893,8 @@ def test_ca_live_apply_stages_decrypted_private_keys_without_leaking_job_output(
     with SessionLocal() as db:
         settings = db.execute(select(CaSettings)).scalar_one()
         settings.enabled = True
-        settings.listen_interface = "eth0"
-        settings.listen_address = "192.168.49.1"
+        settings.listen_interface = "eth2"
+        settings.listen_address = "192.168.50.1"
         db.commit()
 
     login(client)
@@ -6711,9 +6952,9 @@ def test_dns_settings_accept_multiple_listen_interfaces(client):
     assert response.status_code == 303
 
     refreshed = client.get("/dns")
-    assert "interface=eth0" in refreshed.text
+    assert "interface=eth0" not in refreshed.text
     assert "interface=eth2" in refreshed.text
-    assert "listen-address=192.168.49.1" in refreshed.text
+    assert "listen-address=192.168.49.1" not in refreshed.text
     assert "listen-address=192.168.50.1" in refreshed.text
     assert "listen-address=192.168.60.1" not in refreshed.text
     assert "domain=labfoundry.internal" in refreshed.text

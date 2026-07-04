@@ -236,6 +236,7 @@ def ca_payload_text(root_dir: Path) -> str:
     root_cert = "-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----\n"
     cert = "-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n"
     key = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n"
+    crl = "-----BEGIN X509 CRL-----\ncrl\n-----END X509 CRL-----\n"
     return json.dumps(
         {
             "enabled": True,
@@ -246,6 +247,8 @@ def ca_payload_text(root_dir: Path) -> str:
                 "root_cert_path": str(root_dir / "ca" / "root-ca.pem"),
                 "legacy_root_cert_path": str(root_dir / "ca" / "root.crt"),
                 "ca_bundle_path": str(root_dir / "ca" / "ca-bundle.pem"),
+                "crl_path": str(root_dir / "ca" / "labfoundry-ca.crl"),
+                "crl_pem": crl,
             },
             "certificates": [
                 {
@@ -703,11 +706,35 @@ def test_ca_helper_validates_and_writes_managed_files(monkeypatch, tmp_path):
     assert helper._handle_ca("apply", [str(config_path)]) == 0
 
     root_ca = managed_root / "ca" / "root-ca.pem"
+    crl_path = managed_root / "ca" / "labfoundry-ca.crl"
     key_path = managed_root / "kms" / "certs" / "kms.labfoundry.internal.key"
     assert root_ca.read_text(encoding="utf-8").startswith("-----BEGIN CERTIFICATE-----")
+    assert crl_path.read_text(encoding="utf-8").startswith("-----BEGIN X509 CRL-----")
     assert key_path.read_text(encoding="utf-8").startswith("-----BEGIN PRIVATE KEY-----")
     if os.name != "nt":
         assert oct(key_path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_ca_helper_removes_stale_crl_when_publication_is_empty(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "ca"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    apply_dir.mkdir(parents=True)
+    payload = json.loads(ca_payload_text(managed_root))
+    crl_path = managed_root / "ca" / "labfoundry-ca.crl"
+    crl_path.parent.mkdir(parents=True)
+    crl_path.write_text("-----BEGIN X509 CRL-----\nstale\n-----END X509 CRL-----\n", encoding="utf-8")
+    payload["root"]["crl_pem"] = ""
+    config_path = apply_dir / "labfoundry-ca.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "CA_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "_ca_key_matches_certificate", lambda certificate_pem, private_key_pem: True)
+
+    assert helper._handle_ca("validate", [str(config_path)]) == 0
+    assert helper._handle_ca("apply", [str(config_path)]) == 0
+    assert not crl_path.exists()
 
 
 def test_ca_helper_allows_csr_certificate_without_private_key(monkeypatch, tmp_path):

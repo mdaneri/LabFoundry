@@ -150,7 +150,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
                 vlan_id=20,
                 ip_cidr="192.168.20.1/24",
                 mtu=1500,
-                role="wan",
+                role="route",
                 enabled=True,
             )
         )
@@ -335,6 +335,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
         db.add(
             CaSettings(
                 enabled=False,
+                portal_hostname="ca.labfoundry.internal",
                 root_common_name="LabFoundry Internal Root CA",
                 organization="LabFoundry",
                 organizational_unit="Lab Infrastructure",

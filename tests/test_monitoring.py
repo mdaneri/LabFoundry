@@ -108,6 +108,7 @@ def test_monitor_samples_persist_rates_and_payload(client, monkeypatch):
     assert payload["summary"]["network"]["rx_bytes_per_sec"] == 30.0
     assert payload["summary"]["disk"]["highest_used_mount"] == "/"
     assert payload["virtualization"]["detected"] == "vmware"
+    assert payload["server_time"] == payload["generated_at"]
 
 
 def test_monitor_payload_disabled_does_not_collect_or_write(client):
@@ -119,5 +120,6 @@ def test_monitor_payload_disabled_does_not_collect_or_write(client):
 
     assert payload["enabled"] is False
     assert payload["sample_count"] == 0
+    assert payload["server_time"] == payload["generated_at"]
     assert payload["virtualization"]["detected"] == "disabled"
     assert sample_count == []

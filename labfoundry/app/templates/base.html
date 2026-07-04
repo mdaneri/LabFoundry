@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=dns-new-row-lock-monitor-20260703-1">
+    <link rel="stylesheet" href="/static/app.css?v=sidebar-ca-portal-20260704-1">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -26,44 +26,67 @@
           </span>
         </a>
         <nav class="nav-stack" aria-label="Primary">
-          {% set nav = [
-            ("Dashboard", "/dashboard"),
-            ("Monitor", "/monitor"),
-            ("Physical Interfaces", "/physical-interfaces"),
-            ("VLAN Interfaces", "/vlan-interfaces"),
-            ("Routes & WAN Simulation", "/routes-wan"),
-            ("Firewall", "/firewall"),
-            ("DNS", "/dns"),
-            ("DHCP", "/dhcp"),
-            ("Authentication", "/authentication"),
-            ("Users", "/users"),
-            ("Certificate Authority", "/certificate-authority"),
-            ("KMS / KMIP", "/kms"),
-            ("Chrony", "/chrony"),
-            ("ESXi PXE", "/esxi-pxe"),
-            ("VCF Offline Depot", "/vcf-offline-depot"),
-            ("VCF Private Registry", "/vcf-private-registry"),
-            ("VCF Backups", "/vcf-backups"),
-            ("Services", "/services"),
-            ("Logs", "/logs"),
-            ("Appliance Update", "/appliance-update"),
-            ("Backup / Restore", "/backup-restore"),
-            ("Settings", "/settings")
+          {% set nav_groups = [
+            ("Overview", [
+              ("Dashboard", "/dashboard", "read:dashboard"),
+              ("Monitor", "/monitor", "read:monitoring")
+            ]),
+            ("Appliance Setup", [
+              ("Settings", "/settings", "admin:all"),
+              ("Physical Interfaces", "/physical-interfaces", "read:interfaces"),
+              ("VLAN Interfaces", "/vlan-interfaces", "read:vlans"),
+              ("Routes & WAN Simulation", "/routes-wan", "read:routes"),
+              ("Firewall", "/firewall", "read:firewall")
+            ]),
+            ("Core Services", [
+              ("DNS", "/dns", "read:dns"),
+              ("DHCP", "/dhcp", "read:dhcp"),
+              ("Chrony", "/chrony", "read:services")
+            ]),
+            ("Identity & Trust", [
+              ("Authentication", "/authentication", "read:dashboard"),
+              ("Users", "/users", "admin:all"),
+              ("Certificate Authority", "/certificate-authority", "admin:all"),
+              ("KMS / KMIP", "/kms", "read:kms")
+            ]),
+            ("VCF Workflows", [
+              ("ESXi PXE", "/esxi-pxe", "read:esxi-pxe"),
+              ("VCF Offline Depot", "/vcf-offline-depot", "read:repository"),
+              ("VCF Private Registry", "/vcf-private-registry", "read:vcf-registry"),
+              ("VCF Backups", "/vcf-backups", "read:vcf-backups")
+            ]),
+            ("Operations", [
+              ("Services", "/services", "read:services"),
+              ("Logs", "/logs", "read:logs"),
+              ("Appliance Update", "/appliance-update", "admin:all"),
+              ("Backup / Restore", "/backup-restore", "admin:all")
+            ])
           ] %}
-          {% for label, href in nav %}
-            <a class="nav-link {% if request.url.path == href %}active{% endif %}" href="{{ href }}">{{ label }}</a>
+          {% for group_label, links in nav_groups %}
+            {% set group = namespace(rendered=false) %}
+            {% for label, href, scope in links %}
+              {% if identity and identity.can(scope) %}
+                {% if not group.rendered %}
+                  <span class="nav-section-label">{{ group_label }}</span>
+                  {% set group.rendered = true %}
+                {% endif %}
+                <a class="nav-link {% if request.url.path == href %}active{% endif %}" href="{{ href }}">{{ label }}</a>
+              {% endif %}
+            {% endfor %}
           {% endfor %}
         </nav>
-        {% set pending_apply_count = sidebar_pending_apply_count|default(0) %}
-        <div class="sidebar-apply">
-          <a class="sidebar-apply-link {% if pending_apply_count %}pending{% else %}current{% endif %} {% if request.url.path == '/appliance-apply' %}active{% endif %}" href="/appliance-apply" data-appliance-apply-sidebar data-pending-count="{{ pending_apply_count }}">
-            <span class="sidebar-apply-text">
-              <strong data-appliance-apply-sidebar-title>{% if pending_apply_count %}Review appliance changes{% else %}Appliance Apply{% endif %}</strong>
-              <small data-appliance-apply-sidebar-detail>{% if pending_apply_count %}{{ pending_apply_count }} pending {{ 'unit' if pending_apply_count == 1 else 'units' }}{% else %}Desired state current{% endif %}</small>
-            </span>
-            <span class="sidebar-apply-badge" data-appliance-apply-sidebar-badge>{% if pending_apply_count %}pending{% else %}current{% endif %}</span>
-          </a>
-        </div>
+        {% if identity %}
+          {% set pending_apply_count = sidebar_pending_apply_count|default(0) %}
+          <div class="sidebar-apply">
+            <a class="sidebar-apply-link {% if pending_apply_count %}pending{% else %}current{% endif %} {% if request.url.path == '/appliance-apply' %}active{% endif %}" href="/appliance-apply" data-appliance-apply-sidebar data-pending-count="{{ pending_apply_count }}">
+              <span class="sidebar-apply-text">
+                <strong data-appliance-apply-sidebar-title>{% if pending_apply_count %}Review appliance changes{% else %}Appliance Apply{% endif %}</strong>
+                <small data-appliance-apply-sidebar-detail>{% if pending_apply_count %}{{ pending_apply_count }} pending {{ 'unit' if pending_apply_count == 1 else 'units' }}{% else %}Desired state current{% endif %}</small>
+              </span>
+              <span class="sidebar-apply-badge" data-appliance-apply-sidebar-badge>{% if pending_apply_count %}pending{% else %}current{% endif %}</span>
+            </a>
+          </div>
+        {% endif %}
       </aside>
 
       <main class="main-pane">
@@ -74,8 +97,8 @@
           </div>
           {% if identity %}
             <div class="topbar-actions">
-              <span class="role-chip">{{ identity.role }}</span>
-              <span class="user-chip">{{ identity.username }}</span>
+              <span class="server-time-chip" data-server-time data-server-time-iso="{{ server_time.isoformat() }}">{{ server_time.strftime("Server %H:%M:%S UTC") }}</span>
+              <span class="user-chip" title="Roles: {{ identity.roles|join(', ') }}">User {{ identity.username }}</span>
               <form action="/logout" method="post">
                 <input type="hidden" name="csrf" value="{{ csrf_token }}">
                 <button class="button ghost" type="submit">Sign out</button>
@@ -135,7 +158,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=dns-new-row-lock-monitor-20260703-1"></script>
+    <script src="/static/app.js?v=monitor-refresh-time-20260704-1"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

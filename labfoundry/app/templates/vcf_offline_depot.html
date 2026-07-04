@@ -150,7 +150,7 @@
         <input type="hidden" name="listen_interfaces_present" value="1">
         <div class="service-bind-editor stacked-service-bind-editor" data-service-bind>
           <div class="form-field">
-            <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more non-management access-mode physical interfaces and VLAN interfaces with configured IP addresses can host the depot. Trunk physical NICs and management-role interfaces are not direct bind targets.">i</button></span>
+            <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more access-mode physical interfaces and VLAN interfaces with configured IP addresses can host the depot. Trunk physical NICs are not direct bind targets; management is reserved for the LabFoundry UI.">i</button></span>
             <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces" data-service-bind-interface>
               <div class="tag-editor-tags" data-tag-list>
                 {% for interface_name in selected_vcf_depot_interfaces %}

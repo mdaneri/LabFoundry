@@ -110,14 +110,14 @@
     {% endif %}
 
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="ESXi PXE views" data-tab-storage-key="labfoundry:esxi-pxe:active-tab">
-      <button class="tab-button active" type="button" role="tab" data-tab-target="esxi-pxe-editor-panel" aria-controls="esxi-pxe-editor-panel" aria-selected="true">Kickstart Editor</button>
-      <button class="tab-button" type="button" role="tab" data-tab-target="esxi-pxe-hosts-panel" aria-controls="esxi-pxe-hosts-panel" aria-selected="false">Host References</button>
+      <button class="tab-button active" type="button" role="tab" data-tab-target="esxi-pxe-hosts-panel" aria-controls="esxi-pxe-hosts-panel" aria-selected="true">Host References</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="esxi-pxe-editor-panel" aria-controls="esxi-pxe-editor-panel" aria-selected="false">Kickstart Editor</button>
       <button class="tab-button" type="button" role="tab" data-tab-target="esxi-pxe-isos-panel" aria-controls="esxi-pxe-isos-panel" aria-selected="false">Installer ISOs</button>
       <button class="tab-button" type="button" role="tab" data-tab-target="esxi-pxe-preview-panel" aria-controls="esxi-pxe-preview-panel" aria-selected="false">Preview</button>
     </div>
 
     <div class="tab-panels">
-      <div id="esxi-pxe-editor-panel" class="tab-panel active" role="tabpanel">
+      <div id="esxi-pxe-editor-panel" class="tab-panel" role="tabpanel" hidden>
         <div class="kickstart-layout">
           <aside class="kickstart-list">
             {% for row in esxi_kickstart_rows %}
@@ -233,7 +233,7 @@
         </div>
       </div>
 
-      <div id="esxi-pxe-hosts-panel" class="tab-panel" role="tabpanel" hidden>
+      <div id="esxi-pxe-hosts-panel" class="tab-panel active" role="tabpanel">
         <div id="esxi-pxe-hosts">
           <div id="esxi-pxe-host-error" class="alert error hidden"></div>
           <div

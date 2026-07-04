@@ -488,11 +488,13 @@ def monitor_payload(db: Session, *, hours: int = 6, collector: SystemMetricsColl
         .order_by(MonitorSample.sampled_at, MonitorSample.id)
     ).scalars().all()
     latest = samples[-1] if samples else None
+    generated_at = utcnow()
     return {
         "enabled": settings.monitor_enabled,
         "window_hours": hours,
         "sample_interval_seconds": settings.monitor_sample_interval_seconds,
-        "generated_at": utcnow().isoformat(),
+        "generated_at": generated_at.isoformat(),
+        "server_time": generated_at.isoformat(),
         "last_sample_at": latest.sampled_at.isoformat() if latest else None,
         "sample_count": len(samples),
         "summary": _summary(samples),

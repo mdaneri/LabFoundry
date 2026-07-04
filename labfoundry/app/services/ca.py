@@ -20,6 +20,7 @@ from labfoundry.app.secrets import decrypt_secret, encrypt_secret, secret_key_st
 
 
 CA_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/ca/labfoundry-ca.json"
+CA_DEFAULT_PORTAL_HOSTNAME = "ca.labfoundry.internal"
 CA_SERVER_PROFILE_NAME = "VCF service TLS"
 CA_CLIENT_PROFILE_NAME = "VCF KMIP client"
 CA_STATUS_VALUES = {"planned", "csr-staged", "issued", "revoked"}
@@ -142,6 +143,34 @@ def _load_root(settings: CaSettings) -> tuple[x509.Certificate, object]:
     private_key_pem = decrypt_secret(settings.root_private_key_encrypted)
     private_key = serialization.load_pem_private_key(private_key_pem.encode("utf-8"), password=None)
     return certificate, private_key
+
+
+def generate_crl_pem(settings: CaSettings, certificates: list[CaCertificate]) -> str:
+    revoked_certificates = [
+        certificate
+        for certificate in certificates
+        if certificate.status == "revoked" and certificate.serial_number and certificate.revoked_at
+    ]
+    if not revoked_certificates or not settings.root_certificate_pem or not settings.root_private_key_encrypted:
+        return ""
+    root_certificate, root_private_key = _load_root(settings)
+    now = utcnow()
+    builder = (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(root_certificate.subject)
+        .last_update(now)
+        .next_update(now + timedelta(days=7))
+    )
+    for certificate in revoked_certificates:
+        revoked_at = ensure_aware(certificate.revoked_at)
+        revoked = (
+            x509.RevokedCertificateBuilder()
+            .serial_number(int(str(certificate.serial_number), 16))
+            .revocation_date(revoked_at)
+            .build()
+        )
+        builder = builder.add_revoked_certificate(revoked)
+    return builder.sign(private_key=root_private_key, algorithm=_hash_algorithm(settings.digest_algorithm)).public_bytes(serialization.Encoding.PEM).decode("utf-8")
 
 
 def ensure_default_ca_profiles(db: Session) -> bool:
@@ -439,6 +468,9 @@ def ca_certificate_to_dict(certificate: CaCertificate) -> dict:
         "description": certificate.description or "",
         "has_certificate": bool(certificate.certificate_pem),
         "has_private_key": bool(certificate.private_key_encrypted),
+        "revoked_at": certificate.revoked_at.isoformat() if certificate.revoked_at else "",
+        "revoked_by": certificate.revoked_by or "",
+        "revocation_reason": certificate.revocation_reason or "",
     }
 
 
@@ -451,8 +483,10 @@ def render_ca_config(
     payload = {
         "managed_by": "LabFoundry",
         "enabled": settings.enabled,
+        "portal_hostname": settings.portal_hostname,
         "storage_path": settings.storage_path,
         "publication": {
+            "portal_hostname": settings.portal_hostname,
             "listen_interfaces": settings.listen_interface,
             "listen_addresses": settings.listen_address,
         },
@@ -492,10 +526,14 @@ def render_ca_apply_payload(settings: CaSettings, certificates: list[CaCertifica
     root_cert_path = str(PurePosixPath(settings.storage_path) / "root-ca.pem")
     legacy_root_path = str(PurePosixPath(settings.storage_path) / "root.crt")
     bundle_path = str(PurePosixPath(settings.storage_path) / "ca-bundle.pem")
+    crl_path = str(PurePosixPath(settings.storage_path) / "labfoundry-ca.crl")
+    crl_pem = generate_crl_pem(settings, certificates) if settings.publish_crl else ""
     payload = {
         "enabled": settings.enabled,
+        "portal_hostname": settings.portal_hostname,
         "storage_path": settings.storage_path,
         "publication": {
+            "portal_hostname": settings.portal_hostname,
             "listen_interfaces": settings.listen_interface,
             "listen_addresses": settings.listen_address,
         },
@@ -506,6 +544,8 @@ def render_ca_apply_payload(settings: CaSettings, certificates: list[CaCertifica
             "root_cert_path": root_cert_path,
             "legacy_root_cert_path": legacy_root_path,
             "ca_bundle_path": bundle_path,
+            "crl_path": crl_path,
+            "crl_pem": crl_pem if include_private_keys else ("[public CRL available]" if crl_pem else ""),
             "fingerprint": settings.root_fingerprint,
             "expires_at": settings.root_expires_at.isoformat() if settings.root_expires_at else "",
         },
@@ -543,6 +583,10 @@ def validate_ca_state(
     errors: list[str] = []
     if settings.enabled and not secret_key_status(get_settings()).dedicated and get_settings().environment not in {"development", "test"}:
         errors.append("LABFOUNDRY_SECRETS_KEY is required before enabling the CA outside development.")
+    if not settings.portal_hostname.strip() or "." not in settings.portal_hostname.strip():
+        errors.append("CA portal hostname must be a fully qualified DNS name.")
+    elif not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+", settings.portal_hostname.strip().lower()):
+        errors.append("CA portal hostname must be a valid DNS name.")
     if not settings.root_common_name.strip():
         errors.append("CA root common name is required.")
     if settings.country and len(settings.country.strip()) != 2:
@@ -588,6 +632,10 @@ def validate_ca_state(
                 errors.append(f"Certificate {certificate.common_name} has invalid IP SAN {item}.")
         if settings.enabled and certificate.status == "issued" and not certificate.certificate_pem:
             errors.append(f"Certificate {certificate.common_name} is marked issued but has no certificate PEM.")
-        if settings.enabled and certificate.managed_owner and not certificate.private_key_encrypted:
+        if settings.enabled and certificate.status == "revoked" and not certificate.serial_number:
+            errors.append(f"Revoked certificate {certificate.common_name} has no serial number for CRL publication.")
+        if settings.enabled and certificate.status == "revoked" and not certificate.revoked_at:
+            errors.append(f"Revoked certificate {certificate.common_name} has no revocation timestamp.")
+        if settings.enabled and certificate.status != "revoked" and certificate.managed_owner and not certificate.private_key_encrypted:
             errors.append(f"Managed certificate {certificate.common_name} has no encrypted private key.")
     return errors

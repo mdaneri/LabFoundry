@@ -260,7 +260,7 @@
         <input type="hidden" name="listen_interfaces_present" value="1">
         <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry renders DNS as enabled desired state for dnsmasq.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if dns_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <div class="form-field">
-          <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more available network interfaces dnsmasq should bind to for this lab DNS service. DHCP remains bound to its own selected lab interface.">i</button></span>
+          <span class="field-label"><span>Listen interfaces</span><button class="help-icon" type="button" data-help="One or more access-mode physical interfaces and VLAN interfaces with configured IP addresses dnsmasq should bind to. Management is reserved for the LabFoundry UI; DHCP remains bound to its own selected lab interface.">i</button></span>
           <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces">
             <div class="tag-editor-tags" data-tag-list>
               {% for interface_name in selected_dns_interfaces %}

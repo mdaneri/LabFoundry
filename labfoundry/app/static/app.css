@@ -93,6 +93,20 @@ textarea {
   gap: 3px;
 }
 
+.nav-section-label {
+  margin: 12px 10px 3px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.nav-section-label:first-child {
+  margin-top: 2px;
+}
+
 .nav-link {
   display: block;
   border-radius: 6px;
@@ -127,6 +141,15 @@ textarea {
   background: white;
   text-decoration: none;
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.04);
+}
+
+.ca-home-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.ca-home-hero .metric-grid {
+  margin-top: 14px;
 }
 
 .sidebar-apply-link:hover,
@@ -357,6 +380,7 @@ textarea {
 }
 
 .role-chip,
+.server-time-chip,
 .user-chip,
 .status-pill {
   display: inline-flex;
@@ -373,6 +397,12 @@ textarea {
 .role-chip {
   background: #dbeafe;
   color: #1d4ed8;
+}
+
+.server-time-chip {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #475569;
 }
 
 .status-pill.good,
