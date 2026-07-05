@@ -3883,14 +3883,22 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
     assert "VCF Private Registry" not in page.text
     assert "/registry" not in page.text
 
-    registry_page = client.get("/", headers={"host": "192.168.88.32"})
-    assert registry_page.status_code == 200
-    assert "VCF Private Registry" in registry_page.text
-    assert 'href="https://registry.labfoundry.internal:9443"' in registry_page.text
-    assert "Certificate Authority" not in registry_page.text
-    assert "VCF Offline Depot" not in registry_page.text
+    depot_redirect = client.get("/PROD/", headers={"host": "192.168.87.32"}, follow_redirects=False)
+    assert depot_redirect.status_code == 303
+    assert depot_redirect.headers["location"] == "/PROD/login?next=/PROD/"
 
-    depot_browser = client.get("/PROD/", headers={"host": "192.168.87.32"})
+    depot_login = client.get(depot_redirect.headers["location"], headers={"host": "192.168.87.32"})
+    assert depot_login.status_code == 200
+    assert "Sign in to the depot" in depot_login.text
+    assert 'action="/PROD/login"' in depot_login.text
+    assert 'name="next" value="/PROD/"' in depot_login.text
+
+    with SessionLocal() as db:
+        depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        depot_settings.allow_unauthenticated_access = True
+        db.commit()
+
+    depot_browser = client.get("/PROD/", headers={"host": "192.168.87.32"}, follow_redirects=False)
     assert depot_browser.status_code == 200
     assert "VCF Offline Depot" in depot_browser.text
     assert "Index of /PROD/" not in depot_browser.text
@@ -3907,6 +3915,13 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
 
     unrelated_depot = client.get("/PROD/", headers={"host": "192.168.88.32"})
     assert unrelated_depot.status_code == 404
+
+    registry_page = client.get("/", headers={"host": "192.168.88.32"})
+    assert registry_page.status_code == 200
+    assert "VCF Private Registry" in registry_page.text
+    assert 'href="https://registry.labfoundry.internal:9443"' in registry_page.text
+    assert "Certificate Authority" not in registry_page.text
+    assert "VCF Offline Depot" not in registry_page.text
 
     management_ip_home = client.get("/", headers={"host": "192.168.167.10"}, follow_redirects=False)
     assert management_ip_home.status_code == 303

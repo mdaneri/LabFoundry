@@ -5344,6 +5344,7 @@ def _depot_browser_context(db: Session, depot_path: str = "") -> dict[str, Any]:
         "depot_path": "/PROD/" + (relative_path + "/" if relative_path else ""),
         "depot_entries": entries,
         "depot_parent_href": parent_href,
+        "depot_allow_unauthenticated_access": settings.allow_unauthenticated_access,
     }
 
 
@@ -5352,18 +5353,94 @@ def public_depot_redirect() -> RedirectResponse:
     return RedirectResponse("/PROD/", status_code=301)
 
 
+def safe_depot_login_next(value: str | None) -> str:
+    target = (value or "").strip()
+    if target == "/PROD" or target.startswith("/PROD/"):
+        return target
+    return "/PROD/"
+
+
+def depot_login_response(request: Request, *, return_to: str = "/PROD/", error: str | None = None, status_code: int = 200) -> HTMLResponse:
+    return render(
+        request,
+        "ca_request_login.html",
+        {
+            "error": error,
+            "return_to": safe_depot_login_next(return_to),
+            "login_action": "/PROD/login",
+            "portal_title": "VCF Offline Depot",
+            "portal_subtitle": "Public depot browser",
+            "login_heading": "Sign in to the depot",
+            "login_copy": "Use a LabFoundry local account to browse authenticated VCF depot directories.",
+            "back_href": "/",
+            "back_label": "Back to public services",
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/PROD/login", response_class=HTMLResponse, response_model=None)
+def depot_login_page(
+    request: Request,
+    next: str = Query("/PROD/"),
+    identity: Identity | None = Depends(get_session_identity),
+) -> HTMLResponse | RedirectResponse:
+    return_to = safe_depot_login_next(next)
+    if identity:
+        return RedirectResponse(return_to, status_code=303)
+    return depot_login_response(request, return_to=return_to)
+
+
+@router.post("/PROD/login", response_model=None)
+def depot_login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    csrf: str = Form(...),
+    next: str = Form("/PROD/"),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    return_to = safe_depot_login_next(next)
+    return authenticate_ca_portal_session(
+        request,
+        db,
+        username=username,
+        password=password,
+        csrf=csrf,
+        next_path=return_to,
+        failure_response=lambda failed_request, *, error=None, status_code=200: depot_login_response(
+            failed_request,
+            return_to=return_to,
+            error=error,
+            status_code=status_code,
+        ),
+    )
+
+
+@router.post("/PROD/logout", response_model=None)
+def depot_logout(request: Request, csrf: str = Form(...), next: str = Form("/")) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    request.session.clear()
+    return RedirectResponse(next if next in {"/", "/PROD/"} else "/", status_code=303)
+
+
 @router.get("/PROD/", response_class=HTMLResponse, response_model=None)
 @router.get("/PROD/{depot_path:path}", response_class=HTMLResponse, response_model=None)
 def public_depot_browser(
     request: Request,
     depot_path: str = "",
+    identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
-) -> HTMLResponse:
+) -> HTMLResponse | RedirectResponse:
     if not request_allows_public_service(db, request, "vcf_offline_depot"):
         raise HTTPException(status_code=404, detail="Depot path not found")
     if depot_path and not depot_path.endswith("/"):
         raise HTTPException(status_code=404, detail="Depot path not found")
-    return render(request, "depot_browser.html", _depot_browser_context(db, depot_path.rstrip("/")))
+    settings = get_vcf_offline_depot_settings_row(db)
+    if identity is None and not settings.allow_unauthenticated_access:
+        next_path = "/PROD/" + depot_path if depot_path else "/PROD/"
+        return RedirectResponse(f"/PROD/login?next={quote(next_path, safe='/')}", status_code=303)
+    return render(request, "depot_browser.html", {"identity": identity, **_depot_browser_context(db, depot_path.rstrip("/"))})
 
 
 @router.get("/login", response_class=HTMLResponse, response_model=None)

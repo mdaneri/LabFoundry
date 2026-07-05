@@ -71,6 +71,8 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "alias /var/lib/labfoundry/pxe/http/esxi/;" in config
     assert "location = /PROD" in config
     assert "return 301 /PROD/;" in config
+    assert "location = /PROD/login {" in config
+    assert "location = /PROD/logout {" in config
     assert "location = /PROD/ {" in config
     assert "location ~ ^/PROD/.*/$ {" in config
     assert "location /PROD/ {" in config
@@ -79,6 +81,13 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in config
     assert "autoindex off;" in config
     assert "/registry" not in config
+
+    depot_login_block = config.split("location = /PROD/login {", 1)[1].split("  }", 1)[0]
+    depot_directory_block = config.split("location = /PROD/ {", 1)[1].split("  }", 1)[0]
+    depot_static_block = config.split("location /PROD/ {", 1)[1].split("  }", 1)[0]
+    assert "auth_basic" not in depot_login_block
+    assert "auth_basic" not in depot_directory_block
+    assert "auth_basic" in depot_static_block
 
     registry_block = config.split("listen 192.168.88.32:80;", 1)[1]
     assert "location = /requests/login {" not in registry_block

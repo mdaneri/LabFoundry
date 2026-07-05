@@ -23,7 +23,15 @@
         </a>
         <div class="public-portal-actions">
           <button class="button ghost" type="button" data-history-back data-history-fallback="/">Back</button>
-          <a class="button secondary" href="/">Public services</a>
+          {% if identity %}
+            <form action="/PROD/logout" method="post">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="next" value="/">
+              <button class="button ghost" type="submit">Sign out</button>
+            </form>
+          {% elif not depot_allow_unauthenticated_access %}
+            <a class="button secondary" href="/PROD/login?next={{ depot_path }}">Login</a>
+          {% endif %}
         </div>
       </header>
 
