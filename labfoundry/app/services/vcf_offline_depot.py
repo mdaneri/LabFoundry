@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path
 
-from labfoundry.app.models import Setting, VcfDepotDownloadProfile, VcfOfflineDepotSettings
+from labfoundry.app.models import Setting, User, VcfDepotDownloadProfile, VcfOfflineDepotSettings
 from labfoundry.app.services.dnsmasq import split_addresses, split_interfaces
 
 
@@ -19,6 +19,8 @@ VCF_DEPOT_LEGACY_STORE_PATH = "/srv/repository"
 VCF_DEPOT_DEFAULT_STORE_PATH = "/mnt/labfoundry-vcf-offline-depot"
 VCF_DEPOT_DEFAULT_CONFIG_PATH = "/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf"
 VCF_DEPOT_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/vcf-offline-depot/labfoundry-vcf-offline-depot.conf"
+VCF_DEPOT_DEFAULT_USERNAME = "vcf-depot"
+VCF_DEPOT_HTPASSWD_PATH = "/etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd"
 VCF_DEPOT_APPLICATION_PROPERTIES_NAME = "application-prodv2.properties"
 VCF_DEPOT_APPLICATION_PROPERTIES_CONTENT_KEY = "vcf_depot_application_properties_content"
 VCF_DEPOT_APPLICATION_PROPERTIES_SOURCE_KEY = "vcf_depot_application_properties_source"
@@ -310,6 +312,9 @@ def vcf_depot_settings_to_dict(settings: VcfOfflineDepotSettings) -> dict[str, o
         "listen_interface": settings.listen_interface,
         "listen_address": settings.listen_address,
         "port": settings.port,
+        "http_user_id": settings.http_user_id,
+        "http_username": settings.http_user.username if settings.http_user else "",
+        "allow_unauthenticated_access": settings.allow_unauthenticated_access,
         "server_certificate": settings.server_certificate,
         "depot_store_path": settings.depot_store_path,
         "tool_archive_path": settings.tool_archive_path,
@@ -389,6 +394,8 @@ def render_nginx_depot_config(
     certificate_name = settings.server_certificate or settings.hostname or VCF_DEPOT_DEFAULT_HOSTNAME
     certificate_path = certificate_path or "/etc/labfoundry/vcf-offline-depot/certs/" + certificate_name + ".crt"
     key_path = key_path or "/etc/labfoundry/vcf-offline-depot/certs/" + certificate_name + ".key"
+    username = settings.http_user.username if settings.http_user else VCF_DEPOT_DEFAULT_USERNAME
+    auth_required = not bool(settings.allow_unauthenticated_access)
     if not settings.enabled:
         return "\n".join(
             [
@@ -404,6 +411,8 @@ def render_nginx_depot_config(
         f"# VCF endpoint: https://{vcf_depot_endpoint(settings)}/PROD/",
         f"# Listen interfaces: {', '.join(split_interfaces(settings.listen_interface)) or 'none'}",
         f"# Listen addresses: {', '.join(split_addresses(settings.listen_address)) or 'none'}",
+        f"# LabFoundry VCF Offline Depot unauthenticated access: {str(settings.allow_unauthenticated_access).lower()}",
+        f"# LabFoundry VCF Offline Depot user: {username if auth_required else 'none'}",
         "",
         "server {",
         *[
@@ -419,6 +428,14 @@ def render_nginx_depot_config(
         "  }",
         "",
         "  location ^~ /PROD/ {",
+        *(
+            [
+                '    auth_basic "LabFoundry VCF Offline Depot";',
+                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
+            ]
+            if auth_required
+            else []
+        ),
         f"    alias {settings.depot_store_path.rstrip('/')}/PROD/;",
         "    sendfile on;",
         "    tcp_nopush on;",
@@ -599,6 +616,7 @@ def validate_vcf_depot_state(
     download_token_present: bool = False,
     activation_code_present: bool = False,
     management_interface_names: set[str] | None = None,
+    users: list[User] | None = None,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -609,6 +627,13 @@ def validate_vcf_depot_state(
     if hostname.endswith(".local"):
         warnings.append("Avoid .local for VCF labs; use labfoundry.internal or another non-.local internal domain.")
     if settings.enabled:
+        if not settings.allow_unauthenticated_access:
+            user_by_id = {user.id: user for user in users or []}
+            selected_user = user_by_id.get(settings.http_user_id or -1) or settings.http_user
+            if selected_user is None:
+                errors.append("Select a VCF Offline Depot HTTP user or enable unauthenticated access.")
+            elif not selected_user.enabled:
+                errors.append(f"VCF Offline Depot HTTP user {selected_user.username} is disabled.")
         listen_interfaces = split_interfaces(settings.listen_interface)
         listen_addresses = split_addresses(settings.listen_address)
         if not listen_interfaces:

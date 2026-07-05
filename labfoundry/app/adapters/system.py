@@ -189,6 +189,12 @@ class SystemAdapter:
     def apply_vcf_offline_depot_https_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("vcf-offline-depot", "apply-https", config_path, dry_run_message="dry-run: VCF Offline Depot HTTPS apply command recorded")
 
+    def validate_public_services_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("public-services", "validate", config_path, dry_run_message="dry-run: public services nginx validation command recorded")
+
+    def apply_public_services_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("public-services", "apply", config_path, dry_run_message="dry-run: public services nginx apply command recorded")
+
     def check_appliance_update_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("appliance-update", "check", config_path, dry_run_message="dry-run: appliance update check command recorded")
 

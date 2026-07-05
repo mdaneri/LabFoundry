@@ -153,6 +153,8 @@ class VcfOfflineDepotStatusResponse(BaseModel):
     listen_interface: str
     listen_address: str
     port: int
+    http_username: str
+    allow_unauthenticated_access: bool
     depot_store_path: str
     tool_archive_name: str
     tool_version: str
