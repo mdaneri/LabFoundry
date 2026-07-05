@@ -450,6 +450,8 @@ def render(request: Request, template: str, context: dict, status_code: int = 20
             "identity": identity,
             "csrf_token": csrf_token(request),
             "server_time": utcnow(),
+            "public_github_url": "https://github.com/mdaneri/LabFoundry",
+            "current_version_info": current_version_info(),
             **context,
         },
         status_code=status_code,

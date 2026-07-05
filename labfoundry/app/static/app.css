@@ -307,6 +307,19 @@ textarea {
   stroke-linejoin: round;
 }
 
+.public-login-shell {
+  min-height: auto;
+  padding: 34px 0;
+}
+
+.public-login-shell .login-panel {
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: white;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+}
+
 .sidebar-apply-link:hover,
 .sidebar-apply-link.active {
   border-color: #bfdbfe;

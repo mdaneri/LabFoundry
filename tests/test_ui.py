@@ -3711,8 +3711,7 @@ def test_public_ca_root_page_is_unauthenticated(client):
     page = client.get("/ca")
     assert page.status_code == 200
     assert "LabFoundry Certificate Authority" in page.text
-    assert "LabFoundry CA" in page.text
-    assert "Public trust portal" in page.text
+    assert "Photon appliance" in page.text
     assert 'class="brand" href="/"' in page.text
     assert "LabFoundry Internal Root CA" in page.text
     assert "abc123" in page.text
@@ -3724,11 +3723,10 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert 'href="/requests"' in page.text
     assert page.text.count('href="/requests"') == 1
     assert 'href="/ca/login"' in page.text
-    assert 'data-history-back' in page.text
     assert "Trust Material" not in page.text
     assert "Appliance Information" not in page.text
-    assert "https://github.com/mdaneri/LabFoundry" not in page.text
-    assert 'href="/openapi.json"' not in page.text
+    assert "https://github.com/mdaneri/LabFoundry" in page.text
+    assert 'href="/openapi.json"' in page.text
     assert "/certificate-authority" not in page.text
     assert "/appliance-apply" not in page.text
 
@@ -3738,6 +3736,9 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert 'action="/ca/login"' in login_page.text
     assert 'name="next" value="/ca"' in login_page.text
     assert 'data-history-back' in login_page.text
+    assert 'class="public-portal-shell"' in login_page.text
+    assert "https://github.com/mdaneri/LabFoundry" in login_page.text
+    assert 'href="/openapi.json"' in login_page.text
     csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     login_response = client.post(
         "/ca/login",
