@@ -159,7 +159,7 @@ def render_public_services_nginx_config(
                 "",
                 "server {",
                 f"  listen {_nginx_listen(address, http_port)};",
-                "  server_name _;",
+                f"  server_name {_nginx_server_name(address)};",
                 "  client_max_body_size 1g;",
                 "",
                 *_proxy_location("= /", upstream_host, upstream_port),
@@ -270,6 +270,15 @@ def _normalized_addresses(value: str | None) -> set[str]:
 def _nginx_listen(address: str, port: int) -> str:
     normalized = _normalize_address(address)
     return f"[{normalized}]:{port}" if ":" in normalized else f"{normalized}:{port}"
+
+
+def _nginx_server_name(address: str) -> str:
+    normalized = _normalize_address(address)
+    try:
+        parsed = ip_address(normalized)
+    except ValueError:
+        return "_"
+    return f"_ {normalized}" if parsed.version == 4 else "_"
 
 
 def _proxy_location(path: str, upstream_host: str, upstream_port: int, *, extra_directives: list[str] | None = None) -> list[str]:

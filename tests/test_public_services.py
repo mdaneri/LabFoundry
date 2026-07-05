@@ -58,6 +58,8 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
 
     assert "listen 192.168.87.32:80;" in config
     assert "listen 192.168.88.32:80;" in config
+    assert "server_name _ 192.168.87.32;" in config
+    assert "server_name _ 192.168.88.32;" in config
     assert "location ^~ /static/ {" in config
     assert "location = /favicon.ico {" in config
     assert "location = /manifest.webmanifest {" in config
