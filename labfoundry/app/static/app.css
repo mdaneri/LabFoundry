@@ -949,6 +949,22 @@ textarea {
   margin: 18px 0 10px;
 }
 
+.routing-state-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.routing-empty-state {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+}
+
+.routing-empty-state h2 {
+  font-size: 13px;
+}
+
 .panel h2 {
   margin: 0;
   font-size: 16px;

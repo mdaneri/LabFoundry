@@ -2650,6 +2650,14 @@ def routes_wan_context(db: Session) -> dict:
     routing_rules = db.execute(select(RoutingRule).order_by(RoutingRule.priority, RoutingRule.name)).scalars().all()
     all_targets = wan_routing_targets(db)
     targets = wan_route_targets(db)
+    generated_routing_rows = generated_route_role_rules(targets)
+    routing_summary = {
+        "generated_count": len(generated_routing_rows),
+        "explicit_count": len(routing_rules),
+        "route_target_count": len([target for target in targets if target.get("role") == "route"]),
+        "access_target_count": len([target for target in targets if target.get("role") != "route"]),
+        "management_target_count": len([target for target in all_targets if target.get("routing_domain") == "management"]),
+    }
     nat_targets = wan_nat_targets_from_route_targets(targets)
     source_groups = firewall_source_group_state_for_db(db)["groups"]
     validation_errors = validate_wan_state(
@@ -2671,7 +2679,8 @@ def routes_wan_context(db: Session) -> dict:
         "route_rows": [route_to_dict(route) for route in routes],
         "nat_rule_rows": [nat_rule_to_dict(rule) for rule in nat_rules],
         "routing_rule_rows": [routing_rule_to_dict(rule) for rule in routing_rules],
-        "generated_routing_rule_rows": generated_route_role_rules(targets),
+        "generated_routing_rule_rows": generated_routing_rows,
+        "routing_summary": routing_summary,
         "policy_rows": [wan_policy_to_dict(policy) for policy in policies],
         "wan_all_targets": all_targets,
         "wan_route_targets": targets,

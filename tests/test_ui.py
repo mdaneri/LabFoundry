@@ -2373,10 +2373,14 @@ def test_routes_wan_policy_form_renders(client):
     assert "routes-wan-routing-table" in response.text
     assert "routes-wan-nat-table" in response.text
     assert "routes-wan-policies-table" in response.text
+    assert "auto route-role" in response.text
+    assert "explicit access" in response.text
+    assert "management isolated" in response.text
+    assert "No automatic route-role paths" in response.text
     assert "data-mode-options" not in response.text
     assert "<th>Mode</th>" not in response.text
     assert "+ Add route here" in client.get("/static/app.js").text
-    assert "+ Add routing rule here" in client.get("/static/app.js").text
+    assert "+ Add explicit access rule" in client.get("/static/app.js").text
     assert "+ Add NAT rule here" in client.get("/static/app.js").text
     assert "+ Add policy here" in client.get("/static/app.js").text
     assert "Europe WAN" in response.text

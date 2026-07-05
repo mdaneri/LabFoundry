@@ -80,10 +80,20 @@
         <div class="section-head compact-section-head">
           <div>
             <h3>Routing Permissions</h3>
-            <p class="muted">Route-role networks are generated automatically. Access networks forward only when an explicit routing rule allows the path.</p>
+            <p class="muted">Route-role networks generate forwarding automatically. Access networks stay blocked until an explicit routing rule allows the path.</p>
           </div>
-          <span class="status-pill muted">{{ routing_rules|length }} explicit</span>
+          <div class="routing-state-pills" aria-label="Routing state summary">
+            <span class="status-pill {{ 'good' if routing_summary.generated_count else 'muted' }}">{{ routing_summary.generated_count }} auto route-role</span>
+            <span class="status-pill {{ 'good' if routing_summary.explicit_count else 'muted' }}">{{ routing_summary.explicit_count }} explicit access</span>
+            <span class="status-pill warn">management isolated</span>
+          </div>
         </div>
+        {% if routing_summary.generated_count == 0 and routing_summary.route_target_count < 2 %}
+          <div class="empty-state compact routing-empty-state">
+            <h2>No automatic route-role paths</h2>
+            <p class="muted">{{ routing_summary.access_target_count }} lab access targets are available for explicit routing. Mark two non-management interfaces or VLANs as Route to generate forwarding between them automatically.</p>
+          </div>
+        {% endif %}
         <div
           id="routes-wan-routing-table"
           class="tabulator-shell routes-wan-table"

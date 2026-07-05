@@ -3508,6 +3508,7 @@ function newWanRoutingRuleRow(defaultSource = "", defaultDestination = "") {
   return {
     id: "__new__",
     name: "",
+    kind: "add explicit rule",
     enabled: true,
     source_interface: defaultSource,
     destination_interface: defaultDestination,
@@ -3781,8 +3782,9 @@ function initializeRoutesWanRoutingTable() {
   const defaultSource = targets[0]?.name || "";
   const defaultDestination = targets.find((target) => target.name !== defaultSource)?.name || "";
   const generatedRows = JSON.parse(tableElement.dataset.generatedRules || "[]");
-  const explicitRows = JSON.parse(tableElement.dataset.rules || "[]");
-  const rows = [...generatedRows, ...explicitRows, newWanRoutingRuleRow(defaultSource, defaultDestination)];
+  const explicitRows = JSON.parse(tableElement.dataset.rules || "[]").map((row) => ({ ...row, kind: "explicit access rule" }));
+  const generatedWithKind = generatedRows.map((row) => ({ ...row, kind: "auto route-role rule" }));
+  const rows = [...generatedWithKind, ...explicitRows, newWanRoutingRuleRow(defaultSource, defaultDestination)];
   try {
     new Tabulator(tableElement, {
       data: rows,
@@ -3805,9 +3807,25 @@ function initializeRoutesWanRoutingTable() {
           field: "name",
           editor: "input",
           editable: (cell) => !cell.getRow().getData().generated,
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add routing rule here"),
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add explicit access rule"),
           minWidth: 170,
           cellEdited: (cell) => autoSaveWanRoutingRule(cell, csrf),
+        },
+        {
+          title: "Type",
+          field: "kind",
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.generated) {
+              return '<span class="status-pill good">auto route-role</span>';
+            }
+            if (data.is_new) {
+              return '<span class="status-pill warn">new explicit</span>';
+            }
+            return '<span class="status-pill muted">explicit access</span>';
+          },
+          width: 140,
+          headerSort: false,
         },
         {
           title: "Source",
