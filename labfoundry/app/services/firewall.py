@@ -245,7 +245,7 @@ def managed_service_firewall_rules(
                 interface_name=interface_name,
                 source=_managed_rule_source("public-services", interface_name, interface_networks, source_groups_by_id, source_group_assignments),
                 protocol="tcp",
-                ports="80,443",
+                ports="80",
                 priority=75 + index,
             )
         )
