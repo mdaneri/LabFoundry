@@ -54,7 +54,7 @@
       </div>
     </div>
 
-    <div class="panel">
+    <a class="panel public-link-panel" href="/requests" aria-label="Open certificate requests">
       <div class="panel-head">
         <div>
           <h2>Certificate Requests</h2>
@@ -62,7 +62,6 @@
         </div>
         <span class="status-pill {{ 'good' if identity else 'warn' }}">{{ "signed in" if identity else "sign-in required" }}</span>
       </div>
-      <a class="button secondary" href="/requests">Open request portal</a>
-    </div>
+    </a>
   </section>
 {% endblock %}

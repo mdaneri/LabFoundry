@@ -156,6 +156,28 @@ textarea {
   margin-top: 14px;
 }
 
+.public-link-panel {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+
+.public-link-panel:hover,
+.public-link-panel:focus-visible {
+  border-color: #bfdbfe;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+  transform: translateY(-1px);
+}
+
+.public-link-panel:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
 .ca-trust-grid {
   display: grid;
   grid-template-columns: minmax(220px, 1.4fr) minmax(120px, 0.7fr) minmax(120px, 0.7fr);
@@ -318,6 +340,19 @@ textarea {
   border-radius: 7px;
   background: white;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+}
+
+.login-actions {
+  flex-wrap: nowrap;
+  margin-top: 2px;
+}
+
+.login-actions .button.primary {
+  flex: 1 1 auto;
+}
+
+.login-actions .button.secondary {
+  flex: 0 0 auto;
 }
 
 .sidebar-apply-link:hover,

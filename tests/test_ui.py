@@ -3722,6 +3722,8 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert "/ca/downloads/root-ca.pem" in page.text
     assert 'href="/requests"' in page.text
     assert page.text.count('href="/requests"') == 1
+    assert "public-link-panel" in page.text
+    assert "Open request portal" not in page.text
     assert 'href="/ca/login"' in page.text
     assert "Trust Material" not in page.text
     assert "Appliance Information" not in page.text
@@ -3999,7 +4001,8 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
     login_page = client.get("/requests")
     assert login_page.status_code == 200
     assert "Certificate Request Portal" in login_page.text
-    assert "Sign in to request certificates" in login_page.text
+    assert "Sign in to user portal" in login_page.text
+    assert "Use your LabFoundry user account to continue." in login_page.text
     assert "Sign in to the appliance" not in login_page.text
     assert 'action="/requests/login"' in login_page.text
     assert 'action="/login"' not in login_page.text

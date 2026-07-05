@@ -23,11 +23,11 @@
           <span>Password</span>
           <input name="password" type="password" autocomplete="current-password" required>
         </label>
-        <button class="button primary" type="submit">Sign in</button>
+        <div class="button-row login-actions">
+          <button class="button primary" type="submit">Sign in</button>
+          <button class="button secondary" type="button" data-history-back data-history-fallback="{{ back_href|default('/ca') }}">{{ back_label|default("Cancel") }}</button>
+        </div>
       </form>
-      <div class="button-row">
-        <button class="button ghost" type="button" data-history-back data-history-fallback="{{ back_href|default('/ca') }}">{{ back_label|default("Cancel") }}</button>
-      </div>
     </div>
   </section>
 {% endblock %}

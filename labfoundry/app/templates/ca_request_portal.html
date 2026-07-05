@@ -10,7 +10,10 @@
       <p class="kicker">Independent request portal</p>
       <h1>Certificate Requests</h1>
     </div>
-    <span class="status-pill muted">{{ ca_certificates|length }} requests</span>
+    <div class="topbar-actions">
+      <button class="button secondary" type="button" data-history-back data-history-fallback="/ca">Back</button>
+      <span class="status-pill muted">{{ ca_certificates|length }} requests</span>
+    </div>
   </div>
 
   {% if form_error %}
