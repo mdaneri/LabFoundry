@@ -35,7 +35,22 @@ def test_public_service_entries_scope_services_to_matching_address():
     assert services_by_id["ca"]["dns_names"] == ["ca.labfoundry.internal"]
     assert services_by_id["esxi_pxe"]["dns_names"] == ["esxi-pxe.labfoundry.internal"]
     assert services_by_id["vcf_offline_depot"]["dns_names"] == ["depot.labfoundry.internal"]
+    assert services_by_id["vcf_offline_depot"]["allow_unauthenticated_access"] is False
+    assert "allow_unauthenticated_access" not in services_by_id["esxi_pxe"]
     assert services_by_id["vcf_private_registry"]["dns_names"] == ["registry.labfoundry.internal"]
+
+    depot_settings.allow_unauthenticated_access = True
+    open_entries = public_service_entries(
+        interfaces=interfaces,
+        vlans=[],
+        ca_settings=ca_settings,
+        esxi_pxe_boot={"enabled": True, "listen_interface": "eth2", "listen_address": "192.168.87.32"},
+        vcf_depot_settings=depot_settings,
+        vcf_registry_settings=registry_settings,
+    )
+    open_services_by_id = {service["id"]: service for entry in open_entries for service in entry["services"]}
+    assert open_services_by_id["vcf_offline_depot"]["allow_unauthenticated_access"] is True
+    assert "allow_unauthenticated_access" not in open_services_by_id["esxi_pxe"]
 
 
 def test_public_services_nginx_config_contains_per_ip_scoped_locations():
@@ -80,18 +95,17 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "return 301 /PROD/;" in config
     assert "location = /PROD/login {" in config
     assert "location = /PROD/logout {" in config
-    assert "location = /_labfoundry_depot_auth {" in config
-    assert "internal;" in config
-    assert "proxy_pass http://127.0.0.1:8000/PROD/auth-check;" in config
-    assert "location @labfoundry_depot_login {" in config
-    assert "return 303 /PROD/login?next=$request_uri;" in config
+    assert "location = /_labfoundry_depot_auth {" not in config
+    assert "proxy_pass http://127.0.0.1:8000/PROD/auth-check;" not in config
+    assert "location @labfoundry_depot_login {" not in config
+    assert "return 303 /PROD/login?next=$request_uri;" not in config
     assert "location = /PROD/ {" in config
     assert "location ~ ^/PROD/.*/$ {" in config
     assert "location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {" in config
-    assert "auth_request /_labfoundry_depot_auth;" in config
-    assert "error_page 401 = @labfoundry_depot_login;" in config
-    assert "auth_basic" not in config
-    assert "auth_basic_user_file" not in config
+    assert "auth_request /_labfoundry_depot_auth;" not in config
+    assert "error_page 401 = @labfoundry_depot_login;" not in config
+    assert 'auth_basic "LabFoundry VCF Offline Depot";' in config
+    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in config
     assert "autoindex off;" in config
     assert "/registry" not in config
@@ -101,7 +115,9 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     depot_static_block = config.split("location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {", 1)[1].split("  }", 1)[0]
     assert "auth_basic" not in depot_login_block
     assert "auth_basic" not in depot_directory_block
-    assert "auth_request /_labfoundry_depot_auth;" in depot_static_block
+    assert 'auth_basic "LabFoundry VCF Offline Depot";' in depot_static_block
+    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in depot_static_block
+    assert "auth_request /_labfoundry_depot_auth;" not in depot_static_block
 
     registry_block = config.split("listen 192.168.88.32:80;", 1)[1]
     assert "location = /requests/login {" not in registry_block
