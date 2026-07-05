@@ -368,7 +368,7 @@ def test_wan_helper_accepts_ipv6_routes_and_rejects_ipv6_only_nat_targets(tmp_pa
     helper._run = fake_run
     helper.shutil.which = lambda command: f"/usr/sbin/{command}" if command in {"ip", "tc"} else None
     assert helper._apply_wan_routes_and_qdiscs(parsed) == 0
-    assert ["ip", "-6", "route", "replace", "2001:db8:100::/64", "via", "2001:db8:20::fe", "dev", "eth1.20", "metric", "120"] in commands
+    assert ["ip", "-6", "route", "replace", "2001:db8:100::/64", "via", "2001:db8:20::fe", "dev", "eth1.20", "metric", "120", "table", "200"] in commands
     assert any("outbound interface with an IPv4 CIDR" in error for error in helper._wan_config_errors(ipv6_only_nat))
 
 
@@ -822,7 +822,8 @@ def test_wan_helper_apply_routes_nat_and_netem(monkeypatch, tmp_path):
     assert 'oifname "eth1.20" masquerade' in input_commands[0][1]
     assert ["sysctl", "-w", "net.ipv4.ip_forward=1"] in commands
     assert ["nft", "-f", str(nat_dir / "labfoundry-nat.nft")] in commands
-    assert ["ip", "route", "replace", "10.20.0.0/24", "dev", "eth1.20", "metric", "120"] in commands
+    assert ["ip", "rule", "add", "from", "192.168.20.0/24", "table", "200", "priority", "2000"] in commands
+    assert ["ip", "route", "replace", "10.20.0.0/24", "dev", "eth1.20", "metric", "120", "table", "200"] in commands
     assert ["tc", "qdisc", "replace", "dev", "eth1.20", "root", "netem", "delay", "100ms", "10ms", "loss", "0.5%", "rate", "100mbit"] in commands
     assert service_path.exists()
     assert sysctl_path.read_text(encoding="utf-8") == "net.ipv4.ip_forward = 1\n"
@@ -875,6 +876,9 @@ def test_network_helper_renders_systemd_networkd_files(tmp_path):
     assert "Name=eth0" in files["00-labfoundry-mgmt.network"]
     assert "Name=eth*" not in files["00-labfoundry-mgmt.network"]
     assert "Address=192.168.49.1/24" in files["00-labfoundry-mgmt.network"]
+    assert "[RoutingPolicyRule]" in files["00-labfoundry-mgmt.network"]
+    assert "From=192.168.49.0/24" in files["00-labfoundry-mgmt.network"]
+    assert "Table=100" in files["00-labfoundry-mgmt.network"]
     assert "10-labfoundry-eth2.network" in files
     assert "VLAN=eth2.20" in files["10-labfoundry-eth2.network"]
     assert "10-labfoundry-eth2.20.netdev" in files

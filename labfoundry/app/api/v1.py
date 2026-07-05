@@ -38,6 +38,7 @@ from labfoundry.app.models import (
     ChronySettings,
     PhysicalInterface,
     Route,
+    RoutingRule,
     ServiceState,
     Setting,
     User,
@@ -164,6 +165,7 @@ from labfoundry.app.services.firewall import (
     ca_portal_firewall_interfaces,
     firewall_interface_networks,
     firewall_source_group_state,
+    managed_routing_firewall_rules,
     managed_service_firewall_rules,
     render_nftables_config,
     validate_firewall_source_groups,
@@ -532,6 +534,13 @@ def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[Fir
         interface_networks=interface_networks,
         source_groups=source_group_state["groups"],
         source_group_assignments=source_group_state["assignments"],
+    )
+    generated_rules.extend(
+        managed_routing_firewall_rules(
+            physical_interfaces,
+            vlan_interfaces,
+            db.execute(select(RoutingRule).order_by(RoutingRule.priority, RoutingRule.name)).scalars().all(),
+        )
     )
     return (
         settings,
@@ -985,9 +994,10 @@ def route_target_names(db: Session) -> set[str]:
         for interface in interfaces
         if interface.oper_state != "missing"
         and normalize_interface_mode(interface.mode) != "trunk"
+        and (interface.role or "").strip().lower() != "management"
         and (interface.ip_cidr or interface.ipv6_cidr)
     }
-    names.update({vlan.name for vlan in vlans if vlan.enabled and (vlan.ip_cidr or vlan.ipv6_cidr)})
+    names.update({vlan.name for vlan in vlans if vlan.enabled and (vlan.role or "").strip().lower() != "management" and (vlan.ip_cidr or vlan.ipv6_cidr)})
     return names
 
 

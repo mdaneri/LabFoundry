@@ -30,6 +30,7 @@ from labfoundry.app.models import (
     ChronySettings,
     PhysicalInterface,
     Route,
+    RoutingRule,
     ServiceState,
     Setting,
     User,
@@ -60,6 +61,7 @@ SCALAR_TABLES = {
     "vlan_interfaces": VlanInterface,
     "wan_policies": WanPolicy,
     "nat_rules": NatRule,
+    "routing_rules": RoutingRule,
     "service_states": ServiceState,
     "appliance_settings": ApplianceSettings,
     "chrony_settings": ChronySettings,
@@ -104,6 +106,7 @@ RESTORE_DELETE_MODELS = [
     DnsRecord,
     DnsSettings,
     Route,
+    RoutingRule,
     NatRule,
     WanPolicy,
     VlanInterface,
@@ -231,7 +234,7 @@ def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, 
     _clear_desired_state(db)
 
     counts: dict[str, int] = {}
-    for key in ["physical_interfaces", "vlan_interfaces", "wan_policies", "nat_rules"]:
+    for key in ["physical_interfaces", "vlan_interfaces", "wan_policies", "nat_rules", "routing_rules"]:
         counts[key] = _insert_rows(db, SCALAR_TABLES[key], data.get(key, []))
     db.flush()
 
@@ -294,6 +297,7 @@ def factory_reset_desired_state(db: Session) -> dict[str, int]:
 def desired_state_counts(db: Session) -> dict[str, int]:
     counts = {key: len(db.execute(select(model)).scalars().all()) for key, model in SCALAR_TABLES.items()}
     counts["routes"] = len(db.execute(select(Route)).scalars().all())
+    counts["routing_rules"] = len(db.execute(select(RoutingRule)).scalars().all())
     counts["dhcp_options"] = len(db.execute(select(DhcpOption)).scalars().all())
     counts["ca_certificates"] = len(db.execute(select(CaCertificate)).scalars().all())
     counts["kms_keys"] = len(db.execute(select(KmsKey)).scalars().all())

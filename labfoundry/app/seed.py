@@ -205,6 +205,8 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
         elif service_state["service"] in {"chronyd", "repository", "vcf-backups"}:
             existing_service.display_name = service_state["display_name"]
             existing_service.detail = service_state["detail"]
+            if existing_service.health == "unconfigured":
+                continue
             if existing_service.health == "healthy":
                 existing_service.health = service_state["health"]
             if service_state["service"] == "repository":

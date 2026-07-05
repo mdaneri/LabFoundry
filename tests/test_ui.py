@@ -2265,6 +2265,7 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
         NatRule,
         PhysicalInterface,
         Route,
+        RoutingRule,
         ServiceState,
         Setting,
         VcfBackupSettings,
@@ -2327,6 +2328,7 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
         assert db.execute(select(WanPolicy)).scalars().all() == []
         assert db.execute(select(NatRule)).scalars().all() == []
         assert db.execute(select(Route)).scalars().all() == []
+        assert db.execute(select(RoutingRule)).scalars().all() == []
         dns_records = db.execute(select(DnsRecord)).scalars().all()
         assert len(dns_records) == 1
         assert dns_records[0].hostname == "labfoundry.labfoundry.internal"
@@ -2362,16 +2364,19 @@ def test_routes_wan_policy_form_renders(client):
     assert response.status_code == 200
     assert "Routes &amp; WAN Simulation" in response.text
     assert "Managed Routes" in response.text
+    assert "Routing Permissions" in response.text
     assert "NAT Rules" in response.text
     assert "WAN Policies" in response.text
     assert "Routes &amp; WAN Simulation has pending appliance changes" in response.text
     assert "Validation" in response.text
     assert "routes-wan-routes-table" in response.text
+    assert "routes-wan-routing-table" in response.text
     assert "routes-wan-nat-table" in response.text
     assert "routes-wan-policies-table" in response.text
     assert "data-mode-options" not in response.text
     assert "<th>Mode</th>" not in response.text
     assert "+ Add route here" in client.get("/static/app.js").text
+    assert "+ Add routing rule here" in client.get("/static/app.js").text
     assert "+ Add NAT rule here" in client.get("/static/app.js").text
     assert "+ Add policy here" in client.get("/static/app.js").text
     assert "Europe WAN" in response.text
@@ -2463,6 +2468,22 @@ def test_routes_wan_allows_ipv6_only_route_targets_but_not_nat_targets(client):
     assert route_response.status_code == 303
     assert nat_response.status_code == 422
     assert "Choose an access physical interface" in nat_response.text
+    mgmt_route_response = client.post(
+        "/routes-wan/routes",
+        data={
+            "destination_cidr": "10.49.0.0/24",
+            "gateway": "",
+            "interface_name": "eth0",
+            "metric": "100",
+            "wan_policy_id": "",
+            "wan_mode": "interface",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert mgmt_route_response.status_code == 422
+    assert "Choose an access physical interface" in mgmt_route_response.text
     with SessionLocal() as db:
         route = db.execute(select(Route).where(Route.interface_name == "eth6")).scalar_one()
         assert route.destination_cidr == "2001:db8:66::/64"
@@ -2473,7 +2494,7 @@ def test_routes_wan_autosave_endpoints_and_apply_task(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Job, NatRule, WanPolicy
+    from labfoundry.app.models import Job, NatRule, RoutingRule, WanPolicy
 
     login(client)
     page = client.get("/routes-wan")
@@ -2530,15 +2551,48 @@ def test_routes_wan_autosave_endpoints_and_apply_task(client):
         follow_redirects=False,
     )
     assert nat_response.status_code == 303
+    routing_response = client.post(
+        "/routes-wan/routing-rules",
+        data={
+            "name": "SiteA to WAN",
+            "source_interface": "eth1.20",
+            "destination_interface": "eth2",
+            "priority": "120",
+            "description": "Allow SiteA toward WAN link",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert routing_response.status_code == 303
+    management_routing_response = client.post(
+        "/routes-wan/routing-rules",
+        data={
+            "name": "Bad management route",
+            "source_interface": "eth1.20",
+            "destination_interface": "eth0",
+            "priority": "120",
+            "description": "",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert management_routing_response.status_code == 422
+    assert "non-management destination" in management_routing_response.text
     refreshed = client.get("/routes-wan")
     assert "Metro WAN" in refreshed.text
     assert "Metro outbound" in refreshed.text
+    assert "SiteA to WAN" in refreshed.text
     assert "10.20.0.0/24" in refreshed.text
     assert "ip saddr 192.168.50.0/24 oifname &#34;eth2&#34; masquerade" in refreshed.text
+    assert "ip rule add from 192.168.50.0/24 table 200" in refreshed.text
     assert "tc qdisc replace dev eth1.20" in refreshed.text
     with SessionLocal() as db:
         rule = db.execute(select(NatRule).where(NatRule.name == "Metro outbound")).scalar_one()
         assert rule.outbound_interface == "eth2"
+        routing = db.execute(select(RoutingRule).where(RoutingRule.name == "SiteA to WAN")).scalar_one()
+        assert routing.source_interface == "eth1.20"
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "wan"})
     assert apply_response.status_code == 200
@@ -2549,7 +2603,9 @@ def test_routes_wan_autosave_endpoints_and_apply_task(client):
         assert "labfoundry-helper" in (job.result or "")
         assert "wan" in (job.result or "")
         assert "NAT rules" in (job.result or "")
+        assert "explicit routing rules" in (job.result or "")
         assert "nft -f /etc/labfoundry/nftables.d/labfoundry-nat.nft" in (job.result or "")
+        assert "ip rule add from 192.168.50.0/24 table 200" in (job.result or "")
         assert "tc qdisc replace dev eth1.20" in (job.result or "")
 
 

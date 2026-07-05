@@ -1,7 +1,7 @@
 import json
 import logging
 
-from labfoundry.app.models import AuditEvent, CaSettings, DhcpScope, DhcpSettings, DnsSettings, Job, KmsSettings, NatRule, PhysicalInterface, Route, Setting, VlanInterface
+from labfoundry.app.models import AuditEvent, CaSettings, DhcpScope, DhcpSettings, DnsSettings, Job, KmsSettings, NatRule, PhysicalInterface, Route, RoutingRule, Setting, VlanInterface
 from labfoundry.app.services.networking import (
     HostPhysicalInterface,
     NETWORK_INVENTORY_CLEANUP_WARNING_KEY,
@@ -242,6 +242,8 @@ def test_sync_host_inventory_cleans_removed_nic_bindings_and_retargets_survivors
                 Route(destination_cidr="10.50.0.0/24", interface_name="eth2.50"),
                 Route(destination_cidr="10.22.0.0/24", interface_name="eth1.22"),
                 NatRule(name="removed outbound", source="192.168.22.0/24", outbound_interface="eth1.22"),
+                RoutingRule(name="removed route permission", source_interface="eth1.22", destination_interface="eth2.50"),
+                RoutingRule(name="survivor route permission", source_interface="eth2.50", destination_interface="eth2"),
                 DhcpSettings(enabled=True),
                 DhcpScope(name="removed-zone", interface_name="eth1.22", site_address="192.168.22.1", range_start="192.168.22.100", range_end="192.168.22.200"),
                 DnsSettings(enabled=True, listen_interface="eth1.22\neth2.50", listen_address="192.168.22.1\n192.168.50.1"),
@@ -279,6 +281,14 @@ def test_sync_host_inventory_cleans_removed_nic_bindings_and_retargets_survivors
         nat_rule = db.execute(select(NatRule).where(NatRule.name == "removed outbound")).scalar_one()
         assert nat_rule.enabled is False
         assert nat_rule.outbound_interface == ""
+        removed_routing_rule = db.execute(select(RoutingRule).where(RoutingRule.name == "removed route permission")).scalar_one()
+        assert removed_routing_rule.enabled is False
+        assert removed_routing_rule.source_interface == f"{removed.name}.22"
+        assert removed_routing_rule.destination_interface == "eth1.50"
+        survivor_routing_rule = db.execute(select(RoutingRule).where(RoutingRule.name == "survivor route permission")).scalar_one()
+        assert survivor_routing_rule.enabled is True
+        assert survivor_routing_rule.source_interface == "eth1.50"
+        assert survivor_routing_rule.destination_interface == "eth1"
         dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
         assert dhcp_settings.enabled is False
         dhcp_scope = db.execute(select(DhcpScope).where(DhcpScope.name == "removed-zone")).scalar_one()

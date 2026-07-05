@@ -53,6 +53,7 @@ from labfoundry.app.models import (
     PhysicalInterface,
     Role,
     Route,
+    RoutingRule,
     ServiceState,
     Setting,
     User,
@@ -187,8 +188,10 @@ from labfoundry.app.services.monitoring import monitor_payload
 from labfoundry.app.services.routes_wan import (
     WAN_CONFIG_PATH,
     WAN_MODES,
+    generated_route_role_rules,
     nat_rule_to_dict,
     render_wan_config,
+    routing_rule_to_dict,
     route_to_dict,
     validate_nat_source,
     validate_wan_state,
@@ -242,6 +245,7 @@ from labfoundry.app.services.firewall import (
     firewall_settings_to_dict,
     firewall_source_group_state,
     is_labfoundry_managed_firewall_rule,
+    managed_routing_firewall_rules,
     managed_service_firewall_rules,
     render_nftables_config,
     validate_firewall_source_groups,
@@ -2221,6 +2225,13 @@ def firewall_context(db: Session) -> dict:
         source_groups=source_group_state["groups"],
         source_group_assignments=source_group_state["assignments"],
     )
+    generated_rules.extend(
+        managed_routing_firewall_rules(
+            physical_interfaces,
+            vlan_interfaces,
+            db.execute(select(RoutingRule).order_by(RoutingRule.priority, RoutingRule.name)).scalars().all(),
+        )
+    )
     config_preview = render_nftables_config(
         settings,
         rules,
@@ -2573,6 +2584,10 @@ def network_context(db: Session) -> dict:
 
 
 def wan_route_targets(db: Session) -> list[dict[str, str]]:
+    return [target for target in wan_routing_targets(db) if target["routing_domain"] == "lab"]
+
+
+def wan_routing_targets(db: Session) -> list[dict[str, str]]:
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlans = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     targets: list[dict[str, str]] = []
@@ -2585,6 +2600,7 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
         if mode == "trunk" or not addresses:
             continue
         address_label = " / ".join(addresses)
+        routing_domain = "management" if role == "management" else "lab"
         targets.append(
             {
                 "name": interface.name,
@@ -2594,6 +2610,8 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
                 "ipv6_cidr": interface.ipv6_cidr or "",
                 "addresses": addresses,
                 "wan": role == "route",
+                "routing_domain": routing_domain,
+                "route_allowed": routing_domain == "lab",
                 "label": f"{interface.name} - physical / {role} / {address_label}",
             }
         )
@@ -2603,6 +2621,7 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
         if not vlan.enabled or not addresses:
             continue
         address_label = " / ".join(addresses)
+        routing_domain = "management" if role == "management" else "lab"
         targets.append(
             {
                 "name": vlan.name,
@@ -2612,6 +2631,8 @@ def wan_route_targets(db: Session) -> list[dict[str, str]]:
                 "ipv6_cidr": vlan.ipv6_cidr or "",
                 "addresses": addresses,
                 "wan": role == "route",
+                "routing_domain": routing_domain,
+                "route_allowed": routing_domain == "lab",
                 "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {role} / {address_label}",
             }
         )
@@ -2626,6 +2647,8 @@ def routes_wan_context(db: Session) -> dict:
     routes = db.execute(select(Route).options(selectinload(Route.wan_policy)).order_by(Route.destination_cidr)).scalars().all()
     policies = db.execute(select(WanPolicy).order_by(WanPolicy.name)).scalars().all()
     nat_rules = db.execute(select(NatRule).order_by(NatRule.priority, NatRule.name)).scalars().all()
+    routing_rules = db.execute(select(RoutingRule).order_by(RoutingRule.priority, RoutingRule.name)).scalars().all()
+    all_targets = wan_routing_targets(db)
     targets = wan_route_targets(db)
     nat_targets = wan_nat_targets_from_route_targets(targets)
     source_groups = firewall_source_group_state_for_db(db)["groups"]
@@ -2636,15 +2659,21 @@ def routes_wan_context(db: Session) -> dict:
         nat_rules,
         {target["name"] for target in nat_targets},
         source_groups,
+        routing_rules,
+        {target["name"] for target in targets},
     )
-    config_preview = render_wan_config(routes, policies, nat_rules, targets, source_groups=source_groups)
+    config_preview = render_wan_config(routes, policies, nat_rules, all_targets, routing_rules, source_groups=source_groups)
     return {
         "routes": routes,
         "policies": policies,
         "nat_rules": nat_rules,
+        "routing_rules": routing_rules,
         "route_rows": [route_to_dict(route) for route in routes],
         "nat_rule_rows": [nat_rule_to_dict(rule) for rule in nat_rules],
+        "routing_rule_rows": [routing_rule_to_dict(rule) for rule in routing_rules],
+        "generated_routing_rule_rows": generated_route_role_rules(targets),
         "policy_rows": [wan_policy_to_dict(policy) for policy in policies],
+        "wan_all_targets": all_targets,
         "wan_route_targets": targets,
         "wan_route_target_names": [target["name"] for target in targets],
         "wan_nat_targets": nat_targets,
@@ -4207,11 +4236,17 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             wan["routes"],
             wan["policies"],
             wan["nat_rules"],
-            wan["wan_route_targets"],
+            wan["wan_all_targets"],
+            wan["routing_rules"],
             removed_routes=wan_removed_routes,
             source_groups=wan["wan_source_groups"],
         )
-    wan_summary = [f"{len(wan['routes'])} routes", f"{len(wan['nat_rules'])} NAT rules", f"{len(wan['policies'])} WAN policies"]
+    wan_summary = [
+        f"{len(wan['routes'])} routes",
+        f"{len(wan['routing_rules'])} explicit routing rules",
+        f"{len(wan['nat_rules'])} NAT rules",
+        f"{len(wan['policies'])} WAN policies",
+    ]
     if wan_removed_routes:
         wan_summary.append(f"{len(wan_removed_routes)} route removals")
 
@@ -5617,6 +5652,31 @@ def validate_nat_rule_form_values(
     return name_value, source_value, outbound_value, masquerade_value, priority_value
 
 
+def validate_routing_rule_form_values(
+    name: str,
+    source_interface: str,
+    destination_interface: str,
+    priority: str,
+    db: Session,
+) -> tuple[str, str, str, int] | Response:
+    name_value = name.strip()
+    if not name_value:
+        return Response("Routing rule name is required.", status_code=422, media_type="text/plain")
+    target_names = {target["name"] for target in wan_route_targets(db)}
+    source_value = source_interface.strip()
+    destination_value = destination_interface.strip()
+    if source_value not in target_names:
+        return Response("Choose a non-management source interface or VLAN with an IP CIDR.", status_code=422, media_type="text/plain")
+    if destination_value not in target_names:
+        return Response("Choose a non-management destination interface or VLAN with an IP CIDR.", status_code=422, media_type="text/plain")
+    if source_value == destination_value:
+        return Response("Routing source and destination must be different.", status_code=422, media_type="text/plain")
+    priority_value = parse_int_form_value(priority.strip(), "Priority", default=100, minimum=0)
+    if isinstance(priority_value, Response):
+        return priority_value
+    return name_value, source_value, destination_value, priority_value
+
+
 @router.post("/routes-wan/routes", response_model=None)
 def create_route_from_ui(
     request: Request,
@@ -5702,6 +5762,98 @@ def delete_route_from_ui(
     db.delete(route)
     db.commit()
     record_audit(db, actor=identity.username, action="delete_route", resource_type="route", resource_id=str(route_id))
+    return RedirectResponse("/routes-wan", status_code=303)
+
+
+@router.post("/routes-wan/routing-rules", response_model=None)
+def create_routing_rule_from_ui(
+    request: Request,
+    name: str = Form(""),
+    source_interface: str = Form(""),
+    destination_interface: str = Form(""),
+    priority: str = Form("100"),
+    description: str = Form(""),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | Response:
+    verify_csrf(request, csrf)
+    parsed = validate_routing_rule_form_values(name, source_interface, destination_interface, priority, db)
+    if isinstance(parsed, Response):
+        return parsed
+    name_value, source_value, destination_value, priority_value = parsed
+    rule = RoutingRule(
+        name=name_value,
+        source_interface=source_value,
+        destination_interface=destination_value,
+        priority=priority_value,
+        description=description.strip() or None,
+        enabled=enabled == "on",
+    )
+    db.add(rule)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return Response(f"Routing rule {rule.name} already exists.", status_code=409, media_type="text/plain")
+    record_audit(db, actor=identity.username, action="create_routing_rule", resource_type="routing_rule", resource_id=str(rule.id))
+    return RedirectResponse("/routes-wan", status_code=303)
+
+
+@router.post("/routes-wan/routing-rules/{rule_id}/edit", response_model=None)
+def edit_routing_rule_from_ui(
+    request: Request,
+    rule_id: int,
+    name: str = Form(""),
+    source_interface: str = Form(""),
+    destination_interface: str = Form(""),
+    priority: str = Form("100"),
+    description: str = Form(""),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | Response:
+    verify_csrf(request, csrf)
+    rule = db.get(RoutingRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Routing rule not found")
+    parsed = validate_routing_rule_form_values(name, source_interface, destination_interface, priority, db)
+    if isinstance(parsed, Response):
+        return parsed
+    name_value, source_value, destination_value, priority_value = parsed
+    rule.name = name_value
+    rule.source_interface = source_value
+    rule.destination_interface = destination_value
+    rule.priority = priority_value
+    rule.description = description.strip() or None
+    rule.enabled = enabled == "on"
+    db.add(rule)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return Response(f"Routing rule {rule.name} already exists.", status_code=409, media_type="text/plain")
+    record_audit(db, actor=identity.username, action="update_routing_rule", resource_type="routing_rule", resource_id=str(rule.id))
+    return RedirectResponse("/routes-wan", status_code=303)
+
+
+@router.post("/routes-wan/routing-rules/{rule_id}/delete", response_model=None)
+def delete_routing_rule_from_ui(
+    request: Request,
+    rule_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | Response:
+    verify_csrf(request, csrf)
+    rule = db.get(RoutingRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Routing rule not found")
+    db.delete(rule)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_routing_rule", resource_type="routing_rule", resource_id=str(rule_id))
     return RedirectResponse("/routes-wan", status_code=303)
 
 

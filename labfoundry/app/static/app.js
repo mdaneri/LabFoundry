@@ -3504,6 +3504,20 @@ function newWanNatRuleRow(defaultTarget = "") {
   };
 }
 
+function newWanRoutingRuleRow(defaultSource = "", defaultDestination = "") {
+  return {
+    id: "__new__",
+    name: "",
+    enabled: true,
+    source_interface: defaultSource,
+    destination_interface: defaultDestination,
+    priority: 100,
+    description: "",
+    generated: false,
+    is_new: true,
+  };
+}
+
 function hasRequiredWanRouteFields(data) {
   return Boolean((data.destination_cidr || "").trim() && (data.interface_name || "").trim());
 }
@@ -3514,6 +3528,10 @@ function hasRequiredWanNatFields(data) {
 
 function hasRequiredWanPolicyFields(data) {
   return Boolean((data.name || "").trim());
+}
+
+function hasRequiredWanRoutingFields(data) {
+  return Boolean((data.name || "").trim() && (data.source_interface || "").trim() && (data.destination_interface || "").trim());
 }
 
 function wanPolicyValues(policyOptions) {
@@ -3628,6 +3646,41 @@ async function autoSaveWanNatRule(cell, csrf) {
   }
 }
 
+async function autoSaveWanRoutingRule(cell, csrf) {
+  clearCaMessage("routes-wan-routing-error");
+  const row = cell.getRow();
+  const data = row.getData();
+  if (data.generated) {
+    return;
+  }
+  if (data.is_new) {
+    if (!hasRequiredWanRoutingFields(data)) {
+      return;
+    }
+    try {
+      await postWanAction("/routes-wan/routing-rules", data, csrf, { reload: false });
+      showTransientGridStatus("Added");
+      window.location.reload();
+    } catch (error) {
+      showWanMessage("routes-wan-routing-error", error instanceof Error ? error.message : "The routing rule could not be added.");
+      if (typeof cell.restoreOldValue === "function") {
+        cell.restoreOldValue();
+      }
+    }
+    return;
+  }
+  try {
+    await postWanAction(`/routes-wan/routing-rules/${data.id}/edit`, data, csrf, { reload: false });
+    showTransientGridStatus("Saved");
+    await refreshNetworkSideStack();
+  } catch (error) {
+    showWanMessage("routes-wan-routing-error", error instanceof Error ? error.message : "The routing rule could not be saved.");
+    if (typeof cell.restoreOldValue === "function") {
+      cell.restoreOldValue();
+    }
+  }
+}
+
 async function deleteWanRouteFromMenu(row, csrf) {
   clearCaMessage("routes-wan-route-error");
   const data = row.getData();
@@ -3688,6 +3741,133 @@ async function deleteWanPolicyFromMenu(row, csrf) {
     await postWanAction(`/routes-wan/policies/${data.id}/delete`, {}, csrf);
   } catch (error) {
     showWanMessage("routes-wan-policy-error", error instanceof Error ? error.message : "The WAN policy could not be deleted.");
+  }
+}
+
+async function deleteWanRoutingRuleFromMenu(row, csrf) {
+  clearCaMessage("routes-wan-routing-error");
+  const data = row.getData();
+  if (data.is_new || data.generated) {
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `Delete routing rule ${data.name}?`,
+    message: "This removes the routing permission from LabFoundry desired state. It will not touch the appliance until global appliance apply runs.",
+    label: "Delete routing rule",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await postWanAction(`/routes-wan/routing-rules/${data.id}/delete`, {}, csrf);
+  } catch (error) {
+    showWanMessage("routes-wan-routing-error", error instanceof Error ? error.message : "The routing rule could not be deleted.");
+  }
+}
+
+function initializeRoutesWanRoutingTable() {
+  const tableElement = document.getElementById("routes-wan-routing-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  if (typeof Tabulator === "undefined") {
+    showWanMessage("routes-wan-routing-error", "Tabulator did not load. Showing the fallback table.");
+    return;
+  }
+  const csrf = tableElement.dataset.csrf || "";
+  const targets = JSON.parse(tableElement.dataset.targetOptions || "[]");
+  const targetValues = Object.fromEntries(targets.map((target) => [target.name, target.label]));
+  const defaultSource = targets[0]?.name || "";
+  const defaultDestination = targets.find((target) => target.name !== defaultSource)?.name || "";
+  const generatedRows = JSON.parse(tableElement.dataset.generatedRules || "[]");
+  const explicitRows = JSON.parse(tableElement.dataset.rules || "[]");
+  const rows = [...generatedRows, ...explicitRows, newWanRoutingRuleRow(defaultSource, defaultDestination)];
+  try {
+    new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "420px",
+      rowHeight: 28,
+      placeholder: "No routing permissions configured.",
+      reactiveData: false,
+      rowContextMenu: [
+        {
+          label: "Delete routing rule",
+          action: (_event, row) => deleteWanRoutingRuleFromMenu(row, csrf),
+          disabled: (component) => component.getData().is_new || component.getData().generated,
+        },
+      ],
+      columns: [
+        {
+          title: "Name",
+          field: "name",
+          editor: "input",
+          editable: (cell) => !cell.getRow().getData().generated,
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add routing rule here"),
+          minWidth: 170,
+          cellEdited: (cell) => autoSaveWanRoutingRule(cell, csrf),
+        },
+        {
+          title: "Source",
+          field: "source_interface",
+          editor: "list",
+          editable: (cell) => !cell.getRow().getData().generated,
+          editorParams: { values: targetValues },
+          formatter: (cell) => escapeHtml(targetValues[cell.getValue()] || cell.getValue() || "choose source..."),
+          minWidth: 220,
+          cellEdited: (cell) => autoSaveWanRoutingRule(cell, csrf),
+        },
+        {
+          title: "Destination",
+          field: "destination_interface",
+          editor: "list",
+          editable: (cell) => !cell.getRow().getData().generated,
+          editorParams: { values: targetValues },
+          formatter: (cell) => escapeHtml(targetValues[cell.getValue()] || cell.getValue() || "choose destination..."),
+          minWidth: 220,
+          cellEdited: (cell) => autoSaveWanRoutingRule(cell, csrf),
+        },
+        {
+          title: "Priority",
+          field: "priority",
+          editor: "number",
+          editable: (cell) => !cell.getRow().getData().generated,
+          width: 100,
+          cellEdited: (cell) => autoSaveWanRoutingRule(cell, csrf),
+        },
+        {
+          title: "Enabled",
+          field: "enabled",
+          formatter: "tickCross",
+          editor: "tickCross",
+          editable: (cell) => !cell.getRow().getData().generated,
+          hozAlign: "center",
+          width: 100,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveWanRoutingRule(cell, csrf),
+        },
+        {
+          title: "Description",
+          field: "description",
+          editor: "input",
+          editable: (cell) => !cell.getRow().getData().generated,
+          minWidth: 190,
+          cellEdited: (cell) => autoSaveWanRoutingRule(cell, csrf),
+        },
+      ],
+      rowFormatter: (row) => {
+        const data = row.getData();
+        row.getElement().classList.toggle("new-record-row", Boolean(data.is_new));
+        row.getElement().classList.toggle("readonly-row", Boolean(data.generated));
+      },
+    });
+    if (fallback) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    showWanMessage("routes-wan-routing-error", error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
   }
 }
 
@@ -8453,6 +8633,7 @@ document.addEventListener("DOMContentLoaded", initializeServicesTable);
 document.addEventListener("DOMContentLoaded", initializeUsersTable);
 document.addEventListener("DOMContentLoaded", initializeUserPasswordForm);
 document.addEventListener("DOMContentLoaded", initializeRoutesWanRoutesTable);
+document.addEventListener("DOMContentLoaded", initializeRoutesWanRoutingTable);
 document.addEventListener("DOMContentLoaded", initializeRoutesWanNatTable);
 document.addEventListener("DOMContentLoaded", initializeRoutesWanPoliciesTable);
 document.addEventListener("DOMContentLoaded", initializePhysicalInterfacesTable);

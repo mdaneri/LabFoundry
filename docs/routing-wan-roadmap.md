@@ -5,12 +5,15 @@ LabFoundry Routing/WAN v1 is intentionally appliance-owned and conservative. Des
 ## Current V1 Scope
 
 - Static route desired state rendered to `/var/lib/labfoundry/apply/wan/labfoundry-wan.conf`.
+- Separate route tables for management and lab networks: management keeps its own default gateway, while non-management routes install into the lab route table.
+- Routing permissions for lab forwarding. Route-role networks forward to other route-role networks by default; access networks need explicit routing rules.
 - IPv4 outbound masquerade NAT rules rendered as the LabFoundry-owned `table ip labfoundry_nat`.
 - NAT outbound interfaces can be access physical interfaces with IPv4 CIDRs or enabled VLAN interfaces with IPv4 CIDRs; they do not have to use role `wan`.
-- IPv4 forwarding enabled only when an enabled NAT rule requires it.
+- IPv4 forwarding enabled only when enabled lab routing or NAT requires it.
+- Management is never a route, NAT, or routing-permission target, and firewall apply generates explicit management-to-lab and lab-to-management forward drops.
 - Interface/VLAN-level WAN simulation through one `tc qdisc replace dev <target> root netem ...` per target with an enabled assigned policy.
 - Disabled or unassigned WAN policy targets clear only LabFoundry-owned root qdisc intent.
-- Route commands use `ip route replace <destination> [via <gateway>] dev <interface> metric <metric>`.
+- Route commands use `ip route replace <destination> [via <gateway>] dev <interface> metric <metric> table 200`.
 
 `wan_mode=interface` is the only supported WAN impairment mode in v1. Route-specific impairment is not exposed in the UI or public API until it has a real helper implementation.
 
