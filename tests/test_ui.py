@@ -3726,19 +3726,23 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert "Trust Material" not in page.text
     assert "Appliance Information" not in page.text
     assert "https://github.com/mdaneri/LabFoundry" in page.text
-    assert 'href="/openapi.json"' in page.text
+    assert 'href="http://192.168.167.10/"' in page.text
+    assert ">Management<" in page.text
+    assert 'href="http://192.168.167.10/openapi.json"' in page.text
     assert "/certificate-authority" not in page.text
     assert "/appliance-apply" not in page.text
 
     login_page = client.get("/ca/login")
     assert login_page.status_code == 200
-    assert "Sign in to the CA portal" in login_page.text
+    assert "Sign in to user portal" in login_page.text
+    assert "Use your LabFoundry user account to continue." in login_page.text
     assert 'action="/ca/login"' in login_page.text
     assert 'name="next" value="/ca"' in login_page.text
     assert 'data-history-back' in login_page.text
+    assert ">Cancel<" in login_page.text
     assert 'class="public-portal-shell"' in login_page.text
     assert "https://github.com/mdaneri/LabFoundry" in login_page.text
-    assert 'href="/openapi.json"' in login_page.text
+    assert 'href="http://192.168.167.10/openapi.json"' in login_page.text
     csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     login_response = client.post(
         "/ca/login",
@@ -3775,7 +3779,9 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert 'href="/ca/login"' in ca_ip_home.text
     assert ">Login<" in ca_ip_home.text
     assert "https://github.com/mdaneri/LabFoundry" in ca_ip_home.text
-    assert 'href="/openapi.json"' in ca_ip_home.text
+    assert 'href="http://192.168.167.10/"' in ca_ip_home.text
+    assert ">Management<" in ca_ip_home.text
+    assert 'href="http://192.168.167.10/openapi.json"' in ca_ip_home.text
     assert 'href="/requests"' not in ca_ip_home.text
     assert "Request certificate" not in ca_ip_home.text
     assert ca_ip_home.text.index("https://github.com/mdaneri/LabFoundry") > ca_ip_home.text.index('href="/ca/login"')
@@ -3869,13 +3875,18 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
     assert "Certificate Authority" in page.text
     assert "VCF Offline Depot" in page.text
     assert "ESXi PXE" in page.text
+    assert "ca.labfoundry.internal" in page.text
+    assert "depot.labfoundry.internal" in page.text
+    assert "esxi-pxe.labfoundry.internal" in page.text
     assert 'href="/PROD/"' in page.text
     assert 'href="/pxe/esxi/"' in page.text
     assert "Appliance Information" not in page.text
     assert 'href="/ca/login"' in page.text
     assert ">Login<" in page.text
     assert "https://github.com/mdaneri/LabFoundry" in page.text
-    assert 'href="/openapi.json"' in page.text
+    assert ">Management<" in page.text
+    assert 'href="http://192.168.167.10/openapi.json"' in page.text
+    assert ">Open<" not in page.text
     assert 'href="/requests"' not in page.text
     assert "Request certificate" not in page.text
     assert 'class="public-portal-shell"' in page.text
@@ -3894,7 +3905,9 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
 
     depot_login = client.get(depot_redirect.headers["location"], headers={"host": "192.168.87.32"})
     assert depot_login.status_code == 200
-    assert "Sign in to the depot" in depot_login.text
+    assert "Sign in to user portal" in depot_login.text
+    assert "Use your LabFoundry user account to continue." in depot_login.text
+    assert ">Cancel<" in depot_login.text
     assert 'action="/PROD/login"' in depot_login.text
     assert 'name="next" value="/PROD/"' in depot_login.text
 

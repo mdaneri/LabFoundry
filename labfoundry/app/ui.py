@@ -2450,7 +2450,33 @@ def public_ca_context(db: Session) -> dict:
         "root_fingerprint": settings.root_fingerprint,
         "root_issued_at": settings.root_issued_at,
         "root_expires_at": settings.root_expires_at,
+        **public_portal_links_context(db),
     }
+
+
+def public_portal_links_context(db: Session) -> dict[str, str]:
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    management = management_interface_context(interfaces)
+    settings = get_appliance_settings_row(db)
+    host = _url_host(management.get("ip") or settings.fqdn)
+    scheme = "https" if settings.management_https_enabled else "http"
+    base_url = f"{scheme}://{host}" if host else ""
+    return {
+        "public_management_base_url": base_url,
+        "public_management_url": f"{base_url}/" if base_url else "",
+        "public_openapi_url": f"{base_url}/openapi.json" if base_url else "/openapi.json",
+    }
+
+
+def _url_host(value: str) -> str:
+    host = (value or "").strip().strip(".")
+    if not host:
+        return ""
+    try:
+        parsed = ip_address(host.strip("[]"))
+    except ValueError:
+        return host
+    return f"[{parsed}]" if parsed.version == 6 else str(parsed)
 
 
 def safe_login_next(value: str | None) -> str:
@@ -2576,6 +2602,7 @@ def public_service_directory_context(db: Session, binding: dict[str, str]) -> di
         "public_ca_service_available": any(service.get("id") == "ca" for service in services),
         "public_github_url": "https://github.com/mdaneri/LabFoundry",
         "current_version_info": current_version_info(),
+        **public_portal_links_context(db),
     }
 
 
@@ -5347,6 +5374,7 @@ def _depot_browser_context(db: Session, depot_path: str = "") -> dict[str, Any]:
         "depot_entries": entries,
         "depot_parent_href": parent_href,
         "depot_allow_unauthenticated_access": settings.allow_unauthenticated_access,
+        **public_portal_links_context(db),
     }
 
 
@@ -5362,7 +5390,7 @@ def safe_depot_login_next(value: str | None) -> str:
     return "/PROD/"
 
 
-def depot_login_response(request: Request, *, return_to: str = "/PROD/", error: str | None = None, status_code: int = 200) -> HTMLResponse:
+def depot_login_response(request: Request, *, return_to: str = "/PROD/", error: str | None = None, status_code: int = 200, db: Session | None = None) -> HTMLResponse:
     return render(
         request,
         "ca_request_login.html",
@@ -5372,10 +5400,9 @@ def depot_login_response(request: Request, *, return_to: str = "/PROD/", error: 
             "login_action": "/PROD/login",
             "portal_title": "VCF Offline Depot",
             "portal_subtitle": "Public depot browser",
-            "login_heading": "Sign in to the depot",
-            "login_copy": "Use a LabFoundry local account to browse authenticated VCF depot directories.",
             "back_href": "/",
-            "back_label": "Back to public services",
+            "back_label": "Cancel",
+            **(public_portal_links_context(db) if db else {}),
         },
         status_code=status_code,
     )
@@ -5386,11 +5413,12 @@ def depot_login_page(
     request: Request,
     next: str = Query("/PROD/"),
     identity: Identity | None = Depends(get_session_identity),
+    db: Session = Depends(get_db),
 ) -> HTMLResponse | RedirectResponse:
     return_to = safe_depot_login_next(next)
     if identity:
         return RedirectResponse(return_to, status_code=303)
-    return depot_login_response(request, return_to=return_to)
+    return depot_login_response(request, return_to=return_to, db=db)
 
 
 @router.post("/PROD/login", response_model=None)
@@ -5415,6 +5443,7 @@ def depot_login(
             return_to=return_to,
             error=error,
             status_code=status_code,
+            db=db,
         ),
     )
 
@@ -7899,7 +7928,7 @@ def public_ca_page(
     return render(request, "ca_public.html", {"identity": identity, **public_ca_context(db)})
 
 
-def ca_public_login_response(request: Request, *, error: str | None = None, status_code: int = 200) -> HTMLResponse:
+def ca_public_login_response(request: Request, *, error: str | None = None, status_code: int = 200, db: Session | None = None) -> HTMLResponse:
     return render(
         request,
         "ca_request_login.html",
@@ -7909,10 +7938,9 @@ def ca_public_login_response(request: Request, *, error: str | None = None, stat
             "login_action": "/ca/login",
             "portal_title": "LabFoundry CA",
             "portal_subtitle": "Public trust portal",
-            "login_heading": "Sign in to the CA portal",
-            "login_copy": "Use a certificate operator account to access request actions from the public CA portal.",
             "back_href": "/ca",
-            "back_label": "Back to public CA",
+            "back_label": "Cancel",
+            **(public_portal_links_context(db) if db else {}),
         },
         status_code=status_code,
     )
@@ -7940,8 +7968,8 @@ def authenticate_ca_portal_session(
 
 
 @router.get("/ca/login", response_class=HTMLResponse, response_model=None)
-def ca_public_login_page(request: Request) -> HTMLResponse:
-    return ca_public_login_response(request)
+def ca_public_login_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    return ca_public_login_response(request, db=db)
 
 
 @router.post("/ca/login", response_model=None)
@@ -7960,7 +7988,12 @@ def ca_public_login(
         password=password,
         csrf=csrf,
         next_path="/ca" if next != "/ca" else next,
-        failure_response=ca_public_login_response,
+        failure_response=lambda failed_request, *, error=None, status_code=200: ca_public_login_response(
+            failed_request,
+            error=error,
+            status_code=status_code,
+            db=db,
+        ),
     )
 
 
@@ -8000,8 +8033,17 @@ def ca_requests_page(
     return render(request, "ca_requests.html", {"identity": identity, **ca_request_context(db)})
 
 
-def ca_request_portal_login_response(request: Request, *, error: str | None = None, status_code: int = 200) -> HTMLResponse:
-    return render(request, "ca_request_login.html", {"error": error, "return_to": "/requests"}, status_code=status_code)
+def ca_request_portal_login_response(request: Request, *, error: str | None = None, status_code: int = 200, db: Session | None = None) -> HTMLResponse:
+    return render(
+        request,
+        "ca_request_login.html",
+        {
+            "error": error,
+            "return_to": "/requests",
+            **(public_portal_links_context(db) if db else {}),
+        },
+        status_code=status_code,
+    )
 
 
 @router.get("/requests", response_class=HTMLResponse, response_model=None)
@@ -8011,7 +8053,7 @@ def ca_portal_requests_page(
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     if identity is None:
-        return ca_request_portal_login_response(request)
+        return ca_request_portal_login_response(request, db=db)
     require_certificate_workflow_identity(identity)
     return render(request, "ca_request_portal.html", {"identity": identity, **ca_request_context(db)})
 
@@ -8032,7 +8074,12 @@ def ca_request_portal_login(
         password=password,
         csrf=csrf,
         next_path="/requests" if next != "/requests" else next,
-        failure_response=ca_request_portal_login_response,
+        failure_response=lambda failed_request, *, error=None, status_code=200: ca_request_portal_login_response(
+            failed_request,
+            error=error,
+            status_code=status_code,
+            db=db,
+        ),
     )
 
 

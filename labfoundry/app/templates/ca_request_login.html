@@ -7,8 +7,8 @@
 {% block public_content %}
   <section class="login-shell public-login-shell">
     <div class="login-panel">
-      <h1>{{ login_heading|default("Sign in to request certificates") }}</h1>
-      <p class="muted">{{ login_copy|default("Use a certificate operator account to submit certificate requests and manage request revocation.") }}</p>
+      <h1>{{ login_heading|default("Sign in to user portal") }}</h1>
+      <p class="muted">{{ login_copy|default("Use your LabFoundry user account to continue.") }}</p>
       {% if error %}
         <div class="alert error">{{ error }}</div>
       {% endif %}
@@ -26,7 +26,7 @@
         <button class="button primary" type="submit">Sign in</button>
       </form>
       <div class="button-row">
-        <button class="button ghost" type="button" data-history-back data-history-fallback="{{ back_href|default('/ca') }}">{{ back_label|default("Back") }}</button>
+        <button class="button ghost" type="button" data-history-back data-history-fallback="{{ back_href|default('/ca') }}">{{ back_label|default("Cancel") }}</button>
       </div>
     </div>
   </section>

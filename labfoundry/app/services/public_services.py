@@ -4,10 +4,12 @@ from ipaddress import ip_address
 from typing import Any
 
 from labfoundry.app.models import CaSettings, PhysicalInterface, VcfOfflineDepotSettings, VcfPrivateRegistrySettings, VlanInterface
+from labfoundry.app.services.ca import CA_DEFAULT_PORTAL_HOSTNAME
 from labfoundry.app.services.dnsmasq import split_addresses
+from labfoundry.app.services.esxi_pxe import ESXI_PXE_DEFAULT_HOSTNAME
 from labfoundry.app.services.networking import normalize_interface_role
-from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_DEFAULT_STORE_PATH, vcf_depot_endpoint
-from labfoundry.app.services.vcf_private_registry import vcf_registry_endpoint
+from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_DEFAULT_HOSTNAME, VCF_DEPOT_DEFAULT_STORE_PATH, vcf_depot_endpoint
+from labfoundry.app.services.vcf_private_registry import VCF_REGISTRY_DEFAULT_HOSTNAME, vcf_registry_endpoint
 
 
 PUBLIC_SERVICES_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/public-services/labfoundry-public-services.conf"
@@ -40,7 +42,7 @@ def public_services_for_address(
     vcf_registry_settings: VcfPrivateRegistrySettings,
 ) -> list[dict[str, Any]]:
     normalized = _normalize_address(address)
-    services: list[dict[str, str]] = []
+    services: list[dict[str, Any]] = []
     if ca_settings.enabled and normalized in _normalized_addresses(ca_settings.listen_address):
         services.append(
             {
@@ -52,6 +54,7 @@ def public_services_for_address(
                 "secondary_label": "",
                 "status": "available" if ca_settings.root_certificate_pem else "configured",
                 "pill": "good" if ca_settings.root_certificate_pem else "warn",
+                "dns_names": _service_dns_names(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME),
             }
         )
     boot = esxi_pxe_boot or {}
@@ -67,6 +70,7 @@ def public_services_for_address(
                 "status": "enabled",
                 "pill": "good",
                 "allow_unauthenticated_access": vcf_depot_settings.allow_unauthenticated_access,
+                "dns_names": _service_dns_names(str(boot.get("hostname") or ESXI_PXE_DEFAULT_HOSTNAME)),
             }
         )
     if vcf_depot_settings.enabled and normalized in _normalized_addresses(vcf_depot_settings.listen_address):
@@ -80,6 +84,7 @@ def public_services_for_address(
                 "secondary_label": "",
                 "status": "enabled",
                 "pill": "good",
+                "dns_names": _service_dns_names(vcf_depot_settings.hostname or VCF_DEPOT_DEFAULT_HOSTNAME),
             }
         )
     if vcf_registry_settings.enabled and normalized in _normalized_addresses(vcf_registry_settings.listen_address):
@@ -93,6 +98,7 @@ def public_services_for_address(
                 "secondary_label": "",
                 "status": "link only",
                 "pill": "muted",
+                "dns_names": _service_dns_names(vcf_registry_settings.hostname or VCF_REGISTRY_DEFAULT_HOSTNAME),
             }
         )
     return services
@@ -267,6 +273,18 @@ def _normalize_address(value: str) -> str:
 
 def _normalized_addresses(value: str | None) -> set[str]:
     return {_normalize_address(address) for address in split_addresses(value)}
+
+
+def _service_dns_names(*values: str | None) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        candidate = (value or "").strip().strip(".").lower()
+        if not candidate or candidate in seen:
+            continue
+        names.append(candidate)
+        seen.add(candidate)
+    return names
 
 
 def _nginx_listen(address: str, port: int) -> str:

@@ -31,6 +31,11 @@ def test_public_service_entries_scope_services_to_matching_address():
     assert "192.168.167.10" not in by_address
     assert by_address["192.168.87.32"] == {"ca", "esxi_pxe", "vcf_offline_depot"}
     assert by_address["192.168.88.32"] == {"vcf_private_registry"}
+    services_by_id = {service["id"]: service for entry in entries for service in entry["services"]}
+    assert services_by_id["ca"]["dns_names"] == ["ca.labfoundry.internal"]
+    assert services_by_id["esxi_pxe"]["dns_names"] == ["esxi-pxe.labfoundry.internal"]
+    assert services_by_id["vcf_offline_depot"]["dns_names"] == ["depot.labfoundry.internal"]
+    assert services_by_id["vcf_private_registry"]["dns_names"] == ["registry.labfoundry.internal"]
 
 
 def test_public_services_nginx_config_contains_per_ip_scoped_locations():
