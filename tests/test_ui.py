@@ -3884,6 +3884,10 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
     assert "VCF Private Registry" not in page.text
     assert "/registry" not in page.text
 
+    management_ip_home = client.get("/", headers={"host": "192.168.167.10"}, follow_redirects=False)
+    assert management_ip_home.status_code == 303
+    assert management_ip_home.headers["location"] == "/login"
+
     depot_redirect = client.get("/PROD/", headers={"host": "192.168.87.32"}, follow_redirects=False)
     assert depot_redirect.status_code == 303
     assert depot_redirect.headers["location"] == "/PROD/login?next=/PROD/"
@@ -3893,6 +3897,16 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
     assert "Sign in to the depot" in depot_login.text
     assert 'action="/PROD/login"' in depot_login.text
     assert 'name="next" value="/PROD/"' in depot_login.text
+
+    depot_auth_check = client.get("/PROD/auth-check", headers={"host": "192.168.87.32"})
+    assert depot_auth_check.status_code == 401
+
+    login(client)
+    signed_in_depot_auth_check = client.get("/PROD/auth-check", headers={"host": "192.168.87.32"})
+    assert signed_in_depot_auth_check.status_code == 204
+
+    unrelated_depot_auth_check = client.get("/PROD/auth-check", headers={"host": "192.168.88.32"})
+    assert unrelated_depot_auth_check.status_code == 401
 
     with SessionLocal() as db:
         depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
@@ -3923,10 +3937,6 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
     assert 'href="https://registry.labfoundry.internal:9443"' in registry_page.text
     assert "Certificate Authority" not in registry_page.text
     assert "VCF Offline Depot" not in registry_page.text
-
-    management_ip_home = client.get("/", headers={"host": "192.168.167.10"}, follow_redirects=False)
-    assert management_ip_home.status_code == 303
-    assert management_ip_home.headers["location"] == "/login"
 
 
 def test_public_service_home_empty_state_for_non_management_ip(client):

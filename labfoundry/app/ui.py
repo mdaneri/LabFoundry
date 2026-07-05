@@ -5426,6 +5426,20 @@ def depot_logout(request: Request, csrf: str = Form(...), next: str = Form("/"))
     return RedirectResponse(next if next in {"/", "/PROD/"} else "/", status_code=303)
 
 
+@router.get("/PROD/auth-check", response_model=None)
+def depot_auth_check(
+    request: Request,
+    identity: Identity | None = Depends(get_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    if not request_allows_public_service(db, request, "vcf_offline_depot"):
+        return Response(status_code=401)
+    settings = get_vcf_offline_depot_settings_row(db)
+    if identity or settings.allow_unauthenticated_access:
+        return Response(status_code=204)
+    return Response(status_code=401)
+
+
 @router.get("/PROD/", response_class=HTMLResponse, response_model=None)
 @router.get("/PROD/{depot_path:path}", response_class=HTMLResponse, response_model=None)
 def public_depot_browser(

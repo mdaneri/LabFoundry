@@ -6,7 +6,7 @@ from typing import Any
 from labfoundry.app.models import CaSettings, PhysicalInterface, VcfOfflineDepotSettings, VcfPrivateRegistrySettings, VlanInterface
 from labfoundry.app.services.dnsmasq import split_addresses
 from labfoundry.app.services.networking import normalize_interface_role
-from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_DEFAULT_STORE_PATH, VCF_DEPOT_HTPASSWD_PATH, vcf_depot_endpoint
+from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_DEFAULT_STORE_PATH, vcf_depot_endpoint
 from labfoundry.app.services.vcf_private_registry import vcf_registry_endpoint
 
 
@@ -148,8 +148,8 @@ def render_public_services_nginx_config(
             []
             if bool(vcf_depot_service.get("allow_unauthenticated_access"))
             else [
-                '    auth_basic "LabFoundry VCF Offline Depot";',
-                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
             ]
         )
         if not address:
@@ -224,6 +224,8 @@ def render_public_services_nginx_config(
                     "  }",
                 ]
             )
+            if vcf_depot_auth_lines:
+                lines.extend(["", *_depot_auth_location(upstream_host, upstream_port), "", *_depot_login_redirect_location()])
         lines.extend(
             [
                 "",
@@ -291,5 +293,28 @@ def _proxy_location(path: str, upstream_host: str, upstream_port: int, *, extra_
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
         "    proxy_set_header X-Forwarded-Proto http;",
+        "  }",
+    ]
+
+
+def _depot_auth_location(upstream_host: str, upstream_port: int) -> list[str]:
+    return [
+        "  location = /_labfoundry_depot_auth {",
+        "    internal;",
+        f"    proxy_pass http://{upstream_host}:{upstream_port}/PROD/auth-check;",
+        "    proxy_pass_request_body off;",
+        '    proxy_set_header Content-Length "";',
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto http;",
+        "  }",
+    ]
+
+
+def _depot_login_redirect_location() -> list[str]:
+    return [
+        "  location @labfoundry_depot_login {",
+        "    return 303 /PROD/login?next=$request_uri;",
         "  }",
     ]

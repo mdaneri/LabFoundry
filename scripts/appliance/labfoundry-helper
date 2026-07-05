@@ -2086,14 +2086,11 @@ def _public_services_config_errors(path: Path) -> list[str]:
         errors.append("Public services nginx config must not expose a broad server root.")
     if "/registry" in text:
         errors.append("Public services nginx config must not add registry proxy locations.")
-    if "location /PROD/" in text:
+    if "/PROD/" in text:
         aliases = _nginx_directive(text, "alias")
-        prod_aliases = [alias for alias in aliases if alias.rstrip("/").endswith("/PROD")]
+        prod_aliases = [alias for alias in aliases if _public_services_prod_alias_path(alias) == VCF_DEPOT_PROD_PATH]
         if not prod_aliases:
             errors.append("Public services /PROD/ location must use an alias to the depot PROD directory.")
-        for alias in prod_aliases:
-            if Path(alias.rstrip("/")) != VCF_DEPOT_PROD_PATH:
-                errors.append(f"Public services /PROD/ alias must point at {VCF_DEPOT_PROD_PATH}.")
         for required in [
             "location = /PROD",
             "return 301 /PROD/;",
@@ -2111,6 +2108,13 @@ def _public_services_config_errors(path: Path) -> list[str]:
     if "location /pxe/esxi/ks/" in text and "proxy_pass http://127.0.0.1:8000;" not in text:
         errors.append("Public services ESXi Kickstart location must proxy to LabFoundry.")
     return errors
+
+
+def _public_services_prod_alias_path(alias: str) -> Path:
+    normalized = alias.strip().rstrip("/")
+    if normalized.endswith("/$1"):
+        normalized = normalized[:-3]
+    return Path(normalized)
 
 
 def _handle_public_services(action: str, args: list[str]) -> int:

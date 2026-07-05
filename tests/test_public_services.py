@@ -75,11 +75,18 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "return 301 /PROD/;" in config
     assert "location = /PROD/login {" in config
     assert "location = /PROD/logout {" in config
+    assert "location = /_labfoundry_depot_auth {" in config
+    assert "internal;" in config
+    assert "proxy_pass http://127.0.0.1:8000/PROD/auth-check;" in config
+    assert "location @labfoundry_depot_login {" in config
+    assert "return 303 /PROD/login?next=$request_uri;" in config
     assert "location = /PROD/ {" in config
     assert "location ~ ^/PROD/.*/$ {" in config
     assert "location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {" in config
-    assert 'auth_basic "LabFoundry VCF Offline Depot";' in config
-    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config
+    assert "auth_request /_labfoundry_depot_auth;" in config
+    assert "error_page 401 = @labfoundry_depot_login;" in config
+    assert "auth_basic" not in config
+    assert "auth_basic_user_file" not in config
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in config
     assert "autoindex off;" in config
     assert "/registry" not in config
@@ -89,7 +96,7 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     depot_static_block = config.split("location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {", 1)[1].split("  }", 1)[0]
     assert "auth_basic" not in depot_login_block
     assert "auth_basic" not in depot_directory_block
-    assert "auth_basic" in depot_static_block
+    assert "auth_request /_labfoundry_depot_auth;" in depot_static_block
 
     registry_block = config.split("listen 192.168.88.32:80;", 1)[1]
     assert "location = /requests/login {" not in registry_block
@@ -113,4 +120,5 @@ def test_public_services_nginx_config_respects_unauthenticated_depot_access():
     )
 
     assert "location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {" in config
+    assert "auth_request" not in config
     assert "auth_basic" not in config
