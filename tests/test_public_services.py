@@ -77,16 +77,16 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "location = /PROD/logout {" in config
     assert "location = /PROD/ {" in config
     assert "location ~ ^/PROD/.*/$ {" in config
-    assert "location /PROD/ {" in config
+    assert "location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {" in config
     assert 'auth_basic "LabFoundry VCF Offline Depot";' in config
     assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config
-    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in config
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in config
     assert "autoindex off;" in config
     assert "/registry" not in config
 
     depot_login_block = config.split("location = /PROD/login {", 1)[1].split("  }", 1)[0]
     depot_directory_block = config.split("location = /PROD/ {", 1)[1].split("  }", 1)[0]
-    depot_static_block = config.split("location /PROD/ {", 1)[1].split("  }", 1)[0]
+    depot_static_block = config.split("location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {", 1)[1].split("  }", 1)[0]
     assert "auth_basic" not in depot_login_block
     assert "auth_basic" not in depot_directory_block
     assert "auth_basic" in depot_static_block
@@ -112,5 +112,5 @@ def test_public_services_nginx_config_respects_unauthenticated_depot_access():
         depot_store_path="/mnt/labfoundry-vcf-offline-depot",
     )
 
-    assert "location /PROD/ {" in config
+    assert "location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {" in config
     assert "auth_basic" not in config
