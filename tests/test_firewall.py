@@ -16,6 +16,7 @@ from labfoundry.app.models import (
 from labfoundry.app.services.firewall import (
     ca_portal_firewall_interfaces,
     dhcp_firewall_rules,
+    managed_routing_firewall_rules,
     managed_service_firewall_rules,
     render_nftables_config,
     validate_firewall_state,
@@ -153,6 +154,24 @@ def test_ca_portal_firewall_interfaces_exclude_trunk_parents():
     )
 
     assert targets == ["eth2", "eth1.50"]
+
+
+def test_managed_routing_firewall_rules_isolate_management_and_allow_route_role_pairs():
+    settings = FirewallSettings(enabled=True, default_input_policy="drop", default_forward_policy="drop", default_output_policy="accept")
+    interfaces = [
+        PhysicalInterface(name="eth0", role="management", mode="access", ip_cidr="192.168.49.1/24", mac_address="00:50:56:00:00:10"),
+        PhysicalInterface(name="eth1", role="route", mode="access", ip_cidr="172.20.1.1/24", mac_address="00:50:56:00:00:11"),
+        PhysicalInterface(name="eth2", role="route", mode="access", ip_cidr="172.20.2.1/24", mac_address="00:50:56:00:00:12"),
+        PhysicalInterface(name="eth3", role="access", mode="access", ip_cidr="172.20.3.1/24", mac_address="00:50:56:00:00:13"),
+    ]
+
+    rules = managed_routing_firewall_rules(interfaces, [])
+    config = render_nftables_config(settings, [], rules, replace_labfoundry_service_rules=True)
+
+    assert 'iifname "eth1" ip saddr 172.20.1.0/24 ip daddr 192.168.49.0/24 drop comment "isolate-eth1-to-eth0"' in config
+    assert 'iifname "eth0" ip saddr 192.168.49.0/24 ip daddr 172.20.1.0/24 drop comment "isolate-eth0-to-eth1"' in config
+    assert 'iifname "eth1" ip saddr 172.20.1.0/24 ip daddr 172.20.2.0/24 accept comment "route-eth1-to-eth2"' in config
+    assert 'iifname "eth3" ip saddr 172.20.3.0/24 ip daddr 172.20.1.0/24 accept' not in config
 
 
 def test_managed_service_firewall_rules_include_all_enabled_service_listeners():

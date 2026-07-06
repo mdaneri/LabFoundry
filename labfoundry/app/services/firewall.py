@@ -13,13 +13,14 @@ from labfoundry.app.models import (
     KmsSettings,
     ChronySettings,
     PhysicalInterface,
+    RoutingRule,
     VcfBackupSettings,
     VcfOfflineDepotSettings,
     VcfPrivateRegistrySettings,
     VlanInterface,
 )
 from labfoundry.app.services.dnsmasq import dhcp_scope_address_family, split_interfaces
-from labfoundry.app.services.networking import normalize_interface_mode
+from labfoundry.app.services.networking import normalize_interface_mode, normalize_interface_role
 
 
 FIREWALL_DIRECTIONS = ["input", "forward", "output"]
@@ -33,6 +34,8 @@ FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX = "group:"
 LABFOUNDRY_DHCP_FIREWALL_RULE_MARKER = "LabFoundry-managed DNS/DHCP access"
 LABFOUNDRY_DNS_FIREWALL_RULE_MARKER = "LabFoundry-managed DNS access"
 LABFOUNDRY_SERVICE_FIREWALL_RULE_MARKER = "LabFoundry-managed service access"
+LABFOUNDRY_ROUTING_FIREWALL_RULE_MARKER = "LabFoundry-managed lab routing"
+LABFOUNDRY_MANAGEMENT_ISOLATION_RULE_MARKER = "LabFoundry-managed management routing isolation"
 LABFOUNDRY_LEGACY_DHCP_FIREWALL_RULE_NAMES = {"sitea-dns-dhcp"}
 LABFOUNDRY_LEGACY_SERVICE_FIREWALL_RULE_NAMES = {"mgmt-console"}
 
@@ -303,6 +306,105 @@ def managed_service_firewall_rules(
     return rules
 
 
+def routing_firewall_targets(interfaces: list[PhysicalInterface], vlans: list[VlanInterface]) -> list[dict]:
+    targets: list[dict] = []
+    for interface in interfaces:
+        if interface.oper_state == "missing" or normalize_interface_mode(interface.mode) == "trunk":
+            continue
+        networks = _networks_from_cidrs(interface.ip_cidr, interface.ipv6_cidr)
+        if not networks:
+            continue
+        role = normalize_interface_role(interface.role)
+        targets.append({"name": interface.name, "role": role, "networks": networks})
+    for vlan in vlans:
+        if not vlan.enabled:
+            continue
+        networks = _networks_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
+        if not networks:
+            continue
+        role = normalize_interface_role(vlan.role)
+        targets.append({"name": vlan.name, "role": role, "networks": networks})
+    return targets
+
+
+def managed_routing_firewall_rules(
+    interfaces: list[PhysicalInterface],
+    vlans: list[VlanInterface],
+    routing_rules: list[RoutingRule] | None = None,
+) -> list[FirewallRule]:
+    targets = routing_firewall_targets(interfaces, vlans)
+    targets_by_name = {target["name"]: target for target in targets}
+    management_targets = [target for target in targets if target["role"] == "management"]
+    lab_targets = [target for target in targets if target["role"] != "management"]
+    rules: list[FirewallRule] = []
+
+    for lab in lab_targets:
+        for management in management_targets:
+            rules.append(
+                _routing_firewall_rule(
+                    name=f"isolate-{_slug(lab['name'])}-to-{_slug(management['name'])}",
+                    action="drop",
+                    source_interface=lab["name"],
+                    source_networks=lab["networks"],
+                    destination_networks=management["networks"],
+                    priority=-100,
+                    description=LABFOUNDRY_MANAGEMENT_ISOLATION_RULE_MARKER,
+                )
+            )
+            rules.append(
+                _routing_firewall_rule(
+                    name=f"isolate-{_slug(management['name'])}-to-{_slug(lab['name'])}",
+                    action="drop",
+                    source_interface=management["name"],
+                    source_networks=management["networks"],
+                    destination_networks=lab["networks"],
+                    priority=-100,
+                    description=LABFOUNDRY_MANAGEMENT_ISOLATION_RULE_MARKER,
+                )
+            )
+
+    route_targets = [target for target in lab_targets if target["role"] == "route"]
+    for source in route_targets:
+        for destination in route_targets:
+            if source["name"] == destination["name"]:
+                continue
+            rules.append(
+                _routing_firewall_rule(
+                    name=f"route-{_slug(source['name'])}-to-{_slug(destination['name'])}",
+                    action="accept",
+                    source_interface=source["name"],
+                    source_networks=source["networks"],
+                    destination_networks=destination["networks"],
+                    priority=30,
+                    description=f"{LABFOUNDRY_ROUTING_FIREWALL_RULE_MARKER} from route-role networks.",
+                )
+            )
+
+    for rule in routing_rules or []:
+        if not rule.enabled:
+            continue
+        source = targets_by_name.get(rule.source_interface)
+        destination = targets_by_name.get(rule.destination_interface)
+        if not source or not destination:
+            continue
+        if source["role"] == "management" or destination["role"] == "management":
+            continue
+        if source["name"] == destination["name"]:
+            continue
+        rules.append(
+            _routing_firewall_rule(
+                name=f"routing-{_slug(rule.name)}",
+                action="accept",
+                source_interface=source["name"],
+                source_networks=source["networks"],
+                destination_networks=destination["networks"],
+                priority=rule.priority,
+                description=f"{LABFOUNDRY_ROUTING_FIREWALL_RULE_MARKER} from explicit routing rule {rule.name}.",
+            )
+        )
+    return rules
+
+
 def firewall_source_group_state(raw_json: str, interface_networks: dict[str, str]) -> dict:
     saved: dict = {}
     if raw_json.strip():
@@ -442,6 +544,8 @@ def is_labfoundry_managed_firewall_rule(rule: FirewallRule) -> bool:
     return (
         normalized_name in LABFOUNDRY_LEGACY_SERVICE_FIREWALL_RULE_NAMES
         or LABFOUNDRY_SERVICE_FIREWALL_RULE_MARKER in description
+        or LABFOUNDRY_ROUTING_FIREWALL_RULE_MARKER in description
+        or LABFOUNDRY_MANAGEMENT_ISOLATION_RULE_MARKER in description
         or is_labfoundry_dns_firewall_rule(rule)
         or is_labfoundry_dhcp_firewall_rule(rule)
     )
@@ -682,6 +786,31 @@ def _service_firewall_rule(
         priority=priority,
         enabled=True,
         description=f"{LABFOUNDRY_SERVICE_FIREWALL_RULE_MARKER} for {service}.",
+    )
+
+
+def _routing_firewall_rule(
+    *,
+    name: str,
+    action: str,
+    source_interface: str,
+    source_networks: list[str],
+    destination_networks: list[str],
+    priority: int,
+    description: str,
+) -> FirewallRule:
+    return FirewallRule(
+        name=name,
+        direction="forward",
+        action=action,
+        protocol="any",
+        source="\n".join(source_networks or ["any"]),
+        destination="\n".join(destination_networks or ["any"]),
+        destination_port="",
+        interface_name=source_interface,
+        priority=priority,
+        enabled=True,
+        description=description,
     )
 
 

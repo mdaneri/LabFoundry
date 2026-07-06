@@ -1,4 +1,4 @@
-from labfoundry.app.models import NatRule, Route
+from labfoundry.app.models import NatRule, Route, RoutingRule
 from labfoundry.app.services.routes_wan import render_wan_config, validate_nat_source, validate_wan_state
 
 
@@ -21,12 +21,52 @@ def test_render_wan_config_uses_ipv6_route_commands():
                 "ip_cidr": "192.168.50.1/24",
                 "ipv6_cidr": "2001:db8:50::1/64",
                 "wan": True,
+                "routing_domain": "lab",
+                "route_allowed": True,
             }
         ],
     )
 
     assert "  ipv6_cidr=2001:db8:50::1/64" in config
-    assert "ip -6 route replace 2001:db8:100::/64 via 2001:db8:50::fe dev eth2.50 metric 120" in config
+    assert "  routing_domain=lab" in config
+    assert "ip -6 rule add from 2001:db8:50::/64 table 200 priority 2000" in config
+    assert "ip -6 route replace 2001:db8:100::/64 via 2001:db8:50::fe dev eth2.50 metric 120 table 200" in config
+
+
+def test_render_wan_config_keeps_management_and_lab_route_tables_separate():
+    config = render_wan_config(
+        [Route(destination_cidr="0.0.0.0/0", gateway="172.20.0.254", interface_name="eth1", metric=100, enabled=True)],
+        targets=[
+            {
+                "name": "eth0",
+                "kind": "physical",
+                "role": "management",
+                "ip_cidr": "192.168.49.10/24",
+                "ipv6_cidr": "",
+                "wan": False,
+                "routing_domain": "management",
+                "route_allowed": False,
+            },
+            {
+                "name": "eth1",
+                "kind": "physical",
+                "role": "route",
+                "ip_cidr": "172.20.0.1/24",
+                "ipv6_cidr": "",
+                "wan": True,
+                "routing_domain": "lab",
+                "route_allowed": True,
+            },
+        ],
+    )
+
+    assert "management=100 labfoundry_mgmt" in config
+    assert "lab=200 labfoundry_lab" in config
+    assert "ip rule add from 192.168.49.0/24 table 100 priority 1000" in config
+    assert "ip route replace 192.168.49.0/24 dev eth0 table 100" in config
+    assert "ip rule add from 172.20.0.0/24 table 200 priority 2001" in config
+    assert "ip route replace 172.20.0.0/24 dev eth1 table 200" in config
+    assert "ip route replace 0.0.0.0/0 via 172.20.0.254 dev eth1 metric 100 table 200" in config
 
 
 def test_validate_wan_state_rejects_ipv6_nat_sources_and_gateway_family_mismatch():
@@ -42,3 +82,11 @@ def test_validate_wan_state_rejects_ipv6_nat_sources_and_gateway_family_mismatch
     assert any("same IP family" in error for error in errors)
     assert any("NAT v1 supports IPv4 source CIDRs only" in error for error in errors)
     assert any("NAT v1 supports IPv4 source CIDRs only" in error for error in validate_nat_source("group:custom:dual", {"custom:dual"}, groups))
+
+
+def test_validate_wan_state_rejects_management_routing_rule_targets():
+    rule = RoutingRule(name="mgmt transit", source_interface="eth0", destination_interface="eth1", priority=100, enabled=True)
+
+    errors = validate_wan_state([], [], {"eth1"}, [], {"eth1"}, [], [rule], {"eth1"})
+
+    assert any("source must be a non-management" in error for error in errors)

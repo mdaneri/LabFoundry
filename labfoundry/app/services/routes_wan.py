@@ -1,12 +1,16 @@
 from ipaddress import ip_address, ip_network
 import re
 
-from labfoundry.app.models import NatRule, Route, WanPolicy
+from labfoundry.app.models import NatRule, Route, RoutingRule, WanPolicy
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX, source_group_to_rule_source
 
 
 WAN_CONFIG_PATH = "/var/lib/labfoundry/apply/wan/labfoundry-wan.conf"
 WAN_MODES = ["interface"]
+MANAGEMENT_ROUTE_TABLE_ID = 100
+LAB_ROUTE_TABLE_ID = 200
+MANAGEMENT_ROUTE_TABLE_NAME = "labfoundry_mgmt"
+LAB_ROUTE_TABLE_NAME = "labfoundry_lab"
 
 
 def _bool_value(value: bool) -> str:
@@ -54,6 +58,41 @@ def nat_rule_to_dict(rule: NatRule) -> dict:
         "priority": rule.priority,
         "description": rule.description or "",
     }
+
+
+def routing_rule_to_dict(rule: RoutingRule) -> dict:
+    return {
+        "id": rule.id,
+        "name": rule.name,
+        "enabled": rule.enabled,
+        "source_interface": rule.source_interface,
+        "destination_interface": rule.destination_interface,
+        "priority": rule.priority,
+        "description": rule.description or "",
+        "generated": False,
+    }
+
+
+def generated_route_role_rules(targets: list[dict[str, str]]) -> list[dict]:
+    route_targets = [target for target in targets if target.get("role") == "route" and target.get("routing_domain") == "lab"]
+    rows: list[dict] = []
+    for source in route_targets:
+        for destination in route_targets:
+            if source["name"] == destination["name"]:
+                continue
+            rows.append(
+                {
+                    "id": f"generated:{source['name']}:{destination['name']}",
+                    "name": f"{source['name']} to {destination['name']}",
+                    "enabled": True,
+                    "source_interface": source["name"],
+                    "destination_interface": destination["name"],
+                    "priority": 30,
+                    "description": "Generated from route-role network intent.",
+                    "generated": True,
+                }
+            )
+    return rows
 
 
 def wan_policy_summary(policy: WanPolicy | None) -> str:
@@ -131,6 +170,8 @@ def validate_wan_state(
     nat_rules: list[NatRule] | None = None,
     wan_target_names: set[str] | None = None,
     source_groups: list[dict] | None = None,
+    routing_rules: list[RoutingRule] | None = None,
+    routing_target_names: set[str] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     policy_ids = {policy.id for policy in policies}
@@ -174,6 +215,24 @@ def validate_wan_state(
             errors.append(f"NAT rule {rule.name} has a negative priority.")
         if rule.enabled and not rule.masquerade:
             errors.append(f"NAT rule {rule.name} must use masquerade; destination NAT and port forwarding are not supported in v1.")
+
+    routing_target_names = routing_target_names or target_names
+    seen_routing_names: set[str] = set()
+    for rule in routing_rules or []:
+        if not rule.name.strip():
+            errors.append("Routing rule name is required.")
+        normalized_name = rule.name.strip().lower()
+        if normalized_name in seen_routing_names:
+            errors.append(f"Routing rule {rule.name} is duplicated.")
+        seen_routing_names.add(normalized_name)
+        if rule.enabled and rule.source_interface not in routing_target_names:
+            errors.append(f"Routing rule {rule.name} source must be a non-management access or route interface.")
+        if rule.enabled and rule.destination_interface not in routing_target_names:
+            errors.append(f"Routing rule {rule.name} destination must be a non-management access or route interface.")
+        if rule.enabled and rule.source_interface == rule.destination_interface:
+            errors.append(f"Routing rule {rule.name} must use different source and destination interfaces.")
+        if rule.priority < 0:
+            errors.append(f"Routing rule {rule.name} has a negative priority.")
 
     for policy in policies:
         if not policy.name.strip():
@@ -222,12 +281,14 @@ def render_wan_config(
     policies: list[WanPolicy] | None = None,
     nat_rules: list[NatRule] | None = None,
     targets: list[dict[str, str]] | None = None,
+    routing_rules: list[RoutingRule] | None = None,
     removed_routes: list[dict[str, str]] | None = None,
     source_groups: list[dict] | None = None,
 ) -> str:
     policies = policies or []
     nat_rules = nat_rules or []
     targets = targets or []
+    routing_rules = routing_rules or []
     policy_lookup = _policy_by_id(policies)
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
@@ -244,6 +305,8 @@ def render_wan_config(
                 f"  ip_cidr={target.get('ip_cidr', '')}",
                 f"  ipv6_cidr={target.get('ipv6_cidr', '')}",
                 f"  wan={_bool_value(bool(target.get('wan')))}",
+                f"  routing_domain={target.get('routing_domain', 'lab')}",
+                f"  route_allowed={_bool_value(bool(target.get('route_allowed', True)))}",
             ]
         )
 
@@ -279,6 +342,32 @@ def render_wan_config(
                 ]
             )
 
+    lines.extend(["", "[routing_rules]"])
+    for generated in generated_route_role_rules(targets):
+        lines.extend(
+            [
+                f"routing={generated['name']}",
+                "  enabled=true",
+                f"  source_interface={generated['source_interface']}",
+                f"  destination_interface={generated['destination_interface']}",
+                f"  priority={generated['priority']}",
+                "  generated=true",
+                f"  description={generated['description']}",
+            ]
+        )
+    for rule in sorted(routing_rules, key=lambda item: item.priority):
+        lines.extend(
+            [
+                f"routing={rule.name}",
+                f"  enabled={_bool_value(rule.enabled)}",
+                f"  source_interface={rule.source_interface}",
+                f"  destination_interface={rule.destination_interface}",
+                f"  priority={rule.priority}",
+                "  generated=false",
+                f"  description={(rule.description or '').replace(chr(10), ' ')}",
+            ]
+        )
+
     lines.extend(["", "[nat_rules]"])
     for rule in sorted(nat_rules, key=lambda item: item.priority):
         lines.extend(
@@ -313,6 +402,10 @@ def render_wan_config(
     lines.extend(
         [
             "",
+            "[route_tables]",
+            f"management={MANAGEMENT_ROUTE_TABLE_ID} {MANAGEMENT_ROUTE_TABLE_NAME}",
+            f"lab={LAB_ROUTE_TABLE_ID} {LAB_ROUTE_TABLE_NAME}",
+            "",
             "[rendered_nftables_nat]",
             "table ip labfoundry_nat {",
             "  chain postrouting {",
@@ -325,8 +418,24 @@ def render_wan_config(
         lines.append(f'    {source_expr}oifname "{rule.outbound_interface}" masquerade comment "{comment}"')
     lines.extend(["  }", "}", "", "[commands]"])
 
-    for rule in sorted([item for item in nat_rules if item.enabled], key=lambda item: item.priority):
-        lines.append(f"sysctl -w net.ipv4.ip_forward=1  # required for NAT rule {rule.name}")
+    generated_lab_routing_enabled = any(row["generated"] and row["enabled"] for row in generated_route_role_rules(targets))
+    if any(rule.enabled for rule in nat_rules):
+        lines.append("sysctl -w net.ipv4.ip_forward=1  # required for NAT rules")
+    if any(route.enabled for route in routes):
+        lines.append("sysctl -w net.ipv4.ip_forward=1  # required for lab routes")
+    if generated_lab_routing_enabled or any(rule.enabled for rule in routing_rules):
+        lines.append("sysctl -w net.ipv4.ip_forward=1  # required for lab routing rules")
+    if not any(rule.enabled for rule in nat_rules) and not any(route.enabled for route in routes) and not generated_lab_routing_enabled and not any(rule.enabled for rule in routing_rules):
+        lines.append("sysctl -w net.ipv4.ip_forward=0  # no LabFoundry lab routing or NAT requires forwarding")
+    for index, target in enumerate(targets):
+        table = MANAGEMENT_ROUTE_TABLE_ID if target.get("routing_domain") == "management" else LAB_ROUTE_TABLE_ID
+        priority = (1000 if target.get("routing_domain") == "management" else 2000) + index
+        for cidr_key in ("ip_cidr", "ipv6_cidr"):
+            if target.get(cidr_key):
+                network = ip_network(target[cidr_key], strict=False)
+                route_family = "-6 " if network.version == 6 else ""
+                lines.append(f"ip {route_family}rule add from {network} table {table} priority {priority}")
+                lines.append(f"ip {route_family}route replace {network} dev {target['name']} table {table}")
     if any(rule.enabled for rule in nat_rules):
         lines.append("nft -f /etc/labfoundry/nftables.d/labfoundry-nat.nft")
 
@@ -334,12 +443,12 @@ def render_wan_config(
         destination = ip_network(route.destination_cidr, strict=False)
         route_family = "-6 " if destination.version == 6 else ""
         if not route.enabled:
-            lines.append(f"ip {route_family}route del {route.destination_cidr} dev {route.interface_name}  # disabled desired route")
+            lines.append(f"ip {route_family}route del {route.destination_cidr} dev {route.interface_name} table {LAB_ROUTE_TABLE_ID}  # disabled desired route")
             continue
         command = ["ip", "-6", "route", "replace", route.destination_cidr] if destination.version == 6 else ["ip", "route", "replace", route.destination_cidr]
         if route.gateway:
             command.extend(["via", route.gateway])
-        command.extend(["dev", route.interface_name, "metric", str(route.metric)])
+        command.extend(["dev", route.interface_name, "metric", str(route.metric), "table", str(LAB_ROUTE_TABLE_ID)])
         lines.append(" ".join(command))
         policy = policy_lookup.get(route.wan_policy_id or 0) or route.wan_policy
         if policy and policy.enabled:
@@ -352,5 +461,5 @@ def render_wan_config(
         except ValueError:
             destination = None
         route_family = "-6 " if destination and destination.version == 6 else ""
-        lines.append(f"ip {route_family}route del {route.get('destination_cidr', '')} dev {route.get('interface_name', '')}  # removed managed route")
+        lines.append(f"ip {route_family}route del {route.get('destination_cidr', '')} dev {route.get('interface_name', '')} table {LAB_ROUTE_TABLE_ID}  # removed managed route")
     return "\n".join(lines).strip() + "\n"

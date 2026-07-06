@@ -121,6 +121,11 @@ WAN_NAT_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
 WAN_NAT_CONFIG_PATH = WAN_NAT_CONFIG_DIR / "labfoundry-nat.nft"
 WAN_NAT_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-nat.service")
 WAN_SYSCTL_PATH = Path("/etc/sysctl.d/90-labfoundry-routing-wan.conf")
+MANAGEMENT_ROUTE_TABLE_ID = 100
+LAB_ROUTE_TABLE_ID = 200
+MANAGEMENT_ROUTE_RULE_PRIORITY = 1000
+LAB_ROUTE_RULE_PRIORITY = 2000
+ROUTE_RULE_PRIORITY_WINDOW = 100
 APPLIANCE_SETTINGS_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-settings")
 PUBLIC_SERVICES_APPLY_DIR = Path("/var/lib/labfoundry/apply/public-services")
 TIMESYNCD_CONFIG_DIR = Path("/etc/systemd/timesyncd.conf.d")
@@ -1210,6 +1215,13 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             target = ESXI_TFTP_ROOT / filename
             _copy_file(source, target)
             generated_tftp_files.append(str(target))
+        if str(boot.get("bios_second_stage_bootfile") or "") == "pxelinux.0":
+            ldlinux_source = _find_pxe_boot_binary("ldlinux.c32")
+            if ldlinux_source is None:
+                raise RuntimeError("PXELINUX runtime module is missing: ldlinux.c32")
+            ldlinux_target = ESXI_TFTP_ROOT / "ldlinux.c32"
+            _copy_file(ldlinux_source, ldlinux_target)
+            generated_tftp_files.append(str(ldlinux_target))
         staged_images: set[str] = set()
         first_mboot_efi: Path | None = None
         first_crypto64: Path | None = None
@@ -2593,6 +2605,34 @@ def _set_os_user_shell(username: str, shell: str) -> int:
     return _run_and_forward([usermod, "--shell", shell, username])
 
 
+def _ensure_os_user_role_groups(username: str, role: str) -> int:
+    id_command = _command_path("id")
+    if id_command is None:
+        print("id command not found", file=sys.stderr)
+        return 127
+    usermod = _command_path("usermod")
+    groups_result = _run([id_command, "-nG", username])
+    if groups_result.returncode != 0:
+        print(groups_result.stdout, end="")
+        print(groups_result.stderr, end="", file=sys.stderr)
+        return groups_result.returncode
+    groups = set(groups_result.stdout.split())
+    if role == "admin":
+        if "wheel" in groups:
+            return 0
+        if usermod is None:
+            print("usermod command not found", file=sys.stderr)
+            return 127
+        return _run_and_forward([usermod, "--append", "--groups", "wheel", username])
+    if "wheel" not in groups:
+        return 0
+    gpasswd = _command_path("gpasswd")
+    if gpasswd is None:
+        print("gpasswd command not found", file=sys.stderr)
+        return 127
+    return _run_and_forward([gpasswd, "--delete", username, "wheel"])
+
+
 def _unlock_os_user(username: str) -> int:
     passwd = _command_path("passwd")
     if passwd is None:
@@ -2825,6 +2865,9 @@ def _handle_local_users(action: str, args: list[str]) -> int:
         shell_result = _set_os_user_shell(username, str(row["shell"]))
         if shell_result != 0:
             return shell_result
+        group_result = _ensure_os_user_role_groups(username, str(row.get("role") or ""))
+        if group_result != 0:
+            return group_result
         if row.get("password"):
             password_result = _set_os_user_password(username, str(row["password"]))
             if password_result != 0:
@@ -2917,19 +2960,18 @@ def _read_existing_management_network_values() -> dict[str, list[str]]:
         lines = NETWORKD_MGMT_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         return values
-    in_network = False
+    current_section = ""
     for raw_line in lines:
         line = raw_line.strip()
-        if line == "[Network]":
-            in_network = True
-            continue
         if line.startswith("[") and line.endswith("]"):
-            in_network = False
+            current_section = line.strip("[]")
             continue
-        if not in_network or "=" not in line:
+        if current_section not in {"Network", "Route"} or "=" not in line:
             continue
         key, value = [part.strip() for part in line.split("=", 1)]
-        if key in values and value:
+        if key == "DNS" and current_section == "Network" and value:
+            values[key].append(value)
+        if key == "Gateway" and value:
             values[key].append(value)
     return values
 
@@ -2970,8 +3012,6 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
         if interface.get("ipv6_cidr"):
             lines.append(f"Address={interface['ipv6_cidr']}")
         if name == management_name:
-            for gateway in preserved_management["Gateway"]:
-                lines.append(f"Gateway={gateway}")
             for dns in preserved_management["DNS"]:
                 lines.append(f"DNS={dns}")
         elif not interface.get("ip_cidr") and not interface.get("ipv6_cidr"):
@@ -2979,6 +3019,28 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
         if mode == "trunk":
             for vlan in sorted(vlans_by_parent.get(name, []), key=lambda row: int(row.get("vlan_id", "0"))):
                 lines.append(f"VLAN={vlan['name']}")
+        if name == management_name:
+            for cidr_key in ("ip_cidr", "ipv6_cidr"):
+                if interface.get(cidr_key):
+                    network = ip_network(interface[cidr_key], strict=False)
+                    lines.extend(
+                        [
+                            "",
+                            "[RoutingPolicyRule]",
+                            f"From={network}",
+                            f"Table={MANAGEMENT_ROUTE_TABLE_ID}",
+                            f"Priority={MANAGEMENT_ROUTE_RULE_PRIORITY}",
+                        ]
+                    )
+            for gateway in preserved_management["Gateway"]:
+                lines.extend(
+                    [
+                        "",
+                        "[Route]",
+                        f"Gateway={gateway}",
+                        f"Table={MANAGEMENT_ROUTE_TABLE_ID}",
+                    ]
+                )
         filename = "00-labfoundry-mgmt.network" if name == management_name else _networkd_managed_filename(name, "network")
         files[filename] = "\n".join(lines).strip() + "\n"
         if name != management_name:
@@ -3324,6 +3386,7 @@ def _parse_wan_config(path: Path) -> dict[str, list[dict[str, str]]]:
         "targets": [],
         "routes": [],
         "removed_routes": [],
+        "routing_rules": [],
         "nat_rules": [],
         "wan_policies": [],
     }
@@ -3333,6 +3396,7 @@ def _parse_wan_config(path: Path) -> dict[str, list[dict[str, str]]]:
         "targets": "target",
         "routes": "route",
         "removed_routes": "route",
+        "routing_rules": "routing",
         "nat_rules": "nat",
         "wan_policies": "policy",
     }
@@ -3394,6 +3458,9 @@ def _wan_config_errors(path: Path) -> list[str]:
             else:
                 if parsed_interface.version != 6:
                     errors.append(f"WAN target {name} IPv6 CIDR must use an IPv6 address.")
+        domain = target.get("routing_domain", "lab")
+        if domain not in {"management", "lab"}:
+            errors.append(f"WAN target {name or '<missing>'} routing domain must be management or lab.")
     for route in [*parsed["routes"], *parsed["removed_routes"]]:
         destination = route.get("destination_cidr", "")
         destination_network = None
@@ -3417,6 +3484,11 @@ def _wan_config_errors(path: Path) -> list[str]:
         interface_name = route.get("interface", "")
         if interface_name not in targets:
             errors.append(f"Route {destination or '<missing>'} references missing WAN target {interface_name or '<missing>'}.")
+        elif targets[interface_name].get("routing_domain", "lab") == "management" or not _wan_bool(
+            targets[interface_name].get("route_allowed", "true"),
+            default=True,
+        ):
+            errors.append(f"Route {destination or '<missing>'} cannot target management routing domain {interface_name}.")
         try:
             metric = int(route.get("metric", "100"))
         except ValueError:
@@ -3439,6 +3511,11 @@ def _wan_config_errors(path: Path) -> list[str]:
         outbound = rule.get("outbound_interface", "")
         if outbound not in targets:
             errors.append(f"NAT rule {name or '<missing>'} must use an access physical interface or enabled VLAN with an IP CIDR.")
+        elif targets[outbound].get("routing_domain", "lab") == "management" or not _wan_bool(
+            targets[outbound].get("route_allowed", "true"),
+            default=True,
+        ):
+            errors.append(f"NAT rule {name or '<missing>'} cannot use management routing domain {outbound}.")
         elif not targets[outbound].get("ip_cidr"):
             errors.append(f"NAT rule {name or '<missing>'} must use an outbound interface with an IPv4 CIDR.")
         if not _wan_bool(rule.get("masquerade", ""), default=True):
@@ -3465,6 +3542,31 @@ def _wan_config_errors(path: Path) -> list[str]:
             priority = 0
         if priority < 0:
             errors.append(f"NAT rule {name or '<missing>'} priority cannot be negative.")
+    for rule in parsed["routing_rules"]:
+        name = rule.get("name", "")
+        source = rule.get("source_interface", "")
+        destination = rule.get("destination_interface", "")
+        enabled = _wan_bool(rule.get("enabled", ""), default=True)
+        if not name:
+            errors.append("Routing rule is missing a name.")
+        if enabled:
+            for label, target_name in [("source", source), ("destination", destination)]:
+                if target_name not in targets:
+                    errors.append(f"Routing rule {name or '<missing>'} references missing {label} target {target_name or '<missing>'}.")
+                elif targets[target_name].get("routing_domain", "lab") == "management" or not _wan_bool(
+                    targets[target_name].get("route_allowed", "true"),
+                    default=True,
+                ):
+                    errors.append(f"Routing rule {name or '<missing>'} {label} cannot use management routing domain {target_name}.")
+        if enabled and source and destination and source == destination:
+            errors.append(f"Routing rule {name or '<missing>'} must use different source and destination interfaces.")
+        try:
+            priority = int(rule.get("priority", "100"))
+        except ValueError:
+            errors.append(f"Routing rule {name or '<missing>'} priority is not an integer.")
+            priority = 0
+        if priority < 0:
+            errors.append(f"Routing rule {name or '<missing>'} priority cannot be negative.")
     for policy in parsed["wan_policies"]:
         name = policy.get("name", "")
         if not name:
@@ -3555,8 +3657,101 @@ def _route_command_prefix(destination: str) -> list[str]:
     return ["ip", "-6", "route"] if network.version == 6 else ["ip", "route"]
 
 
+def _rule_command_prefix(source: str) -> list[str]:
+    try:
+        network = ip_network(source, strict=False)
+    except ValueError:
+        return ["ip", "rule"]
+    return ["ip", "-6", "rule"] if network.version == 6 else ["ip", "rule"]
+
+
+def _target_networks(target: dict[str, str]) -> list[str]:
+    networks: list[str] = []
+    for key in ("ip_cidr", "ipv6_cidr"):
+        if target.get(key):
+            networks.append(str(ip_network(target[key], strict=False)))
+    return networks
+
+
+def _target_route_table_id(target: dict[str, str]) -> int:
+    return MANAGEMENT_ROUTE_TABLE_ID if target.get("routing_domain", "lab") == "management" else LAB_ROUTE_TABLE_ID
+
+
+def _run_target_route_replace(network: str, interface_name: str, table_id: int) -> int:
+    command = [*_route_command_prefix(network), "replace", network, "dev", interface_name, "table", str(table_id)]
+    result = _run(command)
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
+    if shutil.which("ip") is None:
+        print("ip command not found", file=sys.stderr)
+        return 127
+    for target in parsed["targets"]:
+        table_id = _target_route_table_id(target)
+        interface_name = target.get("name", "")
+        for network in _target_networks(target):
+            result = _run_target_route_replace(network, interface_name, table_id)
+            if result != 0:
+                return result
+    return 0
+
+
+def _run_rule_replace(source_network: str, table_id: int, priority: int) -> int:
+    prefix = _rule_command_prefix(source_network)
+    delete = _run([*prefix, "del", "priority", str(priority)])
+    if delete.returncode not in {0, 2}:
+        print(delete.stdout, end="")
+        print(delete.stderr, end="", file=sys.stderr)
+        return delete.returncode
+    add = _run([*prefix, "add", "from", source_network, "table", str(table_id), "priority", str(priority)])
+    print(add.stdout, end="")
+    print(add.stderr, end="", file=sys.stderr)
+    return add.returncode
+
+
+def _run_rule_priority_delete(prefix: list[str], priority: int) -> int:
+    result = _run([*prefix, "del", "priority", str(priority)])
+    if result.returncode in {0, 2}:
+        return 0
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _cleanup_wan_policy_rules() -> int:
+    prefixes = [["ip", "rule"], ["ip", "-6", "rule"]]
+    for base_priority in (MANAGEMENT_ROUTE_RULE_PRIORITY, LAB_ROUTE_RULE_PRIORITY):
+        for priority in range(base_priority, base_priority + ROUTE_RULE_PRIORITY_WINDOW):
+            for prefix in prefixes:
+                result = _run_rule_priority_delete(prefix, priority)
+                if result != 0:
+                    return result
+    return 0
+
+
+def _apply_wan_policy_rules(parsed: dict[str, list[dict[str, str]]]) -> int:
+    if shutil.which("ip") is None:
+        print("ip command not found", file=sys.stderr)
+        return 127
+    cleanup_result = _cleanup_wan_policy_rules()
+    if cleanup_result != 0:
+        return cleanup_result
+    for index, target in enumerate(parsed["targets"]):
+        domain = target.get("routing_domain", "lab")
+        table_id = _target_route_table_id(target)
+        base_priority = MANAGEMENT_ROUTE_RULE_PRIORITY if domain == "management" else LAB_ROUTE_RULE_PRIORITY
+        for source_network in _target_networks(target):
+            result = _run_rule_replace(source_network, table_id, base_priority + index)
+            if result != 0:
+                return result
+    return 0
+
+
 def _run_route_delete(destination: str, interface_name: str) -> int:
-    command = [*_route_command_prefix(destination), "del", destination, "dev", interface_name]
+    command = [*_route_command_prefix(destination), "del", destination, "dev", interface_name, "table", str(LAB_ROUTE_TABLE_ID)]
     result = _run(command)
     print(result.stdout, end="")
     print(result.stderr, end="", file=sys.stderr)
@@ -3587,7 +3782,7 @@ def _apply_wan_routes_and_qdiscs(parsed: dict[str, list[dict[str, str]]]) -> int
         command = [*_route_command_prefix(destination), "replace", destination]
         if route.get("gateway"):
             command.extend(["via", route["gateway"]])
-        command.extend(["dev", interface_name, "metric", str(int(route.get("metric", "100") or "100"))])
+        command.extend(["dev", interface_name, "metric", str(int(route.get("metric", "100") or "100")), "table", str(LAB_ROUTE_TABLE_ID)])
         result = _run(command)
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
@@ -3658,15 +3853,6 @@ def _apply_wan_nat(parsed: dict[str, list[dict[str, str]]]) -> int:
     tmp_target.write_text(nat_config, encoding="utf-8")
     os.chmod(tmp_target, 0o644)
     tmp_target.replace(WAN_NAT_CONFIG_PATH)
-    enabled_nat = any(_wan_bool(rule.get("enabled", ""), default=True) for rule in parsed["nat_rules"])
-    if enabled_nat:
-        WAN_SYSCTL_PATH.write_text("net.ipv4.ip_forward = 1\n", encoding="utf-8")
-        os.chmod(WAN_SYSCTL_PATH, 0o644)
-        sysctl = _run(["sysctl", "-w", "net.ipv4.ip_forward=1"])
-        print(sysctl.stdout, end="")
-        print(sysctl.stderr, end="", file=sys.stderr)
-        if sysctl.returncode != 0:
-            return sysctl.returncode
     apply_result = _run(["nft", "-f", str(WAN_NAT_CONFIG_PATH)])
     print(apply_result.stdout, end="")
     print(apply_result.stderr, end="", file=sys.stderr)
@@ -3674,6 +3860,23 @@ def _apply_wan_nat(parsed: dict[str, list[dict[str, str]]]) -> int:
         return apply_result.returncode
     _install_wan_nat_service()
     return 0
+
+
+def _wan_forwarding_required(parsed: dict[str, list[dict[str, str]]]) -> bool:
+    enabled_nat = any(_wan_bool(rule.get("enabled", ""), default=True) for rule in parsed["nat_rules"])
+    enabled_routes = any(_wan_bool(route.get("enabled", ""), default=True) for route in parsed["routes"])
+    enabled_routing_rules = any(_wan_bool(rule.get("enabled", ""), default=True) for rule in parsed["routing_rules"])
+    return enabled_nat or enabled_routes or enabled_routing_rules
+
+
+def _apply_wan_forwarding(parsed: dict[str, list[dict[str, str]]]) -> int:
+    value = "1" if _wan_forwarding_required(parsed) else "0"
+    WAN_SYSCTL_PATH.write_text(f"net.ipv4.ip_forward = {value}\n", encoding="utf-8")
+    os.chmod(WAN_SYSCTL_PATH, 0o644)
+    sysctl = _run(["sysctl", "-w", f"net.ipv4.ip_forward={value}"])
+    print(sysctl.stdout, end="")
+    print(sysctl.stderr, end="", file=sys.stderr)
+    return sysctl.returncode
 
 
 def _handle_wan(action: str, args: list[str]) -> int:
@@ -3704,7 +3907,8 @@ def _handle_wan(action: str, args: list[str]) -> int:
                     "routes": len(parsed["routes"]),
                     "nat_rules": len(parsed["nat_rules"]),
                     "wan_policies": len(parsed["wan_policies"]),
-                    "scope": "ip-route nftables tc-netem",
+                    "routing_rules": len(parsed["routing_rules"]),
+                    "scope": "ip-rule ip-route nftables tc-netem",
                 },
                 sort_keys=True,
             )
@@ -3713,6 +3917,15 @@ def _handle_wan(action: str, args: list[str]) -> int:
     nat_result = _apply_wan_nat(parsed)
     if nat_result != 0:
         return nat_result
+    forwarding_result = _apply_wan_forwarding(parsed)
+    if forwarding_result != 0:
+        return forwarding_result
+    target_route_result = _apply_wan_target_routes(parsed)
+    if target_route_result != 0:
+        return target_route_result
+    rule_result = _apply_wan_policy_rules(parsed)
+    if rule_result != 0:
+        return rule_result
     route_result = _apply_wan_routes_and_qdiscs(parsed)
     if route_result != 0:
         return route_result
@@ -3722,6 +3935,7 @@ def _handle_wan(action: str, args: list[str]) -> int:
                 "wan": "apply complete",
                 "routes": len(parsed["routes"]),
                 "removed_routes": len(parsed["removed_routes"]),
+                "routing_rules": len(parsed["routing_rules"]),
                 "nat_rules": len(parsed["nat_rules"]),
                 "wan_policies": len(parsed["wan_policies"]),
             },

@@ -21,6 +21,7 @@ from labfoundry.app.models import (
     NatRule,
     PhysicalInterface,
     Route,
+    RoutingRule,
     Setting,
     VcfBackupSettings,
     VcfOfflineDepotSettings,
@@ -356,6 +357,18 @@ def _cleanup_missing_interface_references(db: Session, missing_renames: dict[str
                 rule.enabled = False
                 details.append(f"disabled NAT rule {rule.name}: outbound interface {old_interface} is missing")
 
+    for rule in db.execute(select(RoutingRule)).scalars().all():
+        removed_bindings = []
+        if rule.source_interface in unavailable_targets:
+            removed_bindings.append(f"source {rule.source_interface}")
+            rule.source_interface = target_replacements.get(rule.source_interface, "")
+        if rule.destination_interface in unavailable_targets:
+            removed_bindings.append(f"destination {rule.destination_interface}")
+            rule.destination_interface = target_replacements.get(rule.destination_interface, "")
+        if removed_bindings and rule.enabled:
+            rule.enabled = False
+            details.append(f"disabled routing rule {rule.name}: {' and '.join(removed_bindings)} is missing")
+
     for rule in db.execute(select(FirewallRule)).scalars().all():
         if rule.interface_name in unavailable_targets:
             old_interface = rule.interface_name
@@ -464,6 +477,8 @@ def _retarget_interface_references(db: Session, renames: dict[str, str]) -> None
     scalar_targets = [
         (Route, "interface_name"),
         (NatRule, "outbound_interface"),
+        (RoutingRule, "source_interface"),
+        (RoutingRule, "destination_interface"),
         (FirewallRule, "interface_name"),
         (DhcpSettings, "interface_name"),
         (DhcpScope, "interface_name"),

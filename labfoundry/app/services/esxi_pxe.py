@@ -153,6 +153,11 @@ def host_kickstart_url(base_url: str, http_path: str, mac_key: str) -> str:
     return f"{url}?mac={mac_key}" if url and mac_key and mac_key != "default" else url
 
 
+def kickstart_requires_host_context(content: str) -> bool:
+    names, invalid = kickstart_template_variables(content)
+    return bool(names or invalid)
+
+
 def normalize_host_variables(value: Any) -> dict[str, str]:
     if value in (None, ""):
         return {}
@@ -1098,6 +1103,7 @@ def _esxi_pxe_artifact(
     kickstart_id: int | None,
     boot_settings: dict[str, Any],
     kickstart_http_path: str = "",
+    kickstart_host_context_required: bool = True,
     is_default: bool = False,
 ) -> dict[str, Any]:
     base_url = esxi_http_base_url(boot_settings)
@@ -1127,7 +1133,7 @@ def _esxi_pxe_artifact(
         "image_generated_path": str(ESXI_PXE_IMAGE_HTTP_ROOT / image_key),
         "kickstart_id": kickstart_id,
         "kickstart_http_path": kickstart_path,
-        "kickstart_url": host_kickstart_url(base_url, kickstart_path, mac_key) if not is_default else kickstart_url(base_url, kickstart_path),
+        "kickstart_url": host_kickstart_url(base_url, kickstart_path, mac_key) if (not is_default and kickstart_host_context_required) else kickstart_url(base_url, kickstart_path),
         "pxelinux_config_path": pxelinux_config_path,
         "uefi_tftp_boot_cfg_path": uefi_tftp_boot_cfg_path,
         "http_boot_cfg_path": http_boot_cfg_path,
@@ -1171,6 +1177,7 @@ def esxi_pxe_host_artifacts(
             kickstart_path = paths.get(host.kickstart_id, "")
             if not kickstart_path and host.kickstart is not None:
                 kickstart_path = canonical_http_path(host.kickstart_id, host.kickstart.content_hash)
+        requires_host_context = kickstart_requires_host_context(host.kickstart.content) if host.kickstart is not None else True
         artifacts.append(
             _esxi_pxe_artifact(
                 host_id=host.id,
@@ -1181,6 +1188,7 @@ def esxi_pxe_host_artifacts(
                 iso_path=iso_path,
                 kickstart_id=host.kickstart_id,
                 kickstart_http_path=kickstart_path,
+                kickstart_host_context_required=requires_host_context,
                 boot_settings=boot_settings,
             )
         )

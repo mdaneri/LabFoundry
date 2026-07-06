@@ -469,6 +469,52 @@ def test_wan_helper_rejects_route_wan_mode(tmp_path):
     assert any("WAN mode route is planned but not supported in v1" in error for error in helper._wan_config_errors(config_path))
 
 
+def test_wan_helper_ignores_disabled_routing_rule_missing_targets(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "disabled-routing-rule.conf"
+    config_path.write_text(
+        wan_config_text()
+        + "\n".join(
+            [
+                "",
+                "[routing_rules]",
+                "routing=Stale disabled rule",
+                "  enabled=false",
+                "  source_interface=missing-source",
+                "  destination_interface=missing-destination",
+                "  priority=100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert helper._wan_config_errors(config_path) == []
+
+
+def test_wan_helper_rejects_enabled_routing_rule_missing_targets(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "enabled-routing-rule.conf"
+    config_path.write_text(
+        wan_config_text()
+        + "\n".join(
+            [
+                "",
+                "[routing_rules]",
+                "routing=Stale enabled rule",
+                "  enabled=true",
+                "  source_interface=missing-source",
+                "  destination_interface=missing-destination",
+                "  priority=100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    errors = helper._wan_config_errors(config_path)
+    assert any("references missing source target missing-source" in error for error in errors)
+    assert any("references missing destination target missing-destination" in error for error in errors)
+
+
 def test_wan_helper_allows_nat_on_non_wan_role_target(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "nat-access-target.conf"
@@ -495,8 +541,30 @@ def test_wan_helper_accepts_ipv6_routes_and_rejects_ipv6_only_nat_targets(tmp_pa
     helper._run = fake_run
     helper.shutil.which = lambda command: f"/usr/sbin/{command}" if command in {"ip", "tc"} else None
     assert helper._apply_wan_routes_and_qdiscs(parsed) == 0
-    assert ["ip", "-6", "route", "replace", "2001:db8:100::/64", "via", "2001:db8:20::fe", "dev", "eth1.20", "metric", "120"] in commands
+    assert ["ip", "-6", "route", "replace", "2001:db8:100::/64", "via", "2001:db8:20::fe", "dev", "eth1.20", "metric", "120", "table", "200"] in commands
     assert any("outbound interface with an IPv4 CIDR" in error for error in helper._wan_config_errors(ipv6_only_nat))
+
+
+def test_wan_helper_cleans_managed_policy_rule_windows_before_apply(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "policy-rules.conf"
+    config_path.write_text(wan_config_text(), encoding="utf-8")
+    parsed = helper._parse_wan_config(config_path)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    helper._run = fake_run
+    helper.shutil.which = lambda command: f"/usr/sbin/{command}" if command == "ip" else None
+
+    assert helper._apply_wan_policy_rules(parsed) == 0
+    assert ["ip", "rule", "del", "priority", "1000"] in commands
+    assert ["ip", "-6", "rule", "del", "priority", "1000"] in commands
+    assert ["ip", "rule", "del", "priority", "2099"] in commands
+    assert ["ip", "-6", "rule", "del", "priority", "2099"] in commands
+    assert ["ip", "rule", "add", "from", "192.168.20.0/24", "table", "200", "priority", "2000"] in commands
 
 
 def test_staging_prepare_repairs_apply_directory_ownership(monkeypatch, tmp_path):
@@ -546,6 +614,8 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     (ipxe_binary_dir / "undionly.kpxe").write_bytes(b"bios ipxe")
     (ipxe_binary_dir / "snponly.efi").write_bytes(b"uefi ipxe")
     (ipxe_binary_dir / "pxelinux.0").write_bytes(b"pxelinux")
+    (ipxe_binary_dir / "ldlinux.c32").write_bytes(b"ldlinux")
+    (ipxe_binary_dir / "ldlinux.c32").write_bytes(b"ldlinux")
     (http_base / "boot.ipxe").write_text("old ipxe script", encoding="utf-8")
     (tftp_root / "bootx64.efi").parent.mkdir(parents=True, exist_ok=True)
     (tftp_root / "bootx64.efi").write_bytes(b"old uefi first stage")
@@ -615,6 +685,7 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert (tftp_root / "undionly.kpxe").read_bytes() == b"bios ipxe"
     assert (tftp_root / "snponly.efi").read_bytes() == b"uefi ipxe"
     assert (tftp_root / "pxelinux.0").read_bytes() == b"pxelinux"
+    assert (tftp_root / "ldlinux.c32").read_bytes() == b"ldlinux"
     assert (tftp_root / "mboot.efi").read_bytes() == b"mboot efi"
     assert (http_base / "mboot.efi").read_bytes() == b"mboot efi"
     assert not (http_base / "boot.ipxe").exists()
@@ -949,7 +1020,9 @@ def test_wan_helper_apply_routes_nat_and_netem(monkeypatch, tmp_path):
     assert 'oifname "eth1.20" masquerade' in input_commands[0][1]
     assert ["sysctl", "-w", "net.ipv4.ip_forward=1"] in commands
     assert ["nft", "-f", str(nat_dir / "labfoundry-nat.nft")] in commands
-    assert ["ip", "route", "replace", "10.20.0.0/24", "dev", "eth1.20", "metric", "120"] in commands
+    assert ["ip", "route", "replace", "192.168.20.0/24", "dev", "eth1.20", "table", "200"] in commands
+    assert ["ip", "rule", "add", "from", "192.168.20.0/24", "table", "200", "priority", "2000"] in commands
+    assert ["ip", "route", "replace", "10.20.0.0/24", "dev", "eth1.20", "metric", "120", "table", "200"] in commands
     assert ["tc", "qdisc", "replace", "dev", "eth1.20", "root", "netem", "delay", "100ms", "10ms", "loss", "0.5%", "rate", "100mbit"] in commands
     assert service_path.exists()
     assert sysctl_path.read_text(encoding="utf-8") == "net.ipv4.ip_forward = 1\n"
@@ -1002,6 +1075,9 @@ def test_network_helper_renders_systemd_networkd_files(tmp_path):
     assert "Name=eth0" in files["00-labfoundry-mgmt.network"]
     assert "Name=eth*" not in files["00-labfoundry-mgmt.network"]
     assert "Address=192.168.49.1/24" in files["00-labfoundry-mgmt.network"]
+    assert "[RoutingPolicyRule]" in files["00-labfoundry-mgmt.network"]
+    assert "From=192.168.49.0/24" in files["00-labfoundry-mgmt.network"]
+    assert "Table=100" in files["00-labfoundry-mgmt.network"]
     assert "10-labfoundry-eth2.network" in files
     assert "VLAN=eth2.20" in files["10-labfoundry-eth2.network"]
     assert "10-labfoundry-eth2.20.netdev" in files
@@ -1577,6 +1653,71 @@ def test_local_users_helper_applies_per_user_shell(monkeypatch, tmp_path):
 
     assert helper._handle_local_users("apply", [str(config_path)]) == 0
     assert ["usermod", "--shell", "/bin/bash", "sync-user"] in commands
+
+
+def test_local_users_helper_keeps_admin_role_sudo_capable(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    home_base = tmp_path / "users"
+    pwquality_path = tmp_path / "etc" / "security" / "pwquality.conf"
+    pam_path = tmp_path / "etc" / "pam.d" / "system-password"
+    pam_path.parent.mkdir(parents=True)
+    pam_path.write_text("password  required    pam_pwquality.so  retry=3\npassword  required    pam_unix.so\n", encoding="utf-8")
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    payload = json.loads(local_users_json(username="admin", password=None))
+    payload["users"][0]["role"] = "admin"
+    payload["users"][0]["home"] = (home_base / "admin").as_posix()
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "LOCAL_USERS_HOME_BASE", home_base)
+    monkeypatch.setattr(helper, "LOCAL_USERS_PWQUALITY_PATH", pwquality_path)
+    monkeypatch.setattr(helper, "LOCAL_USERS_SYSTEM_PASSWORD_PAM_PATH", pam_path)
+    monkeypatch.setattr(helper, "_command_path", lambda command: command)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_local_users("apply", [str(config_path)]) == 0
+    assert ["usermod", "--shell", "/sbin/nologin", "admin"] in commands
+    assert ["usermod", "--append", "--groups", "wheel", "admin"] in commands
+
+
+def test_local_users_helper_removes_wheel_on_admin_downgrade(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "local-users"
+    home_base = tmp_path / "users"
+    pwquality_path = tmp_path / "etc" / "security" / "pwquality.conf"
+    pam_path = tmp_path / "etc" / "pam.d" / "system-password"
+    pam_path.parent.mkdir(parents=True)
+    pam_path.write_text("password  required    pam_pwquality.so  retry=3\npassword  required    pam_unix.so\n", encoding="utf-8")
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-users.json"
+    payload = json.loads(local_users_json(username="downgraded-user", password=None))
+    payload["users"][0]["role"] = "viewer"
+    payload["users"][0]["home"] = (home_base / "downgraded-user").as_posix()
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command == ["id", "-nG", "downgraded-user"]:
+            return subprocess.CompletedProcess(command, 0, "downgraded-user wheel", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "LOCAL_USERS_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "LOCAL_USERS_HOME_BASE", home_base)
+    monkeypatch.setattr(helper, "LOCAL_USERS_PWQUALITY_PATH", pwquality_path)
+    monkeypatch.setattr(helper, "LOCAL_USERS_SYSTEM_PASSWORD_PAM_PATH", pam_path)
+    monkeypatch.setattr(helper, "_command_path", lambda command: command)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_local_users("apply", [str(config_path)]) == 0
+    assert ["gpasswd", "--delete", "downgraded-user", "wheel"] in commands
 
 
 def test_local_users_helper_allows_powershell_shell(monkeypatch, tmp_path, capsys):

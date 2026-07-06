@@ -15,11 +15,13 @@
       <div class="alert error">{{ form_error }}</div>
     {% endif %}
     <div id="routes-wan-route-error" class="alert error hidden"></div>
+    <div id="routes-wan-routing-error" class="alert error hidden"></div>
     <div id="routes-wan-nat-error" class="alert error hidden"></div>
     <div id="routes-wan-policy-error" class="alert error hidden"></div>
 
     <div class="tab-buttons" role="tablist" aria-label="Route and WAN tools">
       <button class="tab-button active" type="button" role="tab" data-tab-target="routes-wan-routes-panel" aria-controls="routes-wan-routes-panel" aria-selected="true">Routes</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="routes-wan-routing-panel" aria-controls="routes-wan-routing-panel" aria-selected="false">Routing</button>
       <button class="tab-button" type="button" role="tab" data-tab-target="routes-wan-nat-panel" aria-controls="routes-wan-nat-panel" aria-selected="false">NAT</button>
       <button class="tab-button" type="button" role="tab" data-tab-target="routes-wan-policies-panel" aria-controls="routes-wan-policies-panel" aria-selected="false">WAN Policies</button>
     </div>
@@ -63,6 +65,76 @@
                     data-confirm-title="Delete route {{ route.destination_cidr }}?"
                     data-confirm-message="This removes the route from LabFoundry desired state. It will not touch the appliance until global appliance apply runs."
                     data-confirm-label="Delete route"
+                  >
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button class="button tiny danger" type="submit">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div id="routes-wan-routing-panel" class="tab-panel" role="tabpanel" hidden>
+        <div class="section-head compact-section-head">
+          <div>
+            <h3>Routing Permissions</h3>
+            <p class="muted">Route-role networks generate forwarding automatically. Access networks stay blocked until an explicit routing rule allows the path.</p>
+          </div>
+          <div class="routing-state-pills" aria-label="Routing state summary">
+            <span class="status-pill {{ 'good' if routing_summary.generated_count else 'muted' }}">{{ routing_summary.generated_count }} auto route-role</span>
+            <span class="status-pill {{ 'good' if routing_summary.explicit_count else 'muted' }}">{{ routing_summary.explicit_count }} explicit access</span>
+            <span class="status-pill warn">management isolated</span>
+          </div>
+        </div>
+        {% if routing_summary.generated_count == 0 and routing_summary.route_target_count < 2 %}
+          <div class="empty-state compact routing-empty-state">
+            <h2>No automatic route-role paths</h2>
+            <p class="muted">{{ routing_summary.access_target_count }} lab access targets are available for explicit routing. Mark two non-management interfaces or VLANs as Route to generate forwarding between them automatically.</p>
+          </div>
+        {% endif %}
+        <div
+          id="routes-wan-routing-table"
+          class="tabulator-shell routes-wan-table"
+          data-rules='{{ routing_rule_rows | tojson }}'
+          data-generated-rules='{{ generated_routing_rule_rows | tojson }}'
+          data-target-options='{{ wan_route_targets | tojson }}'
+          data-csrf="{{ csrf_token }}"
+          data-fallback-id="routes-wan-routing-fallback"
+        ></div>
+        <table id="routes-wan-routing-fallback" class="data-table dns-fallback-table">
+          <thead>
+            <tr><th>Name</th><th>Source</th><th>Destination</th><th>Priority</th><th>Status</th><th>Description</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            {% for rule in generated_routing_rule_rows %}
+              <tr>
+                <td>{{ rule.name }}</td>
+                <td>{{ rule.source_interface }}</td>
+                <td>{{ rule.destination_interface }}</td>
+                <td>{{ rule.priority }}</td>
+                <td><span class="status-pill good">generated</span></td>
+                <td>{{ rule.description }}</td>
+                <td></td>
+              </tr>
+            {% endfor %}
+            {% for rule in routing_rules %}
+              <tr>
+                <td>{{ rule.name }}</td>
+                <td>{{ rule.source_interface }}</td>
+                <td>{{ rule.destination_interface }}</td>
+                <td>{{ rule.priority }}</td>
+                <td><span class="status-pill {{ 'good' if rule.enabled else 'muted' }}">{{ "enabled" if rule.enabled else "disabled" }}</span></td>
+                <td>{{ rule.description or "" }}</td>
+                <td>
+                  <form
+                    action="/routes-wan/routing-rules/{{ rule.id }}/delete"
+                    method="post"
+                    data-confirm-modal
+                    data-confirm-title="Delete routing rule {{ rule.name }}?"
+                    data-confirm-message="This removes the routing permission from LabFoundry desired state. It will not touch the appliance until global appliance apply runs."
+                    data-confirm-label="Delete routing rule"
                   >
                     <input type="hidden" name="csrf" value="{{ csrf_token }}">
                     <button class="button tiny danger" type="submit">Delete</button>

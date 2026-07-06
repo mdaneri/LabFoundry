@@ -30,6 +30,7 @@ from labfoundry.app.models import (
     ChronySettings,
     PhysicalInterface,
     Route,
+    RoutingRule,
     ServiceState,
     Setting,
     User,
@@ -46,6 +47,7 @@ from labfoundry.app.services.dnsmasq import DNS_CONDITIONAL_FORWARDERS_SETTING_K
 from labfoundry.app.services.esxi_pxe import host_variables_json, normalize_host_mac, normalize_host_variables
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY
 from labfoundry.app.services.local_users import LOCAL_USERS_PASSWORD_POLICY_KEY
+from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
 
 ARCHIVE_SCHEMA_VERSION = 1
 ARCHIVE_KIND = "labfoundry-settings-archive"
@@ -60,6 +62,7 @@ SCALAR_TABLES = {
     "vlan_interfaces": VlanInterface,
     "wan_policies": WanPolicy,
     "nat_rules": NatRule,
+    "routing_rules": RoutingRule,
     "service_states": ServiceState,
     "appliance_settings": ApplianceSettings,
     "chrony_settings": ChronySettings,
@@ -104,6 +107,7 @@ RESTORE_DELETE_MODELS = [
     DnsRecord,
     DnsSettings,
     Route,
+    RoutingRule,
     NatRule,
     WanPolicy,
     VlanInterface,
@@ -242,7 +246,7 @@ def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, 
     _clear_desired_state(db)
 
     counts: dict[str, int] = {}
-    for key in ["physical_interfaces", "vlan_interfaces", "wan_policies", "nat_rules"]:
+    for key in ["physical_interfaces", "vlan_interfaces", "wan_policies", "nat_rules", "routing_rules"]:
         counts[key] = _insert_rows(db, SCALAR_TABLES[key], data.get(key, []))
     db.flush()
 
@@ -305,6 +309,7 @@ def factory_reset_desired_state(db: Session) -> dict[str, int]:
 def desired_state_counts(db: Session) -> dict[str, int]:
     counts = {key: len(db.execute(select(model)).scalars().all()) for key, model in SCALAR_TABLES.items()}
     counts["routes"] = len(db.execute(select(Route)).scalars().all())
+    counts["routing_rules"] = len(db.execute(select(RoutingRule)).scalars().all())
     counts["dhcp_options"] = len(db.execute(select(DhcpOption)).scalars().all())
     counts["ca_certificates"] = len(db.execute(select(CaCertificate)).scalars().all())
     counts["kms_keys"] = len(db.execute(select(KmsKey)).scalars().all())
@@ -424,6 +429,11 @@ def _restore_vcf_backup_settings(db: Session, rows: list[dict[str, Any]]) -> int
     for row in rows:
         payload = _model_kwargs(VcfBackupSettings, row, exclude={"sftp_user_id"})
         username = str(row.get("sftp_username") or "")
+        if username == VCF_BACKUP_DEFAULT_USERNAME and username not in users:
+            user = User(username=username, role="viewer", roles_json='["viewer"]', shell="/sbin/nologin", enabled=False, os_sync_status="password_not_staged")
+            db.add(user)
+            db.flush()
+            users[username] = user.id
         payload["sftp_user_id"] = users.get(username) if username else None
         db.add(VcfBackupSettings(**payload))
     db.flush()

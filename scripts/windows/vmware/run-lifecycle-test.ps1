@@ -26,6 +26,12 @@ param(
     [string]$WanCidr = '172.31.50.1/24',
     [switch]$AllowDryRunApply,
     [switch]$SkipBackupRestoreTest,
+    [switch]$RoutingWanOnly,
+    [switch]$FullEsxiPxeInstall,
+    [string]$PxeInstallerIsoPath = '',
+    [string]$PxeClientIPAddress = '',
+    [int]$EsxiInstallTimeoutSeconds = 3600,
+    [int]$EsxiInstallProbeDelaySeconds = 300,
     [switch]$CleanupCreatedLab,
     [switch]$PlanOnly
 )
@@ -38,6 +44,9 @@ if (-not $ApplianceUrl) {
 }
 if (-not $SshPassword) {
     $SshPassword = $AdminPassword
+}
+if ($RoutingWanOnly) {
+    $SkipBackupRestoreTest = $true
 }
 
 $resultStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -68,6 +77,27 @@ function Resolve-VmrunPath {
     throw 'vmrun.exe was not found. Install VMware Workstation Pro or pass -VmrunPath.'
 }
 
+function Resolve-VdiskManagerPath {
+    $vmrunDirectory = Split-Path -Parent $resolvedVmrun
+    $candidate = Join-Path $vmrunDirectory 'vmware-vdiskmanager.exe'
+    if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+    }
+    foreach ($path in @(
+        'C:\Program Files\VMware\VMware Workstation\vmware-vdiskmanager.exe',
+        'C:\Program Files (x86)\VMware\VMware Workstation\vmware-vdiskmanager.exe'
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            return $path
+        }
+    }
+    $command = Get-Command vmware-vdiskmanager -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+    throw 'vmware-vdiskmanager.exe was not found. It is required for -FullEsxiPxeInstall.'
+}
+
 function Assert-SafeLifecycleName {
     param([string]$Name)
 
@@ -78,6 +108,63 @@ function Assert-SafeLifecycleName {
     if (-not $Name.StartsWith($LabName)) {
         throw "Refusing VM name '$Name' because it does not start with lifecycle lab prefix '$LabName'."
     }
+}
+
+function ConvertTo-GuestShellSingleQuote {
+    param([string]$Value)
+    return "'" + ($Value -replace "'", "'\''") + "'"
+}
+
+function ConvertTo-NativeArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return '""'
+    }
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
+function Invoke-VmrunBounded {
+    param(
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $resolvedVmrun
+    $startInfo.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument -Value $_ }) -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        try {
+            $process.Kill()
+        } catch {
+        }
+        return [pscustomobject]@{
+            ExitCode = -1
+            TimedOut = $true
+            StdOut   = ''
+            StdErr   = "vmrun timed out after $TimeoutSeconds seconds: $($Arguments -join ' ')"
+        }
+    }
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        TimedOut = $false
+        StdOut   = $process.StandardOutput.ReadToEnd()
+        StdErr   = $process.StandardError.ReadToEnd()
+    }
+}
+
+function New-StaticVmwareMac {
+    $bytes = [guid]::NewGuid().ToByteArray()
+    return ('00:50:56:{0:x2}:{1:x2}:{2:x2}' -f (0x20 -bor ($bytes[0] -band 0x1f)), $bytes[1], $bytes[2])
 }
 
 function ConvertTo-VmxString {
@@ -114,18 +201,159 @@ function Set-VmxValue {
     [System.IO.File]::WriteAllLines($Path, [string[]]$content, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Remove-VmxValue {
+    param(
+        [string]$Path,
+        [string]$Key
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $pattern = '^\s*' + [regex]::Escape($Key) + '\s*='
+    $content = @(Get-Content -LiteralPath $Path | Where-Object { $_ -notmatch $pattern })
+    [System.IO.File]::WriteAllLines($Path, [string[]]$content, [System.Text.UTF8Encoding]::new($false))
+}
+
+function New-LanSegmentId {
+    param([string]$Name)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("LabFoundryWorkstationLifecycle:$Name"))
+    } finally {
+        $sha.Dispose()
+    }
+    $idBytes = [byte[]]$bytes[0..15]
+    $idBytes[0] = 0x52
+    $first = (($idBytes[0..7] | ForEach-Object { $_.ToString('x2') }) -join ' ')
+    $second = (($idBytes[8..15] | ForEach-Object { $_.ToString('x2') }) -join ' ')
+    return "$first-$second"
+}
+
+function Resolve-LanSegmentId {
+    param([string]$Name)
+
+    $preferenceDirectory = Join-Path $env:APPDATA 'VMware'
+    $preferencePath = Join-Path $preferenceDirectory 'preferences.ini'
+    if (-not (Test-Path -LiteralPath $preferenceDirectory)) {
+        New-Item -ItemType Directory -Force -Path $preferenceDirectory | Out-Null
+    }
+    $content = if (Test-Path -LiteralPath $preferencePath) {
+        @(Get-Content -LiteralPath $preferencePath)
+    } else {
+        @()
+    }
+
+    $segments = @{}
+    for ($index = 0; $index -lt $content.Count; $index++) {
+        if ($content[$index] -match '^pref\.namedPVNs(?<id>\d+)\.name\s*=\s*"(?<name>.*)"\s*$') {
+            $entry = [int]$matches.id
+            if (-not $segments.ContainsKey($entry)) {
+                $segments[$entry] = @{}
+            }
+            $segments[$entry].Name = $matches.name
+        } elseif ($content[$index] -match '^pref\.namedPVNs(?<id>\d+)\.pvnID\s*=\s*"(?<pvn>.*)"\s*$') {
+            $entry = [int]$matches.id
+            if (-not $segments.ContainsKey($entry)) {
+                $segments[$entry] = @{}
+            }
+            $segments[$entry].PvnId = $matches.pvn
+        }
+    }
+
+    $requiredCount = 0
+    if ($segments.Count -gt 0) {
+        $requiredCount = (($segments.Keys | Measure-Object -Maximum).Maximum + 1)
+    }
+
+    $countUpdated = $false
+    $countChanged = $false
+    $content = @($content | ForEach-Object {
+        if ($_ -match '^pref\.namedPVNs\.count\s*=') {
+            $countUpdated = $true
+            $desiredLine = "pref.namedPVNs.count = $(ConvertTo-VmxString -Value ([string]$requiredCount))"
+            if ($_ -ne $desiredLine) {
+                $countChanged = $true
+                $desiredLine
+            } else {
+                $_
+            }
+        } else {
+            $_
+        }
+    })
+    if (-not $countUpdated -and $requiredCount -gt 0) {
+        $content += "pref.namedPVNs.count = $(ConvertTo-VmxString -Value ([string]$requiredCount))"
+        $countChanged = $true
+    }
+    if ($countChanged) {
+        [System.IO.File]::WriteAllLines($preferencePath, [string[]]$content, [System.Text.UTF8Encoding]::new($false))
+    }
+
+    foreach ($entry in $segments.GetEnumerator()) {
+        if ($entry.Value.Name -eq $Name -and $entry.Value.PvnId) {
+            if ($entry.Value.PvnId -notmatch '^52 ') {
+                $pvnId = New-LanSegmentId -Name $Name
+                $content = @($content | ForEach-Object {
+                    if ($_ -match "^pref\.namedPVNs$($entry.Key)\.pvnID\s*=") {
+                        "pref.namedPVNs$($entry.Key).pvnID = $(ConvertTo-VmxString -Value $pvnId)"
+                    } else {
+                        $_
+                    }
+                })
+                [System.IO.File]::WriteAllLines($preferencePath, [string[]]$content, [System.Text.UTF8Encoding]::new($false))
+                return $pvnId
+            }
+            return $entry.Value.PvnId
+        }
+    }
+
+    $nextIndex = $requiredCount
+    $pvnId = New-LanSegmentId -Name $Name
+    $content += "pref.namedPVNs$nextIndex.name = $(ConvertTo-VmxString -Value $Name)"
+    $content += "pref.namedPVNs$nextIndex.pvnID = $(ConvertTo-VmxString -Value $pvnId)"
+    $content = @($content | ForEach-Object {
+        if ($_ -match '^pref\.namedPVNs\.count\s*=') {
+            "pref.namedPVNs.count = $(ConvertTo-VmxString -Value ([string]($nextIndex + 1)))"
+        } else {
+            $_
+        }
+    })
+    if (-not ($content | Where-Object { $_ -match '^pref\.namedPVNs\.count\s*=' })) {
+        $content += "pref.namedPVNs.count = $(ConvertTo-VmxString -Value ([string]($nextIndex + 1)))"
+    }
+    [System.IO.File]::WriteAllLines($preferencePath, [string[]]$content, [System.Text.UTF8Encoding]::new($false))
+    return $pvnId
+}
+
 function Set-VmxNetworkAdapter {
     param(
         [string]$Path,
         [int]$Index,
-        [string]$Vmnet
+        [string]$Vmnet,
+        [string]$StaticMac = '',
+        [string]$VirtualDev = 'vmxnet3'
     )
 
     $prefix = "ethernet$Index"
     Set-VmxValue -Path $Path -Key "$prefix.present" -Value 'TRUE'
-    Set-VmxValue -Path $Path -Key "$prefix.connectionType" -Value 'custom'
-    Set-VmxValue -Path $Path -Key "$prefix.vnet" -Value $Vmnet
-    Set-VmxValue -Path $Path -Key "$prefix.virtualDev" -Value 'vmxnet3'
+    if ($Vmnet.StartsWith('lan:')) {
+        $segmentName = $Vmnet.Substring(4)
+        $pvnId = Resolve-LanSegmentId -Name $segmentName
+        Set-VmxValue -Path $Path -Key "$prefix.connectionType" -Value 'pvn'
+        Set-VmxValue -Path $Path -Key "$prefix.pvnID" -Value $pvnId
+        Remove-VmxValue -Path $Path -Key "$prefix.vnet"
+    } else {
+        Set-VmxValue -Path $Path -Key "$prefix.connectionType" -Value 'custom'
+        Set-VmxValue -Path $Path -Key "$prefix.vnet" -Value $Vmnet
+        Remove-VmxValue -Path $Path -Key "$prefix.pvnID"
+    }
+    Set-VmxValue -Path $Path -Key "$prefix.virtualDev" -Value $VirtualDev
+    if ($StaticMac) {
+        Set-VmxValue -Path $Path -Key "$prefix.addressType" -Value 'static'
+        Set-VmxValue -Path $Path -Key "$prefix.address" -Value $StaticMac
+    }
     Set-VmxValue -Path $Path -Key "$prefix.startConnected" -Value 'TRUE'
 }
 
@@ -181,20 +409,77 @@ function New-ClientVm {
         'guestOS = "other5xlinux-64"',
         'memsize = "1024"',
         'numvcpus = "1"',
-        'scsi0.present = "TRUE"',
-        'scsi0.virtualDev = "lsisas1068"',
-        'scsi0:0.present = "TRUE"',
-        "scsi0:0.fileName = $(ConvertTo-VmxString -Value (Split-Path -Leaf $diskTarget))",
         'sata0.present = "TRUE"',
         'sata0:0.present = "TRUE"',
-        "sata0:0.fileName = $(ConvertTo-VmxString -Value $SeedIso)",
-        'sata0:0.deviceType = "cdrom-image"',
-        'sata0:0.startConnected = "TRUE"'
+        "sata0:0.fileName = $(ConvertTo-VmxString -Value (Split-Path -Leaf $diskTarget))",
+        'sata0:0.deviceType = "disk"',
+        'sata0:1.present = "TRUE"',
+        "sata0:1.fileName = $(ConvertTo-VmxString -Value $SeedIso)",
+        'sata0:1.deviceType = "cdrom-image"',
+        'sata0:1.startConnected = "TRUE"'
     )
     [System.IO.File]::WriteAllLines($vmxPath, [string[]]$lines, [System.Text.UTF8Encoding]::new($false))
     for ($index = 0; $index -lt $Networks.Count; $index++) {
-        Set-VmxNetworkAdapter -Path $vmxPath -Index $index -Vmnet $Networks[$index]
+        Set-VmxNetworkAdapter -Path $vmxPath -Index $index -Vmnet $Networks[$index] -VirtualDev 'e1000'
     }
+    $createdVmxPaths.Add($vmxPath)
+    return $vmxPath
+}
+
+function New-EsxiPxeVm {
+    param(
+        [string]$Name,
+        [string]$Directory,
+        [string]$Network,
+        [string]$MacAddress
+    )
+
+    Assert-SafeLifecycleName -Name $Name
+    New-Item -ItemType Directory -Force -Path $Directory | Out-Null
+    $diskTarget = Join-Path $Directory "$Name.vmdk"
+    $vdiskManager = Resolve-VdiskManagerPath
+    if ($PSCmdlet.ShouldProcess($diskTarget, "Create ESXi PXE install disk for $Name")) {
+        & $vdiskManager -c -s 32GB -a pvscsi -t 0 $diskTarget | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create ESXi PXE install disk with vmware-vdiskmanager."
+        }
+    }
+    $vmxPath = Join-Path $Directory "$Name.vmx"
+    $lines = @(
+        '.encoding = "windows-1252"',
+        'config.version = "8"',
+        'virtualHW.version = "22"',
+        'pciBridge0.present = "TRUE"',
+        'pciBridge4.present = "TRUE"',
+        'pciBridge4.virtualDev = "pcieRootPort"',
+        'pciBridge4.functions = "8"',
+        'pciBridge5.present = "TRUE"',
+        'pciBridge5.virtualDev = "pcieRootPort"',
+        'pciBridge5.functions = "8"',
+        'pciBridge6.present = "TRUE"',
+        'pciBridge6.virtualDev = "pcieRootPort"',
+        'pciBridge6.functions = "8"',
+        'pciBridge7.present = "TRUE"',
+        'pciBridge7.virtualDev = "pcieRootPort"',
+        'pciBridge7.functions = "8"',
+        'vmci0.present = "TRUE"',
+        'virtualHW.productCompatibility = "hosted"',
+        'firmware = "efi"',
+        'uefi.secureBoot.enabled = "FALSE"',
+        "displayName = $(ConvertTo-VmxString -Value $Name)",
+        'guestOS = "vmkernel9"',
+        'memsize = "8192"',
+        'numvcpus = "4"',
+        'vhv.enable = "FALSE"',
+        'tools.syncTime = "FALSE"',
+        'floppy0.present = "FALSE"',
+        'scsi0.present = "TRUE"',
+        'scsi0.virtualDev = "pvscsi"',
+        'scsi0:0.present = "TRUE"',
+        "scsi0:0.fileName = $(ConvertTo-VmxString -Value (Split-Path -Leaf $diskTarget))"
+    )
+    [System.IO.File]::WriteAllLines($vmxPath, [string[]]$lines, [System.Text.UTF8Encoding]::new($false))
+    Set-VmxNetworkAdapter -Path $vmxPath -Index 0 -Vmnet $Network -StaticMac $MacAddress -VirtualDev 'vmxnet3'
     $createdVmxPaths.Add($vmxPath)
     return $vmxPath
 }
@@ -226,9 +511,25 @@ function Invoke-Vmrun {
     }
 }
 
+function Register-WorkstationVm {
+    param([string]$Path)
+    if ($PSCmdlet.ShouldProcess($Path, 'Register Workstation VM')) {
+        & $resolvedVmrun -T ws register $Path 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Verbose "Workstation VM may already be registered: $Path"
+        }
+    }
+}
+
+function Unregister-WorkstationVm {
+    param([string]$Path)
+    & $resolvedVmrun -T ws unregister $Path 2>$null | Out-Null
+}
+
 function Start-WorkstationVm {
     param([string]$Path)
     if ($PSCmdlet.ShouldProcess($Path, 'Start Workstation VM')) {
+        Register-WorkstationVm -Path $Path
         Invoke-Vmrun -Arguments @('-T', 'ws', 'start', $Path, 'nogui')
     }
 }
@@ -238,38 +539,390 @@ function Stop-WorkstationVm {
     & $resolvedVmrun -T ws stop $Path hard 2>$null | Out-Null
 }
 
+function Test-TcpPort {
+    param(
+        [string]$HostName,
+        [int]$Port,
+        [int]$TimeoutMilliseconds = 1000
+    )
+
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $async = $client.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
+            return $false
+        }
+        $client.EndConnect($async)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
+    }
+}
+
+function Get-PlinkHostKey {
+    param(
+        [string]$HostName,
+        [string]$UserName,
+        [string]$Password
+    )
+
+    if (-not $HostName -or -not $Password -or -not (Get-Command plink -ErrorAction SilentlyContinue)) {
+        return ''
+    }
+
+    $deadline = (Get-Date).AddMinutes(4)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-TcpPort -HostName $HostName -Port 22 -TimeoutMilliseconds 1000)) {
+            Start-Sleep -Seconds 5
+            continue
+        }
+
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = & plink -batch -ssh -pw $Password "$UserName@$HostName" 'hostname' 2>&1
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        $text = ($output | Out-String)
+        if ($text -match '(ssh-[A-Za-z0-9-]+\s+\d+\s+SHA256:[A-Za-z0-9+/=]+)') {
+            return $Matches[1]
+        }
+        if ($exitCode -eq 0) {
+            return ''
+        }
+        Start-Sleep -Seconds 5
+    }
+    Write-Warning "Timed out waiting for SSH host key from $UserName@$HostName; continuing without host key pinning."
+    return ''
+}
+
+function Get-GuestIPv4FromAddressText {
+    param([string[]]$Lines)
+
+    foreach ($line in $Lines) {
+        foreach ($match in [regex]::Matches($line, '(?<ip>(?:\d{1,3}\.){3}\d{1,3})/\d+')) {
+            $ip = $match.Groups['ip'].Value
+            if ($ip -notlike '127.*' -and $ip -notlike '169.254.*') {
+                return $ip
+            }
+        }
+        if ($line -match '^\s*(?<ip>(?:\d{1,3}\.){3}\d{1,3})\s*$') {
+            $ip = $Matches['ip']
+            if ($ip -notlike '127.*' -and $ip -notlike '169.254.*') {
+                return $ip
+            }
+        }
+    }
+    return ''
+}
+
+function ConvertTo-HyphenMac {
+    param([string]$MacAddress)
+
+    return ($MacAddress -replace '[^0-9A-Fa-f]', '').ToLowerInvariant() -replace '(.{2})(?!$)', '$1-'
+}
+
+function Get-VmxEthernetMacAddress {
+    param(
+        [string]$Path,
+        [int]$Index = 0
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return ''
+    }
+    $content = Get-Content -LiteralPath $Path
+    $prefix = "ethernet$Index"
+    foreach ($key in @('address', 'generatedAddress')) {
+        $pattern = '^\s*' + [regex]::Escape("$prefix.$key") + '\s*=\s*"(?<value>[^"]+)"\s*$'
+        $line = $content | Where-Object { $_ -match $pattern } | Select-Object -First 1
+        if ($line -and $line -match $pattern) {
+            return ConvertTo-HyphenMac -MacAddress $Matches['value']
+        }
+    }
+    return ''
+}
+
+function Get-GuestIPv4FromHostNeighbor {
+    param(
+        [string]$Path,
+        [int]$Index = 0
+    )
+
+    $mac = Get-VmxEthernetMacAddress -Path $Path -Index $Index
+    if (-not $mac) {
+        return ''
+    }
+    try {
+        $neighbors = Get-NetNeighbor -AddressFamily IPv4 -ErrorAction Stop
+    } catch {
+        return ''
+    }
+    foreach ($neighbor in $neighbors) {
+        if (($neighbor.LinkLayerAddress -as [string]).ToLowerInvariant() -ne $mac) {
+            continue
+        }
+        $ip = $neighbor.IPAddress -as [string]
+        if ($ip -and $ip -notlike '127.*' -and $ip -notlike '169.254.*') {
+            return $ip
+        }
+    }
+    return ''
+}
+
+function Get-GuestIPv4ViaGuestOps {
+    param(
+        [string]$Path,
+        [string]$GuestUser,
+        [string]$GuestPassword,
+        [string]$Name
+    )
+
+    if (-not $GuestUser -or -not $GuestPassword) {
+        return ''
+    }
+    $safeName = ($Name -replace '[^A-Za-z0-9_.-]', '-')
+    $guestOutput = "/tmp/labfoundry-ipv4-$safeName.txt"
+    $hostOutput = Join-Path $resultRoot "guest-ipv4-$safeName.txt"
+    $script = "ip -4 -br addr > $guestOutput 2>/dev/null || /sbin/ip -4 -br addr > $guestOutput 2>/dev/null || ifconfig > $guestOutput 2>/dev/null"
+    $runResult = Invoke-VmrunBounded -Arguments @('-T', 'ws', '-gu', $GuestUser, '-gp', $GuestPassword, 'runScriptInGuest', $Path, '/bin/sh', $script) -TimeoutSeconds 15
+    if ($runResult.ExitCode -ne 0) {
+        return ''
+    }
+    $copyResult = Invoke-VmrunBounded -Arguments @('-T', 'ws', '-gu', $GuestUser, '-gp', $GuestPassword, 'copyFileFromGuestToHost', $Path, $guestOutput, $hostOutput) -TimeoutSeconds 15
+    if ($copyResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $hostOutput)) {
+        return ''
+    }
+    return Get-GuestIPv4FromAddressText -Lines @(Get-Content -LiteralPath $hostOutput)
+}
+
 function Wait-GuestIPv4 {
     param(
         [string]$Path,
-        [int]$TimeoutSeconds = 240
+        [int]$TimeoutSeconds = 240,
+        [string]$GuestUser = '',
+        [string]$GuestPassword = '',
+        [string]$Name = 'guest'
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        $ip = (& $resolvedVmrun -T ws getGuestIPAddress $Path -wait 2>$null | Select-Object -First 1)
-        if ($LASTEXITCODE -eq 0 -and $ip -match '^\d+\.\d+\.\d+\.\d+$' -and $ip -notlike '169.254.*') {
-            return $ip
+        $reported = Invoke-VmrunBounded -Arguments @('-T', 'ws', 'getGuestIPAddress', $Path) -TimeoutSeconds 10
+        if ($reported.ExitCode -eq 0) {
+            $ip = Get-GuestIPv4FromAddressText -Lines @($reported.StdOut -split "`r?`n")
+            if ($ip) {
+                return $ip
+            }
+        }
+        $neighborIp = Get-GuestIPv4FromHostNeighbor -Path $Path
+        if ($neighborIp) {
+            return $neighborIp
+        }
+        $fallbackIp = Get-GuestIPv4ViaGuestOps -Path $Path -GuestUser $GuestUser -GuestPassword $GuestPassword -Name $Name
+        if ($fallbackIp) {
+            return $fallbackIp
         }
         Start-Sleep -Seconds 5
     }
     return ''
 }
 
+function Invoke-ApplianceGuestScript {
+    param(
+        [string]$ApplianceVmx,
+        [string]$Script
+    )
+
+    & $resolvedVmrun -T ws -gu $ApplianceSshUser -gp $SshPassword runScriptInGuest $ApplianceVmx /bin/sh $Script | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Appliance guest operation failed."
+    }
+}
+
+function Sync-ApplianceHelperScript {
+    param([string]$ApplianceVmx)
+
+    $localHelper = Join-Path $repoRoot 'scripts\appliance\labfoundry-helper'
+    if (-not (Test-Path -LiteralPath $localHelper)) {
+        throw "LabFoundry helper script not found: $localHelper"
+    }
+    $guestTemp = "/tmp/labfoundry-helper"
+    if ($PSCmdlet.ShouldProcess($ApplianceVmx, "Sync LabFoundry helper into appliance")) {
+        & $resolvedVmrun -T ws -gu $ApplianceSshUser -gp $SshPassword copyFileFromHostToGuest $ApplianceVmx $localHelper $guestTemp | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to copy LabFoundry helper into the appliance with VMware guest operations."
+        }
+        $quotedPassword = ConvertTo-GuestShellSingleQuote -Value $SshPassword
+        $quotedTemp = ConvertTo-GuestShellSingleQuote -Value $guestTemp
+        $script = "printf '%s\n' $quotedPassword | sudo -S install -o root -g root -m 0755 $quotedTemp /opt/labfoundry/bin/labfoundry-helper"
+        Invoke-ApplianceGuestScript -ApplianceVmx $ApplianceVmx -Script $script
+    }
+}
+
+function Sync-ApplianceApplicationWheel {
+    param([string]$ApplianceVmx)
+
+    $wheelRoot = Join-Path $resultRoot 'wheel'
+    if (Test-Path -LiteralPath $wheelRoot) {
+        Remove-Item -LiteralPath $wheelRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $wheelRoot | Out-Null
+    Write-Host "Building LabFoundry wheel from current branch."
+    & python -m pip wheel $repoRoot --no-deps -w $wheelRoot | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to build LabFoundry wheel from $repoRoot."
+    }
+    $wheel = Get-ChildItem -LiteralPath $wheelRoot -Filter 'labfoundry-*.whl' -File |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if (-not $wheel) {
+        throw "Built wheel was not found under $wheelRoot."
+    }
+
+    $guestWheel = "/tmp/$($wheel.Name)"
+    if ($PSCmdlet.ShouldProcess($ApplianceVmx, "Install current LabFoundry wheel into appliance")) {
+        & $resolvedVmrun -T ws -gu $ApplianceSshUser -gp $SshPassword copyFileFromHostToGuest $ApplianceVmx $wheel.FullName $guestWheel | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to copy LabFoundry wheel into the appliance with VMware guest operations."
+        }
+        $quotedPassword = ConvertTo-GuestShellSingleQuote -Value $SshPassword
+        $quotedWheel = ConvertTo-GuestShellSingleQuote -Value $guestWheel
+        $script = "printf '%s\n' $quotedPassword | sudo -S /opt/labfoundry/.venv/bin/python -m pip install --force-reinstall --no-deps $quotedWheel && printf '%s\n' $quotedPassword | sudo -S find /opt/labfoundry/.venv -type d -exec chmod 0755 {} + && printf '%s\n' $quotedPassword | sudo -S find /opt/labfoundry/.venv -type f -exec chmod 0644 {} + && printf '%s\n' $quotedPassword | sudo -S find /opt/labfoundry/.venv/bin -type f -exec chmod 0755 {} + && printf '%s\n' $quotedPassword | sudo -S systemctl restart labfoundry.service"
+        Invoke-ApplianceGuestScript -ApplianceVmx $ApplianceVmx -Script $script
+    }
+
+    $deadline = (Get-Date).AddMinutes(3)
+    do {
+        try {
+            $response = Invoke-WebRequest -Uri "$ApplianceUrl/openapi.json" -UseBasicParsing -TimeoutSec 10
+            if ($response.StatusCode -eq 200) {
+                return $wheel.FullName
+            }
+        } catch {
+        }
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+    throw "Timed out waiting for LabFoundry web service after installing $($wheel.Name)."
+}
+
+function Find-ApplianceEsxiIsoPath {
+    param([string]$ApplianceVmx)
+
+    $guestOutput = '/tmp/labfoundry-esxi-iso.txt'
+    $hostOutput = Join-Path $resultRoot 'appliance-esxi-iso.txt'
+    $script = "find /mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST -maxdepth 1 -type f -iname '*.iso' | head -n 1 > $guestOutput"
+    & $resolvedVmrun -T ws -gu $ApplianceSshUser -gp $SshPassword runScriptInGuest $ApplianceVmx /bin/sh $script 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        return ''
+    }
+    & $resolvedVmrun -T ws -gu $ApplianceSshUser -gp $SshPassword copyFileFromGuestToHost $ApplianceVmx $guestOutput $hostOutput 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hostOutput)) {
+        return ''
+    }
+    return ((Get-Content -LiteralPath $hostOutput | Select-Object -First 1) -as [string]).Trim()
+}
+
+function Resolve-ApplianceEsxiIsoPath {
+    param([string]$ApplianceVmx)
+
+    if (-not $FullEsxiPxeInstall) {
+        return ''
+    }
+    if (-not $PxeInstallerIsoPath) {
+        $discovered = Find-ApplianceEsxiIsoPath -ApplianceVmx $ApplianceVmx
+        if ($discovered) {
+            return $discovered
+        }
+        throw "-FullEsxiPxeInstall requires -PxeInstallerIsoPath or an existing ESXi ISO under /mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST on the appliance."
+    }
+    if ($PxeInstallerIsoPath.StartsWith('/')) {
+        return $PxeInstallerIsoPath
+    }
+    $localIso = Resolve-Path -LiteralPath $PxeInstallerIsoPath
+    $leaf = Split-Path -Leaf $localIso.Path
+    $guestTemp = "/tmp/$leaf"
+    $guestTarget = "/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST/$leaf"
+    if ($PSCmdlet.ShouldProcess($guestTarget, "Stage ESXi installer ISO into appliance depot")) {
+        & $resolvedVmrun -T ws -gu $ApplianceSshUser -gp $SshPassword copyFileFromHostToGuest $ApplianceVmx $localIso.Path $guestTemp | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to copy ESXi installer ISO into the appliance with VMware guest operations."
+        }
+        $quotedPassword = ConvertTo-GuestShellSingleQuote -Value $SshPassword
+        $quotedTemp = ConvertTo-GuestShellSingleQuote -Value $guestTemp
+        $quotedTarget = ConvertTo-GuestShellSingleQuote -Value $guestTarget
+        $script = "printf '%s\n' $quotedPassword | sudo -S mkdir -p /mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_HOST && printf '%s\n' $quotedPassword | sudo -S mv $quotedTemp $quotedTarget && printf '%s\n' $quotedPassword | sudo -S chmod 0644 $quotedTarget"
+        Invoke-ApplianceGuestScript -ApplianceVmx $ApplianceVmx -Script $script
+    }
+    return $guestTarget
+}
+
+function Add-LifecycleResultStep {
+    param(
+        [string]$ResultDirectory,
+        [string]$Name,
+        [string]$Status,
+        [hashtable]$Evidence,
+        [string]$ErrorMessage = ''
+    )
+
+    $path = Join-Path $ResultDirectory 'result.json'
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "Lifecycle result JSON not found: $path"
+    }
+    $result = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    $step = [ordered]@{
+        name        = $Name
+        status      = $Status
+        started_at  = (Get-Date).ToUniversalTime().ToString('o')
+        finished_at = (Get-Date).ToUniversalTime().ToString('o')
+        evidence    = $Evidence
+        error       = $ErrorMessage
+    }
+    $result.steps += @($step)
+    if ($Status -ne 'passed') {
+        $result.status = 'failed'
+        if ($result.PSObject.Properties.Name -contains 'error') {
+            $result.error = $ErrorMessage
+        } else {
+            $result | Add-Member -MemberType NoteProperty -Name 'error' -Value $ErrorMessage
+        }
+    }
+    $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding UTF8
+}
+
 $resolvedVmrun = Resolve-VmrunPath
+if ($RoutingWanOnly -and $FullEsxiPxeInstall) {
+    throw "-RoutingWanOnly and -FullEsxiPxeInstall are mutually exclusive."
+}
 $applianceName = "$LabName-Appliance"
 $clientAName = "$LabName-ClientA"
 $clientBName = "$LabName-ClientB"
+$esxiName = "$LabName-ESXiPXE"
+$esxiMacAddress = if ($FullEsxiPxeInstall) { New-StaticVmwareMac } else { '' }
+$planApplianceVmx = if (Test-Path -LiteralPath $ApplianceVmxPath) { (Resolve-Path -LiteralPath $ApplianceVmxPath).Path } else { $ApplianceVmxPath }
+$planClientVmdk = if (Test-Path -LiteralPath $ClientVmdkPath) { (Resolve-Path -LiteralPath $ClientVmdkPath).Path } else { $ClientVmdkPath }
 
 $plan = [ordered]@{
     name                  = 'vmware workstation lifecycle interop'
     lab_name              = $LabName
-    appliance_vmx         = (Resolve-Path -LiteralPath $ApplianceVmxPath).Path
-    client_vmdk           = (Resolve-Path -LiteralPath $ClientVmdkPath -ErrorAction SilentlyContinue).Path
+    appliance_vmx         = $planApplianceVmx
+    client_vmdk           = $planClientVmdk
     result_root           = $resultRoot
     management_network    = $ManagementNetwork
     site_a_network        = $SiteANetwork
     trunk_network         = $TrunkNetwork
     site_b_network        = $SiteBNetwork
+    routing_wan_only      = [bool]$RoutingWanOnly
+    full_esxi_pxe_install = [bool]$FullEsxiPxeInstall
+    pxe_installer_iso     = $PxeInstallerIsoPath
+    pxe_client_ip         = $PxeClientIPAddress
+    esxi_probe_delay_seconds = $EsxiInstallProbeDelaySeconds
+    esxi_pxe_vm           = if ($FullEsxiPxeInstall) { $esxiName } else { '' }
+    esxi_pxe_mac          = $esxiMacAddress
     workstation_fidelity  = 'Workstation vmnets are isolated layer-2 segments; Hyper-V access/trunk VLAN port behavior is approximated by separate vmnets.'
 }
 
@@ -297,14 +950,24 @@ try {
 
     $clientAVmx = New-ClientVm -Name $clientAName -Directory (Join-Path $vmRoot $clientAName) -DiskPath $ClientVmdkPath -SeedIso $clientASeedIso -Networks @($ManagementNetwork, $SiteANetwork, $TrunkNetwork)
     $clientBVmx = New-ClientVm -Name $clientBName -Directory (Join-Path $vmRoot $clientBName) -DiskPath $ClientVmdkPath -SeedIso $clientBSeedIso -Networks @($ManagementNetwork, $SiteBNetwork)
+    $esxiVmx = ''
+    if ($FullEsxiPxeInstall) {
+        $esxiVmx = New-EsxiPxeVm -Name $esxiName -Directory (Join-Path $vmRoot $esxiName) -Network $SiteANetwork -MacAddress $esxiMacAddress
+    }
 
     foreach ($vmx in @($applianceVmx, $clientAVmx, $clientBVmx)) {
         Start-WorkstationVm -Path $vmx
     }
 
     Start-Sleep -Seconds 20
-    $clientAHost = Wait-GuestIPv4 -Path $clientAVmx
-    $clientBHost = Wait-GuestIPv4 -Path $clientBVmx
+    Sync-ApplianceHelperScript -ApplianceVmx $applianceVmx
+    $applianceWheelPath = Sync-ApplianceApplicationWheel -ApplianceVmx $applianceVmx
+    $applianceHostKey = Get-PlinkHostKey -HostName $ApplianceIPAddress -UserName $ApplianceSshUser -Password $SshPassword
+    $clientAHost = Wait-GuestIPv4 -Path $clientAVmx -GuestUser $ClientSshUser -GuestPassword $SshPassword -Name $clientAName
+    $clientBHost = Wait-GuestIPv4 -Path $clientBVmx -GuestUser $ClientSshUser -GuestPassword $SshPassword -Name $clientBName
+    $clientAHostKey = Get-PlinkHostKey -HostName $clientAHost -UserName $ClientSshUser -Password $SshPassword
+    $clientBHostKey = Get-PlinkHostKey -HostName $clientBHost -UserName $ClientSshUser -Password $SshPassword
+    $appliancePxeInstallerIsoPath = Resolve-ApplianceEsxiIsoPath -ApplianceVmx $applianceVmx
 
     $basePythonArgs = @(
         (Join-Path $repoRoot 'scripts\interop\lifecycle_test.py'),
@@ -321,12 +984,24 @@ try {
         '--vlan-id', "$VlanId",
         '--vlan-cidr', $TaggedVlanCidr,
         '--wan-cidr', $WanCidr,
-        '--pxe-test-mode', 'linux',
-        '--pxe-client-mac', ''
+        '--pxe-test-mode', $(if ($FullEsxiPxeInstall) { 'esxi' } else { 'linux' })
     )
+    if ($FullEsxiPxeInstall) {
+        $basePythonArgs += @(
+            '--pxe-client-mac', $esxiMacAddress,
+            '--pxe-installer-iso-path', $appliancePxeInstallerIsoPath
+        )
+        if ($PxeClientIPAddress) {
+            $basePythonArgs += @('--pxe-client-ip', $PxeClientIPAddress)
+        }
+    }
+    if ($applianceHostKey) { $basePythonArgs += @('--appliance-ssh-hostkey', $applianceHostKey) }
     if ($clientAHost) { $basePythonArgs += @('--client-a-host', $clientAHost) }
     if ($clientBHost) { $basePythonArgs += @('--client-b-host', $clientBHost) }
+    if ($clientAHostKey) { $basePythonArgs += @('--client-a-hostkey', $clientAHostKey) }
+    if ($clientBHostKey) { $basePythonArgs += @('--client-b-hostkey', $clientBHostKey) }
     if ($AllowDryRunApply) { $basePythonArgs += '--allow-dry-run' }
+    if ($RoutingWanOnly) { $basePythonArgs += '--routing-wan-only' }
 
     $initialResultRoot = if ($SkipBackupRestoreTest) { $resultRoot } else { Join-Path $resultRoot 'initial' }
     $restoredResultRoot = Join-Path $resultRoot 'restored'
@@ -341,6 +1016,32 @@ try {
         python @initialPythonArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Lifecycle interop runner failed with exit code $LASTEXITCODE"
+        }
+        if ($FullEsxiPxeInstall) {
+            try {
+                Start-WorkstationVm -Path $esxiVmx
+                if ($EsxiInstallProbeDelaySeconds -gt 0) {
+                    Write-Host "Waiting $EsxiInstallProbeDelaySeconds seconds before probing ESXi guest operations."
+                    Start-Sleep -Seconds $EsxiInstallProbeDelaySeconds
+                }
+                $esxiDetectedIp = Wait-GuestIPv4 -Path $esxiVmx -TimeoutSeconds $EsxiInstallTimeoutSeconds -GuestUser 'root' -GuestPassword 'vmware01!' -Name $esxiName
+                if (-not $esxiDetectedIp) {
+                    throw "Timed out waiting for ESXi PXE install guest IP after $EsxiInstallTimeoutSeconds seconds."
+                }
+                Add-LifecycleResultStep -ResultDirectory $initialResultRoot -Name 'esxi-pxe-install-check' -Status 'passed' -Evidence @{
+                    vmx                = $esxiVmx
+                    mac_address        = $esxiMacAddress
+                    detected_ip        = $esxiDetectedIp
+                    installer_iso_path = $appliancePxeInstallerIsoPath
+                }
+            } catch {
+                Add-LifecycleResultStep -ResultDirectory $initialResultRoot -Name 'esxi-pxe-install-check' -Status 'failed' -Evidence @{
+                    vmx                = $esxiVmx
+                    mac_address        = $esxiMacAddress
+                    installer_iso_path = $appliancePxeInstallerIsoPath
+                } -ErrorMessage $_.Exception.Message
+                throw
+            }
         }
         if (-not $SkipBackupRestoreTest) {
             $restoredPythonArgs = @($basePythonArgs + @(
@@ -359,6 +1060,7 @@ try {
     if ($CleanupCreatedLab) {
         foreach ($vmx in @($createdVmxPaths.ToArray())) {
             Stop-WorkstationVm -Path $vmx
+            Unregister-WorkstationVm -Path $vmx
         }
         if (Test-Path -LiteralPath $vmRoot) {
             Remove-Item -LiteralPath $vmRoot -Recurse -Force

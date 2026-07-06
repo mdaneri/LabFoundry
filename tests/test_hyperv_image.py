@@ -540,6 +540,85 @@ def test_lifecycle_hyperv_script_finds_alpine_ips_and_pins_plink_hostkeys():
     assert "'--client-b-hostkey'" in script
 
 
+def test_lifecycle_vmware_script_supports_routing_wan_only_and_esxi_pxe_install():
+    wrapper = Path("scripts/windows/vmware/invoke-lifecycle-test.ps1").read_text(encoding="utf-8")
+    runner = Path("scripts/windows/vmware/run-lifecycle-test.ps1").read_text(encoding="utf-8")
+
+    assert "[switch]$RoutingWanOnly" in wrapper
+    assert "[switch]$FullEsxiPxeInstall" in wrapper
+    assert "[string]$PxeInstallerIsoPath = ''" in wrapper
+    assert "$effectiveSkipBackupRestoreTest = [bool]($SkipBackupRestoreTest -or $RoutingWanOnly)" in wrapper
+    assert "if ($RoutingWanOnly) { $arguments += '-RoutingWanOnly' }" in wrapper
+    assert "if ($FullEsxiPxeInstall) { $arguments += '-FullEsxiPxeInstall' }" in wrapper
+    assert "if ($PxeInstallerIsoPath) { $arguments += @('-PxeInstallerIsoPath', $PxeInstallerIsoPath) }" in wrapper
+    assert "-RoutingWanOnly and -FullEsxiPxeInstall are mutually exclusive." in wrapper
+
+    assert "function Get-GuestIPv4ViaGuestOps" in runner
+    assert "function Invoke-VmrunBounded" in runner
+    assert "vmrun timed out after $TimeoutSeconds seconds" in runner
+    assert "function Get-GuestIPv4FromHostNeighbor" in runner
+    assert "function Get-VmxEthernetMacAddress" in runner
+    assert "Get-NetNeighbor -AddressFamily IPv4" in runner
+    assert "ip -4 -br addr" in runner
+    assert "'copyFileFromGuestToHost', $Path, $guestOutput, $hostOutput" in runner
+    assert "'getGuestIPAddress', $Path" in runner
+    assert "-TimeoutSeconds 15" in runner
+    assert "function Get-PlinkHostKey" in runner
+    assert "$applianceHostKey = Get-PlinkHostKey -HostName $ApplianceIPAddress" in runner
+    assert "'--appliance-ssh-hostkey', $applianceHostKey" in runner
+    assert "'--client-a-hostkey', $clientAHostKey" in runner
+    assert "function Sync-ApplianceHelperScript" in runner
+    assert "scripts\\appliance\\labfoundry-helper" in runner
+    assert "copyFileFromHostToGuest $ApplianceVmx $localHelper $guestTemp" in runner
+    assert "install -o root -g root -m 0755 $quotedTemp /opt/labfoundry/bin/labfoundry-helper" in runner
+    assert "function Sync-ApplianceApplicationWheel" in runner
+    assert "python -m pip wheel $repoRoot --no-deps -w $wheelRoot" in runner
+    assert "pip install --force-reinstall --no-deps $quotedWheel" in runner
+    assert "systemctl restart labfoundry.service" in runner
+    assert "$applianceWheelPath = Sync-ApplianceApplicationWheel -ApplianceVmx $applianceVmx" in runner
+    assert "function Register-WorkstationVm" in runner
+    assert "$resolvedVmrun @Arguments" in runner
+    assert "ws register $Path" in runner
+    assert "ws unregister $Path" in runner
+    assert "Register-WorkstationVm -Path $Path" in runner
+    assert "function New-EsxiPxeVm" in runner
+    assert "[string]$PxeClientIPAddress = ''" in runner
+    assert "[int]$EsxiInstallProbeDelaySeconds = 300" in runner
+    assert "Waiting $EsxiInstallProbeDelaySeconds seconds before probing ESXi guest operations." in runner
+    assert "esxi_probe_delay_seconds = $EsxiInstallProbeDelaySeconds" in runner
+    assert "if ($PxeClientIPAddress)" in runner
+    assert "@('--pxe-client-ip', $PxeClientIPAddress)" in runner
+    assert "$Vmnet.StartsWith('lan:')" in runner
+    assert "function Resolve-LanSegmentId" in runner
+    assert "pref.namedPVNs$nextIndex.name" in runner
+    assert "connectionType\" -Value 'pvn'" in runner
+    assert "$prefix.pvnID" in runner
+    assert "Remove-VmxValue -Path $Path -Key \"$prefix.vnet\"" in runner
+    assert "sata0:0.deviceType = \"disk\"" in runner
+    assert "sata0:1.deviceType = \"cdrom-image\"" in runner
+    assert "Set-VmxNetworkAdapter -Path $vmxPath -Index $index -Vmnet $Networks[$index] -VirtualDev 'e1000'" in runner
+    assert "firmware = \"efi\"" in runner
+    assert "uefi.secureBoot.enabled = \"FALSE\"" in runner
+    assert "vhv.enable = \"FALSE\"" in runner
+    assert "& $vdiskManager -c -s 32GB -a pvscsi -t 0 $diskTarget" in runner
+    assert 'virtualHW.version = "22"' in runner
+    assert 'pciBridge0.present = "TRUE"' in runner
+    assert 'pciBridge4.virtualDev = "pcieRootPort"' in runner
+    assert 'pciBridge7.functions = "8"' in runner
+    assert 'vmci0.present = "TRUE"' in runner
+    assert 'virtualHW.productCompatibility = "hosted"' in runner
+    assert 'tools.syncTime = "FALSE"' in runner
+    assert 'floppy0.present = "FALSE"' in runner
+    assert 'guestOS = "vmkernel9"' in runner
+    assert 'scsi0.virtualDev = "pvscsi"' in runner
+    assert "Set-VmxNetworkAdapter -Path $vmxPath -Index 0 -Vmnet $Network -StaticMac $MacAddress -VirtualDev 'vmxnet3'" in runner
+    assert "function Resolve-ApplianceEsxiIsoPath" in runner
+    assert "copyFileFromHostToGuest $ApplianceVmx $localIso.Path $guestTemp" in runner
+    assert "'--routing-wan-only'" in runner
+    assert "'--pxe-test-mode', $(if ($FullEsxiPxeInstall) { 'esxi' } else { 'linux' })" in runner
+    assert "Add-LifecycleResultStep -ResultDirectory $initialResultRoot -Name 'esxi-pxe-install-check' -Status 'passed'" in runner
+
+
 def test_lifecycle_hyperv_script_seeds_alpine_clients_for_ssh():
     script = Path("scripts/windows/hyperv/run-lifecycle-test.ps1").read_text(encoding="utf-8")
 
