@@ -7766,14 +7766,14 @@ def edit_dhcp_scope_from_ui(
     if not scope:
         raise HTTPException(status_code=404, detail="DHCP IP zone not found")
     normalized_family = address_family.strip().lower() if address_family.strip().lower() in {"ipv4", "ipv6"} else "ipv4"
-    if scope.range_expression.strip() and normalized_family != scope.address_family:
+    if normalized_family != scope.address_family:
         return render(
             request,
             "dhcp.html",
             {
                 "identity": identity,
                 **dnsmasq_context(db),
-                "form_error": "DHCP IP zone family cannot be changed while a range is defined.",
+                "form_error": "DHCP IP zone family cannot be changed after it is created.",
             },
             status_code=409,
         )

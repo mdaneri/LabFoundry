@@ -3260,7 +3260,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "isUniqueNewDhcpScopeName(data, existingScopeNames)" in app_js.text
     assert "cellMouseEnter" in app_js.text
     assert "dhcpScopeFamilyEditable" in app_js.text
-    assert "String(data.range_expression ?? \"\").trim()" in app_js.text
+    assert "if (!data.is_new)" in app_js.text
     assert "dhcpDefaultFamilyForInterface(scopeDefaults, data.interface_name || defaultInterface)" in app_js.text
     assert "applyDhcpScopeInterfaceDefaults" in app_js.text
     assert 'title: "Family"' in app_js.text
@@ -7766,7 +7766,7 @@ def test_dhcp_scope_edit_form_updates_ip_zone(client):
     assert '"ntp_server": "192.168.50.1"' in refreshed.text
 
 
-def test_dhcp_scope_family_cannot_change_while_range_defined(client):
+def test_dhcp_scope_family_cannot_change_after_create(client):
     import html
     import json
 
@@ -7802,7 +7802,7 @@ def test_dhcp_scope_family_cannot_change_while_range_defined(client):
     )
 
     assert rejected.status_code == 409
-    assert "DHCP IP zone family cannot be changed while a range is defined." in rejected.text
+    assert "DHCP IP zone family cannot be changed after it is created." in rejected.text
     with SessionLocal() as db:
         scope = db.execute(select(DhcpScope).where(DhcpScope.id == scope_id)).scalar_one()
         assert scope.address_family == "ipv4"

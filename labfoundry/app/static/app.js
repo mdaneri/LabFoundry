@@ -916,7 +916,7 @@ async function postDhcpScopeAction(url, data, csrf, options = {}) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text.match(/DHCP IP zone .*?(?:already exists|family cannot be changed while a range is defined)[^<]*/)?.[0] || "The DHCP IP zone could not be saved.");
+    throw new Error(text.match(/DHCP IP zone .*?(?:already exists|family cannot be changed after it is created)[^<]*/)?.[0] || "The DHCP IP zone could not be saved.");
   }
   if (reload) {
     window.location.reload();
@@ -1026,7 +1026,7 @@ function dhcpScopeCellEditable(cell, existingNames) {
 
 function dhcpScopeFamilyEditable(cell, existingNames) {
   const data = cell.getRow().getData();
-  if (String(data.range_expression ?? "").trim()) {
+  if (!data.is_new) {
     return false;
   }
   return dhcpScopeCellEditable(cell, existingNames);

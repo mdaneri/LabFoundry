@@ -678,7 +678,7 @@ def test_dhcp_api_scope_and_reservations(client):
         },
     )
     assert family_change.status_code == 409
-    assert family_change.json()["detail"] == "DHCP IP zone family cannot be changed while a range is defined"
+    assert family_change.json()["detail"] == "DHCP IP zone family cannot be changed after it is created"
 
     created_scope = client.post(
         "/api/v1/dhcp/scopes",
