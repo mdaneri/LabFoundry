@@ -3278,6 +3278,9 @@ def test_dns_and_dhcp_pages_render(client):
     assert "initializeDhcpReservationsTable" in app_js.text
     assert "autoSaveDhcpReservation" in app_js.text
     assert "+ Add reservation here" in app_js.text
+    assert "dhcpReservationCellEditable" in app_js.text
+    assert "dhcpReservationAddRowHintFormatter" in app_js.text
+    assert "dhcpReservationHasHostname(data)" in app_js.text
     assert 'field: "zone_name"' in app_js.text
     assert 'title: "DNS name / FQDN"' in app_js.text
     assert "initializeCaSettings" in app_js.text

@@ -1232,6 +1232,29 @@ function hasRequiredDhcpReservationFields(data) {
   return Boolean((data.hostname || "").trim() && (data.mac_address || "").trim() && (data.ip_address || "").trim());
 }
 
+function dhcpReservationHasHostname(data) {
+  return Boolean(String(data.hostname ?? "").trim());
+}
+
+function dhcpReservationCellEditable(cell) {
+  const data = cell.getRow().getData();
+  if (!data.is_new) {
+    return true;
+  }
+  if (cell.getField() === "hostname") {
+    return true;
+  }
+  return dhcpReservationHasHostname(data);
+}
+
+function dhcpReservationAddRowHintFormatter(cell, hint) {
+  const data = cell.getRow().getData();
+  if (data.is_new && !dhcpReservationHasHostname(data) && !String(cell.getValue() ?? "").trim()) {
+    return "";
+  }
+  return dnsAddRowHintFormatter(cell, hint);
+}
+
 async function autoSaveDhcpReservation(cell, csrf) {
   clearDhcpReservationError();
   const row = cell.getRow();
@@ -5323,6 +5346,12 @@ function initializeDhcpReservationsTable() {
   }
   const csrf = tableElement.dataset.csrf || "";
   const rows = [...JSON.parse(tableElement.dataset.reservations || "[]"), newDhcpReservationRow()];
+  const handleDhcpReservationEdited = (cell) => {
+    if (cell.getRow().getData().is_new) {
+      cell.getRow().reformat();
+    }
+    return autoSaveDhcpReservation(cell, csrf);
+  };
   try {
     new Tabulator(tableElement, {
       data: rows,
@@ -5345,23 +5374,25 @@ function initializeDhcpReservationsTable() {
           editor: "input",
           formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add reservation here"),
           minWidth: 180,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
         },
         {
           title: "MAC address",
           field: "mac_address",
           editor: "input",
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "enter MAC..."),
+          editable: dhcpReservationCellEditable,
+          formatter: (cell) => dhcpReservationAddRowHintFormatter(cell, "enter MAC..."),
           minWidth: 180,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
         },
         {
           title: "IP address",
           field: "ip_address",
           editor: "input",
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "enter IP..."),
+          editable: dhcpReservationCellEditable,
+          formatter: (cell) => dhcpReservationAddRowHintFormatter(cell, "enter IP..."),
           minWidth: 150,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
         },
         {
           title: "Zone",
@@ -5375,18 +5406,20 @@ function initializeDhcpReservationsTable() {
           field: "enabled",
           formatter: "tickCross",
           editor: "tickCross",
+          editable: dhcpReservationCellEditable,
           hozAlign: "center",
           width: 110,
           headerSort: false,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
         },
         {
           title: "Description",
           field: "description",
           editor: "input",
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "optional note..."),
+          editable: dhcpReservationCellEditable,
+          formatter: (cell) => dhcpReservationAddRowHintFormatter(cell, "optional note..."),
           minWidth: 220,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
         },
       ],
       rowFormatter: (row) => {
