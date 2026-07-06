@@ -110,7 +110,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v15" in service_worker.text
+    assert "labfoundry-pwa-v16" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -123,7 +123,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=dns-new-row-lock-monitor-20260703-1" in offline.text
+    assert "/static/app.css?v=routing-visibility-20260705-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -136,7 +136,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
     assert 'data-monitor-page' in page.text
-    assert "/static/app.js?v=dns-new-row-lock-monitor-20260703-1" in page.text
+    assert "/static/app.js?v=routing-visibility-20260705-1" in page.text
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -162,7 +162,7 @@ def test_unauthenticated_ui_request_redirects_to_login(client):
     response = client.get("/certificate-authority", follow_redirects=False)
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/login"
+    assert response.headers["location"] == "/login?next=/certificate-authority"
 
 
 def test_ui_session_is_rejected_after_appliance_instance_changes(client):
@@ -181,7 +181,7 @@ def test_ui_session_is_rejected_after_appliance_instance_changes(client):
     response = client.get("/vlan-interfaces", follow_redirects=False)
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/login"
+    assert response.headers["location"] == "/login?next=/vlan-interfaces"
     assert client.get("/", follow_redirects=False).headers["location"] == "/login"
 
 
@@ -6587,7 +6587,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "dns-new-row-lock-monitor-20260703-1" in page.text
+    assert "routing-visibility-20260705-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

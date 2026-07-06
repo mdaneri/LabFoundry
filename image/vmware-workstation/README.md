@@ -50,7 +50,7 @@ powershell.exe -ExecutionPolicy Bypass `
 
 The built VMX keeps the first adapter on `-VmnetName` as management-only and
 adds a second `vmxnet3` adapter on `-ServiceVmnetName` for service traffic. The
-service network defaults to `VMnet2`.
+service network defaults to Workstation's built-in host-only `VMnet1`.
 
 ## Networking
 
@@ -58,7 +58,7 @@ The default Workstation builder and lifecycle scripts expect:
 
 - management: `vmnet8`, with the LabFoundry appliance address derived from the
   selected vmnet subnet by default
-- services: `VMnet2`
+- services: `VMnet1`
 - SiteA: `VMnet2`
 - WAN/SiteB: `VMnet3`
 - trunk-like validation segment: `VMnet4`

@@ -445,7 +445,7 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "vmxnet3" in nics_script
     assert "Join-Path $PSScriptRoot '..\\common\\LabFoundry.PhotonImage.psm1'" in build_script
     assert "Join-Path $PSScriptRoot '..\\..\\..\\image\\vmware-workstation'" in build_script
-    assert "[string]$ServiceVmnetName = 'VMnet2'" in build_script
+    assert "[string]$ServiceVmnetName = 'VMnet1'" in build_script
     assert "service_vmnet_name = $ServiceVmnetName" in build_script
     assert "Using VMware services network $ServiceVmnetName" in build_script
     assert "prepare-networks.ps1" in build_script

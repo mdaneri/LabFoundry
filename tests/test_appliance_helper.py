@@ -743,6 +743,7 @@ def test_esxi_pxe_helper_does_not_copy_host_artifact_to_default_fallback(monkeyp
     (ipxe_binary_dir / "undionly.kpxe").write_bytes(b"bios ipxe")
     (ipxe_binary_dir / "snponly.efi").write_bytes(b"uefi ipxe")
     (ipxe_binary_dir / "pxelinux.0").write_bytes(b"pxelinux")
+    (ipxe_binary_dir / "ldlinux.c32").write_bytes(b"ldlinux")
     (tftp_root / "boot.cfg").write_text("stale default", encoding="utf-8")
     (http_base / "boot.cfg").write_text("stale default", encoding="utf-8")
     (tftp_root / "pxelinux.cfg" / "default").write_text("stale default", encoding="utf-8")
