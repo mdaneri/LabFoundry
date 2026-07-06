@@ -250,6 +250,21 @@ def service_state_response(row: ServiceState, db: Session | None = None) -> Serv
         "health": row.health,
         "detail": row.detail,
     }
+    if row.service in {"dns", "dhcp"} and db is not None:
+        if row.service == "dns":
+            data["enabled"] = get_dns_settings_row(db).enabled
+        else:
+            data["enabled"] = get_dhcp_settings_row(db).enabled
+        active = backing_systemd_unit_active("dnsmasq.service")
+        if active is not None:
+            data["running"] = active
+        if data["running"] and data["enabled"]:
+            data["health"] = "healthy"
+        elif data["running"] or data["enabled"]:
+            data["health"] = "degraded"
+        else:
+            data["health"] = "disabled"
+        return ServiceStateResponse(**data)
     if row.service == "esxi-pxe" and db is not None:
         data.update(esxi_pxe_service_state_from_boot(esxi_pxe_boot_settings(db)))
         data["detail"] = "dnsmasq TFTP/DHCP boot options and PXE HTTP files"
@@ -1619,8 +1634,7 @@ def get_dhcp_status(identity: Annotated[Identity, Depends(require_scope("read:dh
         enabled=settings.enabled,
         service=ServiceStateResponse.model_validate(service) if service else None,
         interface_name=first_scope.interface_name if first_scope else settings.interface_name,
-        range_start=first_scope.range_start if first_scope else settings.range_start,
-        range_end=first_scope.range_end if first_scope else settings.range_end,
+        range_expression=first_scope.range_expression if first_scope else "",
         reservation_count=len(reservations),
         config_path=settings.config_path,
         dry_run=SystemAdapter().dry_run,
@@ -1681,6 +1695,8 @@ def update_dhcp_scope(
     scope = db.get(DhcpScope, scope_id)
     if not scope:
         raise HTTPException(status_code=404, detail="DHCP IP zone not found")
+    if payload.address_family != scope.address_family:
+        raise HTTPException(status_code=409, detail="DHCP IP zone family cannot be changed after it is created")
     for key, value in payload.model_dump().items():
         setattr(scope, key, value)
     scope.updated_at = utcnow()
@@ -2012,8 +2028,16 @@ def service_action(service: str, action: str, identity: Identity, db: Session) -
         raise HTTPException(status_code=404, detail="Service not found")
     if action == "enable":
         row.enabled = True
+        if service == "dns":
+            get_dns_settings_row(db).enabled = True
+        elif service == "dhcp":
+            get_dhcp_settings_row(db).enabled = True
     elif action == "disable":
         row.enabled = False
+        if service == "dns":
+            get_dns_settings_row(db).enabled = False
+        elif service == "dhcp":
+            get_dhcp_settings_row(db).enabled = False
     elif action in {"start", "restart"}:
         row.running = True
     elif action == "stop":

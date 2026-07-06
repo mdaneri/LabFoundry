@@ -557,7 +557,10 @@ def _selected_dhcp_scopes(
     listen_interface: str,
     listen_address: str,
 ) -> list[DhcpScope]:
-    scopes = _normalize_dhcp_scope_selections(db, (raw_scope_ids or "").replace(",", "\n").splitlines(), allow_empty=True)
+    try:
+        scopes = _normalize_dhcp_scope_selections(db, (raw_scope_ids or "").replace(",", "\n").splitlines(), allow_empty=True)
+    except ValueError:
+        scopes = []
     if scopes:
         return scopes
     legacy_scope = _selected_dhcp_scope(db, raw_scope_id, listen_interface, listen_address)

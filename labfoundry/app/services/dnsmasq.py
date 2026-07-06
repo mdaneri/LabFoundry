@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from ipaddress import ip_address, ip_interface, ip_network
+from ipaddress import IPv4Address, ip_address, ip_interface, ip_network
 from pathlib import PurePosixPath
 
 from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
@@ -7,6 +7,91 @@ from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSe
 DNS_CONDITIONAL_FORWARDERS_SETTING_KEY = "dns.conditional_forwarders"
 DNSMASQ_LEASE_FILE_PATH = "/var/lib/labfoundry/dnsmasq/dhcp.leases"
 DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX = "Deny DHCP for "
+
+
+def _dhcp_scope_network(scope: DhcpScope):
+    try:
+        return ip_network(f"{scope.site_address}/{scope.prefix_length}", strict=False)
+    except ValueError:
+        return None
+
+
+def _parse_compact_ipv4_endpoint(value: str, start: IPv4Address) -> IPv4Address:
+    parts = value.split(".")
+    if not 1 <= len(parts) <= 4 or any(not part.isdigit() for part in parts):
+        raise ValueError
+    if len(parts) == 4:
+        return IPv4Address(value)
+    start_parts = str(start).split(".")
+    merged = [*start_parts[: 4 - len(parts)], *parts]
+    return IPv4Address(".".join(merged))
+
+
+def parse_dhcp_range_expression(scope: DhcpScope) -> tuple[list[str], list[tuple[object, object]]]:
+    errors: list[str] = []
+    ranges: list[tuple[object, object]] = []
+    label = f"DHCP IP zone {scope.name}"
+    family = dhcp_scope_address_family(scope)
+    required_version = 6 if family == "ipv6" else 4
+    network = _dhcp_scope_network(scope)
+    expression = (scope.range_expression or "").strip()
+    if not expression:
+        return [f"{label} range is required."], []
+    for raw_part in expression.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        start_text, separator, end_text = part.partition("-")
+        start_text = start_text.strip()
+        end_text = end_text.strip() if separator else start_text
+        try:
+            start = ip_address(start_text)
+        except ValueError:
+            errors.append(f"{label} range {part} has an invalid start address.")
+            continue
+        try:
+            if isinstance(start, IPv4Address):
+                end = _parse_compact_ipv4_endpoint(end_text, start)
+            else:
+                end = ip_address(end_text)
+        except ValueError:
+            errors.append(f"{label} range {part} has an invalid end address.")
+            continue
+        if start.version != required_version or end.version != required_version:
+            errors.append(f"{label} range {part} must use {'IPv6' if required_version == 6 else 'IPv4'} addresses.")
+            continue
+        if network and (start not in network or end not in network):
+            errors.append(f"{label} range {part} must stay inside {network.with_prefixlen}.")
+            continue
+        if int(start) > int(end):
+            errors.append(f"{label} range {part} start must be less than or equal to end.")
+            continue
+        ranges.append((start, end))
+    if not ranges and not errors:
+        errors.append(f"{label} range is required.")
+    return errors, ranges
+
+
+def compact_dhcp_range_expression(scope: DhcpScope) -> str:
+    errors, ranges = parse_dhcp_range_expression(scope)
+    if errors or not ranges:
+        return (scope.range_expression or "").strip()
+    if dhcp_scope_address_family(scope) == "ipv6":
+        return ", ".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
+    prefix_octets = max(0, min(3, int(scope.prefix_length or 0) // 8))
+    items = []
+    for start, end in ranges:
+        if start == end:
+            items.append(str(start))
+            continue
+        start_parts = str(start).split(".")
+        end_parts = str(end).split(".")
+        if start_parts[:prefix_octets] == end_parts[:prefix_octets]:
+            suffix = ".".join(end_parts[prefix_octets:])
+            items.append(f"{start}-{suffix}")
+        else:
+            items.append(f"{start}-{end}")
+    return ", ".join(items)
 
 
 def split_servers(raw: str | None) -> list[str]:
@@ -260,8 +345,6 @@ def dhcp_settings_to_scope(settings: DhcpSettings) -> dict:
         "interface_name": settings.interface_name,
         "site_address": settings.site_address,
         "prefix_length": settings.prefix_length,
-        "range_start": settings.range_start,
-        "range_end": settings.range_end,
         "lease_time": settings.lease_time,
         "domain_name": settings.domain_name,
         "dns_server": settings.dns_server,
@@ -279,8 +362,7 @@ def dhcp_scope_to_dict(scope: DhcpScope) -> dict:
         "interface_name": scope.interface_name,
         "site_address": scope.site_address,
         "prefix_length": scope.prefix_length,
-        "range_start": scope.range_start,
-        "range_end": scope.range_end,
+        "range_expression": compact_dhcp_range_expression(scope),
         "lease_time": scope.lease_time,
         "domain_name": scope.domain_name,
         "dns_server": scope.dns_server,
@@ -522,8 +604,8 @@ def validate_dhcp_scope(scope: DhcpScope) -> tuple[list[str], object | None]:
     if not scope.name.strip():
         errors.append("DHCP IP zone name is required.")
     site_address = _validate_ip(scope.site_address, f"{label} gateway", errors, version=required_version)
-    range_start = _validate_ip(scope.range_start, f"{label} range start", errors, version=required_version)
-    range_end = _validate_ip(scope.range_end, f"{label} range end", errors, version=required_version)
+    range_errors, parsed_ranges = parse_dhcp_range_expression(scope)
+    errors.extend(range_errors)
     dns_server = _validate_ip(scope.dns_server, f"{label} DNS server", errors, version=required_version)
     ntp_server = _validate_ip(scope.ntp_server, f"{label} NTP server", errors, version=required_version) if scope.ntp_server else None
     network = None
@@ -536,12 +618,6 @@ def validate_dhcp_scope(scope: DhcpScope) -> tuple[list[str], object | None]:
         errors.append(f"{label} IPv4 prefix length must be between 1 and 32.")
     if family == "ipv6" and not 1 <= int(scope.prefix_length or 0) <= 128:
         errors.append(f"{label} IPv6 prefix length must be between 1 and 128.")
-    if network and range_start and range_start not in network:
-        errors.append(f"{label} range start must be inside the zone subnet.")
-    if network and range_end and range_end not in network:
-        errors.append(f"{label} range end must be inside the zone subnet.")
-    if range_start and range_end and int(range_start) > int(range_end):
-        errors.append(f"{label} range start must be less than or equal to range end.")
     if network and dns_server and dns_server not in network:
         errors.append(f"{label} DNS server {dns_server} is outside {network.with_prefixlen}. Bind DNS to {scope.interface_name} or leave the DNS server blank for this zone.")
     if network and ntp_server and ntp_server not in network:
@@ -695,10 +771,14 @@ def render_dnsmasq_config(
             if scope.enabled is False:
                 continue
             tag = dnsmasq_tag(scope.name)
+            range_errors, parsed_ranges = parse_dhcp_range_expression(scope)
+            if range_errors:
+                continue
             if dhcp_scope_address_family(scope) == "ipv6":
+                for start_address, end_address in parsed_ranges:
+                    lines.append(f"dhcp-range=set:{tag},{start_address},{end_address},{scope.prefix_length},{scope.lease_time or '12h'}")
                 lines.extend(
                     [
-                        f"dhcp-range=set:{tag},{scope.range_start},{scope.range_end},{scope.prefix_length},{scope.lease_time or '12h'}",
                         f"dhcp-option=tag:{tag},option6:dns-server,{_dnsmasq_ipv6_option_address(scope.dns_server)}",
                         f"dhcp-option=tag:{tag},option6:domain-search,{scope.domain_name or domains[0]}",
                     ]
@@ -706,9 +786,10 @@ def render_dnsmasq_config(
                 if scope.ntp_server:
                     lines.append(f"dhcp-option=tag:{tag},option6:ntp-server,{_dnsmasq_ipv6_option_address(scope.ntp_server)}")
             else:
+                for start_address, end_address in parsed_ranges:
+                    lines.append(f"dhcp-range=set:{tag},{start_address},{end_address},{scope.lease_time or '12h'}")
                 lines.extend(
                     [
-                        f"dhcp-range=set:{tag},{scope.range_start},{scope.range_end},{scope.lease_time or '12h'}",
                         f"dhcp-option=tag:{tag},option:router,{scope.site_address}",
                         f"dhcp-option=tag:{tag},option:dns-server,{scope.dns_server}",
                         f"dhcp-option=tag:{tag},option:domain-name,{scope.domain_name or domains[0]}",
@@ -845,8 +926,7 @@ def _legacy_scope(settings: DhcpSettings) -> DhcpScope:
         interface_name=settings.interface_name,
         site_address=settings.site_address,
         prefix_length=settings.prefix_length,
-        range_start=settings.range_start,
-        range_end=settings.range_end,
+        range_expression="",
         lease_time=settings.lease_time,
         domain_name=settings.domain_name,
         dns_server=settings.dns_server,

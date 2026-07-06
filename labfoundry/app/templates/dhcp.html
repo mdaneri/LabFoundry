@@ -50,7 +50,7 @@
             <td>{{ scope.interface_name }}</td>
             <td>{{ scope.site_address }}</td>
             <td>/{{ scope.prefix_length }}</td>
-            <td>{{ scope.range_start }} - {{ scope.range_end }}</td>
+            <td>{{ scope.range_expression }}</td>
             <td>{{ scope.lease_time }}</td>
             <td>{{ scope.dns_server }}</td>
             <td>{{ scope.ntp_server or "" }}</td>
@@ -136,14 +136,15 @@
     ></div>
     <table id="dhcp-reservations-fallback" class="data-table dns-fallback-table">
       <thead>
-        <tr><th>DNS name / FQDN</th><th>MAC</th><th>IP</th><th>Status</th><th>Description</th><th>Actions</th></tr>
+        <tr><th>DNS name / FQDN</th><th>MAC</th><th>IP</th><th>Zone</th><th>Status</th><th>Description</th><th>Actions</th></tr>
       </thead>
       <tbody>
-        {% for reservation in dhcp_reservations %}
+        {% for reservation in dhcp_reservation_rows %}
           <tr>
             <td>{{ reservation.hostname }}</td>
             <td>{{ reservation.mac_address }}</td>
             <td>{{ reservation.ip_address }}</td>
+            <td>{{ reservation.zone_name or "-" }}</td>
             <td><span class="status-pill {{ 'good' if reservation.enabled else 'muted' }}">{{ "enabled" if reservation.enabled else "disabled" }}</span></td>
             <td>{{ reservation.description or "" }}</td>
             <td>
@@ -217,16 +218,17 @@
         ></div>
         <table id="dhcp-leases-fallback" class="data-table compact">
           <thead>
-            <tr><th>Status</th><th>DNS name / FQDN</th><th>IP</th><th>MAC</th><th>Expires</th><th>Client ID</th><th>Actions</th></tr>
+            <tr><th>Status</th><th>DNS name / FQDN</th><th>IP</th><th>Zone</th><th>MAC</th><th>Expires</th><th>Client ID</th><th>Actions</th></tr>
           </thead>
           <tbody>
-            {% for lease in dhcp_leases %}
+            {% for lease in dhcp_lease_rows %}
               <tr>
                 <td><span class="status-pill {{ 'good' if lease.status == 'active' else 'muted' }}">{{ lease.status }}</span></td>
                 <td>{{ lease.hostname or "-" }}</td>
                 <td>{{ lease.ip_address }}</td>
+                <td>{{ lease.zone_name or "-" }}</td>
                 <td>{{ lease.mac_address }}</td>
-                <td>{{ lease.expires_at.isoformat() if lease.expires_at else "never" }}</td>
+                <td>{{ lease.expires_at }}</td>
                 <td>{{ lease.client_id or "-" }}</td>
                 <td class="lease-action-cell">
                   <div class="lease-action-menu" data-lease-action-menu>
@@ -335,8 +337,6 @@
         <input type="hidden" name="interface_name" value="{{ dhcp_settings.interface_name }}">
         <input type="hidden" name="site_address" value="{{ dhcp_settings.site_address }}">
         <input type="hidden" name="prefix_length" value="{{ dhcp_settings.prefix_length }}">
-        <input type="hidden" name="range_start" value="{{ dhcp_settings.range_start }}">
-        <input type="hidden" name="range_end" value="{{ dhcp_settings.range_end }}">
         <input type="hidden" name="lease_time" value="{{ dhcp_settings.lease_time }}">
         <input type="hidden" name="domain_name" value="{{ dhcp_settings.domain_name }}">
         <input type="hidden" name="dns_server" value="{{ dhcp_settings.dns_server }}">

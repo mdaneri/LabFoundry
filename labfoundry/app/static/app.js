@@ -405,6 +405,138 @@ function dnsAddRowHintFormatter(cell, emptyText) {
   return escapeHtml(value);
 }
 
+let dhcpRangeTooltip = null;
+
+function parseIpv4AddressParts(value) {
+  const parts = String(value ?? "").trim().split(".");
+  if (parts.length !== 4) {
+    return null;
+  }
+  const octets = parts.map((part) => {
+    if (!/^\d+$/.test(part)) {
+      return null;
+    }
+    const number = Number(part);
+    return number >= 0 && number <= 255 ? number : null;
+  });
+  return octets.some((part) => part === null) ? null : octets;
+}
+
+function parseCompactIpv4RangeEnd(value, startParts) {
+  const parts = String(value ?? "").trim().split(".");
+  if (!parts.length || parts.length > 4 || parts.some((part) => !/^\d+$/.test(part))) {
+    return null;
+  }
+  const suffix = parts.map((part) => Number(part));
+  if (suffix.some((part) => part < 0 || part > 255)) {
+    return null;
+  }
+  return [...startParts.slice(0, 4 - suffix.length), ...suffix];
+}
+
+function ipv4PartsToText(parts) {
+  return Array.isArray(parts) && parts.length === 4 ? parts.join(".") : "";
+}
+
+function dhcpRangeTooltipRows(data) {
+  const expression = String(data?.range_expression ?? "").trim();
+  if (!expression) {
+    return [];
+  }
+  return expression
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const [rawStart, rawEnd] = item.split("-", 2).map((part) => part.trim());
+      if (!rawStart) {
+        return null;
+      }
+      if (data?.address_family === "ipv6") {
+        return { start: rawStart, end: rawEnd || rawStart };
+      }
+      const startParts = parseIpv4AddressParts(rawStart);
+      if (!startParts) {
+        return null;
+      }
+      const endParts = rawEnd ? parseCompactIpv4RangeEnd(rawEnd, startParts) : startParts;
+      if (!endParts) {
+        return null;
+      }
+      return { start: ipv4PartsToText(startParts), end: ipv4PartsToText(endParts) };
+    })
+    .filter(Boolean);
+}
+
+function ensureDhcpRangeTooltip() {
+  if (!dhcpRangeTooltip) {
+    dhcpRangeTooltip = document.createElement("div");
+    dhcpRangeTooltip.className = "dhcp-range-tooltip hidden";
+    document.body.appendChild(dhcpRangeTooltip);
+  }
+  return dhcpRangeTooltip;
+}
+
+function moveDhcpRangeTooltip(event) {
+  if (!dhcpRangeTooltip || dhcpRangeTooltip.classList.contains("hidden")) {
+    return;
+  }
+  const offset = 12;
+  const width = dhcpRangeTooltip.offsetWidth || 240;
+  const height = dhcpRangeTooltip.offsetHeight || 120;
+  const x = Math.min(event.clientX + offset, window.innerWidth - width - offset);
+  const y = Math.min(event.clientY + offset, window.innerHeight - height - offset);
+  dhcpRangeTooltip.style.left = `${Math.max(offset, x)}px`;
+  dhcpRangeTooltip.style.top = `${Math.max(offset, y)}px`;
+}
+
+function showDhcpRangeTooltip(event, data) {
+  const rows = dhcpRangeTooltipRows(data);
+  if (!rows.length) {
+    return;
+  }
+  const tooltip = ensureDhcpRangeTooltip();
+  tooltip.innerHTML = `
+    <table>
+      <thead><tr><th>Start</th><th>End</th></tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr><td>${escapeHtml(row.start)}</td><td>${escapeHtml(row.end)}</td></tr>`).join("")}
+      </tbody>
+    </table>
+  `;
+  tooltip.classList.remove("hidden");
+  moveDhcpRangeTooltip(event);
+}
+
+function hideDhcpRangeTooltip() {
+  if (dhcpRangeTooltip) {
+    dhcpRangeTooltip.classList.add("hidden");
+  }
+}
+
+function dhcpRangeFormatter(cell) {
+  const data = cell.getRow().getData();
+  const value = String(cell.getValue() ?? "").trim();
+  if (data.is_new && !value) {
+    if (!String(data.name ?? "").trim()) {
+      return "";
+    }
+    if (data.address_family === "ipv6") {
+      return "";
+    }
+    return dnsAddRowHintFormatter(cell, "192.168.87.100-200, 192.168.87.222");
+  }
+  const element = document.createElement("span");
+  element.className = "dhcp-range-value";
+  element.textContent = value;
+  if (dhcpRangeTooltipRows(data).length) {
+    element.addEventListener("mouseenter", (event) => showDhcpRangeTooltip(event, data));
+    element.addEventListener("mousemove", moveDhcpRangeTooltip);
+    element.addEventListener("mouseleave", hideDhcpRangeTooltip);
+  }
+  return element;
+}
+
 function dnsRecordCellEditable(cell) {
   const data = cell.getRow().getData();
   if (!data.is_new) {
@@ -787,7 +919,7 @@ async function postDhcpScopeAction(url, data, csrf, options = {}) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text.match(/DHCP IP zone .* already exists[^<]*/)?.[0] || "The DHCP IP zone could not be saved.");
+    throw new Error(text.match(/DHCP IP zone .*?(?:already exists|family cannot be changed after it is created)[^<]*/)?.[0] || "The DHCP IP zone could not be saved.");
   }
   if (reload) {
     window.location.reload();
@@ -834,26 +966,44 @@ function dhcpInterfaceDefaults(defaults, interfaceName) {
   return entries.find((item) => item.name === interfaceName) || entries[0] || {};
 }
 
+function dhcpDefaultFamilyForInterface(defaults, interfaceName) {
+  const interfaceDefaults = dhcpInterfaceDefaults(defaults, interfaceName);
+  if (interfaceDefaults.ipv4_address) {
+    return "ipv4";
+  }
+  if (interfaceDefaults.ipv6_address) {
+    return "ipv6";
+  }
+  return "ipv4";
+}
+
 function applyDhcpScopeInterfaceDefaults(rowData, defaults, options = {}) {
   const overwrite = options.overwrite ?? false;
   const interfaceDefaults = dhcpInterfaceDefaults(defaults, rowData.interface_name);
-  const gateway = rowData.address_family === "ipv6" ? interfaceDefaults.ipv6_address || interfaceDefaults.address : interfaceDefaults.ipv4_address || interfaceDefaults.address;
-  const prefix = rowData.address_family === "ipv6" ? interfaceDefaults.ipv6_prefix : interfaceDefaults.ipv4_prefix;
-  if ((overwrite || !rowData.site_address) && gateway) {
+  const family = rowData.address_family === "ipv6" ? "ipv6" : "ipv4";
+  const gateway = family === "ipv6" ? interfaceDefaults.ipv6_address : interfaceDefaults.ipv4_address;
+  const prefix = family === "ipv6" ? interfaceDefaults.ipv6_prefix : interfaceDefaults.ipv4_prefix;
+  const dnsDefault = family === "ipv6" ? interfaceDefaults.ipv6_dns_default : interfaceDefaults.ipv4_dns_default;
+  const ntpDefault = family === "ipv6" ? interfaceDefaults.ipv6_ntp_default : interfaceDefaults.ipv4_ntp_default;
+  if (overwrite) {
+    rowData.site_address = gateway || "";
+  } else if (!rowData.site_address && gateway) {
     rowData.site_address = gateway;
   }
-  if ((overwrite || !rowData.prefix_length) && Number.isInteger(prefix)) {
+  if (overwrite) {
+    rowData.prefix_length = Number.isInteger(prefix) ? prefix : "";
+  } else if (!rowData.prefix_length && Number.isInteger(prefix)) {
     rowData.prefix_length = prefix;
   }
   if (overwrite) {
-    rowData.dns_server = interfaceDefaults.dns_default || "";
-  } else if (!rowData.dns_server && interfaceDefaults.dns_default) {
-    rowData.dns_server = interfaceDefaults.dns_default;
+    rowData.dns_server = dnsDefault || "";
+  } else if (!rowData.dns_server && dnsDefault) {
+    rowData.dns_server = dnsDefault;
   }
   if (overwrite) {
-    rowData.ntp_server = interfaceDefaults.ntp_default || "";
-  } else if (!rowData.ntp_server && interfaceDefaults.ntp_default) {
-    rowData.ntp_server = interfaceDefaults.ntp_default;
+    rowData.ntp_server = ntpDefault || "";
+  } else if (!rowData.ntp_server && ntpDefault) {
+    rowData.ntp_server = ntpDefault;
   }
   if ((overwrite || !rowData.domain_name) && defaults.default_domain) {
     rowData.domain_name = defaults.default_domain;
@@ -877,25 +1027,31 @@ function dhcpScopeCellEditable(cell, existingNames) {
   return isUniqueNewDhcpScopeName(data, existingNames);
 }
 
+function dhcpScopeFamilyEditable(cell, existingNames) {
+  const data = cell.getRow().getData();
+  if (!data.is_new) {
+    return false;
+  }
+  return dhcpScopeCellEditable(cell, existingNames);
+}
+
 function newDhcpScopeRow(defaultInterface = "eth2", defaults = {}) {
-  const row = {
+  return {
     id: "__new__",
     name: "",
-    address_family: "ipv4",
-    interface_name: defaultInterface,
+    address_family: "",
+    interface_name: "",
     site_address: "",
-    prefix_length: 24,
-    range_start: "",
-    range_end: "",
-    lease_time: "12h",
-    domain_name: "labfoundry.internal",
+    prefix_length: "",
+    range_expression: "",
+    lease_time: "",
+    domain_name: "",
     dns_server: "",
     ntp_server: "",
     enabled: true,
     description: "",
     is_new: true,
   };
-  return applyDhcpScopeInterfaceDefaults(row, defaults);
 }
 
 function newDhcpOptionRow() {
@@ -971,8 +1127,7 @@ function hasRequiredDhcpScopeFields(data) {
     (data.name || "").trim() &&
       (data.interface_name || "").trim() &&
       (data.site_address || "").trim() &&
-      (data.range_start || "").trim() &&
-      (data.range_end || "").trim() &&
+      (data.range_expression || "").trim() &&
       (data.dns_server || "").trim(),
   );
 }
@@ -1075,6 +1230,29 @@ function newDhcpReservationRow() {
 
 function hasRequiredDhcpReservationFields(data) {
   return Boolean((data.hostname || "").trim() && (data.mac_address || "").trim() && (data.ip_address || "").trim());
+}
+
+function dhcpReservationHasHostname(data) {
+  return Boolean(String(data.hostname ?? "").trim());
+}
+
+function dhcpReservationCellEditable(cell) {
+  const data = cell.getRow().getData();
+  if (!data.is_new) {
+    return true;
+  }
+  if (cell.getField() === "hostname") {
+    return true;
+  }
+  return dhcpReservationHasHostname(data);
+}
+
+function dhcpReservationAddRowHintFormatter(cell, hint) {
+  const data = cell.getRow().getData();
+  if (data.is_new && !dhcpReservationHasHostname(data) && !String(cell.getValue() ?? "").trim()) {
+    return "";
+  }
+  return dnsAddRowHintFormatter(cell, hint);
 }
 
 async function autoSaveDhcpReservation(cell, csrf) {
@@ -1316,6 +1494,7 @@ function initializeDhcpLeasesTable() {
         { title: "Status", field: "status", formatter: dhcpLeaseStatusFormatter, width: 100 },
         { title: "DNS name / FQDN", field: "hostname", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 190 },
         { title: "IP", field: "ip_address", minWidth: 140 },
+        { title: "Zone", field: "zone_name", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 120 },
         { title: "MAC", field: "mac_address", minWidth: 170 },
         { title: "Expires", field: "expires_at", minWidth: 210 },
         { title: "Client ID", field: "client_id", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 210 },
@@ -2274,15 +2453,6 @@ function initializeFirewallRulesTable() {
         },
         { title: "Ports", field: "destination_port", editor: "input", width: 120, cellEdited: (cell) => autoSaveFirewallRule(cell, csrf) },
         {
-          title: "Family",
-          field: "address_family",
-          editor: "list",
-          editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" } },
-          formatter: (cell) => (cell.getValue() === "ipv6" ? "IPv6" : "IPv4"),
-          width: 95,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
-        },
-        {
           title: "Interface",
           field: "interface_name",
           editor: "list",
@@ -2507,7 +2677,7 @@ function initializeServicesTable() {
           hozAlign: "center",
         },
         {
-          title: "Enabled",
+          title: "Startup",
           field: "enabled",
           formatter: "tickCross",
           editor: "tickCross",
@@ -4915,6 +5085,17 @@ function initializeDhcpScopesTable() {
     const row = cell.getRow();
     const data = row.getData();
     if (data.is_new) {
+      if (cell.getField() === "name" && isUniqueNewDhcpScopeName(data, existingScopeNames)) {
+        if (!data.address_family) {
+          data.address_family = dhcpDefaultFamilyForInterface(scopeDefaults, data.interface_name || defaultInterface);
+        }
+        if (!data.interface_name) {
+          data.interface_name = defaultInterface;
+        }
+        if (!data.lease_time) {
+          data.lease_time = "12h";
+        }
+      }
       if (["name", "interface_name", "address_family"].includes(cell.getField())) {
         const updated = applyDhcpScopeInterfaceDefaults(data, scopeDefaults, { overwrite: cell.getField() !== "name" });
         row.update(updated);
@@ -4949,6 +5130,22 @@ function initializeDhcpScopesTable() {
           cellEdited: handleDhcpScopeEdited,
         },
         {
+          title: "Family",
+          field: "address_family",
+          editor: "list",
+          editable: (cell) => dhcpScopeFamilyEditable(cell, existingScopeNames),
+          editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" } },
+          formatter: (cell) => {
+            const value = cell.getValue();
+            if (cell.getRow().getData().is_new && !value) {
+              return "";
+            }
+            return value === "ipv6" ? "IPv6" : "IPv4";
+          },
+          width: 100,
+          cellEdited: handleDhcpScopeEdited,
+        },
+        {
           title: "Interface",
           field: "interface_name",
           editor: "list",
@@ -4975,21 +5172,15 @@ function initializeDhcpScopesTable() {
           cellEdited: handleDhcpScopeEdited,
         },
         {
-          title: "Range start",
-          field: "range_start",
+          title: "Range",
+          field: "range_expression",
           editor: "input",
           editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "start IP..."),
-          minWidth: 140,
-          cellEdited: handleDhcpScopeEdited,
-        },
-        {
-          title: "Range end",
-          field: "range_end",
-          editor: "input",
-          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "end IP..."),
-          minWidth: 140,
+          formatter: dhcpRangeFormatter,
+          cellMouseEnter: (event, cell) => showDhcpRangeTooltip(event, cell.getRow().getData()),
+          cellMouseMove: moveDhcpRangeTooltip,
+          cellMouseLeave: hideDhcpRangeTooltip,
+          minWidth: 240,
           cellEdited: handleDhcpScopeEdited,
         },
         {
@@ -5155,6 +5346,12 @@ function initializeDhcpReservationsTable() {
   }
   const csrf = tableElement.dataset.csrf || "";
   const rows = [...JSON.parse(tableElement.dataset.reservations || "[]"), newDhcpReservationRow()];
+  const handleDhcpReservationEdited = (cell) => {
+    if (cell.getRow().getData().is_new) {
+      cell.getRow().reformat();
+    }
+    return autoSaveDhcpReservation(cell, csrf);
+  };
   try {
     new Tabulator(tableElement, {
       data: rows,
@@ -5177,41 +5374,52 @@ function initializeDhcpReservationsTable() {
           editor: "input",
           formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add reservation here"),
           minWidth: 180,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
         },
         {
           title: "MAC address",
           field: "mac_address",
           editor: "input",
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "enter MAC..."),
+          editable: dhcpReservationCellEditable,
+          formatter: (cell) => dhcpReservationAddRowHintFormatter(cell, "enter MAC..."),
           minWidth: 180,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
         },
         {
           title: "IP address",
           field: "ip_address",
           editor: "input",
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "enter IP..."),
+          editable: dhcpReservationCellEditable,
+          formatter: (cell) => dhcpReservationAddRowHintFormatter(cell, "enter IP..."),
           minWidth: 150,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
+        },
+        {
+          title: "Zone",
+          field: "zone_name",
+          formatter: (cell) => escapeHtml(cell.getValue() || "-"),
+          minWidth: 120,
+          editor: false,
         },
         {
           title: "Enabled",
           field: "enabled",
           formatter: "tickCross",
           editor: "tickCross",
+          editable: dhcpReservationCellEditable,
           hozAlign: "center",
           width: 110,
           headerSort: false,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
         },
         {
           title: "Description",
           field: "description",
           editor: "input",
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "optional note..."),
+          editable: dhcpReservationCellEditable,
+          formatter: (cell) => dhcpReservationAddRowHintFormatter(cell, "optional note..."),
           minWidth: 220,
-          cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+          cellEdited: handleDhcpReservationEdited,
         },
       ],
       rowFormatter: (row) => {

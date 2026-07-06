@@ -119,6 +119,7 @@ from labfoundry.app.security import (
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+    compact_dhcp_range_expression,
     dhcp_bind_target_families,
     dns_domain_warnings,
     dns_reverse_records,
@@ -132,6 +133,7 @@ from labfoundry.app.services.dnsmasq import (
     join_servers,
     parse_hosts_records,
     parse_dnsmasq_leases,
+    parse_dhcp_range_expression,
     parse_zone_records,
     render_hosts_records,
     render_zone_file,
@@ -1134,20 +1136,25 @@ def refresh_interface_dependent_addresses(
             getattr(scope, "interface_name", ""),
             getattr(scope, "site_address", ""),
             getattr(scope, "prefix_length", None),
-            getattr(scope, "range_start", ""),
-            getattr(scope, "range_end", ""),
+            getattr(scope, "range_expression", ""),
             getattr(scope, "dns_server", ""),
             getattr(scope, "ntp_server", ""),
         )
+        parsed_range_errors, parsed_ranges = parse_dhcp_range_expression(scope) if isinstance(scope, DhcpScope) else ([], [])
         scope.interface_name = new_name
         site_address_is_stale = bool(scope_site_address and new_network and not _address_in_network(scope_site_address, new_network))
         if not getattr(scope, "site_address", "") or getattr(scope, "site_address", "") in stale_addresses or site_address_is_stale:
             scope.site_address = new_address
         if new_prefixes[family] and (not getattr(scope, "prefix_length", None) or getattr(scope, "prefix_length", None) == (old_network.prefixlen if old_network else None)):
             scope.prefix_length = int(new_prefixes[family])
-        if family == 4:
-            scope.range_start = _rebase_address_in_network(getattr(scope, "range_start", ""), old_network, new_network)
-            scope.range_end = _rebase_address_in_network(getattr(scope, "range_end", ""), old_network, new_network)
+        if isinstance(scope, DhcpScope) and not parsed_range_errors and parsed_ranges:
+            rebased_ranges = []
+            for start_address, end_address in parsed_ranges:
+                rebased_start = _rebase_address_in_network(str(start_address), old_network, new_network)
+                rebased_end = _rebase_address_in_network(str(end_address), old_network, new_network)
+                rebased_ranges.append(rebased_start if rebased_start == rebased_end else f"{rebased_start}-{rebased_end}")
+            scope.range_expression = ", ".join(rebased_ranges)
+            scope.range_expression = compact_dhcp_range_expression(scope)
         if not getattr(scope, "dns_server", "") or getattr(scope, "dns_server", "") in stale_addresses or dns_bound:
             scope.dns_server = new_address if dns_bound or getattr(scope, "dns_server", "") in stale_addresses else getattr(scope, "dns_server", "")
         if isinstance(scope, DhcpScope) and (not scope.ntp_server or scope.ntp_server in stale_addresses or chrony_bound):
@@ -1158,8 +1165,7 @@ def refresh_interface_dependent_addresses(
             getattr(scope, "interface_name", ""),
             getattr(scope, "site_address", ""),
             getattr(scope, "prefix_length", None),
-            getattr(scope, "range_start", ""),
-            getattr(scope, "range_end", ""),
+            getattr(scope, "range_expression", ""),
             getattr(scope, "dns_server", ""),
             getattr(scope, "ntp_server", ""),
         )
@@ -2952,9 +2958,9 @@ def dnsmasq_context(db: Session) -> dict:
         "dhcp_option_scope_choices": dhcp_option_scope_choices(dhcp_scopes),
         "dhcp_generated_pxe_options": generated_esxi_pxe_dhcp_options(esxi_boot, dhcp_scopes),
         "dhcp_reservations": dhcp_reservations,
-        "dhcp_reservation_rows": [dhcp_reservation_payload(item) for item in dhcp_reservations],
+        "dhcp_reservation_rows": [dhcp_reservation_payload(item, dhcp_scopes) for item in dhcp_reservations],
         "dhcp_leases": dhcp_leases,
-        "dhcp_lease_rows": [dhcp_lease_payload(lease) for lease in dhcp_leases],
+        "dhcp_lease_rows": [dhcp_lease_payload(lease, dhcp_scopes) for lease in dhcp_leases],
         "dhcp_lease_dry_run": lease_result.dry_run,
         "dhcp_lease_command": " ".join(lease_result.command),
         "dhcp_lease_error": dhcp_lease_error,
@@ -2985,12 +2991,20 @@ def dhcp_scope_grid_defaults(
 ) -> dict[str, Any]:
     dns_interfaces = set(split_interfaces(dns_settings.listen_interface)) if dns_settings.enabled else set()
     chrony_interfaces = set(split_interfaces(chrony_settings.listen_interface)) if chrony_settings.enabled else set()
+    dns_addresses = set(split_addresses(dns_settings.listen_address)) if dns_settings.enabled else set()
+    chrony_addresses = set(split_addresses(chrony_settings.listen_address)) if chrony_settings.enabled else set()
     defaults: list[dict[str, Any]] = []
     for interface in available_interfaces:
         ipv4_address = str(interface.get("ipv4_address") or "")
         ipv6_address = str(interface.get("ipv6_address") or "")
         primary_address = ipv4_address or ipv6_address or str(interface.get("address") or "")
         interface_name = str(interface.get("name") or "")
+        dns_enabled = interface_name in dns_interfaces
+        chrony_enabled = interface_name in chrony_interfaces
+        ipv4_dns_default = ipv4_address if dns_enabled and ipv4_address and (not dns_addresses or ipv4_address in dns_addresses) else ""
+        ipv6_dns_default = ipv6_address if dns_enabled and ipv6_address and (not dns_addresses or ipv6_address in dns_addresses) else ""
+        ipv4_ntp_default = ipv4_address if chrony_enabled and ipv4_address and (not chrony_addresses or ipv4_address in chrony_addresses) else ""
+        ipv6_ntp_default = ipv6_address if chrony_enabled and ipv6_address and (not chrony_addresses or ipv6_address in chrony_addresses) else ""
         defaults.append(
             {
                 "name": interface_name,
@@ -2999,8 +3013,12 @@ def dhcp_scope_grid_defaults(
                 "ipv4_prefix": interface.get("ipv4_prefix"),
                 "ipv6_address": ipv6_address,
                 "ipv6_prefix": interface.get("ipv6_prefix"),
-                "dns_default": primary_address if interface_name in dns_interfaces else "",
-                "ntp_default": primary_address if interface_name in chrony_interfaces else "",
+                "dns_default": ipv4_dns_default or ipv6_dns_default,
+                "ntp_default": ipv4_ntp_default or ipv6_ntp_default,
+                "ipv4_dns_default": ipv4_dns_default,
+                "ipv6_dns_default": ipv6_dns_default,
+                "ipv4_ntp_default": ipv4_ntp_default,
+                "ipv6_ntp_default": ipv6_ntp_default,
             }
         )
     return {
@@ -3129,23 +3147,45 @@ def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any], scopes: list[Dhcp
     return rows
 
 
-def dhcp_reservation_payload(reservation: DhcpReservation) -> dict:
+def dhcp_scope_network_any(scope: DhcpScope):
+    try:
+        return ip_network(f"{scope.site_address}/{scope.prefix_length}", strict=False)
+    except ValueError:
+        return None
+
+
+def dhcp_scope_name_for_ip(value: str | None, scopes: list[DhcpScope]) -> str:
+    try:
+        address = ip_address(str(value or "").strip())
+    except ValueError:
+        return ""
+    for scope in scopes:
+        network = dhcp_scope_network_any(scope)
+        if network is not None and address.version == network.version and address in network:
+            return scope.name
+    return ""
+
+
+def dhcp_reservation_payload(reservation: DhcpReservation, scopes: list[DhcpScope] | None = None) -> dict:
     return {
         "id": reservation.id,
         "hostname": reservation.hostname,
         "mac_address": reservation.mac_address,
         "ip_address": reservation.ip_address,
+        "zone_name": dhcp_scope_name_for_ip(reservation.ip_address, scopes or []),
         "description": reservation.description or "",
         "enabled": reservation.enabled,
     }
 
 
-def dhcp_lease_payload(lease: dict[str, Any]) -> dict[str, str]:
+def dhcp_lease_payload(lease: dict[str, Any], scopes: list[DhcpScope] | None = None) -> dict[str, str]:
     expires_at = lease.get("expires_at")
+    ip_address_value = str(lease.get("ip_address") or "")
     return {
         "status": str(lease.get("status") or ""),
         "hostname": str(lease.get("hostname") or ""),
-        "ip_address": str(lease.get("ip_address") or ""),
+        "ip_address": ip_address_value,
+        "zone_name": dhcp_scope_name_for_ip(ip_address_value, scopes or []),
         "mac_address": str(lease.get("mac_address") or ""),
         "expires_at": expires_at.isoformat() if hasattr(expires_at, "isoformat") else str(expires_at or "never"),
         "client_id": str(lease.get("client_id") or ""),
@@ -3716,7 +3756,10 @@ def dns_record_suggested_ipv4(records: list[DnsRecord], domain: str, dhcp_scopes
         site_address = ipv4_address_or_none(scope.site_address)
         if site_address:
             scope_excluded.add(site_address)
-        scope_excluded.update(ipv4_range(scope.range_start, scope.range_end))
+        range_errors, parsed_ranges = parse_dhcp_range_expression(scope)
+        if not range_errors:
+            for start_address, end_address in parsed_ranges:
+                scope_excluded.update(ipv4_range(str(start_address), str(end_address)))
         candidate_networks.append((network, scope_excluded))
 
     inferred_networks: dict[IPv4Network, int] = {}
@@ -7626,8 +7669,6 @@ def update_dhcp_from_ui(
     interface_name: str | None = Form(None),
     site_address: str | None = Form(None),
     prefix_length: str | None = Form(None),
-    range_start: str | None = Form(None),
-    range_end: str | None = Form(None),
     lease_time: str | None = Form(None),
     domain_name: str | None = Form(None),
     dns_server: str | None = Form(None),
@@ -7649,10 +7690,6 @@ def update_dhcp_from_ui(
             settings.prefix_length = int(prefix_text)
         except ValueError:
             return JSONResponse({"status": "error", "error": "DHCP prefix length must be an integer."}, status_code=422)
-    if range_start is not None:
-        settings.range_start = range_start.strip()
-    if range_end is not None:
-        settings.range_end = range_end.strip()
     if lease_time is not None:
         settings.lease_time = lease_time.strip() or settings.lease_time
     if domain_name is not None:
@@ -7681,8 +7718,7 @@ def create_dhcp_scope_from_ui(
     interface_name: str = Form(...),
     site_address: str = Form(...),
     prefix_length: int = Form(...),
-    range_start: str = Form(...),
-    range_end: str = Form(...),
+    range_expression: str = Form(...),
     lease_time: str = Form(...),
     domain_name: str = Form(...),
     dns_server: str = Form(...),
@@ -7700,8 +7736,7 @@ def create_dhcp_scope_from_ui(
         interface_name=interface_name.strip(),
         site_address=site_address.strip(),
         prefix_length=prefix_length,
-        range_start=range_start.strip(),
-        range_end=range_end.strip(),
+        range_expression=range_expression.strip(),
         lease_time=lease_time.strip(),
         domain_name=domain_name.strip(),
         dns_server=dns_server.strip(),
@@ -7737,8 +7772,7 @@ def edit_dhcp_scope_from_ui(
     interface_name: str = Form(...),
     site_address: str = Form(...),
     prefix_length: int = Form(...),
-    range_start: str = Form(...),
-    range_end: str = Form(...),
+    range_expression: str = Form(...),
     lease_time: str = Form(...),
     domain_name: str = Form(...),
     dns_server: str = Form(...),
@@ -7753,13 +7787,24 @@ def edit_dhcp_scope_from_ui(
     scope = db.get(DhcpScope, scope_id)
     if not scope:
         raise HTTPException(status_code=404, detail="DHCP IP zone not found")
+    normalized_family = address_family.strip().lower() if address_family.strip().lower() in {"ipv4", "ipv6"} else "ipv4"
+    if normalized_family != scope.address_family:
+        return render(
+            request,
+            "dhcp.html",
+            {
+                "identity": identity,
+                **dnsmasq_context(db),
+                "form_error": "DHCP IP zone family cannot be changed after it is created.",
+            },
+            status_code=409,
+        )
     scope.name = name.strip()
-    scope.address_family = address_family.strip().lower() if address_family.strip().lower() in {"ipv4", "ipv6"} else "ipv4"
+    scope.address_family = normalized_family
     scope.interface_name = interface_name.strip()
     scope.site_address = site_address.strip()
     scope.prefix_length = prefix_length
-    scope.range_start = range_start.strip()
-    scope.range_end = range_end.strip()
+    scope.range_expression = range_expression.strip()
     scope.lease_time = lease_time.strip()
     scope.domain_name = domain_name.strip()
     scope.dns_server = dns_server.strip()
@@ -10357,6 +10402,17 @@ def service_state_to_grid_row(service: ServiceState) -> dict[str, object]:
     return row
 
 
+def dnsmasq_backed_service_grid_row(service: ServiceState, enabled: bool) -> dict[str, object]:
+    row = service_state_to_grid_row(service)
+    if not get_settings().dry_run_system_adapters:
+        active = backing_systemd_unit_active("dnsmasq.service")
+        if active is not None:
+            row["running"] = active
+    row["enabled"] = enabled
+    row.pop("health", None)
+    return row
+
+
 def esxi_pxe_service_grid_row(service: ServiceState, db: Session) -> dict[str, object]:
     row = service_state_to_grid_row(service)
     row.update(esxi_pxe_service_state_from_boot(esxi_pxe_boot_settings(db)))
@@ -10391,20 +10447,27 @@ def vcf_depot_service_grid_row(service: ServiceState, db: Session) -> dict[str, 
     return row
 
 
+def service_grid_row(service: ServiceState, db: Session, dns_enabled: bool, dhcp_enabled: bool) -> dict[str, object]:
+    if service.service == "dns":
+        return dnsmasq_backed_service_grid_row(service, dns_enabled)
+    if service.service == "dhcp":
+        return dnsmasq_backed_service_grid_row(service, dhcp_enabled)
+    if service.service == "esxi-pxe":
+        return esxi_pxe_service_grid_row(service, db)
+    if service.service == "ca":
+        return ca_service_grid_row(service, db)
+    if service.service == "vcf-backups":
+        return vcf_backup_service_grid_row(service, db)
+    if service.service == "repository":
+        return vcf_depot_service_grid_row(service, db)
+    return service_state_to_grid_row(service)
+
+
 def services_template_context(db: Session) -> dict[str, object]:
+    dns_settings = get_dns_settings_row(db)
+    dhcp_settings = get_dhcp_settings_row(db)
     rows = db.execute(select(ServiceState).where(ServiceState.service.in_(SERVICE_STATE_IDS)).order_by(ServiceState.display_name)).scalars().all()
-    service_rows = [
-        esxi_pxe_service_grid_row(row, db)
-        if row.service == "esxi-pxe"
-        else ca_service_grid_row(row, db)
-        if row.service == "ca"
-        else vcf_backup_service_grid_row(row, db)
-        if row.service == "vcf-backups"
-        else vcf_depot_service_grid_row(row, db)
-        if row.service == "repository"
-        else service_state_to_grid_row(row)
-        for row in rows
-    ]
+    service_rows = [service_grid_row(row, db, dns_settings.enabled, dhcp_settings.enabled) for row in rows]
     system_adapter_dry_run = get_settings().dry_run_system_adapters
     return {
         "services": service_rows,
@@ -10487,8 +10550,16 @@ def service_action_from_ui(
         raise HTTPException(status_code=422, detail="Unsupported service action")
     if action == "enable":
         row.enabled = True
+        if service == "dns":
+            get_dns_settings_row(db).enabled = True
+        elif service == "dhcp":
+            get_dhcp_settings_row(db).enabled = True
     elif action == "disable":
         row.enabled = False
+        if service == "dns":
+            get_dns_settings_row(db).enabled = False
+        elif service == "dhcp":
+            get_dhcp_settings_row(db).enabled = False
     elif action in {"start", "restart"}:
         row.running = True
     elif action == "stop":

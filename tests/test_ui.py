@@ -1995,8 +1995,7 @@ def test_esxi_pxe_multi_zone_host_reservations_and_grid_menu(client):
             interface_name="eth3",
             site_address="10.1.1.1",
             prefix_length=24,
-            range_start="10.1.1.100",
-            range_end="10.1.1.200",
+            range_expression="10.1.1.100-200",
             lease_time="12h",
             domain_name="labfoundry.internal",
             dns_server="10.1.1.1",
@@ -3136,6 +3135,9 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
 
 
 def test_dns_and_dhcp_pages_render(client):
+    import html
+    import json
+
     login(client)
     dns = client.get("/dns")
     assert dns.status_code == 200
@@ -3251,6 +3253,19 @@ def test_dns_and_dhcp_pages_render(client):
     assert "+ Add IP zone here" in app_js.text
     assert "isUniqueNewDhcpScopeName" in app_js.text
     assert "dhcpScopeCellEditable" in app_js.text
+    assert "dhcpRangeFormatter" in app_js.text
+    assert "dhcpRangeTooltipRows" in app_js.text
+    assert "if (!String(data.name ?? \"\").trim())" in app_js.text
+    assert 'if (data.address_family === "ipv6")' in app_js.text
+    assert 'address_family: ""' in app_js.text
+    assert 'interface_name: ""' in app_js.text
+    assert 'lease_time: ""' in app_js.text
+    assert 'if (!data.interface_name)' in app_js.text
+    assert "isUniqueNewDhcpScopeName(data, existingScopeNames)" in app_js.text
+    assert "cellMouseEnter" in app_js.text
+    assert "dhcpScopeFamilyEditable" in app_js.text
+    assert "if (!data.is_new)" in app_js.text
+    assert "dhcpDefaultFamilyForInterface(scopeDefaults, data.interface_name || defaultInterface)" in app_js.text
     assert "applyDhcpScopeInterfaceDefaults" in app_js.text
     assert 'title: "Family"' in app_js.text
     assert "address_family" in app_js.text
@@ -3263,6 +3278,10 @@ def test_dns_and_dhcp_pages_render(client):
     assert "initializeDhcpReservationsTable" in app_js.text
     assert "autoSaveDhcpReservation" in app_js.text
     assert "+ Add reservation here" in app_js.text
+    assert "dhcpReservationCellEditable" in app_js.text
+    assert "dhcpReservationAddRowHintFormatter" in app_js.text
+    assert "dhcpReservationHasHostname(data)" in app_js.text
+    assert 'field: "zone_name"' in app_js.text
     assert 'title: "DNS name / FQDN"' in app_js.text
     assert "initializeCaSettings" in app_js.text
     assert "data-ca-config-preview" in app_js.text
@@ -3280,6 +3299,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "background: var(--bg);" in app_css.text
     assert "color: var(--text);" in app_css.text
     assert ".add-row-hint" in app_css.text
+    assert ".dhcp-range-tooltip" in app_css.text
     assert ".new-record-row-locked" in app_css.text
     assert 'tabulator-field="host_label"' in app_css.text
     assert ".alert.warning" in app_css.text
@@ -3335,6 +3355,10 @@ def test_dns_and_dhcp_pages_render(client):
     assert "Save DHCP" not in dhcp.text
     assert "192.168.50.100" in dhcp.text
     assert "192.168.50.1" in dhcp.text
+    reservation_payload = dhcp.text.split("data-reservations='", 1)[1].split("'", 1)[0]
+    reservation_rows = json.loads(html.unescape(reservation_payload))
+    assert reservation_rows
+    assert all("zone_name" in row for row in reservation_rows)
 
 
 def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
@@ -3344,18 +3368,20 @@ def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ChronySettings, DnsSettings
+    from labfoundry.app.models import ChronySettings, DnsSettings, PhysicalInterface
 
     with SessionLocal() as db:
+        eth2_interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
+        eth2_interface.ipv6_cidr = "fd00:50::1/64"
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.enabled = True
         dns_settings.listen_interface = "eth2"
-        dns_settings.listen_address = "192.168.50.1"
+        dns_settings.listen_address = "192.168.50.1\nfd00:50::1"
         chrony_settings = db.execute(select(ChronySettings)).scalar_one()
         chrony_settings.enabled = True
         chrony_settings.listen_interface = "eth2"
-        chrony_settings.listen_address = "192.168.50.1"
-        db.add_all([dns_settings, chrony_settings])
+        chrony_settings.listen_address = "192.168.50.1\nfd00:50::1"
+        db.add_all([eth2_interface, dns_settings, chrony_settings])
         db.commit()
 
     login(client)
@@ -3368,16 +3394,25 @@ def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
     eth1_vlan = next(item for item in defaults["interfaces"] if item["name"] == "eth1.20")
     assert eth2["ipv4_address"] == "192.168.50.1"
     assert eth2["ipv4_prefix"] == 24
+    assert eth2["ipv6_address"] == "fd00:50::1"
+    assert eth2["ipv6_prefix"] == 64
     assert eth2["dns_default"] == "192.168.50.1"
     assert eth2["ntp_default"] == "192.168.50.1"
+    assert eth2["ipv4_dns_default"] == "192.168.50.1"
+    assert eth2["ipv6_dns_default"] == "fd00:50::1"
+    assert eth2["ipv4_ntp_default"] == "192.168.50.1"
+    assert eth2["ipv6_ntp_default"] == "fd00:50::1"
     assert eth1_vlan["dns_default"] == ""
     assert eth1_vlan["ntp_default"] == ""
     assert "sitea" in defaults["existing_names"]
     assert defaults["default_domain"] == "labfoundry.internal"
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
-    assert 'rowData.dns_server = interfaceDefaults.dns_default || "";' in app_js.text
-    assert 'rowData.ntp_server = interfaceDefaults.ntp_default || "";' in app_js.text
+    assert "dhcpDefaultFamilyForInterface" in app_js.text
+    assert 'rowData.dns_server = dnsDefault || "";' in app_js.text
+    assert 'rowData.ntp_server = ntpDefault || "";' in app_js.text
+    assert 'rowData.site_address = gateway || "";' in app_js.text
+    assert 'rowData.prefix_length = Number.isInteger(prefix) ? prefix : "";' in app_js.text
 
 
 def test_dns_new_record_row_suggests_next_available_ipv4(client):
@@ -3396,7 +3431,7 @@ def test_dns_new_record_row_suggests_next_available_ipv4(client):
 
 def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
     from labfoundry.app.models import DhcpReservation, DhcpScope, DnsRecord
-    from labfoundry.app.ui import dns_record_suggested_ipv4
+    from labfoundry.app.ui import dhcp_scope_name_for_ip, dns_record_suggested_ipv4
 
     records = [
         DnsRecord(hostname="labfoundry.labfoundry.internal", record_type="A", address="192.168.49.1", enabled=True),
@@ -3410,8 +3445,7 @@ def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
             name="SiteA",
             site_address="192.168.50.1",
             prefix_length=24,
-            range_start="192.168.50.100",
-            range_end="192.168.50.200",
+            range_expression="192.168.50.100-200",
             domain_name="labfoundry.internal",
             enabled=True,
         )
@@ -3425,6 +3459,8 @@ def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
     ]
 
     assert dns_record_suggested_ipv4(records, "labfoundry.internal", scopes, reservations) == "192.168.50.3"
+    assert dhcp_scope_name_for_ip("192.168.50.140", scopes) == "SiteA"
+    assert dhcp_scope_name_for_ip("192.168.1.140", scopes) == ""
 
 
 def test_dns_settings_badge_reflects_desired_state_not_runtime_state(client):
@@ -3452,6 +3488,9 @@ def test_dns_settings_badge_reflects_desired_state_not_runtime_state(client):
 
 
 def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
+    import html
+    import json
+
     from sqlalchemy import select
 
     from labfoundry.app.adapters.system import AdapterResult
@@ -3482,6 +3521,19 @@ def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
     assert "dhcp-leases-table" in page.text
     assert "dhcp-leases-fallback" in page.text
     assert "data-leases=" in page.text
+    lease_payload = page.text.split("data-leases='", 1)[1].split("'", 1)[0]
+    lease_rows = json.loads(html.unescape(lease_payload))
+    assert lease_rows == [
+        {
+            "status": "active",
+            "hostname": "live-client.labfoundry.internal",
+            "ip_address": "192.168.50.140",
+            "zone_name": "SiteA",
+            "mac_address": "02:15:5d:00:20:40",
+            "expires_at": "2030-01-01T00:00:00+00:00",
+            "client_id": "",
+        }
+    ]
     assert "data-dhcp-lease-reservation" in page.text
     assert "data-dhcp-lease-pxe-host" in page.text
     assert "dhcp-lease-reservation-modal" in page.text
@@ -5976,8 +6028,7 @@ def test_physical_interface_edit_updates_desired_state(client):
         scope.interface_name = "eth2"
         scope.site_address = "192.168.50.1"
         scope.prefix_length = 24
-        scope.range_start = "192.168.50.100"
-        scope.range_end = "192.168.50.200"
+        scope.range_expression = "192.168.50.100-200"
         scope.dns_server = "192.168.50.1"
         scope.ntp_server = "192.168.50.1"
         db.add(scope)
@@ -6050,8 +6101,7 @@ def test_physical_interface_edit_updates_desired_state(client):
         assert scope.interface_name == "eth2"
         assert scope.site_address == "192.168.70.1"
         assert scope.prefix_length == 24
-        assert scope.range_start == "192.168.70.100"
-        assert scope.range_end == "192.168.70.200"
+        assert scope.range_expression == "192.168.70.100-200"
         assert scope.dns_server == "192.168.70.1"
         assert scope.ntp_server == "192.168.70.1"
         kms_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "CNAME")).scalar_one()
@@ -6092,8 +6142,7 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
         scope.interface_name = "eth2"
         scope.site_address = "192.168.1.1"
         scope.prefix_length = 24
-        scope.range_start = "192.168.1.100"
-        scope.range_end = "192.168.1.120"
+        scope.range_expression = "192.168.1.100-120"
         scope.dns_server = "192.168.1.1"
         scope.ntp_server = "192.168.1.1"
         save_esxi_pxe_boot_settings(
@@ -6143,8 +6192,7 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
     with SessionLocal() as db:
         scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
         assert scope.site_address == "192.168.50.1"
-        assert scope.range_start == "192.168.50.100"
-        assert scope.range_end == "192.168.50.120"
+        assert scope.range_expression == "192.168.50.100-120"
         assert scope.dns_server == "192.168.50.1"
         assert scope.ntp_server == "192.168.50.1"
         pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "CNAME")).scalar_one()
@@ -7004,7 +7052,7 @@ def test_services_ui_records_dry_run_action(client):
     assert "serviceHealthFormatter" not in js.text
     assert "openServiceActionMenu" not in js.text
     assert "serviceActionsFormatter" not in js.text
-    assert 'title: "Enabled"' in js.text
+    assert 'title: "Startup"' in js.text
     assert 'editor: "tickCross"' in js.text
     assert 'service-state muted">disabled' in js.text
     css = client.get("/static/app.css")
@@ -7168,6 +7216,136 @@ def test_services_and_service_pages_derive_composite_runtime_status(client, monk
     assert client.get("/api/v1/services/ca", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
     assert client.get("/api/v1/services/repository", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
     assert client.get("/api/v1/services/vcf-backups", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+
+
+def test_services_dns_dhcp_rows_use_desired_enabled_state(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpSettings, DnsSettings, ServiceState
+
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp_settings.enabled = True
+        for service_name in ("dns", "dhcp"):
+            service = db.execute(select(ServiceState).where(ServiceState.service == service_name)).scalar_one()
+            service.running = False
+            service.enabled = False
+            service.health = "disabled"
+        db.commit()
+
+    login(client)
+    page = client.get("/services")
+    assert page.status_code == 200
+    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    dns_row = next(row for row in service_rows if row["service"] == "dns")
+    dhcp_row = next(row for row in service_rows if row["service"] == "dhcp")
+    assert dns_row["enabled"] is True
+    assert dhcp_row["enabled"] is True
+    assert dns_row["running"] is False
+    assert dhcp_row["running"] is False
+
+    token = create_api_token(client, ["read:services"])
+    assert client.get("/api/v1/services/dns", headers={"Authorization": f"Bearer {token}"}).json()["enabled"] is True
+    assert client.get("/api/v1/services/dhcp", headers={"Authorization": f"Bearer {token}"}).json()["enabled"] is True
+
+
+def test_services_dns_dhcp_actions_update_desired_settings(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpSettings, DnsSettings, ServiceState
+
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp_settings.enabled = True
+        for service_name in ("dns", "dhcp"):
+            service = db.execute(select(ServiceState).where(ServiceState.service == service_name)).scalar_one()
+            service.enabled = False
+        db.commit()
+
+    token = create_api_token(client, ["read:services", "write:services"])
+    response = client.post("/api/v1/services/dns/disable", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert client.get("/api/v1/services/dns", headers={"Authorization": f"Bearer {token}"}).json()["enabled"] is False
+
+    with SessionLocal() as db:
+        assert db.execute(select(DnsSettings)).scalar_one().enabled is False
+
+    login(client)
+    page = client.get("/services")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post("/services/dhcp/disable", data={"csrf": csrf})
+    assert response.status_code == 200
+    service_rows = json.loads(html.unescape(response.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    dhcp_row = next(row for row in service_rows if row["service"] == "dhcp")
+    assert dhcp_row["enabled"] is False
+
+    with SessionLocal() as db:
+        assert db.execute(select(DhcpSettings)).scalar_one().enabled is False
+
+
+def test_services_live_dns_dhcp_runtime_uses_dnsmasq_systemd(client, monkeypatch):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpSettings, DnsSettings, ServiceState
+
+    def fake_service_status(self, unit: str):
+        active = "active" if unit == "dnsmasq.service" else "inactive"
+        enabled = "enabled" if unit == "dnsmasq.service" else "disabled"
+        return AdapterResult(
+            command=["systemctl", "is-active", unit, "&&", "systemctl", "is-enabled", unit],
+            dry_run=False,
+            stdout=json.dumps({"active": active, "enabled": enabled}),
+        )
+
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.service_status", fake_service_status)
+    monkeypatch.setattr("labfoundry.app.api.v1.SystemAdapter.service_status", fake_service_status)
+
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp_settings.enabled = True
+        for service_name in ("dns", "dhcp"):
+            service = db.execute(select(ServiceState).where(ServiceState.service == service_name)).scalar_one()
+            service.running = False
+            service.enabled = False
+            service.health = "disabled"
+        db.commit()
+
+    login(client)
+    page = client.get("/services")
+    assert page.status_code == 200
+    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    dns_row = next(row for row in service_rows if row["service"] == "dns")
+    dhcp_row = next(row for row in service_rows if row["service"] == "dhcp")
+    assert dns_row["running"] is True
+    assert dns_row["enabled"] is True
+    assert dhcp_row["running"] is True
+    assert dhcp_row["enabled"] is True
+
+    token = create_api_token(client, ["read:services"])
+    assert client.get("/api/v1/services/dns", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+    assert client.get("/api/v1/services/dhcp", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
 
 
 def test_services_live_chrony_status_uses_systemd(client, monkeypatch):
@@ -7516,8 +7694,6 @@ def test_dhcp_settings_autosave_returns_json(client):
             "interface_name": "eth2",
             "site_address": "192.168.50.1",
             "prefix_length": "24",
-            "range_start": "192.168.50.120",
-            "range_end": "192.168.50.220",
             "lease_time": "8h",
             "domain_name": "labfoundry.internal",
             "dns_server": "192.168.50.1",
@@ -7600,8 +7776,7 @@ def test_dhcp_scope_edit_form_updates_ip_zone(client):
             "interface_name": "eth2",
             "site_address": "192.168.50.1",
             "prefix_length": "24",
-            "range_start": "192.168.50.110",
-            "range_end": "192.168.50.210",
+            "range_expression": "192.168.50.110-210",
             "lease_time": "8h",
             "domain_name": "labfoundry.internal",
             "dns_server": "192.168.50.1",
@@ -7619,6 +7794,87 @@ def test_dhcp_scope_edit_form_updates_ip_zone(client):
     assert "192.168.50.110" in refreshed.text
     assert "edited IP zone" in refreshed.text
     assert '"ntp_server": "192.168.50.1"' in refreshed.text
+
+
+def test_dhcp_scope_family_cannot_change_after_create(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope
+
+    login(client)
+    page = client.get("/dhcp")
+
+    payload = page.text.split("data-scopes='", 1)[1].split("'", 1)[0]
+    rows = json.loads(html.unescape(payload))
+    scope_id = next(row["id"] for row in rows if row["name"] == "SiteA")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    rejected = client.post(
+        f"/dhcp/scopes/{scope_id}/edit",
+        data={
+            "name": "SiteA",
+            "address_family": "ipv6",
+            "interface_name": "eth2",
+            "site_address": "fd00:50::1",
+            "prefix_length": "64",
+            "range_expression": "fd00:50::100-fd00:50::200",
+            "lease_time": "8h",
+            "domain_name": "labfoundry.internal",
+            "dns_server": "fd00:50::1",
+            "ntp_server": "fd00:50::1",
+            "description": "try family flip",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+    )
+
+    assert rejected.status_code == 409
+    assert "DHCP IP zone family cannot be changed after it is created." in rejected.text
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.id == scope_id)).scalar_one()
+        assert scope.address_family == "ipv4"
+        assert scope.range_expression == "192.168.50.100-200"
+
+
+def test_dhcp_page_tolerates_stale_ipv6_esxi_pxe_scope_selection(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope
+    from labfoundry.app.services.esxi_pxe import save_esxi_pxe_boot_settings
+
+    login(client)
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        save_esxi_pxe_boot_settings(
+            db,
+            enabled=True,
+            hostname="esxi-pxe.labfoundry.internal",
+            listen_interface="eth2",
+            listen_address="192.168.50.1",
+            dhcp_scope_id=str(scope.id),
+            dhcp_scope_ids=[str(scope.id)],
+            tftp_root="/var/lib/labfoundry/pxe/tftp",
+            http_port=8080,
+            bios_bootfile="undionly.kpxe",
+            uefi_bootfile="snponly.efi",
+            native_uefi_http_enabled=True,
+            native_uefi_http_url="",
+        )
+        scope.address_family = "ipv6"
+        scope.site_address = "fd00:50::1"
+        scope.prefix_length = 64
+        scope.range_expression = "fd00:50::100-fd00:50::200"
+        db.add(scope)
+        db.commit()
+
+    page = client.get("/dhcp")
+
+    assert page.status_code == 200
+    assert "Generated PXE" in page.text
 
 
 def test_dhcp_apply_task_captures_current_desired_state(client):
