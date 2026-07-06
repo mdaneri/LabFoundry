@@ -660,6 +660,25 @@ def test_dhcp_api_scope_and_reservations(client):
     assert scopes.status_code == 200
     assert scopes.json()[0]["name"] == "SiteA"
     assert scopes.json()[0]["range_expression"] == "192.168.50.100-200"
+    family_change = client.patch(
+        f"/api/v1/dhcp/scopes/{scopes.json()[0]['id']}",
+        headers={"Authorization": f"Bearer {dhcp_token}"},
+        json={
+            "name": "SiteA",
+            "address_family": "ipv6",
+            "interface_name": "eth2",
+            "site_address": "fd00:50::1",
+            "prefix_length": 64,
+            "range_expression": "fd00:50::100-fd00:50::200",
+            "lease_time": "12h",
+            "domain_name": "labfoundry.internal",
+            "dns_server": "fd00:50::1",
+            "ntp_server": "fd00:50::1",
+            "enabled": True,
+        },
+    )
+    assert family_change.status_code == 409
+    assert family_change.json()["detail"] == "DHCP IP zone family cannot be changed while a range is defined"
 
     created_scope = client.post(
         "/api/v1/dhcp/scopes",

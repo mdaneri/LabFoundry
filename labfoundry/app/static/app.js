@@ -916,7 +916,7 @@ async function postDhcpScopeAction(url, data, csrf, options = {}) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text.match(/DHCP IP zone .* already exists[^<]*/)?.[0] || "The DHCP IP zone could not be saved.");
+    throw new Error(text.match(/DHCP IP zone .*?(?:already exists|family cannot be changed while a range is defined)[^<]*/)?.[0] || "The DHCP IP zone could not be saved.");
   }
   if (reload) {
     window.location.reload();
@@ -963,26 +963,44 @@ function dhcpInterfaceDefaults(defaults, interfaceName) {
   return entries.find((item) => item.name === interfaceName) || entries[0] || {};
 }
 
+function dhcpDefaultFamilyForInterface(defaults, interfaceName) {
+  const interfaceDefaults = dhcpInterfaceDefaults(defaults, interfaceName);
+  if (interfaceDefaults.ipv4_address) {
+    return "ipv4";
+  }
+  if (interfaceDefaults.ipv6_address) {
+    return "ipv6";
+  }
+  return "ipv4";
+}
+
 function applyDhcpScopeInterfaceDefaults(rowData, defaults, options = {}) {
   const overwrite = options.overwrite ?? false;
   const interfaceDefaults = dhcpInterfaceDefaults(defaults, rowData.interface_name);
-  const gateway = rowData.address_family === "ipv6" ? interfaceDefaults.ipv6_address || interfaceDefaults.address : interfaceDefaults.ipv4_address || interfaceDefaults.address;
-  const prefix = rowData.address_family === "ipv6" ? interfaceDefaults.ipv6_prefix : interfaceDefaults.ipv4_prefix;
-  if ((overwrite || !rowData.site_address) && gateway) {
+  const family = rowData.address_family === "ipv6" ? "ipv6" : "ipv4";
+  const gateway = family === "ipv6" ? interfaceDefaults.ipv6_address : interfaceDefaults.ipv4_address;
+  const prefix = family === "ipv6" ? interfaceDefaults.ipv6_prefix : interfaceDefaults.ipv4_prefix;
+  const dnsDefault = family === "ipv6" ? interfaceDefaults.ipv6_dns_default : interfaceDefaults.ipv4_dns_default;
+  const ntpDefault = family === "ipv6" ? interfaceDefaults.ipv6_ntp_default : interfaceDefaults.ipv4_ntp_default;
+  if (overwrite) {
+    rowData.site_address = gateway || "";
+  } else if (!rowData.site_address && gateway) {
     rowData.site_address = gateway;
   }
-  if ((overwrite || !rowData.prefix_length) && Number.isInteger(prefix)) {
+  if (overwrite) {
+    rowData.prefix_length = Number.isInteger(prefix) ? prefix : "";
+  } else if (!rowData.prefix_length && Number.isInteger(prefix)) {
     rowData.prefix_length = prefix;
   }
   if (overwrite) {
-    rowData.dns_server = interfaceDefaults.dns_default || "";
-  } else if (!rowData.dns_server && interfaceDefaults.dns_default) {
-    rowData.dns_server = interfaceDefaults.dns_default;
+    rowData.dns_server = dnsDefault || "";
+  } else if (!rowData.dns_server && dnsDefault) {
+    rowData.dns_server = dnsDefault;
   }
   if (overwrite) {
-    rowData.ntp_server = interfaceDefaults.ntp_default || "";
-  } else if (!rowData.ntp_server && interfaceDefaults.ntp_default) {
-    rowData.ntp_server = interfaceDefaults.ntp_default;
+    rowData.ntp_server = ntpDefault || "";
+  } else if (!rowData.ntp_server && ntpDefault) {
+    rowData.ntp_server = ntpDefault;
   }
   if ((overwrite || !rowData.domain_name) && defaults.default_domain) {
     rowData.domain_name = defaults.default_domain;
@@ -1004,6 +1022,14 @@ function dhcpScopeCellEditable(cell, existingNames) {
     return true;
   }
   return isUniqueNewDhcpScopeName(data, existingNames);
+}
+
+function dhcpScopeFamilyEditable(cell, existingNames) {
+  const data = cell.getRow().getData();
+  if (String(data.range_expression ?? "").trim()) {
+    return false;
+  }
+  return dhcpScopeCellEditable(cell, existingNames);
 }
 
 function newDhcpScopeRow(defaultInterface = "eth2", defaults = {}) {
@@ -5034,7 +5060,7 @@ function initializeDhcpScopesTable() {
     if (data.is_new) {
       if (cell.getField() === "name" && isUniqueNewDhcpScopeName(data, existingScopeNames)) {
         if (!data.address_family) {
-          data.address_family = "ipv4";
+          data.address_family = dhcpDefaultFamilyForInterface(scopeDefaults, data.interface_name || defaultInterface);
         }
         if (!data.interface_name) {
           data.interface_name = defaultInterface;
@@ -5080,7 +5106,7 @@ function initializeDhcpScopesTable() {
           title: "Family",
           field: "address_family",
           editor: "list",
-          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
+          editable: (cell) => dhcpScopeFamilyEditable(cell, existingScopeNames),
           editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" } },
           formatter: (cell) => {
             const value = cell.getValue();

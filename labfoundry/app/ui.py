@@ -2991,12 +2991,20 @@ def dhcp_scope_grid_defaults(
 ) -> dict[str, Any]:
     dns_interfaces = set(split_interfaces(dns_settings.listen_interface)) if dns_settings.enabled else set()
     chrony_interfaces = set(split_interfaces(chrony_settings.listen_interface)) if chrony_settings.enabled else set()
+    dns_addresses = set(split_addresses(dns_settings.listen_address)) if dns_settings.enabled else set()
+    chrony_addresses = set(split_addresses(chrony_settings.listen_address)) if chrony_settings.enabled else set()
     defaults: list[dict[str, Any]] = []
     for interface in available_interfaces:
         ipv4_address = str(interface.get("ipv4_address") or "")
         ipv6_address = str(interface.get("ipv6_address") or "")
         primary_address = ipv4_address or ipv6_address or str(interface.get("address") or "")
         interface_name = str(interface.get("name") or "")
+        dns_enabled = interface_name in dns_interfaces
+        chrony_enabled = interface_name in chrony_interfaces
+        ipv4_dns_default = ipv4_address if dns_enabled and ipv4_address and (not dns_addresses or ipv4_address in dns_addresses) else ""
+        ipv6_dns_default = ipv6_address if dns_enabled and ipv6_address and (not dns_addresses or ipv6_address in dns_addresses) else ""
+        ipv4_ntp_default = ipv4_address if chrony_enabled and ipv4_address and (not chrony_addresses or ipv4_address in chrony_addresses) else ""
+        ipv6_ntp_default = ipv6_address if chrony_enabled and ipv6_address and (not chrony_addresses or ipv6_address in chrony_addresses) else ""
         defaults.append(
             {
                 "name": interface_name,
@@ -3005,8 +3013,12 @@ def dhcp_scope_grid_defaults(
                 "ipv4_prefix": interface.get("ipv4_prefix"),
                 "ipv6_address": ipv6_address,
                 "ipv6_prefix": interface.get("ipv6_prefix"),
-                "dns_default": primary_address if interface_name in dns_interfaces else "",
-                "ntp_default": primary_address if interface_name in chrony_interfaces else "",
+                "dns_default": ipv4_dns_default or ipv6_dns_default,
+                "ntp_default": ipv4_ntp_default or ipv6_ntp_default,
+                "ipv4_dns_default": ipv4_dns_default,
+                "ipv6_dns_default": ipv6_dns_default,
+                "ipv4_ntp_default": ipv4_ntp_default,
+                "ipv6_ntp_default": ipv6_ntp_default,
             }
         )
     return {
@@ -7753,8 +7765,20 @@ def edit_dhcp_scope_from_ui(
     scope = db.get(DhcpScope, scope_id)
     if not scope:
         raise HTTPException(status_code=404, detail="DHCP IP zone not found")
+    normalized_family = address_family.strip().lower() if address_family.strip().lower() in {"ipv4", "ipv6"} else "ipv4"
+    if scope.range_expression.strip() and normalized_family != scope.address_family:
+        return render(
+            request,
+            "dhcp.html",
+            {
+                "identity": identity,
+                **dnsmasq_context(db),
+                "form_error": "DHCP IP zone family cannot be changed while a range is defined.",
+            },
+            status_code=409,
+        )
     scope.name = name.strip()
-    scope.address_family = address_family.strip().lower() if address_family.strip().lower() in {"ipv4", "ipv6"} else "ipv4"
+    scope.address_family = normalized_family
     scope.interface_name = interface_name.strip()
     scope.site_address = site_address.strip()
     scope.prefix_length = prefix_length

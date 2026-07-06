@@ -3259,6 +3259,9 @@ def test_dns_and_dhcp_pages_render(client):
     assert 'if (!data.interface_name)' in app_js.text
     assert "isUniqueNewDhcpScopeName(data, existingScopeNames)" in app_js.text
     assert "cellMouseEnter" in app_js.text
+    assert "dhcpScopeFamilyEditable" in app_js.text
+    assert "String(data.range_expression ?? \"\").trim()" in app_js.text
+    assert "dhcpDefaultFamilyForInterface(scopeDefaults, data.interface_name || defaultInterface)" in app_js.text
     assert "applyDhcpScopeInterfaceDefaults" in app_js.text
     assert 'title: "Family"' in app_js.text
     assert "address_family" in app_js.text
@@ -3353,18 +3356,20 @@ def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ChronySettings, DnsSettings
+    from labfoundry.app.models import ChronySettings, DnsSettings, PhysicalInterface
 
     with SessionLocal() as db:
+        eth2_interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
+        eth2_interface.ipv6_cidr = "fd00:50::1/64"
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.enabled = True
         dns_settings.listen_interface = "eth2"
-        dns_settings.listen_address = "192.168.50.1"
+        dns_settings.listen_address = "192.168.50.1\nfd00:50::1"
         chrony_settings = db.execute(select(ChronySettings)).scalar_one()
         chrony_settings.enabled = True
         chrony_settings.listen_interface = "eth2"
-        chrony_settings.listen_address = "192.168.50.1"
-        db.add_all([dns_settings, chrony_settings])
+        chrony_settings.listen_address = "192.168.50.1\nfd00:50::1"
+        db.add_all([eth2_interface, dns_settings, chrony_settings])
         db.commit()
 
     login(client)
@@ -3377,16 +3382,25 @@ def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
     eth1_vlan = next(item for item in defaults["interfaces"] if item["name"] == "eth1.20")
     assert eth2["ipv4_address"] == "192.168.50.1"
     assert eth2["ipv4_prefix"] == 24
+    assert eth2["ipv6_address"] == "fd00:50::1"
+    assert eth2["ipv6_prefix"] == 64
     assert eth2["dns_default"] == "192.168.50.1"
     assert eth2["ntp_default"] == "192.168.50.1"
+    assert eth2["ipv4_dns_default"] == "192.168.50.1"
+    assert eth2["ipv6_dns_default"] == "fd00:50::1"
+    assert eth2["ipv4_ntp_default"] == "192.168.50.1"
+    assert eth2["ipv6_ntp_default"] == "fd00:50::1"
     assert eth1_vlan["dns_default"] == ""
     assert eth1_vlan["ntp_default"] == ""
     assert "sitea" in defaults["existing_names"]
     assert defaults["default_domain"] == "labfoundry.internal"
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
-    assert 'rowData.dns_server = interfaceDefaults.dns_default || "";' in app_js.text
-    assert 'rowData.ntp_server = interfaceDefaults.ntp_default || "";' in app_js.text
+    assert "dhcpDefaultFamilyForInterface" in app_js.text
+    assert 'rowData.dns_server = dnsDefault || "";' in app_js.text
+    assert 'rowData.ntp_server = ntpDefault || "";' in app_js.text
+    assert 'rowData.site_address = gateway || "";' in app_js.text
+    assert 'rowData.prefix_length = Number.isInteger(prefix) ? prefix : "";' in app_js.text
 
 
 def test_dns_new_record_row_suggests_next_available_ipv4(client):
@@ -7750,6 +7764,49 @@ def test_dhcp_scope_edit_form_updates_ip_zone(client):
     assert "192.168.50.110" in refreshed.text
     assert "edited IP zone" in refreshed.text
     assert '"ntp_server": "192.168.50.1"' in refreshed.text
+
+
+def test_dhcp_scope_family_cannot_change_while_range_defined(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope
+
+    login(client)
+    page = client.get("/dhcp")
+
+    payload = page.text.split("data-scopes='", 1)[1].split("'", 1)[0]
+    rows = json.loads(html.unescape(payload))
+    scope_id = next(row["id"] for row in rows if row["name"] == "SiteA")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    rejected = client.post(
+        f"/dhcp/scopes/{scope_id}/edit",
+        data={
+            "name": "SiteA",
+            "address_family": "ipv6",
+            "interface_name": "eth2",
+            "site_address": "fd00:50::1",
+            "prefix_length": "64",
+            "range_expression": "fd00:50::100-fd00:50::200",
+            "lease_time": "8h",
+            "domain_name": "labfoundry.internal",
+            "dns_server": "fd00:50::1",
+            "ntp_server": "fd00:50::1",
+            "description": "try family flip",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+    )
+
+    assert rejected.status_code == 409
+    assert "DHCP IP zone family cannot be changed while a range is defined." in rejected.text
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.id == scope_id)).scalar_one()
+        assert scope.address_family == "ipv4"
+        assert scope.range_expression == "192.168.50.100-200"
 
 
 def test_dhcp_apply_task_captures_current_desired_state(client):

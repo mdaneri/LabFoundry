@@ -1695,6 +1695,8 @@ def update_dhcp_scope(
     scope = db.get(DhcpScope, scope_id)
     if not scope:
         raise HTTPException(status_code=404, detail="DHCP IP zone not found")
+    if scope.range_expression.strip() and payload.address_family != scope.address_family:
+        raise HTTPException(status_code=409, detail="DHCP IP zone family cannot be changed while a range is defined")
     for key, value in payload.model_dump().items():
         setattr(scope, key, value)
     scope.updated_at = utcnow()
