@@ -3250,6 +3250,9 @@ def test_dns_and_dhcp_pages_render(client):
     assert "+ Add IP zone here" in app_js.text
     assert "isUniqueNewDhcpScopeName" in app_js.text
     assert "dhcpScopeCellEditable" in app_js.text
+    assert "dhcpRangeFormatter" in app_js.text
+    assert "dhcpRangeTooltipRows" in app_js.text
+    assert "if (!String(data.name ?? \"\").trim())" in app_js.text
     assert "applyDhcpScopeInterfaceDefaults" in app_js.text
     assert 'title: "Family"' in app_js.text
     assert "address_family" in app_js.text
@@ -3279,6 +3282,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "background: var(--bg);" in app_css.text
     assert "color: var(--text);" in app_css.text
     assert ".add-row-hint" in app_css.text
+    assert ".dhcp-range-tooltip" in app_css.text
     assert ".new-record-row-locked" in app_css.text
     assert 'tabulator-field="host_label"' in app_css.text
     assert ".alert.warning" in app_css.text

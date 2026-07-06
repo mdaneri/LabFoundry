@@ -405,6 +405,135 @@ function dnsAddRowHintFormatter(cell, emptyText) {
   return escapeHtml(value);
 }
 
+let dhcpRangeTooltip = null;
+
+function parseIpv4AddressParts(value) {
+  const parts = String(value ?? "").trim().split(".");
+  if (parts.length !== 4) {
+    return null;
+  }
+  const octets = parts.map((part) => {
+    if (!/^\d+$/.test(part)) {
+      return null;
+    }
+    const number = Number(part);
+    return number >= 0 && number <= 255 ? number : null;
+  });
+  return octets.some((part) => part === null) ? null : octets;
+}
+
+function parseCompactIpv4RangeEnd(value, startParts) {
+  const parts = String(value ?? "").trim().split(".");
+  if (!parts.length || parts.length > 4 || parts.some((part) => !/^\d+$/.test(part))) {
+    return null;
+  }
+  const suffix = parts.map((part) => Number(part));
+  if (suffix.some((part) => part < 0 || part > 255)) {
+    return null;
+  }
+  return [...startParts.slice(0, 4 - suffix.length), ...suffix];
+}
+
+function ipv4PartsToText(parts) {
+  return Array.isArray(parts) && parts.length === 4 ? parts.join(".") : "";
+}
+
+function dhcpRangeTooltipRows(data) {
+  const expression = String(data?.range_expression ?? "").trim();
+  if (!expression) {
+    return [];
+  }
+  return expression
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const [rawStart, rawEnd] = item.split("-", 2).map((part) => part.trim());
+      if (!rawStart) {
+        return null;
+      }
+      if (data?.address_family === "ipv6") {
+        return { start: rawStart, end: rawEnd || rawStart };
+      }
+      const startParts = parseIpv4AddressParts(rawStart);
+      if (!startParts) {
+        return null;
+      }
+      const endParts = rawEnd ? parseCompactIpv4RangeEnd(rawEnd, startParts) : startParts;
+      if (!endParts) {
+        return null;
+      }
+      return { start: ipv4PartsToText(startParts), end: ipv4PartsToText(endParts) };
+    })
+    .filter(Boolean);
+}
+
+function ensureDhcpRangeTooltip() {
+  if (!dhcpRangeTooltip) {
+    dhcpRangeTooltip = document.createElement("div");
+    dhcpRangeTooltip.className = "dhcp-range-tooltip hidden";
+    document.body.appendChild(dhcpRangeTooltip);
+  }
+  return dhcpRangeTooltip;
+}
+
+function moveDhcpRangeTooltip(event) {
+  if (!dhcpRangeTooltip || dhcpRangeTooltip.classList.contains("hidden")) {
+    return;
+  }
+  const offset = 12;
+  const width = dhcpRangeTooltip.offsetWidth || 240;
+  const height = dhcpRangeTooltip.offsetHeight || 120;
+  const x = Math.min(event.clientX + offset, window.innerWidth - width - offset);
+  const y = Math.min(event.clientY + offset, window.innerHeight - height - offset);
+  dhcpRangeTooltip.style.left = `${Math.max(offset, x)}px`;
+  dhcpRangeTooltip.style.top = `${Math.max(offset, y)}px`;
+}
+
+function showDhcpRangeTooltip(event, data) {
+  const rows = dhcpRangeTooltipRows(data);
+  if (!rows.length) {
+    return;
+  }
+  const tooltip = ensureDhcpRangeTooltip();
+  tooltip.innerHTML = `
+    <table>
+      <thead><tr><th>Start</th><th>End</th></tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr><td>${escapeHtml(row.start)}</td><td>${escapeHtml(row.end)}</td></tr>`).join("")}
+      </tbody>
+    </table>
+  `;
+  tooltip.classList.remove("hidden");
+  moveDhcpRangeTooltip(event);
+}
+
+function hideDhcpRangeTooltip() {
+  if (dhcpRangeTooltip) {
+    dhcpRangeTooltip.classList.add("hidden");
+  }
+}
+
+function dhcpRangeFormatter(cell) {
+  const data = cell.getRow().getData();
+  const value = String(cell.getValue() ?? "").trim();
+  if (data.is_new && !value) {
+    if (!String(data.name ?? "").trim()) {
+      return "";
+    }
+    return dnsAddRowHintFormatter(cell, "192.168.87.100-200, 192.168.87.222");
+  }
+  const element = document.createElement("span");
+  element.className = "dhcp-range-value";
+  element.textContent = value;
+  if (dhcpRangeTooltipRows(data).length) {
+    element.addEventListener("mouseenter", (event) => showDhcpRangeTooltip(event, data));
+    element.addEventListener("mousemove", moveDhcpRangeTooltip);
+    element.addEventListener("mouseleave", hideDhcpRangeTooltip);
+  }
+  return element;
+}
+
 function dnsRecordCellEditable(cell) {
   const data = cell.getRow().getData();
   if (!data.is_new) {
@@ -4978,7 +5107,7 @@ function initializeDhcpScopesTable() {
           field: "range_expression",
           editor: "input",
           editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "192.168.87.100-200, 192.168.87.222"),
+          formatter: dhcpRangeFormatter,
           minWidth: 240,
           cellEdited: handleDhcpScopeEdited,
         },
