@@ -28,3 +28,4 @@ playwright-report/
 /dist
 /image/vmware-workstation/ovf
 /VCFDT
+/scripts/VCFDT
