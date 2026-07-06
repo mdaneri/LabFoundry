@@ -76,22 +76,7 @@ def compact_dhcp_range_expression(scope: DhcpScope) -> str:
     errors, ranges = parse_dhcp_range_expression(scope)
     if errors or not ranges:
         return (scope.range_expression or "").strip()
-    if dhcp_scope_address_family(scope) == "ipv6":
-        return ", ".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
-    prefix_octets = max(0, min(3, int(scope.prefix_length or 0) // 8))
-    items = []
-    for start, end in ranges:
-        if start == end:
-            items.append(str(start))
-            continue
-        start_parts = str(start).split(".")
-        end_parts = str(end).split(".")
-        if start_parts[:prefix_octets] == end_parts[:prefix_octets]:
-            suffix = ".".join(end_parts[prefix_octets:])
-            items.append(f"{start}-{suffix}")
-        else:
-            items.append(f"{start}-{end}")
-    return ", ".join(items)
+    return ", ".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
 
 
 def split_servers(raw: str | None) -> list[str]:

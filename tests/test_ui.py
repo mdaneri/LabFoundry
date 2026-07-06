@@ -6101,7 +6101,7 @@ def test_physical_interface_edit_updates_desired_state(client):
         assert scope.interface_name == "eth2"
         assert scope.site_address == "192.168.70.1"
         assert scope.prefix_length == 24
-        assert scope.range_expression == "192.168.70.100-200"
+        assert scope.range_expression == "192.168.70.100-192.168.70.200"
         assert scope.dns_server == "192.168.70.1"
         assert scope.ntp_server == "192.168.70.1"
         kms_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "CNAME")).scalar_one()
@@ -6192,7 +6192,7 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
     with SessionLocal() as db:
         scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
         assert scope.site_address == "192.168.50.1"
-        assert scope.range_expression == "192.168.50.100-120"
+        assert scope.range_expression == "192.168.50.100-192.168.50.120"
         assert scope.dns_server == "192.168.50.1"
         assert scope.ntp_server == "192.168.50.1"
         pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "CNAME")).scalar_one()
@@ -7836,7 +7836,7 @@ def test_dhcp_scope_family_cannot_change_after_create(client):
     with SessionLocal() as db:
         scope = db.execute(select(DhcpScope).where(DhcpScope.id == scope_id)).scalar_one()
         assert scope.address_family == "ipv4"
-        assert scope.range_expression == "192.168.50.100-200"
+        assert scope.range_expression == "192.168.50.100-192.168.50.200"
 
 
 def test_dhcp_page_tolerates_stale_ipv6_esxi_pxe_scope_selection(client):

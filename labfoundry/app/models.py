@@ -390,7 +390,7 @@ class DhcpScope(Base):
     interface_name: Mapped[str] = mapped_column(String(80), default="eth2")
     site_address: Mapped[str] = mapped_column(String(64), default="192.168.50.1")
     prefix_length: Mapped[int] = mapped_column(Integer, default=24)
-    range_expression: Mapped[str] = mapped_column(String(500), default="192.168.50.100-200")
+    range_expression: Mapped[str] = mapped_column(String(500), default="192.168.50.100-192.168.50.200")
     lease_time: Mapped[str] = mapped_column(String(40), default="12h")
     domain_name: Mapped[str] = mapped_column(String(120), default="labfoundry.internal")
     dns_server: Mapped[str] = mapped_column(String(64), default="192.168.50.1")

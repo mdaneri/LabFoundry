@@ -524,7 +524,7 @@ function dhcpRangeFormatter(cell) {
     if (data.address_family === "ipv6") {
       return "";
     }
-    return dnsAddRowHintFormatter(cell, "192.168.87.100-200, 192.168.87.222");
+    return dnsAddRowHintFormatter(cell, "192.168.87.100-192.168.87.200, 192.168.87.222");
   }
   const element = document.createElement("span");
   element.className = "dhcp-range-value";
