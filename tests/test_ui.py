@@ -7201,6 +7201,46 @@ def test_services_dns_dhcp_rows_use_desired_enabled_state(client):
     assert client.get("/api/v1/services/dhcp", headers={"Authorization": f"Bearer {token}"}).json()["enabled"] is True
 
 
+def test_services_dns_dhcp_actions_update_desired_settings(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpSettings, DnsSettings, ServiceState
+
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp_settings.enabled = True
+        for service_name in ("dns", "dhcp"):
+            service = db.execute(select(ServiceState).where(ServiceState.service == service_name)).scalar_one()
+            service.enabled = False
+        db.commit()
+
+    token = create_api_token(client, ["read:services", "write:services"])
+    response = client.post("/api/v1/services/dns/disable", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert client.get("/api/v1/services/dns", headers={"Authorization": f"Bearer {token}"}).json()["enabled"] is False
+
+    with SessionLocal() as db:
+        assert db.execute(select(DnsSettings)).scalar_one().enabled is False
+
+    login(client)
+    page = client.get("/services")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post("/services/dhcp/disable", data={"csrf": csrf})
+    assert response.status_code == 200
+    service_rows = json.loads(html.unescape(response.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    dhcp_row = next(row for row in service_rows if row["service"] == "dhcp")
+    assert dhcp_row["enabled"] is False
+
+    with SessionLocal() as db:
+        assert db.execute(select(DhcpSettings)).scalar_one().enabled is False
+
+
 def test_services_live_dns_dhcp_runtime_uses_dnsmasq_systemd(client, monkeypatch):
     import html
     import json

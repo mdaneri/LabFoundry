@@ -10504,8 +10504,16 @@ def service_action_from_ui(
         raise HTTPException(status_code=422, detail="Unsupported service action")
     if action == "enable":
         row.enabled = True
+        if service == "dns":
+            get_dns_settings_row(db).enabled = True
+        elif service == "dhcp":
+            get_dhcp_settings_row(db).enabled = True
     elif action == "disable":
         row.enabled = False
+        if service == "dns":
+            get_dns_settings_row(db).enabled = False
+        elif service == "dhcp":
+            get_dhcp_settings_row(db).enabled = False
     elif action in {"start", "restart"}:
         row.running = True
     elif action == "stop":
