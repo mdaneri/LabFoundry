@@ -7809,6 +7809,44 @@ def test_dhcp_scope_family_cannot_change_while_range_defined(client):
         assert scope.range_expression == "192.168.50.100-200"
 
 
+def test_dhcp_page_tolerates_stale_ipv6_esxi_pxe_scope_selection(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope
+    from labfoundry.app.services.esxi_pxe import save_esxi_pxe_boot_settings
+
+    login(client)
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
+        save_esxi_pxe_boot_settings(
+            db,
+            enabled=True,
+            hostname="esxi-pxe.labfoundry.internal",
+            listen_interface="eth2",
+            listen_address="192.168.50.1",
+            dhcp_scope_id=str(scope.id),
+            dhcp_scope_ids=[str(scope.id)],
+            tftp_root="/var/lib/labfoundry/pxe/tftp",
+            http_port=8080,
+            bios_bootfile="undionly.kpxe",
+            uefi_bootfile="snponly.efi",
+            native_uefi_http_enabled=True,
+            native_uefi_http_url="",
+        )
+        scope.address_family = "ipv6"
+        scope.site_address = "fd00:50::1"
+        scope.prefix_length = 64
+        scope.range_expression = "fd00:50::100-fd00:50::200"
+        db.add(scope)
+        db.commit()
+
+    page = client.get("/dhcp")
+
+    assert page.status_code == 200
+    assert "Generated PXE" in page.text
+
+
 def test_dhcp_apply_task_captures_current_desired_state(client):
     from sqlalchemy import select
 
