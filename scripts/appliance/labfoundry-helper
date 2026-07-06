@@ -125,6 +125,7 @@ MANAGEMENT_ROUTE_TABLE_ID = 100
 LAB_ROUTE_TABLE_ID = 200
 MANAGEMENT_ROUTE_RULE_PRIORITY = 1000
 LAB_ROUTE_RULE_PRIORITY = 2000
+ROUTE_RULE_PRIORITY_WINDOW = 100
 APPLIANCE_SETTINGS_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-settings")
 PUBLIC_SERVICES_APPLY_DIR = Path("/var/lib/labfoundry/apply/public-services")
 TIMESYNCD_CONFIG_DIR = Path("/etc/systemd/timesyncd.conf.d")
@@ -2605,13 +2606,31 @@ def _set_os_user_shell(username: str, shell: str) -> int:
 
 
 def _ensure_os_user_role_groups(username: str, role: str) -> int:
-    if role != "admin":
-        return 0
-    usermod = _command_path("usermod")
-    if usermod is None:
-        print("usermod command not found", file=sys.stderr)
+    id_command = _command_path("id")
+    if id_command is None:
+        print("id command not found", file=sys.stderr)
         return 127
-    return _run_and_forward([usermod, "--append", "--groups", "wheel", username])
+    usermod = _command_path("usermod")
+    groups_result = _run([id_command, "-nG", username])
+    if groups_result.returncode != 0:
+        print(groups_result.stdout, end="")
+        print(groups_result.stderr, end="", file=sys.stderr)
+        return groups_result.returncode
+    groups = set(groups_result.stdout.split())
+    if role == "admin":
+        if "wheel" in groups:
+            return 0
+        if usermod is None:
+            print("usermod command not found", file=sys.stderr)
+            return 127
+        return _run_and_forward([usermod, "--append", "--groups", "wheel", username])
+    if "wheel" not in groups:
+        return 0
+    gpasswd = _command_path("gpasswd")
+    if gpasswd is None:
+        print("gpasswd command not found", file=sys.stderr)
+        return 127
+    return _run_and_forward([gpasswd, "--delete", username, "wheel"])
 
 
 def _unlock_os_user(username: str) -> int:
@@ -3527,17 +3546,19 @@ def _wan_config_errors(path: Path) -> list[str]:
         name = rule.get("name", "")
         source = rule.get("source_interface", "")
         destination = rule.get("destination_interface", "")
+        enabled = _wan_bool(rule.get("enabled", ""), default=True)
         if not name:
             errors.append("Routing rule is missing a name.")
-        for label, target_name in [("source", source), ("destination", destination)]:
-            if target_name not in targets:
-                errors.append(f"Routing rule {name or '<missing>'} references missing {label} target {target_name or '<missing>'}.")
-            elif targets[target_name].get("routing_domain", "lab") == "management" or not _wan_bool(
-                targets[target_name].get("route_allowed", "true"),
-                default=True,
-            ):
-                errors.append(f"Routing rule {name or '<missing>'} {label} cannot use management routing domain {target_name}.")
-        if source and destination and source == destination:
+        if enabled:
+            for label, target_name in [("source", source), ("destination", destination)]:
+                if target_name not in targets:
+                    errors.append(f"Routing rule {name or '<missing>'} references missing {label} target {target_name or '<missing>'}.")
+                elif targets[target_name].get("routing_domain", "lab") == "management" or not _wan_bool(
+                    targets[target_name].get("route_allowed", "true"),
+                    default=True,
+                ):
+                    errors.append(f"Routing rule {name or '<missing>'} {label} cannot use management routing domain {target_name}.")
+        if enabled and source and destination and source == destination:
             errors.append(f"Routing rule {name or '<missing>'} must use different source and destination interfaces.")
         try:
             priority = int(rule.get("priority", "100"))
@@ -3691,10 +3712,33 @@ def _run_rule_replace(source_network: str, table_id: int, priority: int) -> int:
     return add.returncode
 
 
+def _run_rule_priority_delete(prefix: list[str], priority: int) -> int:
+    result = _run([*prefix, "del", "priority", str(priority)])
+    if result.returncode in {0, 2}:
+        return 0
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _cleanup_wan_policy_rules() -> int:
+    prefixes = [["ip", "rule"], ["ip", "-6", "rule"]]
+    for base_priority in (MANAGEMENT_ROUTE_RULE_PRIORITY, LAB_ROUTE_RULE_PRIORITY):
+        for priority in range(base_priority, base_priority + ROUTE_RULE_PRIORITY_WINDOW):
+            for prefix in prefixes:
+                result = _run_rule_priority_delete(prefix, priority)
+                if result != 0:
+                    return result
+    return 0
+
+
 def _apply_wan_policy_rules(parsed: dict[str, list[dict[str, str]]]) -> int:
     if shutil.which("ip") is None:
         print("ip command not found", file=sys.stderr)
         return 127
+    cleanup_result = _cleanup_wan_policy_rules()
+    if cleanup_result != 0:
+        return cleanup_result
     for index, target in enumerate(parsed["targets"]):
         domain = target.get("routing_domain", "lab")
         table_id = _target_route_table_id(target)
