@@ -20,9 +20,9 @@ Default vmnets:
 
 - `vmnet8` for management, with appliance addresses derived from the selected
   vmnet subnet by default
-- `vmnet2` for SiteA
-- `vmnet3` for WAN/SiteB
-- `vmnet4` for trunk-like validation
+- `VMnet2` for SiteA
+- `VMnet3` for WAN/SiteB
+- `VMnet4` for trunk-like validation
 
 Check the current Workstation host network inventory with:
 

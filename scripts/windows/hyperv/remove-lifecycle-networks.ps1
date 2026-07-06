@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 
 $switchNames = @(
     'LabFoundry-Mgmt',
+    'LabFoundry-Services',
     'LabFoundry-SiteA',
     'LabFoundry-SiteB',
     'LabFoundry-Trunk'

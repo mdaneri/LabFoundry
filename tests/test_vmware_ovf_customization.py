@@ -144,6 +144,11 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "VMware Workstation\\OVFTool\\ovftool.exe" in export_script
     assert "Join-Path $Path 'ovftool.exe'" in export_script
     assert "Add-LabFoundryOvfProperties" in export_script
+    assert "Ensure-LabFoundryOvfNetworks" in export_script
+    assert "LabFoundry Management Network" in export_script
+    assert "LabFoundry Services Network" in export_script
+    assert "Network adapter 2" in export_script
+    assert "Remove-NamespacedChildElement -Parent $serviceAdapter -LocalName 'Address'" in export_script
     assert "Update-OvfManifest" in export_script
     assert "New-OvaArchive" in export_script
     assert "Get-OvfDescriptorPath" in export_script
@@ -158,3 +163,5 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "Before=network-pre.target" in vmware_unit
     assert "/image/vmware-workstation/ovf" in gitignore
     assert "VMware Workstation\\OVFTool" in docs
+    assert "LabFoundry Management Network" in docs
+    assert "LabFoundry Services Network" in docs

@@ -130,6 +130,168 @@ function Add-TextElement {
     return $element
 }
 
+function Get-NamespacedChildElement {
+    param(
+        [System.Xml.XmlElement]$Parent,
+        [string]$LocalName,
+        [string]$Namespace
+    )
+
+    foreach ($child in $Parent.ChildNodes) {
+        if ($child.NodeType -eq [System.Xml.XmlNodeType]::Element -and $child.LocalName -eq $LocalName -and $child.NamespaceURI -eq $Namespace) {
+            return $child
+        }
+    }
+    return $null
+}
+
+function Set-NamespacedTextElement {
+    param(
+        [xml]$Document,
+        [System.Xml.XmlElement]$Parent,
+        [string]$Prefix,
+        [string]$LocalName,
+        [string]$Namespace,
+        [string]$Value
+    )
+
+    $element = Get-NamespacedChildElement -Parent $Parent -LocalName $LocalName -Namespace $Namespace
+    if (-not $element) {
+        $element = $Document.CreateElement($Prefix, $LocalName, $Namespace)
+        [void]$Parent.AppendChild($element)
+    }
+    $element.InnerText = $Value
+    return $element
+}
+
+function Remove-NamespacedChildElement {
+    param(
+        [System.Xml.XmlElement]$Parent,
+        [string]$LocalName,
+        [string]$Namespace
+    )
+
+    foreach ($child in @($Parent.ChildNodes)) {
+        if ($child.NodeType -eq [System.Xml.XmlNodeType]::Element -and $child.LocalName -eq $LocalName -and $child.NamespaceURI -eq $Namespace) {
+            [void]$Parent.RemoveChild($child)
+        }
+    }
+}
+
+function Get-RasdValue {
+    param(
+        [System.Xml.XmlElement]$Item,
+        [string]$LocalName
+    )
+
+    $element = Get-NamespacedChildElement -Parent $Item -LocalName $LocalName -Namespace $rasdNamespace
+    if ($element) {
+        return $element.InnerText
+    }
+    return ''
+}
+
+function Set-RasdValue {
+    param(
+        [xml]$Document,
+        [System.Xml.XmlElement]$Item,
+        [string]$LocalName,
+        [string]$Value
+    )
+
+    [void](Set-NamespacedTextElement -Document $Document -Parent $Item -Prefix 'rasd' -LocalName $LocalName -Namespace $rasdNamespace -Value $Value)
+}
+
+function Get-NextRasdInstanceId {
+    param(
+        [System.Xml.XmlElement]$HardwareSection,
+        [System.Xml.XmlNamespaceManager]$NamespaceManager
+    )
+
+    $maxId = 0
+    foreach ($item in $HardwareSection.SelectNodes('ovf:Item', $NamespaceManager)) {
+        $instanceId = 0
+        if ([int]::TryParse((Get-RasdValue -Item $item -LocalName 'InstanceID'), [ref]$instanceId) -and $instanceId -gt $maxId) {
+            $maxId = $instanceId
+        }
+    }
+    return $maxId + 1
+}
+
+function Set-OvfNetwork {
+    param(
+        [xml]$Document,
+        [System.Xml.XmlElement]$Network,
+        [string]$Name,
+        [string]$Description
+    )
+
+    Set-OvfAttribute -Document $Document -Element $Network -Name 'name' -Value $Name
+    [void](Set-NamespacedTextElement -Document $Document -Parent $Network -Prefix 'ovf' -LocalName 'Description' -Namespace $ovfNamespace -Value $Description)
+}
+
+function Ensure-LabFoundryOvfNetworks {
+    param(
+        [xml]$Document,
+        [System.Xml.XmlElement]$VirtualSystem,
+        [System.Xml.XmlElement]$HardwareSection,
+        [System.Xml.XmlNamespaceManager]$NamespaceManager
+    )
+
+    $managementNetworkName = 'LabFoundry Management Network'
+    $serviceNetworkName = 'LabFoundry Services Network'
+
+    $networkSection = $Document.SelectSingleNode('//ovf:VirtualSystem/ovf:NetworkSection', $NamespaceManager)
+    if (-not $networkSection) {
+        $networkSection = $Document.CreateElement('ovf', 'NetworkSection', $ovfNamespace)
+        [void](Add-TextElement -Document $Document -Parent $networkSection -LocalName 'Info' -Value 'LabFoundry deployment networks')
+        [void]$VirtualSystem.InsertBefore($networkSection, $HardwareSection)
+    }
+
+    $networks = @($networkSection.GetElementsByTagName('Network', $ovfNamespace))
+    $managementNetwork = $networks | Select-Object -First 1
+    if (-not $managementNetwork) {
+        $managementNetwork = $Document.CreateElement('ovf', 'Network', $ovfNamespace)
+        [void]$networkSection.AppendChild($managementNetwork)
+    }
+    Set-OvfNetwork -Document $Document -Network $managementNetwork -Name $managementNetworkName -Description 'Management-only network for the LabFoundry admin UI and appliance administration.'
+
+    $serviceNetwork = $networks | Where-Object {
+        $name = $_.Attributes.GetNamedItem('name', $ovfNamespace)
+        $name -and $name.Value -eq $serviceNetworkName
+    } | Select-Object -First 1
+    if (-not $serviceNetwork) {
+        $serviceNetwork = $Document.CreateElement('ovf', 'Network', $ovfNamespace)
+        [void]$networkSection.AppendChild($serviceNetwork)
+    }
+    Set-OvfNetwork -Document $Document -Network $serviceNetwork -Name $serviceNetworkName -Description 'Service network for LabFoundry-managed DNS, DHCP, CA, depot, PXE, KMS, and other lab services.'
+
+    $networkAdapters = @($HardwareSection.SelectNodes('ovf:Item', $NamespaceManager) | Where-Object { (Get-RasdValue -Item $_ -LocalName 'ResourceType') -eq '10' })
+    if ($networkAdapters.Count -eq 0) {
+        throw 'OVF descriptor does not contain a network adapter to use as the management NIC.'
+    }
+
+    $managementAdapter = $networkAdapters[0]
+    Set-RasdValue -Document $Document -Item $managementAdapter -LocalName 'ElementName' -Value 'Network adapter 1'
+    Set-RasdValue -Document $Document -Item $managementAdapter -LocalName 'Description' -Value 'VMXNET3 Ethernet adapter for LabFoundry management traffic.'
+    Set-RasdValue -Document $Document -Item $managementAdapter -LocalName 'Connection' -Value $managementNetworkName
+
+    $serviceAdapter = $networkAdapters | Where-Object { (Get-RasdValue -Item $_ -LocalName 'Connection') -eq $serviceNetworkName } | Select-Object -First 1
+    if (-not $serviceAdapter) {
+        $serviceAdapter = $managementAdapter.CloneNode($true)
+        Remove-NamespacedChildElement -Parent $serviceAdapter -LocalName 'Address' -Namespace $rasdNamespace
+        [void]$HardwareSection.InsertAfter($serviceAdapter, $managementAdapter)
+    }
+
+    Set-RasdValue -Document $Document -Item $serviceAdapter -LocalName 'ElementName' -Value 'Network adapter 2'
+    Set-RasdValue -Document $Document -Item $serviceAdapter -LocalName 'Description' -Value 'VMXNET3 Ethernet adapter for LabFoundry service traffic.'
+    Set-RasdValue -Document $Document -Item $serviceAdapter -LocalName 'InstanceID' -Value "$(Get-NextRasdInstanceId -HardwareSection $HardwareSection -NamespaceManager $NamespaceManager)"
+    Set-RasdValue -Document $Document -Item $serviceAdapter -LocalName 'ResourceType' -Value '10'
+    Set-RasdValue -Document $Document -Item $serviceAdapter -LocalName 'ResourceSubType' -Value 'VmxNet3'
+    Set-RasdValue -Document $Document -Item $serviceAdapter -LocalName 'AutomaticAllocation' -Value 'true'
+    Set-RasdValue -Document $Document -Item $serviceAdapter -LocalName 'Connection' -Value $serviceNetworkName
+}
+
 function Get-OvfProperty {
     param(
         [System.Xml.XmlElement]$ProductSection,
@@ -215,6 +377,7 @@ function Add-LabFoundryOvfProperties {
     $hardware = $document.SelectSingleNode('//ovf:VirtualSystem/ovf:VirtualHardwareSection', $manager)
     if ($hardware) {
         Set-OvfAttribute -Document $document -Element $hardware -Name 'transport' -Value 'com.vmware.guestInfo'
+        Ensure-LabFoundryOvfNetworks -Document $document -VirtualSystem $virtualSystem -HardwareSection $hardware -NamespaceManager $manager
     }
 
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.cidr' -Label 'Management IP CIDR' -Description 'Static management address for eth0, for example 192.168.10.10/24.' -Required $true

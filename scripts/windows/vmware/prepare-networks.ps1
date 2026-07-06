@@ -4,9 +4,9 @@ param(
     [string]$ManagementNetwork = 'vmnet8',
     [string]$ManagementSubnet = '',
     [string]$BridgedInterfaceAlias = '',
-    [string]$SiteANetwork = 'vmnet2',
-    [string]$SiteBNetwork = 'vmnet3',
-    [string]$TrunkNetwork = 'vmnet4',
+    [string]$SiteANetwork = 'VMnet2',
+    [string]$SiteBNetwork = 'VMnet3',
+    [string]$TrunkNetwork = 'VMnet4',
     [switch]$ManagementOnly,
     [switch]$AllowExistingManagementSubnet,
     [switch]$PlanOnly

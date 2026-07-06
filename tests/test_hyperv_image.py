@@ -340,15 +340,20 @@ def test_create_labfoundry_test_vm_wrapper_is_safe_and_simple():
     assert "Run this script from an elevated PowerShell session." not in script
     assert "create-labfoundry-test-vm.ps1 -WaitForIp" in docs
     assert "pass `-Redeploy` to remove and recreate only that VM" in docs
-    assert "same appliance-side lab NIC layout as the lifecycle" in docs
-    assert "SiteA` on `LabFoundry-SiteA` as trunk VLAN 12" in docs
-    assert "`Trunk` on" in docs and "`LabFoundry-Trunk` as trunk VLAN 50" in docs
+    assert "first adapter management-only on `LabFoundry-Mgmt`" in docs
+    assert "`Services` on the dedicated `LabFoundry-Services` switch" in docs
+    assert "`SiteA` on" in docs and "`LabFoundry-SiteA` as trunk VLAN 12" in docs
+    assert "`Trunk` on `LabFoundry-Trunk` as trunk" in docs and "VLAN 50" in docs
     assert "WAN-Test` on `LabFoundry-SiteB` as" in docs
     assert "`/var/lib/labfoundry/users/<admin>` with `/usr/bin/pwsh`" in docs
     assert "`powershell` package" in docs
     assert "[switch]$SkipLabNetworkAdapters" in vm_script
     assert "[int]$SiteVlanId = 12" in vm_script
     assert "[int]$TaggedVlanId = 50" in vm_script
+    assert "[string]$ServiceSwitchName = 'LabFoundry-Services'" in vm_script
+    assert "Add-ServiceNetworkAdapter" in vm_script
+    assert "Add-VMNetworkAdapter -VMName $VMName -Name 'Services' -SwitchName $SwitchName" in vm_script
+    assert "Set-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName 'Services' -Untagged" in vm_script
     assert "Add-LabNetworkAdapters" in vm_script
     assert "Add-VMNetworkAdapter -VMName $VMName -Name 'SiteA' -SwitchName 'LabFoundry-SiteA'" in vm_script
     assert "Set-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName 'SiteA' -Trunk -AllowedVlanIdList \"$SiteTag\" -NativeVlanId 0" in vm_script
@@ -407,6 +412,8 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     vm_script = Path("scripts/windows/vmware/create-labfoundry-vm.ps1").read_text(encoding="utf-8")
     nics_script = Path("scripts/windows/vmware/set-test-nics.ps1").read_text(encoding="utf-8")
     build_script = Path("scripts/windows/vmware/build-photon-image.ps1").read_text(encoding="utf-8")
+    packer_template = Path("image/vmware-workstation/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
+    docs = Path("image/vmware-workstation/README.md").read_text(encoding="utf-8")
 
     assert "[string]$Name = 'LabFoundry-VMware'" in script
     assert "[switch]$Redeploy" in script
@@ -438,7 +445,15 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "vmxnet3" in nics_script
     assert "Join-Path $PSScriptRoot '..\\common\\LabFoundry.PhotonImage.psm1'" in build_script
     assert "Join-Path $PSScriptRoot '..\\..\\..\\image\\vmware-workstation'" in build_script
+    assert "[string]$ServiceVmnetName = 'VMnet2'" in build_script
+    assert "service_vmnet_name = $ServiceVmnetName" in build_script
+    assert "Using VMware services network $ServiceVmnetName" in build_script
     assert "prepare-networks.ps1" in build_script
+    assert 'variable "service_vmnet_name"' in packer_template
+    assert '"ethernet1.present"       = "TRUE"' in packer_template
+    assert '"ethernet1.vnet"          = var.service_vmnet_name' in packer_template
+    assert '"ethernet1.virtualDev"    = "vmxnet3"' in packer_template
+    assert "adds a second `vmxnet3` adapter on `-ServiceVmnetName`" in docs
 
 
 def test_lifecycle_hyperv_script_does_not_cleanup_without_explicit_flag():
@@ -481,11 +496,14 @@ def test_lifecycle_single_command_wrapper_prepares_runs_and_cleans_up_by_default
 
 
 def test_lifecycle_cleanup_scripts_are_scoped_to_labfoundry_assets():
+    switch_script = Path("scripts/windows/hyperv/create-switches.ps1").read_text(encoding="utf-8")
     network_script = Path("scripts/windows/hyperv/remove-lifecycle-networks.ps1").read_text(encoding="utf-8")
     vm_script = Path("scripts/windows/hyperv/remove-lifecycle-vms.ps1").read_text(encoding="utf-8")
 
+    assert "LabFoundry-Services" in switch_script
     assert "LabFoundry-Mgmt-NAT" in network_script
     assert "LabFoundry-Mgmt" in network_script
+    assert "LabFoundry-Services" in network_script
     assert "LabFoundry-SiteA" in network_script
     assert "Get-VMNetworkAdapter -All" in network_script
     assert "Refusing to remove switch" in network_script

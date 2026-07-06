@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 
 $switches = @(
     @{ Name = 'LabFoundry-Mgmt'; Type = 'Internal' },
+    @{ Name = 'LabFoundry-Services'; Type = 'Private' },
     @{ Name = 'LabFoundry-SiteA'; Type = 'Private' },
     @{ Name = 'LabFoundry-SiteB'; Type = 'Private' },
     @{ Name = 'LabFoundry-Trunk'; Type = 'Private' }

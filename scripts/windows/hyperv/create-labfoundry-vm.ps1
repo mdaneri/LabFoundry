@@ -10,6 +10,7 @@ param(
     [int64]$DepotDiskSizeBytes = 500GB,
     [int64]$BackupDiskSizeBytes = 500GB,
     [switch]$SkipLabNetworkAdapters,
+    [string]$ServiceSwitchName = 'LabFoundry-Services',
     [int]$SiteVlanId = 12,
     [int]$TaggedVlanId = 50
 )
@@ -57,6 +58,19 @@ function Ensure-DataDisk {
     }
 }
 
+function Add-ServiceNetworkAdapter {
+    param(
+        [string]$VMName,
+        [string]$SwitchName
+    )
+
+    if ($PSCmdlet.ShouldProcess("$VMName/Services", 'Add services NIC')) {
+        Add-VMNetworkAdapter -VMName $VMName -Name 'Services' -SwitchName $SwitchName
+        Set-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName 'Services' -Untagged
+        Write-Host "Attached Services NIC on $SwitchName as untagged"
+    }
+}
+
 function Add-LabNetworkAdapters {
     param(
         [string]$VMName,
@@ -94,6 +108,7 @@ if ($PSCmdlet.ShouldProcess($Name, 'Create LabFoundry Hyper-V VM')) {
     Add-VMHardDiskDrive -VMName $Name -ControllerType SCSI -Path $resolvedDepotVhdxPath
     Add-VMHardDiskDrive -VMName $Name -ControllerType SCSI -Path $resolvedBackupVhdxPath
     if (-not $SkipLabNetworkAdapters) {
+        Add-ServiceNetworkAdapter -VMName $Name -SwitchName $ServiceSwitchName
         Add-LabNetworkAdapters -VMName $Name -SiteTag $SiteVlanId -TaggedVlanTag $TaggedVlanId
     }
     Write-Host "Created VM: $Name"

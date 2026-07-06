@@ -14,7 +14,8 @@ param(
     [string]$SshHost = '',
     [string]$SharedSourceDirectory = '',
     [string]$VmrunPath = '',
-    [string]$VmnetName = 'vmnet8',
+    [string]$VmnetName = 'VMnet8',
+    [string]$ServiceVmnetName = 'VMnet1',
     [string]$BridgedInterfaceAlias = '',
     # Legacy fallbacks; normal builds replace these from the selected VMware vmnet unless explicitly passed.
     [string]$BuilderStaticIp = '192.168.167.30/24',
@@ -43,6 +44,18 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot '..\common\LabFoundry.PhotonImage.psm1') -Force
+
+function ConvertTo-WorkstationVmnetName {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$ParameterName
+    )
+
+    if ($Name -notmatch '^(?i)vmnet(\d+)$') {
+        throw "$ParameterName must be a VMware Workstation VMnet name such as VMnet1; got '$Name'."
+    }
+    return "VMnet$($Matches[1])"
+}
 
 function ConvertTo-Ipv4Integer {
     param([Parameter(Mandatory = $true)][string]$Address)
@@ -122,6 +135,7 @@ function Get-Ipv4AddressFromSubnetOffset {
 function Get-WorkstationManagementNetwork {
     param(
         [string]$NetworkName,
+        [string]$ServiceNetworkName,
         [string]$ResolvedVmrunPath,
         [string]$BridgedInterfaceAlias
     )
@@ -157,12 +171,23 @@ function Get-WorkstationManagementNetwork {
     if ([string]::IsNullOrWhiteSpace($management.Subnet) -or [string]::IsNullOrWhiteSpace($management.Mask)) {
         throw "Management VMware network $NetworkName did not report an IPv4 subnet and mask."
     }
+
+    if (-not [string]::IsNullOrWhiteSpace($ServiceNetworkName)) {
+        $serviceName = $ServiceNetworkName.ToLowerInvariant()
+        $service = $plan.discovered_networks | Where-Object { $_.Name -eq $serviceName } | Select-Object -First 1
+        if (-not $service) {
+            throw "Services VMware network was not found: $ServiceNetworkName. Create it in Virtual Network Editor, pass -ServiceVmnetName, or pass -SkipNetworkCheck."
+        }
+    }
     return $management
 }
 
 if ([string]::IsNullOrWhiteSpace($PackerDirectory)) {
     $PackerDirectory = Join-Path $PSScriptRoot '..\..\..\image\vmware-workstation'
 }
+
+$VmnetName = ConvertTo-WorkstationVmnetName -Name $VmnetName -ParameterName 'VmnetName'
+$ServiceVmnetName = ConvertTo-WorkstationVmnetName -Name $ServiceVmnetName -ParameterName 'ServiceVmnetName'
 
 $builderIpWasPassed = $PSBoundParameters.ContainsKey('BuilderStaticIp')
 $builderNetmaskWasPassed = $PSBoundParameters.ContainsKey('BuilderStaticNetmask')
@@ -171,7 +196,7 @@ $finalAddressWasPassed = $PSBoundParameters.ContainsKey('FinalMgmtAddress')
 $finalGatewayWasPassed = $PSBoundParameters.ContainsKey('FinalMgmtGateway')
 
 if (-not $SkipNetworkCheck) {
-    $management = Get-WorkstationManagementNetwork -NetworkName $VmnetName -ResolvedVmrunPath $VmrunPath -BridgedInterfaceAlias $BridgedInterfaceAlias
+    $management = Get-WorkstationManagementNetwork -NetworkName $VmnetName -ServiceNetworkName $ServiceVmnetName -ResolvedVmrunPath $VmrunPath -BridgedInterfaceAlias $BridgedInterfaceAlias
     $managementGateway = if ($management.PSObject.Properties['Gateway'] -and -not [string]::IsNullOrWhiteSpace($management.Gateway)) {
         $management.Gateway
     } else {
@@ -193,6 +218,7 @@ if (-not $SkipNetworkCheck) {
         $FinalMgmtGateway = $managementGateway
     }
     Write-Host "Using VMware management network $($management.Name) on $($management.Subnet)/$($management.Mask)."
+    Write-Host "Using VMware services network $ServiceVmnetName for the second appliance NIC."
     Write-Host "Photon builder SSH address: $BuilderStaticIp; final appliance management address: $FinalMgmtAddress."
 }
 
@@ -222,8 +248,9 @@ if (-not $ValidateOnly -and -not $PrepareIsoOnly -and -not $SkipNetworkCheck) {
 }
 
 $packerVariables = @{
-    vmnet_name = $VmnetName
-    headless   = [bool]$Headless
+    vmnet_name         = $VmnetName
+    service_vmnet_name = $ServiceVmnetName
+    headless           = [bool]$Headless
 }
 
 Invoke-LabFoundryPhotonImageBuild `

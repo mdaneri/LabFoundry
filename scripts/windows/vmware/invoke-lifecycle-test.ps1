@@ -32,17 +32,17 @@ param(
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
     [Parameter(ParameterSetName = 'PrepareNetworks')]
-    [string]$SiteANetwork = 'vmnet2',
+    [string]$SiteANetwork = 'VMnet2',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
     [Parameter(ParameterSetName = 'PrepareNetworks')]
-    [string]$SiteBNetwork = 'vmnet3',
+    [string]$SiteBNetwork = 'VMnet3',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
     [Parameter(ParameterSetName = 'PrepareNetworks')]
-    [string]$TrunkNetwork = 'vmnet4',
+    [string]$TrunkNetwork = 'VMnet4',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]

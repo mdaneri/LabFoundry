@@ -487,6 +487,7 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/windows/hyperv/create-switc
 The scaffold uses these switch names:
 
 - `LabFoundry-Mgmt`
+- `LabFoundry-Services`
 - `LabFoundry-SiteA`
 - `LabFoundry-SiteB`
 - `LabFoundry-Trunk`
@@ -597,7 +598,7 @@ powershell.exe -ExecutionPolicy Bypass `
   -WaitForIp
 ```
 
-Pass `-IncludeLabNetworkAdapters` only after `vmnet2`, `vmnet3`, and `vmnet4`
+Pass `-IncludeLabNetworkAdapters` only after `VMnet2`, `VMnet3`, and `VMnet4`
 exist for the SiteA, WAN/SiteB, and trunk-like validation networks.
 
 Discover the running Workstation appliance address with:

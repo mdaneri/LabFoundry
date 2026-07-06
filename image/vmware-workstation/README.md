@@ -48,15 +48,20 @@ powershell.exe -ExecutionPolicy Bypass `
   -EnableRealSystemAdapters
 ```
 
+The built VMX keeps the first adapter on `-VmnetName` as management-only and
+adds a second `vmxnet3` adapter on `-ServiceVmnetName` for service traffic. The
+service network defaults to `VMnet2`.
+
 ## Networking
 
 The default Workstation builder and lifecycle scripts expect:
 
 - management: `vmnet8`, with the LabFoundry appliance address derived from the
   selected vmnet subnet by default
-- SiteA: `vmnet2`
-- WAN/SiteB: `vmnet3`
-- trunk-like validation segment: `vmnet4`
+- services: `VMnet2`
+- SiteA: `VMnet2`
+- WAN/SiteB: `VMnet3`
+- trunk-like validation segment: `VMnet4`
 
 Validate the current Workstation network inventory with:
 
@@ -76,6 +81,8 @@ builder SSH address, `.10` for the final appliance management address, and the
 VMware/host gateway for routing. Pass `-BuilderStaticIp`,
 `-BuilderStaticGateway`, `-FinalMgmtAddress`, and `-FinalMgmtGateway` together
 only when a different address plan is intentional.
+Pass `-ServiceVmnetName` only when the second appliance NIC should attach to a
+different Workstation network.
 
 Create or adjust missing lifecycle vmnets in VMware Virtual Network Editor. The
 scripts intentionally do not rewrite global Workstation vmnet configuration
@@ -94,9 +101,14 @@ powershell.exe -ExecutionPolicy Bypass `
   -Force
 ```
 
-The export script runs OVF Tool, adds LabFoundry vApp properties to the OVF
-descriptor, regenerates the manifest, and packages the folder as an OVA unless
-`-NoOva` is passed. The OVF properties are intended for vSphere/ESXi import:
+The export script runs OVF Tool, adds LabFoundry vApp properties and appliance
+network mappings to the OVF descriptor, regenerates the manifest, and packages
+the folder as an OVA unless `-NoOva` is passed. The descriptor exposes two
+network mappings for vSphere/ESXi import: `LabFoundry Management Network` for
+the first adapter, which remains management-only as `eth0`, and
+`LabFoundry Services Network` for the second adapter used by DNS, DHCP, CA,
+depot, PXE, KMS, and other LabFoundry-managed services. The OVF properties are
+intended for vSphere/ESXi import:
 
 | Property | Required | Description |
 | --- | --- | --- |
@@ -145,7 +157,7 @@ powershell.exe -ExecutionPolicy Bypass `
 
 The wrapper creates fresh Depot and Backups data VMDKs when needed, and
 `-ResetDataDisks` removes those data VMDKs before recreating them. Pass
-`-IncludeLabNetworkAdapters` only after `vmnet2`, `vmnet3`, and `vmnet4` exist
+`-IncludeLabNetworkAdapters` only after `VMnet2`, `VMnet3`, and `VMnet4` exist
 for the SiteA, WAN/SiteB, and trunk-like lifecycle networks.
 On first boot, `labfoundry-data-disks.service` formats blank attached data
 VMDKs, labels them as `LABFOUNDRY_DEPOT` and `LABFOUNDRY_BKUP`, writes

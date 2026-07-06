@@ -21,8 +21,14 @@ variable "output_directory" {
 
 variable "vmnet_name" {
   type        = string
-  default     = "vmnet8"
+  default     = "VMnet8"
   description = "VMware Workstation network used by the Packer builder NIC."
+}
+
+variable "service_vmnet_name" {
+  type        = string
+  default     = "VMnet1"
+  description = "VMware Workstation network attached as the appliance service NIC after the management NIC."
 }
 
 variable "headless" {
@@ -169,6 +175,12 @@ source "vmware-iso" "photon" {
   vmx_data = {
     "firmware"                = "efi"
     "uefi.secureBoot.enabled" = "FALSE"
+    "ethernet1.present"       = "TRUE"
+    "ethernet1.connectionType" = "custom"
+    "ethernet1.vnet"          = var.service_vmnet_name
+    "ethernet1.virtualDev"    = "vmxnet3"
+    "ethernet1.addressType"   = "generated"
+    "ethernet1.startConnected" = "TRUE"
   }
 }
 

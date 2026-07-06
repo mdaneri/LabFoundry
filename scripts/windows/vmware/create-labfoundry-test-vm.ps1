@@ -5,9 +5,9 @@ param(
     [string]$OutputDirectory = '',
     [string]$VmrunPath = '',
     [string]$ManagementNetwork = 'vmnet8',
-    [string]$SiteANetwork = 'vmnet2',
-    [string]$SiteBNetwork = 'vmnet3',
-    [string]$TrunkNetwork = 'vmnet4',
+    [string]$SiteANetwork = 'VMnet2',
+    [string]$SiteBNetwork = 'VMnet3',
+    [string]$TrunkNetwork = 'VMnet4',
     [string]$VdiskManagerPath = '',
     [string]$DepotVmdkPath = '',
     [string]$BackupVmdkPath = '',
@@ -87,7 +87,7 @@ if (-not $SkipNetworkPrepare) {
         -TrunkNetwork $TrunkNetwork `
         -ManagementOnly:$effectiveSkipLabNetworkAdapters
     if (-not $?) {
-        throw "VMware Workstation network validation failed. Plain test VM creation uses management only by default; pass -IncludeLabNetworkAdapters only after vmnet2, vmnet3, and vmnet4 exist."
+        throw "VMware Workstation network validation failed. Plain test VM creation uses management only by default; pass -IncludeLabNetworkAdapters only after VMnet2, VMnet3, and VMnet4 exist."
     }
 }
 

@@ -120,8 +120,9 @@ and reboot to finish. Provisioning removes the temporary sudoers entry before
 the image is finalized.
 
 Use `-var "switch_name=<switch>"` only if the replacement switch has a host
-adapter IP and internet access. The LabFoundry private site/trunk switches are
-intended for the finished appliance VM, not for the Packer installer VM.
+adapter IP and internet access. The LabFoundry private service/site/trunk
+switches are intended for the finished appliance VM, not for the Packer
+installer VM.
 
 Packer logs a line like `Host IP for the HyperV machine: 192.168.49.254`. That
 is the Windows host-side `LabFoundry-Mgmt` address used for the kickstart HTTP
@@ -368,11 +369,13 @@ prints the management IP when `-WaitForIp` is used. If `LabFoundry` already
 exists, pass `-Redeploy` to remove and recreate only that VM, or pass `-Name`
 to create a separate test VM.
 
-The sample VM uses the same appliance-side lab NIC layout as the lifecycle
-interop test: the first adapter is management on `LabFoundry-Mgmt`, then
-`SiteA` on `LabFoundry-SiteA` as trunk VLAN 12, `Trunk` on
-`LabFoundry-Trunk` as trunk VLAN 50, and `WAN-Test` on `LabFoundry-SiteB` as
-untagged WAN test traffic. Pass `-SkipLabNetworkAdapters` only when you need a
+The sample VM keeps the first adapter management-only on `LabFoundry-Mgmt`.
+The second adapter is `Services` on the dedicated `LabFoundry-Services` switch
+as untagged service traffic for DNS, DHCP, CA, depot, PXE, KMS, and other
+LabFoundry-managed services. The wrapper also adds `SiteA` on
+`LabFoundry-SiteA` as trunk VLAN 12, `Trunk` on `LabFoundry-Trunk` as trunk
+VLAN 50, and `WAN-Test` on `LabFoundry-SiteB` as untagged WAN test traffic.
+Pass `-SkipLabNetworkAdapters` only when you intentionally need a
 management-only VM.
 
 For a clean appliance data start, also pass `-ResetDataDisks`. The wrapper
