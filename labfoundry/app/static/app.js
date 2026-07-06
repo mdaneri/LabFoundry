@@ -2507,7 +2507,7 @@ function initializeServicesTable() {
           hozAlign: "center",
         },
         {
-          title: "Enabled",
+          title: "Startup",
           field: "enabled",
           formatter: "tickCross",
           editor: "tickCross",

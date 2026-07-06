@@ -250,6 +250,21 @@ def service_state_response(row: ServiceState, db: Session | None = None) -> Serv
         "health": row.health,
         "detail": row.detail,
     }
+    if row.service in {"dns", "dhcp"} and db is not None:
+        if row.service == "dns":
+            data["enabled"] = get_dns_settings_row(db).enabled
+        else:
+            data["enabled"] = get_dhcp_settings_row(db).enabled
+        active = backing_systemd_unit_active("dnsmasq.service")
+        if active is not None:
+            data["running"] = active
+        if data["running"] and data["enabled"]:
+            data["health"] = "healthy"
+        elif data["running"] or data["enabled"]:
+            data["health"] = "degraded"
+        else:
+            data["health"] = "disabled"
+        return ServiceStateResponse(**data)
     if row.service == "esxi-pxe" and db is not None:
         data.update(esxi_pxe_service_state_from_boot(esxi_pxe_boot_settings(db)))
         data["detail"] = "dnsmasq TFTP/DHCP boot options and PXE HTTP files"

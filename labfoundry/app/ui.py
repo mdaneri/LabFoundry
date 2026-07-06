@@ -10357,6 +10357,17 @@ def service_state_to_grid_row(service: ServiceState) -> dict[str, object]:
     return row
 
 
+def dnsmasq_backed_service_grid_row(service: ServiceState, enabled: bool) -> dict[str, object]:
+    row = service_state_to_grid_row(service)
+    if not get_settings().dry_run_system_adapters:
+        active = backing_systemd_unit_active("dnsmasq.service")
+        if active is not None:
+            row["running"] = active
+    row["enabled"] = enabled
+    row.pop("health", None)
+    return row
+
+
 def esxi_pxe_service_grid_row(service: ServiceState, db: Session) -> dict[str, object]:
     row = service_state_to_grid_row(service)
     row.update(esxi_pxe_service_state_from_boot(esxi_pxe_boot_settings(db)))
@@ -10391,20 +10402,27 @@ def vcf_depot_service_grid_row(service: ServiceState, db: Session) -> dict[str, 
     return row
 
 
+def service_grid_row(service: ServiceState, db: Session, dns_enabled: bool, dhcp_enabled: bool) -> dict[str, object]:
+    if service.service == "dns":
+        return dnsmasq_backed_service_grid_row(service, dns_enabled)
+    if service.service == "dhcp":
+        return dnsmasq_backed_service_grid_row(service, dhcp_enabled)
+    if service.service == "esxi-pxe":
+        return esxi_pxe_service_grid_row(service, db)
+    if service.service == "ca":
+        return ca_service_grid_row(service, db)
+    if service.service == "vcf-backups":
+        return vcf_backup_service_grid_row(service, db)
+    if service.service == "repository":
+        return vcf_depot_service_grid_row(service, db)
+    return service_state_to_grid_row(service)
+
+
 def services_template_context(db: Session) -> dict[str, object]:
+    dns_settings = get_dns_settings_row(db)
+    dhcp_settings = get_dhcp_settings_row(db)
     rows = db.execute(select(ServiceState).where(ServiceState.service.in_(SERVICE_STATE_IDS)).order_by(ServiceState.display_name)).scalars().all()
-    service_rows = [
-        esxi_pxe_service_grid_row(row, db)
-        if row.service == "esxi-pxe"
-        else ca_service_grid_row(row, db)
-        if row.service == "ca"
-        else vcf_backup_service_grid_row(row, db)
-        if row.service == "vcf-backups"
-        else vcf_depot_service_grid_row(row, db)
-        if row.service == "repository"
-        else service_state_to_grid_row(row)
-        for row in rows
-    ]
+    service_rows = [service_grid_row(row, db, dns_settings.enabled, dhcp_settings.enabled) for row in rows]
     system_adapter_dry_run = get_settings().dry_run_system_adapters
     return {
         "services": service_rows,

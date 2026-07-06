@@ -7004,7 +7004,7 @@ def test_services_ui_records_dry_run_action(client):
     assert "serviceHealthFormatter" not in js.text
     assert "openServiceActionMenu" not in js.text
     assert "serviceActionsFormatter" not in js.text
-    assert 'title: "Enabled"' in js.text
+    assert 'title: "Startup"' in js.text
     assert 'editor: "tickCross"' in js.text
     assert 'service-state muted">disabled' in js.text
     css = client.get("/static/app.css")
@@ -7168,6 +7168,96 @@ def test_services_and_service_pages_derive_composite_runtime_status(client, monk
     assert client.get("/api/v1/services/ca", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
     assert client.get("/api/v1/services/repository", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
     assert client.get("/api/v1/services/vcf-backups", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+
+
+def test_services_dns_dhcp_rows_use_desired_enabled_state(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpSettings, DnsSettings, ServiceState
+
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp_settings.enabled = True
+        for service_name in ("dns", "dhcp"):
+            service = db.execute(select(ServiceState).where(ServiceState.service == service_name)).scalar_one()
+            service.running = False
+            service.enabled = False
+            service.health = "disabled"
+        db.commit()
+
+    login(client)
+    page = client.get("/services")
+    assert page.status_code == 200
+    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    dns_row = next(row for row in service_rows if row["service"] == "dns")
+    dhcp_row = next(row for row in service_rows if row["service"] == "dhcp")
+    assert dns_row["enabled"] is True
+    assert dhcp_row["enabled"] is True
+    assert dns_row["running"] is False
+    assert dhcp_row["running"] is False
+
+    token = create_api_token(client, ["read:services"])
+    assert client.get("/api/v1/services/dns", headers={"Authorization": f"Bearer {token}"}).json()["enabled"] is True
+    assert client.get("/api/v1/services/dhcp", headers={"Authorization": f"Bearer {token}"}).json()["enabled"] is True
+
+
+def test_services_live_dns_dhcp_runtime_uses_dnsmasq_systemd(client, monkeypatch):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpSettings, DnsSettings, ServiceState
+
+    def fake_service_status(self, unit: str):
+        active = "active" if unit == "dnsmasq.service" else "inactive"
+        enabled = "enabled" if unit == "dnsmasq.service" else "disabled"
+        return AdapterResult(
+            command=["systemctl", "is-active", unit, "&&", "systemctl", "is-enabled", unit],
+            dry_run=False,
+            stdout=json.dumps({"active": active, "enabled": enabled}),
+        )
+
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.service_status", fake_service_status)
+    monkeypatch.setattr("labfoundry.app.api.v1.SystemAdapter.service_status", fake_service_status)
+
+    with SessionLocal() as db:
+        dns_settings = db.execute(select(DnsSettings)).scalar_one()
+        dns_settings.enabled = True
+        dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
+        dhcp_settings.enabled = True
+        for service_name in ("dns", "dhcp"):
+            service = db.execute(select(ServiceState).where(ServiceState.service == service_name)).scalar_one()
+            service.running = False
+            service.enabled = False
+            service.health = "disabled"
+        db.commit()
+
+    login(client)
+    page = client.get("/services")
+    assert page.status_code == 200
+    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    dns_row = next(row for row in service_rows if row["service"] == "dns")
+    dhcp_row = next(row for row in service_rows if row["service"] == "dhcp")
+    assert dns_row["running"] is True
+    assert dns_row["enabled"] is True
+    assert dhcp_row["running"] is True
+    assert dhcp_row["enabled"] is True
+
+    token = create_api_token(client, ["read:services"])
+    assert client.get("/api/v1/services/dns", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+    assert client.get("/api/v1/services/dhcp", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
 
 
 def test_services_live_chrony_status_uses_systemd(client, monkeypatch):
