@@ -1007,23 +1007,22 @@ function dhcpScopeCellEditable(cell, existingNames) {
 }
 
 function newDhcpScopeRow(defaultInterface = "eth2", defaults = {}) {
-  const row = {
+  return {
     id: "__new__",
     name: "",
-    address_family: "ipv4",
-    interface_name: defaultInterface,
+    address_family: "",
+    interface_name: "",
     site_address: "",
-    prefix_length: 24,
+    prefix_length: "",
     range_expression: "",
-    lease_time: "12h",
-    domain_name: "labfoundry.internal",
+    lease_time: "",
+    domain_name: "",
     dns_server: "",
     ntp_server: "",
     enabled: true,
     description: "",
     is_new: true,
   };
-  return applyDhcpScopeInterfaceDefaults(row, defaults);
 }
 
 function newDhcpOptionRow() {
@@ -5033,6 +5032,17 @@ function initializeDhcpScopesTable() {
     const row = cell.getRow();
     const data = row.getData();
     if (data.is_new) {
+      if (cell.getField() === "name" && isUniqueNewDhcpScopeName(data, existingScopeNames)) {
+        if (!data.address_family) {
+          data.address_family = "ipv4";
+        }
+        if (!data.interface_name) {
+          data.interface_name = defaultInterface;
+        }
+        if (!data.lease_time) {
+          data.lease_time = "12h";
+        }
+      }
       if (["name", "interface_name", "address_family"].includes(cell.getField())) {
         const updated = applyDhcpScopeInterfaceDefaults(data, scopeDefaults, { overwrite: cell.getField() !== "name" });
         row.update(updated);
@@ -5072,7 +5082,13 @@ function initializeDhcpScopesTable() {
           editor: "list",
           editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" } },
-          formatter: (cell) => (cell.getValue() === "ipv6" ? "IPv6" : "IPv4"),
+          formatter: (cell) => {
+            const value = cell.getValue();
+            if (cell.getRow().getData().is_new && !value) {
+              return "";
+            }
+            return value === "ipv6" ? "IPv6" : "IPv4";
+          },
           width: 100,
           cellEdited: handleDhcpScopeEdited,
         },
@@ -5108,6 +5124,9 @@ function initializeDhcpScopesTable() {
           editor: "input",
           editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           formatter: dhcpRangeFormatter,
+          cellMouseEnter: (event, cell) => showDhcpRangeTooltip(event, cell.getRow().getData()),
+          cellMouseMove: moveDhcpRangeTooltip,
+          cellMouseLeave: hideDhcpRangeTooltip,
           minWidth: 240,
           cellEdited: handleDhcpScopeEdited,
         },
