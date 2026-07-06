@@ -521,6 +521,9 @@ function dhcpRangeFormatter(cell) {
     if (!String(data.name ?? "").trim()) {
       return "";
     }
+    if (data.address_family === "ipv6") {
+      return "";
+    }
     return dnsAddRowHintFormatter(cell, "192.168.87.100-200, 192.168.87.222");
   }
   const element = document.createElement("span");

@@ -3253,6 +3253,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "dhcpRangeFormatter" in app_js.text
     assert "dhcpRangeTooltipRows" in app_js.text
     assert "if (!String(data.name ?? \"\").trim())" in app_js.text
+    assert 'if (data.address_family === "ipv6")' in app_js.text
     assert 'address_family: ""' in app_js.text
     assert 'interface_name: ""' in app_js.text
     assert 'lease_time: ""' in app_js.text
