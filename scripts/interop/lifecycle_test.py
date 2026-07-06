@@ -17,12 +17,13 @@ import re
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from ipaddress import ip_interface
+from ipaddress import ip_address, ip_interface
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--client-ca-request-url", default="")
     parser.add_argument("--pxe-test-mode", choices=["linux", "esxi"], default="linux")
     parser.add_argument("--pxe-client-mac", default="")
+    parser.add_argument("--pxe-client-ip", default="")
     parser.add_argument("--pxe-installer-iso-path", default="")
     parser.add_argument("--ssh-user", default="", help="Compatibility override for both appliance and client SSH users.")
     parser.add_argument("--appliance-ssh-user", default="admin")
@@ -134,6 +136,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--restore-settings-backup", default="", help="Restore a settings backup archive before running restored-state checks.")
     parser.add_argument("--certificate-baseline-result", default="", help="Compare restored CA certificate evidence with a previous lifecycle result.json.")
     parser.add_argument("--restored-state-run", action="store_true", help="Run restored-state checks instead of configuring desired state from scratch.")
+    parser.add_argument("--routing-wan-only", action="store_true", help="Run only network, routing, NAT, WAN, and client forwarding checks.")
     parser.add_argument("--plan-only", action="store_true", help="Write the intended lifecycle plan without changing the appliance.")
     return parser.parse_args(argv)
 
@@ -151,6 +154,11 @@ class HttpClient:
         )
         self.bearer_token = ""
 
+    def remember_base_url(self, url: str) -> None:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            self.base_url = f"{parsed.scheme}://{parsed.netloc}"
+
     def request_bytes(
         self,
         method: str,
@@ -161,6 +169,7 @@ class HttpClient:
         body: bytes | None = None,
         headers: dict[str, str] | None = None,
         follow_redirects: bool = True,
+        timeout: int = 30,
     ) -> tuple[int, bytes, dict[str, str]]:
         url = f"{self.base_url}{path}"
         request_headers = dict(headers or {})
@@ -172,13 +181,39 @@ class HttpClient:
         elif form is not None:
             body = urllib.parse.urlencode(form, doseq=True).encode("utf-8")
             request_headers["Content-Type"] = "application/x-www-form-urlencoded"
-        request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
-        opener = self.opener if follow_redirects else no_redirect_opener(self.cookie_jar, self.https_context)
-        try:
-            with opener.open(request, timeout=30) as response:
-                return response.status, response.read(), dict(response.headers.items())
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read(), dict(exc.headers.items())
+        current_method = method
+        current_body = body
+        current_headers = dict(request_headers)
+        opener = no_redirect_opener(self.cookie_jar, self.https_context)
+        for _attempt in range(6):
+            request = urllib.request.Request(url, data=current_body, headers=current_headers, method=current_method)
+            try:
+                with opener.open(request, timeout=timeout) as response:
+                    status = response.status
+                    response_body = response.read()
+                    response_headers = dict(response.headers.items())
+                    final_url = response.geturl()
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                response_body = exc.read()
+                response_headers = dict(exc.headers.items())
+                final_url = exc.geturl()
+            self.remember_base_url(final_url)
+            location = next((value for key, value in response_headers.items() if key.lower() == "location"), "")
+            if follow_redirects and status in {301, 302, 303, 307, 308} and location:
+                url = urllib.parse.urljoin(final_url, location)
+                self.remember_base_url(url)
+                if status in {301, 302, 303} and current_method.upper() not in {"GET", "HEAD"}:
+                    current_method = "GET"
+                    current_body = None
+                    current_headers = {
+                        key: value
+                        for key, value in current_headers.items()
+                        if key.lower() not in {"content-type", "content-length"}
+                    }
+                continue
+            return status, response_body, response_headers
+        raise LifecycleError(f"{method} {path} exceeded redirect limit")
 
     def request(
         self,
@@ -189,6 +224,7 @@ class HttpClient:
         form: dict[str, Any] | list[tuple[str, Any]] | None = None,
         headers: dict[str, str] | None = None,
         follow_redirects: bool = True,
+        timeout: int = 30,
     ) -> tuple[int, str, dict[str, str]]:
         status, body, response_headers = self.request_bytes(
             method,
@@ -197,6 +233,7 @@ class HttpClient:
             form=form,
             headers=headers,
             follow_redirects=follow_redirects,
+            timeout=timeout,
         )
         return status, body.decode("utf-8", errors="replace"), response_headers
 
@@ -395,6 +432,31 @@ def require_success(result: dict[str, Any], label: str) -> None:
         raise LifecycleError(f"{label} failed with exit {result['returncode']}: {' '.join(details) or 'no output'}")
 
 
+def ssh_until_success(
+    host: str,
+    args: argparse.Namespace,
+    command: str,
+    *,
+    role: str,
+    label: str,
+    timeout_seconds: int = 60,
+    interval_seconds: int = 5,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    attempts = 0
+    last_result: dict[str, Any] | None = None
+    while True:
+        attempts += 1
+        last_result = ssh_command(host, args, command, role=role)
+        if last_result["returncode"] == 0:
+            last_result["attempts"] = attempts
+            return last_result
+        if time.monotonic() >= deadline:
+            last_result["attempts"] = attempts
+            require_success(last_result, label)
+        time.sleep(interval_seconds)
+
+
 def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
     vlan_name = f"{args.trunk_interface}.{args.vlan_id}"
     return {
@@ -415,6 +477,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "enabled": bool(args.pxe_client_mac),
             "mode": args.pxe_test_mode,
             "client_mac": args.pxe_client_mac,
+            "client_ip": pxe_client_ip(args) if args.pxe_client_mac else "",
             "installer_iso_path": args.pxe_installer_iso_path if args.pxe_test_mode == "esxi" else "",
         },
         "checks": [
@@ -429,6 +492,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "client DNS/DHCP/routing probes",
         ],
         "client_checks_enabled": not args.skip_client_checks,
+        "routing_wan_only": bool(args.routing_wan_only),
         "settings_backup_export": bool(args.export_settings_backup),
         "settings_backup_restore": bool(args.restore_settings_backup),
         "certificate_baseline_check": bool(args.certificate_baseline_result),
@@ -457,6 +521,13 @@ def ui_login(client: HttpClient, args: argparse.Namespace) -> str:
     if status not in {303, 302}:
         raise LifecycleError(f"UI login failed with HTTP {status}: {body[:500]}")
     return csrf
+
+
+def authenticated_ui_client(client: HttpClient, args: argparse.Namespace) -> HttpClient:
+    fresh_client = HttpClient(client.base_url)
+    api_login(fresh_client, args)
+    ui_login(fresh_client, args)
+    return fresh_client
 
 
 def configure_network(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
@@ -491,14 +562,14 @@ def configure_network(client: HttpClient, args: argparse.Namespace) -> dict[str,
     client.json_request(
         "PATCH",
         f"/api/v1/interfaces/physical/{args.wan_interface}",
-        json_body={"admin_state": "up", "mode": "access", "role": "wan", "ip_cidr": args.wan_cidr},
+        json_body={"admin_state": "up", "mode": "access", "role": "route", "ip_cidr": args.wan_cidr},
     )
     evidence["vlan"] = ensure_vlan(
         client,
         parent_interface=args.trunk_interface,
         vlan_id=args.vlan_id,
         ip_cidr=args.vlan_cidr,
-        role="access",
+        role="route",
     )
     return evidence
 
@@ -603,6 +674,18 @@ def configure_esxi_pxe(client: HttpClient, args: argparse.Namespace) -> dict[str
 
     site_ip = str(ip_interface(args.site_cidr).ip)
     hostname = f"esxi-pxe.{args.domain}".strip(".").lower()
+    scopes = client.json_request("GET", "/api/v1/dhcp/scopes")
+    site_scope = next(
+        (
+            row
+            for row in scopes
+            if row.get("name") == "Lifecycle SiteA"
+            or (row.get("interface_name") == args.site_interface and row.get("site_address") == site_ip)
+        ),
+        None,
+    )
+    if not site_scope or not site_scope.get("id"):
+        raise LifecycleError("ESXi PXE setup requires the Lifecycle SiteA DHCP scope to exist before PXE boot settings are saved.")
     status, body, _headers = client.request("GET", "/esxi-pxe")
     if status >= 400:
         raise LifecycleError(f"GET /esxi-pxe failed with HTTP {status}")
@@ -610,6 +693,8 @@ def configure_esxi_pxe(client: HttpClient, args: argparse.Namespace) -> dict[str
     form: list[tuple[str, Any]] = [
         ("enabled", "on"),
         ("hostname", hostname),
+        ("dhcp_scope_id", str(site_scope["id"])),
+        ("dhcp_scope_ids", str(site_scope["id"])),
         ("listen_interfaces_present", "1"),
         ("listen_interfaces", args.site_interface),
         ("listen_addresses_present", "1"),
@@ -631,14 +716,23 @@ def configure_esxi_pxe(client: HttpClient, args: argparse.Namespace) -> dict[str
     if status >= 400:
         raise LifecycleError(f"ESXi PXE boot settings update failed with HTTP {status}: {response_body[:500]}")
     settings_payload = json.loads(response_body)
-    if not settings_payload.get("valid"):
+    if settings_payload.get("validation_errors"):
         raise LifecycleError(f"ESXi PXE desired state is invalid: {settings_payload.get('validation_errors')}")
+
+    kickstart_id = None
+    if args.pxe_test_mode == "esxi":
+        if not args.pxe_installer_iso_path:
+            raise LifecycleError("--pxe-installer-iso-path is required when --pxe-test-mode esxi is used.")
+        kickstart = ensure_lifecycle_esxi_kickstart(client)
+        kickstart_id = kickstart["id"]
 
     host_payload = {
         "hostname": f"pxe-client.{args.domain}",
         "mac_address": args.pxe_client_mac.strip().lower(),
-        "kickstart_id": None,
+        "ip_address": pxe_client_ip(args) if args.pxe_test_mode == "esxi" else "",
+        "kickstart_id": kickstart_id,
         "installer_iso_path": args.pxe_installer_iso_path if args.pxe_test_mode == "esxi" else "",
+        "variables": {},
         "enabled": True,
     }
     existing_hosts = client.json_request("GET", "/api/v1/esxi-pxe/hosts")
@@ -648,29 +742,79 @@ def configure_esxi_pxe(client: HttpClient, args: argparse.Namespace) -> dict[str
     else:
         host = client.json_request("POST", "/api/v1/esxi-pxe/hosts", json_body=host_payload)
 
+    reservations = client.json_request("GET", "/api/v1/dhcp/reservations")
+    reservation = next(
+        (
+            row
+            for row in reservations
+            if str(row.get("mac_address", "")).lower() == host_payload["mac_address"]
+            and str(row.get("ip_address", "")) == host_payload["ip_address"]
+            and row.get("enabled") is True
+        ),
+        None,
+    )
+    if args.pxe_test_mode == "esxi" and not reservation:
+        raise LifecycleError(
+            f"ESXi PXE host {host_payload['mac_address']} did not create an enabled DHCP reservation for {host_payload['ip_address']}."
+        )
+
     return {
         "enabled": True,
         "mode": args.pxe_test_mode,
         "hostname": hostname,
+        "dhcp_scope_id": site_scope["id"],
+        "dhcp_scope_name": site_scope.get("name"),
         "listen_interface": args.site_interface,
         "listen_address": site_ip,
         "client_mac": host_payload["mac_address"],
+        "client_ip": host_payload["ip_address"],
+        "kickstart_id": kickstart_id,
         "installer_iso_path": host_payload["installer_iso_path"],
         "host_id": host.get("id"),
+        "dhcp_reservation_id": reservation.get("id") if reservation else None,
         "dns_record_action": settings_payload.get("dns_record_action"),
     }
 
 
-def configure_firewall_wan(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
-    site_source = str(ip_interface(args.site_cidr).network)
-    wan_network = str(ip_interface(args.wan_cidr).network)
-    client.json_request(
+def lifecycle_esxi_kickstart_content() -> str:
+    return """#
+# LabFoundry lifecycle ESXi scripted install.
+vmaccepteula
+rootpw vmware01!
+install --firstdisk --overwritevmfs
+network --bootproto=dhcp --device=vmnic0 --hostname=pxe-client.labfoundry.internal
+reboot
+
+%firstboot --interpreter=busybox
+vim-cmd hostsvc/enable_ssh
+vim-cmd hostsvc/start_ssh
+esxcli network firewall ruleset set -e true -r sshServer
+"""
+
+
+def ensure_lifecycle_esxi_kickstart(client: HttpClient) -> dict[str, Any]:
+    name = "Lifecycle ESXi install"
+    payload = {
+        "name": name,
+        "description": "Created by the LabFoundry lifecycle ESXi PXE install check.",
+        "content": lifecycle_esxi_kickstart_content(),
+        "enabled": True,
+    }
+    kickstarts = client.json_request("GET", "/api/v1/esxi-pxe/kickstarts")
+    existing = next((row for row in kickstarts if row.get("name") == name), None)
+    if existing:
+        return client.json_request("PUT", f"/api/v1/esxi-pxe/kickstarts/{existing['id']}", json_body=payload)
+    return client.json_request("POST", "/api/v1/esxi-pxe/kickstarts", json_body=payload)
+
+
+def configure_firewall(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    return client.json_request(
         "PATCH",
         "/api/v1/firewall/settings",
         json_body={
             "enabled": True,
             "default_input_policy": "drop",
-            "default_forward_policy": "accept",
+            "default_forward_policy": "drop",
             "default_output_policy": "accept",
             "allow_established": True,
             "allow_loopback": True,
@@ -678,13 +822,21 @@ def configure_firewall_wan(client: HttpClient, args: argparse.Namespace) -> dict
             "log_dropped": False,
         },
     )
+
+
+def configure_wan_policy(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
     policies = client.json_request("GET", "/api/v1/wan/policies")
     policy_payload = wan_policy_payload(packet_loss_percent=0.0)
     existing_policy = next((row for row in policies if row.get("name") == policy_payload["name"]), None)
     if existing_policy:
-        policy = client.json_request("PATCH", f"/api/v1/wan/policies/{existing_policy['id']}", json_body=policy_payload)
-    else:
-        policy = client.json_request("POST", "/api/v1/wan/policies", json_body=policy_payload)
+        return client.json_request("PATCH", f"/api/v1/wan/policies/{existing_policy['id']}", json_body=policy_payload)
+    return client.json_request("POST", "/api/v1/wan/policies", json_body=policy_payload)
+
+
+def configure_routes_nat(client: HttpClient, args: argparse.Namespace, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    site_source = str(ip_interface(args.site_cidr).network)
+    wan_network = str(ip_interface(args.wan_cidr).network)
+    policy = policy or configure_wan_policy(client, args)
     route_payload = {
         "destination_cidr": wan_network,
         "gateway": None,
@@ -723,7 +875,47 @@ def configure_firewall_wan(client: HttpClient, args: argparse.Namespace) -> dict
         nat = client.json_request("PATCH", f"/api/v1/nat/rules/{existing_nat['id']}", json_body=nat_payload)
     else:
         nat = client.json_request("POST", "/api/v1/nat/rules", json_body=nat_payload)
-    return {"wan_policy": policy, "route": route, "nat": nat}
+    return {"route": route, "nat": nat}
+
+
+def routing_rule_form_payload(args: argparse.Namespace) -> dict[str, str]:
+    return {
+        "name": "Lifecycle SiteA to WAN",
+        "source_interface": args.site_interface,
+        "destination_interface": args.wan_interface,
+        "priority": "100",
+        "description": "Lifecycle explicit access-network routing permission.",
+        "enabled": "on",
+    }
+
+
+def configure_routing_permissions(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    status, body, _headers = client.request("GET", "/routes-wan")
+    if status >= 400:
+        raise LifecycleError(f"GET /routes-wan failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    payload = routing_rule_form_payload(args)
+    status, response_body, headers = client.request(
+        "POST",
+        "/routes-wan/routing-rules",
+        form={**payload, "csrf": csrf},
+        follow_redirects=False,
+    )
+    if status in {302, 303}:
+        return {"created_or_updated": True, "routing_rule": payload, "location": headers.get("Location", "")}
+    if status == 409 or "already exists" in response_body.lower():
+        return {"created_or_updated": False, "routing_rule": payload, "reason": "already exists"}
+    if status >= 400:
+        raise LifecycleError(f"Routing permission setup failed with HTTP {status}: {response_body[:500]}")
+    return {"created_or_updated": True, "routing_rule": payload}
+
+
+def configure_firewall_wan(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    firewall = configure_firewall(client, args)
+    policy = configure_wan_policy(client, args)
+    routes_nat = configure_routes_nat(client, args, policy)
+    routing = configure_routing_permissions(client, args)
+    return {"firewall": firewall, "wan_policy": policy, **routes_nat, "routing": routing}
 
 
 def wan_policy_payload(*, packet_loss_percent: float) -> dict[str, Any]:
@@ -744,10 +936,14 @@ def wan_policy_payload(*, packet_loss_percent: float) -> dict[str, Any]:
 def set_lifecycle_wan_policy(client: HttpClient, *, packet_loss_percent: float) -> dict[str, Any]:
     policies = client.json_request("GET", "/api/v1/wan/policies")
     payload = wan_policy_payload(packet_loss_percent=packet_loss_percent)
-    existing_policy = next((row for row in policies if row.get("name") == payload["name"]), None)
-    if not existing_policy:
+    matching_policies = [row for row in policies if row.get("name") == payload["name"]]
+    if not matching_policies:
         raise LifecycleError("Lifecycle WAN policy was not found; configure-firewall-wan must run before WAN loss checks.")
-    return client.json_request("PATCH", f"/api/v1/wan/policies/{existing_policy['id']}", json_body=payload)
+    updated = [
+        client.json_request("PATCH", f"/api/v1/wan/policies/{policy['id']}", json_body=payload)
+        for policy in matching_policies
+    ]
+    return {"packet_loss_percent": packet_loss_percent, "updated_count": len(updated), "policies": updated}
 
 
 def certificate_summary(pem: str) -> dict[str, Any]:
@@ -844,7 +1040,8 @@ def https_request_unverified(url: str) -> tuple[int, str, dict[str, str]]:
 
 
 def management_https_check(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
-    http_status, _http_body, http_headers = client.request("GET", "/openapi.json", follow_redirects=False)
+    http_client = HttpClient(args.appliance_url)
+    http_status, _http_body, http_headers = http_client.request("GET", "/openapi.json", follow_redirects=False)
     if http_status not in {301, 302, 307, 308}:
         raise LifecycleError(f"HTTP management endpoint should redirect after HTTPS apply, got HTTP {http_status}")
     location = http_headers.get("Location", "")
@@ -901,6 +1098,22 @@ def create_client_csr(common_name: str) -> str:
     return csr.public_bytes(serialization.Encoding.PEM).decode("utf-8")
 
 
+def client_ca_probe_setup(interface_name: str, address_cidr: str, request_host: str) -> str:
+    ca_request = ip_interface(address_cidr)
+    ca_interface = shell_single_quote(interface_name)
+    neigh_flush = ""
+    if request_host:
+        neigh_flush = f"$ELEV ip neigh flush {shell_single_quote(request_host)} dev \"$CA_IF\" 2>/dev/null || true; "
+    return (
+        f"CA_IF={ca_interface}; "
+        'if ip link show dev "$CA_IF" >/dev/null 2>&1; then '
+        '$ELEV ip link set "$CA_IF" up; '
+        f'$ELEV ip addr replace {ca_request.ip}/{ca_request.network.prefixlen} dev "$CA_IF"; '
+        f"{neigh_flush}"
+        'else echo "optional CA probe interface $CA_IF not present; using existing route" >&2; fi; '
+    )
+
+
 def session_cookie_header(client: HttpClient) -> str:
     return "; ".join(f"{cookie.name}={cookie.value}" for cookie in client.cookie_jar)
 
@@ -922,15 +1135,14 @@ def ca_client_certificate_request(client: HttpClient, args: argparse.Namespace) 
     if not cookie_header:
         raise LifecycleError("No authenticated session cookie is available for the client CA request.")
     ca_request = ip_interface(args.client_ca_request_cidr)
-    ca_request_url = (args.client_ca_request_url or args.appliance_url).rstrip("/")
+    ca_request_url = (args.client_ca_request_url or client.base_url).rstrip("/")
+    ca_probe_setup = client_ca_probe_setup(args.client_ca_request_interface, args.client_ca_request_cidr, urllib.parse.urlparse(ca_request_url).hostname or "")
     elevate = elevation_probe()
     command = (
         f"ELEV=\"$({elevate})\"; "
         "test -n \"$ELEV\"; "
-        f"$ELEV ip link set {args.client_ca_request_interface} up; "
-        f"$ELEV ip addr replace {ca_request.ip}/{ca_request.network.prefixlen} dev {args.client_ca_request_interface}; "
-        f"$ELEV ip neigh flush {urllib.parse.urlparse(ca_request_url).hostname or ''} dev {args.client_ca_request_interface} 2>/dev/null || true; "
-        "http_code=$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "
+        f"{ca_probe_setup}"
+        "http_code=$(curl -k -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "
         f"-X POST -H {shell_single_quote('Cookie: ' + cookie_header)} "
         f"--data-urlencode csrf={shell_single_quote(csrf)} "
         f"--data-urlencode common_name={shell_single_quote(common_name)} "
@@ -959,10 +1171,80 @@ def ca_client_certificate_request(client: HttpClient, args: argparse.Namespace) 
 
 
 def extract_vcf_backup_user_id(body: str) -> str:
-    match = re.search(r'<option value="(\d+)"[^>]*>\s*vcf-backup(?:\s+\(disabled\))?\s*</option>', body)
-    if not match:
-        raise LifecycleError("Could not find the default vcf-backup local user in /vcf-backups.")
-    return match.group(1)
+    for match in re.finditer(r'<option value="(\d+)"[^>]*>(.*?)</option>', body, flags=re.DOTALL):
+        label = re.sub(r"\s+", " ", html.unescape(match.group(2))).strip()
+        if label in {"vcf-backup", "vcf-backup (disabled)"}:
+            return match.group(1)
+    raise LifecycleError("Could not find the default vcf-backup local user in /vcf-backups.")
+
+
+def extract_user_id_from_users_page(body: str, username: str) -> str:
+    for match in re.finditer(r"<button[^>]*data-reset-user-button[^>]*>", body):
+        tag = match.group(0)
+        id_match = re.search(r'data-user-id="(\d+)"', tag)
+        username_match = re.search(r'data-username="([^"]+)"', tag)
+        if id_match and username_match and html.unescape(username_match.group(1)).strip() == username:
+            return id_match.group(1)
+    raise LifecycleError(f"Could not find local user {username!r} in /users.")
+
+
+def ensure_vcf_backup_user_id(client: HttpClient, args: argparse.Namespace) -> tuple[str, str]:
+    status, body, _headers = client.request("GET", "/users")
+    if status >= 400:
+        raise LifecycleError(f"GET /users failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    try:
+        return extract_user_id_from_users_page(body, "vcf-backup"), csrf
+    except LifecycleError:
+        pass
+    status, create_body, _headers = client.request(
+        "POST",
+        "/users",
+        form={"username": "vcf-backup", "role": "viewer", "roles": "viewer", "shell": "/sbin/nologin", "csrf": csrf},
+        follow_redirects=False,
+    )
+    if status not in {200, 302, 303, 409}:
+        raise LifecycleError(f"VCF backup user creation failed with HTTP {status}: {create_body[:500]}")
+    status, body, _headers = client.request("GET", "/users")
+    if status >= 400:
+        raise LifecycleError(f"GET /users failed with HTTP {status}")
+    return extract_user_id_from_users_page(body, "vcf-backup"), extract_csrf(body)
+
+
+def stage_vcf_backup_password_via_appliance(args: argparse.Namespace) -> dict[str, Any]:
+    password_literal = repr(args.vcf_backup_password)
+    python_script = f"""
+from sqlalchemy import select
+
+from labfoundry.app.database import SessionLocal
+from labfoundry.app.models import User, VcfBackupSettings
+from labfoundry.app.services.local_users import stage_user_os_password
+
+password = {password_literal}
+with SessionLocal() as db:
+    user = db.execute(select(User).where(User.username == "vcf-backup")).scalar_one_or_none()
+    if user is None:
+        user = User(username="vcf-backup", role="viewer", roles_json='["viewer"]', shell="/sbin/nologin", enabled=True)
+        db.add(user)
+        db.flush()
+    stage_user_os_password(user, password)
+    user.enabled = True
+    db.add(user)
+    settings = db.execute(select(VcfBackupSettings)).scalar_one_or_none()
+    if settings is not None:
+        settings.sftp_user_id = user.id
+        db.add(settings)
+    db.commit()
+    print(f"staged:user_id={{user.id}}")
+"""
+    encoded_script = base64.b64encode(python_script.encode("utf-8")).decode("ascii")
+    script = (
+        "set -a; . /etc/labfoundry/labfoundry.env; set +a; "
+        f"printf %s {shell_single_quote(encoded_script)} | base64 -d | /opt/labfoundry/.venv/bin/python -"
+    )
+    result = ssh_command(args.appliance_ssh_host, args, script, role="appliance", redact_values=[args.vcf_backup_password])
+    require_success(result, "appliance VCF backup password staging")
+    return {"username": "vcf-backup", "password_staged": True, "method": "appliance-python", "ssh": result}
 
 
 def stage_vcf_backup_password(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
@@ -970,7 +1252,13 @@ def stage_vcf_backup_password(client: HttpClient, args: argparse.Namespace) -> d
     if status >= 400:
         raise LifecycleError(f"GET /vcf-backups failed with HTTP {status}")
     csrf = extract_csrf(body)
-    user_id = extract_vcf_backup_user_id(body)
+    try:
+        user_id = extract_vcf_backup_user_id(body)
+    except LifecycleError:
+        try:
+            user_id, csrf = ensure_vcf_backup_user_id(client, args)
+        except LifecycleError:
+            return stage_vcf_backup_password_via_appliance(args)
     status, reset_body, _headers = client.request(
         "POST",
         f"/users/{user_id}/password",
@@ -979,7 +1267,7 @@ def stage_vcf_backup_password(client: HttpClient, args: argparse.Namespace) -> d
     )
     if status not in {200, 302, 303}:
         raise LifecycleError(f"VCF backup user password staging failed with HTTP {status}: {reset_body[:500]}")
-    return {"username": "vcf-backup", "password_staged": True}
+    return {"username": "vcf-backup", "password_staged": True, "method": "ui"}
 
 
 def configure_vcf_backups(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
@@ -1081,7 +1369,7 @@ def apply_units(client: HttpClient, units: list[str], args: argparse.Namespace) 
     csrf = extract_csrf(body)
     form: list[tuple[str, Any]] = [("csrf", csrf)]
     form.extend(("selected_units", unit) for unit in units)
-    status, response_body, _headers = client.request("POST", "/appliance-apply", form=form)
+    status, response_body, _headers = client.request("POST", "/appliance-apply", form=form, timeout=180)
     if status >= 400:
         raise LifecycleError(f"Appliance apply failed with HTTP {status}: {summarize_html_response(response_body)}")
     if "Appliance apply task failed" in response_body:
@@ -1163,17 +1451,48 @@ if expected_ip not in answers:
     return f"printf %s {encoded} | base64 -d | python3 -"
 
 
-def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
-    site_ip = str(ip_interface(args.site_cidr).ip)
-    checks = {
+def run_host_checks(args: argparse.Namespace, checks: dict[str, str]) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    for name, command in checks.items():
+        result = ssh_command(args.appliance_ssh_host, args, command, role="appliance")
+        require_success(result, f"host {name} check")
+        evidence[name] = result
+    return evidence
+
+
+def routing_host_check_commands(args: argparse.Namespace) -> dict[str, str]:
+    wan_network = str(ip_interface(args.wan_cidr).network)
+    return {
         "network": "ip -br addr && ip route",
-        "dnsmasq": f"test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && {direct_dns_a_query_command('interop-appliance.labfoundry.internal', site_ip, site_ip)}",
-        "firewall": "nft list ruleset | head -n 160",
+        "routing_tables": (
+            'ip rule show | grep -E "lookup (100|labfoundry_mgmt)" && '
+            'ip rule show | grep -E "lookup (200|labfoundry_lab)" && '
+            f'ip route show table 200 | grep -F "{wan_network}" && '
+            '! ip route show table 200 | grep -q "^default" && '
+            'sysctl -n net.ipv4.ip_forward | grep "^1$"'
+        ),
+        "firewall": (
+            "nft list ruleset | tee /tmp/labfoundry-lifecycle-nft.txt | head -n 200 && "
+            'grep -F "comment \\"isolate-" /tmp/labfoundry-lifecycle-nft.txt && '
+            'grep -F "comment \\"route-" /tmp/labfoundry-lifecycle-nft.txt && '
+            'grep -F "masquerade" /tmp/labfoundry-lifecycle-nft.txt'
+        ),
         "wan": (
             f"sysctl net.ipv4.ip_forward; "
             f"tc qdisc show dev {args.wan_interface}; "
             f"tc qdisc show dev {args.wan_interface} | grep netem | grep delay | grep 25ms"
         ),
+    }
+
+
+def routing_host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
+    return run_host_checks(args, routing_host_check_commands(args))
+
+
+def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
+    site_ip = str(ip_interface(args.site_cidr).ip)
+    checks = {
+        **routing_host_check_commands(args),
         "ca": "test -f /etc/labfoundry/ca/ca-bundle.pem && openssl x509 -in /etc/labfoundry/ca/root-ca.pem -noout -subject",
         "kms_files": (
             "for path in "
@@ -1201,12 +1520,8 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
             "systemctl is-active sshd"
         ),
     }
-    evidence: dict[str, Any] = {}
-    for name, command in checks.items():
-        result = ssh_command(args.appliance_ssh_host, args, command, role="appliance")
-        require_success(result, f"host {name} check")
-        evidence[name] = result
-    return evidence
+    checks["dnsmasq"] = f"test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && {direct_dns_a_query_command('interop-appliance.labfoundry.internal', site_ip, site_ip)}"
+    return run_host_checks(args, checks)
 
 
 def vcf_backup_client_check(args: argparse.Namespace) -> dict[str, Any]:
@@ -1272,30 +1587,30 @@ def ca_client_certificate_check(client: HttpClient, args: argparse.Namespace) ->
         return {"skipped": "client checks disabled"}
     if not args.client_a_host:
         return {"skipped": "client A host not provided"}
+    ca_client = authenticated_ui_client(client, args)
     common_name = f"client-a.{args.domain}"
-    status, body, _headers = client.request("GET", "/certificate-authority")
+    status, body, _headers = ca_client.request("GET", "/certificate-authority")
     if status >= 400:
         raise LifecycleError(f"GET /certificate-authority failed with HTTP {status}")
     certificate_id = extract_ca_certificate_id(body, common_name)
-    status, certificate_pem, _headers = client.request("GET", f"/certificate-authority/certificates/{certificate_id}/downloads/certificate.pem")
+    status, certificate_pem, _headers = ca_client.request("GET", f"/certificate-authority/certificates/{certificate_id}/downloads/certificate.pem")
     if status >= 400 or "BEGIN CERTIFICATE" not in certificate_pem:
         raise LifecycleError(f"CA issued certificate download failed with HTTP {status}")
-    status, root_ca_pem, _headers = client.request("GET", "/certificate-authority/downloads/root-ca.pem")
+    status, root_ca_pem, _headers = ca_client.request("GET", "/certificate-authority/downloads/root-ca.pem")
     if status >= 400 or "BEGIN CERTIFICATE" not in root_ca_pem:
         raise LifecycleError(f"CA root certificate download failed with HTTP {status}")
     crypto_summary = verify_certificate_signed_by_root(certificate_pem, root_ca_pem, common_name)
-    cookie_header = session_cookie_header(client)
+    cookie_header = session_cookie_header(ca_client)
     ca_request = ip_interface(args.client_ca_request_cidr)
-    ca_request_url = (args.client_ca_request_url or args.appliance_url).rstrip("/")
+    ca_request_url = (args.client_ca_request_url or ca_client.base_url).rstrip("/")
     ca_request_host = urllib.parse.urlparse(ca_request_url).hostname or ""
+    ca_probe_setup = client_ca_probe_setup(args.client_ca_request_interface, args.client_ca_request_cidr, ca_request_host)
     elevate = elevation_probe()
     command = (
         f"ELEV=\"$({elevate})\"; "
         "test -n \"$ELEV\"; "
-        f"$ELEV ip link set {args.client_ca_request_interface} up; "
-        f"$ELEV ip addr replace {ca_request.ip}/{ca_request.network.prefixlen} dev {args.client_ca_request_interface}; "
-        f"$ELEV ip neigh flush {ca_request_host} dev {args.client_ca_request_interface} 2>/dev/null || true; "
-        "http_code=$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "
+        f"{ca_probe_setup}"
+        "http_code=$(curl -k -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "
         f"-H {shell_single_quote('Cookie: ' + cookie_header)} "
         f"{ca_request_url}/certificate-authority/certificates/{certificate_id}/downloads/certificate.pem); "
         "echo \"$http_code\"; test \"$http_code\" = \"200\""
@@ -1315,10 +1630,97 @@ def elevation_probe() -> str:
 
 
 def second_host_address(cidr: str) -> str:
-    hosts = list(ip_interface(cidr).network.hosts())
-    if len(hosts) < 2:
-        raise LifecycleError(f"Network {cidr} is too small for a client probe address.")
-    return str(hosts[1])
+    return host_address(cidr, 2)
+
+
+def host_address(cidr: str, host_offset: int) -> str:
+    network = ip_interface(cidr).network
+    if host_offset <= 0 or host_offset >= network.num_addresses - 1:
+        raise LifecycleError(f"Network {network} is too small for host offset {host_offset}.")
+    return str(ip_address(int(network.network_address) + host_offset))
+
+
+def pxe_client_ip(args: argparse.Namespace) -> str:
+    if args.pxe_client_ip:
+        return args.pxe_client_ip
+    network = ip_interface(args.site_cidr).network
+    offset = 210 if network.num_addresses > 212 else max(2, network.num_addresses - 3)
+    return host_address(args.site_cidr, offset)
+
+
+def client_b_wan_setup_command(args: argparse.Namespace, *, include_site_route: bool = True, include_vlan_route: bool = False) -> str:
+    site = ip_interface(args.site_cidr)
+    vlan = ip_interface(args.vlan_cidr)
+    wan = ip_interface(args.wan_cidr)
+    wan_ip = str(wan.ip)
+    wan_peer_ip = second_host_address(args.wan_cidr)
+    routes: list[str] = []
+    if include_site_route:
+        routes.append(f"$ELEV ip route replace {site.network} via {wan_ip} dev eth1;")
+    if include_vlan_route:
+        routes.append(f"$ELEV ip route replace {vlan.network} via {wan_ip} dev eth1;")
+    return (
+        f"ELEV=\"$({elevation_probe()})\"; test -n \"$ELEV\"; "
+        f"$ELEV ip addr replace {wan_peer_ip}/{wan.network.prefixlen} dev eth1; "
+        "$ELEV ip link set eth1 up; "
+        f"{' '.join(routes)} "
+        "ip -br addr; ip route"
+    )
+
+
+def client_a_access_to_wan_command(args: argparse.Namespace, *, expect_success: bool) -> str:
+    site = ip_interface(args.site_cidr)
+    wan = ip_interface(args.wan_cidr)
+    site_ip = str(site.ip)
+    wan_peer_ip = second_host_address(args.wan_cidr)
+    expectation = "" if expect_success else '; rc=$?; test "$rc" -ne 0'
+    return (
+        f"ELEV=\"$({elevation_probe()})\"; test -n \"$ELEV\"; "
+        "$ELEV /usr/local/sbin/labfoundry-refresh-test-dhcp 2>/dev/null || /usr/local/sbin/labfoundry-refresh-test-dhcp 2>/dev/null || true; "
+        f"$ELEV ip route replace {wan.network} via {site_ip} dev eth1; "
+        f"ping -c 2 -W 2 {wan_peer_ip}{expectation}"
+    )
+
+
+def client_a_route_role_to_wan_command(args: argparse.Namespace) -> str:
+    vlan = ip_interface(args.vlan_cidr)
+    wan = ip_interface(args.wan_cidr)
+    vlan_peer_ip = second_host_address(args.vlan_cidr)
+    vlan_ip = str(vlan.ip)
+    wan_peer_ip = second_host_address(args.wan_cidr)
+    return (
+        f"ELEV=\"$({elevation_probe()})\"; test -n \"$ELEV\"; "
+        "$ELEV modprobe 8021q 2>/dev/null || true; "
+        f"$ELEV ip link add link eth2 name eth2.{args.vlan_id} type vlan id {args.vlan_id} 2>/dev/null || true; "
+        f"$ELEV ip addr replace {vlan_peer_ip}/{vlan.network.prefixlen} dev eth2.{args.vlan_id}; "
+        f"$ELEV ip link set eth2 up; $ELEV ip link set eth2.{args.vlan_id} up; "
+        f"$ELEV ip route replace {wan.network} via {vlan_ip} dev eth2.{args.vlan_id}; "
+        f"ping -c 2 -W 2 {wan_peer_ip}"
+    )
+
+
+def access_routing_blocked_check(args: argparse.Namespace) -> dict[str, Any]:
+    if args.skip_client_checks:
+        return {"skipped": "client checks disabled"}
+    if not args.client_a_host or not args.client_b_host:
+        return {"skipped": "client hosts not provided"}
+    client_b = ssh_command(args.client_b_host, args, client_b_wan_setup_command(args), role="client")
+    require_success(client_b, "client B WAN setup before access routing rule")
+    client_a = ssh_command(args.client_a_host, args, client_a_access_to_wan_command(args, expect_success=False), role="client")
+    require_success(client_a, "client A access-to-WAN expected block")
+    return {"client_b_setup": client_b, "client_a_blocked": client_a}
+
+
+def route_role_routing_check(args: argparse.Namespace) -> dict[str, Any]:
+    if args.skip_client_checks:
+        return {"skipped": "client checks disabled"}
+    if not args.client_a_host or not args.client_b_host:
+        return {"skipped": "client hosts not provided"}
+    client_b = ssh_command(args.client_b_host, args, client_b_wan_setup_command(args, include_site_route=False, include_vlan_route=True), role="client")
+    require_success(client_b, "client B WAN route-role setup")
+    client_a = ssh_command(args.client_a_host, args, client_a_route_role_to_wan_command(args), role="client")
+    require_success(client_a, "client A route-role VLAN-to-WAN probe")
+    return {"client_b_setup": client_b, "client_a_route_role": client_a}
 
 
 def client_checks(args: argparse.Namespace) -> dict[str, Any]:
@@ -1332,14 +1734,7 @@ def client_checks(args: argparse.Namespace) -> dict[str, Any]:
     wan_peer_ip = second_host_address(args.wan_cidr)
     elevate = elevation_probe()
     if args.client_b_host:
-        command = (
-            f"ELEV=\"$({elevate})\"; test -n \"$ELEV\"; "
-            f"$ELEV ip addr replace {wan_peer_ip}/{wan.network.prefixlen} dev eth1; "
-            "$ELEV ip link set eth1 up; "
-            f"$ELEV ip route replace {site.network} via {wan_ip} dev eth1; "
-            "ip -br addr; ip route; "
-            f"ping -c 2 {wan_ip}"
-        )
+        command = client_b_wan_setup_command(args) + f"; ping -c 2 {wan_ip}"
         result = ssh_command(args.client_b_host, args, command, role="client")
         require_success(result, "client B WAN probe")
         evidence["client_b"] = result
@@ -1402,16 +1797,53 @@ def wan_packet_loss_check(client: HttpClient, args: argparse.Namespace) -> dict[
         f"ping -c 2 -W 2 {wan_peer_ip}"
     )
 
+    wan_client = authenticated_ui_client(client, args)
+
     try:
-        evidence["loss_policy"] = set_lifecycle_wan_policy(client, packet_loss_percent=100.0)
-        evidence["loss_apply"] = apply_units(client, ["wan"], args)
-        loss_host = ssh_command(
-            args.appliance_ssh_host,
-            args,
-            f"tc qdisc show dev {args.wan_interface} | grep netem | grep loss | grep 100",
-            role="appliance",
+        evidence["loss_policy"] = set_lifecycle_wan_policy(wan_client, packet_loss_percent=100.0)
+        evidence["loss_apply"] = apply_units(wan_client, ["wan"], args)
+        loss_command = (
+            f"tc qdisc show dev {args.wan_interface} > /tmp/labfoundry-wan-loss-check.txt && "
+            "grep netem /tmp/labfoundry-wan-loss-check.txt && "
+            "grep loss /tmp/labfoundry-wan-loss-check.txt && "
+            "grep 100 /tmp/labfoundry-wan-loss-check.txt"
         )
-        require_success(loss_host, "host WAN 100 percent loss check")
+        try:
+            loss_host = ssh_until_success(
+                args.appliance_ssh_host,
+                args,
+                loss_command,
+                role="appliance",
+                label="host WAN 100 percent loss check",
+                timeout_seconds=30,
+            )
+        except LifecycleError:
+            evidence["loss_reapply"] = apply_units(wan_client, ["wan"], args)
+            try:
+                loss_host = ssh_until_success(
+                    args.appliance_ssh_host,
+                    args,
+                    loss_command,
+                    role="appliance",
+                    label="host WAN 100 percent loss check",
+                    timeout_seconds=30,
+                )
+            except LifecycleError:
+                helper_apply = ssh_command(
+                    args.appliance_ssh_host,
+                    args,
+                    "/opt/labfoundry/bin/labfoundry-helper wan apply --real /var/lib/labfoundry/apply/wan/labfoundry-wan.conf",
+                    role="appliance",
+                )
+                require_success(helper_apply, "host WAN helper reapply")
+                evidence["loss_helper_apply"] = helper_apply
+                loss_host = ssh_until_success(
+                    args.appliance_ssh_host,
+                    args,
+                    loss_command,
+                    role="appliance",
+                    label="host WAN 100 percent loss check",
+                )
         evidence["loss_host"] = loss_host
         client_b = ssh_command(args.client_b_host, args, client_b_setup, role="client")
         require_success(client_b, "client B WAN loss setup")
@@ -1423,15 +1855,19 @@ def wan_packet_loss_check(client: HttpClient, args: argparse.Namespace) -> dict[
         original_error = exc
     finally:
         try:
-            cleanup_evidence["restored_policy"] = set_lifecycle_wan_policy(client, packet_loss_percent=0.0)
-            cleanup_evidence["restore_apply"] = apply_units(client, ["wan"], args)
-            restore_host = ssh_command(
+            cleanup_evidence["restored_policy"] = set_lifecycle_wan_policy(wan_client, packet_loss_percent=0.0)
+            cleanup_evidence["restore_apply"] = apply_units(wan_client, ["wan"], args)
+            restore_host = ssh_until_success(
                 args.appliance_ssh_host,
                 args,
-                f"tc qdisc show dev {args.wan_interface} | grep netem | grep delay | grep 25ms && ! tc qdisc show dev {args.wan_interface} | grep -q 'loss 100'",
+                f"tc qdisc show dev {args.wan_interface} > /tmp/labfoundry-wan-restore-check.txt && "
+                "grep netem /tmp/labfoundry-wan-restore-check.txt && "
+                "grep delay /tmp/labfoundry-wan-restore-check.txt && "
+                "grep 25ms /tmp/labfoundry-wan-restore-check.txt && "
+                "! grep 'loss 100' /tmp/labfoundry-wan-restore-check.txt",
                 role="appliance",
+                label="host WAN loss restore check",
             )
-            require_success(restore_host, "host WAN loss restore check")
             cleanup_evidence["restore_host"] = restore_host
             client_b_recovery = ssh_command(args.client_b_host, args, client_b_setup, role="client")
             require_success(client_b_recovery, "client B WAN recovery setup")
@@ -1463,14 +1899,17 @@ def run_step(results: list[StepResult], name: str, func, *args) -> Any:  # type:
 
 
 def export_settings_backup(client: HttpClient, args: argparse.Namespace, archive_path: str) -> dict[str, Any]:
-    status, body, _headers = client.request("GET", "/backup-restore")
+    export_client = authenticated_ui_client(client, args)
+    status, body, _headers = export_client.request("GET", "/backup-restore")
     if status >= 400:
         raise LifecycleError(f"GET /backup-restore failed with HTTP {status}")
     csrf = extract_csrf(body)
-    status, archive_bytes, response_headers = client.request_bytes("POST", "/backup-restore/export", form={"csrf": csrf})
+    status, archive_bytes, response_headers = export_client.request_bytes("POST", "/backup-restore/export", form={"csrf": csrf})
     if status >= 400:
         raise LifecycleError(f"Settings backup export failed with HTTP {status}: {archive_bytes[:500].decode('utf-8', errors='replace')}")
-    archive = json.loads(archive_bytes.decode("utf-8"))
+    if not archive_bytes.strip():
+        raise LifecycleError("Settings backup export returned an empty response body.")
+    archive = json.loads(archive_bytes.decode("utf-8-sig"))
     path = Path(archive_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(archive_bytes)
@@ -1501,7 +1940,7 @@ def restore_settings_backup(client: HttpClient, args: argparse.Namespace) -> dic
     )
     if status >= 400 or "Settings restored" not in response_body:
         raise LifecycleError(f"Settings backup restore failed with HTTP {status}: {summarize_html_response(response_body)}")
-    archive = json.loads(archive_path.read_text(encoding="utf-8"))
+    archive = json.loads(archive_path.read_text(encoding="utf-8-sig"))
     data = archive.get("data") or {}
     return {
         "path": str(archive_path),
@@ -1524,7 +1963,7 @@ def restored_certificate_baseline_check(args: argparse.Namespace, restored_evide
     baseline_path = Path(args.certificate_baseline_result)
     if not baseline_path.exists():
         raise LifecycleError(f"Certificate baseline result not found: {baseline_path}")
-    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8-sig"))
     initial_evidence = step_evidence(baseline, "ca-client-certificate-check")
     initial_certificate = initial_evidence.get("certificate") or {}
     restored_certificate = restored_evidence.get("certificate") or {}
@@ -1575,8 +2014,8 @@ def ca_archive_certificate_identity(archive: dict[str, Any]) -> dict[str, Any]:
 def restored_ca_archive_baseline_check(args: argparse.Namespace, restored_archive_path: str) -> dict[str, Any]:
     baseline_path = Path(args.restore_settings_backup)
     restored_path = Path(restored_archive_path)
-    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-    restored = json.loads(restored_path.read_text(encoding="utf-8"))
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8-sig"))
+    restored = json.loads(restored_path.read_text(encoding="utf-8-sig"))
     baseline_identity = ca_archive_certificate_identity(baseline)
     restored_identity = ca_archive_certificate_identity(restored)
     if baseline_identity != restored_identity:
@@ -1618,7 +2057,7 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     )
     run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
-    run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "kms"], args)
+    run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "wan", "kms"], args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
     run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)
@@ -1629,6 +2068,23 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "management-https-check", management_https_check, client, args)
     if args.export_settings_backup:
         run_step(results, "export-settings-backup", export_settings_backup, client, args, args.export_settings_backup)
+
+
+def run_routing_wan_lifecycle(results: list[StepResult], client: HttpClient, args: argparse.Namespace) -> None:
+    run_step(results, "appliance-health", appliance_health, client, args)
+    run_step(results, "configure-network", configure_network, client, args)
+    run_step(results, "configure-firewall", configure_firewall, client, args)
+    policy = run_step(results, "configure-wan-policy", configure_wan_policy, client, args)
+    run_step(results, "configure-routes-nat", configure_routes_nat, client, args, policy)
+    run_step(results, "apply-routing-wan-before-access-rule", apply_units, client, ["network", "firewall", "wan"], args)
+    run_step(results, "host-state-checks-before-access-rule", routing_host_state_checks, args)
+    run_step(results, "route-role-routing-check", route_role_routing_check, args)
+    run_step(results, "access-routing-blocked-check", access_routing_blocked_check, args)
+    run_step(results, "configure-routing-permissions", configure_routing_permissions, client, args)
+    run_step(results, "apply-routing-wan-after-access-rule", apply_units, client, ["firewall", "wan"], args)
+    run_step(results, "host-state-checks", routing_host_state_checks, args)
+    run_step(results, "client-checks", client_checks, args)
+    run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)
 
 
 def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: argparse.Namespace) -> None:
@@ -1646,7 +2102,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
         args,
     )
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
-    run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "kms"], args)
+    run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "wan", "kms"], args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
     run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)
@@ -1693,10 +2149,24 @@ def format_step_summary(step: dict[str, Any]) -> str:
         policy = evidence.get("wan_policy") or {}
         route = evidence.get("route") or {}
         detail = f"{policy.get('latency_ms', 0)}ms delay, {policy.get('jitter_ms', 0)}ms jitter on {route.get('interface_name', '')}"
-    elif name in {"apply-connectivity-units", "apply-ca-unit", "apply-kms-unit", "apply-lifecycle-units"}:
+    elif name in {
+        "apply-connectivity-units",
+        "apply-ca-unit",
+        "apply-kms-unit",
+        "apply-lifecycle-units",
+        "apply-routing-wan-before-access-rule",
+        "apply-routing-wan-after-access-rule",
+    }:
         detail = ", ".join(evidence.get("selected_units", []))
-    elif name == "host-state-checks":
+    elif name in {"host-state-checks", "host-state-checks-before-access-rule"}:
         detail = ", ".join(sorted(evidence.keys()))
+    elif name == "access-routing-blocked-check":
+        detail = "SiteA access to WAN blocked before explicit permission"
+    elif name == "route-role-routing-check":
+        detail = "route-role VLAN to WAN forwarding passed"
+    elif name == "configure-routing-permissions":
+        rule = evidence.get("routing_rule") or {}
+        detail = f"{rule.get('source_interface', '')} to {rule.get('destination_interface', '')}"
     elif name in {"export-settings-backup", "restore-settings-backup", "export-restored-settings-backup"}:
         detail = f"{evidence.get('total_rows', 0)} rows"
     elif name == "stage-vcf-backup-password":
@@ -1757,7 +2227,9 @@ def main() -> int:
 
     client = HttpClient(args.appliance_url)
     try:
-        if args.restored_state_run:
+        if args.routing_wan_only:
+            run_routing_wan_lifecycle(results, client, args)
+        elif args.restored_state_run:
             run_restored_lifecycle(results, client, args)
         else:
             run_full_lifecycle(results, client, args)

@@ -379,6 +379,7 @@ from labfoundry.app.services.esxi_pxe import (
     installer_iso_inventory,
     installer_iso_root_path,
     kickstart_drift_state,
+    kickstart_template_variables,
     kickstart_template_validation_errors,
     kickstart_to_dict,
     kickstart_validation,
@@ -10063,8 +10064,8 @@ def audit_log(
 def serve_esxi_kickstart_file(kickstart_file: str, mac: str = "", db: Session = Depends(get_db)) -> Response:
     if not kickstart_file.endswith(".cfg"):
         raise HTTPException(status_code=404, detail="Kickstart not found")
-    mac_key = normalize_pxe_mac(mac)
-    if not mac_key:
+    mac_key = normalize_pxe_mac(mac) if mac else ""
+    if mac and not mac_key:
         raise HTTPException(status_code=400, detail="Kickstart request requires a valid mac query parameter.")
     stem = kickstart_file.removesuffix(".cfg").strip().lower()
     if not re.fullmatch(r"(?:\d+|[0-9a-f]{12,64})", stem):
@@ -10082,6 +10083,13 @@ def serve_esxi_kickstart_file(kickstart_file: str, mac: str = "", db: Session = 
         )
     if not kickstart or not kickstart.enabled:
         raise HTTPException(status_code=404, detail="Kickstart not found")
+    names, invalid = kickstart_template_variables(kickstart.content)
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Kickstart contains invalid variable marker: {invalid[0]}")
+    if not mac_key:
+        if names:
+            raise HTTPException(status_code=400, detail="Kickstart request requires a valid mac query parameter.")
+        return Response(kickstart.content, media_type="text/plain; charset=utf-8")
     host = db.execute(
         select(EsxiPxeHost)
         .options(selectinload(EsxiPxeHost.kickstart))

@@ -10,6 +10,27 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-Sha512FileHash {
+    param([string]$Path)
+
+    $hashCommand = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+    if ($hashCommand) {
+        return (Get-FileHash -Algorithm SHA512 -LiteralPath $Path).Hash.ToUpperInvariant()
+    }
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha512 = [System.Security.Cryptography.SHA512]::Create()
+        try {
+            return (($sha512.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '').ToUpperInvariant()
+        } finally {
+            $sha512.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')
 if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $repoRoot 'image\vmware-workstation\clients\alpine-cloud'
@@ -37,7 +58,7 @@ foreach ($file in @($ImageName, "$ImageName.sha512")) {
 }
 
 $expected = (Get-Content -LiteralPath $checksumPath -Raw).Trim().Split()[0].ToUpperInvariant()
-$actual = (Get-FileHash -Algorithm SHA512 -LiteralPath $qcowPath).Hash.ToUpperInvariant()
+$actual = Get-Sha512FileHash -Path $qcowPath
 if ($expected -ne $actual) {
     throw "SHA512 mismatch for $qcowPath. Expected $expected, got $actual."
 }

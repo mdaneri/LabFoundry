@@ -98,6 +98,18 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
+    [switch]$RoutingWanOnly,
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [switch]$FullEsxiPxeInstall,
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [string]$PxeInstallerIsoPath = '',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
     [switch]$KeepVms,
 
     [Parameter(ParameterSetName = 'Run')]
@@ -164,13 +176,21 @@ function Get-ManagementNetworkPlan {
     param(
         [Parameter(Mandatory = $true)][string]$NetworkName,
         [string]$Vmrun,
-        [string]$BridgeAlias
+        [string]$BridgeAlias,
+        [switch]$AllLifecycleNetworks
     )
 
     $networkArgs = @{
         ManagementNetwork = $NetworkName
-        ManagementOnly    = $true
         PlanOnly          = $true
+    }
+    if (-not $AllLifecycleNetworks) {
+        $networkArgs['ManagementOnly'] = $true
+    }
+    if ($AllLifecycleNetworks) {
+        $networkArgs['SiteANetwork'] = $SiteANetwork
+        $networkArgs['SiteBNetwork'] = $SiteBNetwork
+        $networkArgs['TrunkNetwork'] = $TrunkNetwork
     }
     if (-not [string]::IsNullOrWhiteSpace($Vmrun)) {
         $networkArgs['VmrunPath'] = $Vmrun
@@ -208,14 +228,31 @@ if ($PSCmdlet.ParameterSetName -eq 'PrepareNetworks') {
     return
 }
 
+if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {
+    & (Join-Path $PSScriptRoot 'remove-lifecycle-vms.ps1') `
+        -LabName $LabName `
+        -VmrunPath $VmrunPath
+    if (-not $?) {
+        throw "VMware Workstation lifecycle VM cleanup failed."
+    }
+    return
+}
+
 if (-not $SshPassword) {
     $SshPassword = $AdminPassword
 }
 if (-not $VcfBackupPassword) {
     $VcfBackupPassword = 'VMware01!Test'
 }
+if ($RoutingWanOnly -and $FullEsxiPxeInstall) {
+    throw "-RoutingWanOnly and -FullEsxiPxeInstall are mutually exclusive."
+}
 if (-not $ApplianceVmxPath) {
-    $ApplianceVmxPath = Find-LatestApplianceVmx
+    if ($PlanOnly) {
+        $ApplianceVmxPath = Join-Path $repoRoot 'image\vmware-workstation\output\LabFoundry-VMware\LabFoundry-VMware.vmx'
+    } else {
+        $ApplianceVmxPath = Find-LatestApplianceVmx
+    }
 }
 if (-not $ClientVmdkPath) {
     $ClientVmdkPath = Join-Path $repoRoot 'image\vmware-workstation\clients\alpine-cloud\labfoundry-tiny-linux-client.vmdk'
@@ -227,17 +264,16 @@ if (-not $applianceIpWasPassed) {
     }
     $ApplianceIPAddress = Get-Ipv4AddressFromSubnetOffset -Subnet $networkPlan.management_subnet -HostOffset 10
 }
-$effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "http://${ApplianceIPAddress}" }
-
-if ($PSCmdlet.ParameterSetName -eq 'CleanupVms') {
-    & (Join-Path $PSScriptRoot 'remove-lifecycle-vms.ps1') `
-        -LabName $LabName `
-        -VmrunPath $VmrunPath
-    if (-not $?) {
-        throw "VMware Workstation lifecycle VM cleanup failed."
+if (-not $PlanOnly -and $PSCmdlet.ParameterSetName -eq 'Run') {
+    $usesLanSegments = @($SiteANetwork, $SiteBNetwork, $TrunkNetwork) | Where-Object { $_.StartsWith('lan:') }
+    if (-not $usesLanSegments) {
+        $lifecycleNetworkPlan = Get-ManagementNetworkPlan -NetworkName $ManagementNetwork -Vmrun $VmrunPath -BridgeAlias $BridgedInterfaceAlias -AllLifecycleNetworks
+        if ($lifecycleNetworkPlan.missing_networks.Count -gt 0) {
+            throw "Missing VMware Workstation lifecycle networks: $($lifecycleNetworkPlan.missing_networks -join ', '). Create them in Virtual Network Editor, pass lan:<segment-name> for isolated Workstation LAN segments, or run -PrepareNetworksOnly after configuring Workstation host-only vmnets."
+        }
     }
-    return
 }
+$effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "http://${ApplianceIPAddress}" }
 
 if (-not $SkipClientPrepare -and -not $PlanOnly) {
     & (Join-Path $PSScriptRoot 'prepare-tiny-linux-client.ps1')
@@ -245,6 +281,8 @@ if (-not $SkipClientPrepare -and -not $PlanOnly) {
         throw "Tiny Linux VMware client preparation failed."
     }
 }
+
+$effectiveSkipBackupRestoreTest = [bool]($SkipBackupRestoreTest -or $RoutingWanOnly)
 
 $arguments = @(
     '-ExecutionPolicy', 'Bypass',
@@ -273,14 +311,19 @@ $arguments = @(
 if ($VmrunPath) { $arguments += @('-VmrunPath', $VmrunPath) }
 if (-not $KeepVms) { $arguments += '-CleanupCreatedLab' }
 if ($AllowDryRunApply) { $arguments += '-AllowDryRunApply' }
-if ($SkipBackupRestoreTest) { $arguments += '-SkipBackupRestoreTest' }
+if ($effectiveSkipBackupRestoreTest) { $arguments += '-SkipBackupRestoreTest' }
+if ($RoutingWanOnly) { $arguments += '-RoutingWanOnly' }
+if ($FullEsxiPxeInstall) { $arguments += '-FullEsxiPxeInstall' }
+if ($PxeInstallerIsoPath) { $arguments += @('-PxeInstallerIsoPath', $PxeInstallerIsoPath) }
 if ($PlanOnly) { $arguments += '-PlanOnly' }
 
 Write-Host "Workstation lifecycle lab: $LabName"
 Write-Host "Appliance VMX: $ApplianceVmxPath"
 Write-Host "Client VMDK: $ClientVmdkPath"
 Write-Host "Appliance URL: $effectiveApplianceUrl"
-Write-Host ("Backup/restore validation: {0}" -f (-not $SkipBackupRestoreTest))
+Write-Host ("Routing/WAN only: {0}" -f ([bool]$RoutingWanOnly))
+Write-Host ("Full ESXi PXE install: {0}" -f ([bool]$FullEsxiPxeInstall))
+Write-Host ("Backup/restore validation: {0}" -f (-not $effectiveSkipBackupRestoreTest))
 Write-Host ("Cleanup created VMs: {0}" -f (-not $KeepVms))
 
 & powershell.exe @arguments

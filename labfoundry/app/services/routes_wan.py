@@ -435,6 +435,7 @@ def render_wan_config(
                 network = ip_network(target[cidr_key], strict=False)
                 route_family = "-6 " if network.version == 6 else ""
                 lines.append(f"ip {route_family}rule add from {network} table {table} priority {priority}")
+                lines.append(f"ip {route_family}route replace {network} dev {target['name']} table {table}")
     if any(rule.enabled for rule in nat_rules):
         lines.append("nft -f /etc/labfoundry/nftables.d/labfoundry-nat.nft")
 

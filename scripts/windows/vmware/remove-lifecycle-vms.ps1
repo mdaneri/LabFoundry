@@ -71,7 +71,8 @@ $candidates = @(
                 IsRunning   = $runningVmxPaths -contains $resolvedPath
             }
         } |
-        Where-Object { $_.DisplayName.StartsWith($LabName) }
+        Where-Object { $_.DisplayName.StartsWith($LabName) } |
+        Sort-Object -Property Directory, DisplayName -Unique
 )
 
 if (-not $candidates) {
@@ -88,10 +89,13 @@ foreach ($candidate in $candidates | Sort-Object -Property DisplayName) {
     }
 
     if ($PSCmdlet.ShouldProcess($candidate.DisplayName, 'Stop and remove Workstation lifecycle VM')) {
-        if ($candidate.IsRunning) {
-            & $resolvedVmrun -T ws stop $candidate.Path hard 2>$null | Out-Null
+        & $resolvedVmrun -T ws stop $candidate.Path hard 2>$null | Out-Null
+        & $resolvedVmrun -T ws unregister $candidate.Path 2>$null | Out-Null
+        if (Test-Path -LiteralPath $candidate.Directory) {
+            Remove-Item -LiteralPath $candidate.Directory -Recurse -Force
+            Write-Host "Removed Workstation lifecycle VM: $($candidate.DisplayName)"
+        } else {
+            Write-Host "Workstation lifecycle VM already removed: $($candidate.DisplayName)"
         }
-        Remove-Item -LiteralPath $candidate.Directory -Recurse -Force
-        Write-Host "Removed Workstation lifecycle VM: $($candidate.DisplayName)"
     }
 }

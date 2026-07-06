@@ -1188,6 +1188,13 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             target = ESXI_TFTP_ROOT / filename
             _copy_file(source, target)
             generated_tftp_files.append(str(target))
+        if str(boot.get("bios_second_stage_bootfile") or "") == "pxelinux.0":
+            ldlinux_source = _find_pxe_boot_binary("ldlinux.c32")
+            if ldlinux_source is None:
+                raise RuntimeError("PXELINUX runtime module is missing: ldlinux.c32")
+            ldlinux_target = ESXI_TFTP_ROOT / "ldlinux.c32"
+            _copy_file(ldlinux_source, ldlinux_target)
+            generated_tftp_files.append(str(ldlinux_target))
         staged_images: set[str] = set()
         first_mboot_efi: Path | None = None
         first_crypto64: Path | None = None
@@ -2486,6 +2493,16 @@ def _set_os_user_shell(username: str, shell: str) -> int:
     return _run_and_forward([usermod, "--shell", shell, username])
 
 
+def _ensure_os_user_role_groups(username: str, role: str) -> int:
+    if role != "admin":
+        return 0
+    usermod = _command_path("usermod")
+    if usermod is None:
+        print("usermod command not found", file=sys.stderr)
+        return 127
+    return _run_and_forward([usermod, "--append", "--groups", "wheel", username])
+
+
 def _unlock_os_user(username: str) -> int:
     passwd = _command_path("passwd")
     if passwd is None:
@@ -2718,6 +2735,9 @@ def _handle_local_users(action: str, args: list[str]) -> int:
         shell_result = _set_os_user_shell(username, str(row["shell"]))
         if shell_result != 0:
             return shell_result
+        group_result = _ensure_os_user_role_groups(username, str(row.get("role") or ""))
+        if group_result != 0:
+            return group_result
         if row.get("password"):
             password_result = _set_os_user_password(username, str(row["password"]))
             if password_result != 0:
@@ -3521,6 +3541,32 @@ def _target_networks(target: dict[str, str]) -> list[str]:
     return networks
 
 
+def _target_route_table_id(target: dict[str, str]) -> int:
+    return MANAGEMENT_ROUTE_TABLE_ID if target.get("routing_domain", "lab") == "management" else LAB_ROUTE_TABLE_ID
+
+
+def _run_target_route_replace(network: str, interface_name: str, table_id: int) -> int:
+    command = [*_route_command_prefix(network), "replace", network, "dev", interface_name, "table", str(table_id)]
+    result = _run(command)
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
+    if shutil.which("ip") is None:
+        print("ip command not found", file=sys.stderr)
+        return 127
+    for target in parsed["targets"]:
+        table_id = _target_route_table_id(target)
+        interface_name = target.get("name", "")
+        for network in _target_networks(target):
+            result = _run_target_route_replace(network, interface_name, table_id)
+            if result != 0:
+                return result
+    return 0
+
+
 def _run_rule_replace(source_network: str, table_id: int, priority: int) -> int:
     prefix = _rule_command_prefix(source_network)
     delete = _run([*prefix, "del", "priority", str(priority)])
@@ -3540,7 +3586,7 @@ def _apply_wan_policy_rules(parsed: dict[str, list[dict[str, str]]]) -> int:
         return 127
     for index, target in enumerate(parsed["targets"]):
         domain = target.get("routing_domain", "lab")
-        table_id = MANAGEMENT_ROUTE_TABLE_ID if domain == "management" else LAB_ROUTE_TABLE_ID
+        table_id = _target_route_table_id(target)
         base_priority = MANAGEMENT_ROUTE_RULE_PRIORITY if domain == "management" else LAB_ROUTE_RULE_PRIORITY
         for source_network in _target_networks(target):
             result = _run_rule_replace(source_network, table_id, base_priority + index)
@@ -3719,6 +3765,9 @@ def _handle_wan(action: str, args: list[str]) -> int:
     forwarding_result = _apply_wan_forwarding(parsed)
     if forwarding_result != 0:
         return forwarding_result
+    target_route_result = _apply_wan_target_routes(parsed)
+    if target_route_result != 0:
+        return target_route_result
     rule_result = _apply_wan_policy_rules(parsed)
     if rule_result != 0:
         return rule_result
