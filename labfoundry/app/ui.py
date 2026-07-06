@@ -119,6 +119,7 @@ from labfoundry.app.security import (
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+    compact_dhcp_range_expression,
     dhcp_bind_target_families,
     dns_domain_warnings,
     dns_reverse_records,
@@ -132,6 +133,7 @@ from labfoundry.app.services.dnsmasq import (
     join_servers,
     parse_hosts_records,
     parse_dnsmasq_leases,
+    parse_dhcp_range_expression,
     parse_zone_records,
     render_hosts_records,
     render_zone_file,
@@ -1134,20 +1136,25 @@ def refresh_interface_dependent_addresses(
             getattr(scope, "interface_name", ""),
             getattr(scope, "site_address", ""),
             getattr(scope, "prefix_length", None),
-            getattr(scope, "range_start", ""),
-            getattr(scope, "range_end", ""),
+            getattr(scope, "range_expression", ""),
             getattr(scope, "dns_server", ""),
             getattr(scope, "ntp_server", ""),
         )
+        parsed_range_errors, parsed_ranges = parse_dhcp_range_expression(scope) if isinstance(scope, DhcpScope) else ([], [])
         scope.interface_name = new_name
         site_address_is_stale = bool(scope_site_address and new_network and not _address_in_network(scope_site_address, new_network))
         if not getattr(scope, "site_address", "") or getattr(scope, "site_address", "") in stale_addresses or site_address_is_stale:
             scope.site_address = new_address
         if new_prefixes[family] and (not getattr(scope, "prefix_length", None) or getattr(scope, "prefix_length", None) == (old_network.prefixlen if old_network else None)):
             scope.prefix_length = int(new_prefixes[family])
-        if family == 4:
-            scope.range_start = _rebase_address_in_network(getattr(scope, "range_start", ""), old_network, new_network)
-            scope.range_end = _rebase_address_in_network(getattr(scope, "range_end", ""), old_network, new_network)
+        if isinstance(scope, DhcpScope) and not parsed_range_errors and parsed_ranges:
+            rebased_ranges = []
+            for start_address, end_address in parsed_ranges:
+                rebased_start = _rebase_address_in_network(str(start_address), old_network, new_network)
+                rebased_end = _rebase_address_in_network(str(end_address), old_network, new_network)
+                rebased_ranges.append(rebased_start if rebased_start == rebased_end else f"{rebased_start}-{rebased_end}")
+            scope.range_expression = ", ".join(rebased_ranges)
+            scope.range_expression = compact_dhcp_range_expression(scope)
         if not getattr(scope, "dns_server", "") or getattr(scope, "dns_server", "") in stale_addresses or dns_bound:
             scope.dns_server = new_address if dns_bound or getattr(scope, "dns_server", "") in stale_addresses else getattr(scope, "dns_server", "")
         if isinstance(scope, DhcpScope) and (not scope.ntp_server or scope.ntp_server in stale_addresses or chrony_bound):
@@ -1158,8 +1165,7 @@ def refresh_interface_dependent_addresses(
             getattr(scope, "interface_name", ""),
             getattr(scope, "site_address", ""),
             getattr(scope, "prefix_length", None),
-            getattr(scope, "range_start", ""),
-            getattr(scope, "range_end", ""),
+            getattr(scope, "range_expression", ""),
             getattr(scope, "dns_server", ""),
             getattr(scope, "ntp_server", ""),
         )
@@ -3716,7 +3722,10 @@ def dns_record_suggested_ipv4(records: list[DnsRecord], domain: str, dhcp_scopes
         site_address = ipv4_address_or_none(scope.site_address)
         if site_address:
             scope_excluded.add(site_address)
-        scope_excluded.update(ipv4_range(scope.range_start, scope.range_end))
+        range_errors, parsed_ranges = parse_dhcp_range_expression(scope)
+        if not range_errors:
+            for start_address, end_address in parsed_ranges:
+                scope_excluded.update(ipv4_range(str(start_address), str(end_address)))
         candidate_networks.append((network, scope_excluded))
 
     inferred_networks: dict[IPv4Network, int] = {}
@@ -7626,8 +7635,6 @@ def update_dhcp_from_ui(
     interface_name: str | None = Form(None),
     site_address: str | None = Form(None),
     prefix_length: str | None = Form(None),
-    range_start: str | None = Form(None),
-    range_end: str | None = Form(None),
     lease_time: str | None = Form(None),
     domain_name: str | None = Form(None),
     dns_server: str | None = Form(None),
@@ -7649,10 +7656,6 @@ def update_dhcp_from_ui(
             settings.prefix_length = int(prefix_text)
         except ValueError:
             return JSONResponse({"status": "error", "error": "DHCP prefix length must be an integer."}, status_code=422)
-    if range_start is not None:
-        settings.range_start = range_start.strip()
-    if range_end is not None:
-        settings.range_end = range_end.strip()
     if lease_time is not None:
         settings.lease_time = lease_time.strip() or settings.lease_time
     if domain_name is not None:
@@ -7681,8 +7684,7 @@ def create_dhcp_scope_from_ui(
     interface_name: str = Form(...),
     site_address: str = Form(...),
     prefix_length: int = Form(...),
-    range_start: str = Form(...),
-    range_end: str = Form(...),
+    range_expression: str = Form(...),
     lease_time: str = Form(...),
     domain_name: str = Form(...),
     dns_server: str = Form(...),
@@ -7700,8 +7702,7 @@ def create_dhcp_scope_from_ui(
         interface_name=interface_name.strip(),
         site_address=site_address.strip(),
         prefix_length=prefix_length,
-        range_start=range_start.strip(),
-        range_end=range_end.strip(),
+        range_expression=range_expression.strip(),
         lease_time=lease_time.strip(),
         domain_name=domain_name.strip(),
         dns_server=dns_server.strip(),
@@ -7737,8 +7738,7 @@ def edit_dhcp_scope_from_ui(
     interface_name: str = Form(...),
     site_address: str = Form(...),
     prefix_length: int = Form(...),
-    range_start: str = Form(...),
-    range_end: str = Form(...),
+    range_expression: str = Form(...),
     lease_time: str = Form(...),
     domain_name: str = Form(...),
     dns_server: str = Form(...),
@@ -7758,8 +7758,7 @@ def edit_dhcp_scope_from_ui(
     scope.interface_name = interface_name.strip()
     scope.site_address = site_address.strip()
     scope.prefix_length = prefix_length
-    scope.range_start = range_start.strip()
-    scope.range_end = range_end.strip()
+    scope.range_expression = range_expression.strip()
     scope.lease_time = lease_time.strip()
     scope.domain_name = domain_name.strip()
     scope.dns_server = dns_server.strip()

@@ -885,8 +885,7 @@ function newDhcpScopeRow(defaultInterface = "eth2", defaults = {}) {
     interface_name: defaultInterface,
     site_address: "",
     prefix_length: 24,
-    range_start: "",
-    range_end: "",
+    range_expression: "",
     lease_time: "12h",
     domain_name: "labfoundry.internal",
     dns_server: "",
@@ -971,8 +970,7 @@ function hasRequiredDhcpScopeFields(data) {
     (data.name || "").trim() &&
       (data.interface_name || "").trim() &&
       (data.site_address || "").trim() &&
-      (data.range_start || "").trim() &&
-      (data.range_end || "").trim() &&
+      (data.range_expression || "").trim() &&
       (data.dns_server || "").trim(),
   );
 }
@@ -2273,15 +2271,6 @@ function initializeFirewallRulesTable() {
           cellEdited: (cell) => autoSaveFirewallRule(cell, csrf),
         },
         { title: "Ports", field: "destination_port", editor: "input", width: 120, cellEdited: (cell) => autoSaveFirewallRule(cell, csrf) },
-        {
-          title: "Family",
-          field: "address_family",
-          editor: "list",
-          editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" } },
-          formatter: (cell) => (cell.getValue() === "ipv6" ? "IPv6" : "IPv4"),
-          width: 95,
-          cellEdited: (cell) => autoSaveDhcpScope(cell, csrf),
-        },
         {
           title: "Interface",
           field: "interface_name",
@@ -4949,6 +4938,16 @@ function initializeDhcpScopesTable() {
           cellEdited: handleDhcpScopeEdited,
         },
         {
+          title: "Family",
+          field: "address_family",
+          editor: "list",
+          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
+          editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" } },
+          formatter: (cell) => (cell.getValue() === "ipv6" ? "IPv6" : "IPv4"),
+          width: 100,
+          cellEdited: handleDhcpScopeEdited,
+        },
+        {
           title: "Interface",
           field: "interface_name",
           editor: "list",
@@ -4975,21 +4974,12 @@ function initializeDhcpScopesTable() {
           cellEdited: handleDhcpScopeEdited,
         },
         {
-          title: "Range start",
-          field: "range_start",
+          title: "Range",
+          field: "range_expression",
           editor: "input",
           editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "start IP..."),
-          minWidth: 140,
-          cellEdited: handleDhcpScopeEdited,
-        },
-        {
-          title: "Range end",
-          field: "range_end",
-          editor: "input",
-          editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "end IP..."),
-          minWidth: 140,
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "192.168.87.100-200, 192.168.87.222"),
+          minWidth: 240,
           cellEdited: handleDhcpScopeEdited,
         },
         {

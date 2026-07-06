@@ -50,7 +50,7 @@
             <td>{{ scope.interface_name }}</td>
             <td>{{ scope.site_address }}</td>
             <td>/{{ scope.prefix_length }}</td>
-            <td>{{ scope.range_start }} - {{ scope.range_end }}</td>
+            <td>{{ scope.range_expression }}</td>
             <td>{{ scope.lease_time }}</td>
             <td>{{ scope.dns_server }}</td>
             <td>{{ scope.ntp_server or "" }}</td>
@@ -335,8 +335,6 @@
         <input type="hidden" name="interface_name" value="{{ dhcp_settings.interface_name }}">
         <input type="hidden" name="site_address" value="{{ dhcp_settings.site_address }}">
         <input type="hidden" name="prefix_length" value="{{ dhcp_settings.prefix_length }}">
-        <input type="hidden" name="range_start" value="{{ dhcp_settings.range_start }}">
-        <input type="hidden" name="range_end" value="{{ dhcp_settings.range_end }}">
         <input type="hidden" name="lease_time" value="{{ dhcp_settings.lease_time }}">
         <input type="hidden" name="domain_name" value="{{ dhcp_settings.domain_name }}">
         <input type="hidden" name="dns_server" value="{{ dhcp_settings.dns_server }}">

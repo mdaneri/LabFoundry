@@ -1,3 +1,5 @@
+from ipaddress import ip_address
+
 from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
@@ -7,6 +9,7 @@ from labfoundry.app.services.dnsmasq import (
     dns_domain_warnings,
     dns_reverse_records,
     join_conditional_forwarders,
+    parse_dhcp_range_expression,
     parse_dnsmasq_leases,
     parse_hosts_records,
     render_dnsmasq_config,
@@ -41,8 +44,6 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
         interface_name="eth1",
         site_address="192.168.50.1",
         prefix_length=24,
-        range_start="192.168.50.100",
-        range_end="192.168.50.200",
         dns_server="192.168.50.1",
     )
     config = render_dnsmasq_config(
@@ -53,6 +54,16 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
             DnsRecord(hostname="www.labfoundry.internal", record_type="CNAME", address="app.labfoundry.internal"),
         ],
         dhcp_settings=dhcp_settings,
+        dhcp_scopes=[
+            DhcpScope(
+                name="SiteA",
+                interface_name="eth1",
+                site_address="192.168.50.1",
+                prefix_length=24,
+                range_expression="192.168.50.100-200",
+                dns_server="192.168.50.1",
+            )
+        ],
         dhcp_reservations=[
             DhcpReservation(hostname="client1", mac_address="02:15:5d:00:20:20", ip_address="192.168.50.120"),
             DhcpReservation(
@@ -97,8 +108,7 @@ def test_dnsmasq_renderer_supports_ipv6_dhcp_zones():
         interface_name="eth2",
         site_address="fd00:50::1",
         prefix_length=64,
-        range_start="fd00:50::100",
-        range_end="fd00:50::1ff",
+        range_expression="fd00:50::100-fd00:50::1ff",
         lease_time="12h",
         domain_name="labfoundry.internal",
         dns_server="fd00:50::1",
@@ -125,6 +135,38 @@ def test_dnsmasq_renderer_supports_ipv6_dhcp_zones():
     assert "dhcp-option=tag:ipv6lab,option6:ntp-server,[fd00:50::1]" in config
     assert "dhcp-option=tag:ipv6lab,option:router" not in config
     assert "dhcp-host=02:15:5d:00:20:21,v6client,[fd00:50::120]" in config
+
+
+def test_dhcp_range_expression_supports_ipv4_prefix_suffix_syntax():
+    scope_24 = DhcpScope(
+        name="Site24",
+        site_address="192.168.87.1",
+        prefix_length=24,
+        range_expression="192.168.87.100-200, 192.168.87.222, 192.168.87.226-228",
+    )
+    scope_16 = DhcpScope(
+        name="Site16",
+        site_address="192.168.87.1",
+        prefix_length=16,
+        range_expression="192.168.87.100-87.200, 192.168.87.222, 192.168.87.226-87.228",
+    )
+
+    assert parse_dhcp_range_expression(scope_24) == (
+        [],
+        [
+            (ip_address("192.168.87.100"), ip_address("192.168.87.200")),
+            (ip_address("192.168.87.222"), ip_address("192.168.87.222")),
+            (ip_address("192.168.87.226"), ip_address("192.168.87.228")),
+        ],
+    )
+    assert parse_dhcp_range_expression(scope_16) == (
+        [],
+        [
+            (ip_address("192.168.87.100"), ip_address("192.168.87.200")),
+            (ip_address("192.168.87.222"), ip_address("192.168.87.222")),
+            (ip_address("192.168.87.226"), ip_address("192.168.87.228")),
+        ],
+    )
 
 
 def test_dns_conditional_forwarders_accept_multiple_servers_per_domain():
@@ -171,8 +213,7 @@ def test_dnsmasq_renderer_adds_esxi_pxe_boot_options():
         interface_name="eth1",
         site_address="192.168.50.1",
         prefix_length=24,
-        range_start="192.168.50.100",
-        range_end="192.168.50.200",
+        range_expression="192.168.50.100-200",
         lease_time="12h",
         domain_name="labfoundry.internal",
         dns_server="192.168.50.1",
@@ -186,8 +227,6 @@ def test_dnsmasq_renderer_adds_esxi_pxe_boot_options():
             interface_name="eth1",
             site_address="192.168.50.1",
             prefix_length=24,
-            range_start="192.168.50.100",
-            range_end="192.168.50.200",
             dns_server="192.168.50.1",
         ),
         dhcp_scopes=[pxe_scope],
@@ -253,8 +292,6 @@ def test_disabled_dhcp_allows_blank_reset_defaults():
             enabled=False,
             interface_name="",
             site_address="",
-            range_start="",
-            range_end="",
             dns_server="",
         ),
         [],
@@ -280,8 +317,7 @@ def test_dnsmasq_renderer_supports_multiple_dhcp_ip_zones():
                 interface_name="eth1",
                 site_address="192.168.50.1",
                 prefix_length=24,
-                range_start="192.168.50.100",
-                range_end="192.168.50.200",
+                range_expression="192.168.50.100-200, 192.168.50.222",
                 lease_time="12h",
                 domain_name="labfoundry.internal",
                 dns_server="192.168.50.1",
@@ -292,8 +328,7 @@ def test_dnsmasq_renderer_supports_multiple_dhcp_ip_zones():
                 interface_name="eth2",
                 site_address="192.168.60.1",
                 prefix_length=24,
-                range_start="192.168.60.100",
-                range_end="192.168.60.200",
+                range_expression="192.168.60.100-200",
                 lease_time="8h",
                 domain_name="siteb.internal",
                 dns_server="192.168.60.1",
@@ -306,6 +341,7 @@ def test_dnsmasq_renderer_supports_multiple_dhcp_ip_zones():
     assert "interface=eth1" in config
     assert "interface=eth2" in config
     assert "dhcp-range=set:sitea,192.168.50.100,192.168.50.200,12h" in config
+    assert "dhcp-range=set:sitea,192.168.50.222,192.168.50.222,12h" in config
     assert "dhcp-range=set:siteb,192.168.60.100,192.168.60.200,8h" in config
     assert "dhcp-option=tag:siteb,option:domain-name,siteb.internal" in config
     assert "dhcp-option=tag:siteb,option:ntp-server,192.168.60.1" in config
@@ -338,18 +374,24 @@ def test_dns_dhcp_validation_reports_bad_addresses():
         interface_name="eth1",
         site_address="192.168.50.1",
         prefix_length=24,
-        range_start="192.168.51.10",
-        range_end="192.168.50.20",
+        dns_server="192.168.60.1",
+    )
+    dhcp_scope = DhcpScope(
+        name="BadRange",
+        interface_name="eth1",
+        site_address="192.168.50.1",
+        prefix_length=24,
+        range_expression="192.168.51.10-192.168.50.20",
         dns_server="192.168.60.1",
     )
 
-    errors = validate_dns_settings(dns_settings, [], "sddc.internal=not-an-ip\nbad=192.168.1.10#70000") + validate_dhcp_settings(dhcp_settings, [])
+    errors = validate_dns_settings(dns_settings, [], "sddc.internal=not-an-ip\nbad=192.168.1.10#70000") + validate_dhcp_settings(dhcp_settings, [], [dhcp_scope])
 
     assert any("DNS listen address" in error for error in errors)
     assert any("upstream server" in error for error in errors)
     assert any("conditional forwarder sddc.internal server" in error for error in errors)
     assert any("conditional forwarder bad server port" in error for error in errors)
-    assert any("range start" in error for error in errors)
+    assert any("range 192.168.51.10-192.168.50.20 must stay inside" in error for error in errors)
     assert any("DNS server" in error for error in errors)
 
 
@@ -385,7 +427,7 @@ def test_dhcp_bind_target_validation_accepts_access_physical_and_vlans():
         DhcpSettings(enabled=True),
         [
             DhcpScope(name="SiteA", interface_name="eth2"),
-            DhcpScope(name="IPv6Lab", address_family="ipv6", interface_name="eth2", site_address="fd00:50::1", prefix_length=64, range_start="fd00:50::100", range_end="fd00:50::1ff", dns_server="fd00:50::1"),
+            DhcpScope(name="IPv6Lab", address_family="ipv6", interface_name="eth2", site_address="fd00:50::1", prefix_length=64, range_expression="fd00:50::100-fd00:50::1ff", dns_server="fd00:50::1"),
             DhcpScope(name="SiteB", interface_name="eth1.20"),
         ],
         target_families,
@@ -617,7 +659,7 @@ def test_dhcp_api_scope_and_reservations(client):
     scopes = client.get("/api/v1/dhcp/scopes", headers={"Authorization": f"Bearer {dhcp_token}"})
     assert scopes.status_code == 200
     assert scopes.json()[0]["name"] == "SiteA"
-    assert scopes.json()[0]["range_start"] == "192.168.50.100"
+    assert scopes.json()[0]["range_expression"] == "192.168.50.100-200"
 
     created_scope = client.post(
         "/api/v1/dhcp/scopes",
@@ -627,8 +669,7 @@ def test_dhcp_api_scope_and_reservations(client):
             "interface_name": "eth2",
             "site_address": "192.168.60.1",
             "prefix_length": 24,
-            "range_start": "192.168.60.100",
-            "range_end": "192.168.60.200",
+            "range_expression": "192.168.60.100-200",
             "lease_time": "8h",
             "domain_name": "siteb.internal",
             "dns_server": "192.168.60.1",

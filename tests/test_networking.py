@@ -245,7 +245,7 @@ def test_sync_host_inventory_cleans_removed_nic_bindings_and_retargets_survivors
                 RoutingRule(name="removed route permission", source_interface="eth1.22", destination_interface="eth2.50"),
                 RoutingRule(name="survivor route permission", source_interface="eth2.50", destination_interface="eth2"),
                 DhcpSettings(enabled=True),
-                DhcpScope(name="removed-zone", interface_name="eth1.22", site_address="192.168.22.1", range_start="192.168.22.100", range_end="192.168.22.200"),
+                DhcpScope(name="removed-zone", interface_name="eth1.22", site_address="192.168.22.1", range_expression="192.168.22.100-200"),
                 DnsSettings(enabled=True, listen_interface="eth1.22\neth2.50", listen_address="192.168.22.1\n192.168.50.1"),
                 CaSettings(enabled=True, listen_interface="eth1.22", listen_address="192.168.22.1\n10.0.0.99"),
                 KmsSettings(enabled=True, listen_interface="eth1.22", listen_address="192.168.22.1"),

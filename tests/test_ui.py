@@ -1995,8 +1995,7 @@ def test_esxi_pxe_multi_zone_host_reservations_and_grid_menu(client):
             interface_name="eth3",
             site_address="10.1.1.1",
             prefix_length=24,
-            range_start="10.1.1.100",
-            range_end="10.1.1.200",
+            range_expression="10.1.1.100-200",
             lease_time="12h",
             domain_name="labfoundry.internal",
             dns_server="10.1.1.1",
@@ -3410,8 +3409,7 @@ def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
             name="SiteA",
             site_address="192.168.50.1",
             prefix_length=24,
-            range_start="192.168.50.100",
-            range_end="192.168.50.200",
+            range_expression="192.168.50.100-200",
             domain_name="labfoundry.internal",
             enabled=True,
         )
@@ -5976,8 +5974,7 @@ def test_physical_interface_edit_updates_desired_state(client):
         scope.interface_name = "eth2"
         scope.site_address = "192.168.50.1"
         scope.prefix_length = 24
-        scope.range_start = "192.168.50.100"
-        scope.range_end = "192.168.50.200"
+        scope.range_expression = "192.168.50.100-200"
         scope.dns_server = "192.168.50.1"
         scope.ntp_server = "192.168.50.1"
         db.add(scope)
@@ -6050,8 +6047,7 @@ def test_physical_interface_edit_updates_desired_state(client):
         assert scope.interface_name == "eth2"
         assert scope.site_address == "192.168.70.1"
         assert scope.prefix_length == 24
-        assert scope.range_start == "192.168.70.100"
-        assert scope.range_end == "192.168.70.200"
+        assert scope.range_expression == "192.168.70.100-200"
         assert scope.dns_server == "192.168.70.1"
         assert scope.ntp_server == "192.168.70.1"
         kms_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "kms.labfoundry.internal", DnsRecord.record_type == "CNAME")).scalar_one()
@@ -6092,8 +6088,7 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
         scope.interface_name = "eth2"
         scope.site_address = "192.168.1.1"
         scope.prefix_length = 24
-        scope.range_start = "192.168.1.100"
-        scope.range_end = "192.168.1.120"
+        scope.range_expression = "192.168.1.100-120"
         scope.dns_server = "192.168.1.1"
         scope.ntp_server = "192.168.1.1"
         save_esxi_pxe_boot_settings(
@@ -6143,8 +6138,7 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
     with SessionLocal() as db:
         scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
         assert scope.site_address == "192.168.50.1"
-        assert scope.range_start == "192.168.50.100"
-        assert scope.range_end == "192.168.50.120"
+        assert scope.range_expression == "192.168.50.100-120"
         assert scope.dns_server == "192.168.50.1"
         assert scope.ntp_server == "192.168.50.1"
         pxe_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == ESXI_PXE_DEFAULT_HOSTNAME, DnsRecord.record_type == "CNAME")).scalar_one()
@@ -7606,8 +7600,6 @@ def test_dhcp_settings_autosave_returns_json(client):
             "interface_name": "eth2",
             "site_address": "192.168.50.1",
             "prefix_length": "24",
-            "range_start": "192.168.50.120",
-            "range_end": "192.168.50.220",
             "lease_time": "8h",
             "domain_name": "labfoundry.internal",
             "dns_server": "192.168.50.1",
@@ -7690,8 +7682,7 @@ def test_dhcp_scope_edit_form_updates_ip_zone(client):
             "interface_name": "eth2",
             "site_address": "192.168.50.1",
             "prefix_length": "24",
-            "range_start": "192.168.50.110",
-            "range_end": "192.168.50.210",
+            "range_expression": "192.168.50.110-210",
             "lease_time": "8h",
             "domain_name": "labfoundry.internal",
             "dns_server": "192.168.50.1",

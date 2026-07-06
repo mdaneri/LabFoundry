@@ -75,6 +75,7 @@ def _ensure_sqlite_dhcp_columns() -> None:
     existing = {column["name"] for column in inspector.get_columns("dhcp_scopes")}
     columns = {
         "address_family": "VARCHAR(10) DEFAULT 'ipv4'",
+        "range_expression": "VARCHAR(500) DEFAULT ''",
     }
     with engine.begin() as connection:
         for name, definition in columns.items():

@@ -401,8 +401,6 @@ class DhcpSettingsUpdate(BaseModel):
     interface_name: str = Field(default="eth2", min_length=1, max_length=80)
     site_address: str = Field(default="192.168.50.1", min_length=1, max_length=64)
     prefix_length: int = Field(default=24, ge=1, le=32)
-    range_start: str = Field(default="192.168.50.100", min_length=1, max_length=64)
-    range_end: str = Field(default="192.168.50.200", min_length=1, max_length=64)
     lease_time: str = Field(default="12h", min_length=1, max_length=40)
     domain_name: str = Field(default="labfoundry.internal", min_length=1, max_length=120)
     dns_server: str = Field(default="192.168.50.1", min_length=1, max_length=64)
@@ -423,8 +421,7 @@ class DhcpScopeCreate(BaseModel):
     interface_name: str
     site_address: str
     prefix_length: int = Field(ge=1, le=128)
-    range_start: str
-    range_end: str
+    range_expression: str
     lease_time: str
     domain_name: str
     dns_server: str
@@ -510,8 +507,7 @@ class DhcpStatusResponse(BaseModel):
     enabled: bool
     service: ServiceStateResponse | None
     interface_name: str
-    range_start: str
-    range_end: str
+    range_expression: str
     reservation_count: int
     config_path: str
     dry_run: bool
