@@ -3135,6 +3135,9 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
 
 
 def test_dns_and_dhcp_pages_render(client):
+    import html
+    import json
+
     login(client)
     dns = client.get("/dns")
     assert dns.status_code == 200
@@ -3275,6 +3278,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "initializeDhcpReservationsTable" in app_js.text
     assert "autoSaveDhcpReservation" in app_js.text
     assert "+ Add reservation here" in app_js.text
+    assert 'field: "zone_name"' in app_js.text
     assert 'title: "DNS name / FQDN"' in app_js.text
     assert "initializeCaSettings" in app_js.text
     assert "data-ca-config-preview" in app_js.text
@@ -3348,6 +3352,10 @@ def test_dns_and_dhcp_pages_render(client):
     assert "Save DHCP" not in dhcp.text
     assert "192.168.50.100" in dhcp.text
     assert "192.168.50.1" in dhcp.text
+    reservation_payload = dhcp.text.split("data-reservations='", 1)[1].split("'", 1)[0]
+    reservation_rows = json.loads(html.unescape(reservation_payload))
+    assert reservation_rows
+    assert all("zone_name" in row for row in reservation_rows)
 
 
 def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
@@ -3420,7 +3428,7 @@ def test_dns_new_record_row_suggests_next_available_ipv4(client):
 
 def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
     from labfoundry.app.models import DhcpReservation, DhcpScope, DnsRecord
-    from labfoundry.app.ui import dns_record_suggested_ipv4
+    from labfoundry.app.ui import dhcp_scope_name_for_ip, dns_record_suggested_ipv4
 
     records = [
         DnsRecord(hostname="labfoundry.labfoundry.internal", record_type="A", address="192.168.49.1", enabled=True),
@@ -3448,6 +3456,8 @@ def test_dns_ipv4_suggestion_falls_back_to_existing_a_record_network():
     ]
 
     assert dns_record_suggested_ipv4(records, "labfoundry.internal", scopes, reservations) == "192.168.50.3"
+    assert dhcp_scope_name_for_ip("192.168.50.140", scopes) == "SiteA"
+    assert dhcp_scope_name_for_ip("192.168.1.140", scopes) == ""
 
 
 def test_dns_settings_badge_reflects_desired_state_not_runtime_state(client):
@@ -3475,6 +3485,9 @@ def test_dns_settings_badge_reflects_desired_state_not_runtime_state(client):
 
 
 def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
+    import html
+    import json
+
     from sqlalchemy import select
 
     from labfoundry.app.adapters.system import AdapterResult
@@ -3505,6 +3518,19 @@ def test_dhcp_leases_page_reflects_live_adapter_output(client, monkeypatch):
     assert "dhcp-leases-table" in page.text
     assert "dhcp-leases-fallback" in page.text
     assert "data-leases=" in page.text
+    lease_payload = page.text.split("data-leases='", 1)[1].split("'", 1)[0]
+    lease_rows = json.loads(html.unescape(lease_payload))
+    assert lease_rows == [
+        {
+            "status": "active",
+            "hostname": "live-client.labfoundry.internal",
+            "ip_address": "192.168.50.140",
+            "zone_name": "SiteA",
+            "mac_address": "02:15:5d:00:20:40",
+            "expires_at": "2030-01-01T00:00:00+00:00",
+            "client_id": "",
+        }
+    ]
     assert "data-dhcp-lease-reservation" in page.text
     assert "data-dhcp-lease-pxe-host" in page.text
     assert "dhcp-lease-reservation-modal" in page.text

@@ -1471,6 +1471,7 @@ function initializeDhcpLeasesTable() {
         { title: "Status", field: "status", formatter: dhcpLeaseStatusFormatter, width: 100 },
         { title: "DNS name / FQDN", field: "hostname", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 190 },
         { title: "IP", field: "ip_address", minWidth: 140 },
+        { title: "Zone", field: "zone_name", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 120 },
         { title: "MAC", field: "mac_address", minWidth: 170 },
         { title: "Expires", field: "expires_at", minWidth: 210 },
         { title: "Client ID", field: "client_id", formatter: (cell) => escapeHtml(cell.getValue() || "-"), minWidth: 210 },
@@ -5361,6 +5362,13 @@ function initializeDhcpReservationsTable() {
           formatter: (cell) => dnsAddRowHintFormatter(cell, "enter IP..."),
           minWidth: 150,
           cellEdited: (cell) => autoSaveDhcpReservation(cell, csrf),
+        },
+        {
+          title: "Zone",
+          field: "zone_name",
+          formatter: (cell) => escapeHtml(cell.getValue() || "-"),
+          minWidth: 120,
+          editor: false,
         },
         {
           title: "Enabled",

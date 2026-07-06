@@ -2958,9 +2958,9 @@ def dnsmasq_context(db: Session) -> dict:
         "dhcp_option_scope_choices": dhcp_option_scope_choices(dhcp_scopes),
         "dhcp_generated_pxe_options": generated_esxi_pxe_dhcp_options(esxi_boot, dhcp_scopes),
         "dhcp_reservations": dhcp_reservations,
-        "dhcp_reservation_rows": [dhcp_reservation_payload(item) for item in dhcp_reservations],
+        "dhcp_reservation_rows": [dhcp_reservation_payload(item, dhcp_scopes) for item in dhcp_reservations],
         "dhcp_leases": dhcp_leases,
-        "dhcp_lease_rows": [dhcp_lease_payload(lease) for lease in dhcp_leases],
+        "dhcp_lease_rows": [dhcp_lease_payload(lease, dhcp_scopes) for lease in dhcp_leases],
         "dhcp_lease_dry_run": lease_result.dry_run,
         "dhcp_lease_command": " ".join(lease_result.command),
         "dhcp_lease_error": dhcp_lease_error,
@@ -3147,23 +3147,45 @@ def generated_esxi_pxe_dhcp_options(esxi_boot: dict[str, Any], scopes: list[Dhcp
     return rows
 
 
-def dhcp_reservation_payload(reservation: DhcpReservation) -> dict:
+def dhcp_scope_network_any(scope: DhcpScope):
+    try:
+        return ip_network(f"{scope.site_address}/{scope.prefix_length}", strict=False)
+    except ValueError:
+        return None
+
+
+def dhcp_scope_name_for_ip(value: str | None, scopes: list[DhcpScope]) -> str:
+    try:
+        address = ip_address(str(value or "").strip())
+    except ValueError:
+        return ""
+    for scope in scopes:
+        network = dhcp_scope_network_any(scope)
+        if network is not None and address.version == network.version and address in network:
+            return scope.name
+    return ""
+
+
+def dhcp_reservation_payload(reservation: DhcpReservation, scopes: list[DhcpScope] | None = None) -> dict:
     return {
         "id": reservation.id,
         "hostname": reservation.hostname,
         "mac_address": reservation.mac_address,
         "ip_address": reservation.ip_address,
+        "zone_name": dhcp_scope_name_for_ip(reservation.ip_address, scopes or []),
         "description": reservation.description or "",
         "enabled": reservation.enabled,
     }
 
 
-def dhcp_lease_payload(lease: dict[str, Any]) -> dict[str, str]:
+def dhcp_lease_payload(lease: dict[str, Any], scopes: list[DhcpScope] | None = None) -> dict[str, str]:
     expires_at = lease.get("expires_at")
+    ip_address_value = str(lease.get("ip_address") or "")
     return {
         "status": str(lease.get("status") or ""),
         "hostname": str(lease.get("hostname") or ""),
-        "ip_address": str(lease.get("ip_address") or ""),
+        "ip_address": ip_address_value,
+        "zone_name": dhcp_scope_name_for_ip(ip_address_value, scopes or []),
         "mac_address": str(lease.get("mac_address") or ""),
         "expires_at": expires_at.isoformat() if hasattr(expires_at, "isoformat") else str(expires_at or "never"),
         "client_id": str(lease.get("client_id") or ""),
