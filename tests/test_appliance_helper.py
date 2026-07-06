@@ -567,6 +567,62 @@ def test_wan_helper_cleans_managed_policy_rule_windows_before_apply(tmp_path):
     assert ["ip", "rule", "add", "from", "192.168.20.0/24", "table", "200", "priority", "2000"] in commands
 
 
+def test_wan_helper_preserves_management_default_gateway(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    networkd_dir = tmp_path / "systemd-network"
+    networkd_dir.mkdir()
+    management_network = networkd_dir / "00-labfoundry-mgmt.network"
+    management_network.write_text(
+        "\n".join(
+            [
+                "[Match]",
+                "Name=eth0",
+                "",
+                "[Network]",
+                "Address=192.168.49.10/24",
+                "",
+                "[Route]",
+                "Gateway=192.168.49.254",
+                "Table=100",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "management-default.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[targets]",
+                "target=eth0",
+                "  kind=physical",
+                "  role=management",
+                "  ip_cidr=192.168.49.10/24",
+                "  ipv6_cidr=",
+                "  wan=false",
+                "  routing_domain=management",
+                "  route_allowed=false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parsed = helper._parse_wan_config(config_path)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", management_network)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/sbin/{command}" if command == "ip" else None)
+
+    assert helper._apply_wan_target_routes(parsed) == 0
+    assert ["ip", "route", "replace", "192.168.49.0/24", "dev", "eth0", "table", "100"] in commands
+    assert ["ip", "route", "replace", "default", "via", "192.168.49.254", "dev", "eth0", "table", "100"] in commands
+
+
 def test_staging_prepare_repairs_apply_directory_ownership(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_root = tmp_path / "apply"

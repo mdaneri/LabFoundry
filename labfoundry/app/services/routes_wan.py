@@ -304,6 +304,7 @@ def render_wan_config(
                 f"  role={target.get('role', '')}",
                 f"  ip_cidr={target.get('ip_cidr', '')}",
                 f"  ipv6_cidr={target.get('ipv6_cidr', '')}",
+                f"  gateway={target.get('gateway', '')}",
                 f"  wan={_bool_value(bool(target.get('wan')))}",
                 f"  routing_domain={target.get('routing_domain', 'lab')}",
                 f"  route_allowed={_bool_value(bool(target.get('route_allowed', True)))}",
@@ -436,6 +437,15 @@ def render_wan_config(
                 route_family = "-6 " if network.version == 6 else ""
                 lines.append(f"ip {route_family}rule add from {network} table {table} priority {priority}")
                 lines.append(f"ip {route_family}route replace {network} dev {target['name']} table {table}")
+        gateway = str(target.get("gateway", "") or "").strip()
+        if target.get("routing_domain") == "management" and gateway:
+            try:
+                gateway_address = ip_address(gateway)
+            except ValueError:
+                pass
+            else:
+                route_family = "-6 " if gateway_address.version == 6 else ""
+                lines.append(f"ip {route_family}route replace default via {gateway} dev {target['name']} table {MANAGEMENT_ROUTE_TABLE_ID}")
     if any(rule.enabled for rule in nat_rules):
         lines.append("nft -f /etc/labfoundry/nftables.d/labfoundry-nat.nft")
 

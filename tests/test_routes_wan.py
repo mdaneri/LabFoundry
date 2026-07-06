@@ -43,6 +43,7 @@ def test_render_wan_config_keeps_management_and_lab_route_tables_separate():
                 "role": "management",
                 "ip_cidr": "192.168.49.10/24",
                 "ipv6_cidr": "",
+                "gateway": "192.168.49.254",
                 "wan": False,
                 "routing_domain": "management",
                 "route_allowed": False,
@@ -62,8 +63,10 @@ def test_render_wan_config_keeps_management_and_lab_route_tables_separate():
 
     assert "management=100 labfoundry_mgmt" in config
     assert "lab=200 labfoundry_lab" in config
+    assert "  gateway=192.168.49.254" in config
     assert "ip rule add from 192.168.49.0/24 table 100 priority 1000" in config
     assert "ip route replace 192.168.49.0/24 dev eth0 table 100" in config
+    assert "ip route replace default via 192.168.49.254 dev eth0 table 100" in config
     assert "ip rule add from 172.20.0.0/24 table 200 priority 2001" in config
     assert "ip route replace 172.20.0.0/24 dev eth1 table 200" in config
     assert "ip route replace 0.0.0.0/0 via 172.20.0.254 dev eth1 metric 100 table 200" in config

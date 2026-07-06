@@ -2955,7 +2955,7 @@ def _networkd_managed_filename(name: str, suffix: str) -> str:
 
 
 def _read_existing_management_network_values() -> dict[str, list[str]]:
-    values: dict[str, list[str]] = {"Gateway": [], "DNS": []}
+    values: dict[str, list[str]] = {"Gateway": [], "DNS": [], "Name": []}
     try:
         lines = NETWORKD_MGMT_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -2966,9 +2966,11 @@ def _read_existing_management_network_values() -> dict[str, list[str]]:
         if line.startswith("[") and line.endswith("]"):
             current_section = line.strip("[]")
             continue
-        if current_section not in {"Network", "Route"} or "=" not in line:
+        if current_section not in {"Match", "Network", "Route"} or "=" not in line:
             continue
         key, value = [part.strip() for part in line.split("=", 1)]
+        if key == "Name" and current_section == "Match" and value:
+            values[key].append(value)
         if key == "DNS" and current_section == "Network" and value:
             values[key].append(value)
         if key == "Gateway" and value:
@@ -3442,6 +3444,11 @@ def _wan_config_errors(path: Path) -> list[str]:
             errors.append(f"WAN target name {name or '<missing>'} is invalid.")
         if not target.get("ip_cidr") and not target.get("ipv6_cidr"):
             errors.append(f"WAN target {name or '<missing>'} must include an IPv4 or IPv6 CIDR.")
+        if target.get("gateway"):
+            try:
+                ip_address(target["gateway"])
+            except ValueError:
+                errors.append(f"WAN target {name or '<missing>'} gateway {target['gateway']} is not a valid IP address.")
         if target.get("ip_cidr"):
             try:
                 parsed_interface = ip_interface(target["ip_cidr"])
@@ -3685,6 +3692,54 @@ def _run_target_route_replace(network: str, interface_name: str, table_id: int) 
     return result.returncode
 
 
+def _run_default_gateway_route_replace(gateway: str, interface_name: str, table_id: int) -> int:
+    try:
+        gateway_address = ip_address(gateway)
+    except ValueError:
+        print(f"invalid gateway for {interface_name}: {gateway}", file=sys.stderr)
+        return 2
+    prefix = ["ip", "-6", "route"] if gateway_address.version == 6 else ["ip", "route"]
+    command = [*prefix, "replace", "default", "via", gateway, "dev", interface_name, "table", str(table_id)]
+    result = _run(command)
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _runtime_default_gateways_for_interface(interface_name: str) -> list[str]:
+    gateways: list[str] = []
+    for prefix in (["ip", "route"], ["ip", "-6", "route"]):
+        result = _run([*prefix, "show", "default", "dev", interface_name])
+        if result.returncode != 0:
+            continue
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if parts[:1] == ["default"] and "via" in parts:
+                gateway = parts[parts.index("via") + 1]
+                if gateway not in gateways:
+                    gateways.append(gateway)
+    return gateways
+
+
+def _management_default_gateways_for_target(target: dict[str, str]) -> list[str]:
+    configured = target.get("gateway", "").strip()
+    if configured:
+        return [configured]
+    interface_name = target.get("name", "")
+    preserved = _read_existing_management_network_values()
+    management_names = set(preserved.get("Name", []))
+    gateways: list[str] = []
+    if not management_names or interface_name in management_names:
+        gateways.extend(preserved.get("Gateway", []))
+    if not gateways:
+        gateways.extend(_runtime_default_gateways_for_interface(interface_name))
+    unique_gateways: list[str] = []
+    for gateway in gateways:
+        if gateway and gateway not in unique_gateways:
+            unique_gateways.append(gateway)
+    return unique_gateways
+
+
 def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
     if shutil.which("ip") is None:
         print("ip command not found", file=sys.stderr)
@@ -3696,6 +3751,11 @@ def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
             result = _run_target_route_replace(network, interface_name, table_id)
             if result != 0:
                 return result
+        if target.get("routing_domain", "lab") == "management":
+            for gateway in _management_default_gateways_for_target(target):
+                result = _run_default_gateway_route_replace(gateway, interface_name, table_id)
+                if result != 0:
+                    return result
     return 0
 
 
