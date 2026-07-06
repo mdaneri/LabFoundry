@@ -142,7 +142,7 @@ source "hyperv-iso" "photon" {
   switch_name        = var.switch_name
   generation         = 2
   enable_secure_boot = false
-  cpus               = 2
+  cpus               = 4
   memory             = 4096
   disk_size          = 40960
   differencing_disk  = false

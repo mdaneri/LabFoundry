@@ -149,7 +149,7 @@ source "vmware-iso" "photon" {
   guest_os_type        = "other5xlinux-64"
   version              = 21
   headless             = var.headless
-  cpus                 = 2
+  cpus                 = 4
   memory               = 4096
   disk_size            = 40960
   disk_type_id         = 0
