@@ -13,6 +13,7 @@ from ipaddress import IPv4Address, IPv4Network, ip_address, ip_interface, ip_net
 from pathlib import Path, PurePosixPath
 from secrets import token_urlsafe
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
@@ -184,6 +185,13 @@ from labfoundry.app.services.networking import (
     validate_network_state,
     vlan_interface_to_dict,
 )
+from labfoundry.app.services.public_services import (
+    PUBLIC_SERVICES_STAGED_CONFIG_PATH,
+    public_service_entries,
+    public_service_interface_entries,
+    public_services_for_address,
+    render_public_services_nginx_config,
+)
 from labfoundry.app.services.monitoring import monitor_payload
 from labfoundry.app.services.routes_wan import (
     WAN_CONFIG_PATH,
@@ -318,6 +326,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_DEFAULT_CONFIG_PATH,
     VCF_DEPOT_DEFAULT_HOSTNAME,
     VCF_DEPOT_DEFAULT_STORE_PATH,
+    VCF_DEPOT_DEFAULT_USERNAME,
     VCF_DEPOT_ESX_DISABLED_PLATFORMS,
     VCF_DEPOT_EXTRACT_DIR,
     VCF_DEPOT_LEGACY_STORE_PATH,
@@ -446,6 +455,8 @@ def render(request: Request, template: str, context: dict, status_code: int = 20
             "identity": identity,
             "csrf_token": csrf_token(request),
             "server_time": utcnow(),
+            "public_github_url": "https://github.com/mdaneri/LabFoundry",
+            "current_version_info": current_version_info(),
             **context,
         },
         status_code=status_code,
@@ -587,6 +598,21 @@ def disable_default_vcf_backup_user_when_service_off(db: Session, settings: VcfB
         return False
     user = db.get(User, settings.sftp_user_id)
     if user is None or user.username != VCF_BACKUP_DEFAULT_USERNAME or not user.enabled:
+        return False
+    user.enabled = False
+    user.os_sync_status = "pending"
+    user.os_unlock_requested_at = None
+    if actor:
+        revoke_user_tokens(db, user, actor)
+    db.add(user)
+    return True
+
+
+def disable_default_vcf_depot_user_when_service_off(db: Session, settings: VcfOfflineDepotSettings, *, actor: str | None = None) -> bool:
+    if settings.enabled or not settings.http_user_id:
+        return False
+    user = db.get(User, settings.http_user_id)
+    if user is None or user.username != VCF_DEPOT_DEFAULT_USERNAME or not user.enabled:
         return False
     user.enabled = False
     user.os_sync_status = "pending"
@@ -836,11 +862,20 @@ def get_vcf_private_registry_settings_row(db: Session) -> VcfPrivateRegistrySett
     return settings
 
 
-def get_vcf_offline_depot_settings_row(db: Session) -> VcfOfflineDepotSettings:
-    settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one_or_none()
+def get_vcf_offline_depot_settings_row(db: Session, *, reconcile_default_user: bool = True) -> VcfOfflineDepotSettings:
+    settings = db.execute(select(VcfOfflineDepotSettings).options(selectinload(VcfOfflineDepotSettings.http_user))).scalar_one_or_none()
+    default_user = db.execute(select(User).where(User.username == VCF_DEPOT_DEFAULT_USERNAME).order_by(User.username)).scalar_one_or_none()
     if settings is None:
-        settings = VcfOfflineDepotSettings()
+        settings = VcfOfflineDepotSettings(http_user_id=default_user.id if default_user else None)
         db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    elif not settings.http_user_id and default_user is not None:
+        settings.http_user_id = default_user.id
+        settings.updated_at = utcnow()
+        db.commit()
+        db.refresh(settings)
+    if reconcile_default_user and disable_default_vcf_depot_user_when_service_off(db, settings):
         db.commit()
         db.refresh(settings)
     if settings.depot_store_path == VCF_DEPOT_LEGACY_STORE_PATH:
@@ -1907,6 +1942,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         db.commit()
         db.refresh(settings)
     profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
+    users = db.execute(select(User).order_by(User.username)).scalars().all()
     all_service_interfaces = service_bind_options(db)
     available_interfaces = vcf_depot_service_bind_options(db)
     management_interface_names = {
@@ -1924,6 +1960,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
         bool(secrets["download_token_present"]),
         bool(secrets["activation_code_present"]),
         management_interface_names,
+        users=users,
     )
     depot_cert_path, depot_key_path, _depot_chain_path = ca_managed_certificate_paths(db, "vcf_offline_depot:https")
     if settings.enabled and get_ca_settings_row(db).enabled and not ca_certificate_available(db, "vcf_offline_depot:https"):
@@ -1933,6 +1970,7 @@ def vcf_offline_depot_context(db: Session) -> dict:
     return {
         "vcf_depot_settings": settings,
         "vcf_depot_settings_json": vcf_depot_settings_to_dict(settings),
+        "vcf_depot_users": users,
         "vcf_depot_profiles": profiles,
         "vcf_depot_profile_rows": [vcf_depot_profile_to_dict(profile) for profile in profiles],
         "vcf_depot_available_interfaces": available_interfaces,
@@ -2390,6 +2428,31 @@ def ca_context(db: Session) -> dict:
     }
 
 
+def public_services_context(db: Session) -> dict[str, Any]:
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlans = db.execute(select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    ca_settings = get_ca_settings_row(db)
+    depot_settings = get_vcf_offline_depot_settings_row(db)
+    registry_settings = get_vcf_private_registry_settings_row(db)
+    esxi_boot = esxi_pxe_boot_settings(db)
+    entries = public_service_entries(
+        interfaces=interfaces,
+        vlans=vlans,
+        ca_settings=ca_settings,
+        esxi_pxe_boot=esxi_boot,
+        vcf_depot_settings=depot_settings,
+        vcf_registry_settings=registry_settings,
+    )
+    config_preview = render_public_services_nginx_config(entries, depot_store_path=depot_settings.depot_store_path)
+    return {
+        "public_service_entries": entries,
+        "public_service_config_preview": config_preview,
+        "public_service_config_path": PUBLIC_SERVICES_STAGED_CONFIG_PATH,
+        "public_service_validation_errors": [],
+        "public_service_validation_warnings": [],
+    }
+
+
 def public_ca_context(db: Session) -> dict:
     settings = get_ca_settings_row(db)
     return {
@@ -2399,7 +2462,33 @@ def public_ca_context(db: Session) -> dict:
         "root_fingerprint": settings.root_fingerprint,
         "root_issued_at": settings.root_issued_at,
         "root_expires_at": settings.root_expires_at,
+        **public_portal_links_context(db),
     }
+
+
+def public_portal_links_context(db: Session) -> dict[str, str]:
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    management = management_interface_context(interfaces)
+    settings = get_appliance_settings_row(db)
+    host = _url_host(management.get("ip") or settings.fqdn)
+    scheme = "https" if settings.management_https_enabled else "http"
+    base_url = f"{scheme}://{host}" if host else ""
+    return {
+        "public_management_base_url": base_url,
+        "public_management_url": f"{base_url}/" if base_url else "",
+        "public_openapi_url": f"{base_url}/openapi.json" if base_url else "/openapi.json",
+    }
+
+
+def _url_host(value: str) -> str:
+    host = (value or "").strip().strip(".")
+    if not host:
+        return ""
+    try:
+        parsed = ip_address(host.strip("[]"))
+    except ValueError:
+        return host
+    return f"[{parsed}]" if parsed.version == 6 else str(parsed)
 
 
 def safe_login_next(value: str | None) -> str:
@@ -2446,6 +2535,95 @@ def request_host_interface_role(request_host: str, db: Session) -> str:
         if request_host in addresses:
             return normalize_interface_role(vlan.role)
     return ""
+
+
+def request_host_interface_binding(request_host: str, db: Session) -> dict[str, str] | None:
+    if not request_host:
+        return None
+    entries = public_service_interface_entries(
+        db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all(),
+        db.execute(select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all(),
+    )
+    by_address = {entry["address"].lower(): entry for entry in entries}
+    try:
+        parsed_host = str(ip_address(request_host.strip("[]"))).lower()
+    except ValueError:
+        parsed_host = ""
+    if parsed_host and parsed_host in by_address:
+        return by_address[parsed_host]
+
+    hostname = normalize_dns_hostname(request_host)
+    candidate_addresses: list[str] = []
+    if hostname:
+        records = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.enabled.is_(True),
+                DnsRecord.hostname == hostname,
+                DnsRecord.record_type.in_(["A", "AAAA"]),
+            )
+        ).scalars()
+        candidate_addresses.extend(record.address for record in records)
+
+        appliance_settings = get_appliance_settings_row(db)
+        if hostname == normalize_dns_hostname(appliance_settings.fqdn):
+            management = management_interface_context(db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all())
+            candidate_addresses.append(management.get("ip", ""))
+
+        ca_settings = get_ca_settings_row(db)
+        if hostname == normalize_dns_hostname(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME):
+            candidate_addresses.extend(split_addresses(ca_settings.listen_address))
+
+        depot_settings = get_vcf_offline_depot_settings_row(db)
+        if hostname == normalize_dns_hostname(depot_settings.hostname):
+            candidate_addresses.extend(split_addresses(depot_settings.listen_address))
+
+        registry_settings = get_vcf_private_registry_settings_row(db)
+        if hostname == normalize_dns_hostname(registry_settings.hostname):
+            candidate_addresses.extend(split_addresses(registry_settings.listen_address))
+
+        esxi_boot = esxi_pxe_boot_settings(db)
+        if hostname == normalize_dns_hostname(str(esxi_boot.get("hostname") or "")):
+            candidate_addresses.extend(split_addresses(str(esxi_boot.get("listen_address") or "")))
+
+    for candidate in candidate_addresses:
+        try:
+            normalized = str(ip_address(candidate)).lower()
+        except ValueError:
+            continue
+        if normalized in by_address:
+            return by_address[normalized]
+    return None
+
+
+def public_service_directory_context(db: Session, binding: dict[str, str]) -> dict[str, Any]:
+    ca_settings = get_ca_settings_row(db)
+    depot_settings = get_vcf_offline_depot_settings_row(db)
+    registry_settings = get_vcf_private_registry_settings_row(db)
+    esxi_boot = esxi_pxe_boot_settings(db)
+    services = public_services_for_address(
+        binding["address"],
+        ca_settings=ca_settings,
+        esxi_pxe_boot=esxi_boot,
+        vcf_depot_settings=depot_settings,
+        vcf_registry_settings=registry_settings,
+    )
+    return {
+        "public_interface": binding,
+        "public_services": services,
+        "public_service_count": len(services),
+        "public_ca_service_available": any(service.get("id") == "ca" for service in services),
+        "public_github_url": "https://github.com/mdaneri/LabFoundry",
+        "current_version_info": current_version_info(),
+        **public_portal_links_context(db),
+    }
+
+
+def request_allows_public_service(db: Session, request: Request, service_id: str) -> bool:
+    binding = request_host_interface_binding(request_host_name(request), db)
+    if not binding or binding.get("role") == "management":
+        return False
+    services = public_service_directory_context(db, binding)["public_services"]
+    return any(service.get("id") == service_id for service in services)
 
 
 def is_ca_portal_host(request: Request, db: Session) -> bool:
@@ -3716,6 +3894,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "vcf_backups",
     "vcf_offline_depot",
     "vcf_private_registry",
+    "public_services",
 }
 SECRET_LINE_PATTERN = re.compile(
     r"(rootpw|password|passwd|token|secret|credential|private[_.-]?key|robot[_.-]?account|ca[_.-]?bundle[_.-]?pem|activation[_.-]?code|license|ipxe[_.-]?script)",
@@ -4217,6 +4396,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
     vcf_backup = vcf_backup_context(db)
     vcf_depot = vcf_offline_depot_context(db)
     vcf_registry = vcf_private_registry_context(db)
+    public_services = public_services_context(db)
 
     network_baseline = baselines.get("network")
     network_removed_vlans = removed_network_vlan_entries(
@@ -4436,6 +4616,21 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             config_path=vcf_registry["vcf_registry_settings"].config_path,
             config_preview=f"{vcf_registry['vcf_registry_harbor_config_preview']}\n\n# Bundle relocation preview\n{vcf_registry['vcf_registry_relocation_preview']}",
             baseline=baselines.get("vcf_private_registry"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="public_services",
+            label="Public Services",
+            page_url="/appliance-apply",
+            context=public_services,
+            summary=[
+                f"{len(public_services['public_service_entries'])} non-management addresses",
+                f"{sum(len(entry['services']) for entry in public_services['public_service_entries'])} public service bindings",
+            ],
+            validation_errors=public_services["public_service_validation_errors"],
+            validation_warnings=public_services["public_service_validation_warnings"],
+            config_path=public_services["public_service_config_path"],
+            config_preview=public_services["public_service_config_preview"],
+            baseline=baselines.get("public_services"),
         ),
     ]
 
@@ -5030,6 +5225,16 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
                 lambda: adapter.relocate_vcf_private_registry_bundles(settings.config_path),
             ]
         )
+    elif unit_id == "public_services":
+        config_path = context["public_service_config_path"]
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(PUBLIC_SERVICES_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_public_services_config(config_path),
+                lambda: adapter.apply_public_services_config(config_path),
+            ]
+        )
     else:
         raise HTTPException(status_code=400, detail=f"Unknown apply unit {unit_id}.")
 
@@ -5153,11 +5358,179 @@ def root(
     identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse | RedirectResponse:
-    if is_ca_portal_host(request, db):
-        return render(request, "ca_public.html", public_ca_context(db))
+    binding = request_host_interface_binding(request_host_name(request), db)
+    if binding and binding.get("role") != "management":
+        return render(request, "public_service_home.html", {"identity": identity, **public_service_directory_context(db, binding)})
     if not identity:
         return RedirectResponse("/login", status_code=303)
     return RedirectResponse("/dashboard", status_code=303)
+
+
+def _format_file_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+def _depot_browser_context(db: Session, depot_path: str = "") -> dict[str, Any]:
+    settings = get_vcf_offline_depot_settings_row(db)
+    root = (Path(settings.depot_store_path) / "PROD").resolve(strict=False)
+    relative_parts = [part for part in PurePosixPath(depot_path or "").parts if part not in {"", "."}]
+    if any(part == ".." for part in relative_parts):
+        raise HTTPException(status_code=404, detail="Depot path not found")
+    current = root.joinpath(*relative_parts).resolve(strict=False)
+    try:
+        current.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Depot path not found") from exc
+    if not current.exists() or not current.is_dir():
+        raise HTTPException(status_code=404, detail="Depot path not found")
+
+    entries: list[dict[str, str]] = []
+    for child in sorted(current.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+        child_relative = child.relative_to(root).as_posix()
+        is_dir = child.is_dir()
+        href = "/PROD/" + quote(child_relative, safe="/")
+        if is_dir:
+            href += "/"
+        stat = child.stat()
+        modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        entries.append(
+            {
+                "name": child.name + ("/" if is_dir else ""),
+                "href": href,
+                "kind": "Directory" if is_dir else "File",
+                "pill": "muted" if is_dir else "good",
+                "size": "-" if is_dir else _format_file_size(stat.st_size),
+                "modified": modified.strftime("%Y-%m-%d %H:%M UTC"),
+            }
+        )
+
+    relative_path = PurePosixPath(*relative_parts).as_posix() if relative_parts else ""
+    parent_href = ""
+    if relative_parts:
+        parent_path = PurePosixPath(*relative_parts[:-1]).as_posix() if len(relative_parts) > 1 else ""
+        parent_href = "/PROD/" + (quote(parent_path, safe="/") + "/" if parent_path else "")
+    return {
+        "depot_path": "/PROD/" + (relative_path + "/" if relative_path else ""),
+        "depot_entries": entries,
+        "depot_parent_href": parent_href,
+        "depot_allow_unauthenticated_access": settings.allow_unauthenticated_access,
+        **public_portal_links_context(db),
+    }
+
+
+@router.get("/PROD", response_model=None)
+def public_depot_redirect() -> RedirectResponse:
+    return RedirectResponse("/PROD/", status_code=301)
+
+
+def safe_depot_login_next(value: str | None) -> str:
+    target = (value or "").strip()
+    if target == "/PROD" or target.startswith("/PROD/"):
+        return target
+    return "/PROD/"
+
+
+def depot_login_response(request: Request, *, return_to: str = "/PROD/", error: str | None = None, status_code: int = 200, db: Session | None = None) -> HTMLResponse:
+    return render(
+        request,
+        "ca_request_login.html",
+        {
+            "error": error,
+            "return_to": safe_depot_login_next(return_to),
+            "login_action": "/PROD/login",
+            "portal_title": "VCF Offline Depot",
+            "portal_subtitle": "Public depot browser",
+            "back_href": "/",
+            "back_label": "Cancel",
+            **(public_portal_links_context(db) if db else {}),
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/PROD/login", response_class=HTMLResponse, response_model=None)
+def depot_login_page(
+    request: Request,
+    next: str = Query("/PROD/"),
+    identity: Identity | None = Depends(get_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse | RedirectResponse:
+    return_to = safe_depot_login_next(next)
+    if identity:
+        return RedirectResponse(return_to, status_code=303)
+    return depot_login_response(request, return_to=return_to, db=db)
+
+
+@router.post("/PROD/login", response_model=None)
+def depot_login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    csrf: str = Form(...),
+    next: str = Form("/PROD/"),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    return_to = safe_depot_login_next(next)
+    return authenticate_ca_portal_session(
+        request,
+        db,
+        username=username,
+        password=password,
+        csrf=csrf,
+        next_path=return_to,
+        failure_response=lambda failed_request, *, error=None, status_code=200: depot_login_response(
+            failed_request,
+            return_to=return_to,
+            error=error,
+            status_code=status_code,
+            db=db,
+        ),
+    )
+
+
+@router.post("/PROD/logout", response_model=None)
+def depot_logout(request: Request, csrf: str = Form(...), next: str = Form("/")) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    request.session.clear()
+    return RedirectResponse(next if next in {"/", "/PROD/"} else "/", status_code=303)
+
+
+@router.get("/PROD/auth-check", response_model=None)
+def depot_auth_check(
+    request: Request,
+    identity: Identity | None = Depends(get_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    if not request_allows_public_service(db, request, "vcf_offline_depot"):
+        return Response(status_code=401)
+    settings = get_vcf_offline_depot_settings_row(db)
+    if identity or settings.allow_unauthenticated_access:
+        return Response(status_code=204)
+    return Response(status_code=401)
+
+
+@router.get("/PROD/", response_class=HTMLResponse, response_model=None)
+@router.get("/PROD/{depot_path:path}", response_class=HTMLResponse, response_model=None)
+def public_depot_browser(
+    request: Request,
+    depot_path: str = "",
+    identity: Identity | None = Depends(get_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse | RedirectResponse:
+    if not request_allows_public_service(db, request, "vcf_offline_depot"):
+        raise HTTPException(status_code=404, detail="Depot path not found")
+    if depot_path and not depot_path.endswith("/"):
+        raise HTTPException(status_code=404, detail="Depot path not found")
+    settings = get_vcf_offline_depot_settings_row(db)
+    if identity is None and not settings.allow_unauthenticated_access:
+        next_path = "/PROD/" + depot_path if depot_path else "/PROD/"
+        return RedirectResponse(f"/PROD/login?next={quote(next_path, safe='/')}", status_code=303)
+    return render(request, "depot_browser.html", {"identity": identity, **_depot_browser_context(db, depot_path.rstrip("/"))})
 
 
 @router.get("/login", response_class=HTMLResponse, response_model=None)
@@ -7711,9 +8084,79 @@ def certificate_authority_page(
 @router.get("/ca", response_class=HTMLResponse, response_model=None)
 def public_ca_page(
     request: Request,
+    identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "ca_public.html", public_ca_context(db))
+    return render(request, "ca_public.html", {"identity": identity, **public_ca_context(db)})
+
+
+def ca_public_login_response(request: Request, *, error: str | None = None, status_code: int = 200, db: Session | None = None) -> HTMLResponse:
+    return render(
+        request,
+        "ca_request_login.html",
+        {
+            "error": error,
+            "return_to": "/ca",
+            "login_action": "/ca/login",
+            "portal_title": "LabFoundry CA",
+            "portal_subtitle": "Public trust portal",
+            "back_href": "/ca",
+            "back_label": "Cancel",
+            **(public_portal_links_context(db) if db else {}),
+        },
+        status_code=status_code,
+    )
+
+
+def authenticate_ca_portal_session(
+    request: Request,
+    db: Session,
+    *,
+    username: str,
+    password: str,
+    csrf: str,
+    next_path: str,
+    failure_response,
+) -> RedirectResponse | HTMLResponse:
+    verify_csrf(request, csrf)
+    user = authenticate_user(db, username, password)
+    if not user:
+        record_audit(db, actor=username, action="ca_request_portal_login_failed", resource_type="auth", success=False)
+        return failure_response(request, error="Invalid username or password", status_code=401)
+    request.session["user_id"] = user.id
+    request.session[SESSION_APPLIANCE_INSTANCE_SESSION_KEY] = ensure_appliance_instance_id(db)
+    record_audit(db, actor=user.username, action="ca_request_portal_login", resource_type="auth")
+    return RedirectResponse(next_path, status_code=303)
+
+
+@router.get("/ca/login", response_class=HTMLResponse, response_model=None)
+def ca_public_login_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    return ca_public_login_response(request, db=db)
+
+
+@router.post("/ca/login", response_model=None)
+def ca_public_login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    csrf: str = Form(...),
+    next: str = Form("/ca"),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    return authenticate_ca_portal_session(
+        request,
+        db,
+        username=username,
+        password=password,
+        csrf=csrf,
+        next_path="/ca" if next != "/ca" else next,
+        failure_response=lambda failed_request, *, error=None, status_code=200: ca_public_login_response(
+            failed_request,
+            error=error,
+            status_code=status_code,
+            db=db,
+        ),
+    )
 
 
 def public_root_ca_response(db: Session, *, bundle: bool = False) -> Response:
@@ -7752,14 +8195,61 @@ def ca_requests_page(
     return render(request, "ca_requests.html", {"identity": identity, **ca_request_context(db)})
 
 
+def ca_request_portal_login_response(request: Request, *, error: str | None = None, status_code: int = 200, db: Session | None = None) -> HTMLResponse:
+    return render(
+        request,
+        "ca_request_login.html",
+        {
+            "error": error,
+            "return_to": "/requests",
+            **(public_portal_links_context(db) if db else {}),
+        },
+        status_code=status_code,
+    )
+
+
 @router.get("/requests", response_class=HTMLResponse, response_model=None)
 def ca_portal_requests_page(
     request: Request,
-    identity: Identity = Depends(require_session_identity),
+    identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
+    if identity is None:
+        return ca_request_portal_login_response(request, db=db)
     require_certificate_workflow_identity(identity)
-    return render(request, "ca_requests.html", {"identity": identity, **ca_request_context(db), "ca_portal_path": "/requests"})
+    return render(request, "ca_request_portal.html", {"identity": identity, **ca_request_context(db)})
+
+
+@router.post("/requests/login", response_model=None)
+def ca_request_portal_login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    csrf: str = Form(...),
+    next: str = Form("/requests"),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse:
+    return authenticate_ca_portal_session(
+        request,
+        db,
+        username=username,
+        password=password,
+        csrf=csrf,
+        next_path="/requests" if next != "/requests" else next,
+        failure_response=lambda failed_request, *, error=None, status_code=200: ca_request_portal_login_response(
+            failed_request,
+            error=error,
+            status_code=status_code,
+            db=db,
+        ),
+    )
+
+
+@router.post("/requests/logout", response_model=None)
+def ca_request_portal_logout(request: Request, csrf: str = Form(...), next: str = Form("/requests")) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    request.session.clear()
+    return RedirectResponse(next if next in {"/", "/ca"} else "/requests", status_code=303)
 
 
 def _stage_ca_certificate_request(
@@ -7847,16 +8337,18 @@ def submit_ca_request_from_portal_alias(
     description: str = Form(""),
     csr_text: str = Form(""),
     csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
+    identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse:
+    if identity is None:
+        return ca_request_portal_login_response(request, status_code=401)
     require_certificate_workflow_identity(identity)
     verify_csrf(request, csrf)
     if not common_name.strip():
         return render(
             request,
-            "ca_requests.html",
-            {"identity": identity, **ca_request_context(db), "form_error": "Common name is required.", "ca_portal_path": "/requests"},
+            "ca_request_portal.html",
+            {"identity": identity, **ca_request_context(db), "form_error": "Common name is required."},
             status_code=422,
         )
     certificate = _stage_ca_certificate_request(
@@ -7888,15 +8380,18 @@ def revoke_ca_certificate_from_portal(
     return RedirectResponse("/ca/requests", status_code=303)
 
 
+@router.post("/requests/certificates/{certificate_id}/revoke", response_model=None)
 @router.post("/certificates/{certificate_id}/revoke", response_model=None)
 def revoke_ca_certificate_from_portal_alias(
     request: Request,
     certificate_id: int,
     reason: str = Form("operator requested"),
     csrf: str = Form(...),
-    identity: Identity = Depends(require_session_identity),
+    identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
-) -> RedirectResponse:
+) -> RedirectResponse | HTMLResponse:
+    if identity is None:
+        return ca_request_portal_login_response(request, status_code=401)
     require_certificate_workflow_identity(identity)
     verify_csrf(request, csrf)
     certificate = _revoke_ca_certificate(db, certificate_id=certificate_id, actor=identity.username, reason=reason)
@@ -8660,6 +9155,8 @@ def update_vcf_offline_depot_settings_from_ui(
     listen_interface: str = Form(""),
     listen_address: str = Form(""),
     port: int = Form(443),
+    http_user_id: str = Form(""),
+    allow_unauthenticated_access: str | None = Form(None),
     server_certificate: str | None = Form(None),
     telemetry_choice: str | None = Form(None),
     telemetry_enabled: str | None = Form(None),
@@ -8671,8 +9168,11 @@ def update_vcf_offline_depot_settings_from_ui(
     db: Session = Depends(get_db),
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
-    settings = get_vcf_offline_depot_settings_row(db)
+    settings = get_vcf_offline_depot_settings_row(db, reconcile_default_user=False)
     previous_hostname = settings.hostname
+    user_id = int(http_user_id) if str(http_user_id).strip() else None
+    if user_id and not db.get(User, user_id):
+        raise HTTPException(status_code=400, detail="Selected VCF Offline Depot HTTP user does not exist.")
     selected_interfaces, selected_addresses = resolve_service_bind_targets(
         db,
         [*listen_interfaces, listen_interface],
@@ -8688,6 +9188,8 @@ def update_vcf_offline_depot_settings_from_ui(
     settings.listen_interface = selected_interfaces
     settings.listen_address = selected_addresses
     settings.port = port
+    settings.http_user_id = user_id
+    settings.allow_unauthenticated_access = allow_unauthenticated_access == "on"
     settings.server_certificate = settings.hostname
     settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
     settings.config_path = VCF_DEPOT_DEFAULT_CONFIG_PATH
@@ -8716,11 +9218,26 @@ def update_vcf_offline_depot_settings_from_ui(
         action="upload_vcf_depot_activation_code",
     )
     settings.updated_at = utcnow()
+    selected_user = db.get(User, user_id) if user_id else None
+    if settings.enabled and selected_user and selected_user.username == VCF_DEPOT_DEFAULT_USERNAME and not selected_user.enabled:
+        if has_pending_os_password(selected_user) or selected_user.os_password_applied_at:
+            selected_user.enabled = True
+            selected_user.os_sync_status = "pending"
+            db.add(selected_user)
+    disabled_default_user = disable_default_vcf_depot_user_when_service_off(db, settings, actor=identity.username)
     dns_record_action = ensure_dns_for_vcf_offline_depot(db, settings, identity.username, previous_hostname=previous_hostname)
     db.commit()
     if uploaded_token_name or uploaded_activation_name:
         stage_vcf_depot_runtime_secrets_after_upload(db)
     record_audit(db, actor=identity.username, action="update_vcf_offline_depot_settings", resource_type="vcf_offline_depot", resource_id=str(settings.id))
+    if disabled_default_user:
+        record_audit(
+            db,
+            actor=identity.username,
+            action="disable_vcf_depot_default_user",
+            resource_type="user",
+            resource_id=str(user_id or ""),
+        )
 
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         context = vcf_offline_depot_context(db)
@@ -8743,6 +9260,8 @@ def update_vcf_offline_depot_settings_from_ui(
                 "listen_interfaces": split_interfaces(saved_settings.listen_interface),
                 "listen_addresses": split_addresses(saved_settings.listen_address),
                 "port": saved_settings.port,
+                "http_username": saved_settings.http_user.username if saved_settings.http_user else "",
+                "allow_unauthenticated_access": saved_settings.allow_unauthenticated_access,
                 "server_certificate": saved_settings.server_certificate,
                 "depot_store_path": saved_settings.depot_store_path,
                 "tool_archive_name": uploaded_archive_name or Path(saved_settings.tool_archive_path).name if saved_settings.tool_archive_path else "",
@@ -9111,6 +9630,7 @@ def start_vcf_depot_profile_download_from_ui(
         bool(secrets["download_token_present"]),
         bool(secrets["activation_code_present"]),
         management_interface_names,
+        users=db.execute(select(User).order_by(User.username)).scalars().all(),
     )
     if validation_errors:
         raise HTTPException(status_code=400, detail=" ".join(validation_errors))

@@ -152,6 +152,209 @@ textarea {
   margin-top: 14px;
 }
 
+.ca-home-hero .button-row {
+  margin-top: 14px;
+}
+
+.public-link-panel {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+
+.public-link-panel:hover,
+.public-link-panel:focus-visible {
+  border-color: #bfdbfe;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+  transform: translateY(-1px);
+}
+
+.public-link-panel:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.ca-trust-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) minmax(120px, 0.7fr) minmax(120px, 0.7fr);
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.ca-trust-grid > div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+}
+
+.ca-trust-grid span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.ca-trust-grid strong {
+  display: block;
+  min-width: 0;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.ca-fingerprint-block {
+  grid-column: 1 / -1;
+}
+
+.ca-fingerprint-value {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ca-fingerprint-block strong {
+  flex: 1 1 auto;
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ca-fingerprint-block .icon-button {
+  flex: 0 0 auto;
+}
+
+.public-portal-shell {
+  min-height: 100vh;
+}
+
+.public-portal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  padding: 14px 22px;
+  background: #f8fafc;
+}
+
+.public-portal-header .brand {
+  padding: 0;
+}
+
+.public-portal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.public-portal-actions form {
+  margin: 0;
+}
+
+.button-icon {
+  display: block;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.public-portal-main {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 67px);
+  padding: 22px;
+}
+
+.public-portal-title {
+  margin-bottom: 18px;
+}
+
+.public-info-footnote {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding: 22px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.public-info-footnote a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #475569;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.public-info-footnote a:hover,
+.public-info-footnote a:focus-visible {
+  color: var(--accent-dark);
+}
+
+.public-info-link-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.public-info-link-icon path:not(:first-child) {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.public-login-shell {
+  min-height: auto;
+  padding: 34px 0;
+}
+
+.public-login-shell .login-panel {
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: white;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+}
+
+.login-actions {
+  flex-wrap: nowrap;
+  margin-top: 2px;
+}
+
+.login-actions .button.primary {
+  flex: 1 1 auto;
+}
+
+.login-actions .button.secondary {
+  flex: 0 0 auto;
+}
+
 .sidebar-apply-link:hover,
 .sidebar-apply-link.active {
   border-color: #bfdbfe;
@@ -1148,6 +1351,53 @@ textarea {
 .service-card small {
   color: var(--muted);
   font-size: 12px;
+}
+
+.public-service-card {
+  align-items: flex-start;
+  justify-content: space-between;
+  color: inherit;
+  text-decoration: none;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+
+.public-service-card > div:first-child {
+  min-width: 0;
+  flex: 1;
+}
+
+.public-service-card:hover,
+.public-service-card:focus-visible {
+  border-color: #bfdbfe;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+  transform: translateY(-1px);
+}
+
+.public-service-card:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.service-dns-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.service-dns-list code {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: white;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .service-control-grid {
@@ -3670,8 +3920,13 @@ textarea {
   .app-shell,
   .split-workspace,
   .two-column,
-  .metric-grid {
+  .metric-grid,
+  .ca-trust-grid {
     grid-template-columns: 1fr;
+  }
+
+  .ca-fingerprint-block {
+    grid-column: auto;
   }
 
   .monitor-chart-grid,
@@ -3733,6 +3988,15 @@ textarea {
 @media (max-width: 640px) {
   .main-pane {
     padding: 14px;
+  }
+
+  .public-portal-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .public-portal-main {
+    padding: 16px;
   }
 
   .topbar {

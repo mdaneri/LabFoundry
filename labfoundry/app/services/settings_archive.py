@@ -163,6 +163,7 @@ def export_settings_archive(db: Session, *, actor: str) -> dict[str, Any]:
     data["ca_certificates"] = _ca_certificates_to_archive(db)
     data["kms_keys"] = _kms_keys_to_archive(db)
     data["vcf_backup_settings"] = _vcf_backup_settings_to_archive(db)
+    data["vcf_offline_depot_settings"] = _vcf_offline_depot_settings_to_archive(db)
     data["esxi_pxe_hosts"] = _esxi_pxe_hosts_to_archive(db)
     data["settings"] = _settings_rows(db)
     return payload
@@ -214,6 +215,16 @@ def _vcf_backup_settings_to_archive(db: Session) -> list[dict[str, Any]]:
     for settings in db.execute(select(VcfBackupSettings)).scalars().all():
         payload = _row_to_dict(settings, exclude={"sftp_user_id"})
         payload["sftp_username"] = users.get(settings.sftp_user_id) if settings.sftp_user_id else ""
+        rows.append(payload)
+    return rows
+
+
+def _vcf_offline_depot_settings_to_archive(db: Session) -> list[dict[str, Any]]:
+    users = {user.id: user.username for user in db.execute(select(User)).scalars().all()}
+    rows = []
+    for settings in db.execute(select(VcfOfflineDepotSettings)).scalars().all():
+        payload = _row_to_dict(settings, exclude={"http_user_id"})
+        payload["http_username"] = users.get(settings.http_user_id) if settings.http_user_id else ""
         rows.append(payload)
     return rows
 
@@ -270,10 +281,10 @@ def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, 
     db.flush()
     counts["kms_keys"] = _restore_kms_keys(db, data.get("kms_keys", []))
     counts["vcf_backup_settings"] = _restore_vcf_backup_settings(db, data.get("vcf_backup_settings", []))
+    counts["vcf_offline_depot_settings"] = _restore_vcf_offline_depot_settings(db, data.get("vcf_offline_depot_settings", []))
     for key in [
         "vcf_private_registry_settings",
         "vcf_registry_bundles",
-        "vcf_offline_depot_settings",
         "vcf_depot_download_profiles",
         "esxi_kickstarts",
     ]:
@@ -425,6 +436,17 @@ def _restore_vcf_backup_settings(db: Session, rows: list[dict[str, Any]]) -> int
             users[username] = user.id
         payload["sftp_user_id"] = users.get(username) if username else None
         db.add(VcfBackupSettings(**payload))
+    db.flush()
+    return len(rows)
+
+
+def _restore_vcf_offline_depot_settings(db: Session, rows: list[dict[str, Any]]) -> int:
+    users = {user.username: user.id for user in db.execute(select(User)).scalars().all()}
+    for row in rows:
+        payload = _model_kwargs(VcfOfflineDepotSettings, row, exclude={"http_user_id"})
+        username = str(row.get("http_username") or "")
+        payload["http_user_id"] = users.get(username) if username else None
+        db.add(VcfOfflineDepotSettings(**payload))
     db.flush()
     return len(rows)
 

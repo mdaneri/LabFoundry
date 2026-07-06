@@ -616,6 +616,8 @@ class VcfOfflineDepotSettings(Base):
     listen_interface: Mapped[str] = mapped_column(String(240), default="")
     listen_address: Mapped[str] = mapped_column(String(240), default="")
     port: Mapped[int] = mapped_column(Integer, default=443)
+    http_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    allow_unauthenticated_access: Mapped[bool] = mapped_column(Boolean, default=False)
     server_certificate: Mapped[str] = mapped_column(String(180), default="depot.labfoundry.internal")
     depot_store_path: Mapped[str] = mapped_column(String(240), default="/mnt/labfoundry-vcf-offline-depot")
     tool_archive_path: Mapped[str] = mapped_column(String(500), default="")
@@ -623,6 +625,8 @@ class VcfOfflineDepotSettings(Base):
     telemetry_choice: Mapped[str] = mapped_column(String(20), default="DISABLE")
     config_path: Mapped[str] = mapped_column(String(240), default="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    http_user: Mapped[User | None] = relationship()
 
 
 class VcfDepotDownloadProfile(Base):

@@ -40,10 +40,12 @@ from labfoundry.app.services.networking import normalize_interface_mode
 from labfoundry.app.services.chrony import CHRONY_DEFAULT_HOSTNAME, CHRONY_DEFAULT_UPSTREAM_SERVERS, CHRONY_STAGED_CONFIG_PATH
 from labfoundry.app.services.service_registry import RETIRED_SERVICE_IDS, SERVICE_STATE_DEFAULTS
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
+from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_DEFAULT_USERNAME
 from labfoundry.app.security import ensure_appliance_instance_id
 
 
 VCF_BACKUP_USERNAME = VCF_BACKUP_DEFAULT_USERNAME
+VCF_DEPOT_USERNAME = VCF_DEPOT_DEFAULT_USERNAME
 SEED_EXAMPLES_SETTING_KEY = "seed.include_examples"
 
 
@@ -81,6 +83,15 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
             enabled=False,
         )
         db.add(vcf_backup_user)
+        db.flush()
+    vcf_depot_user = db.execute(select(User).where(User.username == VCF_DEPOT_USERNAME)).scalar_one_or_none()
+    if vcf_depot_user is None:
+        vcf_depot_user = User(
+            username=VCF_DEPOT_USERNAME,
+            role="viewer",
+            enabled=False,
+        )
+        db.add(vcf_depot_user)
         db.flush()
 
     management_cidr = settings.appliance_management_cidr or "192.168.49.1/24"

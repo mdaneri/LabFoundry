@@ -2202,6 +2202,7 @@ def build_vcf_offline_depot_status(db: Session) -> VcfOfflineDepotStatusResponse
         download_token_present=download_token_present,
         activation_code_present=activation_code_present,
         management_interface_names=management_interface_names,
+        users=db.execute(select(User).order_by(User.username)).scalars().all(),
     )
     payload = vcf_depot_settings_to_dict(settings)
     return VcfOfflineDepotStatusResponse(
@@ -2212,6 +2213,8 @@ def build_vcf_offline_depot_status(db: Session) -> VcfOfflineDepotStatusResponse
         listen_interface=str(payload["listen_interface"]),
         listen_address=str(payload["listen_address"]),
         port=int(payload["port"]),
+        http_username=str(payload["http_username"]),
+        allow_unauthenticated_access=bool(payload["allow_unauthenticated_access"]),
         depot_store_path=str(payload["depot_store_path"]),
         tool_archive_name=str(payload["tool_archive_name"]),
         tool_version=str(payload["tool_version"]),

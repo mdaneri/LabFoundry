@@ -1,7 +1,7 @@
 import io
 import tarfile
 
-from labfoundry.app.models import VcfDepotDownloadProfile, VcfOfflineDepotSettings
+from labfoundry.app.models import User, VcfDepotDownloadProfile, VcfOfflineDepotSettings
 from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_COMPONENTS,
     VCF_DEPOT_ESX_DISABLED_PLATFORMS,
@@ -12,6 +12,10 @@ from labfoundry.app.services.vcf_offline_depot import (
     validate_vcf_depot_state,
     vcf_depot_application_properties_from_tool,
 )
+
+
+def depot_http_user(*, enabled: bool = True) -> User:
+    return User(id=1, username="vcf-depot", role="viewer", enabled=enabled)
 
 
 def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
@@ -29,14 +33,16 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
         tool_version="9.1.0",
         telemetry_choice="DISABLE",
         config_path="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf",
+        http_user_id=1,
     )
+    user = depot_http_user()
     profiles = [
         VcfDepotDownloadProfile(name="install", profile_type="binaries", sku="VCF", vcf_version="9.1.0", binary_type="INSTALL", enabled=True),
         VcfDepotDownloadProfile(name="metadata", profile_type="metadata", enabled=True),
         VcfDepotDownloadProfile(name="esx", profile_type="esx", enabled=True),
     ]
 
-    errors, warnings = validate_vcf_depot_state(settings, profiles, {"eth2"})
+    errors, warnings = validate_vcf_depot_state(settings, profiles, {"eth2"}, users=[user])
     assert any("install requires an uploaded download token" in error for error in errors)
     assert any("metadata requires an uploaded download token" in error for error in errors)
     assert any("ESX profile esx requires an uploaded activation-code file" in error for error in errors)
@@ -48,6 +54,7 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
         {"eth2"},
         download_token_present=True,
         activation_code_present=True,
+        users=[user],
     )
     assert errors == []
 
@@ -113,6 +120,7 @@ def test_vcf_depot_validation_uses_documented_component_catalog(tmp_path):
         tool_version="9.1.0",
         telemetry_choice="DISABLE",
         config_path="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf",
+        http_user_id=1,
     )
     assert VCF_DEPOT_COMPONENTS["VRA"] == "VCF Automation"
     assert VCF_DEPOT_COMPONENTS["VCF_OBSERVABILITY_DATA_PLATFORM"] == "Observability Data Platform"
@@ -133,6 +141,7 @@ def test_vcf_depot_validation_uses_documented_component_catalog(tmp_path):
         ],
         {"eth2"},
         download_token_present=True,
+        users=[depot_http_user()],
     )
 
     assert any("unsupported component NOT_A_COMPONENT" in error for error in errors)
@@ -153,6 +162,7 @@ def test_vcf_depot_validation_uses_esx_disabled_platform_catalog(tmp_path):
         tool_version="9.1.0",
         telemetry_choice="DISABLE",
         config_path="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf",
+        http_user_id=1,
     )
     assert VCF_DEPOT_ESX_DISABLED_PLATFORMS == (
         "esxio-9.1-INTL",
@@ -178,6 +188,7 @@ def test_vcf_depot_validation_uses_esx_disabled_platform_catalog(tmp_path):
         ],
         {"eth2"},
         activation_code_present=True,
+        users=[depot_http_user()],
     )
     assert errors == []
 
@@ -208,12 +219,64 @@ def test_vcf_depot_validation_allows_https_only_without_vcfdt_upload():
         depot_store_path="/mnt/labfoundry-vcf-offline-depot",
         telemetry_choice="DISABLE",
         config_path="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf",
+        http_user_id=1,
+    )
+
+    errors, warnings = validate_vcf_depot_state(settings, [], {"eth2"}, users=[depot_http_user()])
+
+    assert errors == []
+    assert warnings == []
+
+
+def test_vcf_depot_validation_requires_user_unless_unauthenticated_access_is_enabled():
+    settings = VcfOfflineDepotSettings(
+        enabled=True,
+        hostname="depot.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        port=443,
+        server_certificate="depot.labfoundry.internal",
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        telemetry_choice="DISABLE",
+        config_path="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf",
     )
 
     errors, warnings = validate_vcf_depot_state(settings, [], {"eth2"})
 
+    assert warnings == []
+    assert any("Select a VCF Offline Depot HTTP user" in error for error in errors)
+
+    settings.allow_unauthenticated_access = True
+    errors, warnings = validate_vcf_depot_state(settings, [], {"eth2"})
+
     assert errors == []
     assert warnings == []
+
+
+def test_vcf_depot_nginx_config_renders_basic_auth_by_default():
+    settings = VcfOfflineDepotSettings(
+        enabled=True,
+        hostname="depot.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        port=443,
+        http_user=depot_http_user(),
+        server_certificate="depot.labfoundry.internal",
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+    )
+
+    config = render_nginx_depot_config(settings)
+
+    assert "# LabFoundry VCF Offline Depot user: vcf-depot" in config
+    assert 'auth_basic "LabFoundry VCF Offline Depot";' in config
+    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in config
+
+    settings.allow_unauthenticated_access = True
+    open_config = render_nginx_depot_config(settings)
+
+    assert "# LabFoundry VCF Offline Depot unauthenticated access: true" in open_config
+    assert "auth_basic" not in open_config
 
 
 def test_vcf_depot_validation_rejects_management_role_interfaces():
@@ -227,9 +290,10 @@ def test_vcf_depot_validation_rejects_management_role_interfaces():
         depot_store_path="/mnt/labfoundry-vcf-offline-depot",
         telemetry_choice="DISABLE",
         config_path="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf",
+        http_user_id=1,
     )
 
-    errors, warnings = validate_vcf_depot_state(settings, [], {"eth2"}, management_interface_names={"eth0"})
+    errors, warnings = validate_vcf_depot_state(settings, [], {"eth2"}, management_interface_names={"eth0"}, users=[depot_http_user()])
 
     assert warnings == []
     assert any("Listen interface eth0 uses the management role" in error for error in errors)

@@ -2732,6 +2732,7 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "Temp Password" not in users.text
     assert "admin" in users.text
     assert "vcf-backup" in users.text
+    assert "vcf-depot" in users.text
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
@@ -3829,6 +3830,7 @@ def test_public_ca_root_page_is_unauthenticated(client):
 
     with SessionLocal() as db:
         settings = db.execute(select(CaSettings)).scalar_one()
+        settings.enabled = True
         settings.root_certificate_pem = "-----BEGIN CERTIFICATE-----\npublic-root\n-----END CERTIFICATE-----\n"
         settings.root_fingerprint = "abc123"
         settings.listen_interface = "eth2"
@@ -3846,27 +3848,92 @@ def test_public_ca_root_page_is_unauthenticated(client):
     page = client.get("/ca")
     assert page.status_code == 200
     assert "LabFoundry Certificate Authority" in page.text
+    assert "Photon appliance" in page.text
+    assert 'class="brand" href="/"' in page.text
     assert "LabFoundry Internal Root CA" in page.text
     assert "abc123" in page.text
+    assert "ca-fingerprint-block" in page.text
+    assert 'data-copy-value="abc123"' in page.text
+    assert "Copy fingerprint" in page.text
     assert "ca.labfoundry.internal" in page.text
     assert "/ca/downloads/root-ca.pem" in page.text
     assert 'href="/requests"' in page.text
+    assert page.text.count('href="/requests"') == 1
+    assert "public-link-panel" in page.text
+    assert "Open request portal" not in page.text
+    assert 'href="/ca/login"' in page.text
+    assert "Trust Material" not in page.text
+    assert "Appliance Information" not in page.text
+    assert "https://github.com/mdaneri/LabFoundry" in page.text
+    assert 'href="http://192.168.167.10/"' in page.text
+    assert ">Management<" in page.text
+    assert 'href="http://192.168.167.10/openapi.json"' in page.text
     assert "/certificate-authority" not in page.text
     assert "/appliance-apply" not in page.text
 
+    login_page = client.get("/ca/login")
+    assert login_page.status_code == 200
+    assert "Sign in to user portal" in login_page.text
+    assert "Use your LabFoundry user account to continue." in login_page.text
+    assert 'action="/ca/login"' in login_page.text
+    assert 'name="next" value="/ca"' in login_page.text
+    assert 'data-history-back' in login_page.text
+    assert ">Cancel<" in login_page.text
+    assert 'class="public-portal-shell"' in login_page.text
+    assert "https://github.com/mdaneri/LabFoundry" in login_page.text
+    assert 'href="http://192.168.167.10/openapi.json"' in login_page.text
+    csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    login_response = client.post(
+        "/ca/login",
+        data={"username": "admin", "password": "labfoundry-admin", "csrf": csrf, "next": "/ca"},
+        follow_redirects=False,
+    )
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/ca"
+
+    signed_in_page = client.get("/ca")
+    assert signed_in_page.status_code == 200
+    assert "Sign out" in signed_in_page.text
+    assert 'name="next" value="/ca"' in signed_in_page.text
+    csrf = signed_in_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    logout_response = client.post("/requests/logout", data={"csrf": csrf, "next": "/ca"}, follow_redirects=False)
+    assert logout_response.status_code == 303
+    assert logout_response.headers["location"] == "/ca"
+
     ca_host_home = client.get("/", headers={"host": "ca.labfoundry.internal"})
     assert ca_host_home.status_code == 200
-    assert "LabFoundry Certificate Authority" in ca_host_home.text
+    assert "LabFoundry Public Services" in ca_host_home.text
+    assert "Certificate Authority" in ca_host_home.text
+    assert 'class="public-portal-shell"' in ca_host_home.text
+    assert 'class="app-shell"' not in ca_host_home.text
+    assert 'class="sidebar"' not in ca_host_home.text
     assert "/certificate-authority" not in ca_host_home.text
 
     ca_ip_home = client.get("/", headers={"host": "192.168.87.32"})
     assert ca_ip_home.status_code == 200
-    assert "LabFoundry Certificate Authority" in ca_ip_home.text
+    assert "LabFoundry Public Services" in ca_ip_home.text
+    assert "Certificate Authority" in ca_ip_home.text
+    assert "/ca/downloads/root-ca.pem" not in ca_ip_home.text
+    assert "Appliance Information" not in ca_ip_home.text
+    assert 'href="/ca/login"' in ca_ip_home.text
+    assert ">Login<" in ca_ip_home.text
+    assert "https://github.com/mdaneri/LabFoundry" in ca_ip_home.text
+    assert 'href="http://192.168.167.10/"' in ca_ip_home.text
+    assert ">Management<" in ca_ip_home.text
+    assert 'href="http://192.168.167.10/openapi.json"' in ca_ip_home.text
+    assert 'href="/requests"' not in ca_ip_home.text
+    assert "Request certificate" not in ca_ip_home.text
+    assert ca_ip_home.text.index("https://github.com/mdaneri/LabFoundry") > ca_ip_home.text.index('href="/ca/login"')
+    assert ca_ip_home.text.index("https://github.com/mdaneri/LabFoundry") > ca_ip_home.text.index("Public Services")
+    assert 'class="public-portal-shell"' in ca_ip_home.text
+    assert 'class="app-shell"' not in ca_ip_home.text
+    assert 'class="sidebar"' not in ca_ip_home.text
     assert "/certificate-authority" not in ca_ip_home.text
 
     ca_ipv6_home = client.get("/", headers={"host": "[fd00:87::32]"})
     assert ca_ipv6_home.status_code == 200
-    assert "LabFoundry Certificate Authority" in ca_ipv6_home.text
+    assert "LabFoundry Public Services" in ca_ipv6_home.text
+    assert "Certificate Authority" in ca_ipv6_home.text
     assert "/certificate-authority" not in ca_ipv6_home.text
 
     management_ip_home = client.get("/", headers={"host": "192.168.167.10"}, follow_redirects=False)
@@ -3877,6 +3944,172 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert root.status_code == 200
     assert "public-root" in root.text
     assert "PRIVATE KEY" not in root.text
+
+
+def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaSettings, PhysicalInterface, Setting, VcfOfflineDepotSettings, VcfPrivateRegistrySettings
+
+    depot_store = tmp_path / "depot"
+    prod_root = depot_store / "PROD"
+    component_dir = prod_root / "COMP"
+    component_dir.mkdir(parents=True)
+    (component_dir / "manifest.json").write_text('{"depot": true}\n', encoding="utf-8")
+
+    with SessionLocal() as db:
+        eth0 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
+        eth0.role = "management"
+        eth0.ip_cidr = "192.168.167.10/24"
+        eth2 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
+        eth2.role = "access"
+        eth2.mode = "access"
+        eth2.ip_cidr = "192.168.87.32/24"
+        eth3 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth3")).scalar_one_or_none()
+        if eth3 is None:
+            eth3 = PhysicalInterface(name="eth3", mac_address="00:15:5d:00:00:33", role="access", mode="access", ip_cidr="192.168.88.32/24")
+            db.add(eth3)
+        else:
+            eth3.role = "access"
+            eth3.mode = "access"
+            eth3.ip_cidr = "192.168.88.32/24"
+
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        ca_settings.enabled = True
+        ca_settings.root_certificate_pem = "-----BEGIN CERTIFICATE-----\npublic-root\n-----END CERTIFICATE-----\n"
+        ca_settings.listen_interface = "eth2"
+        ca_settings.listen_address = "192.168.87.32"
+
+        depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        depot_settings.enabled = True
+        depot_settings.listen_interface = "eth2"
+        depot_settings.listen_address = "192.168.87.32"
+        depot_settings.depot_store_path = str(depot_store)
+
+        registry_settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one()
+        registry_settings.enabled = True
+        registry_settings.hostname = "registry.labfoundry.internal"
+        registry_settings.listen_interface = "eth3"
+        registry_settings.listen_address = "192.168.88.32"
+        registry_settings.port = 9443
+
+        for key, value in {
+            "esxi_pxe.boot.enabled": "true",
+            "esxi_pxe.boot.hostname": "esxi-pxe.labfoundry.internal",
+            "esxi_pxe.boot.listen_interface": "eth2",
+            "esxi_pxe.boot.listen_address": "192.168.87.32",
+        }.items():
+            row = db.execute(select(Setting).where(Setting.key == key)).scalar_one_or_none()
+            if row is None:
+                row = Setting(key=key, value=value)
+            else:
+                row.value = value
+            db.add(row)
+        db.commit()
+
+    page = client.get("/", headers={"host": "192.168.87.32"})
+    assert page.status_code == 200
+    assert "LabFoundry Public Services" in page.text
+    assert "Certificate Authority" in page.text
+    assert "VCF Offline Depot" in page.text
+    assert "ESXi PXE" in page.text
+    assert "ca.labfoundry.internal" in page.text
+    assert "depot.labfoundry.internal" in page.text
+    assert "esxi-pxe.labfoundry.internal" in page.text
+    assert 'href="/PROD/"' in page.text
+    assert 'href="/pxe/esxi/"' in page.text
+    assert "Appliance Information" not in page.text
+    assert 'href="/ca/login"' in page.text
+    assert ">Login<" in page.text
+    assert "https://github.com/mdaneri/LabFoundry" in page.text
+    assert ">Management<" in page.text
+    assert 'href="http://192.168.167.10/openapi.json"' in page.text
+    assert ">Open<" not in page.text
+    assert 'href="/requests"' not in page.text
+    assert "Request certificate" not in page.text
+    assert 'class="public-portal-shell"' in page.text
+    assert 'class="app-shell"' not in page.text
+    assert 'class="sidebar"' not in page.text
+    assert "VCF Private Registry" not in page.text
+    assert "/registry" not in page.text
+
+    management_ip_home = client.get("/", headers={"host": "192.168.167.10"}, follow_redirects=False)
+    assert management_ip_home.status_code == 303
+    assert management_ip_home.headers["location"] == "/login"
+
+    depot_redirect = client.get("/PROD/", headers={"host": "192.168.87.32"}, follow_redirects=False)
+    assert depot_redirect.status_code == 303
+    assert depot_redirect.headers["location"] == "/PROD/login?next=/PROD/"
+
+    depot_login = client.get(depot_redirect.headers["location"], headers={"host": "192.168.87.32"})
+    assert depot_login.status_code == 200
+    assert "Sign in to user portal" in depot_login.text
+    assert "Use your LabFoundry user account to continue." in depot_login.text
+    assert ">Cancel<" in depot_login.text
+    assert 'action="/PROD/login"' in depot_login.text
+    assert 'name="next" value="/PROD/"' in depot_login.text
+
+    depot_auth_check = client.get("/PROD/auth-check", headers={"host": "192.168.87.32"})
+    assert depot_auth_check.status_code == 401
+
+    login(client)
+    signed_in_depot_auth_check = client.get("/PROD/auth-check", headers={"host": "192.168.87.32"})
+    assert signed_in_depot_auth_check.status_code == 204
+
+    unrelated_depot_auth_check = client.get("/PROD/auth-check", headers={"host": "192.168.88.32"})
+    assert unrelated_depot_auth_check.status_code == 401
+
+    with SessionLocal() as db:
+        depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        depot_settings.allow_unauthenticated_access = True
+        db.commit()
+
+    depot_browser = client.get("/PROD/", headers={"host": "192.168.87.32"}, follow_redirects=False)
+    assert depot_browser.status_code == 200
+    assert "VCF Offline Depot" in depot_browser.text
+    assert "Index of /PROD/" not in depot_browser.text
+    assert 'class="public-portal-shell"' in depot_browser.text
+    assert 'href="/PROD/COMP/"' in depot_browser.text
+
+    depot_subdir = client.get("/PROD/COMP/", headers={"host": "192.168.87.32"})
+    assert depot_subdir.status_code == 200
+    assert 'href="/PROD/COMP/manifest.json"' in depot_subdir.text
+    assert "../" in depot_subdir.text
+
+    depot_file = client.get("/PROD/COMP/manifest.json", headers={"host": "192.168.87.32"})
+    assert depot_file.status_code == 404
+
+    unrelated_depot = client.get("/PROD/", headers={"host": "192.168.88.32"})
+    assert unrelated_depot.status_code == 404
+
+    registry_page = client.get("/", headers={"host": "192.168.88.32"})
+    assert registry_page.status_code == 200
+    assert "VCF Private Registry" in registry_page.text
+    assert 'href="https://registry.labfoundry.internal:9443"' in registry_page.text
+    assert "Certificate Authority" not in registry_page.text
+    assert "VCF Offline Depot" not in registry_page.text
+
+
+def test_public_service_home_empty_state_for_non_management_ip(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+
+    with SessionLocal() as db:
+        eth2 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
+        eth2.role = "access"
+        eth2.mode = "access"
+        eth2.ip_cidr = "192.168.87.32/24"
+        db.commit()
+
+    page = client.get("/", headers={"host": "192.168.87.32"})
+    assert page.status_code == 200
+    assert "No public services on this interface" in page.text
+    assert 'class="public-portal-shell"' in page.text
+    assert 'class="app-shell"' not in page.text
+    assert ">Login<" not in page.text
 
 
 def test_certificate_operator_uses_request_page_without_console_access(client):
@@ -3902,15 +4135,19 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
         )
         db.commit()
 
-    redirect = client.get("/requests", follow_redirects=False)
-    assert redirect.status_code == 303
-    assert redirect.headers["location"] == "/login?next=/requests"
-    login_page = client.get(redirect.headers["location"])
+    login_page = client.get("/requests")
     assert login_page.status_code == 200
+    assert "Certificate Request Portal" in login_page.text
+    assert "Sign in to user portal" in login_page.text
+    assert "Use your LabFoundry user account to continue." in login_page.text
+    assert "Sign in to the appliance" not in login_page.text
+    assert 'action="/requests/login"' in login_page.text
+    assert 'action="/login"' not in login_page.text
     assert 'name="next" value="/requests"' in login_page.text
+    assert 'data-history-back' in login_page.text
     csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     login_response = client.post(
-        "/login",
+        "/requests/login",
         data={"username": "admin", "password": "labfoundry-admin", "csrf": csrf, "next": "/requests"},
         follow_redirects=False,
     )
@@ -3927,11 +4164,23 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
     assert "CA Settings" not in page.text
     assert "labfoundry-ca.json" not in page.text
     assert "/certificate-authority" not in page.text
+    with SessionLocal() as db:
+        issued = db.execute(select(CaCertificate).where(CaCertificate.common_name == "issued.labfoundry.internal")).scalar_one()
+        certificate_id = issued.id
     portal_page = client.get("/requests", headers={"host": "ca.labfoundry.internal"})
     assert portal_page.status_code == 200
+    assert "Certificate Request Portal" in portal_page.text
+    assert 'class="brand" href="/"' in portal_page.text
     assert 'action="/requests"' in portal_page.text
+    assert 'action="/requests/logout"' in portal_page.text
+    assert 'data-history-back' in portal_page.text
+    assert 'name="next" value="/requests"' in portal_page.text
+    assert f'action="/requests/certificates/{certificate_id}/revoke"' in portal_page.text
+    assert 'class="app-shell"' not in portal_page.text
+    assert 'class="sidebar"' not in portal_page.text
+    assert "Unprivileged control plane" not in portal_page.text
     assert "/certificate-authority" not in portal_page.text
-    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    csrf = portal_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     submitted = client.post(
         "/requests",
@@ -3948,16 +4197,15 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
 
     with SessionLocal() as db:
         request_row = db.execute(select(CaCertificate).where(CaCertificate.common_name == "operator-request.labfoundry.internal")).scalar_one()
-        issued = db.execute(select(CaCertificate).where(CaCertificate.common_name == "issued.labfoundry.internal")).scalar_one()
         assert request_row.status == "planned"
-        certificate_id = issued.id
 
     revoked = client.post(
-        f"/ca/certificates/{certificate_id}/revoke",
+        f"/requests/certificates/{certificate_id}/revoke",
         data={"csrf": csrf, "reason": "rotation"},
         follow_redirects=False,
     )
     assert revoked.status_code == 303
+    assert revoked.headers["location"] == "/requests"
     with SessionLocal() as db:
         issued = db.get(CaCertificate, certificate_id)
         assert issued.status == "revoked"
@@ -4537,6 +4785,8 @@ def make_vcfdt_archive(path, version="9.1.0.0100.25429019"):
 
 
 def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_path, monkeypatch):
+    import re
+
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -4615,6 +4865,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "<span>Telemetry</span>" in page.text
     assert 'name="telemetry_enabled"' in page.text
     assert 'name="telemetry_choice"' not in page.text
+    assert "<span>HTTP user</span>" in page.text
+    assert "vcf-depot (disabled)" in page.text
+    assert "<span>Unauthenticated access</span>" in page.text
+    assert 'name="allow_unauthenticated_access"' in page.text
     assert "stacked-service-bind-editor" in page.text
     assert "depot-port-telemetry-row" not in page.text
     assert 'data-vcf-depot-software-depot-cell' in page.text
@@ -4698,6 +4952,12 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     make_vcfdt_archive(archive_path)
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    depot_user_id = re.search(r'<option value="(\d+)" selected>vcf-depot(?: \(disabled\))?</option>', page.text).group(1)
+    reset = client.post(
+        f"/users/{depot_user_id}/password",
+        data={"password": "Depot-user1!", "confirm_password": "Depot-user1!", "csrf": csrf},
+    )
+    assert reset.status_code in {200, 303}
     response = client.post(
         "/vcf-offline-depot/settings",
         data={
@@ -4705,6 +4965,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
             "hostname": "depot.labfoundry.internal",
             "listen_interface": "eth2",
             "port": "443",
+            "http_user_id": depot_user_id,
             "csrf": csrf,
         },
         files={
@@ -4720,6 +4981,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["listen_addresses"] == ["192.168.50.1"]
     assert payload["endpoint"] == "depot.labfoundry.internal"
     assert payload["server_certificate"] == "depot.labfoundry.internal"
+    assert payload["http_username"] == "vcf-depot"
+    assert payload["allow_unauthenticated_access"] is False
     assert payload["telemetry_choice"] == "DISABLE"
     assert payload["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
     assert payload["tool_version"] == "9.1.0.0100.25429019"
@@ -4731,6 +4994,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["valid"] is True
     assert payload["dns_record_action"] == "created"
     assert "listen 192.168.50.1:443 ssl;" in payload["https_config_preview"]
+    assert 'auth_basic "LabFoundry VCF Offline Depot";' in payload["https_config_preview"]
+    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in payload["https_config_preview"]
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in payload["https_config_preview"]
     assert "root /mnt/labfoundry-vcf-offline-depot;" not in payload["https_config_preview"]
     assert "--depot-store=/mnt/labfoundry-vcf-offline-depot" in payload["command_preview"]
@@ -4747,6 +5012,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
             "listen_interfaces": ["eth0", "eth2"],
             "listen_addresses": ["192.168.49.1", "192.168.50.1"],
             "port": "443",
+            "allow_unauthenticated_access": "on",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -4756,6 +5022,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert multi_payload["listen_interfaces"] == ["eth2"]
     assert multi_payload["listen_addresses"] == ["192.168.50.1"]
     assert multi_payload["valid"] is True
+    assert multi_payload["allow_unauthenticated_access"] is True
+    assert "auth_basic" not in multi_payload["https_config_preview"]
     assert "listen 192.168.49.1:443 ssl;" not in multi_payload["https_config_preview"]
     assert "listen 192.168.50.1:443 ssl;" in multi_payload["https_config_preview"]
 
@@ -4787,6 +5055,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
             "hostname": "offline-depot.labfoundry.internal",
             "listen_interface": "eth2",
             "port": "443",
+            "http_user_id": depot_user_id,
             "telemetry_enabled": "on",
             "csrf": csrf,
         },
@@ -4799,6 +5068,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert moved_payload["telemetry_choice"] == "ENABLE"
     assert moved_payload["listen_address"] == "192.168.50.1"
     assert moved_payload["valid"] is True
+    assert moved_payload["http_username"] == "vcf-depot"
     assert moved_payload["dns_record_action"] == "created+removed-old"
     with SessionLocal() as db:
         old_dns_record = db.execute(
@@ -4859,6 +5129,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert status.json()["activation_code_present"] is False
     assert status.json()["application_properties_present"] is True
     assert status.json()["application_properties_source"] == "operator saved"
+    assert status.json()["http_username"] == "vcf-depot"
+    assert status.json()["allow_unauthenticated_access"] is False
     assert "super-secret" not in status.text
     assert "secret-activation-property" not in status.text
     alias = client.get("/api/v1/repository/status", headers={"Authorization": f"Bearer {raw_token}"})
