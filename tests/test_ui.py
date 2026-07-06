@@ -5340,6 +5340,7 @@ def test_vcf_offline_depot_accepts_pasted_download_token_and_activation_code(cli
         VCF_DEPOT_TOKEN_NAME_KEY,
         VCF_DEPOT_TOKEN_VALUE_KEY,
     )
+    from labfoundry.app.ui import vcf_depot_secret_snapshot, vcf_offline_depot_context
 
     runtime_log = tmp_path / "active-tool" / "log" / "vdt.log"
     runtime_token = tmp_path / "active-tool" / "secrets" / "download-token.txt"
@@ -5429,14 +5430,14 @@ def test_vcf_offline_depot_accepts_pasted_download_token_and_activation_code(cli
         assert activation_name.value == "activation-code.txt"
         assert activation_secret.value == "uploaded-secret-activation-code"
 
-    apply_page = client.get("/appliance-apply")
-    assert apply_page.status_code == 200
-    assert "Download input file: staged" in apply_page.text
-    assert "ESX input file: staged" in apply_page.text
-    assert "pasted-secret-token" not in apply_page.text
-    assert "uploaded-secret-token" not in apply_page.text
-    assert "pasted-secret-activation-code" not in apply_page.text
-    assert "uploaded-secret-activation-code" not in apply_page.text
+    with SessionLocal() as db:
+        snapshot = vcf_depot_secret_snapshot(vcf_offline_depot_context(db))
+        assert "Download token input file: staged" in snapshot
+        assert "Activation-code input file: staged" in snapshot
+        assert "pasted-secret-token" not in snapshot
+        assert "uploaded-secret-token" not in snapshot
+        assert "pasted-secret-activation-code" not in snapshot
+        assert "uploaded-secret-activation-code" not in snapshot
 
 
 def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, monkeypatch):
@@ -5504,6 +5505,63 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
         assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in (job.result or "")
         assert "manual-secret-token" not in (job.result or "")
         assert profile and profile.status == "ready"
+
+
+def test_vcf_offline_depot_manual_profile_download_accepts_activation_code_without_token(client, tmp_path, monkeypatch):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, Setting, VcfDepotDownloadProfile, VcfOfflineDepotSettings
+    from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_ACTIVATION_NAME_KEY,
+        VCF_DEPOT_ACTIVATION_VALUE_KEY,
+    )
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    make_vcfdt_archive(archive_path)
+    queued: list[tuple[str, int]] = []
+    monkeypatch.setattr("labfoundry.app.ui.queue_vcf_depot_download_job", lambda job_id, profile_id: queued.append((job_id, profile_id)))
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        settings.tool_archive_path = str(archive_path)
+        settings.tool_version = "9.1.0"
+        db.add(Setting(key=VCF_DEPOT_ACTIVATION_NAME_KEY, value="activation-code.txt"))
+        db.add(Setting(key=VCF_DEPOT_ACTIVATION_VALUE_KEY, value="manual-secret-activation-code"))
+        profile = VcfDepotDownloadProfile(
+            name="vcf-install",
+            profile_type="binaries",
+            sku="VCF",
+            vcf_version="9.1.0",
+            binary_type="INSTALL",
+            enabled=True,
+        )
+        db.add(profile)
+        db.commit()
+        profile_id = profile.id
+
+    login(client)
+    page = client.get("/vcf-offline-depot")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        f"/vcf-offline-depot/profiles/{profile_id}/download",
+        data={"csrf": csrf},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "started"
+    assert payload["profile_name"] == "vcf-install"
+    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in payload["commands"][0]["command"]
+    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in payload["commands"][0]["command"]
+    assert "manual-secret-activation-code" not in response.text
+
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "vcf-depot-download")).scalar_one()
+        assert queued == [(job.id, profile_id)]
+        assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in (job.result or "")
+        assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in (job.result or "")
+        assert "manual-secret-activation-code" not in (job.result or "")
 
 
 def test_vcf_offline_depot_prepare_runtime_stages_saved_application_properties(client, tmp_path, monkeypatch):

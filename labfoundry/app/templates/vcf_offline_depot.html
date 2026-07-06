@@ -254,14 +254,14 @@
             </span>
           </div>
           <div class="settings-action-row">
-            <span class="field-label"><span>Download token</span><button class="help-icon" type="button" data-help="Stages the Broadcom download token file used by VCFDT metadata and binaries profiles. Contents are hidden and host changes wait for explicit jobs or appliance apply.">i</button></span>
+            <span class="field-label"><span>Download token</span><button class="help-icon" type="button" data-help="Stages an optional Broadcom download token for VCFDT metadata and binaries profiles. If no token is staged, those profiles can use the activation code instead. Contents stay hidden.">i</button></span>
             <span class="setting-inline-actions">
               <strong data-vcf-depot-token-status>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "not uploaded" }}</strong>
               <button class="button secondary compact-button" type="button" data-vcf-depot-token-modal-open data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Token</button>
             </span>
           </div>
           <div class="settings-action-row">
-            <span class="field-label"><span>Activation code</span><button class="help-icon" type="button" data-help="Stages the activation-code file used by VCFDT ESX profiles. The code is stored as a hidden credential and is not applied to the appliance until a VCFDT job or global apply needs it.">i</button></span>
+            <span class="field-label"><span>Activation code</span><button class="help-icon" type="button" data-help="Stages the activation-code file used by VCFDT ESX profiles and as the metadata/binaries credential when no download token is staged. Contents stay hidden.">i</button></span>
             <span class="setting-inline-actions">
               <strong data-vcf-depot-activation-status>{{ vcf_depot_activation_code.filename if vcf_depot_activation_code.present else "not uploaded" }}</strong>
               <button class="button secondary compact-button" type="button" data-vcf-depot-activation-modal-open data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Code</button>

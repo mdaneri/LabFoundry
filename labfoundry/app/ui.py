@@ -1972,7 +1972,12 @@ def vcf_offline_depot_context(db: Session) -> dict:
     if settings.enabled and get_ca_settings_row(db).enabled and not ca_certificate_available(db, "vcf_offline_depot:https"):
         validation_errors.append("VCF Offline Depot requires an issued CA-managed HTTPS certificate before apply.")
     https_config_preview = render_nginx_depot_config(settings, certificate_path=depot_cert_path, key_path=depot_key_path)
-    command_preview = render_vcfdt_command_preview(settings, profiles)
+    command_preview = render_vcfdt_command_preview(
+        settings,
+        profiles,
+        download_token_present=bool(secrets["download_token_present"]),
+        activation_code_present=bool(secrets["activation_code_present"]),
+    )
     return {
         "vcf_depot_settings": settings,
         "vcf_depot_settings_json": vcf_depot_settings_to_dict(settings),
@@ -2023,10 +2028,10 @@ def vcf_depot_secret_snapshot(context: dict[str, Any]) -> str:
         [
             "# VCFDT input file status",
             "# Contents are not rendered here.",
-            f"# Download input file: {'staged' if token_state.present else 'not staged'}",
-            f"# Download input updated: {token_state.updated_at or 'never'}",
-            f"# ESX input file: {'staged' if activation_state.present else 'not staged'}",
-            f"# ESX input updated: {activation_state.updated_at or 'never'}",
+            f"# Download token input file: {'staged' if token_state.present else 'not staged'}",
+            f"# Download token input updated: {token_state.updated_at or 'never'}",
+            f"# Activation-code input file: {'staged' if activation_state.present else 'not staged'}",
+            f"# Activation-code input updated: {activation_state.updated_at or 'never'}",
         ]
     )
 
@@ -2173,7 +2178,13 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
         if not job or not profile:
             return
         try:
-            commands = vcfdt_commands_for_profile(settings, profile)
+            secrets = vcf_depot_secret_context(db)
+            commands = vcfdt_commands_for_profile(
+                settings,
+                profile,
+                download_token_present=bool(secrets["download_token_present"]),
+                activation_code_present=bool(secrets["activation_code_present"]),
+            )
             tool_path = prepare_vcf_depot_runtime(settings, db)
             command_results: list[dict[str, Any]] = []
             append_vcf_depot_log(
@@ -9680,7 +9691,15 @@ def start_vcf_depot_profile_download_from_ui(
     if validation_errors:
         raise HTTPException(status_code=400, detail=" ".join(validation_errors))
     system_dry_run = get_settings().dry_run_system_adapters
-    commands = [vcf_depot_command_entry(command, dry_run=False) for command in vcfdt_commands_for_profile(settings, profile)]
+    commands = [
+        vcf_depot_command_entry(command, dry_run=False)
+        for command in vcfdt_commands_for_profile(
+            settings,
+            profile,
+            download_token_present=bool(secrets["download_token_present"]),
+            activation_code_present=bool(secrets["activation_code_present"]),
+        )
+    ]
     if not commands:
         raise HTTPException(status_code=400, detail="The VCFDT download profile did not produce any commands.")
     now = utcnow()

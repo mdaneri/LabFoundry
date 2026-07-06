@@ -11,6 +11,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     render_vcfdt_command_preview,
     validate_vcf_depot_state,
     vcf_depot_application_properties_from_tool,
+    vcfdt_commands_for_profile,
 )
 
 
@@ -43,8 +44,8 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
     ]
 
     errors, warnings = validate_vcf_depot_state(settings, profiles, {"eth2"}, users=[user])
-    assert any("install requires an uploaded download token" in error for error in errors)
-    assert any("metadata requires an uploaded download token" in error for error in errors)
+    assert any("install requires an uploaded download token or activation-code file" in error for error in errors)
+    assert any("metadata requires an uploaded download token or activation-code file" in error for error in errors)
     assert any("ESX profile esx requires an uploaded activation-code file" in error for error in errors)
     assert warnings == []
 
@@ -53,6 +54,15 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
         profiles,
         {"eth2"},
         download_token_present=True,
+        activation_code_present=True,
+        users=[user],
+    )
+    assert errors == []
+
+    errors, _warnings = validate_vcf_depot_state(
+        settings,
+        profiles,
+        {"eth2"},
         activation_code_present=True,
         users=[user],
     )
@@ -379,6 +389,28 @@ def test_vcf_depot_command_preview_uses_staged_secret_paths():
     assert '"disabledPlatforms": [' in preview
     assert '"esxio-9.1-INTL"' in preview
     assert "obtu.telemetry.config=DISABLE" in preview
+
+
+def test_vcf_depot_download_profiles_use_activation_code_when_no_token_is_staged():
+    settings = VcfOfflineDepotSettings(
+        hostname="depot.labfoundry.internal",
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        tool_archive_path="vcfDownloadTool/vcf-download-tool-9.1.0.test.tar.gz",
+        tool_version="9.1.0",
+    )
+    profile = VcfDepotDownloadProfile(
+        name="activation-only",
+        profile_type="binaries",
+        sku="VCF",
+        vcf_version="9.1.0",
+        binary_type="INSTALL",
+        enabled=True,
+    )
+
+    commands = vcfdt_commands_for_profile(settings, profile, download_token_present=False, activation_code_present=True)
+
+    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in commands[0]
+    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in commands[0]
 
 
 def test_vcf_depot_command_preview_supports_patch_only_profiles():

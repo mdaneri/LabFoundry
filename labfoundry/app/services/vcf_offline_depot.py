@@ -463,10 +463,23 @@ def split_vcf_depot_lines(value: str | None) -> list[str]:
     return [item.strip() for item in (value or "").splitlines() if item.strip()]
 
 
-def vcfdt_commands_for_profile(settings: VcfOfflineDepotSettings, profile: VcfDepotDownloadProfile) -> list[list[str]]:
+def vcf_depot_download_credential_flag(download_token_present: bool = True, activation_code_present: bool = False) -> str:
+    if download_token_present or not activation_code_present:
+        return f"--depot-download-token-file={VCF_DEPOT_STAGED_TOKEN_FILE}"
+    return f"--depot-download-activation-code-file={VCF_DEPOT_STAGED_ACTIVATION_FILE}"
+
+
+def vcfdt_commands_for_profile(
+    settings: VcfOfflineDepotSettings,
+    profile: VcfDepotDownloadProfile,
+    *,
+    download_token_present: bool = True,
+    activation_code_present: bool = False,
+) -> list[list[str]]:
     if not profile.enabled:
         return []
     profile_type = (profile.profile_type or "binaries").strip() or "binaries"
+    download_credential_flag = vcf_depot_download_credential_flag(download_token_present, activation_code_present)
     if profile_type == "metadata":
         return [
             [
@@ -474,7 +487,7 @@ def vcfdt_commands_for_profile(settings: VcfOfflineDepotSettings, profile: VcfDe
                 "metadata",
                 "download",
                 f"--depot-store={settings.depot_store_path}",
-                f"--depot-download-token-file={VCF_DEPOT_STAGED_TOKEN_FILE}",
+                download_credential_flag,
             ]
         ]
     if profile_type == "esx":
@@ -497,7 +510,7 @@ def vcfdt_commands_for_profile(settings: VcfOfflineDepotSettings, profile: VcfDe
         return commands
 
     base = [
-        f"--depot-download-token-file={VCF_DEPOT_STAGED_TOKEN_FILE}",
+        download_credential_flag,
         f"--vcf-version={(profile.vcf_version or '9.1.0').strip()}",
         f"--sku={(profile.sku or 'VCF').strip() or 'VCF'}",
         f"--type={(profile.binary_type or 'INSTALL').strip() or 'INSTALL'}",
@@ -544,7 +557,13 @@ def _printf_json_to_file_command(lines: list[str], target: str) -> str:
     return f"printf '%s\\n' {quoted_lines} > {target}"
 
 
-def render_vcfdt_command_preview(settings: VcfOfflineDepotSettings, profiles: list[VcfDepotDownloadProfile]) -> str:
+def render_vcfdt_command_preview(
+    settings: VcfOfflineDepotSettings,
+    profiles: list[VcfDepotDownloadProfile],
+    *,
+    download_token_present: bool = True,
+    activation_code_present: bool = False,
+) -> str:
     enabled_profiles = [profile for profile in profiles if profile.enabled]
     if not enabled_profiles:
         return "# No enabled VCFDT download profiles are configured.\n"
@@ -600,7 +619,12 @@ def render_vcfdt_command_preview(settings: VcfOfflineDepotSettings, profiles: li
                         ),
                     ]
                 )
-        for command in vcfdt_commands_for_profile(settings, profile):
+        for command in vcfdt_commands_for_profile(
+            settings,
+            profile,
+            download_token_present=download_token_present,
+            activation_code_present=activation_code_present,
+        ):
             if command[:3] == ["vcf-download-tool", "esx", "configuration"]:
                 lines.append("# Equivalent ESX exclusion command if you prefer not to write conf/esxUserConfig.json:")
                 lines.append("# " + " ".join(shlex.quote(arg) for arg in command))
@@ -687,8 +711,8 @@ def validate_vcf_depot_state(
             errors.append(f"VCFDT download profile {name or profile.id} has unsupported status {profile_status}.")
         if not profile.enabled:
             continue
-        if profile_type in {"binaries", "metadata"} and not download_token_present:
-            errors.append(f"VCFDT download profile {name or profile.id} requires an uploaded download token file.")
+        if profile_type in {"binaries", "metadata"} and not (download_token_present or activation_code_present):
+            errors.append(f"VCFDT download profile {name or profile.id} requires an uploaded download token or activation-code file.")
         if profile_type == "esx" and not activation_code_present:
             errors.append(f"VCFDT ESX profile {name or profile.id} requires an uploaded activation-code file.")
         if profile_type == "esx":
