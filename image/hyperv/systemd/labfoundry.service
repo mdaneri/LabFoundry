@@ -1,7 +1,7 @@
 [Unit]
 Description=LabFoundry appliance control plane
-After=network-online.target labfoundry-data-disks.service
-Wants=network-online.target labfoundry-data-disks.service
+After=network-online.target labfoundry-data-disks.service labfoundry-bootstrap-https.service
+Wants=network-online.target labfoundry-data-disks.service labfoundry-bootstrap-https.service
 
 [Service]
 Type=simple

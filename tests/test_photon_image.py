@@ -28,12 +28,16 @@ def test_photon_provisioning_management_network_matches_eth0_only():
     assert 'printf \'Name=%s\\n\\n\' "$LABFOUNDRY_MGMT_INTERFACE"' in script
     assert "Name=eth* en*" not in script
     assert "rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.network" in script
-    assert 'seed_initial_data(db, include_examples=settings.environment != "appliance")' in main
+    assert "seed_initial_data(db, include_examples=not appliance_mode, appliance_mode=appliance_mode)" in main
+    assert "ensure_ca_state(db)" in main
+    assert main.index("refresh_startup_host_inventory(db, environment=settings.environment)") < main.index("ensure_ca_state(db)")
     assert "if include_examples:" in seed
+    assert "management_https_enabled=appliance_mode" in seed
 
 
 def test_photon_provisioning_installs_default_nginx_management_proxy():
     script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    bootstrap = Path("scripts/appliance/labfoundry-bootstrap-https").read_text(encoding="utf-8")
     systemd_unit = Path("image/hyperv/systemd/labfoundry.service").read_text(encoding="utf-8")
     sudoers = Path("image/hyperv/sudoers.d/labfoundry-helper").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
@@ -62,15 +66,39 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "UMask=0027" in systemd_unit
     assert "--host 127.0.0.1 --port 8000" in systemd_unit
     assert "--host 0.0.0.0" not in systemd_unit
-    assert "configuring default LabFoundry management nginx proxy" in script
+    assert "configuring first-boot LabFoundry management nginx bootstrap" in script
     assert "install -d -o root -g root -m 0755 /etc/nginx/conf.d" in script
     assert "/etc/nginx/conf.d/labfoundry.conf" in script
-    assert "/etc/labfoundry/nginx/sites.d/management.conf" in script
+    assert "/etc/labfoundry/nginx/sites.d/management.conf" in bootstrap
     assert "rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf" in script
-    assert "listen 80 default_server;" in script
-    assert "client_max_body_size 1g;" in script
-    assert "client_max_body_size 512m;" not in script
-    assert "proxy_pass http://127.0.0.1:8000;" in script
+    assert "labfoundry-bootstrap-https" in script
+    assert "labfoundry-bootstrap-https.service" in script
+    assert "ExecStart=/opt/labfoundry/.venv/bin/python /opt/labfoundry/bin/labfoundry-bootstrap-https" in script
+    assert "EnvironmentFile=/etc/labfoundry/labfoundry.env" in script
+    assert "After=network-online.target labfoundry-data-disks.service labfoundry-vmware-ovf-customize.service" in script
+    assert "Wants=network-online.target labfoundry-data-disks.service" in script
+    assert "ConditionPathExists=!/var/lib/labfoundry/first-boot-https.applied" in script
+    assert '"$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"' not in script
+    assert "sync_host_physical_interfaces(db)" in bootstrap
+    assert bootstrap.index("sync_host_physical_interfaces(db)") < bootstrap.index("ensure_ca_state(db)")
+    assert 'str(HELPER_PATH), "ca", action, str(CA_STAGED_CONFIG_PATH), "--real"' in bootstrap
+    assert 'for db_file in state_path.glob("labfoundry.db*")' in bootstrap
+    assert 'shutil.chown(db_file, user="labfoundry", group="labfoundry")' in bootstrap
+    assert 'for path in [ca_apply_path, *ca_apply_path.rglob("*")]' in bootstrap
+    assert 'listen 80 default_server;' in bootstrap
+    assert 'return 308 https://$host$request_uri;' in bootstrap
+    assert 'listen 443 ssl default_server;' in bootstrap
+    assert 'ssl_certificate {cert_path};' in bootstrap
+    assert 'ssl_certificate_key {key_path};' in bootstrap
+    assert "client_max_body_size 1g;" in bootstrap
+    assert "client_max_body_size 512m;" not in bootstrap
+    assert "proxy_pass http://127.0.0.1:8000;" in bootstrap
+    assert "proxy_set_header Host $host;" in bootstrap
+    assert "proxy_set_header X-Real-IP $remote_addr;" in bootstrap
+    assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in bootstrap
+    assert "proxy_set_header X-Forwarded-Proto https;" in bootstrap
+    assert "proxy_set_header X-Forwarded-Proto http;" not in bootstrap
+    assert "proxy_set_header Upgrade $http_upgrade;" in bootstrap
     assert "nginx -t" in script
     assert "systemctl enable --now nginx" in script
     assert 'LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"' in script
@@ -88,12 +116,13 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'LABFOUNDRY_MGMT_ACCESS_RULE="    iifname \\"$LABFOUNDRY_MGMT_INTERFACE\\" tcp dport { 22, 80, 443 } accept comment \\"LabFoundry management access\\""' in script
     assert "$LABFOUNDRY_MGMT_ACCESS_RULE" in script
     assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
-    assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" /etc/sudoers.d/labfoundry-helper' in script
+    assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper' in script
     assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
     assert "labfoundry-root-login.conf" in script
     assert "PermitRootLogin no" in script
-    assert "HTTP/80, proxied to uvicorn on `127.0.0.1:8000`" in docs
-    assert "proxying HTTP/80 to" in root_docs
+    assert "HTTPS/443" in docs
+    assert "HTTP/80 redirects to HTTPS" in docs
+    assert "proxying HTTPS/443 to" in root_docs
     assert "-PipGlobalIndex" in root_docs
     assert "-PipGlobalIndexUrl" in root_docs
     assert "Leave both options empty to keep" in root_docs
@@ -113,7 +142,7 @@ def test_photon_provisioning_prepares_attached_data_disks():
     assert "labfoundry-mount-data-disks" in provision
     assert "labfoundry-data-disks.service" in provision
     assert "systemctl enable labfoundry-data-disks.service" in provision
-    assert "Before=labfoundry.service" in provision
+    assert "Before=labfoundry-bootstrap-https.service labfoundry.service" in provision
 
     assert "LABFOUNDRY_DEPOT" in mount_script
     assert "LABFOUNDRY_BKUP" in mount_script
@@ -124,10 +153,10 @@ def test_photon_provisioning_prepares_attached_data_disks():
     assert "findmnt -n -o SOURCE /" in mount_script
     assert "No blank data disk available" in mount_script
 
-    assert "After=network-online.target labfoundry-data-disks.service" in hyperv_unit
-    assert "Wants=network-online.target labfoundry-data-disks.service" in hyperv_unit
-    assert "After=network-online.target labfoundry-data-disks.service" in vmware_unit
-    assert "Wants=network-online.target labfoundry-data-disks.service" in vmware_unit
+    assert "After=network-online.target labfoundry-data-disks.service labfoundry-bootstrap-https.service" in hyperv_unit
+    assert "Wants=network-online.target labfoundry-data-disks.service labfoundry-bootstrap-https.service" in hyperv_unit
+    assert "After=network-online.target labfoundry-data-disks.service labfoundry-bootstrap-https.service" in vmware_unit
+    assert "Wants=network-online.target labfoundry-data-disks.service labfoundry-bootstrap-https.service" in vmware_unit
 
     assert "labfoundry-data-disks.service" in root_docs
     assert "labfoundry-data-disks.service" in hyperv_docs
@@ -284,14 +313,14 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
 
     assert "[string]$LabName = 'LabFoundryLifecycle'" in script
     assert "[string]$ApplianceUrl = ''" in script
-    assert '$ApplianceUrl = "http://${ApplianceIPAddress}"' in script
+    assert '$ApplianceUrl = "https://${ApplianceIPAddress}"' in script
     assert "'--appliance-url', $ApplianceUrl" in script
     assert '"http://${ApplianceIPAddress}:8000"' not in script
     assert "[string]$ApplianceUrl = ''" in wrapper
-    assert '"http://${ApplianceIPAddress}"' in wrapper
+    assert '"https://${ApplianceIPAddress}"' in wrapper
     assert '"http://${ApplianceIPAddress}:8000"' not in wrapper
     assert "'-ApplianceUrl', $effectiveApplianceUrl" in wrapper
-    assert 'parser.add_argument("--appliance-url", default="http://192.168.49.1")' in runner
+    assert 'parser.add_argument("--appliance-url", default="https://192.168.49.1")' in runner
     assert "[string]$SiteInterface = 'eth1.12'" in script
     assert "[string]$SiteCidr = '192.168.12.1/24'" in script
     assert "[int]$SiteVlanId = 12" in script
@@ -426,6 +455,27 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "[switch]$IncludeLabNetworkAdapters" in script
     assert "[switch]$ResetDataDisks" in script
     assert "[switch]$WaitForIp" in script
+    assert "[switch]$TrustRootCa" in script
+    assert "Install-ApplianceRootCa" in script
+    assert "Write-ConnectionSummary" in script
+    assert "Write-SummaryRow" in script
+    assert "-ForegroundColor Cyan" in script
+    assert "-ForegroundColor DarkGray" in script
+    assert "https://$IpAddress/ca/downloads/root-ca.pem" in script
+    assert "Cert:\\CurrentUser\\Root" in script
+    assert "certutil.exe -user -delstore Root $staleRoot.Thumbprint" in script
+    assert "certutil.exe -f -user -addstore Root $rootCerPath" in script
+    assert "if ($TrustRootCa -and $NoStart)" in script
+    assert "if (-not $NoStart -and -not $WhatIfPreference)" in script
+    assert "if (($WaitForIp -or $TrustRootCa) -and -not $NoStart -and -not $WhatIfPreference)" in script
+    assert 'Write-SummaryRow -Label "Console URL:" -Value "https://$IpAddress/"' in script
+    assert 'Write-SummaryRow -Label "API URL:" -Value "https://$IpAddress/openapi.json"' in script
+    assert 'Write-SummaryRow -Label "Swagger URL:" -Value "https://$IpAddress/api/docs"' in script
+    assert 'Write-SummaryRow -Label "Root CA URL:" -Value "https://$IpAddress/ca/downloads/root-ca.pem"' in script
+    assert 'Write-SummaryRow -Label "SSH:" -Value "ssh admin@$IpAddress"' in script
+    assert "pass -TrustRootCa to trust this appliance root CA" in script
+    assert "Pass -WaitForIp to print the HTTPS console" in script
+    assert "-ValueColor Yellow" in script
     assert "[string]$ManagementNetwork = 'VMnet8'" in script
     assert "[string]$ManagementNetwork = 'VMnet8'" in vm_script
     assert "[string]$ManagementNetwork = 'VMnet8'" in nics_script
@@ -463,6 +513,12 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert '"ethernet1.present"       = "TRUE"' in packer_template
     assert '"ethernet1.vnet"          = var.service_vmnet_name' in packer_template
     assert '"ethernet1.virtualDev"    = "vmxnet3"' in packer_template
+    assert "-TrustRootCa" in docs
+    assert "removes stale" in docs
+    assert "connection summary" in docs
+    assert "Swagger URL" in docs
+    assert "root certificate URL" in docs
+    assert "ssh admin@<appliance-ip>" in docs
     assert "adds a second `vmxnet3` adapter on `-ServiceVmnetName`" in docs
 
 

@@ -49,7 +49,7 @@ VCF_DEPOT_USERNAME = VCF_DEPOT_DEFAULT_USERNAME
 SEED_EXAMPLES_SETTING_KEY = "seed.include_examples"
 
 
-def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
+def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_mode: bool = False) -> None:
     ensure_appliance_instance_id(db)
     if include_examples:
         seed_examples_setting = db.execute(select(Setting).where(Setting.key == SEED_EXAMPLES_SETTING_KEY)).scalar_one_or_none()
@@ -234,6 +234,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
     if appliance_settings is None:
         appliance_settings = ApplianceSettings(
             fqdn=normalize_fqdn(settings.appliance_fqdn) or "labfoundry.labfoundry.internal",
+            management_https_enabled=appliance_mode,
             external_dns_servers=_settings_lines(settings.appliance_external_dns_servers),
             ntp_servers=_settings_lines(settings.appliance_ntp_servers),
         )
@@ -346,7 +347,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
     if db.execute(select(CaSettings)).first() is None:
         db.add(
             CaSettings(
-                enabled=False,
+                enabled=appliance_mode,
                 portal_hostname="ca.labfoundry.internal",
                 root_common_name="LabFoundry Internal Root CA",
                 organization="LabFoundry",

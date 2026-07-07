@@ -99,7 +99,7 @@ def utc_now() -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run LabFoundry appliance lifecycle interop checks.")
-    parser.add_argument("--appliance-url", default="http://192.168.49.1")
+    parser.add_argument("--appliance-url", default="https://192.168.49.1")
     parser.add_argument("--username", default="admin")
     parser.add_argument("--password", required=True)
     parser.add_argument("--result-dir", default="test-results/hyperv-lifecycle/latest")
@@ -1040,15 +1040,15 @@ def https_request_unverified(url: str) -> tuple[int, str, dict[str, str]]:
 
 
 def management_https_check(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
-    http_client = HttpClient(args.appliance_url)
+    parsed = urllib.parse.urlparse(args.appliance_url)
+    host = parsed.hostname or args.appliance_ssh_host
+    http_client = HttpClient(f"http://{host}")
     http_status, _http_body, http_headers = http_client.request("GET", "/openapi.json", follow_redirects=False)
     if http_status not in {301, 302, 307, 308}:
         raise LifecycleError(f"HTTP management endpoint should redirect after HTTPS apply, got HTTP {http_status}")
     location = http_headers.get("Location", "")
     if not location.lower().startswith("https://"):
         raise LifecycleError(f"HTTP management redirect did not point at HTTPS: {location}")
-    parsed = urllib.parse.urlparse(args.appliance_url)
-    host = parsed.hostname or args.appliance_ssh_host
     https_url = f"https://{host}/openapi.json"
     https_status, https_body, _https_headers = https_request_unverified(https_url)
     if https_status >= 400 or '"openapi"' not in https_body:

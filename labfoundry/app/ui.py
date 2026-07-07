@@ -11498,6 +11498,20 @@ def update_settings_from_ui(
     dns_settings = get_dns_settings_row(db)
     management = appliance_settings_management_context(db)
     ca_settings = get_ca_settings_row(db)
+    preflight_errors, _preflight_warnings = validate_appliance_settings(
+        settings,
+        local_dns_enabled=bool(dns_settings.enabled),
+        management_interface=management,
+        dns_record_conflict=bool(dns_settings.enabled) and appliance_dns_record_conflict(db, settings.fqdn),
+        ca_enabled=bool(ca_settings.enabled),
+        management_https_cert_available=True,
+        chrony_enabled=chrony_enabled,
+    )
+    ca_state_errors: list[str] = []
+    if settings.management_https_enabled and ca_settings.enabled and not preflight_errors:
+        ca_state_errors = ensure_ca_state(db)
+        management = appliance_settings_management_context(db)
+        ca_settings = get_ca_settings_row(db)
     management_https_cert_path, management_https_key_path, _management_https_chain_path = ca_managed_certificate_paths(db, "appliance:https")
     management_https_cert_available = bool(management_https_cert_path and management_https_key_path and ca_certificate_available(db, "appliance:https"))
     validation_errors, _validation_warnings = validate_appliance_settings(
@@ -11509,6 +11523,7 @@ def update_settings_from_ui(
         management_https_cert_available=management_https_cert_available,
         chrony_enabled=chrony_enabled,
     )
+    validation_errors = [*ca_state_errors, *validation_errors]
     dns_record_action = None
     if not validation_errors:
         dns_record_action = ensure_dns_for_appliance_settings(db, settings, previous_fqdn=previous_fqdn, actor=identity.username)

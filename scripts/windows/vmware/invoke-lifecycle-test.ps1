@@ -272,7 +272,7 @@ if (-not $PlanOnly -and $PSCmdlet.ParameterSetName -eq 'Run') {
         }
     }
 }
-$effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } elseif ($ApplianceIPAddress) { "http://${ApplianceIPAddress}" } else { "" }
+$effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } elseif ($ApplianceIPAddress) { "https://${ApplianceIPAddress}" } else { "" }
 
 if (-not $SkipClientPrepare -and -not $PlanOnly) {
     & (Join-Path $PSScriptRoot 'prepare-tiny-linux-client.ps1')

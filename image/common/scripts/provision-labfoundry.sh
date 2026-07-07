@@ -214,12 +214,13 @@ chown root:labfoundry /etc/labfoundry/labfoundry.env
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks"
+install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-bootstrap-https" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-vmware-ovf-customize.py" "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py"
   install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry-vmware-ovf-customize.service" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
 install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
-sed -i 's/\r$//' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" /etc/sudoers.d/labfoundry-helper
+sed -i 's/\r$//' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   sed -i 's/\r$//' "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
@@ -243,7 +244,7 @@ cat >/etc/systemd/system/labfoundry-data-disks.service <<'EOF'
 Description=Prepare LabFoundry data disks
 After=systemd-udev-settle.service
 Wants=systemd-udev-settle.service
-Before=labfoundry.service
+Before=labfoundry-bootstrap-https.service labfoundry.service
 
 [Service]
 Type=oneshot
@@ -254,6 +255,24 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 chmod 0644 /etc/systemd/system/labfoundry-data-disks.service
+cat >/etc/systemd/system/labfoundry-bootstrap-https.service <<'EOF'
+[Unit]
+Description=Bootstrap LabFoundry first-boot HTTPS front door
+After=network-online.target labfoundry-data-disks.service labfoundry-vmware-ovf-customize.service
+Wants=network-online.target labfoundry-data-disks.service
+Before=nginx.service labfoundry.service
+ConditionPathExists=!/var/lib/labfoundry/first-boot-https.applied
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/labfoundry/labfoundry.env
+ExecStart=/opt/labfoundry/.venv/bin/python /opt/labfoundry/bin/labfoundry-bootstrap-https
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod 0644 /etc/systemd/system/labfoundry-bootstrap-https.service
 chown -R labfoundry:labfoundry "$LABFOUNDRY_STATE" "$LABFOUNDRY_LOG"
 chmod 0711 "$LABFOUNDRY_STATE"
 if id "$BOOTSTRAP_USERNAME" >/dev/null 2>&1 && [ -d "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME" ]; then
@@ -290,7 +309,7 @@ if [ "$LABFOUNDRY_MGMT_USES_DHCP" != "true" ] && [ -n "$LABFOUNDRY_MGMT_DNS" ]; 
   chmod 0644 /etc/resolv.conf
 fi
 
-log_step "configuring default LabFoundry management nginx proxy"
+log_step "configuring first-boot LabFoundry management nginx bootstrap"
 install -d -o root -g root -m 0755 /etc/nginx/conf.d
 rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf
 cat >/etc/nginx/conf.d/labfoundry.conf <<'EOF'
@@ -298,25 +317,6 @@ cat >/etc/nginx/conf.d/labfoundry.conf <<'EOF'
 include /etc/labfoundry/nginx/sites.d/*.conf;
 EOF
 chmod 0644 /etc/nginx/conf.d/labfoundry.conf
-cat >/etc/labfoundry/nginx/sites.d/management.conf <<'EOF'
-# Managed by LabFoundry. Local changes may be overwritten.
-server {
-  listen 80 default_server;
-  server_name labfoundry.internal _;
-  client_max_body_size 1g;
-  location / {
-    proxy_pass http://127.0.0.1:8000;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto http;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-  }
-}
-EOF
-chmod 0644 /etc/labfoundry/nginx/sites.d/management.conf
 if [ -f /etc/nginx/nginx.conf ] &&
   ! grep -Eq 'include[[:space:]]+/etc/nginx/conf\.d/\*\.conf;' /etc/nginx/nginx.conf &&
   ! grep -Fq '/etc/nginx/conf.d/labfoundry.conf' /etc/nginx/nginx.conf; then
@@ -360,6 +360,7 @@ elif [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   systemctl enable labfoundry-vmware-ovf-customize.service
 fi
 systemctl enable labfoundry-data-disks.service
+systemctl enable labfoundry-bootstrap-https.service
 systemctl enable labfoundry
 systemctl enable --now nginx
 

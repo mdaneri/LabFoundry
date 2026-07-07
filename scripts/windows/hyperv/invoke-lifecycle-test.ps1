@@ -181,7 +181,7 @@ if ($EsxIsoPath) {
         throw "-EsxIsoPath must point to an .iso file."
     }
 }
-$effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "http://${ApplianceIPAddress}" }
+$effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "https://${ApplianceIPAddress}" }
 
 if (-not $SkipClientPrepare -and -not $PlanOnly) {
     & (Join-Path $PSScriptRoot 'prepare-tiny-linux-client.ps1')

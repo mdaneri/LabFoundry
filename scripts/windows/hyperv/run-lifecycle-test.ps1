@@ -39,7 +39,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')
 if (-not $ApplianceUrl) {
-    $ApplianceUrl = "http://${ApplianceIPAddress}"
+    $ApplianceUrl = "https://${ApplianceIPAddress}"
 }
 if (-not $ClientVhdxPath) {
     $ClientVhdxPath = Join-Path $repoRoot 'image\hyperv\clients\alpine-cloud\labfoundry-tiny-linux-client.vhdx'
