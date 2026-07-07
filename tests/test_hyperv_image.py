@@ -73,8 +73,8 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "set -a\n. /etc/labfoundry/labfoundry.env\nset +a" in script
     bootstrap_invocation = '"$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"'
     assert script.index(". /etc/labfoundry/labfoundry.env") < script.index(bootstrap_invocation)
-    assert "labfoundry-helper\" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json" in script
-    assert "labfoundry-helper\" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json" in script
+    assert "labfoundry-helper\" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real" in script
+    assert "labfoundry-helper\" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real" in script
     assert "listen 80 default_server;" in script
     assert "return 308 https://\\$host\\$request_uri;" in script
     assert "listen 443 ssl default_server;" in script

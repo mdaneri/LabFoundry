@@ -296,8 +296,8 @@ set -a
 . /etc/labfoundry/labfoundry.env
 set +a
 "$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
-"$LABFOUNDRY_HOME/bin/labfoundry-helper" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json
-"$LABFOUNDRY_HOME/bin/labfoundry-helper" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json
+"$LABFOUNDRY_HOME/bin/labfoundry-helper" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real
+"$LABFOUNDRY_HOME/bin/labfoundry-helper" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real
 . /var/lib/labfoundry/apply/ca/first-boot-management.env
 chown root:labfoundry "$LABFOUNDRY_FIRST_BOOT_KEY_PATH"
 chmod 0640 "$LABFOUNDRY_FIRST_BOOT_KEY_PATH"
