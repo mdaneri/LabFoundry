@@ -7,7 +7,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ClientVmdkPath,
     [string]$VmrunPath = '',
-    [string]$ManagementNetwork = 'vmnet8',
+    [string]$ManagementNetwork = 'VMnet8',
     [string]$SiteANetwork = 'VMnet2',
     [string]$SiteBNetwork = 'VMnet3',
     [string]$TrunkNetwork = 'VMnet4',
@@ -334,6 +334,9 @@ function Set-VmxNetworkAdapter {
     )
 
     $prefix = "ethernet$Index"
+    if ($Vmnet -match '^(?i)vmnet(\d+)$') {
+        $Vmnet = "VMnet$($Matches[1])"
+    }
     Set-VmxValue -Path $Path -Key "$prefix.present" -Value 'TRUE'
     if ($Vmnet.StartsWith('lan:')) {
         $segmentName = $Vmnet.Substring(4)

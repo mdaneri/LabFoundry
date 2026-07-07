@@ -22,7 +22,7 @@ param(
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
     [Parameter(ParameterSetName = 'PrepareNetworks')]
-    [string]$ManagementNetwork = 'vmnet8',
+    [string]$ManagementNetwork = 'VMnet8',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]

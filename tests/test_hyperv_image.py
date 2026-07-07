@@ -423,6 +423,9 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "[switch]$IncludeLabNetworkAdapters" in script
     assert "[switch]$ResetDataDisks" in script
     assert "[switch]$WaitForIp" in script
+    assert "[string]$ManagementNetwork = 'VMnet8'" in script
+    assert "[string]$ManagementNetwork = 'VMnet8'" in vm_script
+    assert "[string]$ManagementNetwork = 'VMnet8'" in nics_script
     assert "prepare-networks.ps1" in script
     assert "create-labfoundry-vm.ps1" in script
     assert "start-labfoundry-vm.ps1" in script
@@ -443,6 +446,8 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "scsi0:$Unit" in vm_script
     assert "set-test-nics.ps1" in vm_script
     assert '"$prefix.vnet"' in nics_script
+    assert "if ($Vmnet -match '^(?i)vmnet(\\d+)$')" in nics_script
+    assert '$Vmnet = "VMnet$($Matches[1])"' in nics_script
     assert "$prefix.virtualDev" in nics_script
     assert "vmxnet3" in nics_script
     assert "Join-Path $PSScriptRoot '..\\common\\LabFoundry.PhotonImage.psm1'" in build_script
@@ -609,6 +614,8 @@ def test_lifecycle_vmware_script_supports_routing_wan_only_and_esxi_pxe_install(
     assert "if ($PxeClientIPAddress)" in runner
     assert "@('--pxe-client-ip', $PxeClientIPAddress)" in runner
     assert "$Vmnet.StartsWith('lan:')" in runner
+    assert "if ($Vmnet -match '^(?i)vmnet(\\d+)$')" in runner
+    assert '$Vmnet = "VMnet$($Matches[1])"' in runner
     assert "function Resolve-LanSegmentId" in runner
     assert "pref.namedPVNs$nextIndex.name" in runner
     assert "connectionType\" -Value 'pvn'" in runner

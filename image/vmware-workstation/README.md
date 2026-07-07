@@ -56,7 +56,7 @@ service network defaults to Workstation's built-in host-only `VMnet1`.
 
 The default Workstation builder and lifecycle scripts expect:
 
-- management: `vmnet8`, with the LabFoundry appliance address assigned by
+- management: `VMnet8`, with the LabFoundry appliance address assigned by
   DHCP by default
 - services: `VMnet1`
 - SiteA: `VMnet2`

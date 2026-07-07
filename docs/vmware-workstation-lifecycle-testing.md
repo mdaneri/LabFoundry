@@ -18,7 +18,7 @@ Hyper-V lifecycle client.
 
 Default vmnets:
 
-- `vmnet8` for management, with the appliance address assigned by DHCP by
+- `VMnet8` for management, with the appliance address assigned by DHCP by
   default
 - `VMnet2` for SiteA
 - `VMnet3` for WAN/SiteB

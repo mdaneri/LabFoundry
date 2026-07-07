@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$VmrunPath = '',
-    [string]$ManagementNetwork = 'vmnet8',
+    [string]$ManagementNetwork = 'VMnet8',
     [string]$ManagementSubnet = '',
     [string]$BridgedInterfaceAlias = '',
     [string]$SiteANetwork = 'VMnet2',
