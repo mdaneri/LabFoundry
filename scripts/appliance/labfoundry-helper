@@ -2111,6 +2111,22 @@ def _public_services_config_errors(path: Path) -> list[str]:
         errors.append("Public services nginx config must not expose a broad server root.")
     if "/registry" in text:
         errors.append("Public services nginx config must not add registry proxy locations.")
+    for forbidden in [
+        "location = / {",
+        "location ^~ /static/",
+        "location = /favicon.ico",
+        "location = /manifest.webmanifest",
+        "location = /requests/login",
+        "location = /requests/logout",
+        "location /ca",
+        "location /requests",
+        "location = /PROD",
+        "location /PROD/",
+        "location ~ ^/PROD/",
+    ]:
+        if forbidden in text:
+            errors.append("Public services HTTP config may serve only ESXi PXE paths.")
+            break
     if "/PROD/" in text:
         aliases = _nginx_directive(text, "alias")
         prod_aliases = [alias for alias in aliases if _public_services_prod_alias_path(alias) == VCF_DEPOT_PROD_PATH]

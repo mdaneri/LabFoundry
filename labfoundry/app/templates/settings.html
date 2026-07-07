@@ -17,7 +17,7 @@
         <input name="fqdn" value="{{ appliance_settings.fqdn }}" autocomplete="off">
       </label>
       <label class="switch-field">
-        <span class="field-label"><span>Management UI HTTPS</span><button class="help-icon" type="button" data-help="Serves the LabFoundry management UI over HTTPS on the existing management port using the CA-managed appliance certificate. Requires the local CA to be enabled and applied first; host service changes wait for global appliance apply.">i</button></span>
+        <span class="field-label"><span>Management UI HTTPS</span><button class="help-icon" type="button" data-help="Serves the LabFoundry management UI and API over HTTPS using the CA-managed appliance certificate. Fresh appliances enable this at first boot; host service changes wait for global appliance apply.">i</button></span>
         <input class="switch-input" type="checkbox" name="management_https_enabled" {{ "checked" if appliance_settings.management_https_enabled else "" }}>
         <span class="switch-track" aria-hidden="true"></span>
       </label>
@@ -144,7 +144,7 @@
       </div>
       <div class="settings-list">
         <div><span>Management interface</span><strong data-appliance-settings-management>{{ management_interface.name or "not found" }}{% if management_interface.ip %} / {{ management_interface.ip }}{% endif %}</strong></div>
-        <div><span>Management UI</span><strong>{{ "HTTPS" if appliance_settings.management_https_enabled else "HTTP" }}{% if appliance_settings.management_https_enabled and management_https_cert_path %} / {{ management_https_cert_path }}{% endif %}</strong></div>
+        <div><span>Management UI/API</span><strong>{{ "HTTPS" if appliance_settings.management_https_enabled else "HTTP" }}{% if appliance_settings.management_https_enabled and management_https_cert_path %} / {{ management_https_cert_path }}{% endif %}</strong></div>
         <div><span>Root SSH</span><strong data-appliance-settings-root-ssh>{{ "enabled" if appliance_settings.root_ssh_enabled else "disabled" }}</strong></div>
         <div><span>Service DNS targets</span><strong>{{ "IP address" if appliance_settings.service_dns_target_naming == "ip" else "Interface name" }}</strong></div>
         <div><span>Config path</span><strong data-appliance-settings-config-path>{{ appliance_settings.config_path }}</strong></div>

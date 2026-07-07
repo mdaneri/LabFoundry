@@ -6,10 +6,13 @@
     <div class="panel-head">
       <div>
         <h2>Certificate Authority</h2>
-        <p class="muted">Manage internal CA desired state, certificate profiles, and staged certificate requests.</p>
+        <p class="muted">Manage internal CA desired state, certificate profiles, and staged certificate requests. Fresh appliances use this CA for the first-boot management HTTPS certificate.</p>
       </div>
       <span class="status-pill {{ 'good' if ca_settings.enabled else 'muted' }}">{{ "enabled" if ca_settings.enabled else "disabled" }}</span>
     </div>
+    {% if ca_status_summary.root_present %}
+      <div class="alert warning">Root CA material is active. Editing identity fields updates desired metadata only; replacing the root CA requires an explicit rotation workflow so service certificates and client trust can be redeployed deliberately.</div>
+    {% endif %}
     {% if form_error %}
       <div class="alert error">{{ form_error }}</div>
     {% endif %}

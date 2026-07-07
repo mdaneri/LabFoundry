@@ -3,8 +3,8 @@
 This directory contains the first real-OS appliance image path for LabFoundry.
 It builds a Photon OS 5.0 Hyper-V VHDX and provisions the FastAPI control plane
 as a systemd service behind nginx. The first-boot management front door is
-HTTP/80, proxied to uvicorn on `127.0.0.1:8000`; Appliance Settings can later
-move the public management listener to HTTPS.
+CA-backed HTTPS/443, reverse-proxied to uvicorn on `127.0.0.1:8000`.
+HTTP/80 redirects to HTTPS and does not serve management UI or API content.
 
 ## Host Prerequisites
 
@@ -282,11 +282,12 @@ sandbox while still using the constrained helper allowlist.
 Nginx owns the public management front door. Appliance Settings apply writes
 `/etc/nginx/conf.d/labfoundry.conf`,
 `/etc/labfoundry/nginx/sites.d/management.conf`, and a loopback-only
-`labfoundry.service` override. When CA-backed management UI HTTPS is enabled,
-nginx redirects public HTTP/80 to HTTPS/443 and reverse-proxies HTTPS to uvicorn
+`labfoundry.service` override. Fresh appliances enable the integrated CA,
+issue the managed `appliance:https` certificate, and start with nginx
+redirecting public HTTP/80 to HTTPS/443 while reverse-proxying HTTPS to uvicorn
 on `127.0.0.1:8000`. When HTTPS is disabled, including after factory reset plus
-apply, nginx serves public HTTP/80 as a plain reverse proxy to the same loopback
-upstream and does not expose a management HTTPS listener. The helper disables
+apply, nginx can serve public HTTP/80 as a plain reverse proxy to the same
+loopback upstream, but that is not the first-boot appliance posture. The helper disables
 the retired `labfoundry-http-redirect.service` if present, reloads
 nginx/systemd, and schedules a short delayed `labfoundry.service` restart so the
 global apply job can finish before uvicorn moves behind nginx.

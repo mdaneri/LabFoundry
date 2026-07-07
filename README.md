@@ -24,8 +24,8 @@ builder lives in [`image/hyperv/`](image/hyperv/) and provisions:
 - `/var/log/labfoundry` for local logs;
 - fixed appliance mount points under `/mnt/labfoundry-vcf-*`;
 - `labfoundry.service` running uvicorn from a Python virtual environment;
-- nginx enabled as the default management front door, proxying HTTP/80 to
-  uvicorn on `127.0.0.1:8000`;
+- nginx enabled as the default management front door, redirecting HTTP/80 to
+  CA-backed HTTPS/443 and proxying HTTPS/443 to uvicorn on `127.0.0.1:8000`;
 - `labfoundry-firewall.service` loading the appliance nftables firewall;
 - `/opt/labfoundry/bin/labfoundry-helper` and a constrained sudoers template.
 
@@ -235,11 +235,11 @@ VCF Offline Depot uses the proprietary VCF Download Tool to stage disconnected V
 
 ## Public Service Front Door
 
-LabFoundry renders a generated `public_services` nginx site for non-management service IPs. Requests to `/` on a management-role address keep the management portal/login behavior. Requests to `/` on a non-management address render an unauthenticated public service directory scoped to the called IP/host and list only enabled public services whose desired listen addresses include that IP. If no service matches, LabFoundry shows a minimal `No public services on this interface` page.
+LabFoundry renders a generated `public_services` nginx site for non-management service IPs. Requests to `/` on a management-role address keep the HTTPS management portal/login behavior. The app still renders a public service directory when reached through LabFoundry, but the generated HTTP nginx site serves only ESXi PXE paths; other public services use their service-owned HTTPS front doors.
 
-Direct public service paths are scoped per IP: Certificate Authority `/ca`, `/requests`, `/ca/downloads/root-ca.pem`, and `/ca/downloads/ca-bundle.pem`; ESXi PXE `/pxe/esxi/`; VCF Offline Depot `/PROD/` with `/PROD` redirecting to `/PROD/`; and VCF Private Registry as a canonical registry URL link only. The generated public-services site proxies app-owned public portal, CA, request, and styled directory-browsing paths to LabFoundry, serves depot and PXE static content through nginx aliases only on matching service IPs, does not expose a `/registry` proxy, and keeps management nginx config separate.
+Direct public service paths remain scoped per IP in the app: Certificate Authority `/ca`, `/requests`, `/ca/downloads/root-ca.pem`, and `/ca/downloads/ca-bundle.pem`; ESXi PXE `/pxe/esxi/`; VCF Offline Depot `/PROD/` with `/PROD` redirecting to `/PROD/`; and VCF Private Registry as a canonical registry URL link only. The generated public-services HTTP site proxies only dynamic ESXi Kickstart requests and serves PXE static content through a narrow nginx alias on matching PXE service IPs. It does not expose CA, depot, management, or `/registry` HTTP proxies.
 
-The public portal uses the compact LabFoundry shell across the directory, CA trust page, request portal, and depot browser. Public user pages extend `public_portal_base.html`, the brand mark links back to `/`, the header action is contextual `Login` or `Sign out`, and GitHub/OpenAPI/version metadata lives in the shared bottom footnote. Public `/PROD/` locations follow the VCF Offline Depot unauthenticated-access setting; in the default authenticated mode, directory browsing redirects to `/PROD/login`, while artifact downloads remain protected by the same `vcf-depot` htpasswd file after the depot and public-services units are applied.
+The public portal uses the compact LabFoundry shell across the directory, CA trust page, request portal, and depot browser. Public user pages extend `public_portal_base.html`, the brand mark links back to `/`, the header action is contextual `Login` or `Sign out`, and GitHub/OpenAPI/version metadata lives in the shared bottom footnote. Service-owned HTTPS `/PROD/` locations follow the VCF Offline Depot unauthenticated-access setting; in the default authenticated mode, directory browsing redirects to `/PROD/login`, while artifact downloads remain protected by the same `vcf-depot` htpasswd file after the depot unit is applied.
 
 ## Appliance Apply Workflow
 

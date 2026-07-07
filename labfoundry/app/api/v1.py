@@ -2193,6 +2193,12 @@ def update_app_settings(
     db.add(desired)
     db.commit()
     db.refresh(desired)
+    ca_settings = db.execute(select(CaSettings)).scalar_one_or_none()
+    if desired.management_https_enabled and ca_settings and ca_settings.enabled:
+        from labfoundry.app import ui as ui_module
+
+        ui_module.ensure_ca_state(db)
+        db.refresh(desired)
     record_audit(db, actor=identity.username, action="update_appliance_settings", resource_type="settings", resource_id=str(desired.id))
     return appliance_settings_response(db, settings)
 

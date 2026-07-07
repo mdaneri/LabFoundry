@@ -28,8 +28,10 @@ def test_photon_provisioning_management_network_matches_eth0_only():
     assert 'printf \'Name=%s\\n\\n\' "$LABFOUNDRY_MGMT_INTERFACE"' in script
     assert "Name=eth* en*" not in script
     assert "rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.network" in script
-    assert 'seed_initial_data(db, include_examples=settings.environment != "appliance")' in main
+    assert "seed_initial_data(db, include_examples=not appliance_mode, appliance_mode=appliance_mode)" in main
+    assert "ensure_ca_state(db)" in main
     assert "if include_examples:" in seed
+    assert "management_https_enabled=appliance_mode" in seed
 
 
 def test_photon_provisioning_installs_default_nginx_management_proxy():
@@ -67,10 +69,19 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "/etc/nginx/conf.d/labfoundry.conf" in script
     assert "/etc/labfoundry/nginx/sites.d/management.conf" in script
     assert "rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf" in script
+    assert "labfoundry-bootstrap-https" in script
+    assert "labfoundry-helper\" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json" in script
+    assert "labfoundry-helper\" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json" in script
     assert "listen 80 default_server;" in script
+    assert "return 308 https://\\$host\\$request_uri;" in script
+    assert "listen 443 ssl default_server;" in script
+    assert "ssl_certificate $LABFOUNDRY_FIRST_BOOT_CERT_PATH;" in script
+    assert "ssl_certificate_key $LABFOUNDRY_FIRST_BOOT_KEY_PATH;" in script
     assert "client_max_body_size 1g;" in script
     assert "client_max_body_size 512m;" not in script
     assert "proxy_pass http://127.0.0.1:8000;" in script
+    assert "proxy_set_header X-Forwarded-Proto https;" in script
+    assert "proxy_set_header X-Forwarded-Proto http;" not in script
     assert "nginx -t" in script
     assert "systemctl enable --now nginx" in script
     assert 'LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"' in script
@@ -88,12 +99,13 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'LABFOUNDRY_MGMT_ACCESS_RULE="    iifname \\"$LABFOUNDRY_MGMT_INTERFACE\\" tcp dport { 22, 80, 443 } accept comment \\"LabFoundry management access\\""' in script
     assert "$LABFOUNDRY_MGMT_ACCESS_RULE" in script
     assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
-    assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" /etc/sudoers.d/labfoundry-helper' in script
+    assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper' in script
     assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
     assert "labfoundry-root-login.conf" in script
     assert "PermitRootLogin no" in script
-    assert "HTTP/80, proxied to uvicorn on `127.0.0.1:8000`" in docs
-    assert "proxying HTTP/80 to" in root_docs
+    assert "HTTPS/443" in docs
+    assert "HTTP/80 redirects to HTTPS" in docs
+    assert "proxying HTTPS/443 to" in root_docs
     assert "-PipGlobalIndex" in root_docs
     assert "-PipGlobalIndexUrl" in root_docs
     assert "Leave both options empty to keep" in root_docs
@@ -284,14 +296,14 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
 
     assert "[string]$LabName = 'LabFoundryLifecycle'" in script
     assert "[string]$ApplianceUrl = ''" in script
-    assert '$ApplianceUrl = "http://${ApplianceIPAddress}"' in script
+    assert '$ApplianceUrl = "https://${ApplianceIPAddress}"' in script
     assert "'--appliance-url', $ApplianceUrl" in script
     assert '"http://${ApplianceIPAddress}:8000"' not in script
     assert "[string]$ApplianceUrl = ''" in wrapper
-    assert '"http://${ApplianceIPAddress}"' in wrapper
+    assert '"https://${ApplianceIPAddress}"' in wrapper
     assert '"http://${ApplianceIPAddress}:8000"' not in wrapper
     assert "'-ApplianceUrl', $effectiveApplianceUrl" in wrapper
-    assert 'parser.add_argument("--appliance-url", default="http://192.168.49.1")' in runner
+    assert 'parser.add_argument("--appliance-url", default="https://192.168.49.1")' in runner
     assert "[string]$SiteInterface = 'eth1.12'" in script
     assert "[string]$SiteCidr = '192.168.12.1/24'" in script
     assert "[int]$SiteVlanId = 12" in script

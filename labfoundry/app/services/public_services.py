@@ -11,7 +11,6 @@ from labfoundry.app.services.networking import normalize_interface_role
 from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_DEFAULT_HOSTNAME,
     VCF_DEPOT_DEFAULT_STORE_PATH,
-    VCF_DEPOT_HTPASSWD_PATH,
     vcf_depot_endpoint,
 )
 from labfoundry.app.services.vcf_private_registry import VCF_REGISTRY_DEFAULT_HOSTNAME, vcf_registry_endpoint
@@ -154,16 +153,7 @@ def render_public_services_nginx_config(
         address = str(entry.get("address") or "").strip()
         service_rows = entry.get("services") or []
         services = {str(service.get("id")) for service in service_rows}
-        vcf_depot_service = next((service for service in service_rows if str(service.get("id")) == "vcf_offline_depot"), {})
-        vcf_depot_auth_lines = (
-            []
-            if bool(vcf_depot_service.get("allow_unauthenticated_access"))
-            else [
-                '    auth_basic "LabFoundry VCF Offline Depot";',
-                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
-            ]
-        )
-        if not address:
+        if not address or "esxi_pxe" not in services:
             continue
         lines.extend(
             [
@@ -172,66 +162,12 @@ def render_public_services_nginx_config(
                 f"  listen {_nginx_listen(address, http_port)};",
                 f"  server_name {_nginx_server_name(address)};",
                 "  client_max_body_size 1g;",
-                "",
-                *_proxy_location("= /", upstream_host, upstream_port),
-                "",
-                *_proxy_location("^~ /static/", upstream_host, upstream_port),
-                "",
-                *_proxy_location("= /favicon.ico", upstream_host, upstream_port),
-                "",
-                *_proxy_location("= /manifest.webmanifest", upstream_host, upstream_port),
-            ]
-        )
-        if "ca" in services:
-            lines.extend(
-                [
-                    "",
-                    *_proxy_location("= /requests/login", upstream_host, upstream_port),
-                    "",
-                    *_proxy_location("= /requests/logout", upstream_host, upstream_port),
-                    "",
-                    *_proxy_location("/ca", upstream_host, upstream_port),
-                    "",
-                    *_proxy_location("/requests", upstream_host, upstream_port),
-                ]
-            )
-        if "esxi_pxe" in services:
-            lines.extend(
-                [
                     "",
                     *_proxy_location("/pxe/esxi/ks/", upstream_host, upstream_port),
                     "",
                     "  location /pxe/esxi/ {",
                     f"    alias {esxi_http_base.rstrip('/')}/;",
                     "    autoindex off;",
-                    "  }",
-                ]
-            )
-        if "vcf_offline_depot" in services:
-            lines.extend(
-                [
-                    "",
-                    "  location = /PROD {",
-                    "    return 301 /PROD/;",
-                    "  }",
-                    "",
-                    *_proxy_location("= /PROD/login", upstream_host, upstream_port),
-                    "",
-                    *_proxy_location("= /PROD/logout", upstream_host, upstream_port),
-                    "",
-                    *_proxy_location("= /PROD/", upstream_host, upstream_port),
-                    "",
-                    *_proxy_location("~ ^/PROD/.*/$", upstream_host, upstream_port),
-                    "",
-                    "  location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {",
-                    *vcf_depot_auth_lines,
-                    f"    alias {depot_store_path.rstrip('/')}/PROD/$1;",
-                    "    sendfile on;",
-                    "    tcp_nopush on;",
-                    "    directio 8m;",
-                    "    autoindex off;",
-                    "    types { }",
-                    "    default_type application/octet-stream;",
                     "  }",
                 ]
             )

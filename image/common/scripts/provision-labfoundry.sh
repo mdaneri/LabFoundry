@@ -214,12 +214,13 @@ chown root:labfoundry /etc/labfoundry/labfoundry.env
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks"
+install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-bootstrap-https" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-vmware-ovf-customize.py" "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py"
   install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry-vmware-ovf-customize.service" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
 install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
-sed -i 's/\r$//' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" /etc/sudoers.d/labfoundry-helper
+sed -i 's/\r$//' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   sed -i 's/\r$//' "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
@@ -291,6 +292,12 @@ if [ "$LABFOUNDRY_MGMT_USES_DHCP" != "true" ] && [ -n "$LABFOUNDRY_MGMT_DNS" ]; 
 fi
 
 log_step "configuring default LabFoundry management nginx proxy"
+"$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
+"$LABFOUNDRY_HOME/bin/labfoundry-helper" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json
+"$LABFOUNDRY_HOME/bin/labfoundry-helper" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json
+. /var/lib/labfoundry/apply/ca/first-boot-management.env
+chown root:labfoundry "$LABFOUNDRY_FIRST_BOOT_KEY_PATH"
+chmod 0640 "$LABFOUNDRY_FIRST_BOOT_KEY_PATH"
 install -d -o root -g root -m 0755 /etc/nginx/conf.d
 rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf
 cat >/etc/nginx/conf.d/labfoundry.conf <<'EOF'
@@ -298,11 +305,19 @@ cat >/etc/nginx/conf.d/labfoundry.conf <<'EOF'
 include /etc/labfoundry/nginx/sites.d/*.conf;
 EOF
 chmod 0644 /etc/nginx/conf.d/labfoundry.conf
-cat >/etc/labfoundry/nginx/sites.d/management.conf <<'EOF'
+cat >/etc/labfoundry/nginx/sites.d/management.conf <<EOF
 # Managed by LabFoundry. Local changes may be overwritten.
 server {
   listen 80 default_server;
-  server_name labfoundry.internal _;
+  server_name _;
+  return 308 https://\$host\$request_uri;
+}
+
+server {
+  listen 443 ssl default_server;
+  server_name $LABFOUNDRY_FIRST_BOOT_FQDN;
+  ssl_certificate $LABFOUNDRY_FIRST_BOOT_CERT_PATH;
+  ssl_certificate_key $LABFOUNDRY_FIRST_BOOT_KEY_PATH;
   client_max_body_size 1g;
   location / {
     proxy_pass http://127.0.0.1:8000;
@@ -310,7 +325,7 @@ server {
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto http;
+    proxy_set_header X-Forwarded-Proto https;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
   }

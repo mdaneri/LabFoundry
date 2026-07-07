@@ -967,7 +967,7 @@ try {
         }
     }
     if (-not $ApplianceUrl) {
-        $ApplianceUrl = "http://${ApplianceIPAddress}"
+        $ApplianceUrl = "https://${ApplianceIPAddress}"
     }
     [pscustomobject]@{
         appliance_ip  = $ApplianceIPAddress

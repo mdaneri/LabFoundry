@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Prepare first-boot CA-managed HTTPS material for Photon appliances."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import shlex
+
+from sqlalchemy import select
+
+from labfoundry.app.database import SessionLocal, init_db
+from labfoundry.app.models import ApplianceSettings, CaCertificate, CaSettings
+from labfoundry.app.seed import seed_initial_data
+from labfoundry.app.services.ca import CA_STAGED_CONFIG_PATH, render_ca_apply_payload
+from labfoundry.app.ui import ca_managed_certificate_paths, ensure_ca_state
+
+
+ENV_PATH = Path("/var/lib/labfoundry/apply/ca/first-boot-management.env")
+
+
+def main() -> int:
+    init_db()
+    with SessionLocal() as db:
+        seed_initial_data(db, include_examples=False, appliance_mode=True)
+        appliance_settings = db.execute(select(ApplianceSettings)).scalar_one()
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        appliance_settings.management_https_enabled = True
+        ca_settings.enabled = True
+        db.commit()
+
+        errors = ensure_ca_state(db)
+        if errors:
+            for error in errors:
+                print(error)
+            return 2
+
+        ca_settings = db.execute(select(CaSettings)).scalar_one()
+        certificates = db.execute(select(CaCertificate).order_by(CaCertificate.common_name)).scalars().all()
+        config_path = Path(CA_STAGED_CONFIG_PATH)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(render_ca_apply_payload(ca_settings, certificates, include_private_keys=True), encoding="utf-8")
+        config_path.chmod(0o600)
+
+        cert_path, key_path, _chain_path = ca_managed_certificate_paths(db, "appliance:https")
+        if not cert_path or not key_path:
+            print("managed appliance HTTPS certificate was not issued")
+            return 2
+
+        ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ENV_PATH.write_text(
+            "\n".join(
+                [
+                    f"LABFOUNDRY_FIRST_BOOT_FQDN={shlex.quote(appliance_settings.fqdn)}",
+                    f"LABFOUNDRY_FIRST_BOOT_CERT_PATH={shlex.quote(cert_path)}",
+                    f"LABFOUNDRY_FIRST_BOOT_KEY_PATH={shlex.quote(key_path)}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        ENV_PATH.chmod(0o600)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
