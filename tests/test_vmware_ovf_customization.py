@@ -199,6 +199,9 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "com.vmware.guestInfo" in export_script
     assert "vmw:password" not in docs
     assert "labfoundry-vmware-ovf-customize.py" in provision_script
+    assert "labfoundry-bootstrap-https" in provision_script
+    assert "labfoundry-helper\" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real" in provision_script
+    assert "labfoundry-helper\" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real" in provision_script
     assert "systemctl enable labfoundry-vmware-ovf-customize.service" in provision_script
     assert "Before=network-pre.target" in vmware_unit
     assert "/image/vmware-workstation/ovf" in gitignore
