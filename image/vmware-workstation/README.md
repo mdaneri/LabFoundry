@@ -161,13 +161,17 @@ powershell.exe -ExecutionPolicy Bypass `
   -File scripts/windows/vmware/create-labfoundry-test-vm.ps1 `
   -Redeploy `
   -ResetDataDisks `
-  -WaitForIp
+  -WaitForIp `
+  -TrustRootCa
 ```
 
 The wrapper creates fresh Depot and Backups data VMDKs when needed, and
 `-ResetDataDisks` removes those data VMDKs before recreating them. Pass
 `-IncludeLabNetworkAdapters` only after `VMnet2`, `VMnet3`, and `VMnet4` exist
 for the SiteA, WAN/SiteB, and trunk-like lifecycle networks.
+`-TrustRootCa` downloads the freshly deployed appliance root CA, removes stale
+LabFoundry root CAs from the current-user Trusted Root store, and trusts the new
+root so Edge and the Codex integrated browser accept the first-boot HTTPS cert.
 On first boot, `labfoundry-data-disks.service` formats blank attached data
 VMDKs, labels them as `LABFOUNDRY_DEPOT` and `LABFOUNDRY_BKUP`, writes
 `/etc/fstab`, and mounts them at `/mnt/labfoundry-vcf-offline-depot` and

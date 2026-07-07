@@ -450,6 +450,14 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "[switch]$IncludeLabNetworkAdapters" in script
     assert "[switch]$ResetDataDisks" in script
     assert "[switch]$WaitForIp" in script
+    assert "[switch]$TrustRootCa" in script
+    assert "Install-ApplianceRootCa" in script
+    assert "https://$IpAddress/ca/downloads/root-ca.pem" in script
+    assert "Cert:\\CurrentUser\\Root" in script
+    assert "certutil.exe -user -delstore Root $staleRoot.Thumbprint" in script
+    assert "certutil.exe -f -user -addstore Root $rootCerPath" in script
+    assert "if ($TrustRootCa -and $NoStart)" in script
+    assert "($WaitForIp -or $TrustRootCa)" in script
     assert "[string]$ManagementNetwork = 'VMnet8'" in script
     assert "[string]$ManagementNetwork = 'VMnet8'" in vm_script
     assert "[string]$ManagementNetwork = 'VMnet8'" in nics_script
@@ -487,6 +495,8 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert '"ethernet1.present"       = "TRUE"' in packer_template
     assert '"ethernet1.vnet"          = var.service_vmnet_name' in packer_template
     assert '"ethernet1.virtualDev"    = "vmxnet3"' in packer_template
+    assert "-TrustRootCa" in docs
+    assert "removes stale" in docs
     assert "adds a second `vmxnet3` adapter on `-ServiceVmnetName`" in docs
 
 

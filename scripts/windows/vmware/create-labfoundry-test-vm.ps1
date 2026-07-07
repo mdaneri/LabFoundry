@@ -20,6 +20,7 @@ param(
     [switch]$NoStart,
     [switch]$SkipNetworkPrepare,
     [switch]$WaitForIp,
+    [switch]$TrustRootCa,
     [int]$IpTimeoutSeconds = 180
 )
 
@@ -42,10 +43,52 @@ function Find-LatestApplianceVmx {
     return $selected.FullName
 }
 
+function Install-ApplianceRootCa {
+    param(
+        [Parameter(Mandatory = $true)][string]$IpAddress,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $rootPemPath = Join-Path $env:TEMP "labfoundry-$Name-root-ca.pem"
+    $rootCerPath = Join-Path $env:TEMP "labfoundry-$Name-root-ca.cer"
+    $rootUrl = "https://$IpAddress/ca/downloads/root-ca.pem"
+    Write-Host "Downloading LabFoundry root CA from $rootUrl"
+    Invoke-WebRequest -Uri $rootUrl -SkipCertificateCheck -UseBasicParsing -TimeoutSec 30 -OutFile $rootPemPath
+
+    $pem = Get-Content -LiteralPath $rootPemPath -Raw
+    $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::CreateFromPem($pem)
+    if ($certificate.Subject -ne $certificate.Issuer -or $certificate.Subject -notlike '*CN=LabFoundry Internal Root CA*') {
+        throw "Downloaded certificate is not the expected self-signed LabFoundry root CA: $($certificate.Subject)"
+    }
+
+    [System.IO.File]::WriteAllBytes(
+        $rootCerPath,
+        $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+    )
+    $staleRoots = @(Get-ChildItem Cert:\CurrentUser\Root | Where-Object {
+        $_.Subject -like '*CN=LabFoundry Internal Root CA*' -and $_.Thumbprint -ne $certificate.Thumbprint
+    })
+    foreach ($staleRoot in $staleRoots) {
+        Write-Host "Removing stale LabFoundry root CA from current user: $($staleRoot.Thumbprint)"
+        certutil.exe -user -delstore Root $staleRoot.Thumbprint | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to remove stale LabFoundry root CA from the current-user Trusted Root store: $($staleRoot.Thumbprint)"
+        }
+    }
+    certutil.exe -f -user -addstore Root $rootCerPath | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to import LabFoundry root CA into the current-user Trusted Root store."
+    }
+    Write-Host "Trusted LabFoundry root CA for current user: $($certificate.Thumbprint)"
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 
 if ($SkipLabNetworkAdapters -and $IncludeLabNetworkAdapters) {
     throw "Pass either -SkipLabNetworkAdapters or -IncludeLabNetworkAdapters, not both."
+}
+if ($TrustRootCa -and $NoStart) {
+    throw "Pass -TrustRootCa only when the VM will be started, because the script must fetch the appliance root CA over HTTPS."
 }
 
 $effectiveSkipLabNetworkAdapters = -not $IncludeLabNetworkAdapters
@@ -153,10 +196,15 @@ if (-not $NoStart -and -not $WhatIfPreference) {
 Write-Host "LabFoundry Workstation test VM ready: $Name"
 Write-Host "Appliance VMX: $targetVmx"
 
-if ($WaitForIp -and -not $NoStart -and -not $WhatIfPreference) {
+if (($WaitForIp -or $TrustRootCa) -and -not $NoStart -and -not $WhatIfPreference) {
     $ip = & (Join-Path $PSScriptRoot 'get-labfoundry-vm-ip.ps1') `
         -VmxPath $targetVmx `
         -VmrunPath $VmrunPath `
         -TimeoutSeconds $IpTimeoutSeconds
-    Write-Host "Management IP: $ip"
+    if ($WaitForIp) {
+        Write-Host "Management IP: $ip"
+    }
+    if ($TrustRootCa) {
+        Install-ApplianceRootCa -IpAddress $ip -Name $Name
+    }
 }
