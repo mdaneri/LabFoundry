@@ -84,6 +84,7 @@ from labfoundry.app.services.appliance_settings import (
     normalize_fqdn,
     normalize_multiline_values,
     normalize_service_dns_target_naming,
+    observed_management_dhcp_dns_servers,
     SERVICE_DNS_TARGET_NAMING_CHOICES,
     validate_appliance_settings,
 )
@@ -1609,6 +1610,11 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         management_https_cert_path=management_https_cert_path,
         management_https_key_path=management_https_key_path,
     )
+    observed_dhcp_dns_servers = (
+        observed_management_dhcp_dns_servers(management.get("name", ""))
+        if appliance_settings_preview["resolver_mode"] == "dhcp" and management.get("ipv4_method") == "dhcp"
+        else []
+    )
     return {
         "app_settings": get_settings(),
         "runtime_hostname": socket.gethostname(),
@@ -1626,6 +1632,7 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "appliance_settings_validation_errors": validation_errors,
         "appliance_settings_validation_warnings": validation_warnings,
         "appliance_settings_resolver_mode": appliance_settings_preview["resolver_mode"],
+        "appliance_settings_observed_dhcp_dns_servers": observed_dhcp_dns_servers,
         "appliance_settings_config_preview": json.dumps(appliance_settings_preview, indent=2, sort_keys=True) + "\n",
     }
 
@@ -11524,6 +11531,7 @@ def update_settings_from_ui(
                 "service_dns_target_naming": normalize_service_dns_target_naming(saved.service_dns_target_naming),
                 "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
                 "resolver_mode": context["appliance_settings_resolver_mode"],
+                "observed_dhcp_dns_servers": context["appliance_settings_observed_dhcp_dns_servers"],
                 "local_dns_enabled": context["local_dns_enabled"],
                 "chrony_enabled": context["chrony_enabled"],
                 "management_interface": context["management_interface"],

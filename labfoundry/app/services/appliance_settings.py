@@ -1,5 +1,6 @@
 import json
 import re
+import subprocess
 from ipaddress import ip_address, ip_interface
 from typing import Any
 
@@ -68,6 +69,44 @@ def resolver_mode_for_settings(
     if not external_servers and management_interface.get("ipv4_method") == "dhcp":
         return RESOLVER_MODE_DHCP
     return RESOLVER_MODE_EXTERNAL
+
+
+def parse_resolvectl_dns_servers(output: str) -> list[str]:
+    servers: list[str] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        for token in re.split(r"[\s,]+", line.strip()):
+            candidate = token.strip("[](),;")
+            if not candidate:
+                continue
+            candidate = candidate.split("#", 1)[0].split("%", 1)[0]
+            try:
+                server = str(ip_address(candidate))
+            except ValueError:
+                continue
+            if server in seen:
+                continue
+            seen.add(server)
+            servers.append(server)
+    return servers
+
+
+def observed_management_dhcp_dns_servers(interface_name: str) -> list[str]:
+    if not interface_name:
+        return []
+    try:
+        result = subprocess.run(
+            ["resolvectl", "dns", interface_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    return parse_resolvectl_dns_servers(result.stdout)
 
 
 def management_interface_context(interfaces: list[PhysicalInterface]) -> dict[str, str]:

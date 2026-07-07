@@ -6379,6 +6379,37 @@ function updateValidationList(list, items = []) {
   list.classList.toggle("hidden", items.length === 0);
 }
 
+function updateApplianceSettingsDhcpDns(payload = {}) {
+  const servers = Array.isArray(payload.observed_dhcp_dns_servers) ? payload.observed_dhcp_dns_servers.filter(Boolean) : [];
+  const usingDhcp = payload.resolver_mode === "dhcp";
+  const textarea = document.querySelector("[data-appliance-settings-external-dns]");
+  if (textarea instanceof HTMLTextAreaElement) {
+    textarea.placeholder = usingDhcp && servers.length ? `DHCP: ${servers.join(", ")}` : "";
+  }
+  const sourceList = document.querySelector("[data-appliance-settings-dhcp-dns]");
+  if (!(sourceList instanceof HTMLElement)) {
+    return;
+  }
+  sourceList.classList.toggle("hidden", !usingDhcp);
+  const values = sourceList.querySelector("[data-appliance-settings-dhcp-dns-values]");
+  if (!(values instanceof HTMLElement)) {
+    return;
+  }
+  values.innerHTML = "";
+  if (!servers.length) {
+    const empty = document.createElement("span");
+    empty.className = "muted";
+    empty.textContent = "No lease resolver servers reported yet.";
+    values.append(empty);
+    return;
+  }
+  servers.forEach((server) => {
+    const code = document.createElement("code");
+    code.textContent = server;
+    values.append(code);
+  });
+}
+
 function updateApplianceSettingsValidation(payload = {}) {
   const errors = Array.isArray(payload.validation_errors) ? payload.validation_errors : [];
   const warnings = Array.isArray(payload.validation_warnings) ? payload.validation_warnings : [];
@@ -6411,6 +6442,7 @@ function updateApplianceSettingsValidation(payload = {}) {
   if (rootSsh instanceof HTMLElement && payload.root_ssh_enabled !== undefined) {
     rootSsh.textContent = payload.root_ssh_enabled ? "enabled" : "disabled";
   }
+  updateApplianceSettingsDhcpDns(payload);
   const dnsStatus = document.querySelector("[data-appliance-settings-dns-status]");
   if (dnsStatus instanceof HTMLElement) {
     const localDnsEnabled = Boolean(payload.local_dns_enabled);

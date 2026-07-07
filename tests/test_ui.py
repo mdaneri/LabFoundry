@@ -136,7 +136,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
     assert 'data-monitor-page' in page.text
-    assert "/static/app.js?v=vmware-dhcp-20260707-2" in page.text
+    assert "/static/app.js?v=vmware-dhcp-20260707-3" in page.text
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -1073,13 +1073,25 @@ def test_settings_local_dns_disabled_requires_external_dns_without_dns_registrat
         assert record is None
 
 
-def test_settings_management_dhcp_allows_empty_external_dns(client):
+def test_parse_resolvectl_dns_servers_handles_systemd_output():
+    from labfoundry.app.services.appliance_settings import parse_resolvectl_dns_servers
+
+    output = """
+Global:
+Link 2 (eth0): 192.168.167.2 2001:4860:4860::8888 fe80::1%eth0 192.168.167.2
+"""
+
+    assert parse_resolvectl_dns_servers(output) == ["192.168.167.2", "2001:4860:4860::8888", "fe80::1"]
+
+
+def test_settings_management_dhcp_allows_empty_external_dns(client, monkeypatch):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import ApplianceSettings, DnsSettings, PhysicalInterface
 
     login(client)
+    monkeypatch.setattr("labfoundry.app.ui.observed_management_dhcp_dns_servers", lambda interface_name: ["192.168.167.2"])
     with SessionLocal() as db:
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.enabled = False
@@ -1094,6 +1106,10 @@ def test_settings_management_dhcp_allows_empty_external_dns(client):
     page = client.get("/settings")
     assert "DHCP DNS" in page.text
     assert "Management DHCP will keep lease-provided resolver servers" in page.text
+    assert "from DHCP" in page.text
+    assert 'placeholder="DHCP: 192.168.167.2"' in page.text
+    assert "<code>192.168.167.2</code>" in page.text
+    assert ">192.168.167.2</textarea>" not in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
         "/settings",
@@ -1110,6 +1126,7 @@ def test_settings_management_dhcp_allows_empty_external_dns(client):
     assert payload["valid"] is True
     assert payload["external_dns_servers"] == []
     assert payload["resolver_mode"] == "dhcp"
+    assert payload["observed_dhcp_dns_servers"] == ["192.168.167.2"]
     assert '"resolver_mode": "dhcp"' in payload["config_preview"]
     assert '"resolver_servers": []' in payload["config_preview"]
 
