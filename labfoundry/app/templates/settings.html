@@ -7,7 +7,7 @@
       <div>
         <h2>Appliance Identity</h2>
       </div>
-      <span class="status-pill {{ 'good' if local_dns_enabled else 'warn' }}">{{ "local DNS" if local_dns_enabled else "external DNS" }}</span>
+      <span class="status-pill {{ 'good' if local_dns_enabled else 'warn' }}">{{ "local DNS" if local_dns_enabled else ("DHCP DNS" if appliance_settings_resolver_mode == "dhcp" else "external DNS") }}</span>
     </div>
 
     <form class="form-stack" action="/settings" method="post" data-autosave-form data-appliance-settings data-autosave-status-id="appliance-settings-autosave-status">
@@ -37,9 +37,21 @@
         <input type="hidden" name="external_dns_servers" value="{{ appliance_settings.external_dns_servers }}">
       {% else %}
         <label>
-          <span class="field-label"><span>External DNS servers</span><button class="help-icon" type="button" data-help="One resolver IP per line. These are used by appliance resolver apply only when local DNS is disabled; editing does not mutate the host.">i</button></span>
-          <textarea name="external_dns_servers" rows="4">{{ appliance_settings.external_dns_servers }}</textarea>
+          <span class="field-label"><span>External DNS servers</span><button class="help-icon" type="button" data-help="One resolver IP per line. Leave empty with management DHCP to keep lease-provided DNS; enter values to override the DHCP resolver list during global appliance apply.">i</button></span>
+          <textarea name="external_dns_servers" rows="4" data-appliance-settings-external-dns{% if appliance_settings_resolver_mode == "dhcp" and appliance_settings_observed_dhcp_dns_servers %} placeholder="DHCP: {{ appliance_settings_observed_dhcp_dns_servers|join(', ') }}"{% endif %}>{{ appliance_settings.external_dns_servers }}</textarea>
         </label>
+        <div class="runtime-source-list {{ 'hidden' if appliance_settings_resolver_mode != 'dhcp' else '' }}" data-appliance-settings-dhcp-dns>
+          <span class="status-pill muted">from DHCP</span>
+          <span data-appliance-settings-dhcp-dns-values>
+            {% if appliance_settings_observed_dhcp_dns_servers %}
+              {% for server in appliance_settings_observed_dhcp_dns_servers %}
+                <code>{{ server }}</code>
+              {% endfor %}
+            {% else %}
+              <span class="muted">No lease resolver servers reported yet.</span>
+            {% endif %}
+          </span>
+        </div>
       {% endif %}
       <p id="appliance-settings-autosave-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
     </form>
@@ -124,6 +136,8 @@
       <div data-appliance-settings-dns-status class="alert {{ 'success' if local_dns_enabled else 'warning' }}">
         {% if local_dns_enabled %}
           Local DNS is enabled. Autosave manages the app-owned appliance DNS record for {{ appliance_settings.fqdn }}.
+        {% elif appliance_settings_resolver_mode == "dhcp" %}
+          Local DNS is disabled. Management DHCP will keep lease-provided resolver servers unless external DNS servers are entered.
         {% else %}
           Local DNS is disabled. External DNS servers are required for appliance resolver apply.
         {% endif %}

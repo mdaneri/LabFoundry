@@ -22,7 +22,7 @@ param(
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
     [Parameter(ParameterSetName = 'PrepareNetworks')]
-    [string]$ManagementNetwork = 'vmnet8',
+    [string]$ManagementNetwork = 'VMnet8',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
@@ -46,7 +46,7 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
-    [string]$ApplianceIPAddress = '192.168.167.10',
+    [string]$ApplianceIPAddress = '',
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
@@ -262,7 +262,6 @@ if (-not $applianceIpWasPassed) {
     if ($networkPlan.missing_networks.Count -gt 0) {
         throw "Missing VMware Workstation networks: $($networkPlan.missing_networks -join ', ')."
     }
-    $ApplianceIPAddress = Get-Ipv4AddressFromSubnetOffset -Subnet $networkPlan.management_subnet -HostOffset 10
 }
 if (-not $PlanOnly -and $PSCmdlet.ParameterSetName -eq 'Run') {
     $usesLanSegments = @($SiteANetwork, $SiteBNetwork, $TrunkNetwork) | Where-Object { $_.StartsWith('lan:') }
@@ -273,7 +272,7 @@ if (-not $PlanOnly -and $PSCmdlet.ParameterSetName -eq 'Run') {
         }
     }
 }
-$effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "http://${ApplianceIPAddress}" }
+$effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } elseif ($ApplianceIPAddress) { "http://${ApplianceIPAddress}" } else { "" }
 
 if (-not $SkipClientPrepare -and -not $PlanOnly) {
     & (Join-Path $PSScriptRoot 'prepare-tiny-linux-client.ps1')
@@ -294,8 +293,6 @@ $arguments = @(
     '-SiteANetwork', $SiteANetwork,
     '-SiteBNetwork', $SiteBNetwork,
     '-TrunkNetwork', $TrunkNetwork,
-    '-ApplianceIPAddress', $ApplianceIPAddress,
-    '-ApplianceUrl', $effectiveApplianceUrl,
     '-SiteInterface', $SiteInterface,
     '-SiteCidr', $SiteCidr,
     '-AdminUsername', $AdminUsername,
@@ -308,6 +305,8 @@ $arguments = @(
     '-TaggedVlanCidr', $TaggedVlanCidr,
     '-WanCidr', $WanCidr
 )
+if ($ApplianceIPAddress) { $arguments += @('-ApplianceIPAddress', $ApplianceIPAddress) }
+if ($effectiveApplianceUrl) { $arguments += @('-ApplianceUrl', $effectiveApplianceUrl) }
 if ($VmrunPath) { $arguments += @('-VmrunPath', $VmrunPath) }
 if (-not $KeepVms) { $arguments += '-CleanupCreatedLab' }
 if ($AllowDryRunApply) { $arguments += '-AllowDryRunApply' }
@@ -320,7 +319,7 @@ if ($PlanOnly) { $arguments += '-PlanOnly' }
 Write-Host "Workstation lifecycle lab: $LabName"
 Write-Host "Appliance VMX: $ApplianceVmxPath"
 Write-Host "Client VMDK: $ClientVmdkPath"
-Write-Host "Appliance URL: $effectiveApplianceUrl"
+Write-Host "Appliance URL: $(if ($effectiveApplianceUrl) { $effectiveApplianceUrl } else { 'discovered at runtime' })"
 Write-Host ("Routing/WAN only: {0}" -f ([bool]$RoutingWanOnly))
 Write-Host ("Full ESXi PXE install: {0}" -f ([bool]$FullEsxiPxeInstall))
 Write-Host ("Backup/restore validation: {0}" -f (-not $effectiveSkipBackupRestoreTest))

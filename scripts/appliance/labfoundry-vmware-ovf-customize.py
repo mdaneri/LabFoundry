@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 
 
 PROPERTY_PREFIX = "labfoundry."
+PROPERTY_MANAGEMENT_MODE = f"{PROPERTY_PREFIX}management_mode"
 PROPERTY_CIDR = f"{PROPERTY_PREFIX}cidr"
 PROPERTY_GATEWAY = f"{PROPERTY_PREFIX}gateway"
 PROPERTY_FQDN = f"{PROPERTY_PREFIX}fqdn"
@@ -26,10 +27,7 @@ PROPERTY_NTP = f"{PROPERTY_PREFIX}ntp_servers"
 PROPERTY_ADMIN_PASSWORD = f"{PROPERTY_PREFIX}admin_password"
 PROPERTY_ROOT_PASSWORD = f"{PROPERTY_PREFIX}root_password"
 REQUIRED_PROPERTIES = {
-    PROPERTY_CIDR,
-    PROPERTY_GATEWAY,
     PROPERTY_FQDN,
-    PROPERTY_DNS,
     PROPERTY_ADMIN_PASSWORD,
     PROPERTY_ROOT_PASSWORD,
 }
@@ -100,9 +98,9 @@ def validate_fqdn(value: str) -> str:
     return fqdn
 
 
-def validate_dns_servers(value: str) -> list[str]:
+def validate_dns_servers(value: str, *, required: bool = False) -> list[str]:
     servers = split_list(value)
-    if not servers:
+    if required and not servers:
         raise OvfCustomizationError("labfoundry.dns_servers must include at least one DNS server")
     for server in servers:
         try:
@@ -128,34 +126,47 @@ def validate_properties(properties: dict[str, str]) -> dict[str, object]:
     if missing:
         raise OvfCustomizationError(f"Missing required OVF properties: {', '.join(missing)}")
 
-    try:
-        cidr = IPv4Interface(properties[PROPERTY_CIDR].strip())
-    except ValueError as exc:
-        raise OvfCustomizationError("labfoundry.cidr must be an IPv4 CIDR such as 192.168.10.10/24") from exc
+    management_mode = properties.get(PROPERTY_MANAGEMENT_MODE, "dhcp").strip().lower() or "dhcp"
+    if management_mode not in {"dhcp", "static"}:
+        raise OvfCustomizationError("labfoundry.management_mode must be dhcp or static")
 
-    try:
-        gateway = IPv4Address(properties[PROPERTY_GATEWAY].strip())
-    except ValueError as exc:
-        raise OvfCustomizationError("labfoundry.gateway must be an IPv4 address") from exc
+    cidr: IPv4Interface | None = None
+    gateway: IPv4Address | None = None
+    if management_mode == "static":
+        if not properties.get(PROPERTY_CIDR):
+            raise OvfCustomizationError("labfoundry.cidr is required when labfoundry.management_mode is static")
+        if not properties.get(PROPERTY_GATEWAY):
+            raise OvfCustomizationError("labfoundry.gateway is required when labfoundry.management_mode is static")
+        try:
+            cidr = IPv4Interface(properties[PROPERTY_CIDR].strip())
+        except ValueError as exc:
+            raise OvfCustomizationError("labfoundry.cidr must be an IPv4 CIDR such as 192.168.10.10/24") from exc
+
+        try:
+            gateway = IPv4Address(properties[PROPERTY_GATEWAY].strip())
+        except ValueError as exc:
+            raise OvfCustomizationError("labfoundry.gateway must be an IPv4 address") from exc
 
     fqdn = validate_fqdn(properties[PROPERTY_FQDN])
-    dns_servers = validate_dns_servers(properties[PROPERTY_DNS])
+    dns_servers = validate_dns_servers(properties.get(PROPERTY_DNS, ""))
     ntp_servers = validate_ntp_servers(properties.get(PROPERTY_NTP, ""))
     return {
-        "cidr": str(cidr),
-        "gateway": str(gateway),
+        "management_mode": management_mode,
+        "cidr": str(cidr) if cidr else "dhcp",
+        "gateway": str(gateway) if gateway else "",
         "fqdn": fqdn,
         "dns_servers": dns_servers,
         "ntp_servers": ntp_servers,
         "admin_password": properties[PROPERTY_ADMIN_PASSWORD],
         "root_password": properties[PROPERTY_ROOT_PASSWORD],
-        "management_source_cidr": str(cidr.network),
+        "management_source_cidr": str(cidr.network) if cidr else "",
     }
 
 
 def redacted_summary(config: dict[str, object]) -> dict[str, object]:
     return {
         "applied_at": utc_now(),
+        "management_mode": config["management_mode"],
         "cidr": config["cidr"],
         "gateway": config["gateway"],
         "fqdn": config["fqdn"],
@@ -217,21 +228,22 @@ def write_env_file(path: Path, updates: dict[str, object]) -> None:
 
 
 def write_networkd_config(config: dict[str, object]) -> None:
-    dns_lines = "\n".join(f"DNS={server}" for server in config["dns_servers"])
-    content = (
-        "[Match]\n"
-        f"Name={DEFAULT_INTERFACE}\n\n"
-        "[Network]\n"
-        f"Address={config['cidr']}\n"
-        f"Gateway={config['gateway']}\n"
-        f"{dns_lines}\n"
-    )
+    lines = ["[Match]", f"Name={DEFAULT_INTERFACE}", "", "[Network]"]
+    if config["management_mode"] == "dhcp":
+        lines.append("DHCP=ipv4")
+    else:
+        lines.append(f"Address={config['cidr']}")
+        lines.append(f"Gateway={config['gateway']}")
+    lines.extend(f"DNS={server}" for server in config["dns_servers"])
+    content = "\n".join(lines).strip() + "\n"
     NETWORKD_PATH.parent.mkdir(parents=True, exist_ok=True)
     NETWORKD_PATH.write_text(content, encoding="utf-8")
     os.chmod(NETWORKD_PATH, 0o644)
 
 
 def write_resolv_conf(config: dict[str, object]) -> None:
+    if not config["dns_servers"]:
+        return
     RESOLV_CONF_PATH.write_text("".join(f"nameserver {server}\n" for server in config["dns_servers"]), encoding="utf-8")
     os.chmod(RESOLV_CONF_PATH, 0o644)
 
@@ -247,6 +259,11 @@ def write_nginx_management_server_name(config: dict[str, object]) -> None:
 
 def write_initial_firewall_config(config: dict[str, object]) -> None:
     source_cidr = str(config["management_source_cidr"])
+    management_rule = (
+        f'ip saddr {source_cidr} tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry management access"'
+        if source_cidr
+        else f'iifname "{DEFAULT_INTERFACE}" tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry management access"'
+    )
     content = f"""# Managed by LabFoundry. Local changes may be overwritten.
 # nftables firewall state for Photon OS appliance images.
 flush ruleset
@@ -255,7 +272,7 @@ table inet labfoundry {{
     type filter hook input priority filter; policy drop;
     iifname "lo" accept comment "LabFoundry loopback"
     ct state established,related accept comment "LabFoundry established traffic"
-    ip saddr {source_cidr} tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry management access"
+    {management_rule}
     meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
     meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
   }}

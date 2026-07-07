@@ -1,10 +1,12 @@
 import json
 import re
+import subprocess
 from ipaddress import ip_address, ip_interface
 from typing import Any
 
 from labfoundry.app.models import ApplianceSettings, PhysicalInterface
 from labfoundry.app.services.dnsmasq import split_servers
+from labfoundry.app.services.networking import normalize_ipv4_method
 
 
 APPLIANCE_SETTINGS_DEFAULT_FQDN = "labfoundry.labfoundry.internal"
@@ -13,6 +15,9 @@ APPLIANCE_SETTINGS_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/appliance-set
 APPLIANCE_DNS_RECORD_DESCRIPTION = "LabFoundry app-owned appliance FQDN record."
 SERVICE_DNS_TARGET_NAMING_CHOICES = ("ip", "interface")
 SERVICE_DNS_TARGET_NAMING_DEFAULT = "ip"
+RESOLVER_MODE_LOCAL_DNS = "local_dns"
+RESOLVER_MODE_EXTERNAL = "external"
+RESOLVER_MODE_DHCP = "dhcp"
 MANAGEMENT_UI_PORT = 8000
 MANAGEMENT_UI_PUBLIC_HTTP_PORT = 80
 MANAGEMENT_UI_PUBLIC_HTTPS_PORT = 443
@@ -53,6 +58,57 @@ def is_app_owned_appliance_dns_record(description: str | None) -> bool:
     return APPLIANCE_DNS_RECORD_DESCRIPTION in (description or "")
 
 
+def resolver_mode_for_settings(
+    *,
+    local_dns_enabled: bool,
+    management_interface: dict[str, str],
+    external_servers: list[str],
+) -> str:
+    if local_dns_enabled:
+        return RESOLVER_MODE_LOCAL_DNS
+    if not external_servers and management_interface.get("ipv4_method") == "dhcp":
+        return RESOLVER_MODE_DHCP
+    return RESOLVER_MODE_EXTERNAL
+
+
+def parse_resolvectl_dns_servers(output: str) -> list[str]:
+    servers: list[str] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        for token in re.split(r"[\s,]+", line.strip()):
+            candidate = token.strip("[](),;")
+            if not candidate:
+                continue
+            candidate = candidate.split("#", 1)[0].split("%", 1)[0]
+            try:
+                server = str(ip_address(candidate))
+            except ValueError:
+                continue
+            if server in seen:
+                continue
+            seen.add(server)
+            servers.append(server)
+    return servers
+
+
+def observed_management_dhcp_dns_servers(interface_name: str) -> list[str]:
+    if not interface_name:
+        return []
+    try:
+        result = subprocess.run(
+            ["resolvectl", "dns", interface_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    return parse_resolvectl_dns_servers(result.stdout)
+
+
 def management_interface_context(interfaces: list[PhysicalInterface]) -> dict[str, str]:
     candidates = [interface for interface in interfaces if interface.role == "management"] + [
         interface for interface in interfaces if interface.name == "eth0"
@@ -62,18 +118,20 @@ def management_interface_context(interfaces: list[PhysicalInterface]) -> dict[st
         if interface.name in seen:
             continue
         seen.add(interface.name)
-        if not interface.ip_cidr:
+        candidate_cidr = interface.host_ip_cidr if normalize_ipv4_method(interface.ipv4_method) == "dhcp" else interface.ip_cidr
+        if not candidate_cidr:
             continue
         try:
-            parsed = ip_interface(interface.ip_cidr)
+            parsed = ip_interface(candidate_cidr)
         except ValueError:
             continue
         return {
             "name": interface.name,
             "ip": str(parsed.ip),
-            "ip_cidr": interface.ip_cidr,
+            "ip_cidr": candidate_cidr,
+            "ipv4_method": normalize_ipv4_method(interface.ipv4_method),
         }
-    return {"name": "", "ip": "", "ip_cidr": ""}
+    return {"name": "", "ip": "", "ip_cidr": "", "ipv4_method": "static"}
 
 
 def validate_appliance_settings(
@@ -95,7 +153,12 @@ def validate_appliance_settings(
         errors.append("Appliance FQDN must be a valid fully qualified DNS name.")
 
     external_servers = split_servers(settings.external_dns_servers)
-    if not local_dns_enabled and not external_servers:
+    resolver_mode = resolver_mode_for_settings(
+        local_dns_enabled=local_dns_enabled,
+        management_interface=management_interface,
+        external_servers=external_servers,
+    )
+    if resolver_mode == RESOLVER_MODE_EXTERNAL and not external_servers:
         errors.append("External DNS servers are required when local DNS is disabled.")
     for server in external_servers:
         try:
@@ -119,6 +182,8 @@ def validate_appliance_settings(
         errors.append("Service DNS target names must be generated from either IP addresses or interface names.")
     if local_dns_enabled:
         warnings.append("Local DNS is enabled, so appliance resolver apply will point management DNS at 127.0.0.1.")
+    elif resolver_mode == RESOLVER_MODE_DHCP:
+        warnings.append("Management IPv4 uses DHCP and no external DNS servers are set, so appliance resolver apply will keep DHCP-provided DNS.")
     return errors, warnings
 
 
@@ -130,8 +195,13 @@ def appliance_settings_preview_payload(
     management_https_cert_path: str = "",
     management_https_key_path: str = "",
 ) -> dict[str, Any]:
-    resolver_mode = "local_dns" if local_dns_enabled else "external"
-    resolver_servers = ["127.0.0.1"] if local_dns_enabled else split_servers(settings.external_dns_servers)
+    external_servers = split_servers(settings.external_dns_servers)
+    resolver_mode = resolver_mode_for_settings(
+        local_dns_enabled=local_dns_enabled,
+        management_interface=management_interface,
+        external_servers=external_servers,
+    )
+    resolver_servers = ["127.0.0.1"] if local_dns_enabled else external_servers
     payload = {
         "fqdn": normalize_fqdn(settings.fqdn),
         "resolver_mode": resolver_mode,

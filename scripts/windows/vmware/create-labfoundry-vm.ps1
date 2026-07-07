@@ -5,7 +5,7 @@ param(
     [string]$ApplianceVmxPath,
     [string]$OutputDirectory = '',
     [string]$VmrunPath = '',
-    [string]$ManagementNetwork = 'vmnet8',
+    [string]$ManagementNetwork = 'VMnet8',
     [string]$SiteANetwork = 'VMnet2',
     [string]$SiteBNetwork = 'VMnet3',
     [string]$TrunkNetwork = 'VMnet4',

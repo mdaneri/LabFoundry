@@ -113,7 +113,7 @@ from labfoundry.app.schemas import (
 )
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY, firewall_interface_networks, firewall_source_group_state
 from labfoundry.app.services.monitoring import monitor_payload
-from labfoundry.app.services.networking import normalize_interface_mode
+from labfoundry.app.services.networking import normalize_interface_mode, normalize_interface_role, normalize_ipv4_method
 from labfoundry.app.services.routes_wan import validate_nat_source
 from labfoundry.app.services.service_registry import SERVICE_STATE_IDS, SERVICE_SYSTEMD_UNITS
 from labfoundry.app.security import (
@@ -808,8 +808,17 @@ def update_physical_interface(
     interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == name)).scalar_one_or_none()
     if not interface:
         raise HTTPException(status_code=404, detail="Interface not found")
-    for field in ("role", "mtu", "admin_state", "ip_cidr", "ipv6_cidr"):
+    next_role = normalize_interface_role(payload.get("role", interface.role))
+    next_ipv4_method = normalize_ipv4_method(payload.get("ipv4_method", interface.ipv4_method))
+    if next_ipv4_method == "dhcp" and next_role != "management":
+        raise HTTPException(status_code=422, detail="IPv4 DHCP is available only for the management interface.")
+    for field in ("role", "mtu", "admin_state", "ip_cidr", "ipv6_cidr", "ipv4_method"):
         if field in payload:
+            if field == "ipv4_method":
+                interface.ipv4_method = next_ipv4_method
+                if next_ipv4_method == "dhcp":
+                    interface.ip_cidr = None
+                continue
             if field in {"ip_cidr", "ipv6_cidr"} and payload[field]:
                 try:
                     parsed = ip_interface(str(payload[field]).strip())
@@ -819,6 +828,9 @@ def update_physical_interface(
                 if parsed.version != expected_version:
                     family = "IPv4" if expected_version == 4 else "IPv6"
                     raise HTTPException(status_code=422, detail=f"{field} must use an {family} address and prefix.")
+            if field == "role":
+                setattr(interface, field, next_role)
+                continue
             setattr(interface, field, payload[field])
     if "mode" in payload:
         new_mode = normalize_interface_mode(payload["mode"])

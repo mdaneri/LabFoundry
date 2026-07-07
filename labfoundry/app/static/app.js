@@ -4615,6 +4615,9 @@ async function autoSavePhysicalInterface(cell, csrf) {
   const row = cell.getRow();
   const data = row.getData();
   data.admin_state = data.admin_up ? "up" : "down";
+  if (data.ipv4_method === "dhcp") {
+    data.ip_cidr = "";
+  }
   try {
     await postNetworkAction(`/physical-interfaces/${data.id}/edit`, data, csrf, { reload: false });
     showTransientGridStatus("Saved");
@@ -4722,6 +4725,10 @@ function initializePhysicalInterfacesTable() {
   }
   const csrf = tableElement.dataset.csrf || "";
   const roleOptions = roleValues(JSON.parse(tableElement.dataset.roleOptions || "[]"));
+  const ipv4MethodOptions = labeledValues(JSON.parse(tableElement.dataset.ipv4MethodOptions || "[]"), {
+    static: "Static",
+    dhcp: "DHCP",
+  });
   const modeOptions = labeledValues(JSON.parse(tableElement.dataset.modeOptions || "[]"), {
     access: "Access (untagged)",
     trunk: "Trunk (tagged VLANs)",
@@ -4752,11 +4759,46 @@ function initializePhysicalInterfacesTable() {
         { title: "Observed IPv4", field: "host_ip_cidr", minWidth: 150, headerSort: false },
         { title: "Observed IPv6", field: "host_ipv6_cidr", minWidth: 180, headerSort: false },
         {
+          title: "IPv4 Method",
+          field: "ipv4_method",
+          editor: "list",
+          editorParams: { values: ipv4MethodOptions },
+          editable: (cell) => cell.getRow().getData().role === "management",
+          formatter: (cell) => escapeHtml(ipv4MethodOptions[cell.getValue()] || cell.getValue() || "Static"),
+          width: 130,
+          cellEdited: async (cell) => {
+            const row = cell.getRow();
+            const data = row.getData();
+            if (data.ipv4_method === "dhcp" && data.role !== "management") {
+              showNetworkMessage("physical-interface-error", "IPv4 DHCP is available only for the management interface.");
+              if (typeof cell.restoreOldValue === "function") {
+                cell.restoreOldValue();
+              }
+              return;
+            }
+            if (data.ipv4_method === "dhcp") {
+              await row.update({ ip_cidr: "" });
+            }
+            await autoSavePhysicalInterface(cell, csrf);
+          },
+        },
+        {
           title: "IPv4 CIDR",
           field: "ip_cidr",
-          editor: cidrInputEditor,
+          editor: (cell, onRendered, success, cancel, editorParams) => {
+            if (cell.getRow().getData().ipv4_method === "dhcp") {
+              cancel();
+              return document.createElement("span");
+            }
+            return cidrInputEditor(cell, onRendered, success, cancel, editorParams);
+          },
           editorParams: { family: "ipv4", placeholder: "192.168.50.1/24" },
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "192.168.50.1/24"),
+          formatter: (cell) => {
+            if (cell.getRow().getData().ipv4_method === "dhcp") {
+              return '<span class="status-pill muted">DHCP</span>';
+            }
+            return dnsAddRowHintFormatter(cell, "192.168.50.1/24");
+          },
           minWidth: 160,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
@@ -6337,6 +6379,37 @@ function updateValidationList(list, items = []) {
   list.classList.toggle("hidden", items.length === 0);
 }
 
+function updateApplianceSettingsDhcpDns(payload = {}) {
+  const servers = Array.isArray(payload.observed_dhcp_dns_servers) ? payload.observed_dhcp_dns_servers.filter(Boolean) : [];
+  const usingDhcp = payload.resolver_mode === "dhcp";
+  const textarea = document.querySelector("[data-appliance-settings-external-dns]");
+  if (textarea instanceof HTMLTextAreaElement) {
+    textarea.placeholder = usingDhcp && servers.length ? `DHCP: ${servers.join(", ")}` : "";
+  }
+  const sourceList = document.querySelector("[data-appliance-settings-dhcp-dns]");
+  if (!(sourceList instanceof HTMLElement)) {
+    return;
+  }
+  sourceList.classList.toggle("hidden", !usingDhcp);
+  const values = sourceList.querySelector("[data-appliance-settings-dhcp-dns-values]");
+  if (!(values instanceof HTMLElement)) {
+    return;
+  }
+  values.innerHTML = "";
+  if (!servers.length) {
+    const empty = document.createElement("span");
+    empty.className = "muted";
+    empty.textContent = "No lease resolver servers reported yet.";
+    values.append(empty);
+    return;
+  }
+  servers.forEach((server) => {
+    const code = document.createElement("code");
+    code.textContent = server;
+    values.append(code);
+  });
+}
+
 function updateApplianceSettingsValidation(payload = {}) {
   const errors = Array.isArray(payload.validation_errors) ? payload.validation_errors : [];
   const warnings = Array.isArray(payload.validation_warnings) ? payload.validation_warnings : [];
@@ -6369,6 +6442,7 @@ function updateApplianceSettingsValidation(payload = {}) {
   if (rootSsh instanceof HTMLElement && payload.root_ssh_enabled !== undefined) {
     rootSsh.textContent = payload.root_ssh_enabled ? "enabled" : "disabled";
   }
+  updateApplianceSettingsDhcpDns(payload);
   const dnsStatus = document.querySelector("[data-appliance-settings-dns-status]");
   if (dnsStatus instanceof HTMLElement) {
     const localDnsEnabled = Boolean(payload.local_dns_enabled);
@@ -6387,6 +6461,8 @@ function updateApplianceSettingsValidation(payload = {}) {
       dnsStatus.textContent = actionMessages[payload.dns_record_action];
     } else if (localDnsEnabled) {
       dnsStatus.textContent = `Local DNS is enabled. Autosave manages the app-owned appliance DNS record for ${fqdn}.`;
+    } else if (payload.resolver_mode === "dhcp") {
+      dnsStatus.textContent = "Local DNS is disabled. Management DHCP will keep lease-provided resolver servers unless external DNS servers are entered.";
     } else {
       dnsStatus.textContent = "Local DNS is disabled. External DNS servers are required for appliance resolver apply.";
     }

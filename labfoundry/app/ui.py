@@ -77,13 +77,14 @@ from labfoundry.app.schemas import ApiTokenCreate, WanPolicyCreate
 from labfoundry.app.services.appliance_settings import (
     APPLIANCE_DNS_RECORD_DESCRIPTION,
     APPLIANCE_SETTINGS_STAGED_CONFIG_PATH,
+    appliance_settings_preview_payload,
     appliance_settings_to_dict,
     is_app_owned_appliance_dns_record,
     management_interface_context,
     normalize_fqdn,
     normalize_multiline_values,
     normalize_service_dns_target_naming,
-    render_appliance_settings_config,
+    observed_management_dhcp_dns_servers,
     SERVICE_DNS_TARGET_NAMING_CHOICES,
     validate_appliance_settings,
 )
@@ -176,10 +177,12 @@ from labfoundry.app.secrets import decrypt_secret, secret_key_status
 from labfoundry.app.services.networking import (
     INTERFACE_MODES,
     INTERFACE_ROLES,
+    IPV4_METHODS,
     NETWORK_INVENTORY_CLEANUP_WARNING_KEY,
     VLAN_ROLES,
     normalize_interface_mode,
     normalize_interface_role,
+    normalize_ipv4_method,
     physical_interface_to_dict,
     render_network_config,
     sync_host_physical_interfaces,
@@ -1600,6 +1603,18 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
     )
     if settings.root_ssh_enabled and get_settings().dry_run_system_adapters:
         validation_warnings.append("Root SSH is enabled as desired state, but dry-run system adapters are active. Global appliance apply will record intent without changing sshd.")
+    appliance_settings_preview = appliance_settings_preview_payload(
+        settings,
+        local_dns_enabled=local_dns_enabled,
+        management_interface=management,
+        management_https_cert_path=management_https_cert_path,
+        management_https_key_path=management_https_key_path,
+    )
+    observed_dhcp_dns_servers = (
+        observed_management_dhcp_dns_servers(management.get("name", ""))
+        if appliance_settings_preview["resolver_mode"] == "dhcp" and management.get("ipv4_method") == "dhcp"
+        else []
+    )
     return {
         "app_settings": get_settings(),
         "runtime_hostname": socket.gethostname(),
@@ -1616,13 +1631,9 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "logging_preferences": logging_preferences_to_dict(logging_preferences_from_db(db)),
         "appliance_settings_validation_errors": validation_errors,
         "appliance_settings_validation_warnings": validation_warnings,
-        "appliance_settings_config_preview": render_appliance_settings_config(
-            settings,
-            local_dns_enabled=local_dns_enabled,
-            management_interface=management,
-            management_https_cert_path=management_https_cert_path,
-            management_https_key_path=management_https_key_path,
-        ),
+        "appliance_settings_resolver_mode": appliance_settings_preview["resolver_mode"],
+        "appliance_settings_observed_dhcp_dns_servers": observed_dhcp_dns_servers,
+        "appliance_settings_config_preview": json.dumps(appliance_settings_preview, indent=2, sort_keys=True) + "\n",
     }
 
 
@@ -2771,6 +2782,7 @@ def network_context(db: Session) -> dict:
         "trunk_parent_options": [trunk_parent_option(interface) for interface in trunk_interfaces],
         "interface_roles": INTERFACE_ROLES,
         "interface_modes": INTERFACE_MODES,
+        "ipv4_methods": IPV4_METHODS,
         "vlan_roles": VLAN_ROLES,
         "network_config_preview": config_preview,
         "network_validation_errors": validation_errors,
@@ -6952,6 +6964,7 @@ def edit_physical_interface_from_ui(
     interface_id: int,
     role: str = Form("unused"),
     mode: str = Form("unused"),
+    ipv4_method: str = Form("static"),
     ip_cidr: str = Form(""),
     ipv6_cidr: str = Form(""),
     mtu: int = Form(1500),
@@ -6973,16 +6986,25 @@ def edit_physical_interface_from_ui(
             status_code=409,
             media_type="text/plain",
         )
-    ip_value = cidr_for_family(ip_cidr, 4, "Interface IPv4 CIDR")
-    if isinstance(ip_value, Response):
-        return ip_value
+    role_value = normalize_interface_role(role)
+    ipv4_method_value = normalize_ipv4_method(ipv4_method)
+    if ipv4_method_value == "dhcp" and role_value != "management":
+        return Response("IPv4 DHCP is available only for the management interface.", status_code=422, media_type="text/plain")
+    if ipv4_method_value == "dhcp" and ip_cidr.strip():
+        return Response("Clear IPv4 CIDR before switching the management interface to DHCP.", status_code=422, media_type="text/plain")
+    ip_value = None
+    if ipv4_method_value == "static":
+        ip_value = cidr_for_family(ip_cidr, 4, "Interface IPv4 CIDR")
+        if isinstance(ip_value, Response):
+            return ip_value
     ipv6_value = cidr_for_family(ipv6_cidr, 6, "Interface IPv6 CIDR")
     if isinstance(ipv6_value, Response):
         return ipv6_value
     old_ip_cidr = interface.ip_cidr
     old_ipv6_cidr = interface.ipv6_cidr
-    interface.role = normalize_interface_role(role)
+    interface.role = role_value
     interface.mode = new_mode
+    interface.ipv4_method = ipv4_method_value
     interface.ip_cidr = ip_value or None
     interface.ipv6_cidr = ipv6_value or None
     interface.mtu = mtu
@@ -11508,6 +11530,8 @@ def update_settings_from_ui(
                 "root_ssh_enabled": saved.root_ssh_enabled,
                 "service_dns_target_naming": normalize_service_dns_target_naming(saved.service_dns_target_naming),
                 "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
+                "resolver_mode": context["appliance_settings_resolver_mode"],
+                "observed_dhcp_dns_servers": context["appliance_settings_observed_dhcp_dns_servers"],
                 "local_dns_enabled": context["local_dns_enabled"],
                 "chrony_enabled": context["chrony_enabled"],
                 "management_interface": context["management_interface"],

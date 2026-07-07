@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$VmxPath,
-    [string]$ManagementNetwork = 'vmnet8',
+    [string]$ManagementNetwork = 'VMnet8',
     [string]$SiteANetwork = 'VMnet2',
     [string]$SiteBNetwork = 'VMnet3',
     [string]$TrunkNetwork = 'VMnet4',
@@ -49,6 +49,9 @@ function Set-VmxNetworkAdapter {
     )
 
     $prefix = "ethernet$Index"
+    if ($Vmnet -match '^(?i)vmnet(\d+)$') {
+        $Vmnet = "VMnet$($Matches[1])"
+    }
     Set-VmxValue -Path $Path -Key "$prefix.present" -Value 'TRUE'
     Set-VmxValue -Path $Path -Key "$prefix.connectionType" -Value 'custom'
     Set-VmxValue -Path $Path -Key "$prefix.vnet" -Value $Vmnet

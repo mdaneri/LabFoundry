@@ -18,6 +18,7 @@ OVF_ENV = """<?xml version="1.0" encoding="UTF-8"?>
   xmlns="http://schemas.dmtf.org/ovf/environment/1"
   xmlns:oe="http://schemas.dmtf.org/ovf/environment/1">
   <PropertySection>
+    <Property oe:key="labfoundry.management_mode" oe:value="static" />
     <Property oe:key="labfoundry.cidr" oe:value="192.168.10.10/24" />
     <Property oe:key="labfoundry.gateway" oe:value="192.168.10.1" />
     <Property oe:key="labfoundry.fqdn" oe:value="appliance.labfoundry.internal" />
@@ -37,6 +38,7 @@ def test_vmware_ovf_customizer_parses_and_validates_properties_without_logging_s
     config = customizer.validate_properties(properties)
     summary = customizer.redacted_summary(config)
 
+    assert config["management_mode"] == "static"
     assert config["cidr"] == "192.168.10.10/24"
     assert config["gateway"] == "192.168.10.1"
     assert config["fqdn"] == "appliance.labfoundry.internal"
@@ -49,7 +51,24 @@ def test_vmware_ovf_customizer_parses_and_validates_properties_without_logging_s
     assert "root-secret" not in str(summary)
 
 
-def test_vmware_ovf_customizer_requires_all_non_ntp_deployment_properties():
+def test_vmware_ovf_customizer_supports_dhcp_management_by_default():
+    customizer = load_customizer()
+    properties = customizer.parse_ovf_environment(OVF_ENV)
+    properties.pop("labfoundry.management_mode")
+    properties.pop("labfoundry.cidr")
+    properties.pop("labfoundry.gateway")
+    properties.pop("labfoundry.dns_servers")
+
+    config = customizer.validate_properties(properties)
+
+    assert config["management_mode"] == "dhcp"
+    assert config["cidr"] == "dhcp"
+    assert config["gateway"] == ""
+    assert config["dns_servers"] == []
+    assert config["management_source_cidr"] == ""
+
+
+def test_vmware_ovf_customizer_requires_static_network_properties_only_for_static_mode():
     customizer = load_customizer()
     properties = customizer.parse_ovf_environment(OVF_ENV)
     properties.pop("labfoundry.ntp_servers")
@@ -58,13 +77,13 @@ def test_vmware_ovf_customizer_requires_all_non_ntp_deployment_properties():
 
     assert config["ntp_servers"] == []
 
-    properties.pop("labfoundry.root_password")
+    properties.pop("labfoundry.cidr")
     try:
         customizer.validate_properties(properties)
     except customizer.OvfCustomizationError as exc:
-        assert "labfoundry.root_password" in str(exc)
+        assert "labfoundry.cidr" in str(exc)
     else:
-        raise AssertionError("missing root password should fail validation")
+        raise AssertionError("missing static CIDR should fail validation")
 
 
 def test_vmware_ovf_customizer_renders_initial_firewall_for_ovf_subnet(tmp_path):
@@ -81,6 +100,26 @@ def test_vmware_ovf_customizer_renders_initial_firewall_for_ovf_subnet(tmp_path)
     assert "192.168.49.0/24" not in rendered
     assert "flush ruleset" in rendered
     assert "policy drop" in rendered
+
+
+def test_vmware_ovf_customizer_renders_dhcp_network_and_interface_scoped_firewall(tmp_path):
+    customizer = load_customizer()
+    customizer.NETWORKD_PATH = tmp_path / "00-labfoundry-mgmt.network"
+    customizer.FIREWALL_CONFIG_PATH = tmp_path / "labfoundry.nft"
+    properties = customizer.parse_ovf_environment(OVF_ENV)
+    properties["labfoundry.management_mode"] = "dhcp"
+    properties.pop("labfoundry.cidr")
+    properties.pop("labfoundry.gateway")
+    config = customizer.validate_properties(properties)
+
+    customizer.write_networkd_config(config)
+    customizer.write_initial_firewall_config(config)
+
+    networkd = customizer.NETWORKD_PATH.read_text(encoding="utf-8")
+    firewall = customizer.FIREWALL_CONFIG_PATH.read_text(encoding="utf-8")
+    assert "DHCP=ipv4" in networkd
+    assert "Address=" not in networkd
+    assert 'iifname "eth0" tcp dport { 22, 80, 443 } accept' in firewall
 
 
 def test_vmware_ovf_customizer_rotates_clone_specific_env_secrets(tmp_path):
@@ -129,6 +168,7 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     gitignore = Path(".gitignore").read_text(encoding="utf-8")
 
     for key in (
+        "labfoundry.management_mode",
         "labfoundry.cidr",
         "labfoundry.gateway",
         "labfoundry.fqdn",

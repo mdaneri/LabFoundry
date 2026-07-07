@@ -102,6 +102,7 @@ class PhysicalInterface(Base):
     host_mtu: Mapped[int | None] = mapped_column(Integer, nullable=True)
     host_admin_state: Mapped[str | None] = mapped_column(String(20), nullable=True)
     ip_cidr: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ipv4_method: Mapped[str] = mapped_column(String(20), default="static")
     ipv6_cidr: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mtu: Mapped[int] = mapped_column(Integer, default=1500)
     admin_state: Mapped[str] = mapped_column(String(20), default="up")

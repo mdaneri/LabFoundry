@@ -59,6 +59,7 @@ def network_config_text(
         "interface=eth0",
         "  role=management",
         "  mode=access",
+        "  ipv4_method=static",
         "  ip_cidr=192.168.49.1/24",
         f"  ipv6_cidr={'2001:db8:49::1/64' if dual_stack else ''}",
         "  admin_state=up",
@@ -66,6 +67,7 @@ def network_config_text(
         "interface=eth2",
         "  role=access",
         f"  mode={eth2_mode}",
+        "  ipv4_method=static",
         "  ip_cidr=",
         f"  ipv6_cidr={'2001:db8:60::1/64' if dual_stack else ''}",
         f"  admin_state={eth2_admin_state}",
@@ -411,6 +413,26 @@ def test_network_helper_accepts_valid_vlan_config(tmp_path):
     assert helper._network_config_errors(config_path) == []
 
 
+def test_network_helper_rejects_static_management_without_ipv4(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(network_config_text().replace("  ip_cidr=192.168.49.1/24", "  ip_cidr=", 1), encoding="utf-8")
+
+    errors = helper._network_config_errors(config_path)
+
+    assert "Interface eth0 must set an IPv4 CIDR when IPv4 method is static." in errors
+
+
+def test_network_helper_requires_eth0_management(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(network_config_text().replace("interface=eth0", "interface=eth1", 1), encoding="utf-8")
+
+    errors = helper._network_config_errors(config_path)
+
+    assert "Network config must keep eth0 as the management physical interface." in errors
+
+
 def test_network_helper_renders_dual_stack_networkd_addresses(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-network.conf"
@@ -424,6 +446,36 @@ def test_network_helper_renders_dual_stack_networkd_addresses(tmp_path):
     vlan_network = files["10-labfoundry-eth2.20.network"]
     assert "Address=192.168.20.1/24" in vlan_network
     assert "Address=2001:db8:20::1/64" in vlan_network
+
+
+def test_network_helper_renders_management_dhcp_networkd(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[physical_interfaces]",
+                "interface=eth0",
+                "  role=management",
+                "  mode=access",
+                "  ipv4_method=dhcp",
+                "  ip_cidr=",
+                "  ipv6_cidr=",
+                "  admin_state=up",
+                "  mtu=1500",
+                "",
+                "[vlan_interfaces]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert helper._network_config_errors(config_path) == []
+    files, _reconfigure_links, _admin_down_links = helper._systemd_networkd_files(config_path)
+
+    management_network = files["00-labfoundry-mgmt.network"]
+    assert "DHCP=ipv4" in management_network
+    assert "Address=" not in management_network
 
 
 def test_wan_helper_rejects_config_outside_apply_dir(tmp_path):
@@ -2353,7 +2405,7 @@ def appliance_settings_json(
     payload = {
         "fqdn": "labfoundry.labfoundry.internal",
         "resolver_mode": resolver_mode,
-        "resolver_servers": resolver_servers or ["127.0.0.1"],
+        "resolver_servers": ["127.0.0.1"] if resolver_servers is None else resolver_servers,
         "local_dns_enabled": local_dns_enabled,
         "management_interface": "eth0",
         "management_ip": "192.168.49.1",
@@ -2430,7 +2482,20 @@ def test_appliance_settings_helper_rejects_invalid_json(tmp_path):
     errors = helper._appliance_settings_config_errors(config_path)
 
     assert "fqdn must be a valid fully qualified DNS name." in errors
-    assert "resolver_mode must be local_dns or external." in errors
+    assert "resolver_mode must be local_dns, external, or dhcp." in errors
+
+
+def test_appliance_settings_helper_accepts_dhcp_resolver_mode(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-settings.json"
+    config_path.write_text(
+        appliance_settings_json(resolver_mode="dhcp", resolver_servers=[], local_dns_enabled=False),
+        encoding="utf-8",
+    )
+
+    errors = helper._appliance_settings_config_errors(config_path)
+
+    assert errors == []
 
 
 def test_appliance_settings_helper_rejects_invalid_ntp_server(tmp_path):

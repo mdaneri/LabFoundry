@@ -659,6 +659,14 @@ def _configure_resolver(interface_name: str, servers: list[str], domains: list[s
     return subprocess.CompletedProcess(commands[-1], 0, "", "")
 
 
+def _configure_dhcp_resolver(interface_name: str) -> subprocess.CompletedProcess[str]:
+    _write_management_resolver([], [])
+    result = _run(["resolvectl", "revert", interface_name])
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result
+
+
 def _configure_local_resolver() -> subprocess.CompletedProcess[str]:
     return _configure_resolver("eth0", ["127.0.0.1"], ["~."])
 
@@ -1747,8 +1755,8 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
     resolver_mode = str(payload.get("resolver_mode") or "")
     local_dns_enabled = bool(payload.get("local_dns_enabled"))
     resolver_servers = [str(server).strip() for server in payload.get("resolver_servers") or [] if str(server).strip()]
-    if resolver_mode not in {"local_dns", "external"}:
-        errors.append("resolver_mode must be local_dns or external.")
+    if resolver_mode not in {"local_dns", "external", "dhcp"}:
+        errors.append("resolver_mode must be local_dns, external, or dhcp.")
     if resolver_mode == "local_dns":
         if not local_dns_enabled:
             errors.append("local_dns mode requires local_dns_enabled=true.")
@@ -1756,6 +1764,11 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
             errors.append("local_dns mode must use resolver server 127.0.0.1.")
     if resolver_mode == "external" and not resolver_servers:
         errors.append("external resolver mode requires at least one resolver server.")
+    if resolver_mode == "dhcp":
+        if local_dns_enabled:
+            errors.append("dhcp resolver mode requires local_dns_enabled=false.")
+        if resolver_servers:
+            errors.append("dhcp resolver mode must not include static resolver servers.")
     for server in resolver_servers:
         try:
             ip_interface(f"{server}/32" if ":" not in server else f"{server}/128")
@@ -2414,7 +2427,7 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     hostname = _apply_hostname(fqdn)
     if hostname != 0:
         return hostname
-    resolver = _configure_resolver(management_interface, resolver_servers, domains)
+    resolver = _configure_dhcp_resolver(management_interface) if resolver_mode == "dhcp" else _configure_resolver(management_interface, resolver_servers, domains)
     if resolver.returncode != 0:
         return resolver.returncode
     timesyncd = _configure_timesyncd(ntp_servers)
@@ -3001,6 +3014,7 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
             admin_down_links.append(name)
             continue
         mode = interface.get("mode", "unused")
+        ipv4_method = (interface.get("ipv4_method") or "static").strip().lower()
         lines = [
             "# Managed by LabFoundry. Local changes may be overwritten.",
             "[Match]",
@@ -3009,19 +3023,21 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
             "[Network]",
             "IPv6AcceptRA=no",
         ]
-        if interface.get("ip_cidr"):
+        if ipv4_method == "dhcp":
+            lines.append("DHCP=ipv4")
+        elif interface.get("ip_cidr"):
             lines.append(f"Address={interface['ip_cidr']}")
         if interface.get("ipv6_cidr"):
             lines.append(f"Address={interface['ipv6_cidr']}")
         if name == management_name:
             for dns in preserved_management["DNS"]:
                 lines.append(f"DNS={dns}")
-        elif not interface.get("ip_cidr") and not interface.get("ipv6_cidr"):
+        elif ipv4_method != "dhcp" and not interface.get("ip_cidr") and not interface.get("ipv6_cidr"):
             lines.append("LinkLocalAddressing=no")
         if mode == "trunk":
             for vlan in sorted(vlans_by_parent.get(name, []), key=lambda row: int(row.get("vlan_id", "0"))):
                 lines.append(f"VLAN={vlan['name']}")
-        if name == management_name:
+        if name == management_name and ipv4_method != "dhcp":
             for cidr_key in ("ip_cidr", "ipv6_cidr"):
                 if interface.get(cidr_key):
                     network = ip_network(interface[cidr_key], strict=False)
@@ -3091,12 +3107,24 @@ def _network_config_errors(path: Path) -> list[str]:
     management_entries = [row for row in physical_interfaces if row.get("role") == "management"]
     if not management_entries:
         errors.append("Network config must include a management physical interface.")
-    elif not any(row.get("name") == "eth0" and row.get("ip_cidr") for row in management_entries):
-        errors.append("Photon appliance management must keep eth0 with an IP CIDR before networkd apply.")
+    elif len(management_entries) > 1:
+        errors.append("Network config must include only one management physical interface.")
+    elif management_entries[0].get("name", "") != "eth0":
+        errors.append("Network config must keep eth0 as the management physical interface.")
     for interface in physical_interfaces:
         name = interface.get("name", "")
+        role = interface.get("role", "")
+        ipv4_method = (interface.get("ipv4_method") or "static").strip().lower()
         if not _valid_network_interface_name(name):
             errors.append(f"Interface name {name or '<missing>'} is invalid.")
+        if ipv4_method not in {"static", "dhcp"}:
+            errors.append(f"Interface {name or '<missing>'} IPv4 method {ipv4_method or '<missing>'} is invalid.")
+        if ipv4_method == "dhcp" and role != "management":
+            errors.append(f"Interface {name or '<missing>'} can use DHCP only when its role is management.")
+        if ipv4_method == "dhcp" and interface.get("ip_cidr"):
+            errors.append(f"Interface {name or '<missing>'} cannot set an IPv4 CIDR while IPv4 method is DHCP.")
+        if role == "management" and ipv4_method == "static" and not interface.get("ip_cidr"):
+            errors.append(f"Interface {name or '<missing>'} must set an IPv4 CIDR when IPv4 method is static.")
         for key, version, label in [("ip_cidr", 4, "IPv4 CIDR"), ("ipv6_cidr", 6, "IPv6 CIDR")]:
             value = interface.get(key, "")
             if not value:

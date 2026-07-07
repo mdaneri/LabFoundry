@@ -56,8 +56,8 @@ service network defaults to Workstation's built-in host-only `VMnet1`.
 
 The default Workstation builder and lifecycle scripts expect:
 
-- management: `vmnet8`, with the LabFoundry appliance address derived from the
-  selected vmnet subnet by default
+- management: `VMnet8`, with the LabFoundry appliance address assigned by
+  DHCP by default
 - services: `VMnet1`
 - SiteA: `VMnet2`
 - WAN/SiteB: `VMnet3`
@@ -76,11 +76,11 @@ lab subnet. The build wrapper reads the selected VMware network before
 rendering Packer variables. For NAT/host-only vmnets it uses
 `vmrun -T ws listHostNetworks`; for bridged `vmnet0` it falls back to the active
 Windows IPv4 interface, or the interface named by `-BridgedInterfaceAlias`.
-Unless overridden, it chooses host offsets `.30` for the temporary Photon
-builder SSH address, `.10` for the final appliance management address, and the
-VMware/host gateway for routing. Pass `-BuilderStaticIp`,
-`-BuilderStaticGateway`, `-FinalMgmtAddress`, and `-FinalMgmtGateway` together
-only when a different address plan is intentional.
+Unless overridden, it chooses host offset `.30` for the temporary Photon
+builder SSH address and uses DHCP for the final appliance management address.
+Pass `-BuilderStaticIp` and `-BuilderStaticGateway` together only when a
+different builder address plan is intentional. Pass `-FinalMgmtAddress` and
+`-FinalMgmtGateway` only when a static final management address is intentional.
 Pass `-ServiceVmnetName` only when the second appliance NIC should attach to a
 different Workstation network.
 
@@ -112,18 +112,21 @@ intended for vSphere/ESXi import:
 
 | Property | Required | Description |
 | --- | --- | --- |
-| `labfoundry.cidr` | yes | Static management IPv4 CIDR for `eth0`, for example `192.168.10.10/24`. |
-| `labfoundry.gateway` | yes | IPv4 gateway for the management network. |
+| `labfoundry.management_mode` | no | `dhcp` by default. Use `static` only when `labfoundry.cidr` and `labfoundry.gateway` should be enforced on first boot. |
+| `labfoundry.cidr` | no | Static management IPv4 CIDR for `eth0`, for example `192.168.10.10/24`; required only when management mode is `static`. |
+| `labfoundry.gateway` | no | IPv4 gateway for the management network when management mode is `static`. |
 | `labfoundry.fqdn` | yes | Appliance FQDN applied to Photon OS and LabFoundry desired state. |
-| `labfoundry.dns_servers` | yes | One or more resolver IPs separated by commas, spaces, or new lines. |
+| `labfoundry.dns_servers` | no | Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS. |
 | `labfoundry.ntp_servers` | no | Optional NTP names or IPs. Blank keeps the image defaults. |
 | `labfoundry.admin_password` | yes | Initial LabFoundry web `admin` password. |
 | `labfoundry.root_password` | yes | Photon root console password. Root SSH remains disabled by default. |
 
 On first boot from an OVF/OVA deployment, `labfoundry-vmware-ovf-customize`
-reads those properties through VMware Tools before LabFoundry starts. It writes
-the management network, resolver, hostname, root password, and bootstrap admin
-password once, then records a redacted marker under `/var/lib/labfoundry`.
+reads those properties through VMware Tools before LabFoundry starts. DHCP
+management writes `DHCP=ipv4` for `eth0`; static management writes the supplied
+CIDR and gateway. It also writes resolver overrides when supplied, hostname,
+root password, and bootstrap admin password once, then records a redacted marker
+under `/var/lib/labfoundry`.
 Passwords are consumed as deployment inputs and are not printed in the marker or
 customization log.
 
@@ -137,8 +140,11 @@ powershell.exe -ExecutionPolicy Bypass `
 ```
 
 The wrapper writes evidence under
-`test-results/vmware-workstation-lifecycle/<timestamp>`. It keeps the Python
-appliance assertions shared with the Hyper-V lifecycle runner.
+`test-results/vmware-workstation-lifecycle/<timestamp>`. Unless
+`-ApplianceIPAddress` is passed, it waits for VMware Tools to report the DHCP
+management address and records it in `discovered-appliance.json` before running
+HTTP and SSH probes. It keeps the Python appliance assertions shared with the
+Hyper-V lifecycle runner.
 
 Pass `-PlanOnly` to print the selected VMX, client VMDK, vmnets, and result path
 without creating VMs.

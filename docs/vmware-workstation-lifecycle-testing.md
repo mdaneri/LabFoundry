@@ -18,8 +18,8 @@ Hyper-V lifecycle client.
 
 Default vmnets:
 
-- `vmnet8` for management, with appliance addresses derived from the selected
-  vmnet subnet by default
+- `VMnet8` for management, with the appliance address assigned by DHCP by
+  default
 - `VMnet2` for SiteA
 - `VMnet3` for WAN/SiteB
 - `VMnet4` for trunk-like validation
@@ -40,8 +40,8 @@ active Windows IPv4 interface or the interface named by
 
 The Workstation management subnet must remain separate from the Hyper-V
 management subnet. Unless overridden, the build wrapper chooses `.30` in that
-subnet for temporary builder SSH, `.10` for final appliance management, and the
-VMware/host gateway for routing.
+subnet for temporary builder SSH, then leaves final appliance management on
+DHCP and discovers the runtime address through VMware Tools.
 
 ## Build The Appliance
 
@@ -77,9 +77,9 @@ needed, creates a unique `LabFoundryWorkstationLifecycle-*` lab, runs the
 initial lifecycle scenario, and by default runs the restored backup/restore
 pass. Pass `-SkipBackupRestoreTest` only when the older single-pass behavior is
 intended.
-Unless `-ApplianceIPAddress` is passed, the wrapper derives the appliance URL
-from the selected management vmnet using the same `.10` host offset as the image
-build.
+Unless `-ApplianceIPAddress` is passed, the wrapper waits for VMware Tools to
+report the appliance's DHCP management IPv4 address and derives the appliance
+URL from that discovered address.
 
 Useful commands:
 

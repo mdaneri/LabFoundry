@@ -36,7 +36,7 @@ from labfoundry.app.models import (
 from labfoundry.app.services.appliance_settings import APPLIANCE_DNS_RECORD_DESCRIPTION, normalize_fqdn
 from labfoundry.app.services.local_users import DEFAULT_LOCAL_USER_SHELL, POWERSHELL_LOCAL_USER_SHELL, stage_user_os_password
 from labfoundry.app.services.dnsmasq import join_domains, split_domains, validate_dns_record
-from labfoundry.app.services.networking import normalize_interface_mode
+from labfoundry.app.services.networking import normalize_interface_mode, normalize_ipv4_method
 from labfoundry.app.services.chrony import CHRONY_DEFAULT_HOSTNAME, CHRONY_DEFAULT_UPSTREAM_SERVERS, CHRONY_STAGED_CONFIG_PATH
 from labfoundry.app.services.service_registry import RETIRED_SERVICE_IDS, SERVICE_STATE_DEFAULTS
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
@@ -95,6 +95,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
         db.flush()
 
     management_cidr = settings.appliance_management_cidr or "192.168.49.1/24"
+    management_uses_dhcp = management_cidr.strip().lower() == "dhcp"
     if db.execute(select(PhysicalInterface)).first() is None:
         physical_interfaces = [
             PhysicalInterface(
@@ -102,10 +103,11 @@ def seed_initial_data(db: Session, *, include_examples: bool = True) -> None:
                 mac_address="02:15:5d:00:10:01",
                 driver="hv_netvsc",
                 speed="10 Gbps",
-                host_ip_cidr=management_cidr,
+                host_ip_cidr=None if management_uses_dhcp else management_cidr,
                 host_mtu=1500,
                 host_admin_state="up",
-                ip_cidr=management_cidr,
+                ip_cidr=None if management_uses_dhcp else management_cidr,
+                ipv4_method="dhcp" if management_uses_dhcp else "static",
                 mtu=1500,
                 role="management",
                 mode="access",
@@ -506,10 +508,11 @@ def _management_ip(db: Session) -> str:
         if interface.name in seen:
             continue
         seen.add(interface.name)
-        if not interface.ip_cidr:
+        candidate_cidr = interface.host_ip_cidr if normalize_ipv4_method(interface.ipv4_method) == "dhcp" else interface.ip_cidr
+        if not candidate_cidr:
             continue
         try:
-            return str(ip_interface(interface.ip_cidr).ip)
+            return str(ip_interface(candidate_cidr).ip)
         except ValueError:
             continue
     return ""

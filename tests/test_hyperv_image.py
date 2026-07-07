@@ -75,13 +75,18 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "systemctl enable --now nginx" in script
     assert 'LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"' in script
     assert 'LABFOUNDRY_MGMT_SOURCE_CIDR="${LABFOUNDRY_MGMT_SOURCE_CIDR:-}"' in script
+    assert 'LABFOUNDRY_MGMT_USES_DHCP=false' in script
+    assert 'LABFOUNDRY_APPLIANCE_EXTERNAL_DNS_SERVERS=$(if [ "$LABFOUNDRY_MGMT_USES_DHCP" = "true" ]; then printf \'\'; else printf \'%s\' "$LABFOUNDRY_MGMT_DNS" | tr \' \' \',\'; fi)' in script
+    assert 'if [ "$LABFOUNDRY_MGMT_USES_DHCP" != "true" ] && [ -n "$LABFOUNDRY_MGMT_DNS" ]; then' in script
     assert 'ip -4 -o addr show dev "$LABFOUNDRY_MGMT_INTERFACE" scope global' in script
     assert 'DETECTED_MGMT_ADDRESS' in script
     assert "ipaddress.ip_interface(sys.argv[1]).network" in script
     assert "printf '\\nLABFOUNDRY_MANAGEMENT_SOURCE_CIDR=%s\\n' \"$LABFOUNDRY_MGMT_SOURCE_CIDR\" >>/etc/labfoundry/labfoundry.env" in script
     assert 'log_step "system adapter dry-run mode: $LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS"' in script
     assert "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=$LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS" in script
-    assert 'ip saddr $LABFOUNDRY_MGMT_SOURCE_CIDR tcp dport { 22, 80, 443 } accept comment "LabFoundry management access"' in script
+    assert 'LABFOUNDRY_MGMT_ACCESS_RULE="    ip saddr $LABFOUNDRY_MGMT_SOURCE_CIDR tcp dport { 22, 80, 443 } accept comment \\"LabFoundry management access\\""' in script
+    assert 'LABFOUNDRY_MGMT_ACCESS_RULE="    iifname \\"$LABFOUNDRY_MGMT_INTERFACE\\" tcp dport { 22, 80, 443 } accept comment \\"LabFoundry management access\\""' in script
+    assert "$LABFOUNDRY_MGMT_ACCESS_RULE" in script
     assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
     assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" /etc/sudoers.d/labfoundry-helper' in script
     assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
@@ -421,6 +426,9 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "[switch]$IncludeLabNetworkAdapters" in script
     assert "[switch]$ResetDataDisks" in script
     assert "[switch]$WaitForIp" in script
+    assert "[string]$ManagementNetwork = 'VMnet8'" in script
+    assert "[string]$ManagementNetwork = 'VMnet8'" in vm_script
+    assert "[string]$ManagementNetwork = 'VMnet8'" in nics_script
     assert "prepare-networks.ps1" in script
     assert "create-labfoundry-vm.ps1" in script
     assert "start-labfoundry-vm.ps1" in script
@@ -441,6 +449,8 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "scsi0:$Unit" in vm_script
     assert "set-test-nics.ps1" in vm_script
     assert '"$prefix.vnet"' in nics_script
+    assert "if ($Vmnet -match '^(?i)vmnet(\\d+)$')" in nics_script
+    assert '$Vmnet = "VMnet$($Matches[1])"' in nics_script
     assert "$prefix.virtualDev" in nics_script
     assert "vmxnet3" in nics_script
     assert "Join-Path $PSScriptRoot '..\\common\\LabFoundry.PhotonImage.psm1'" in build_script
@@ -607,6 +617,8 @@ def test_lifecycle_vmware_script_supports_routing_wan_only_and_esxi_pxe_install(
     assert "if ($PxeClientIPAddress)" in runner
     assert "@('--pxe-client-ip', $PxeClientIPAddress)" in runner
     assert "$Vmnet.StartsWith('lan:')" in runner
+    assert "if ($Vmnet -match '^(?i)vmnet(\\d+)$')" in runner
+    assert '$Vmnet = "VMnet$($Matches[1])"' in runner
     assert "function Resolve-LanSegmentId" in runner
     assert "pref.namedPVNs$nextIndex.name" in runner
     assert "connectionType\" -Value 'pvn'" in runner

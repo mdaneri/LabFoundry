@@ -30,12 +30,13 @@
       data-interfaces='{{ physical_interface_rows | tojson }}'
       data-role-options='{{ interface_roles | tojson }}'
       data-mode-options='{{ interface_modes | tojson }}'
+      data-ipv4-method-options='{{ ipv4_methods | tojson }}'
       data-csrf="{{ csrf_token }}"
       data-fallback-id="physical-interfaces-fallback"
     ></div>
     <table id="physical-interfaces-fallback" class="data-table dns-fallback-table">
       <thead>
-        <tr><th>Name</th><th>MAC</th><th>Driver</th><th>Speed</th><th>Observed IPv4</th><th>Observed IPv6</th><th>IPv4 CIDR</th><th>IPv6 CIDR</th><th>Role</th><th>Link Type</th><th>MTU</th><th>Admin Up</th><th>Oper</th><th>Source</th></tr>
+        <tr><th>Name</th><th>MAC</th><th>Driver</th><th>Speed</th><th>Observed IPv4</th><th>Observed IPv6</th><th>IPv4 Method</th><th>IPv4 CIDR</th><th>IPv6 CIDR</th><th>Role</th><th>Link Type</th><th>MTU</th><th>Admin Up</th><th>Oper</th><th>Source</th></tr>
       </thead>
       <tbody>
         {% for interface in physical_interface_rows %}
@@ -46,6 +47,7 @@
             <td>{{ interface["speed"] or "" }}</td>
             <td>{{ interface["host_ip_cidr"] or "" }}</td>
             <td>{{ interface["host_ipv6_cidr"] or "" }}</td>
+            <td>{{ interface["ipv4_method"] }}</td>
             <td>{{ interface["ip_cidr"] or "" }}</td>
             <td>{{ interface["ipv6_cidr"] or "" }}</td>
             <td>{{ interface["role"] }}</td>
