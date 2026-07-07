@@ -9,6 +9,7 @@ from labfoundry.app.services.networking import (
     reconcile_host_physical_interfaces,
     render_network_config,
     sync_host_physical_interfaces,
+    validate_network_state,
 )
 
 
@@ -499,6 +500,42 @@ def test_render_network_config_includes_management_dhcp_method():
     assert "  role=management" in config
     assert "  ipv4_method=dhcp" in config
     assert "  ip_cidr=" in config
+
+
+def test_validate_network_state_rejects_static_management_without_ipv4():
+    errors = validate_network_state(
+        interfaces=[
+            PhysicalInterface(
+                name="eth0",
+                mac_address="00:15:5d:aa:bb:01",
+                ipv4_method="static",
+                role="management",
+                mode="access",
+                mtu=1500,
+            )
+        ],
+        vlans=[],
+    )
+
+    assert "Interface eth0 must set an IPv4 CIDR when IPv4 method is static." in errors
+
+
+def test_validate_network_state_requires_eth0_management():
+    errors = validate_network_state(
+        interfaces=[
+            PhysicalInterface(
+                name="eth1",
+                mac_address="00:15:5d:aa:bb:01",
+                ip_cidr="192.168.49.1/24",
+                role="management",
+                mode="access",
+                mtu=1500,
+            )
+        ],
+        vlans=[],
+    )
+
+    assert "Network desired state must keep eth0 as the management physical interface." in errors
 
 
 def test_render_network_config_includes_dual_stack_physical_and_vlan_cidrs():

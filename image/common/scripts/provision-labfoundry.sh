@@ -371,6 +371,9 @@ if [ -z "$LABFOUNDRY_MGMT_SOURCE_CIDR" ] && [ "$LABFOUNDRY_MGMT_ADDRESS" != "dhc
 fi
 if [ -n "$LABFOUNDRY_MGMT_SOURCE_CIDR" ]; then
   printf '\nLABFOUNDRY_MANAGEMENT_SOURCE_CIDR=%s\n' "$LABFOUNDRY_MGMT_SOURCE_CIDR" >>/etc/labfoundry/labfoundry.env
+  LABFOUNDRY_MGMT_ACCESS_RULE="    ip saddr $LABFOUNDRY_MGMT_SOURCE_CIDR tcp dport { 22, 80, 443 } accept comment \"LabFoundry management access\""
+else
+  LABFOUNDRY_MGMT_ACCESS_RULE="    iifname \"$LABFOUNDRY_MGMT_INTERFACE\" tcp dport { 22, 80, 443 } accept comment \"LabFoundry management access\""
 fi
 install -d -o root -g root -m 0755 /etc/labfoundry/nftables.d
 cat >/etc/labfoundry/nftables.d/labfoundry.nft <<EOF
@@ -382,7 +385,7 @@ table inet labfoundry {
     type filter hook input priority filter; policy drop;
     iifname "lo" accept comment "LabFoundry loopback"
     ct state established,related accept comment "LabFoundry established traffic"
-    iifname "$LABFOUNDRY_MGMT_INTERFACE" tcp dport { 22, 80, 443 } accept comment "LabFoundry management access"
+$LABFOUNDRY_MGMT_ACCESS_RULE
     meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
     meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
   }

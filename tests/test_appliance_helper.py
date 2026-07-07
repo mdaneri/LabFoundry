@@ -413,6 +413,26 @@ def test_network_helper_accepts_valid_vlan_config(tmp_path):
     assert helper._network_config_errors(config_path) == []
 
 
+def test_network_helper_rejects_static_management_without_ipv4(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(network_config_text().replace("  ip_cidr=192.168.49.1/24", "  ip_cidr=", 1), encoding="utf-8")
+
+    errors = helper._network_config_errors(config_path)
+
+    assert "Interface eth0 must set an IPv4 CIDR when IPv4 method is static." in errors
+
+
+def test_network_helper_requires_eth0_management(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(network_config_text().replace("interface=eth0", "interface=eth1", 1), encoding="utf-8")
+
+    errors = helper._network_config_errors(config_path)
+
+    assert "Network config must keep eth0 as the management physical interface." in errors
+
+
 def test_network_helper_renders_dual_stack_networkd_addresses(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-network.conf"

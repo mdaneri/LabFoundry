@@ -767,6 +767,8 @@ def validate_network_state(
     management_interfaces = [interface for interface in interfaces if interface.oper_state != "missing" and normalize_interface_role(interface.role) == "management"]
     if len(management_interfaces) != 1:
         errors.append("Network desired state must include exactly one management physical interface.")
+    elif management_interfaces[0].name != "eth0":
+        errors.append("Network desired state must keep eth0 as the management physical interface.")
     for interface in interfaces:
         if interface.oper_state == "missing":
             continue
@@ -780,6 +782,8 @@ def validate_network_state(
             errors.append(f"Interface {interface.name} can use DHCP only when its role is management.")
         if ipv4_method == "dhcp" and interface.ip_cidr:
             errors.append(f"Interface {interface.name} cannot set an IPv4 CIDR while IPv4 method is DHCP.")
+        if role == "management" and ipv4_method == "static" and not interface.ip_cidr:
+            errors.append(f"Interface {interface.name} must set an IPv4 CIDR when IPv4 method is static.")
         mode = normalize_interface_mode(interface.mode)
         if mode not in INTERFACE_MODES:
             errors.append(f"Interface {interface.name} link type {interface.mode} is not supported.")

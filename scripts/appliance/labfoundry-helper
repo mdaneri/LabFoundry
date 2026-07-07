@@ -3096,6 +3096,8 @@ def _network_config_errors(path: Path) -> list[str]:
         errors.append("Network config must include a management physical interface.")
     elif len(management_entries) > 1:
         errors.append("Network config must include only one management physical interface.")
+    elif management_entries[0].get("name", "") != "eth0":
+        errors.append("Network config must keep eth0 as the management physical interface.")
     for interface in physical_interfaces:
         name = interface.get("name", "")
         role = interface.get("role", "")
@@ -3108,6 +3110,8 @@ def _network_config_errors(path: Path) -> list[str]:
             errors.append(f"Interface {name or '<missing>'} can use DHCP only when its role is management.")
         if ipv4_method == "dhcp" and interface.get("ip_cidr"):
             errors.append(f"Interface {name or '<missing>'} cannot set an IPv4 CIDR while IPv4 method is DHCP.")
+        if role == "management" and ipv4_method == "static" and not interface.get("ip_cidr"):
+            errors.append(f"Interface {name or '<missing>'} must set an IPv4 CIDR when IPv4 method is static.")
         for key, version, label in [("ip_cidr", 4, "IPv4 CIDR"), ("ipv6_cidr", 6, "IPv6 CIDR")]:
             value = interface.get(key, "")
             if not value:
