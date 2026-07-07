@@ -461,6 +461,8 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "if (-not $NoStart -and -not $WhatIfPreference)" in script
     assert "Console URL: https://$IpAddress/" in script
     assert "API URL:     https://$IpAddress/openapi.json" in script
+    assert "Swagger URL: https://$IpAddress/api/docs" in script
+    assert "Root CA URL: https://$IpAddress/ca/downloads/root-ca.pem" in script
     assert "SSH:         ssh admin@$IpAddress" in script
     assert "pass -TrustRootCa to trust this appliance root CA" in script
     assert "[string]$ManagementNetwork = 'VMnet8'" in script
@@ -503,6 +505,8 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "-TrustRootCa" in docs
     assert "removes stale" in docs
     assert "connection summary" in docs
+    assert "Swagger URL" in docs
+    assert "root certificate URL" in docs
     assert "ssh admin@<appliance-ip>" in docs
     assert "adds a second `vmxnet3` adapter on `-ServiceVmnetName`" in docs
 

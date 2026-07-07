@@ -96,6 +96,8 @@ function Write-ConnectionSummary {
     Write-Host "  VMX:         $VmxPath"
     Write-Host "  Console URL: https://$IpAddress/"
     Write-Host "  API URL:     https://$IpAddress/openapi.json"
+    Write-Host "  Swagger URL: https://$IpAddress/api/docs"
+    Write-Host "  Root CA URL: https://$IpAddress/ca/downloads/root-ca.pem"
     Write-Host "  SSH:         ssh admin@$IpAddress"
     Write-Host "  HTTPS trust: $(if ($RootCaTrusted) { 'LabFoundry root CA imported for current user' } else { 'pass -TrustRootCa to trust this appliance root CA' })"
     Write-Host ""

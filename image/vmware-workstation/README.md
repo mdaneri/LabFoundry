@@ -173,7 +173,8 @@ for the SiteA, WAN/SiteB, and trunk-like lifecycle networks.
 LabFoundry root CAs from the current-user Trusted Root store, and trusts the new
 root so Edge and the Codex integrated browser accept the first-boot HTTPS cert.
 After the VM starts, the wrapper prints a connection summary with the HTTPS
-console URL, OpenAPI URL, and `ssh admin@<appliance-ip>` command.
+console URL, Swagger URL, OpenAPI URL, root certificate URL, and
+`ssh admin@<appliance-ip>` command.
 On first boot, `labfoundry-data-disks.service` formats blank attached data
 VMDKs, labels them as `LABFOUNDRY_DEPOT` and `LABFOUNDRY_BKUP`, writes
 `/etc/fstab`, and mounts them at `/mnt/labfoundry-vcf-offline-depot` and
