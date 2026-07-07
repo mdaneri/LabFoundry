@@ -282,10 +282,11 @@ sandbox while still using the constrained helper allowlist.
 Nginx owns the public management front door. Appliance Settings apply writes
 `/etc/nginx/conf.d/labfoundry.conf`,
 `/etc/labfoundry/nginx/sites.d/management.conf`, and a loopback-only
-`labfoundry.service` override. Fresh appliances enable the integrated CA,
-issue the managed `appliance:https` certificate, and start with nginx
+`labfoundry.service` override. Fresh appliances run
+`labfoundry-bootstrap-https.service` on deployed-VM first boot to enable the
+integrated CA, issue the managed `appliance:https` certificate, and start with nginx
 redirecting public HTTP/80 to HTTPS/443 while reverse-proxying HTTPS to uvicorn
-on `127.0.0.1:8000`. When HTTPS is disabled, including after factory reset plus
+on `127.0.0.1:8000`. The root CA is not baked into the reusable image. When HTTPS is disabled, including after factory reset plus
 apply, nginx can serve public HTTP/80 as a plain reverse proxy to the same
 loopback upstream, but that is not the first-boot appliance posture. The helper disables
 the retired `labfoundry-http-redirect.service` if present, reloads

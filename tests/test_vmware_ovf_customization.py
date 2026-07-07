@@ -163,6 +163,7 @@ def test_vmware_ovf_customizer_rotates_clone_specific_env_secrets(tmp_path):
 def test_vmware_ovf_export_and_image_plumbing_are_present():
     export_script = Path("scripts/windows/vmware/export-ovf.ps1").read_text(encoding="utf-8")
     provision_script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    bootstrap_script = Path("scripts/appliance/labfoundry-bootstrap-https").read_text(encoding="utf-8")
     vmware_unit = Path("image/vmware-workstation/systemd/labfoundry-vmware-ovf-customize.service").read_text(encoding="utf-8")
     docs = Path("image/vmware-workstation/README.md").read_text(encoding="utf-8")
     gitignore = Path(".gitignore").read_text(encoding="utf-8")
@@ -200,10 +201,13 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "vmw:password" not in docs
     assert "labfoundry-vmware-ovf-customize.py" in provision_script
     assert "labfoundry-bootstrap-https" in provision_script
-    assert "labfoundry-helper\" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real" in provision_script
-    assert "labfoundry-helper\" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real" in provision_script
+    assert "labfoundry-bootstrap-https.service" in provision_script
+    assert 'for action in ("validate", "apply")' in bootstrap_script
+    assert 'str(HELPER_PATH), "ca", action, str(CA_STAGED_CONFIG_PATH), "--real"' in bootstrap_script
     assert "systemctl enable labfoundry-vmware-ovf-customize.service" in provision_script
+    assert "systemctl enable labfoundry-bootstrap-https.service" in provision_script
     assert "Before=network-pre.target" in vmware_unit
+    assert "labfoundry-bootstrap-https.service" in vmware_unit
     assert "/image/vmware-workstation/ovf" in gitignore
     assert "VMware Workstation\\OVFTool" in docs
     assert "LabFoundry Management Network" in docs

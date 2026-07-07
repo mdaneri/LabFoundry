@@ -90,16 +90,30 @@ function Write-ConnectionSummary {
         [Parameter(Mandatory = $true)][bool]$RootCaTrusted
     )
 
+    function Write-SummaryRow {
+        param(
+            [Parameter(Mandatory = $true)][string]$Label,
+            [Parameter(Mandatory = $true)][string]$Value,
+            [System.ConsoleColor]$ValueColor = [System.ConsoleColor]::Green
+        )
+        Write-Host "  $($Label.PadRight(12))" -ForegroundColor DarkGray -NoNewline
+        Write-Host $Value -ForegroundColor $ValueColor
+    }
+
     Write-Host ""
-    Write-Host "LabFoundry VMware appliance connection summary"
-    Write-Host "  Name:        $Name"
-    Write-Host "  VMX:         $VmxPath"
-    Write-Host "  Console URL: https://$IpAddress/"
-    Write-Host "  API URL:     https://$IpAddress/openapi.json"
-    Write-Host "  Swagger URL: https://$IpAddress/api/docs"
-    Write-Host "  Root CA URL: https://$IpAddress/ca/downloads/root-ca.pem"
-    Write-Host "  SSH:         ssh admin@$IpAddress"
-    Write-Host "  HTTPS trust: $(if ($RootCaTrusted) { 'LabFoundry root CA imported for current user' } else { 'pass -TrustRootCa to trust this appliance root CA' })"
+    Write-Host "LabFoundry VMware appliance connection summary" -ForegroundColor Cyan
+    Write-SummaryRow -Label "Name:" -Value $Name -ValueColor White
+    Write-SummaryRow -Label "VMX:" -Value $VmxPath -ValueColor Gray
+    Write-SummaryRow -Label "Console URL:" -Value "https://$IpAddress/"
+    Write-SummaryRow -Label "API URL:" -Value "https://$IpAddress/openapi.json"
+    Write-SummaryRow -Label "Swagger URL:" -Value "https://$IpAddress/api/docs"
+    Write-SummaryRow -Label "Root CA URL:" -Value "https://$IpAddress/ca/downloads/root-ca.pem"
+    Write-SummaryRow -Label "SSH:" -Value "ssh admin@$IpAddress"
+    if ($RootCaTrusted) {
+        Write-SummaryRow -Label "HTTPS trust:" -Value "LabFoundry root CA imported for current user" -ValueColor Green
+    } else {
+        Write-SummaryRow -Label "HTTPS trust:" -Value "pass -TrustRootCa to trust this appliance root CA" -ValueColor Yellow
+    }
     Write-Host ""
 }
 

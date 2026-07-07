@@ -244,7 +244,7 @@ cat >/etc/systemd/system/labfoundry-data-disks.service <<'EOF'
 Description=Prepare LabFoundry data disks
 After=systemd-udev-settle.service
 Wants=systemd-udev-settle.service
-Before=labfoundry.service
+Before=labfoundry-bootstrap-https.service labfoundry.service
 
 [Service]
 Type=oneshot
@@ -255,6 +255,23 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 chmod 0644 /etc/systemd/system/labfoundry-data-disks.service
+cat >/etc/systemd/system/labfoundry-bootstrap-https.service <<'EOF'
+[Unit]
+Description=Bootstrap LabFoundry first-boot HTTPS front door
+After=labfoundry-data-disks.service labfoundry-vmware-ovf-customize.service
+Wants=labfoundry-data-disks.service
+Before=nginx.service labfoundry.service
+ConditionPathExists=!/var/lib/labfoundry/first-boot-https.applied
+
+[Service]
+Type=oneshot
+ExecStart=/opt/labfoundry/.venv/bin/python /opt/labfoundry/bin/labfoundry-bootstrap-https
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod 0644 /etc/systemd/system/labfoundry-bootstrap-https.service
 chown -R labfoundry:labfoundry "$LABFOUNDRY_STATE" "$LABFOUNDRY_LOG"
 chmod 0711 "$LABFOUNDRY_STATE"
 if id "$BOOTSTRAP_USERNAME" >/dev/null 2>&1 && [ -d "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME" ]; then
@@ -291,25 +308,7 @@ if [ "$LABFOUNDRY_MGMT_USES_DHCP" != "true" ] && [ -n "$LABFOUNDRY_MGMT_DNS" ]; 
   chmod 0644 /etc/resolv.conf
 fi
 
-log_step "configuring default LabFoundry management nginx proxy"
-set -a
-. /etc/labfoundry/labfoundry.env
-set +a
-"$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
-"$LABFOUNDRY_HOME/bin/labfoundry-helper" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real
-"$LABFOUNDRY_HOME/bin/labfoundry-helper" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real
-for db_file in "$LABFOUNDRY_STATE"/labfoundry.db "$LABFOUNDRY_STATE"/labfoundry.db-*; do
-  if [ -e "$db_file" ]; then
-    chown labfoundry:labfoundry "$db_file"
-    chmod 0640 "$db_file"
-  fi
-done
-chown -R labfoundry:labfoundry "$LABFOUNDRY_STATE/apply/ca"
-find "$LABFOUNDRY_STATE/apply/ca" -type d -exec chmod 0750 {} +
-find "$LABFOUNDRY_STATE/apply/ca" -type f -exec chmod 0600 {} +
-. /var/lib/labfoundry/apply/ca/first-boot-management.env
-chown root:labfoundry "$LABFOUNDRY_FIRST_BOOT_KEY_PATH"
-chmod 0640 "$LABFOUNDRY_FIRST_BOOT_KEY_PATH"
+log_step "configuring first-boot LabFoundry management nginx bootstrap"
 install -d -o root -g root -m 0755 /etc/nginx/conf.d
 rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf
 cat >/etc/nginx/conf.d/labfoundry.conf <<'EOF'
@@ -317,33 +316,6 @@ cat >/etc/nginx/conf.d/labfoundry.conf <<'EOF'
 include /etc/labfoundry/nginx/sites.d/*.conf;
 EOF
 chmod 0644 /etc/nginx/conf.d/labfoundry.conf
-cat >/etc/labfoundry/nginx/sites.d/management.conf <<EOF
-# Managed by LabFoundry. Local changes may be overwritten.
-server {
-  listen 80 default_server;
-  server_name _;
-  return 308 https://\$host\$request_uri;
-}
-
-server {
-  listen 443 ssl default_server;
-  server_name $LABFOUNDRY_FIRST_BOOT_FQDN;
-  ssl_certificate $LABFOUNDRY_FIRST_BOOT_CERT_PATH;
-  ssl_certificate_key $LABFOUNDRY_FIRST_BOOT_KEY_PATH;
-  client_max_body_size 1g;
-  location / {
-    proxy_pass http://127.0.0.1:8000;
-    proxy_http_version 1.1;
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-  }
-}
-EOF
-chmod 0644 /etc/labfoundry/nginx/sites.d/management.conf
 if [ -f /etc/nginx/nginx.conf ] &&
   ! grep -Eq 'include[[:space:]]+/etc/nginx/conf\.d/\*\.conf;' /etc/nginx/nginx.conf &&
   ! grep -Fq '/etc/nginx/conf.d/labfoundry.conf' /etc/nginx/nginx.conf; then
@@ -387,6 +359,7 @@ elif [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   systemctl enable labfoundry-vmware-ovf-customize.service
 fi
 systemctl enable labfoundry-data-disks.service
+systemctl enable labfoundry-bootstrap-https.service
 systemctl enable labfoundry
 systemctl enable --now nginx
 
