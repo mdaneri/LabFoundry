@@ -22,8 +22,8 @@ param(
     [string]$BuilderStaticNetmask = '255.255.255.0',
     [string]$BuilderStaticGateway = '192.168.167.2',
     [string[]]$BuilderStaticDns = @(),
-    [string]$FinalMgmtAddress = '192.168.167.10/24',
-    [string]$FinalMgmtGateway = '192.168.167.2',
+    [string]$FinalMgmtAddress = 'dhcp',
+    [string]$FinalMgmtGateway = '',
     [string]$FinalMgmtInterface = 'eth0',
     [string]$PipGlobalIndex = '',
     [string]$PipGlobalIndexUrl = '',
@@ -212,9 +212,9 @@ if (-not $SkipNetworkCheck) {
         $BuilderStaticGateway = $managementGateway
     }
     if (-not $finalAddressWasPassed) {
-        $FinalMgmtAddress = Get-Ipv4CidrFromSubnetOffset -Subnet $management.Subnet -Netmask $management.Mask -HostOffset 10
+        $FinalMgmtAddress = 'dhcp'
     }
-    if (-not $finalGatewayWasPassed) {
+    if (-not $finalGatewayWasPassed -and $FinalMgmtAddress -ne 'dhcp') {
         $FinalMgmtGateway = $managementGateway
     }
     Write-Host "Using VMware management network $($management.Name) on $($management.Subnet)/$($management.Mask)."

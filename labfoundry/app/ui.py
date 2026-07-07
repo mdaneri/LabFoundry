@@ -176,10 +176,12 @@ from labfoundry.app.secrets import decrypt_secret, secret_key_status
 from labfoundry.app.services.networking import (
     INTERFACE_MODES,
     INTERFACE_ROLES,
+    IPV4_METHODS,
     NETWORK_INVENTORY_CLEANUP_WARNING_KEY,
     VLAN_ROLES,
     normalize_interface_mode,
     normalize_interface_role,
+    normalize_ipv4_method,
     physical_interface_to_dict,
     render_network_config,
     sync_host_physical_interfaces,
@@ -2771,6 +2773,7 @@ def network_context(db: Session) -> dict:
         "trunk_parent_options": [trunk_parent_option(interface) for interface in trunk_interfaces],
         "interface_roles": INTERFACE_ROLES,
         "interface_modes": INTERFACE_MODES,
+        "ipv4_methods": IPV4_METHODS,
         "vlan_roles": VLAN_ROLES,
         "network_config_preview": config_preview,
         "network_validation_errors": validation_errors,
@@ -6952,6 +6955,7 @@ def edit_physical_interface_from_ui(
     interface_id: int,
     role: str = Form("unused"),
     mode: str = Form("unused"),
+    ipv4_method: str = Form("static"),
     ip_cidr: str = Form(""),
     ipv6_cidr: str = Form(""),
     mtu: int = Form(1500),
@@ -6973,16 +6977,25 @@ def edit_physical_interface_from_ui(
             status_code=409,
             media_type="text/plain",
         )
-    ip_value = cidr_for_family(ip_cidr, 4, "Interface IPv4 CIDR")
-    if isinstance(ip_value, Response):
-        return ip_value
+    role_value = normalize_interface_role(role)
+    ipv4_method_value = normalize_ipv4_method(ipv4_method)
+    if ipv4_method_value == "dhcp" and role_value != "management":
+        return Response("IPv4 DHCP is available only for the management interface.", status_code=422, media_type="text/plain")
+    if ipv4_method_value == "dhcp" and ip_cidr.strip():
+        return Response("Clear IPv4 CIDR before switching the management interface to DHCP.", status_code=422, media_type="text/plain")
+    ip_value = None
+    if ipv4_method_value == "static":
+        ip_value = cidr_for_family(ip_cidr, 4, "Interface IPv4 CIDR")
+        if isinstance(ip_value, Response):
+            return ip_value
     ipv6_value = cidr_for_family(ipv6_cidr, 6, "Interface IPv6 CIDR")
     if isinstance(ipv6_value, Response):
         return ipv6_value
     old_ip_cidr = interface.ip_cidr
     old_ipv6_cidr = interface.ipv6_cidr
-    interface.role = normalize_interface_role(role)
+    interface.role = role_value
     interface.mode = new_mode
+    interface.ipv4_method = ipv4_method_value
     interface.ip_cidr = ip_value or None
     interface.ipv6_cidr = ipv6_value or None
     interface.mtu = mtu

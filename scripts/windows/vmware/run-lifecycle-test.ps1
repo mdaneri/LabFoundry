@@ -11,7 +11,7 @@ param(
     [string]$SiteANetwork = 'VMnet2',
     [string]$SiteBNetwork = 'VMnet3',
     [string]$TrunkNetwork = 'VMnet4',
-    [string]$ApplianceIPAddress = '192.168.167.10',
+    [string]$ApplianceIPAddress = '',
     [string]$ApplianceUrl = '',
     [string]$SiteInterface = 'eth1',
     [string]$SiteCidr = '192.168.12.1/24',
@@ -39,9 +39,6 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')
-if (-not $ApplianceUrl) {
-    $ApplianceUrl = "http://${ApplianceIPAddress}"
-}
 if (-not $SshPassword) {
     $SshPassword = $AdminPassword
 }
@@ -960,6 +957,19 @@ try {
     }
 
     Start-Sleep -Seconds 20
+    if (-not $ApplianceIPAddress) {
+        $ApplianceIPAddress = Wait-GuestIPv4 -Path $applianceVmx -TimeoutSeconds 300 -GuestUser $ApplianceSshUser -GuestPassword $SshPassword -Name $applianceName
+        if (-not $ApplianceIPAddress) {
+            throw "Timed out waiting for VMware Tools to report the appliance management IPv4 address."
+        }
+    }
+    if (-not $ApplianceUrl) {
+        $ApplianceUrl = "http://${ApplianceIPAddress}"
+    }
+    [pscustomobject]@{
+        appliance_ip  = $ApplianceIPAddress
+        appliance_url = $ApplianceUrl
+    } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $resultRoot 'discovered-appliance.json') -Encoding UTF8
     Sync-ApplianceHelperScript -ApplianceVmx $applianceVmx
     $applianceWheelPath = Sync-ApplianceApplicationWheel -ApplianceVmx $applianceVmx
     $applianceHostKey = Get-PlinkHostKey -HostName $ApplianceIPAddress -UserName $ApplianceSshUser -Password $SshPassword

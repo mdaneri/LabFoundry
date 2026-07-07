@@ -35,6 +35,7 @@ LOGGER = logging.getLogger("labfoundry.networking")
 NETWORK_INVENTORY_CLEANUP_WARNING_KEY = "network.inventory_cleanup.warning"
 INTERFACE_ROLES = ["management", "access", "route", "unused"]
 INTERFACE_MODES = ["access", "trunk", "unused"]
+IPV4_METHODS = ["static", "dhcp"]
 VLAN_ROLES = ["access", "management", "services", "storage", "route"]
 
 
@@ -69,6 +70,11 @@ def normalize_interface_role(role: str | None) -> str:
     return "unused"
 
 
+def normalize_ipv4_method(value: str | None) -> str:
+    method = (value or "static").strip().lower()
+    return method if method in IPV4_METHODS else "static"
+
+
 def physical_interface_to_dict(interface: PhysicalInterface, vlan_count: int = 0) -> dict:
     role = normalize_interface_role(interface.role)
     return {
@@ -82,6 +88,7 @@ def physical_interface_to_dict(interface: PhysicalInterface, vlan_count: int = 0
         "host_mtu": interface.host_mtu,
         "host_admin_state": interface.host_admin_state or "",
         "ip_cidr": interface.ip_cidr or "",
+        "ipv4_method": normalize_ipv4_method(interface.ipv4_method),
         "ipv6_cidr": interface.ipv6_cidr or "",
         "mtu": interface.mtu,
         "admin_state": interface.admin_state,
@@ -634,7 +641,11 @@ def reconcile_host_physical_interfaces(
         interface.missing_since = None
         seen_interface_ids.add(id(interface))
         if seed_desired:
-            interface.ip_cidr = host.host_ip_cidr if interface.name == "eth0" or interface.role == "management" else None
+            interface.ip_cidr = (
+                host.host_ip_cidr
+                if (interface.name == "eth0" or interface.role == "management") and normalize_ipv4_method(interface.ipv4_method) != "dhcp"
+                else None
+            )
             interface.ipv6_cidr = host.host_ipv6_cidr if interface.name == "eth0" or interface.role == "management" else None
             interface.mtu = host.host_mtu or interface.mtu
             interface.admin_state = host.host_admin_state if interface.name == "eth0" or interface.role == "management" else "down"
@@ -720,6 +731,7 @@ def render_network_config(
                 f"interface={interface.name}",
                 f"  role={role}",
                 f"  mode={mode}",
+                f"  ipv4_method={normalize_ipv4_method(interface.ipv4_method)}",
                 f"  ip_cidr={interface.ip_cidr or ''}",
                 f"  ipv6_cidr={interface.ipv6_cidr or ''}",
                 f"  admin_state={interface.admin_state}",
@@ -752,12 +764,22 @@ def validate_network_state(
 ) -> list[str]:
     errors: list[str] = []
     interface_names = {interface.name for interface in interfaces}
+    management_interfaces = [interface for interface in interfaces if interface.oper_state != "missing" and normalize_interface_role(interface.role) == "management"]
+    if len(management_interfaces) != 1:
+        errors.append("Network desired state must include exactly one management physical interface.")
     for interface in interfaces:
         if interface.oper_state == "missing":
             continue
         role = normalize_interface_role(interface.role)
+        ipv4_method = normalize_ipv4_method(interface.ipv4_method)
         if role not in INTERFACE_ROLES:
             errors.append(f"Interface {interface.name} role {interface.role} is not supported.")
+        if ipv4_method not in IPV4_METHODS:
+            errors.append(f"Interface {interface.name} IPv4 method {interface.ipv4_method} is not supported.")
+        if ipv4_method == "dhcp" and role != "management":
+            errors.append(f"Interface {interface.name} can use DHCP only when its role is management.")
+        if ipv4_method == "dhcp" and interface.ip_cidr:
+            errors.append(f"Interface {interface.name} cannot set an IPv4 CIDR while IPv4 method is DHCP.")
         mode = normalize_interface_mode(interface.mode)
         if mode not in INTERFACE_MODES:
             errors.append(f"Interface {interface.name} link type {interface.mode} is not supported.")

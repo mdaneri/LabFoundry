@@ -10,6 +10,7 @@ LABFOUNDRY_MGMT_GATEWAY="${LABFOUNDRY_MGMT_GATEWAY:-192.168.49.254}"
 LABFOUNDRY_MGMT_SOURCE_CIDR="${LABFOUNDRY_MGMT_SOURCE_CIDR:-}"
 LABFOUNDRY_MGMT_DNS="${LABFOUNDRY_MGMT_DNS:-1.1.1.1 9.9.9.9}"
 LABFOUNDRY_MGMT_INTERFACE="${LABFOUNDRY_MGMT_INTERFACE:-eth0}"
+LABFOUNDRY_MGMT_IPV4_METHOD="${LABFOUNDRY_MGMT_IPV4_METHOD:-}"
 LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"
 LABFOUNDRY_GUEST_PLATFORM="${LABFOUNDRY_GUEST_PLATFORM:-hyperv}"
 LABFOUNDRY_IMAGE_ASSET_DIR="${LABFOUNDRY_IMAGE_ASSET_DIR:-image/hyperv}"
@@ -200,6 +201,8 @@ LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD=$BOOTSTRAP_PASSWORD
 LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=$LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS
 LABFOUNDRY_REPOSITORY_PATH=/mnt/labfoundry-vcf-offline-depot
 LABFOUNDRY_VCF_BACKUP_PATH=/mnt/labfoundry-vcf-backups
+LABFOUNDRY_APPLIANCE_MANAGEMENT_CIDR=$LABFOUNDRY_MGMT_ADDRESS
+LABFOUNDRY_APPLIANCE_EXTERNAL_DNS_SERVERS=$(printf '%s' "$LABFOUNDRY_MGMT_DNS" | tr ' ' ',')
 EOF
 chmod 0640 /etc/labfoundry/labfoundry.env
 chown root:labfoundry /etc/labfoundry/labfoundry.env
@@ -259,21 +262,29 @@ log_step "configuring final appliance management network"
   printf '[Match]\n'
   printf 'Name=%s\n\n' "$LABFOUNDRY_MGMT_INTERFACE"
   printf '[Network]\n'
-  printf 'Address=%s\n' "$LABFOUNDRY_MGMT_ADDRESS"
-  printf 'Gateway=%s\n' "$LABFOUNDRY_MGMT_GATEWAY"
-  for dns_server in $LABFOUNDRY_MGMT_DNS; do
-    printf 'DNS=%s\n' "$dns_server"
-  done
+  if [ "$LABFOUNDRY_MGMT_ADDRESS" = "dhcp" ] || [ "$LABFOUNDRY_MGMT_IPV4_METHOD" = "dhcp" ]; then
+    printf 'DHCP=ipv4\n'
+  else
+    printf 'Address=%s\n' "$LABFOUNDRY_MGMT_ADDRESS"
+    if [ -n "$LABFOUNDRY_MGMT_GATEWAY" ]; then
+      printf 'Gateway=%s\n' "$LABFOUNDRY_MGMT_GATEWAY"
+    fi
+    for dns_server in $LABFOUNDRY_MGMT_DNS; do
+      printf 'DNS=%s\n' "$dns_server"
+    done
+  fi
 } >/etc/systemd/network/00-labfoundry-mgmt.network
 chmod 0644 /etc/systemd/network/00-labfoundry-mgmt.network
 rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.network
 
-{
-  for dns_server in $LABFOUNDRY_MGMT_DNS; do
-    printf 'nameserver %s\n' "$dns_server"
-  done
-} >/etc/resolv.conf
-chmod 0644 /etc/resolv.conf
+if [ -n "$LABFOUNDRY_MGMT_DNS" ]; then
+  {
+    for dns_server in $LABFOUNDRY_MGMT_DNS; do
+      printf 'nameserver %s\n' "$dns_server"
+    done
+  } >/etc/resolv.conf
+  chmod 0644 /etc/resolv.conf
+fi
 
 log_step "configuring default LabFoundry management nginx proxy"
 install -d -o root -g root -m 0755 /etc/nginx/conf.d
@@ -355,10 +366,12 @@ if [ -z "$LABFOUNDRY_MGMT_SOURCE_CIDR" ]; then
     LABFOUNDRY_MGMT_SOURCE_CIDR="$(python3 -c 'import ipaddress, sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$DETECTED_MGMT_ADDRESS")"
   fi
 fi
-if [ -z "$LABFOUNDRY_MGMT_SOURCE_CIDR" ]; then
+if [ -z "$LABFOUNDRY_MGMT_SOURCE_CIDR" ] && [ "$LABFOUNDRY_MGMT_ADDRESS" != "dhcp" ]; then
   LABFOUNDRY_MGMT_SOURCE_CIDR="$(python3 -c 'import ipaddress, sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$LABFOUNDRY_MGMT_ADDRESS")"
 fi
-printf '\nLABFOUNDRY_MANAGEMENT_SOURCE_CIDR=%s\n' "$LABFOUNDRY_MGMT_SOURCE_CIDR" >>/etc/labfoundry/labfoundry.env
+if [ -n "$LABFOUNDRY_MGMT_SOURCE_CIDR" ]; then
+  printf '\nLABFOUNDRY_MANAGEMENT_SOURCE_CIDR=%s\n' "$LABFOUNDRY_MGMT_SOURCE_CIDR" >>/etc/labfoundry/labfoundry.env
+fi
 install -d -o root -g root -m 0755 /etc/labfoundry/nftables.d
 cat >/etc/labfoundry/nftables.d/labfoundry.nft <<EOF
 # Managed by LabFoundry. Local changes may be overwritten.
@@ -369,7 +382,7 @@ table inet labfoundry {
     type filter hook input priority filter; policy drop;
     iifname "lo" accept comment "LabFoundry loopback"
     ct state established,related accept comment "LabFoundry established traffic"
-    ip saddr $LABFOUNDRY_MGMT_SOURCE_CIDR tcp dport { 22, 80, 443 } accept comment "LabFoundry management access"
+    iifname "$LABFOUNDRY_MGMT_INTERFACE" tcp dport { 22, 80, 443 } accept comment "LabFoundry management access"
     meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
     meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
   }

@@ -5,6 +5,7 @@ from typing import Any
 
 from labfoundry.app.models import ApplianceSettings, PhysicalInterface
 from labfoundry.app.services.dnsmasq import split_servers
+from labfoundry.app.services.networking import normalize_ipv4_method
 
 
 APPLIANCE_SETTINGS_DEFAULT_FQDN = "labfoundry.labfoundry.internal"
@@ -62,18 +63,20 @@ def management_interface_context(interfaces: list[PhysicalInterface]) -> dict[st
         if interface.name in seen:
             continue
         seen.add(interface.name)
-        if not interface.ip_cidr:
+        candidate_cidr = interface.host_ip_cidr if normalize_ipv4_method(interface.ipv4_method) == "dhcp" else interface.ip_cidr
+        if not candidate_cidr:
             continue
         try:
-            parsed = ip_interface(interface.ip_cidr)
+            parsed = ip_interface(candidate_cidr)
         except ValueError:
             continue
         return {
             "name": interface.name,
             "ip": str(parsed.ip),
-            "ip_cidr": interface.ip_cidr,
+            "ip_cidr": candidate_cidr,
+            "ipv4_method": normalize_ipv4_method(interface.ipv4_method),
         }
-    return {"name": "", "ip": "", "ip_cidr": ""}
+    return {"name": "", "ip": "", "ip_cidr": "", "ipv4_method": "static"}
 
 
 def validate_appliance_settings(

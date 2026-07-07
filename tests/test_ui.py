@@ -136,7 +136,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
     assert 'data-monitor-page' in page.text
-    assert "/static/app.js?v=routing-visibility-20260705-1" in page.text
+    assert "/static/app.js?v=vmware-dhcp-20260707-1" in page.text
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text

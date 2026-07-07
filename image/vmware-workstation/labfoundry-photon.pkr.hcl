@@ -108,14 +108,14 @@ variable "builder_static_dns" {
 
 variable "final_mgmt_address" {
   type        = string
-  default     = "192.168.167.10/24"
-  description = "Final LabFoundry appliance management address after provisioning."
+  default     = "dhcp"
+  description = "Final LabFoundry appliance management address after provisioning, or dhcp for VMware NAT-assigned management."
 }
 
 variable "final_mgmt_gateway" {
   type        = string
-  default     = "192.168.167.2"
-  description = "Final LabFoundry appliance management gateway after provisioning."
+  default     = ""
+  description = "Final LabFoundry appliance management gateway after provisioning. Leave blank when final_mgmt_address is dhcp."
 }
 
 variable "final_mgmt_interface" {
@@ -242,6 +242,7 @@ build {
       "LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=${local.dry_run_system_adapters_text}",
       "LABFOUNDRY_MGMT_ADDRESS=${var.final_mgmt_address}",
       "LABFOUNDRY_MGMT_GATEWAY=${var.final_mgmt_gateway}",
+      "LABFOUNDRY_MGMT_IPV4_METHOD=${var.final_mgmt_address == "dhcp" ? "dhcp" : "static"}",
       "LABFOUNDRY_MGMT_INTERFACE=${var.final_mgmt_interface}",
       "LABFOUNDRY_MGMT_DNS=${local.builder_static_dns_text}",
       "LABFOUNDRY_PIP_GLOBAL_INDEX=${var.pip_global_index}",

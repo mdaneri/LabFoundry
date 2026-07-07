@@ -4615,6 +4615,9 @@ async function autoSavePhysicalInterface(cell, csrf) {
   const row = cell.getRow();
   const data = row.getData();
   data.admin_state = data.admin_up ? "up" : "down";
+  if (data.ipv4_method === "dhcp") {
+    data.ip_cidr = "";
+  }
   try {
     await postNetworkAction(`/physical-interfaces/${data.id}/edit`, data, csrf, { reload: false });
     showTransientGridStatus("Saved");
@@ -4722,6 +4725,10 @@ function initializePhysicalInterfacesTable() {
   }
   const csrf = tableElement.dataset.csrf || "";
   const roleOptions = roleValues(JSON.parse(tableElement.dataset.roleOptions || "[]"));
+  const ipv4MethodOptions = labeledValues(JSON.parse(tableElement.dataset.ipv4MethodOptions || "[]"), {
+    static: "Static",
+    dhcp: "DHCP",
+  });
   const modeOptions = labeledValues(JSON.parse(tableElement.dataset.modeOptions || "[]"), {
     access: "Access (untagged)",
     trunk: "Trunk (tagged VLANs)",
@@ -4752,11 +4759,46 @@ function initializePhysicalInterfacesTable() {
         { title: "Observed IPv4", field: "host_ip_cidr", minWidth: 150, headerSort: false },
         { title: "Observed IPv6", field: "host_ipv6_cidr", minWidth: 180, headerSort: false },
         {
+          title: "IPv4 Method",
+          field: "ipv4_method",
+          editor: "list",
+          editorParams: { values: ipv4MethodOptions },
+          editable: (cell) => cell.getRow().getData().role === "management",
+          formatter: (cell) => escapeHtml(ipv4MethodOptions[cell.getValue()] || cell.getValue() || "Static"),
+          width: 130,
+          cellEdited: async (cell) => {
+            const row = cell.getRow();
+            const data = row.getData();
+            if (data.ipv4_method === "dhcp" && data.role !== "management") {
+              showNetworkMessage("physical-interface-error", "IPv4 DHCP is available only for the management interface.");
+              if (typeof cell.restoreOldValue === "function") {
+                cell.restoreOldValue();
+              }
+              return;
+            }
+            if (data.ipv4_method === "dhcp") {
+              await row.update({ ip_cidr: "" });
+            }
+            await autoSavePhysicalInterface(cell, csrf);
+          },
+        },
+        {
           title: "IPv4 CIDR",
           field: "ip_cidr",
-          editor: cidrInputEditor,
+          editor: (cell, onRendered, success, cancel, editorParams) => {
+            if (cell.getRow().getData().ipv4_method === "dhcp") {
+              cancel();
+              return document.createElement("span");
+            }
+            return cidrInputEditor(cell, onRendered, success, cancel, editorParams);
+          },
           editorParams: { family: "ipv4", placeholder: "192.168.50.1/24" },
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "192.168.50.1/24"),
+          formatter: (cell) => {
+            if (cell.getRow().getData().ipv4_method === "dhcp") {
+              return '<span class="status-pill muted">DHCP</span>';
+            }
+            return dnsAddRowHintFormatter(cell, "192.168.50.1/24");
+          },
           minWidth: 160,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },

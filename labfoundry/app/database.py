@@ -51,6 +51,7 @@ def _ensure_sqlite_network_columns() -> None:
         "physical_interfaces": {
             "host_ipv6_cidr": "VARCHAR(64)",
             "ipv6_cidr": "VARCHAR(64)",
+            "ipv4_method": "VARCHAR(20) DEFAULT 'static'",
         },
         "vlan_interfaces": {
             "ipv6_cidr": "VARCHAR(64)",

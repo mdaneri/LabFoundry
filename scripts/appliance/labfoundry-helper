@@ -3001,6 +3001,7 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
             admin_down_links.append(name)
             continue
         mode = interface.get("mode", "unused")
+        ipv4_method = (interface.get("ipv4_method") or "static").strip().lower()
         lines = [
             "# Managed by LabFoundry. Local changes may be overwritten.",
             "[Match]",
@@ -3009,19 +3010,21 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
             "[Network]",
             "IPv6AcceptRA=no",
         ]
-        if interface.get("ip_cidr"):
+        if ipv4_method == "dhcp":
+            lines.append("DHCP=ipv4")
+        elif interface.get("ip_cidr"):
             lines.append(f"Address={interface['ip_cidr']}")
         if interface.get("ipv6_cidr"):
             lines.append(f"Address={interface['ipv6_cidr']}")
         if name == management_name:
             for dns in preserved_management["DNS"]:
                 lines.append(f"DNS={dns}")
-        elif not interface.get("ip_cidr") and not interface.get("ipv6_cidr"):
+        elif ipv4_method != "dhcp" and not interface.get("ip_cidr") and not interface.get("ipv6_cidr"):
             lines.append("LinkLocalAddressing=no")
         if mode == "trunk":
             for vlan in sorted(vlans_by_parent.get(name, []), key=lambda row: int(row.get("vlan_id", "0"))):
                 lines.append(f"VLAN={vlan['name']}")
-        if name == management_name:
+        if name == management_name and ipv4_method != "dhcp":
             for cidr_key in ("ip_cidr", "ipv6_cidr"):
                 if interface.get(cidr_key):
                     network = ip_network(interface[cidr_key], strict=False)
@@ -3091,12 +3094,20 @@ def _network_config_errors(path: Path) -> list[str]:
     management_entries = [row for row in physical_interfaces if row.get("role") == "management"]
     if not management_entries:
         errors.append("Network config must include a management physical interface.")
-    elif not any(row.get("name") == "eth0" and row.get("ip_cidr") for row in management_entries):
-        errors.append("Photon appliance management must keep eth0 with an IP CIDR before networkd apply.")
+    elif len(management_entries) > 1:
+        errors.append("Network config must include only one management physical interface.")
     for interface in physical_interfaces:
         name = interface.get("name", "")
+        role = interface.get("role", "")
+        ipv4_method = (interface.get("ipv4_method") or "static").strip().lower()
         if not _valid_network_interface_name(name):
             errors.append(f"Interface name {name or '<missing>'} is invalid.")
+        if ipv4_method not in {"static", "dhcp"}:
+            errors.append(f"Interface {name or '<missing>'} IPv4 method {ipv4_method or '<missing>'} is invalid.")
+        if ipv4_method == "dhcp" and role != "management":
+            errors.append(f"Interface {name or '<missing>'} can use DHCP only when its role is management.")
+        if ipv4_method == "dhcp" and interface.get("ip_cidr"):
+            errors.append(f"Interface {name or '<missing>'} cannot set an IPv4 CIDR while IPv4 method is DHCP.")
         for key, version, label in [("ip_cidr", 4, "IPv4 CIDR"), ("ipv6_cidr", 6, "IPv6 CIDR")]:
             value = interface.get(key, "")
             if not value:

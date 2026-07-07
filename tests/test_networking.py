@@ -478,6 +478,27 @@ def test_render_network_config_includes_physical_roles_for_networkd_apply():
 
     assert "interface=eth0" in config
     assert "  role=management" in config
+    assert "  ipv4_method=static" in config
+
+
+def test_render_network_config_includes_management_dhcp_method():
+    config = render_network_config(
+        interfaces=[
+            PhysicalInterface(
+                name="eth0",
+                mac_address="00:15:5d:aa:bb:01",
+                ipv4_method="dhcp",
+                role="management",
+                mode="access",
+            )
+        ],
+        vlans=[],
+    )
+
+    assert "interface=eth0" in config
+    assert "  role=management" in config
+    assert "  ipv4_method=dhcp" in config
+    assert "  ip_cidr=" in config
 
 
 def test_render_network_config_includes_dual_stack_physical_and_vlan_cidrs():
