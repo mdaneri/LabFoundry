@@ -70,6 +70,9 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "/etc/labfoundry/nginx/sites.d/management.conf" in script
     assert "rm -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default_server.conf" in script
     assert "labfoundry-bootstrap-https" in script
+    assert "set -a\n. /etc/labfoundry/labfoundry.env\nset +a" in script
+    bootstrap_invocation = '"$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"'
+    assert script.index(". /etc/labfoundry/labfoundry.env") < script.index(bootstrap_invocation)
     assert "labfoundry-helper\" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json" in script
     assert "labfoundry-helper\" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json" in script
     assert "listen 80 default_server;" in script
@@ -80,8 +83,12 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "client_max_body_size 1g;" in script
     assert "client_max_body_size 512m;" not in script
     assert "proxy_pass http://127.0.0.1:8000;" in script
+    assert "proxy_set_header Host \\$host;" in script
+    assert "proxy_set_header X-Real-IP \\$remote_addr;" in script
+    assert "proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;" in script
     assert "proxy_set_header X-Forwarded-Proto https;" in script
     assert "proxy_set_header X-Forwarded-Proto http;" not in script
+    assert "proxy_set_header Upgrade \\$http_upgrade;" in script
     assert "nginx -t" in script
     assert "systemctl enable --now nginx" in script
     assert 'LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"' in script

@@ -292,6 +292,9 @@ if [ "$LABFOUNDRY_MGMT_USES_DHCP" != "true" ] && [ -n "$LABFOUNDRY_MGMT_DNS" ]; 
 fi
 
 log_step "configuring default LabFoundry management nginx proxy"
+set -a
+. /etc/labfoundry/labfoundry.env
+set +a
 "$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
 "$LABFOUNDRY_HOME/bin/labfoundry-helper" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json
 "$LABFOUNDRY_HOME/bin/labfoundry-helper" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json
@@ -322,11 +325,11 @@ server {
   location / {
     proxy_pass http://127.0.0.1:8000;
     proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection "upgrade";
   }
 }
