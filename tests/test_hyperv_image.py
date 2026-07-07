@@ -75,6 +75,9 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "systemctl enable --now nginx" in script
     assert 'LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS="${LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS:-true}"' in script
     assert 'LABFOUNDRY_MGMT_SOURCE_CIDR="${LABFOUNDRY_MGMT_SOURCE_CIDR:-}"' in script
+    assert 'LABFOUNDRY_MGMT_USES_DHCP=false' in script
+    assert 'LABFOUNDRY_APPLIANCE_EXTERNAL_DNS_SERVERS=$(if [ "$LABFOUNDRY_MGMT_USES_DHCP" = "true" ]; then printf \'\'; else printf \'%s\' "$LABFOUNDRY_MGMT_DNS" | tr \' \' \',\'; fi)' in script
+    assert 'if [ "$LABFOUNDRY_MGMT_USES_DHCP" != "true" ] && [ -n "$LABFOUNDRY_MGMT_DNS" ]; then' in script
     assert 'ip -4 -o addr show dev "$LABFOUNDRY_MGMT_INTERFACE" scope global' in script
     assert 'DETECTED_MGMT_ADDRESS' in script
     assert "ipaddress.ip_interface(sys.argv[1]).network" in script

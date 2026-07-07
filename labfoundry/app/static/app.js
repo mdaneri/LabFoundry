@@ -6429,6 +6429,8 @@ function updateApplianceSettingsValidation(payload = {}) {
       dnsStatus.textContent = actionMessages[payload.dns_record_action];
     } else if (localDnsEnabled) {
       dnsStatus.textContent = `Local DNS is enabled. Autosave manages the app-owned appliance DNS record for ${fqdn}.`;
+    } else if (payload.resolver_mode === "dhcp") {
+      dnsStatus.textContent = "Local DNS is disabled. Management DHCP will keep lease-provided resolver servers unless external DNS servers are entered.";
     } else {
       dnsStatus.textContent = "Local DNS is disabled. External DNS servers are required for appliance resolver apply.";
     }

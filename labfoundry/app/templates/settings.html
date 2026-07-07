@@ -7,7 +7,7 @@
       <div>
         <h2>Appliance Identity</h2>
       </div>
-      <span class="status-pill {{ 'good' if local_dns_enabled else 'warn' }}">{{ "local DNS" if local_dns_enabled else "external DNS" }}</span>
+      <span class="status-pill {{ 'good' if local_dns_enabled else 'warn' }}">{{ "local DNS" if local_dns_enabled else ("DHCP DNS" if appliance_settings_resolver_mode == "dhcp" else "external DNS") }}</span>
     </div>
 
     <form class="form-stack" action="/settings" method="post" data-autosave-form data-appliance-settings data-autosave-status-id="appliance-settings-autosave-status">
@@ -124,6 +124,8 @@
       <div data-appliance-settings-dns-status class="alert {{ 'success' if local_dns_enabled else 'warning' }}">
         {% if local_dns_enabled %}
           Local DNS is enabled. Autosave manages the app-owned appliance DNS record for {{ appliance_settings.fqdn }}.
+        {% elif appliance_settings_resolver_mode == "dhcp" %}
+          Local DNS is disabled. Management DHCP will keep lease-provided resolver servers unless external DNS servers are entered.
         {% else %}
           Local DNS is disabled. External DNS servers are required for appliance resolver apply.
         {% endif %}

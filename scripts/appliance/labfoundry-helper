@@ -659,6 +659,14 @@ def _configure_resolver(interface_name: str, servers: list[str], domains: list[s
     return subprocess.CompletedProcess(commands[-1], 0, "", "")
 
 
+def _configure_dhcp_resolver(interface_name: str) -> subprocess.CompletedProcess[str]:
+    _write_management_resolver([], [])
+    result = _run(["resolvectl", "revert", interface_name])
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result
+
+
 def _configure_local_resolver() -> subprocess.CompletedProcess[str]:
     return _configure_resolver("eth0", ["127.0.0.1"], ["~."])
 
@@ -1747,8 +1755,8 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
     resolver_mode = str(payload.get("resolver_mode") or "")
     local_dns_enabled = bool(payload.get("local_dns_enabled"))
     resolver_servers = [str(server).strip() for server in payload.get("resolver_servers") or [] if str(server).strip()]
-    if resolver_mode not in {"local_dns", "external"}:
-        errors.append("resolver_mode must be local_dns or external.")
+    if resolver_mode not in {"local_dns", "external", "dhcp"}:
+        errors.append("resolver_mode must be local_dns, external, or dhcp.")
     if resolver_mode == "local_dns":
         if not local_dns_enabled:
             errors.append("local_dns mode requires local_dns_enabled=true.")
@@ -1756,6 +1764,11 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
             errors.append("local_dns mode must use resolver server 127.0.0.1.")
     if resolver_mode == "external" and not resolver_servers:
         errors.append("external resolver mode requires at least one resolver server.")
+    if resolver_mode == "dhcp":
+        if local_dns_enabled:
+            errors.append("dhcp resolver mode requires local_dns_enabled=false.")
+        if resolver_servers:
+            errors.append("dhcp resolver mode must not include static resolver servers.")
     for server in resolver_servers:
         try:
             ip_interface(f"{server}/32" if ":" not in server else f"{server}/128")
@@ -2414,7 +2427,7 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     hostname = _apply_hostname(fqdn)
     if hostname != 0:
         return hostname
-    resolver = _configure_resolver(management_interface, resolver_servers, domains)
+    resolver = _configure_dhcp_resolver(management_interface) if resolver_mode == "dhcp" else _configure_resolver(management_interface, resolver_servers, domains)
     if resolver.returncode != 0:
         return resolver.returncode
     timesyncd = _configure_timesyncd(ntp_servers)

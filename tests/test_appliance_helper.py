@@ -2405,7 +2405,7 @@ def appliance_settings_json(
     payload = {
         "fqdn": "labfoundry.labfoundry.internal",
         "resolver_mode": resolver_mode,
-        "resolver_servers": resolver_servers or ["127.0.0.1"],
+        "resolver_servers": ["127.0.0.1"] if resolver_servers is None else resolver_servers,
         "local_dns_enabled": local_dns_enabled,
         "management_interface": "eth0",
         "management_ip": "192.168.49.1",
@@ -2482,7 +2482,20 @@ def test_appliance_settings_helper_rejects_invalid_json(tmp_path):
     errors = helper._appliance_settings_config_errors(config_path)
 
     assert "fqdn must be a valid fully qualified DNS name." in errors
-    assert "resolver_mode must be local_dns or external." in errors
+    assert "resolver_mode must be local_dns, external, or dhcp." in errors
+
+
+def test_appliance_settings_helper_accepts_dhcp_resolver_mode(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-settings.json"
+    config_path.write_text(
+        appliance_settings_json(resolver_mode="dhcp", resolver_servers=[], local_dns_enabled=False),
+        encoding="utf-8",
+    )
+
+    errors = helper._appliance_settings_config_errors(config_path)
+
+    assert errors == []
 
 
 def test_appliance_settings_helper_rejects_invalid_ntp_server(tmp_path):

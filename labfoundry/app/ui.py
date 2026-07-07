@@ -77,13 +77,13 @@ from labfoundry.app.schemas import ApiTokenCreate, WanPolicyCreate
 from labfoundry.app.services.appliance_settings import (
     APPLIANCE_DNS_RECORD_DESCRIPTION,
     APPLIANCE_SETTINGS_STAGED_CONFIG_PATH,
+    appliance_settings_preview_payload,
     appliance_settings_to_dict,
     is_app_owned_appliance_dns_record,
     management_interface_context,
     normalize_fqdn,
     normalize_multiline_values,
     normalize_service_dns_target_naming,
-    render_appliance_settings_config,
     SERVICE_DNS_TARGET_NAMING_CHOICES,
     validate_appliance_settings,
 )
@@ -1602,6 +1602,13 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
     )
     if settings.root_ssh_enabled and get_settings().dry_run_system_adapters:
         validation_warnings.append("Root SSH is enabled as desired state, but dry-run system adapters are active. Global appliance apply will record intent without changing sshd.")
+    appliance_settings_preview = appliance_settings_preview_payload(
+        settings,
+        local_dns_enabled=local_dns_enabled,
+        management_interface=management,
+        management_https_cert_path=management_https_cert_path,
+        management_https_key_path=management_https_key_path,
+    )
     return {
         "app_settings": get_settings(),
         "runtime_hostname": socket.gethostname(),
@@ -1618,13 +1625,8 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "logging_preferences": logging_preferences_to_dict(logging_preferences_from_db(db)),
         "appliance_settings_validation_errors": validation_errors,
         "appliance_settings_validation_warnings": validation_warnings,
-        "appliance_settings_config_preview": render_appliance_settings_config(
-            settings,
-            local_dns_enabled=local_dns_enabled,
-            management_interface=management,
-            management_https_cert_path=management_https_cert_path,
-            management_https_key_path=management_https_key_path,
-        ),
+        "appliance_settings_resolver_mode": appliance_settings_preview["resolver_mode"],
+        "appliance_settings_config_preview": json.dumps(appliance_settings_preview, indent=2, sort_keys=True) + "\n",
     }
 
 
@@ -11521,6 +11523,7 @@ def update_settings_from_ui(
                 "root_ssh_enabled": saved.root_ssh_enabled,
                 "service_dns_target_naming": normalize_service_dns_target_naming(saved.service_dns_target_naming),
                 "external_dns_servers": context["appliance_settings_json"]["external_dns_servers"],
+                "resolver_mode": context["appliance_settings_resolver_mode"],
                 "local_dns_enabled": context["local_dns_enabled"],
                 "chrony_enabled": context["chrony_enabled"],
                 "management_interface": context["management_interface"],
