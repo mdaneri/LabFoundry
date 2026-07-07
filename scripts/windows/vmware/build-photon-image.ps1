@@ -192,6 +192,7 @@ $ServiceVmnetName = ConvertTo-WorkstationVmnetName -Name $ServiceVmnetName -Para
 $builderIpWasPassed = $PSBoundParameters.ContainsKey('BuilderStaticIp')
 $builderNetmaskWasPassed = $PSBoundParameters.ContainsKey('BuilderStaticNetmask')
 $builderGatewayWasPassed = $PSBoundParameters.ContainsKey('BuilderStaticGateway')
+$builderDnsWasPassed = $PSBoundParameters.ContainsKey('BuilderStaticDns')
 $finalAddressWasPassed = $PSBoundParameters.ContainsKey('FinalMgmtAddress')
 $finalGatewayWasPassed = $PSBoundParameters.ContainsKey('FinalMgmtGateway')
 
@@ -211,6 +212,10 @@ if (-not $SkipNetworkCheck) {
     if (-not $builderGatewayWasPassed) {
         $BuilderStaticGateway = $managementGateway
     }
+    if (-not $builderDnsWasPassed -and $BuilderStaticDns.Count -eq 0 -and $management.Type -eq 'nat') {
+        $BuilderStaticDns = @($managementGateway)
+        Write-Host "Using VMware NAT gateway DNS for Photon builder: $($BuilderStaticDns -join ', ')."
+    }
     if (-not $finalAddressWasPassed) {
         $FinalMgmtAddress = 'dhcp'
     }
@@ -219,7 +224,7 @@ if (-not $SkipNetworkCheck) {
     }
     Write-Host "Using VMware management network $($management.Name) on $($management.Subnet)/$($management.Mask)."
     Write-Host "Using VMware services network $ServiceVmnetName for the second appliance NIC."
-    Write-Host "Photon builder SSH address: $BuilderStaticIp; final appliance management address: $FinalMgmtAddress."
+    Write-Host "Photon builder temporary SSH address: $BuilderStaticIp; final appliance management address: $FinalMgmtAddress."
 }
 
 if (-not $ValidateOnly -and -not $PrepareIsoOnly -and -not $SkipNetworkCheck) {

@@ -306,6 +306,20 @@ def test_photon_image_optional_pip_global_index_configuration():
     assert "packages.vcfd.broadcom.net/artifactory" not in script
 
 
+def test_vmware_builder_uses_nat_gateway_dns_by_default():
+    wrapper = Path("scripts/windows/vmware/build-photon-image.ps1").read_text(encoding="utf-8")
+    docs = Path("image/vmware-workstation/README.md").read_text(encoding="utf-8")
+
+    assert "$builderDnsWasPassed = $PSBoundParameters.ContainsKey('BuilderStaticDns')" in wrapper
+    assert "-not $builderDnsWasPassed -and $BuilderStaticDns.Count -eq 0 -and $management.Type -eq 'nat'" in wrapper
+    assert "$BuilderStaticDns = @($managementGateway)" in wrapper
+    assert "Using VMware NAT gateway DNS for Photon builder" in wrapper
+    assert "Photon builder temporary SSH address" in wrapper
+    assert "gateway DNS proxy" in docs
+    assert "copying unrelated host" in docs
+    assert "DNS servers into the Photon kickstart" in docs
+
+
 def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
     script = Path("scripts/windows/hyperv/run-lifecycle-test.ps1").read_text(encoding="utf-8")
     wrapper = Path("scripts/windows/hyperv/invoke-lifecycle-test.ps1").read_text(encoding="utf-8")

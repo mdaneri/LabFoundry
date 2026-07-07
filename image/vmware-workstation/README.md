@@ -81,8 +81,11 @@ rendering Packer variables. For NAT/host-only vmnets it uses
 Windows IPv4 interface, or the interface named by `-BridgedInterfaceAlias`.
 Unless overridden, it chooses host offset `.30` for the temporary Photon
 builder SSH address and uses DHCP for the final appliance management address.
-Pass `-BuilderStaticIp` and `-BuilderStaticGateway` together only when a
-different builder address plan is intentional. Pass `-FinalMgmtAddress` and
+For NAT vmnets, the wrapper points the temporary builder at the VMware NAT
+gateway DNS proxy, normally host offset `.2`, instead of copying unrelated host
+DNS servers into the Photon kickstart. Pass `-BuilderStaticIp`,
+`-BuilderStaticGateway`, and `-BuilderStaticDns` together only when a different
+builder address plan is intentional. Pass `-FinalMgmtAddress` and
 `-FinalMgmtGateway` only when a static final management address is intentional.
 Pass `-ServiceVmnetName` only when the second appliance NIC should attach to a
 different Workstation network.
