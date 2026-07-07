@@ -231,7 +231,7 @@ if (-not $NoStart -and -not $WhatIfPreference) {
 Write-Host "LabFoundry Workstation test VM ready: $Name"
 Write-Host "Appliance VMX: $targetVmx"
 
-if (-not $NoStart -and -not $WhatIfPreference) {
+if (($WaitForIp -or $TrustRootCa) -and -not $NoStart -and -not $WhatIfPreference) {
     $ip = & (Join-Path $PSScriptRoot 'get-labfoundry-vm-ip.ps1') `
         -VmxPath $targetVmx `
         -VmrunPath $VmrunPath `
@@ -243,4 +243,6 @@ if (-not $NoStart -and -not $WhatIfPreference) {
         Install-ApplianceRootCa -IpAddress $ip -Name $Name
     }
     Write-ConnectionSummary -IpAddress $ip -Name $Name -VmxPath $targetVmx -RootCaTrusted ([bool]$TrustRootCa)
+} elseif (-not $NoStart -and -not $WhatIfPreference) {
+    Write-Host "Pass -WaitForIp to print the HTTPS console, Swagger, root certificate, and SSH connection summary." -ForegroundColor DarkGray
 }

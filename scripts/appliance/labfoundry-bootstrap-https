@@ -14,6 +14,7 @@ from labfoundry.app.database import SessionLocal, init_db
 from labfoundry.app.models import ApplianceSettings, CaCertificate, CaSettings
 from labfoundry.app.seed import seed_initial_data
 from labfoundry.app.services.ca import CA_STAGED_CONFIG_PATH, render_ca_apply_payload
+from labfoundry.app.services.networking import sync_host_physical_interfaces
 from labfoundry.app.ui import ca_managed_certificate_paths, ensure_ca_state
 
 
@@ -136,6 +137,7 @@ def main() -> int:
     init_db()
     with SessionLocal() as db:
         seed_initial_data(db, include_examples=False, appliance_mode=True)
+        sync_host_physical_interfaces(db)
         appliance_settings = db.execute(select(ApplianceSettings)).scalar_one()
         ca_settings = db.execute(select(CaSettings)).scalar_one()
         appliance_settings.management_https_enabled = True

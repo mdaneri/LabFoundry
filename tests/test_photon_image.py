@@ -74,8 +74,12 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "labfoundry-bootstrap-https" in script
     assert "labfoundry-bootstrap-https.service" in script
     assert "ExecStart=/opt/labfoundry/.venv/bin/python /opt/labfoundry/bin/labfoundry-bootstrap-https" in script
+    assert "After=network-online.target labfoundry-data-disks.service labfoundry-vmware-ovf-customize.service" in script
+    assert "Wants=network-online.target labfoundry-data-disks.service" in script
     assert "ConditionPathExists=!/var/lib/labfoundry/first-boot-https.applied" in script
     assert '"$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"' not in script
+    assert "sync_host_physical_interfaces(db)" in bootstrap
+    assert bootstrap.index("sync_host_physical_interfaces(db)") < bootstrap.index("ensure_ca_state(db)")
     assert 'str(HELPER_PATH), "ca", action, str(CA_STAGED_CONFIG_PATH), "--real"' in bootstrap
     assert 'for db_file in state_path.glob("labfoundry.db*")' in bootstrap
     assert 'shutil.chown(db_file, user="labfoundry", group="labfoundry")' in bootstrap
@@ -462,12 +466,14 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "certutil.exe -f -user -addstore Root $rootCerPath" in script
     assert "if ($TrustRootCa -and $NoStart)" in script
     assert "if (-not $NoStart -and -not $WhatIfPreference)" in script
+    assert "if (($WaitForIp -or $TrustRootCa) -and -not $NoStart -and -not $WhatIfPreference)" in script
     assert 'Write-SummaryRow -Label "Console URL:" -Value "https://$IpAddress/"' in script
     assert 'Write-SummaryRow -Label "API URL:" -Value "https://$IpAddress/openapi.json"' in script
     assert 'Write-SummaryRow -Label "Swagger URL:" -Value "https://$IpAddress/api/docs"' in script
     assert 'Write-SummaryRow -Label "Root CA URL:" -Value "https://$IpAddress/ca/downloads/root-ca.pem"' in script
     assert 'Write-SummaryRow -Label "SSH:" -Value "ssh admin@$IpAddress"' in script
     assert "pass -TrustRootCa to trust this appliance root CA" in script
+    assert "Pass -WaitForIp to print the HTTPS console" in script
     assert "-ValueColor Yellow" in script
     assert "[string]$ManagementNetwork = 'VMnet8'" in script
     assert "[string]$ManagementNetwork = 'VMnet8'" in vm_script

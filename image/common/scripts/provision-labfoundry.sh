@@ -258,8 +258,8 @@ chmod 0644 /etc/systemd/system/labfoundry-data-disks.service
 cat >/etc/systemd/system/labfoundry-bootstrap-https.service <<'EOF'
 [Unit]
 Description=Bootstrap LabFoundry first-boot HTTPS front door
-After=labfoundry-data-disks.service labfoundry-vmware-ovf-customize.service
-Wants=labfoundry-data-disks.service
+After=network-online.target labfoundry-data-disks.service labfoundry-vmware-ovf-customize.service
+Wants=network-online.target labfoundry-data-disks.service
 Before=nginx.service labfoundry.service
 ConditionPathExists=!/var/lib/labfoundry/first-boot-https.applied
 
