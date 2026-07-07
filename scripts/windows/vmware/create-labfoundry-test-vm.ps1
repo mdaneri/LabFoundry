@@ -108,7 +108,7 @@ function Write-ConnectionSummary {
     Write-SummaryRow -Label "API URL:" -Value "https://$IpAddress/openapi.json"
     Write-SummaryRow -Label "Swagger URL:" -Value "https://$IpAddress/api/docs"
     Write-SummaryRow -Label "Root CA URL:" -Value "https://$IpAddress/ca/downloads/root-ca.pem"
-    Write-SummaryRow -Label "SSH:" -Value "ssh://admin@$IpAddress"
+    Write-SummaryRow -Label "SSH:" -Value "ssh admin@$IpAddress"
     if ($RootCaTrusted) {
         Write-SummaryRow -Label "HTTPS trust:" -Value "LabFoundry root CA imported for current user" -ValueColor Green
     } else {

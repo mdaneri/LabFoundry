@@ -74,6 +74,7 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "labfoundry-bootstrap-https" in script
     assert "labfoundry-bootstrap-https.service" in script
     assert "ExecStart=/opt/labfoundry/.venv/bin/python /opt/labfoundry/bin/labfoundry-bootstrap-https" in script
+    assert "EnvironmentFile=/etc/labfoundry/labfoundry.env" in script
     assert "After=network-online.target labfoundry-data-disks.service labfoundry-vmware-ovf-customize.service" in script
     assert "Wants=network-online.target labfoundry-data-disks.service" in script
     assert "ConditionPathExists=!/var/lib/labfoundry/first-boot-https.applied" in script

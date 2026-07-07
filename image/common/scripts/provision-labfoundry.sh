@@ -265,6 +265,7 @@ ConditionPathExists=!/var/lib/labfoundry/first-boot-https.applied
 
 [Service]
 Type=oneshot
+EnvironmentFile=/etc/labfoundry/labfoundry.env
 ExecStart=/opt/labfoundry/.venv/bin/python /opt/labfoundry/bin/labfoundry-bootstrap-https
 RemainAfterExit=yes
 
