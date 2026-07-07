@@ -30,6 +30,7 @@ def test_photon_provisioning_management_network_matches_eth0_only():
     assert "rm -f /etc/systemd/network/50-static-en.network /etc/systemd/network/99-dhcp-en.network" in script
     assert "seed_initial_data(db, include_examples=not appliance_mode, appliance_mode=appliance_mode)" in main
     assert "ensure_ca_state(db)" in main
+    assert main.index("refresh_startup_host_inventory(db, environment=settings.environment)") < main.index("ensure_ca_state(db)")
     assert "if include_examples:" in seed
     assert "management_https_enabled=appliance_mode" in seed
 
@@ -75,6 +76,10 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert script.index(". /etc/labfoundry/labfoundry.env") < script.index(bootstrap_invocation)
     assert "labfoundry-helper\" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real" in script
     assert "labfoundry-helper\" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real" in script
+    assert 'for db_file in "$LABFOUNDRY_STATE"/labfoundry.db "$LABFOUNDRY_STATE"/labfoundry.db-*; do' in script
+    assert 'chown labfoundry:labfoundry "$db_file"' in script
+    assert 'chown -R labfoundry:labfoundry "$LABFOUNDRY_STATE/apply/ca"' in script
+    assert 'find "$LABFOUNDRY_STATE/apply/ca" -type f -exec chmod 0600 {} +' in script
     assert "listen 80 default_server;" in script
     assert "return 308 https://\\$host\\$request_uri;" in script
     assert "listen 443 ssl default_server;" in script

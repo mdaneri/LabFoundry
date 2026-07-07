@@ -43,9 +43,9 @@ async def lifespan(app: FastAPI):
         configure_logging(db)
         appliance_mode = settings.environment == "appliance"
         seed_initial_data(db, include_examples=not appliance_mode, appliance_mode=appliance_mode)
+        refresh_startup_host_inventory(db, environment=settings.environment)
         if appliance_mode:
             ensure_ca_state(db)
-        refresh_startup_host_inventory(db, environment=settings.environment)
         initialize_factory_appliance_apply_baseline(db)
     monitor_sampler = start_monitor_sampler()
     try:

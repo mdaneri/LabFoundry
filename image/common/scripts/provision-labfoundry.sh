@@ -298,6 +298,15 @@ set +a
 "$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
 "$LABFOUNDRY_HOME/bin/labfoundry-helper" ca validate /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real
 "$LABFOUNDRY_HOME/bin/labfoundry-helper" ca apply /var/lib/labfoundry/apply/ca/labfoundry-ca.json --real
+for db_file in "$LABFOUNDRY_STATE"/labfoundry.db "$LABFOUNDRY_STATE"/labfoundry.db-*; do
+  if [ -e "$db_file" ]; then
+    chown labfoundry:labfoundry "$db_file"
+    chmod 0640 "$db_file"
+  fi
+done
+chown -R labfoundry:labfoundry "$LABFOUNDRY_STATE/apply/ca"
+find "$LABFOUNDRY_STATE/apply/ca" -type d -exec chmod 0750 {} +
+find "$LABFOUNDRY_STATE/apply/ca" -type f -exec chmod 0600 {} +
 . /var/lib/labfoundry/apply/ca/first-boot-management.env
 chown root:labfoundry "$LABFOUNDRY_FIRST_BOOT_KEY_PATH"
 chmod 0640 "$LABFOUNDRY_FIRST_BOOT_KEY_PATH"
