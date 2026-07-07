@@ -82,6 +82,25 @@ function Install-ApplianceRootCa {
     Write-Host "Trusted LabFoundry root CA for current user: $($certificate.Thumbprint)"
 }
 
+function Write-ConnectionSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$IpAddress,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$VmxPath,
+        [Parameter(Mandatory = $true)][bool]$RootCaTrusted
+    )
+
+    Write-Host ""
+    Write-Host "LabFoundry VMware appliance connection summary"
+    Write-Host "  Name:        $Name"
+    Write-Host "  VMX:         $VmxPath"
+    Write-Host "  Console URL: https://$IpAddress/"
+    Write-Host "  API URL:     https://$IpAddress/openapi.json"
+    Write-Host "  SSH:         ssh admin@$IpAddress"
+    Write-Host "  HTTPS trust: $(if ($RootCaTrusted) { 'LabFoundry root CA imported for current user' } else { 'pass -TrustRootCa to trust this appliance root CA' })"
+    Write-Host ""
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 
 if ($SkipLabNetworkAdapters -and $IncludeLabNetworkAdapters) {
@@ -196,7 +215,7 @@ if (-not $NoStart -and -not $WhatIfPreference) {
 Write-Host "LabFoundry Workstation test VM ready: $Name"
 Write-Host "Appliance VMX: $targetVmx"
 
-if (($WaitForIp -or $TrustRootCa) -and -not $NoStart -and -not $WhatIfPreference) {
+if (-not $NoStart -and -not $WhatIfPreference) {
     $ip = & (Join-Path $PSScriptRoot 'get-labfoundry-vm-ip.ps1') `
         -VmxPath $targetVmx `
         -VmrunPath $VmrunPath `
@@ -207,4 +226,5 @@ if (($WaitForIp -or $TrustRootCa) -and -not $NoStart -and -not $WhatIfPreference
     if ($TrustRootCa) {
         Install-ApplianceRootCa -IpAddress $ip -Name $Name
     }
+    Write-ConnectionSummary -IpAddress $ip -Name $Name -VmxPath $targetVmx -RootCaTrusted ([bool]$TrustRootCa)
 }
