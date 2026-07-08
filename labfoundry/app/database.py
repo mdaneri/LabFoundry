@@ -37,6 +37,7 @@ def init_db() -> None:
     _ensure_sqlite_user_sync_columns()
     _ensure_sqlite_appliance_settings_columns()
     _ensure_sqlite_chrony_settings_columns()
+    _ensure_sqlite_dns_security_columns()
     _ensure_sqlite_ca_columns()
     _ensure_sqlite_vcf_depot_columns()
     _ensure_sqlite_esxi_pxe_columns()
@@ -143,13 +144,89 @@ def _ensure_sqlite_chrony_settings_columns() -> None:
         "listen_address": "VARCHAR(240) DEFAULT ''",
         "port": "INTEGER DEFAULT 123",
         "upstream_servers": "TEXT DEFAULT 'time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com'",
+        "upstream_sources_json": "TEXT DEFAULT ''",
         "allow_clients": "TEXT DEFAULT 'any'",
+        "nts_server_enabled": "BOOLEAN DEFAULT 0",
+        "nts_server_cert_path": "VARCHAR(300) DEFAULT ''",
+        "nts_server_key_path": "VARCHAR(300) DEFAULT ''",
+        "nts_ke_port": "INTEGER DEFAULT 4460",
+        "command_port_disabled": "BOOLEAN DEFAULT 0",
+        "minsources": "INTEGER",
+        "maxchange_seconds": "INTEGER",
+        "authselectmode": "VARCHAR(20) DEFAULT ''",
         "config_path": "VARCHAR(240) DEFAULT '/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf'",
     }
     with engine.begin() as connection:
         for name, definition in columns.items():
             if name not in existing:
                 connection.execute(text(f"ALTER TABLE chrony_settings ADD COLUMN {name} {definition}"))
+
+
+def _ensure_sqlite_dns_security_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    with engine.begin() as connection:
+        if "dns_settings" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("dns_settings")}
+            columns = {
+                "dnssec_enabled": "BOOLEAN DEFAULT 0",
+                "rebind_protection_enabled": "BOOLEAN DEFAULT 0",
+                "rebind_domain_exemptions": "TEXT DEFAULT ''",
+                "query_logging_mode": "VARCHAR(20) DEFAULT 'off'",
+            }
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE dns_settings ADD COLUMN {name} {definition}"))
+        if "dns_records" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("dns_records")}
+            if "record_data_json" not in existing:
+                connection.execute(text("ALTER TABLE dns_records ADD COLUMN record_data_json TEXT DEFAULT ''"))
+            indexes = connection.execute(text("PRAGMA index_list('dns_records')")).fetchall()
+            has_old_unique = False
+            has_new_unique = False
+            for index in indexes:
+                index_name = index[1]
+                is_unique = bool(index[2])
+                if not is_unique:
+                    continue
+                columns = [row[2] for row in connection.execute(text(f"PRAGMA index_info('{index_name}')")).fetchall()]
+                if columns == ["hostname", "record_type"]:
+                    has_old_unique = True
+                if columns == ["hostname", "record_type", "address"]:
+                    has_new_unique = True
+            if has_old_unique and not has_new_unique:
+                connection.execute(text("ALTER TABLE dns_records RENAME TO dns_records_old_unique"))
+                connection.execute(
+                    text(
+                        """
+                        CREATE TABLE dns_records (
+                            id INTEGER NOT NULL,
+                            hostname VARCHAR(120) NOT NULL,
+                            record_type VARCHAR(20) NOT NULL,
+                            address VARCHAR(120) NOT NULL,
+                            record_data_json TEXT NOT NULL DEFAULT '',
+                            description TEXT,
+                            enabled BOOLEAN NOT NULL,
+                            created_at DATETIME NOT NULL,
+                            PRIMARY KEY (id),
+                            CONSTRAINT uq_dns_record_hostname_type_address UNIQUE (hostname, record_type, address)
+                        )
+                        """
+                    )
+                )
+                connection.execute(text("CREATE INDEX ix_dns_records_hostname ON dns_records (hostname)"))
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO dns_records (id, hostname, record_type, address, record_data_json, description, enabled, created_at)
+                        SELECT id, hostname, record_type, address, COALESCE(record_data_json, ''), description, enabled, created_at
+                        FROM dns_records_old_unique
+                        """
+                    )
+                )
+                connection.execute(text("DROP TABLE dns_records_old_unique"))
 
 
 def _ensure_sqlite_ca_columns() -> None:

@@ -296,7 +296,16 @@ class ChronySettings(Base):
     listen_address: Mapped[str] = mapped_column(String(240), default="")
     port: Mapped[int] = mapped_column(Integer, default=123)
     upstream_servers: Mapped[str] = mapped_column(Text, default="time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com")
+    upstream_sources_json: Mapped[str] = mapped_column(Text, default="")
     allow_clients: Mapped[str] = mapped_column(Text, default="any")
+    nts_server_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    nts_server_cert_path: Mapped[str] = mapped_column(String(300), default="")
+    nts_server_key_path: Mapped[str] = mapped_column(String(300), default="")
+    nts_ke_port: Mapped[int] = mapped_column(Integer, default=4460)
+    command_port_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    minsources: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    maxchange_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    authselectmode: Mapped[str] = mapped_column(String(20), default="")
     config_path: Mapped[str] = mapped_column(String(240), default="/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -349,18 +358,23 @@ class DnsSettings(Base):
     cache_size: Mapped[int] = mapped_column(Integer, default=1000)
     expand_hosts: Mapped[bool] = mapped_column(Boolean, default=True)
     authoritative: Mapped[bool] = mapped_column(Boolean, default=True)
+    dnssec_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    rebind_protection_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    rebind_domain_exemptions: Mapped[str] = mapped_column(Text, default="")
+    query_logging_mode: Mapped[str] = mapped_column(String(20), default="off")
     config_path: Mapped[str] = mapped_column(String(240), default="/etc/labfoundry/dnsmasq.d/labfoundry.conf")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class DnsRecord(Base):
     __tablename__ = "dns_records"
-    __table_args__ = (UniqueConstraint("hostname", "record_type", name="uq_dns_record_hostname_type"),)
+    __table_args__ = (UniqueConstraint("hostname", "record_type", "address", name="uq_dns_record_hostname_type_address"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     hostname: Mapped[str] = mapped_column(String(120), index=True)
     record_type: Mapped[str] = mapped_column(String(20), default="A")
     address: Mapped[str] = mapped_column(String(120))
+    record_data_json: Mapped[str] = mapped_column(Text, default="")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

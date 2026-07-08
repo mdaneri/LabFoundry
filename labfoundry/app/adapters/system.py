@@ -135,6 +135,21 @@ class SystemAdapter:
     def validate_chronyd_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("chronyd", "validate", config_path, dry_run_message="dry-run: Chrony validation command recorded")
 
+    def read_chronyd_status(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(
+                ["labfoundry-helper", "chronyd", "status"],
+                json.dumps(
+                    {
+                        "tracking": {"returncode": 0, "stdout": "Reference ID    : 00000000 (dry-run)\nLeap status     : Normal\n", "stderr": ""},
+                        "sources": {"returncode": 0, "stdout": "MS Name/IP address Stratum Poll Reach LastRx Last sample\n", "stderr": ""},
+                        "authdata": {"returncode": 0, "stdout": "Name/IP address Mode KeyID Type KLen Last Atmp NAK Cook CLen\n", "stderr": ""},
+                    },
+                    sort_keys=True,
+                ),
+            )
+        return self._helper_result("chronyd", "status", dry_run_message="dry-run: Chrony status command recorded", use_sudo=False)
+
     def apply_network_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("network", "apply", config_path, dry_run_message="dry-run: network apply command recorded")
 

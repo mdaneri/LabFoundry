@@ -54,7 +54,7 @@ COMMANDS: dict[str, set[str]] = {
     "dnsmasq": {"validate", "apply", "reload", "leases"},
     "ca": {"validate", "apply"},
     "kms": {"validate", "apply"},
-    "chronyd": {"validate", "apply"},
+    "chronyd": {"validate", "apply", "status"},
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
     "vcf-offline-depot": {"validate", "stage-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties"},
@@ -65,7 +65,7 @@ COMMANDS: dict[str, set[str]] = {
 }
 SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "generate-software-depot-id", "sync", "apply-https", "relocate-bundles", "restart-service"}
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
-NO_PATH_ACTIONS = {("dnsmasq", "leases"), ("dnsmasq", "reload"), ("vcf-offline-depot", "generate-software-depot-id")}
+NO_PATH_ACTIONS = {("dnsmasq", "leases"), ("dnsmasq", "reload"), ("chronyd", "status"), ("vcf-offline-depot", "generate-software-depot-id")}
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
 LABFOUNDRY_APPLY_DIR = Path("/var/lib/labfoundry/apply")
 FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
@@ -78,6 +78,12 @@ DNSMASQ_CONFIG_DIR = Path("/etc/labfoundry/dnsmasq.d")
 DNSMASQ_CONFIG_PATH = DNSMASQ_CONFIG_DIR / "labfoundry.conf"
 DNSMASQ_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/dnsmasq.service.d")
 DNSMASQ_SERVICE_DROPIN_PATH = DNSMASQ_SERVICE_DROPIN_DIR / "labfoundry.conf"
+DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH = DNSMASQ_APPLY_DIR / "labfoundry-trust-anchors.conf"
+DNSMASQ_DNSSEC_TRUST_ANCHOR_CANDIDATES = [
+    Path("/usr/share/dnsmasq/trust-anchors.conf"),
+    Path("/usr/share/dnsmasq-base/trust-anchors.conf"),
+    Path("/usr/share/doc/dnsmasq/trust-anchors.conf"),
+]
 ESXI_PXE_APPLY_DIR = Path("/var/lib/labfoundry/apply/esxi-pxe")
 ESXI_PXE_HTTP_BASE = Path("/var/lib/labfoundry/pxe/http/esxi")
 ESXI_PXE_HTTP_ROOT = Path("/var/lib/labfoundry/pxe/http/esxi/ks")
@@ -564,6 +570,56 @@ def _validate_dnsmasq_config(path: Path) -> subprocess.CompletedProcess[str]:
     return _run([dnsmasq, "--test", f"--conf-file={path}"])
 
 
+def _dnsmasq_config_uses_dnssec(path: Path) -> bool:
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip().lower()
+        if line == "dnssec":
+            return True
+    return False
+
+
+def _dnsmasq_supports_dnssec() -> tuple[bool, str]:
+    dnsmasq = shutil.which("dnsmasq")
+    if dnsmasq is None:
+        return False, "dnsmasq command not found"
+    result = _run([dnsmasq, "--version"])
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "dnsmasq --version failed").strip()
+    if "no-dnssec" in output:
+        return False, "installed dnsmasq reports no-DNSSEC"
+    if "dnssec" in output:
+        return True, ""
+    return False, "installed dnsmasq does not report DNSSEC support"
+
+
+def _find_dnsmasq_trust_anchor_file() -> Path | None:
+    for candidate in DNSMASQ_DNSSEC_TRUST_ANCHOR_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _prepare_dnsmasq_dnssec(path: Path) -> tuple[bool, str]:
+    if not _dnsmasq_config_uses_dnssec(path):
+        return True, ""
+    supported, detail = _dnsmasq_supports_dnssec()
+    if not supported:
+        return False, f"DNSSEC validation is enabled, but {detail}."
+    anchor_path = _find_dnsmasq_trust_anchor_file()
+    if anchor_path is None:
+        candidates = ", ".join(str(candidate) for candidate in DNSMASQ_DNSSEC_TRUST_ANCHOR_CANDIDATES)
+        return False, f"DNSSEC validation is enabled, but no package trust-anchor file was found. Checked: {candidates}."
+    DNSMASQ_APPLY_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(anchor_path, DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH)
+    try:
+        shutil.chown(DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH, user="labfoundry", group="labfoundry")
+    except LookupError:
+        pass
+    os.chmod(DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH, 0o644)
+    return True, ""
+
+
 def _dnsmasq_tftp_roots(path: Path) -> list[Path]:
     roots: list[Path] = []
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -686,6 +742,10 @@ def _handle_dnsmasq(action: str, args: list[str]) -> int:
             print(str(exc), file=sys.stderr)
             return 2
 
+        dnssec_ready, dnssec_error = _prepare_dnsmasq_dnssec(config_path)
+        if not dnssec_ready:
+            print(dnssec_error, file=sys.stderr)
+            return 2
         validation = _validate_dnsmasq_config(config_path)
         print(validation.stdout, end="")
         print(validation.stderr, end="", file=sys.stderr)
@@ -1628,6 +1688,8 @@ def _chronyd_config_errors(path: Path) -> list[str]:
     servers: list[str] = []
     listen_addresses: list[str] = []
     allow_entries: list[str] = []
+    nts_server_cert = ""
+    nts_server_key = ""
     enabled = _chronyd_config_enabled(path)
 
     def add_allow_entry(value: str) -> None:
@@ -1658,6 +1720,12 @@ def _chronyd_config_errors(path: Path) -> list[str]:
             parts = line.split()
             if len(parts) >= 2:
                 add_allow_entry(parts[1])
+        elif lower.startswith("ntsservercert "):
+            parts = line.split(maxsplit=1)
+            nts_server_cert = parts[1].strip() if len(parts) == 2 else ""
+        elif lower.startswith("ntsserverkey "):
+            parts = line.split(maxsplit=1)
+            nts_server_key = parts[1].strip() if len(parts) == 2 else ""
         elif lower.startswith("# labfoundry chrony client allow list:"):
             for item in line.split(":", 1)[1].replace(",", "\n").splitlines():
                 add_allow_entry(item)
@@ -1680,6 +1748,14 @@ def _chronyd_config_errors(path: Path) -> list[str]:
             ip_address(address)
         except ValueError:
             errors.append(f"chronyd bindaddress {address} must be a valid IP address.")
+    if nts_server_cert or nts_server_key:
+        if not nts_server_cert:
+            errors.append("chronyd NTS server config must include ntsservercert.")
+        if not nts_server_key:
+            errors.append("chronyd NTS server config must include ntsserverkey.")
+        for label, value in {"certificate": nts_server_cert, "key": nts_server_key}.items():
+            if value and not Path(value).is_absolute():
+                errors.append(f"chronyd NTS server {label} path must be absolute.")
     if allow_entries:
         if "all" in allow_entries and len(allow_entries) > 1:
             errors.append("chronyd client allow list can use 'all' only by itself.")
@@ -1702,7 +1778,33 @@ def _install_chronyd_config(config_path: Path) -> None:
     tmp_target.replace(CHRONY_CONFIG_PATH)
 
 
+def _chronyd_status() -> int:
+    chronyc = shutil.which("chronyc")
+    if chronyc is None:
+        print(json.dumps({"error": "chronyc command not found"}, sort_keys=True))
+        return 0
+    payload = {}
+    for key, command in {
+        "tracking": [chronyc, "tracking"],
+        "sources": [chronyc, "sources", "-v"],
+        "authdata": [chronyc, "authdata"],
+    }.items():
+        result = _run(command)
+        payload[key] = {
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
 def _handle_chronyd(action: str, args: list[str]) -> int:
+    if action == "status":
+        if args:
+            print("chronyd status does not accept a path", file=sys.stderr)
+            return 2
+        return _chronyd_status()
     if len(args) != 1:
         print(f"chronyd {action} requires exactly one staged config path", file=sys.stderr)
         return 2

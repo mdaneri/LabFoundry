@@ -8573,12 +8573,26 @@ def test_duplicate_dns_record_form_shows_conflict(client):
 
     page = client.get("/dns")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    duplicate = client.post(
+    same_owner_different_value = client.post(
         "/dns/records",
         data={
             "hostname": "duplicate.labfoundry.internal",
             "record_type": "A",
             "address": "192.168.50.41",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+    )
+    assert same_owner_different_value.status_code == 200
+
+    page = client.get("/dns")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    duplicate = client.post(
+        "/dns/records",
+        data={
+            "hostname": "duplicate.labfoundry.internal",
+            "record_type": "A",
+            "address": "192.168.50.40",
             "enabled": "on",
             "csrf": csrf,
         },

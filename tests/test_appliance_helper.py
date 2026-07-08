@@ -1642,6 +1642,59 @@ def test_dnsmasq_helper_validates_staged_config(monkeypatch, tmp_path):
     assert commands == [["/usr/sbin/dnsmasq", "--test", f"--conf-file={config_path}"]]
 
 
+def test_dnsmasq_helper_prepares_dnssec_trust_anchors(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "dnsmasq"
+    anchor_source = tmp_path / "usr" / "share" / "dnsmasq" / "trust-anchors.conf"
+    apply_dir.mkdir(parents=True)
+    anchor_source.parent.mkdir(parents=True)
+    anchor_source.write_text("trust-anchor=.,20326,8,2,abc\n", encoding="utf-8")
+    config_path = apply_dir / "labfoundry.conf"
+    anchor_target = apply_dir / "labfoundry-trust-anchors.conf"
+    config_path.write_text(f"dnssec\nconf-file={anchor_target}\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command == ["/usr/sbin/dnsmasq", "--version"]:
+            return subprocess.CompletedProcess(command, 0, "Compile time options: DNSSEC\n", "")
+        return subprocess.CompletedProcess(command, 0, "dnsmasq: syntax check OK.\n", "")
+
+    monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH", anchor_target)
+    monkeypatch.setattr(helper, "DNSMASQ_DNSSEC_TRUST_ANCHOR_CANDIDATES", [anchor_source])
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/dnsmasq" if command == "dnsmasq" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_dnsmasq("validate", [str(config_path)]) == 0
+
+    assert anchor_target.read_text(encoding="utf-8") == "trust-anchor=.,20326,8,2,abc\n"
+    assert commands == [
+        ["/usr/sbin/dnsmasq", "--version"],
+        ["/usr/sbin/dnsmasq", "--test", f"--conf-file={config_path}"],
+    ]
+
+
+def test_dnsmasq_helper_rejects_dnssec_when_package_lacks_support(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "dnsmasq"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry.conf"
+    config_path.write_text("dnssec\n", encoding="utf-8")
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, "Compile time options: no-DNSSEC\n", "")
+
+    monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/dnsmasq" if command == "dnsmasq" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_dnsmasq("validate", [str(config_path)]) == 2
+    captured = capsys.readouterr()
+    assert "DNSSEC validation is enabled" in captured.err
+    assert "no-DNSSEC" in captured.err
+
+
 def test_dnsmasq_helper_apply_installs_config_dropin_and_enables_service(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "dnsmasq"
@@ -3241,6 +3294,31 @@ def test_chronyd_helper_disabled_apply_allows_empty_upstream_list(monkeypatch, t
 
     assert not chrony_conf.exists()
     assert commands == [["systemctl", "disable", "--now", "chronyd.service"]]
+
+
+def test_chronyd_helper_status_reads_tracking_sources_and_authdata(monkeypatch, capsys):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, f"{' '.join(command[1:])} ok\n", "")
+
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/chronyc" if command == "chronyc" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_chronyd("status", []) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["tracking"]["stdout"] == "tracking ok\n"
+    assert payload["sources"]["stdout"] == "sources -v ok\n"
+    assert payload["authdata"]["stdout"] == "authdata ok\n"
+    assert commands == [
+        ["/usr/bin/chronyc", "tracking"],
+        ["/usr/bin/chronyc", "sources", "-v"],
+        ["/usr/bin/chronyc", "authdata"],
+    ]
 
 
 def test_appliance_settings_hostname_fallback_writes_etc_hostname(monkeypatch, tmp_path):

@@ -439,6 +439,58 @@ function escapeHtml(value) {
 }
 
 function dnsRecordTypeLabel(value) {
+  const labels = {
+    A: "A (IPv4)",
+    AAAA: "AAAA (IPv6)",
+    CNAME: "CNAME (alias)",
+    TXT: "TXT",
+    SRV: "SRV",
+    MX: "MX",
+    CAA: "CAA",
+    PTR: "PTR",
+  };
+  if (labels[value]) {
+    return labels[value];
+  }
+  return String(value || "A");
+}
+
+function dnsRecordTypeOptions() {
+  return {
+    A: "A (IPv4)",
+    AAAA: "AAAA (IPv6)",
+    CNAME: "CNAME (alias)",
+    TXT: "TXT",
+    SRV: "SRV",
+    MX: "MX",
+    CAA: "CAA",
+    PTR: "PTR",
+  };
+}
+
+function dnsRecordValueHint(recordType) {
+  if (recordType === "SRV") {
+    return "target port priority weight";
+  }
+  if (recordType === "MX") {
+    return "target preference";
+  }
+  if (recordType === "CAA") {
+    return '0 issue "ca.example"';
+  }
+  if (recordType === "PTR") {
+    return "target hostname";
+  }
+  if (recordType === "TXT") {
+    return "text value";
+  }
+  if (recordType === "CNAME") {
+    return "target hostname";
+  }
+  return "enter value...";
+}
+
+function legacyDnsRecordTypeLabel(value) {
   if (value === "AAAA") {
     return "AAAA (IPv6)";
   }
@@ -5195,7 +5247,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           field: "record_type",
           editor: "list",
           editable: dnsRecordCellEditable,
-          editorParams: { values: { A: "A (IPv4)", AAAA: "AAAA (IPv6)", CNAME: "CNAME (alias)" } },
+          editorParams: { values: dnsRecordTypeOptions() },
           formatter: (cell) => dnsRecordTypeLabel(cell.getValue()),
           width: 130,
           headerSort: false,
@@ -5206,7 +5258,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           field: "address",
           editor: "input",
           editable: dnsRecordCellEditable,
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "enter value..."),
+          formatter: (cell) => dnsAddRowHintFormatter(cell, dnsRecordValueHint(cell.getRow().getData().record_type)),
           minWidth: 170,
           cellEdited: (cell) => autoSaveDnsRecord(cell, csrf),
         },

@@ -90,13 +90,67 @@
           <span class="field-label"><span>Port</span><button class="help-icon" type="button" data-help="NTP uses UDP 123. LabFoundry keeps Chrony fixed on this protocol port for predictable firewall and client behavior.">i</button></span>
           <input type="number" name="port" value="{{ chrony_settings.port }}" min="123" max="123">
         </label>
-        <label>
-          <span class="field-label"><span>Upstream servers</span><button class="help-icon" type="button" data-help="One upstream NTP server per line. Chrony uses these as its own time sources when the Chrony apply unit runs.">i</button></span>
-          <textarea name="upstream_servers" rows="5">{{ chrony_settings.upstream_servers }}</textarea>
-        </label>
+        <input type="hidden" name="upstream_servers" value="{{ chrony_settings.upstream_servers }}">
+        <div class="form-field">
+          <span class="field-label"><span>Upstream sources</span><button class="help-icon" type="button" data-help="Chrony time sources used after global appliance apply. Enable NTS per source when the upstream supports Network Time Security; disabled rows stay in desired state but are not rendered.">i</button></span>
+          <table class="data-table compact">
+            <thead>
+              <tr><th>Source</th><th>NTS</th><th>Max delay</th><th>Enabled</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              {% for source in chrony_settings_json.upstream_sources + [{"source": "", "enabled": true, "use_nts": false, "description": "", "maxdelay": ""}] %}
+                <tr>
+                  <td><input class="table-input" name="upstream_source" value="{{ source.source }}" placeholder="time.example.com"></td>
+                  <td>
+                    <label class="inline-check">
+                      <input type="checkbox" name="upstream_use_nts" value="{{ loop.index0 }}" {{ "checked" if source.use_nts else "" }}>
+                      <span>NTS</span>
+                    </label>
+                  </td>
+                  <td><input class="table-input short" name="upstream_maxdelay" value="{{ source.maxdelay }}" placeholder="seconds"></td>
+                  <td>
+                    <label class="inline-check">
+                      <input type="checkbox" name="upstream_enabled" value="{{ loop.index0 }}" {{ "checked" if source.enabled else "" }}>
+                      <span>enabled</span>
+                    </label>
+                  </td>
+                  <td><input class="table-input" name="upstream_description" value="{{ source.description }}" placeholder="optional note"></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
         <label>
           <span class="field-label"><span>Allowed clients</span><button class="help-icon" type="button" data-help="Use any or one IPv4/IPv6 CIDR per line for Chrony allow rules. Firewall source groups can still narrow UDP 123 exposure during Firewall apply.">i</button></span>
           <textarea name="allow_clients" rows="4">{{ chrony_settings.allow_clients }}</textarea>
+        </label>
+        <label class="switch-field"><span class="field-label"><span>NTS server</span><button class="help-icon" type="button" data-help="Enables Chrony NTS-KE for lab clients using CA-managed certificate and key paths. Host listeners and TCP 4460 firewall rules change only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="nts_server_enabled" {{ "checked" if chrony_settings.nts_server_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label>
+          <span class="field-label"><span>NTS certificate path</span><button class="help-icon" type="button" data-help="Absolute appliance path to the CA-managed server certificate used by Chrony NTS server mode.">i</button></span>
+          <input name="nts_server_cert_path" value="{{ chrony_settings.nts_server_cert_path }}" autocomplete="off">
+        </label>
+        <label>
+          <span class="field-label"><span>NTS key path</span><button class="help-icon" type="button" data-help="Absolute appliance path to the CA-managed private key used by Chrony NTS server mode. The key contents are never rendered in previews.">i</button></span>
+          <input name="nts_server_key_path" value="{{ chrony_settings.nts_server_key_path }}" autocomplete="off">
+        </label>
+        <label class="switch-field"><span class="field-label"><span>Disable command port</span><button class="help-icon" type="button" data-help="Renders cmdport 0 to disable Chrony's network command port. Local LabFoundry status reads still use the allowlisted helper path.">i</button></span><input class="switch-input" type="checkbox" name="command_port_disabled" {{ "checked" if chrony_settings.command_port_disabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <div class="form-grid">
+          <label>
+            <span class="field-label"><span>Minimum sources</span><button class="help-icon" type="button" data-help="Optional Chrony minsources value. Leave blank for Chrony's default source-selection behavior.">i</button></span>
+            <input type="number" name="minsources" min="1" value="{{ chrony_settings.minsources or '' }}">
+          </label>
+          <label>
+            <span class="field-label"><span>Max change seconds</span><button class="help-icon" type="button" data-help="Optional maxchange threshold in seconds for Chrony clock corrections. Leave blank to omit the directive.">i</button></span>
+            <input type="number" name="maxchange_seconds" min="1" value="{{ chrony_settings.maxchange_seconds or '' }}">
+          </label>
+        </div>
+        <label>
+          <span class="field-label"><span>Auth select mode</span><button class="help-icon" type="button" data-help="Optional Chrony authselectmode for authenticated source preference. Leave blank for the default.">i</button></span>
+          <select name="authselectmode">
+            {% for mode in ["", "ignore", "require", "prefer", "mix"] %}
+              <option value="{{ mode }}" {{ "selected" if chrony_settings.authselectmode == mode else "" }}>{{ mode or "default" }}</option>
+            {% endfor %}
+          </select>
         </label>
         <p id="ntp-settings-autosave-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
       </form>
@@ -121,6 +175,19 @@
       <div class="terminal-note">
         <strong data-ntp-config-path>{{ chrony_settings.config_path }}</strong>
         <code data-ntp-config-preview>{{ ntp_config_preview }}</code>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Source Health</h2>
+        <span class="status-pill {{ 'muted' if ntp_chronyc_status_dry_run else ('warn' if ntp_chronyc_status_error else 'good') }}">{{ "dry-run" if ntp_chronyc_status_dry_run else ("needs attention" if ntp_chronyc_status_error else "available") }}</span>
+      </div>
+      {% if ntp_chronyc_status_error %}
+        <div class="alert warning">{{ ntp_chronyc_status_error }}</div>
+      {% endif %}
+      <div class="terminal-note">
+        <strong>chronyc tracking / sources / authdata</strong>
+        <code>{{ ntp_chronyc_status }}</code>
       </div>
     </div>
   </aside>

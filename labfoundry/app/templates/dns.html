@@ -98,6 +98,11 @@
                           <option value="A" {{ "selected" if record.record_type == "A" else "" }}>A (IPv4)</option>
                           <option value="AAAA" {{ "selected" if record.record_type == "AAAA" else "" }}>AAAA (IPv6)</option>
                           <option value="CNAME" {{ "selected" if record.record_type == "CNAME" else "" }}>CNAME (alias)</option>
+                          <option value="TXT" {{ "selected" if record.record_type == "TXT" else "" }}>TXT</option>
+                          <option value="SRV" {{ "selected" if record.record_type == "SRV" else "" }}>SRV</option>
+                          <option value="MX" {{ "selected" if record.record_type == "MX" else "" }}>MX</option>
+                          <option value="CAA" {{ "selected" if record.record_type == "CAA" else "" }}>CAA</option>
+                          <option value="PTR" {{ "selected" if record.record_type == "PTR" else "" }}>PTR</option>
                         </select>
                       </td>
                       <td><input class="table-input" name="address" value="{{ record.address }}" form="dns-record-edit-{{ record.id }}" aria-label="Record value for {{ record.host_label or record.hostname or 'DNS record' }}"></td>
@@ -179,7 +184,7 @@
                   </label>
                 </div>
                 <label>
-                  <span class="field-label"><span>Zone contents</span><button class="help-icon" type="button" data-help="Paste BIND-style zone records. LabFoundry imports A, AAAA, and CNAME records into this managed domain.">i</button></span>
+                    <span class="field-label"><span>Zone contents</span><button class="help-icon" type="button" data-help="Paste BIND-style zone records. LabFoundry imports A, AAAA, CNAME, TXT, SRV, MX, CAA, and PTR records into this managed domain.">i</button></span>
                   <textarea id="zone-file-editor-{{ loop.index }}" class="monospace-textarea" name="zone_text" rows="12" data-codemirror-editor data-codemirror-language="labfoundry-zone">{{ zone_editor_text if active_zone_import_domain == group.domain else group.zone_file_text }}</textarea>
                 </label>
                 <button class="button primary" type="submit">Import zone file into {{ group.domain }}</button>
@@ -307,6 +312,15 @@
         <label><span class="field-label"><span>Cache size</span><button class="help-icon" type="button" data-help="Maximum number of DNS responses dnsmasq keeps in memory to speed repeated lookups.">i</button></span><input type="number" name="cache_size" min="0" value="{{ dns_settings.cache_size }}"></label>
         <label class="switch-field"><span class="field-label"><span>Expand hosts</span><button class="help-icon" type="button" data-help="Adds the primary managed domain to simple hostnames so short names can resolve inside the lab.">i</button></span><input class="switch-input" type="checkbox" name="expand_hosts" {{ "checked" if dns_settings.expand_hosts else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>Authoritative</span><button class="help-icon" type="button" data-help="Marks LabFoundry dnsmasq as authoritative for this lab network's local DNS/DHCP data.">i</button></span><input class="switch-input" type="checkbox" name="authoritative" {{ "checked" if dns_settings.authoritative else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>DNSSEC validation</span><button class="help-icon" type="button" data-help="Renders dnsmasq DNSSEC validation and uses package-provided trust anchors during appliance validation. Existing labs stay unchanged until this desired state is applied.">i</button></span><input class="switch-input" type="checkbox" name="dnssec_enabled" {{ "checked" if dns_settings.dnssec_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Rebind protection</span><button class="help-icon" type="button" data-help="Blocks upstream DNS answers that point public names at private addresses. Add exemptions for intentional split-horizon lab domains before applying.">i</button></span><input class="switch-input" type="checkbox" name="rebind_protection_enabled" {{ "checked" if dns_settings.rebind_protection_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label><span class="field-label"><span>Rebind exemptions</span><button class="help-icon" type="button" data-help="One domain per line that may legitimately resolve to private or lab addresses through upstream DNS when rebind protection is enabled.">i</button></span><textarea name="rebind_domain_exemptions" rows="2" placeholder="corp.example.com">{{ dns_settings.rebind_domain_exemptions }}</textarea></label>
+        <label><span class="field-label"><span>Query logging</span><button class="help-icon" type="button" data-help="Temporarily logs DNS queries with extra detail for troubleshooting. Query names can be sensitive and log volume can grow quickly.">i</button></span>
+          <select name="query_logging_mode">
+            <option value="off" {{ "selected" if dns_settings.query_logging_mode == "off" else "" }}>off</option>
+            <option value="queries-extra" {{ "selected" if dns_settings.query_logging_mode == "queries-extra" else "" }}>log queries with extra detail</option>
+          </select>
+        </label>
         <p id="dns-settings-autosave-status" class="autosave-status" aria-live="polite">Changes save automatically.</p>
       </form>
     </div>

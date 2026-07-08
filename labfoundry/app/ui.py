@@ -120,6 +120,7 @@ from labfoundry.app.security import (
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+    dump_dns_record_data,
     compact_dhcp_range_expression,
     dhcp_bind_target_families,
     dns_domain_warnings,
@@ -286,8 +287,10 @@ from labfoundry.app.services.chrony import (
     CHRONY_DEFAULT_HOSTNAME,
     CHRONY_DEFAULT_UPSTREAM_SERVERS,
     CHRONY_STAGED_CONFIG_PATH,
+    dump_chrony_upstream_sources,
     join_allow_clients,
     chrony_settings_to_dict,
+    chrony_upstream_sources,
     render_chrony_config,
     split_allow_clients,
     validate_chrony_state,
@@ -1404,6 +1407,7 @@ def ntp_context(db: Session) -> dict:
     available_interfaces = service_bind_options(db)
     config_preview = render_chrony_config(settings)
     validation_errors = validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})
+    status_result = SystemAdapter().read_chronyd_status()
     return {
         "chrony_settings": settings,
         "chrony_settings_json": chrony_settings_to_dict(settings),
@@ -1416,6 +1420,9 @@ def ntp_context(db: Session) -> dict:
         "ntp_config_preview": config_preview,
         "ntp_validation_errors": validation_errors,
         "ntp_service_status": service_runtime_status(db, "chronyd"),
+        "ntp_chronyc_status": status_result.stdout,
+        "ntp_chronyc_status_error": status_result.stderr if status_result.returncode != 0 else "",
+        "ntp_chronyc_status_dry_run": status_result.dry_run,
     }
 
 
@@ -4064,6 +4071,7 @@ def dns_record_payload(record: DnsRecord, domain: str) -> dict:
         "domain": domain,
         "record_type": record.record_type,
         "address": record.address,
+        "record_data_json": record.record_data_json or "",
         "description": record.description or "",
         "enabled": record.enabled,
         **dns_record_reverse_status(record),
@@ -7467,6 +7475,10 @@ def update_dns_from_ui(
     cache_size: int = Form(1000),
     expand_hosts: str | None = Form(None),
     authoritative: str | None = Form(None),
+    dnssec_enabled: str | None = Form(None),
+    rebind_protection_enabled: str | None = Form(None),
+    rebind_domain_exemptions: str = Form(""),
+    query_logging_mode: str = Form("off"),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -7508,6 +7520,10 @@ def update_dns_from_ui(
     settings.cache_size = cache_size
     settings.expand_hosts = expand_hosts == "on"
     settings.authoritative = authoritative == "on"
+    settings.dnssec_enabled = dnssec_enabled == "on"
+    settings.rebind_protection_enabled = rebind_protection_enabled == "on"
+    settings.rebind_domain_exemptions = join_domains(split_domains(rebind_domain_exemptions))
+    settings.query_logging_mode = query_logging_mode if query_logging_mode in {"off", "queries-extra"} else "off"
     settings.updated_at = utcnow()
     db.commit()
     record_audit(db, actor=identity.username, action="update_dns_settings", resource_type="dns", resource_id=str(settings.id))
@@ -7526,6 +7542,9 @@ def update_dns_from_ui(
                 "config_preview": context["config_preview"],
                 "observed_dhcp_upstream_servers": context["observed_dhcp_upstream_servers"],
                 "effective_upstream_servers": context["effective_upstream_servers"],
+                "dnssec_enabled": context["dns_settings"].dnssec_enabled,
+                "rebind_protection_enabled": context["dns_settings"].rebind_protection_enabled,
+                "query_logging_mode": context["dns_settings"].query_logging_mode,
             }
         )
     return RedirectResponse("/dns", status_code=303)
@@ -7626,6 +7645,7 @@ def create_dns_record_from_ui(
     hostname = normalize_dns_hostname(hostname, domain)
     record_type = record_type.strip().upper()
     address = address.strip()
+    record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
     if validation_errors:
         return render(
@@ -7640,8 +7660,9 @@ def create_dns_record_from_ui(
         )
     existing = db.execute(
         select(DnsRecord).where(
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type == record_type,
+            func.lower(DnsRecord.hostname) == hostname.lower(),
+            func.lower(DnsRecord.record_type) == record_type.lower(),
+            DnsRecord.address == address,
         )
     ).scalar_one_or_none()
     if existing:
@@ -7659,6 +7680,7 @@ def create_dns_record_from_ui(
         hostname=hostname,
         record_type=record_type,
         address=address,
+        record_data_json=record_data_json,
         description=description or None,
         enabled=enabled == "on",
     )
@@ -7720,6 +7742,7 @@ def edit_dns_record_from_ui(
     hostname = normalize_dns_hostname(hostname, domain)
     record_type = record_type.strip().upper()
     address = address.strip()
+    record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
     if validation_errors:
         return render(
@@ -7735,8 +7758,9 @@ def edit_dns_record_from_ui(
     existing = db.execute(
         select(DnsRecord).where(
             DnsRecord.id != record_id,
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type == record_type,
+            func.lower(DnsRecord.hostname) == hostname.lower(),
+            func.lower(DnsRecord.record_type) == record_type.lower(),
+            DnsRecord.address == address,
         )
     ).scalar_one_or_none()
     if existing:
@@ -7753,6 +7777,7 @@ def edit_dns_record_from_ui(
     record.hostname = hostname
     record.record_type = record_type
     record.address = address
+    record.record_data_json = record_data_json
     record.description = description or None
     record.enabled = enabled == "on"
     try:
@@ -7813,13 +7838,16 @@ def import_dns_hosts_from_ui(
                 select(DnsRecord).where(
                     DnsRecord.hostname == item["hostname"],
                     DnsRecord.record_type == item["record_type"],
+                    DnsRecord.address == item["address"],
                 )
             ).scalar_one_or_none()
         if existing:
             existing.address = str(item["address"])
+            existing.record_data_json = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             existing.description = str(item["description"] or "")
             existing.enabled = bool(item["enabled"])
         else:
+            item["record_data_json"] = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             db.add(DnsRecord(**item))
     try:
         db.commit()
@@ -7884,13 +7912,16 @@ def import_dns_zone_from_ui(
                 select(DnsRecord).where(
                     DnsRecord.hostname == item["hostname"],
                     DnsRecord.record_type == item["record_type"],
+                    DnsRecord.address == item["address"],
                 )
             ).scalar_one_or_none()
         if existing:
             existing.address = str(item["address"])
+            existing.record_data_json = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             existing.description = str(item["description"] or "")
             existing.enabled = bool(item["enabled"])
         else:
+            item["record_data_json"] = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             db.add(DnsRecord(**item))
     try:
         db.commit()
@@ -9219,7 +9250,19 @@ def update_chrony_settings_from_ui(
     listen_address: str = Form(""),
     port: int = Form(123),
     upstream_servers: str = Form(""),
+    upstream_source: list[str] = Form(default_factory=list),
+    upstream_enabled: list[str] = Form(default_factory=list),
+    upstream_use_nts: list[str] = Form(default_factory=list),
+    upstream_description: list[str] = Form(default_factory=list),
+    upstream_maxdelay: list[str] = Form(default_factory=list),
     allow_clients: str = Form("any"),
+    nts_server_enabled: str | None = Form(None),
+    nts_server_cert_path: str = Form(""),
+    nts_server_key_path: str = Form(""),
+    command_port_disabled: str | None = Form(None),
+    minsources: int | None = Form(None),
+    maxchange_seconds: int | None = Form(None),
+    authselectmode: str = Form(""),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -9240,8 +9283,40 @@ def update_chrony_settings_from_ui(
     settings.listen_interface = selected_interfaces
     settings.listen_address = selected_addresses
     settings.port = port
-    settings.upstream_servers = join_servers(split_servers(upstream_servers))
+    source_rows = []
+    max_rows = max(len(upstream_source), len(upstream_description), len(upstream_maxdelay))
+    enabled_indexes = {int(value) for value in upstream_enabled if str(value).isdigit()}
+    nts_indexes = {int(value) for value in upstream_use_nts if str(value).isdigit()}
+    for index in range(max_rows):
+        source = upstream_source[index].strip() if index < len(upstream_source) else ""
+        if not source:
+            continue
+        source_rows.append(
+            {
+                "id": f"source-{index + 1}",
+                "source": source,
+                "enabled": index in enabled_indexes,
+                "use_nts": index in nts_indexes,
+                "description": upstream_description[index].strip() if index < len(upstream_description) else "",
+                "maxdelay": upstream_maxdelay[index].strip() if index < len(upstream_maxdelay) else "",
+            }
+        )
+    if not source_rows:
+        source_rows = [
+            {"id": f"legacy-{index}", "source": server, "enabled": True, "use_nts": False, "description": "", "maxdelay": ""}
+            for index, server in enumerate(split_servers(upstream_servers), start=1)
+        ]
+    settings.upstream_sources_json = dump_chrony_upstream_sources(source_rows)
+    settings.upstream_servers = join_servers([str(row["source"]) for row in source_rows if row.get("enabled")])
     settings.allow_clients = join_allow_clients(split_allow_clients(allow_clients))
+    settings.nts_server_enabled = nts_server_enabled == "on"
+    settings.nts_server_cert_path = nts_server_cert_path.strip()
+    settings.nts_server_key_path = nts_server_key_path.strip()
+    settings.nts_ke_port = 4460
+    settings.command_port_disabled = command_port_disabled == "on"
+    settings.minsources = minsources if minsources and minsources > 0 else None
+    settings.maxchange_seconds = maxchange_seconds if maxchange_seconds and maxchange_seconds > 0 else None
+    settings.authselectmode = authselectmode.strip()
     settings.config_path = CHRONY_STAGED_CONFIG_PATH
     settings.updated_at = utcnow()
     db.add(settings)
@@ -9262,6 +9337,7 @@ def update_chrony_settings_from_ui(
                 "listen_addresses": split_addresses(saved_settings.listen_address),
                 "port": saved_settings.port,
                 "upstream_servers": context["chrony_settings_json"]["upstream_servers"],
+                "upstream_sources": context["chrony_settings_json"]["upstream_sources"],
                 "allow_clients": saved_settings.allow_clients,
                 "valid": not context["ntp_validation_errors"],
                 "validation_errors": context["ntp_validation_errors"],
