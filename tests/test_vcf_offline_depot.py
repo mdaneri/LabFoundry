@@ -273,7 +273,7 @@ def test_vcf_depot_validation_requires_user_unless_unauthenticated_access_is_ena
     assert warnings == []
 
 
-def test_vcf_depot_nginx_config_renders_basic_auth_by_default():
+def test_vcf_depot_nginx_config_renders_labfoundry_auth_request_by_default():
     settings = VcfOfflineDepotSettings(
         enabled=True,
         hostname="depot.labfoundry.internal",
@@ -288,8 +288,8 @@ def test_vcf_depot_nginx_config_renders_basic_auth_by_default():
     config = render_nginx_depot_config(settings)
 
     assert "# LabFoundry VCF Offline Depot user: vcf-depot" in config
-    assert 'auth_basic "LabFoundry VCF Offline Depot";' in config
-    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config
+    assert "auth_basic" not in config
+    assert "auth_basic_user_file" not in config
     assert "location = /PROD/" in config
     assert "location ^~ /static/" in config
     assert "location = /favicon.ico" in config
@@ -300,6 +300,7 @@ def test_vcf_depot_nginx_config_renders_basic_auth_by_default():
     assert "location = /requests" not in config
     assert "location ^~ /requests/" not in config
     assert "auth_request /_labfoundry_depot_auth;" in config
+    assert "error_page 401 = @labfoundry_depot_login;" in config
     assert "proxy_pass http://127.0.0.1:8000;" in config
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in config
 
@@ -308,6 +309,7 @@ def test_vcf_depot_nginx_config_renders_basic_auth_by_default():
 
     assert "# LabFoundry VCF Offline Depot unauthenticated access: true" in open_config
     assert "auth_basic" not in open_config
+    assert "auth_request /_labfoundry_depot_auth;" not in open_config
 
 
 def test_vcf_depot_validation_rejects_management_role_interfaces():
@@ -398,7 +400,9 @@ def test_vcf_depot_command_preview_uses_staged_secret_paths():
 
     preview = render_vcfdt_command_preview(settings, profiles)
 
+    assert "vcf-download-tool configuration get --software-depot-id" in preview
     assert "vcf-download-tool binaries list" in preview
+    assert preview.index("vcf-download-tool configuration get --software-depot-id") < preview.index("vcf-download-tool binaries list")
     assert "--depot-store=/mnt/labfoundry-vcf-offline-depot" in preview
     assert "VCFDT_HOME=/var/lib/labfoundry/vcfDownloadTool/active-tool" in preview
     assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in preview
@@ -430,8 +434,11 @@ def test_vcf_depot_download_profiles_use_activation_code_when_no_token_is_staged
 
     commands = vcfdt_commands_for_profile(settings, profile, download_token_present=False, activation_code_present=True)
 
-    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in commands[0]
-    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in commands[0]
+    assert commands[0] == ["vcf-download-tool", "configuration", "get", "--software-depot-id"]
+    assert commands[1][0:3] == ["vcf-download-tool", "binaries", "list"]
+    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in commands[1]
+    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in commands[1]
+    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in commands[2]
 
 
 def test_vcf_depot_command_preview_supports_patch_only_profiles():
