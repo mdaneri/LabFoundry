@@ -35,6 +35,8 @@ VCF_DEPOT_TOKEN_NAME_KEY = "vcf_depot_download_token_name"
 VCF_DEPOT_TOKEN_VALUE_KEY = "vcf_depot_download_token_value"
 VCF_DEPOT_ACTIVATION_NAME_KEY = "vcf_depot_activation_code_name"
 VCF_DEPOT_ACTIVATION_VALUE_KEY = "vcf_depot_activation_code_value"
+VCF_DEPOT_TOOL_VERSION_SOURCE_KEY = "vcf_depot_tool_version_source"
+VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND = "vcf-download-tool --version"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY = "vcf_depot_software_depot_id"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY = "vcf_depot_software_depot_id_generated_at"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY = "vcf_depot_software_depot_id_error"
@@ -136,6 +138,11 @@ def detect_vcf_download_tool_version(archive_path: str | Path) -> str:
         return ""
 
 
+def parse_vcf_download_tool_version(output: str) -> str:
+    match = re.search(r"\b\d+(?:\.\d+){2,}(?:[-+][A-Za-z0-9._-]+)?\b", output or "")
+    return match.group(0) if match else ""
+
+
 def _read_properties_from_archive(archive_path: str | Path) -> str:
     path = Path(archive_path)
     if not path.exists():
@@ -179,19 +186,6 @@ def default_vcf_depot_application_properties() -> str:
 
 
 def vcf_depot_application_properties_from_tool(settings: VcfOfflineDepotSettings) -> tuple[str, str]:
-    if settings.tool_archive_path:
-        archive_text = _read_properties_from_archive(settings.tool_archive_path)
-        if archive_text:
-            return archive_text, "VCFDT default"
-        for candidate in [
-            VCF_DEPOT_EXTRACT_DIR / "conf" / VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
-            VCF_DEPOT_EXTRACT_DIR / VCF_DEPOT_APPLICATION_PROPERTIES_NAME,
-        ]:
-            if candidate.is_file():
-                try:
-                    return candidate.read_text(encoding="utf-8"), "VCFDT default"
-                except OSError:
-                    pass
     return default_vcf_depot_application_properties(), "LabFoundry default"
 
 
@@ -217,6 +211,15 @@ def validate_vcf_download_tool_archive(archive_path: Path) -> None:
     except (EOFError, tarfile.TarError, OSError) as exc:
         raise ValueError(VCF_DEPOT_INVALID_ARCHIVE_MESSAGE) from exc
     _validate_tar_members(members, Path("vcf-download-tool-validation"))
+
+
+def validate_vcf_download_tool_upload_envelope(archive_path: Path) -> None:
+    try:
+        with archive_path.open("rb") as handle:
+            if handle.read(2) != b"\x1f\x8b":
+                raise ValueError(VCF_DEPOT_INVALID_ARCHIVE_MESSAGE)
+    except OSError as exc:
+        raise ValueError(VCF_DEPOT_INVALID_ARCHIVE_MESSAGE) from exc
 
 
 def _safe_extract_tar_gz(archive_path: Path, destination: Path) -> None:
@@ -354,8 +357,36 @@ def vcf_depot_service_state(settings: VcfOfflineDepotSettings, *, nginx_active: 
     }
 
 
-def vcf_depot_profile_to_dict(profile: VcfDepotDownloadProfile) -> dict[str, object]:
+def vcf_depot_profile_start_blocker(
+    profile: VcfDepotDownloadProfile,
+    *,
+    download_token_present: bool = False,
+    activation_code_present: bool = False,
+) -> str:
+    if not profile.enabled:
+        return "Enable the VCFDT download profile before starting a download."
+    profile_type = (profile.profile_type or "binaries").strip() or "binaries"
+    if profile_type == "esx" and not activation_code_present:
+        return "Upload a Broadcom activation code before starting this ESX profile."
+    if profile_type in {"binaries", "metadata"} and not (download_token_present or activation_code_present):
+        return "Upload a Broadcom download token or activation code before starting this profile."
+    if profile_type not in VCF_DEPOT_PROFILE_TYPES:
+        return "Choose a supported VCFDT profile type before starting a download."
+    return ""
+
+
+def vcf_depot_profile_to_dict(
+    profile: VcfDepotDownloadProfile,
+    *,
+    download_token_present: bool = False,
+    activation_code_present: bool = False,
+) -> dict[str, object]:
     component = profile.component or ""
+    start_blocker = vcf_depot_profile_start_blocker(
+        profile,
+        download_token_present=download_token_present,
+        activation_code_present=activation_code_present,
+    )
     return {
         "id": profile.id,
         "name": profile.name,
@@ -373,6 +404,8 @@ def vcf_depot_profile_to_dict(profile: VcfDepotDownloadProfile) -> dict[str, obj
         "enabled": profile.enabled,
         "status": profile.status,
         "notes": profile.notes or "",
+        "can_start": not start_blocker,
+        "start_blocker": start_blocker,
         "created_at": profile.created_at.isoformat() if profile.created_at else "",
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else "",
     }
@@ -390,6 +423,8 @@ def render_nginx_depot_config(
     *,
     certificate_path: str = "",
     key_path: str = "",
+    upstream_host: str = "127.0.0.1",
+    upstream_port: int = 8000,
 ) -> str:
     certificate_name = settings.server_certificate or settings.hostname or VCF_DEPOT_DEFAULT_HOSTNAME
     certificate_path = certificate_path or "/etc/labfoundry/vcf-offline-depot/certs/" + certificate_name + ".crt"
@@ -423,11 +458,147 @@ def render_nginx_depot_config(
         f"  ssl_certificate {certificate_path};",
         f"  ssl_certificate_key {key_path};",
         "",
+        "  location = / {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location ^~ /static/ {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location = /favicon.ico {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location = /manifest.webmanifest {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location = /service-worker.js {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location = /ca {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location ^~ /ca/ {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location = /requests {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location ^~ /requests/ {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
         "  location = /PROD {",
         "    return 301 /PROD/;",
         "  }",
         "",
-        "  location ^~ /PROD/ {",
+        "  location = /PROD/login {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location = /PROD/logout {",
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location = /_labfoundry_depot_auth {",
+        "    internal;",
+        f"    proxy_pass http://{upstream_host}:{upstream_port}/PROD/auth-check;",
+        "    proxy_pass_request_body off;",
+        "    proxy_set_header Content-Length \"\";",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Original-URI $request_uri;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location @labfoundry_depot_login {",
+        "    return 303 /PROD/login?next=$request_uri;",
+        "  }",
+        "",
+        "  location = /PROD/ {",
+        *(
+            [
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
+            ]
+            if auth_required
+            else []
+        ),
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location ~ ^/PROD/.*/$ {",
+        *(
+            [
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
+            ]
+            if auth_required
+            else []
+        ),
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
         *(
             [
                 '    auth_basic "LabFoundry VCF Offline Depot";',
@@ -436,11 +607,11 @@ def render_nginx_depot_config(
             if auth_required
             else []
         ),
-        f"    alias {settings.depot_store_path.rstrip('/')}/PROD/;",
+        f"    alias {settings.depot_store_path.rstrip('/')}/PROD/$1;",
         "    sendfile on;",
         "    tcp_nopush on;",
         "    directio 8m;",
-        "    autoindex on;",
+        "    autoindex off;",
         "    types { }",
         "    default_type application/octet-stream;",
         "  }",
@@ -693,7 +864,7 @@ def validate_vcf_depot_state(
     elif settings.tool_archive_path and not Path(settings.tool_archive_path).exists():
         errors.append("The configured VCF Download Tool file is not present on disk.")
     if settings.tool_archive_path and not settings.tool_version:
-        warnings.append("The VCF Download Tool version could not be detected from conf/tool-version.txt.")
+        warnings.append("The VCF Download Tool version will be detected with vcf-download-tool --version during appliance apply.")
 
     seen_names: set[str] = set()
     for profile in profiles:
@@ -711,10 +882,6 @@ def validate_vcf_depot_state(
             errors.append(f"VCFDT download profile {name or profile.id} has unsupported status {profile_status}.")
         if not profile.enabled:
             continue
-        if profile_type in {"binaries", "metadata"} and not (download_token_present or activation_code_present):
-            errors.append(f"VCFDT download profile {name or profile.id} requires an uploaded download token or activation-code file.")
-        if profile_type == "esx" and not activation_code_present:
-            errors.append(f"VCFDT ESX profile {name or profile.id} requires an uploaded activation-code file.")
         if profile_type == "esx":
             unsupported_platforms = [
                 platform

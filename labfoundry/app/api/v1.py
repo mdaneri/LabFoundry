@@ -130,6 +130,7 @@ from labfoundry.app.services.dnsmasq import (
     dns_domain_warnings,
     dns_settings_to_dict,
     dnsmasq_test_command,
+    effective_dns_upstream_servers,
     join_conditional_forwarders,
     join_domains,
     join_servers,
@@ -147,6 +148,7 @@ from labfoundry.app.services.dnsmasq import (
 from labfoundry.app.services.appliance_settings import (
     APPLIANCE_SETTINGS_STAGED_CONFIG_PATH,
     appliance_settings_to_dict,
+    management_dhcp_dns_context,
     management_interface_context,
     normalize_fqdn,
     normalize_multiline_values,
@@ -189,8 +191,9 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
+    VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND,
+    VCF_DEPOT_TOOL_VERSION_SOURCE_KEY,
     VCF_DEPOT_TOKEN_VALUE_KEY,
-    detect_vcf_download_tool_version,
     find_local_vcf_download_tool_archive,
     validate_vcf_depot_state,
     vcf_depot_service_state,
@@ -499,11 +502,18 @@ def get_vcf_offline_depot_settings(db: Session) -> VcfOfflineDepotSettings:
         settings.updated_at = utcnow()
         db.commit()
         db.refresh(settings)
+    if settings.tool_archive_path and settings.tool_version:
+        version_source = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOOL_VERSION_SOURCE_KEY)).scalar_one_or_none()
+        if not version_source or version_source.value != VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND:
+            settings.tool_version = ""
+            settings.updated_at = utcnow()
+            db.commit()
+            db.refresh(settings)
     if not settings.tool_archive_path:
         archive = find_local_vcf_download_tool_archive()
         if archive is not None:
             settings.tool_archive_path = str(archive)
-            settings.tool_version = detect_vcf_download_tool_version(archive)
+            settings.tool_version = ""
             settings.updated_at = utcnow()
             db.commit()
             db.refresh(settings)
@@ -1331,6 +1341,9 @@ def get_dnsmasq_state(db: Session) -> tuple[DnsSettings, list[DnsRecord], DhcpSe
     dhcp_scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
     dhcp_options = db.execute(select(DhcpOption).order_by(DhcpOption.scope_id, DhcpOption.option_code)).scalars().all()
     dhcp_reservations = db.execute(select(DhcpReservation).order_by(DhcpReservation.hostname)).scalars().all()
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    _management_interface, observed_dhcp_upstream_servers = management_dhcp_dns_context(physical_interfaces)
+    fallback_upstream_servers = observed_dhcp_upstream_servers if not effective_dns_upstream_servers(dns_settings) else []
     config_preview = render_dnsmasq_config(
         dns_settings=dns_settings,
         dns_records=dns_records,
@@ -1339,6 +1352,7 @@ def get_dnsmasq_state(db: Session) -> tuple[DnsSettings, list[DnsRecord], DhcpSe
         dhcp_scopes=dhcp_scopes,
         dhcp_options=dhcp_options,
         conditional_forwarders=conditional_forwarders,
+        fallback_upstream_servers=fallback_upstream_servers,
         esxi_pxe_boot=esxi_pxe_boot_settings(db),
     )
     return dns_settings, dns_records, dhcp_settings, dhcp_scopes, dhcp_options, dhcp_reservations, config_preview

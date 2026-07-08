@@ -58,6 +58,8 @@ def public_services_for_address(
                 "secondary_label": "",
                 "status": "available" if ca_settings.root_certificate_pem else "configured",
                 "pill": "good" if ca_settings.root_certificate_pem else "warn",
+                "scheme": "https",
+                "port": 443,
                 "dns_names": _service_dns_names(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME),
             }
         )
@@ -73,6 +75,8 @@ def public_services_for_address(
                 "secondary_label": "",
                 "status": "enabled",
                 "pill": "good",
+                "scheme": "http",
+                "port": int(boot.get("http_port") or 8080),
                 "dns_names": _service_dns_names(str(boot.get("hostname") or ESXI_PXE_DEFAULT_HOSTNAME)),
             }
         )
@@ -87,6 +91,8 @@ def public_services_for_address(
                 "secondary_label": "",
                 "status": "enabled",
                 "pill": "good",
+                "scheme": "https",
+                "port": int(vcf_depot_settings.port or 443),
                 "allow_unauthenticated_access": bool(vcf_depot_settings.allow_unauthenticated_access),
                 "dns_names": _service_dns_names(vcf_depot_settings.hostname or VCF_DEPOT_DEFAULT_HOSTNAME),
             }
@@ -102,6 +108,8 @@ def public_services_for_address(
                 "secondary_label": "",
                 "status": "link only",
                 "pill": "muted",
+                "scheme": "https",
+                "port": int(vcf_registry_settings.port or 443),
                 "dns_names": _service_dns_names(vcf_registry_settings.hostname or VCF_REGISTRY_DEFAULT_HOSTNAME),
             }
         )
@@ -164,6 +172,17 @@ def render_public_services_nginx_config(
                 "  client_max_body_size 1g;",
                     "",
                     *_proxy_location("/pxe/esxi/ks/", upstream_host, upstream_port),
+                    "",
+                    *_proxy_location("= /pxe/esxi/boot.ipxe", upstream_host, upstream_port),
+                    "",
+                    "  location = /pxe/esxi {",
+                    "    return 301 /pxe/esxi/;",
+                    "  }",
+                    "",
+                    "  location = /pxe/esxi/ {",
+                    "    default_type text/plain;",
+                    '    return 200 "LabFoundry ESXi PXE HTTP root\\n";',
+                    "  }",
                     "",
                     "  location /pxe/esxi/ {",
                     f"    alias {esxi_http_base.rstrip('/')}/;",

@@ -322,6 +322,13 @@ def dns_settings_to_dict(settings: DnsSettings, conditional_forwarders: str | No
     }
 
 
+def effective_dns_upstream_servers(settings: DnsSettings, fallback_servers: list[str] | None = None) -> list[str]:
+    configured = split_servers(settings.upstream_servers)
+    if configured:
+        return configured
+    return _ordered_unique([server.strip() for server in fallback_servers or [] if server.strip()])
+
+
 def dhcp_settings_to_scope(settings: DhcpSettings) -> dict:
     return {
         "id": 0,
@@ -619,6 +626,7 @@ def render_dnsmasq_config(
     dhcp_scopes: list[DhcpScope] | None = None,
     dhcp_options: list[DhcpOption] | None = None,
     conditional_forwarders: str | None = None,
+    fallback_upstream_servers: list[str] | None = None,
     esxi_pxe_boot: dict | None = None,
 ) -> str:
     domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
@@ -644,7 +652,7 @@ def render_dnsmasq_config(
         lines.append(f"interface={interface_name}")
     for listen_address in split_addresses(dns_settings.listen_address):
         lines.append(f"listen-address={listen_address}")
-    for server in split_servers(dns_settings.upstream_servers):
+    for server in effective_dns_upstream_servers(dns_settings, fallback_upstream_servers):
         lines.append(f"server={server}")
     for forwarder in split_conditional_forwarders(conditional_forwarders):
         lines.append(f"server=/{forwarder['domain']}/{forwarder['server']}")

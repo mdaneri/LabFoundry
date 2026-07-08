@@ -523,6 +523,11 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "service_vmnet_name = $ServiceVmnetName" in build_script
     assert "Using VMware services network $ServiceVmnetName" in build_script
     assert "prepare-networks.ps1" in build_script
+    assert "Resolve-WorkstationVmrunPath -Path $VmrunPath" in build_script
+    assert "Resolve-WorkstationOutputDirectory -PackerDirectory $PackerDirectory -OutputDirectory $OutputDirectory" in build_script
+    assert "Unregister-ExistingWorkstationTemplate" in build_script
+    assert "'unregister', $resolvedVmx" in build_script
+    assert "Refusing to unregister VMware template outside the configured image output directory" in build_script
     assert 'variable "service_vmnet_name"' in packer_template
     assert '"ethernet1.present"       = "TRUE"' in packer_template
     assert '"ethernet1.vnet"          = var.service_vmnet_name' in packer_template

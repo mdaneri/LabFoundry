@@ -1254,6 +1254,11 @@ def render_esxi_pxe_manifest(kickstarts: list[EsxiKickstart], hosts: list[EsxiPx
         "native_uefi_http_enabled",
         "native_uefi_http_url",
         "effective_native_uefi_http_url",
+        "ipxe_script_name",
+        "ipxe_script",
+        "tftp_ipxe_script",
+        "http_ipxe_path",
+        "http_ipxe_generated_path",
     }
     boot_manifest = {key: boot.get(key) for key in boot_manifest_keys}
     kickstart_paths = {row.id: canonical_http_path(row.id, row.content_hash) for row in kickstarts if row.id is not None}

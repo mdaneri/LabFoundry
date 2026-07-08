@@ -41,6 +41,12 @@ powershell.exe -ExecutionPolicy Bypass `
   -IsoChecksum "sha512:<checksum>"
 ```
 
+Before `packer build -force` replaces the Workstation output directory, the
+wrapper checks for an existing output VMX and unregisters it with
+`vmrun -T ws unregister`. The `vmrun.exe` path is resolved through the same
+Workstation discovery path used by the rest of the VMware scripts, and the
+cleanup is scoped to this image target's configured output directory.
+
 For lifecycle/demo images that should use real appliance adapters:
 
 ```powershell

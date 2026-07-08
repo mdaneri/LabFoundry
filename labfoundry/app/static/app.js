@@ -16,6 +16,7 @@ document.addEventListener("click", (event) => {
 });
 
 const DNS_ACTIVE_ZONE_STORAGE_KEY = "labfoundry:dns:active-zone";
+const PUBLIC_ADDRESS_MODE_COOKIE = "labfoundry_public_address_mode";
 const LABFOUNDRY_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 let applianceApplySidebarRefreshTimer = 0;
 
@@ -55,6 +56,57 @@ if (typeof window.fetch === "function" && !window.fetch.labFoundryApplyStatusWra
   };
   wrappedFetch.labFoundryApplyStatusWrapped = true;
   window.fetch = wrappedFetch;
+}
+
+function readCookieValue(name) {
+  const prefix = `${name}=`;
+  return document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix))
+    ?.slice(prefix.length) || "";
+}
+
+function writeCookieValue(name, value) {
+  document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=31536000; samesite=lax`;
+}
+
+function applyPublicAddressMode(mode) {
+  const normalized = mode === "ip" ? "ip" : "name";
+  document.querySelectorAll("[data-public-address-mode-option]").forEach((button) => {
+    if (button instanceof HTMLButtonElement) {
+      button.setAttribute("aria-pressed", button.dataset.publicAddressModeOption === normalized ? "true" : "false");
+    }
+  });
+  document.querySelectorAll("[data-public-service-card]").forEach((card) => {
+    if (!(card instanceof HTMLAnchorElement)) {
+      return;
+    }
+    const target = normalized === "ip" ? card.dataset.ipHref : card.dataset.nameHref;
+    if (target) {
+      card.href = target;
+    }
+  });
+}
+
+function initializePublicAddressModeToggle() {
+  const toggle = document.querySelector("[data-public-address-mode-toggle]");
+  if (!(toggle instanceof HTMLElement)) {
+    return;
+  }
+  const saved = decodeURIComponent(readCookieValue(PUBLIC_ADDRESS_MODE_COOKIE) || "");
+  const initialMode = saved === "ip" ? "ip" : "name";
+  applyPublicAddressMode(initialMode);
+  toggle.querySelectorAll("[data-public-address-mode-option]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      const mode = button.dataset.publicAddressModeOption === "ip" ? "ip" : "name";
+      writeCookieValue(PUBLIC_ADDRESS_MODE_COOKIE, mode);
+      applyPublicAddressMode(mode);
+    });
+  });
 }
 
 function registerLabFoundryPrismLanguages() {
@@ -4630,6 +4682,85 @@ async function autoSavePhysicalInterface(cell, csrf) {
   }
 }
 
+async function savePhysicalInterfaceRow(row, csrf, successMessage = "Saved") {
+  clearCaMessage("physical-interface-error");
+  const data = row.getData();
+  data.admin_state = data.admin_up ? "up" : "down";
+  if (data.ipv4_method === "dhcp") {
+    data.ip_cidr = "";
+  }
+  try {
+    await postNetworkAction(`/physical-interfaces/${data.id}/edit`, data, csrf, { reload: false });
+    showTransientGridStatus(successMessage);
+    await refreshNetworkSideStack();
+  } catch (error) {
+    showNetworkMessage("physical-interface-error", error instanceof Error ? error.message : "The physical interface could not be saved.");
+    throw error;
+  }
+}
+
+async function togglePhysicalInterfaceFromMenu(row, csrf) {
+  const data = row.getData();
+  const nextAdminUp = !Boolean(data.admin_up);
+  const actionLabel = nextAdminUp ? "Enable interface" : "Disable interface";
+  if (data.role === "management" && !nextAdminUp) {
+    showNetworkMessage("physical-interface-error", "The management interface must stay enabled.");
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `${actionLabel} ${data.name}?`,
+    message: `This changes ${data.name} desired admin state to ${nextAdminUp ? "up" : "down"}. It will not touch the appliance until global appliance apply runs.`,
+    label: actionLabel,
+  });
+  if (!confirmed) {
+    return;
+  }
+  const previousAdminUp = data.admin_up;
+  try {
+    await row.update({ admin_up: nextAdminUp, admin_state: nextAdminUp ? "up" : "down" });
+    await savePhysicalInterfaceRow(row, csrf, nextAdminUp ? "Enabled" : "Disabled");
+  } catch (_error) {
+    await row.update({ admin_up: previousAdminUp, admin_state: previousAdminUp ? "up" : "down" });
+  }
+}
+
+async function convertManagementDhcpInterfaceToStatic(row, csrf) {
+  const data = row.getData();
+  const observedIpv4 = String(data.host_ip_cidr || "").trim();
+  const observedIpv6 = String(data.host_ipv6_cidr || "").trim();
+  if (data.role !== "management" || data.ipv4_method !== "dhcp") {
+    showNetworkMessage("physical-interface-error", "Only a management interface using IPv4 DHCP can be converted to static addressing.");
+    return;
+  }
+  if (!observedIpv4 && !observedIpv6) {
+    showNetworkMessage("physical-interface-error", `${data.name} has no observed DHCP IPv4 or IPv6 CIDR to copy into desired state.`);
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: `Convert ${data.name} DHCP lease to static?`,
+    message: `This copies the observed DHCP address${observedIpv6 ? "es" : ""} into desired IPv4/IPv6 CIDR fields and changes IPv4 method to static. If DHCP-provided DNS was being used, LabFoundry also preserves it as static resolver or DNS forwarder desired state. The appliance is not changed until global appliance apply runs.`,
+    label: "Convert to static",
+  });
+  if (!confirmed) {
+    return;
+  }
+  const previous = {
+    ipv4_method: data.ipv4_method,
+    ip_cidr: data.ip_cidr,
+    ipv6_cidr: data.ipv6_cidr,
+  };
+  try {
+    await row.update({
+      ipv4_method: "static",
+      ip_cidr: observedIpv4 || data.ip_cidr || "",
+      ipv6_cidr: observedIpv6 || data.ipv6_cidr || "",
+    });
+    await savePhysicalInterfaceRow(row, csrf, "Converted");
+  } catch (_error) {
+    await row.update(previous);
+  }
+}
+
 async function forgetPhysicalInterfaceFromMenu(row, csrf) {
   clearCaMessage("physical-interface-error");
   const data = row.getData();
@@ -4746,6 +4877,22 @@ function initializePhysicalInterfacesTable() {
       reactiveData: false,
       rowContextMenu: [
         {
+          label: (component) => (component.getData().admin_up ? "Disable interface" : "Enable interface"),
+          disabled: (component) => {
+            const data = component.getData();
+            return data.role === "management" && data.admin_up;
+          },
+          action: (event, row) => togglePhysicalInterfaceFromMenu(row, csrf),
+        },
+        {
+          label: "Convert DHCP lease to static",
+          disabled: (component) => {
+            const data = component.getData();
+            return data.role !== "management" || data.ipv4_method !== "dhcp" || (!data.host_ip_cidr && !data.host_ipv6_cidr);
+          },
+          action: (event, row) => convertManagementDhcpInterfaceToStatic(row, csrf),
+        },
+        {
           label: "Forget missing interface",
           disabled: (component) => component.getData().oper_state !== "missing",
           action: (event, row) => forgetPhysicalInterfaceFromMenu(row, csrf),
@@ -4851,6 +4998,10 @@ function initializePhysicalInterfacesTable() {
           field: "admin_up",
           formatter: adminStateFormatter,
           editor: "tickCross",
+          editable: (cell) => {
+            const data = cell.getRow().getData();
+            return data.role !== "management" || !data.admin_up;
+          },
           hozAlign: "center",
           width: 110,
           headerSort: false,
@@ -6534,6 +6685,27 @@ function updateDnsValidation(payload = {}) {
     configPreview.textContent = payload.config_preview;
     highlightConfigPreviewElement(configPreview);
   }
+  const dhcpUpstreams = Array.isArray(payload.observed_dhcp_upstream_servers) ? payload.observed_dhcp_upstream_servers : null;
+  if (dhcpUpstreams) {
+    const upstreamInput = document.querySelector('form[action="/dns/settings"] textarea[name="upstream_servers"]');
+    if (upstreamInput instanceof HTMLTextAreaElement) {
+      upstreamInput.placeholder = dhcpUpstreams.length ? `DHCP: ${dhcpUpstreams.join(", ")}` : "";
+    }
+    const upstreamList = document.querySelector("[data-dns-dhcp-upstreams]");
+    if (upstreamList instanceof HTMLElement) {
+      const values = upstreamList.querySelector("span:last-child");
+      if (values instanceof HTMLElement) {
+        values.innerHTML = "";
+        dhcpUpstreams.forEach((server) => {
+          const code = document.createElement("code");
+          code.textContent = server;
+          values.append(code);
+          values.append(" ");
+        });
+      }
+      upstreamList.classList.toggle("hidden", dhcpUpstreams.length === 0);
+    }
+  }
 }
 
 function initializeDnsSettings() {
@@ -7229,6 +7401,10 @@ async function startVcfDepotProfileDownload(row, csrf) {
     showVcfDepotMessage("Enable the VCFDT download profile before starting a download.");
     return;
   }
+  if (!data.can_start) {
+    showVcfDepotMessage(data.start_blocker || "Stage Broadcom credentials before starting this VCFDT download profile.");
+    return;
+  }
   try {
     const body = new FormData();
     body.set("csrf", csrf);
@@ -7280,7 +7456,7 @@ function initializeVcfDepotProfilesTable() {
       index: "id",
       layout: "fitColumns",
       height: "380px",
-      rowHeight: 28,
+      rowHeight: 34,
       placeholder: "No VCFDT download profiles configured.",
       reactiveData: false,
       rowContextMenu: [
@@ -7289,7 +7465,7 @@ function initializeVcfDepotProfilesTable() {
           action: (_event, row) => startVcfDepotProfileDownload(row, csrf),
           disabled: (component) => {
             const data = component.getData();
-            return data.is_new || !data.enabled;
+            return data.is_new || !data.enabled || !data.can_start;
           },
         },
         {
@@ -7311,8 +7487,9 @@ function initializeVcfDepotProfilesTable() {
           field: "start",
           formatter: (cell) => {
             const data = cell.getRow().getData();
-            const disabled = data.is_new || !data.enabled ? " disabled" : "";
-            return `<button class="button tiny secondary" type="button" data-vcf-depot-start-download${disabled}>Start</button>`;
+            const disabled = data.is_new || !data.enabled || !data.can_start ? " disabled" : "";
+            const title = data.start_blocker ? ` title="${escapeHtml(data.start_blocker)}"` : "";
+            return `<button class="button tiny secondary" type="button" data-vcf-depot-start-download${disabled}${title}>Start</button>`;
           },
           width: 90,
           hozAlign: "center",
@@ -7474,7 +7651,7 @@ function updateVcfDepotSummary(form, payload = {}) {
   const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
   const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
   const propertiesStatus = document.querySelector("[data-vcf-depot-properties-status]");
-  const softwareDepotGenerateButtons = document.querySelectorAll("[data-vcf-depot-generate-id] button[type='submit']");
+  const softwareDepotGenerateButtons = document.querySelectorAll("[data-vcf-depot-generate-id-modal-open]");
   if (endpoint instanceof HTMLElement) {
     endpoint.textContent = endpointValue || "depot hostname required";
   }
@@ -7533,10 +7710,10 @@ function updateVcfDepotSummary(form, payload = {}) {
     });
   }
   if (tokenStatus instanceof HTMLElement && payload.download_token_present !== undefined) {
-    tokenStatus.textContent = payload.download_token_present ? payload.download_token_name || "uploaded" : "not uploaded";
+    tokenStatus.textContent = payload.download_token_present ? payload.download_token_name || "token uploaded" : "token not uploaded";
   }
   if (activationStatus instanceof HTMLElement && payload.activation_code_present !== undefined) {
-    activationStatus.textContent = payload.activation_code_present ? payload.activation_code_name || "uploaded" : "not uploaded";
+    activationStatus.textContent = payload.activation_code_present ? payload.activation_code_name || "code uploaded" : "code not uploaded";
   }
   if (propertiesStatus instanceof HTMLElement && payload.application_properties_source !== undefined) {
     propertiesStatus.textContent = payload.application_properties_updated_at
@@ -7589,21 +7766,13 @@ function updateVcfDepotSoftwareDepotId(payload = {}) {
       softwareDepotId.textContent = payload.software_depot_id || "";
     }
     softwareDepotId.classList.toggle("hidden", !payload.software_depot_id);
-    const button = softwareDepotCell?.querySelector("[data-vcf-depot-generate-id] button[type='submit']");
+    const button = softwareDepotCell?.querySelector("[data-vcf-depot-generate-id-modal-open]");
     if (button instanceof HTMLButtonElement) {
-      if (payload.software_depot_id) {
-        button.textContent = "↻";
-        button.classList.add("icon-button");
-        button.classList.remove("compact-button");
-        button.setAttribute("aria-label", "Refresh software depot ID");
-        button.setAttribute("title", "Refresh software depot ID");
-      } else {
-        button.textContent = "Generate software depot ID";
-        button.classList.remove("icon-button");
-        button.classList.add("compact-button");
-        button.removeAttribute("aria-label");
-        button.removeAttribute("title");
-      }
+      button.textContent = "↻";
+      button.classList.add("icon-button");
+      button.classList.remove("compact-button");
+      button.setAttribute("aria-label", "Refresh software depot ID");
+      button.setAttribute("title", "Refresh software depot ID");
     }
   }
   if (softwareDepotMessage instanceof HTMLElement && (payload.software_depot_id_error !== undefined || payload.software_depot_id_generated_at !== undefined)) {
@@ -7614,7 +7783,7 @@ function updateVcfDepotSoftwareDepotId(payload = {}) {
       softwareDepotMessage.textContent = `Generated ${new Date(payload.software_depot_id_generated_at).toLocaleString()}.`;
       softwareDepotMessage.classList.remove("error-text");
     } else {
-      softwareDepotMessage.textContent = "Upload VCFDT to generate the software depot ID.";
+      softwareDepotMessage.textContent = "Upload VCFDT, then submit VCF Offline Depot through Appliance Apply to generate the software depot ID.";
       softwareDepotMessage.classList.remove("error-text");
     }
   }
@@ -7663,17 +7832,149 @@ function updateVcfDepotHttpsPreview(payload = {}) {
     `  ssl_certificate /etc/labfoundry/vcf-offline-depot/certs/${certificateName}.crt;`,
     `  ssl_certificate_key /etc/labfoundry/vcf-offline-depot/certs/${certificateName}.key;`,
     "",
+    "  location = / {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location ^~ /static/ {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location = /favicon.ico {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location = /manifest.webmanifest {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location = /service-worker.js {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location = /ca {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location ^~ /ca/ {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location = /requests {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location ^~ /requests/ {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
     "  location = /PROD {",
     "    return 301 /PROD/;",
     "  }",
     "",
-    "  location ^~ /PROD/ {",
+    "  location = /PROD/login {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location = /PROD/logout {",
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location = /_labfoundry_depot_auth {",
+    "    internal;",
+    "    proxy_pass http://127.0.0.1:8000/PROD/auth-check;",
+    "    proxy_pass_request_body off;",
+    "    proxy_set_header Content-Length \"\";",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Original-URI $request_uri;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location @labfoundry_depot_login {",
+    "    return 303 /PROD/login?next=$request_uri;",
+    "  }",
+    "",
+    "  location = /PROD/ {",
+    ...(payload.allow_unauthenticated_access
+      ? []
+      : [
+          "    auth_request /_labfoundry_depot_auth;",
+          "    error_page 401 = @labfoundry_depot_login;",
+        ]),
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location ~ ^/PROD/.*/$ {",
+    ...(payload.allow_unauthenticated_access
+      ? []
+      : [
+          "    auth_request /_labfoundry_depot_auth;",
+          "    error_page 401 = @labfoundry_depot_login;",
+        ]),
+    "    proxy_pass http://127.0.0.1:8000;",
+    "    proxy_set_header Host $host;",
+    "    proxy_set_header X-Real-IP $remote_addr;",
+    "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+    "    proxy_set_header X-Forwarded-Proto https;",
+    "  }",
+    "",
+    "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
     ...authLines,
-    `    alias ${depotStorePath.replace(/\/+$/, "")}/PROD/;`,
+    `    alias ${depotStorePath.replace(/\/+$/, "")}/PROD/$1;`,
     "    sendfile on;",
     "    tcp_nopush on;",
     "    directio 8m;",
-    "    autoindex on;",
+    "    autoindex off;",
     "    types { }",
     "    default_type application/octet-stream;",
     "  }",
@@ -7784,42 +8085,24 @@ function initializeVcfDepotSettings() {
 }
 
 function initializeVcfDepotSoftwareDepotIdGenerator() {
-  document.querySelectorAll("[data-vcf-depot-generate-id]").forEach((form) => {
-    if (!(form instanceof HTMLFormElement)) {
+  const modal = document.getElementById("vcf-depot-generate-id-modal");
+  document.querySelectorAll("[data-vcf-depot-generate-id-modal-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
       return;
     }
-    const button = form.querySelector("button[type='submit']");
-    const message = form.querySelector("[data-vcf-depot-software-depot-message]");
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (button instanceof HTMLButtonElement) {
-        button.disabled = true;
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.showModal();
       }
-      if (message instanceof HTMLElement) {
-        message.textContent = "Generating software depot ID...";
-        message.classList.remove("error-text");
-      }
-      try {
-        const response = await fetch(form.action, {
-          method: "POST",
-          body: new FormData(form),
-          credentials: "same-origin",
-          headers: { "X-LabFoundry-Autosave": "1" },
-        });
-        const payload = await response.json();
-        if (!response.ok) {
-          throw new Error(payload.software_depot_id_error || "Software depot ID generation failed.");
-        }
-        updateVcfDepotSoftwareDepotId(payload);
-      } catch (error) {
-        if (message instanceof HTMLElement) {
-          message.textContent = error instanceof Error ? error.message : "Software depot ID generation failed.";
-          message.classList.add("error-text");
-        }
-      } finally {
-        if (button instanceof HTMLButtonElement) {
-          button.disabled = false;
-        }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-generate-id-modal-cancel]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.close("cancel");
       }
     });
   });
@@ -8031,6 +8314,99 @@ function initializeVcfDepotActivationPaste() {
   });
 }
 
+function initializeVcfDepotCredentialsPaste() {
+  const modal = document.getElementById("vcf-depot-credentials-modal");
+  document.querySelectorAll("[data-vcf-depot-credentials-modal-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.showModal();
+      }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-credentials-modal-cancel]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.close("cancel");
+      }
+    });
+  });
+  document.querySelectorAll("[data-vcf-depot-credentials-paste]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const button = form.querySelector("button[type='submit']");
+    const textarea = form.querySelector('textarea[name="credential_text"]');
+    const fileInput = form.querySelector('input[name="credential_file"]');
+    const status = form.querySelector("[data-vcf-depot-credentials-paste-status]");
+    const typeSelect = form.querySelector('select[name="credential_type"]');
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const hasPastedCredential = textarea instanceof HTMLTextAreaElement && Boolean(textarea.value.trim());
+      const hasCredentialFile = fileInput instanceof HTMLInputElement && Boolean(fileInput.files?.length);
+      if (!hasPastedCredential && !hasCredentialFile) {
+        if (status instanceof HTMLElement) {
+          status.textContent = "Choose a credential file or paste credential text.";
+          status.classList.add("error-text");
+        }
+        return;
+      }
+      if (button instanceof HTMLButtonElement) {
+        button.disabled = true;
+      }
+      if (status instanceof HTMLElement) {
+        status.textContent = "Staging Broadcom credential...";
+        status.classList.remove("error-text");
+      }
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: new FormData(form),
+          credentials: "same-origin",
+          headers: { "X-LabFoundry-Autosave": "1" },
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || "Broadcom credential could not be staged.");
+        }
+        const settingsForm = document.querySelector("[data-vcf-depot-settings]");
+        if (settingsForm instanceof HTMLFormElement) {
+          updateVcfDepotSummary(settingsForm, payload);
+        }
+        updateVcfDepotValidation(payload);
+        if (textarea instanceof HTMLTextAreaElement) {
+          textarea.value = "";
+        }
+        if (fileInput instanceof HTMLInputElement) {
+          fileInput.value = "";
+        }
+        if (status instanceof HTMLElement) {
+          const credentialLabel = typeSelect instanceof HTMLSelectElement && typeSelect.value === "activation_code" ? "Activation code" : "Download token";
+          status.textContent = `${credentialLabel} staged. Contents are hidden.`;
+          status.classList.remove("error-text");
+        }
+        if (modal instanceof HTMLDialogElement && modal.open) {
+          modal.close("saved");
+        }
+      } catch (error) {
+        if (status instanceof HTMLElement) {
+          status.textContent = error instanceof Error ? error.message : "Broadcom credential could not be staged.";
+          status.classList.add("error-text");
+        }
+      } finally {
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = false;
+        }
+      }
+    });
+  });
+}
+
 function initializeVcfDepotPropertiesEditor() {
   const modal = document.getElementById("vcf-depot-properties-modal");
   document.querySelectorAll("[data-vcf-depot-properties-modal-open]").forEach((button) => {
@@ -8066,6 +8442,9 @@ function initializeVcfDepotPropertiesEditor() {
     const status = form.querySelector("[data-vcf-depot-properties-save-status]");
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (textarea instanceof HTMLTextAreaElement && textarea.labFoundryCodeMirrorView?.state?.doc) {
+        textarea.value = textarea.labFoundryCodeMirrorView.state.doc.toString();
+      }
       if (!(textarea instanceof HTMLTextAreaElement) || !textarea.value.trim()) {
         if (status instanceof HTMLElement) {
           status.textContent = "application-prodv2.properties cannot be empty.";
@@ -9043,6 +9422,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfDepotSoftwareDepotIdG
 document.addEventListener("DOMContentLoaded", initializeVcfDepotToolResetModal);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTokenPaste);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotActivationPaste);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotCredentialsPaste);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotPropertiesEditor);
 document.addEventListener("DOMContentLoaded", initializeFileUploadControls);
 document.addEventListener("DOMContentLoaded", initializeEsxiIsoUploadForms);
@@ -9052,6 +9432,7 @@ document.addEventListener("DOMContentLoaded", initializeTabs);
 document.addEventListener("DOMContentLoaded", initializeApplianceApplyProgress);
 document.addEventListener("DOMContentLoaded", initializeMonitorPage);
 document.addEventListener("DOMContentLoaded", initializeHistoryBackButtons);
+document.addEventListener("DOMContentLoaded", initializePublicAddressModeToggle);
 document.addEventListener("DOMContentLoaded", () => {
   registerLabFoundryPrismLanguages();
   highlightConfigPreviews();

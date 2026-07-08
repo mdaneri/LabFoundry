@@ -109,6 +109,13 @@ def observed_management_dhcp_dns_servers(interface_name: str) -> list[str]:
     return parse_resolvectl_dns_servers(result.stdout)
 
 
+def management_dhcp_dns_context(interfaces: list[PhysicalInterface]) -> tuple[dict[str, str], list[str]]:
+    management = management_interface_context(interfaces)
+    if management.get("ipv4_method") != "dhcp":
+        return management, []
+    return management, observed_management_dhcp_dns_servers(management.get("name", ""))
+
+
 def management_interface_context(interfaces: list[PhysicalInterface]) -> dict[str, str]:
     candidates = [interface for interface in interfaces if interface.role == "management"] + [
         interface for interface in interfaces if interface.name == "eth0"

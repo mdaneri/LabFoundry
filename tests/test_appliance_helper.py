@@ -728,6 +728,7 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
         "http_base_url": "http://192.168.50.1:8080/pxe/esxi",
         "native_uefi_http_enabled": True,
         "effective_native_uefi_http_url": "http://192.168.50.1:8080/pxe/esxi/mboot.efi",
+        "ipxe_script": "#!ipxe\necho LabFoundry PXE ready\nshell\n",
     }
     config_path = apply_dir / "labfoundry-esxi-pxe.json"
     config_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -754,7 +755,7 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
     assert (tftp_root / "ldlinux.c32").read_bytes() == b"ldlinux"
     assert (tftp_root / "mboot.efi").read_bytes() == b"mboot efi"
     assert (http_base / "mboot.efi").read_bytes() == b"mboot efi"
-    assert not (http_base / "boot.ipxe").exists()
+    assert (http_base / "boot.ipxe").read_text(encoding="utf-8") == "#!ipxe\necho LabFoundry PXE ready\nshell\n"
     assert not (tftp_root / "bootx64.efi").exists()
     assert not (tftp_root / "esxi.ipxe").exists()
     assert not (tftp_root / "pxelinux.cfg" / stale_mac).exists()
@@ -789,6 +790,76 @@ def test_esxi_pxe_helper_validates_and_writes_generated_kickstarts(monkeypatch, 
 
     manifest["hosts"][0]["installer_iso_path"] = str(tmp_path / "escape.iso")
     assert any("installer ISO must be under" in error for error in helper._esxi_pxe_manifest_errors(manifest))
+
+
+def test_esxi_pxe_helper_writes_http_ipxe_script_without_profiles(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    http_root = tmp_path / "pxe" / "http" / "esxi" / "ks"
+    http_base = http_root.parent
+    tftp_root = tmp_path / "pxe" / "tftp"
+    apply_dir = tmp_path / "apply" / "esxi-pxe"
+    iso_root = tmp_path / "vcf-depot" / "PROD" / "COMP" / "ESX_HOST"
+    ipxe_binary_dir = tmp_path / "bootloaders"
+    http_root.mkdir(parents=True)
+    apply_dir.mkdir(parents=True)
+    iso_root.mkdir(parents=True)
+    ipxe_binary_dir.mkdir(parents=True)
+    (ipxe_binary_dir / "undionly.kpxe").write_bytes(b"bios ipxe")
+    (ipxe_binary_dir / "snponly.efi").write_bytes(b"uefi ipxe")
+    (ipxe_binary_dir / "pxelinux.0").write_bytes(b"pxelinux")
+    (ipxe_binary_dir / "ldlinux.c32").write_bytes(b"ldlinux")
+    manifest = {
+        "kind": "labfoundry-esxi-pxe",
+        "schema_version": 2,
+        "http_root": str(http_root),
+        "http_base": str(http_base),
+        "image_http_root": str(http_base / "images"),
+        "installer_iso_root": str(iso_root),
+        "installer_isos": [],
+        "boot": {
+            "enabled": True,
+            "hostname": "esxi-pxe.labfoundry.internal",
+            "listen_interface": "eth1",
+            "listen_address": "192.168.50.1",
+            "tftp_root": str(tftp_root),
+            "bios_bootfile": "undionly.kpxe",
+            "uefi_bootfile": "snponly.efi",
+            "bios_second_stage_bootfile": "pxelinux.0",
+            "uefi_second_stage_bootfile": "mboot.efi",
+            "native_uefi_bootfile": "mboot.efi",
+            "http_port": 8080,
+            "http_base_url": "http://192.168.50.1:8080/pxe/esxi",
+            "native_uefi_http_enabled": True,
+            "effective_native_uefi_http_url": "http://192.168.50.1:8080/pxe/esxi/mboot.efi",
+            "ipxe_script": "#!ipxe\necho No profiles yet\nshell\n",
+        },
+        "kickstarts": [],
+        "hosts": [],
+        "artifacts": [],
+    }
+    config_path = apply_dir / "labfoundry-esxi-pxe.json"
+    config_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_ROOT", http_root)
+    monkeypatch.setattr(helper, "ESXI_PXE_HTTP_BASE", http_base)
+    monkeypatch.setattr(helper, "ESXI_PXE_IMAGE_HTTP_ROOT", http_base / "images")
+    monkeypatch.setattr(helper, "ESXI_IPXE_HTTP_SCRIPT_PATH", http_base / "boot.ipxe")
+    monkeypatch.setattr(helper, "ESXI_TFTP_ROOT", tftp_root)
+    monkeypatch.setattr(helper, "PXE_BOOT_BINARY_DIRS", [ipxe_binary_dir])
+    monkeypatch.setattr(helper, "ESXI_PXE_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "ESXI_INSTALLER_ISO_ROOT", iso_root)
+    monkeypatch.setattr(helper, "ESXI_PXE_NGINX_SITE_PATH", tmp_path / "nginx" / "sites.d" / "esxi-pxe.conf")
+    monkeypatch.setattr(helper, "_install_nginx_site", lambda path, text: (path.parent.mkdir(parents=True, exist_ok=True), path.write_text(text, encoding="utf-8"), 0)[2])
+
+    payload = helper._load_esxi_pxe_manifest(helper._validate_esxi_pxe_config_path(str(config_path)))
+    assert helper._esxi_pxe_manifest_errors(payload) == []
+    assert helper._apply_esxi_pxe_manifest(payload) == 0
+
+    assert (http_base / "boot.ipxe").read_text(encoding="utf-8") == "#!ipxe\necho No profiles yet\nshell\n"
+    assert (tftp_root / "undionly.kpxe").read_bytes() == b"bios ipxe"
+    assert (tftp_root / "snponly.efi").read_bytes() == b"uefi ipxe"
+    assert (tftp_root / "pxelinux.0").read_bytes() == b"pxelinux"
+    assert (tftp_root / "ldlinux.c32").read_bytes() == b"ldlinux"
 
 
 def test_esxi_pxe_helper_does_not_copy_host_artifact_to_default_fallback(monkeypatch, tmp_path):
@@ -838,6 +909,7 @@ def test_esxi_pxe_helper_does_not_copy_host_artifact_to_default_fallback(monkeyp
         "http_base_url": "http://192.168.50.1:8080/pxe/esxi",
         "native_uefi_http_enabled": True,
         "effective_native_uefi_http_url": "http://192.168.50.1:8080/pxe/esxi/mboot.efi",
+        "ipxe_script": "#!ipxe\necho LabFoundry PXE ready\nshell\n",
     }
     config_path = apply_dir / "labfoundry-esxi-pxe.json"
     config_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -2045,12 +2117,64 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
                 f"  ssl_certificate {cert_path};",
                 f"  ssl_certificate_key {key_path};",
                 "",
+                "  location = / {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ^~ /static/ {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /favicon.ico {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /manifest.webmanifest {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /service-worker.js {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /ca {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ^~ /ca/ {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /requests {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ^~ /requests/ {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
                 "  location = /PROD {",
                 "    return 301 /PROD/;",
                 "  }",
                 "",
-                "  location ^~ /PROD/ {",
-                "    alias /mnt/labfoundry-vcf-offline-depot/PROD/;",
+                "  location = /PROD/login {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /PROD/logout {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /PROD/ {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ~ ^/PROD/.*/$ {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
+                "    alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;",
                 "    sendfile on;",
                 "    default_type application/octet-stream;",
                 "  }",
@@ -2084,7 +2208,7 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
 
     site_text = (site_dir / "vcf-offline-depot.conf").read_text(encoding="utf-8")
     assert "server_name depot.labfoundry.internal;" in site_text
-    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in site_text
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in site_text
     assert "root /mnt/labfoundry-vcf-offline-depot;" not in site_text
     assert "sendfile on;" in site_text
     assert nginx_include.read_text(encoding="utf-8").strip().endswith(f"include {site_dir}/*.conf;")
@@ -2120,14 +2244,70 @@ def test_vcf_offline_depot_helper_writes_htpasswd_for_authenticated_site(monkeyp
                 f"  ssl_certificate {cert_path};",
                 f"  ssl_certificate_key {key_path};",
                 "",
+                "  location = / {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ^~ /static/ {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /favicon.ico {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /manifest.webmanifest {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /service-worker.js {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /ca {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ^~ /ca/ {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /requests {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ^~ /requests/ {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
                 "  location = /PROD {",
                 "    return 301 /PROD/;",
                 "  }",
                 "",
-                "  location ^~ /PROD/ {",
+                "  location = /PROD/login {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /PROD/logout {",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location = /PROD/ {",
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ~ ^/PROD/.*/$ {",
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
+                "    proxy_pass http://127.0.0.1:8000;",
+                "  }",
+                "",
+                "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
                 '    auth_basic "LabFoundry VCF Offline Depot";',
                 f"    auth_basic_user_file {htpasswd_path};",
-                "    alias /mnt/labfoundry-vcf-offline-depot/PROD/;",
+                "    alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;",
                 "    sendfile on;",
                 "    default_type application/octet-stream;",
                 "  }",
@@ -2224,7 +2404,7 @@ def test_vcf_offline_depot_helper_rejects_broad_nginx_root(monkeypatch, tmp_path
 def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
-    payload = b"#!/bin/sh\necho software depot id 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n"
+    payload = b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'vcf-download-tool 9.1.0.0100.25429019'; else echo software depot id 8c9506c6-7bdf-44d5-b2e9-50d829d66b99; fi\n"
     with tarfile.open(archive_path, "w:gz") as archive:
         info = tarfile.TarInfo("vcfdt/bin/vcf-download-tool")
         info.mode = 0o644
@@ -2233,12 +2413,15 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
 
     tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
     monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper, "_run", lambda command: subprocess.CompletedProcess(command, 0, "vcf-download-tool 9.1.0.0100.25429019\n", ""))
 
     assert helper._handle_vcf_offline_depot("stage-tool", [str(archive_path)]) == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["vcf_offline_depot"] == "stage-tool complete"
     assert payload["executable"] == str(tool_dir / "vcf-download-tool")
+    assert payload["tool_version"] == "9.1.0.0100.25429019"
+    assert payload["version_command"] == "vcf-download-tool --version"
     wrapper = tool_dir / "vcf-download-tool"
     extracted = tool_dir / "extracted" / "vcfdt" / "bin" / "vcf-download-tool"
     assert wrapper.is_file()
@@ -2246,6 +2429,45 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert os.access(wrapper, os.X_OK)
     assert os.access(extracted, os.X_OK)
     assert str(extracted) in wrapper.read_text(encoding="utf-8")
+
+
+def test_vcf_offline_depot_helper_generates_software_depot_id(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
+    wrapper = tool_dir / "vcf-download-tool"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    commands: list[tuple[list[str], str]] = []
+
+    def fake_run_with_input(command: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        commands.append((command, text))
+        return subprocess.CompletedProcess(command, 0, "Software Depot ID: 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n", "")
+
+    monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper, "_run_with_input", fake_run_with_input)
+
+    assert helper._handle_vcf_offline_depot("generate-software-depot-id", []) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert commands == [([str(wrapper), "configuration", "generate", "--software-depot-id"], "Y\n")]
+    assert payload["software_depot_id"] == "8c9506c6-7bdf-44d5-b2e9-50d829d66b99"
+    assert payload["command"] == "vcf-download-tool configuration generate --software-depot-id"
+
+
+def test_vcf_offline_depot_generate_software_depot_id_main_allows_no_path(monkeypatch):
+    helper = load_helper_module()
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_handle(action: str, args: list[str]) -> int:
+        calls.append((action, args))
+        return 0
+
+    monkeypatch.delenv("LABFOUNDRY_HELPER_USE_SYSTEMD_RUN", raising=False)
+    monkeypatch.setattr(helper, "_handle_vcf_offline_depot", fake_handle)
+
+    assert helper.main(["labfoundry-helper", "vcf-offline-depot", "generate-software-depot-id", "--real"]) == 0
+    assert calls == [("generate-software-depot-id", [])]
 
 
 def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypatch, tmp_path, capsys):

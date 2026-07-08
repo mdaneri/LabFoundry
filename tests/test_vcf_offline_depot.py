@@ -11,6 +11,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     render_vcfdt_command_preview,
     validate_vcf_depot_state,
     vcf_depot_application_properties_from_tool,
+    vcf_depot_profile_start_blocker,
     vcfdt_commands_for_profile,
 )
 
@@ -19,7 +20,7 @@ def depot_http_user(*, enabled: bool = True) -> User:
     return User(id=1, username="vcf-depot", role="viewer", enabled=enabled)
 
 
-def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
+def test_vcf_depot_start_requires_correct_credential_kind_without_blocking_apply(tmp_path):
     archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     archive.write_bytes(b"not-a-real-archive")
     settings = VcfOfflineDepotSettings(
@@ -44,10 +45,11 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
     ]
 
     errors, warnings = validate_vcf_depot_state(settings, profiles, {"eth2"}, users=[user])
-    assert any("install requires an uploaded download token or activation-code file" in error for error in errors)
-    assert any("metadata requires an uploaded download token or activation-code file" in error for error in errors)
-    assert any("ESX profile esx requires an uploaded activation-code file" in error for error in errors)
+    assert errors == []
     assert warnings == []
+    assert "download token or activation code" in vcf_depot_profile_start_blocker(profiles[0])
+    assert "download token or activation code" in vcf_depot_profile_start_blocker(profiles[1])
+    assert "activation code" in vcf_depot_profile_start_blocker(profiles[2])
 
     errors, _warnings = validate_vcf_depot_state(
         settings,
@@ -58,6 +60,9 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
         users=[user],
     )
     assert errors == []
+    assert vcf_depot_profile_start_blocker(profiles[0], download_token_present=True, activation_code_present=True) == ""
+    assert vcf_depot_profile_start_blocker(profiles[1], download_token_present=True, activation_code_present=True) == ""
+    assert vcf_depot_profile_start_blocker(profiles[2], download_token_present=True, activation_code_present=True) == ""
 
     errors, _warnings = validate_vcf_depot_state(
         settings,
@@ -67,9 +72,12 @@ def test_vcf_depot_validation_requires_correct_credential_kind(tmp_path):
         users=[user],
     )
     assert errors == []
+    assert vcf_depot_profile_start_blocker(profiles[0], activation_code_present=True) == ""
+    assert vcf_depot_profile_start_blocker(profiles[1], activation_code_present=True) == ""
+    assert vcf_depot_profile_start_blocker(profiles[2], activation_code_present=True) == ""
 
 
-def test_vcf_depot_application_properties_prefers_uploaded_tool_archive(tmp_path):
+def test_vcf_depot_application_properties_does_not_scan_uploaded_tool_archive(tmp_path):
     archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     properties = b"spring.profiles.active=depot\nlcm.depot.adapter.host=archive.example.test\n"
     with tarfile.open(archive, "w:gz") as bundle:
@@ -80,11 +88,12 @@ def test_vcf_depot_application_properties_prefers_uploaded_tool_archive(tmp_path
 
     content, source = vcf_depot_application_properties_from_tool(settings)
 
-    assert source == "VCFDT default"
-    assert "archive.example.test" in content
+    assert source == "LabFoundry default"
+    assert "archive.example.test" not in content
+    assert "lcm.depot.adapter.host=dl.broadcom.com" in content
 
 
-def test_vcf_depot_application_properties_finds_archive_members_under_top_level_directory(tmp_path):
+def test_vcf_depot_application_properties_skips_nested_archive_members(tmp_path):
     archive = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     properties = b"spring.profiles.active=depot\nlcm.depot.adapter.host=nested-archive.example.test\n"
     with tarfile.open(archive, "w:gz") as bundle:
@@ -95,8 +104,9 @@ def test_vcf_depot_application_properties_finds_archive_members_under_top_level_
 
     content, source = vcf_depot_application_properties_from_tool(settings)
 
-    assert source == "VCFDT default"
-    assert "nested-archive.example.test" in content
+    assert source == "LabFoundry default"
+    assert "nested-archive.example.test" not in content
+    assert "lcm.depot.adapter.host=dl.broadcom.com" in content
 
 
 def test_vcf_depot_application_properties_falls_back_when_archive_member_is_missing(tmp_path, monkeypatch):
@@ -280,7 +290,18 @@ def test_vcf_depot_nginx_config_renders_basic_auth_by_default():
     assert "# LabFoundry VCF Offline Depot user: vcf-depot" in config
     assert 'auth_basic "LabFoundry VCF Offline Depot";' in config
     assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config
-    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in config
+    assert "location = /PROD/" in config
+    assert "location ^~ /static/" in config
+    assert "location = /favicon.ico" in config
+    assert "location = /manifest.webmanifest" in config
+    assert "location = /service-worker.js" in config
+    assert "location = /ca" in config
+    assert "location ^~ /ca/" in config
+    assert "location = /requests" in config
+    assert "location ^~ /requests/" in config
+    assert "auth_request /_labfoundry_depot_auth;" in config
+    assert "proxy_pass http://127.0.0.1:8000;" in config
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in config
 
     settings.allow_unauthenticated_access = True
     open_config = render_nginx_depot_config(settings)
@@ -460,13 +481,29 @@ def test_vcf_depot_nginx_preview_uses_ca_paths_and_static_file_directives():
     assert "listen 192.168.50.1:443 ssl;" in preview
     assert "# VCF endpoint: https://depot.labfoundry.internal/PROD/" in preview
     assert "root /mnt/labfoundry-vcf-offline-depot;" not in preview
+    assert "location = / {" in preview
+    assert "proxy_pass http://127.0.0.1:8000;" in preview
+    assert "location ^~ /static/" in preview
+    assert "location = /favicon.ico" in preview
+    assert "location = /manifest.webmanifest" in preview
+    assert "location = /service-worker.js" in preview
+    assert "location = /ca" in preview
+    assert "location ^~ /ca/" in preview
+    assert "location = /requests" in preview
+    assert "location ^~ /requests/" in preview
     assert "location = /PROD" in preview
     assert "return 301 /PROD/;" in preview
-    assert "location ^~ /PROD/" in preview
-    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/;" in preview
+    assert "location = /PROD/login" in preview
+    assert "location = /PROD/logout" in preview
+    assert "location = /_labfoundry_depot_auth" in preview
+    assert "location = /PROD/" in preview
+    assert "location ~ ^/PROD/.*/$" in preview
+    assert "location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$" in preview
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in preview
     assert "location /" in preview
     assert "return 404;" in preview
     assert "sendfile on;" in preview
+    assert "autoindex off;" in preview
     assert "default_type application/octet-stream;" in preview
     assert "ssl_certificate /etc/labfoundry/vcf-offline-depot/certs/depot.crt;" in preview
     assert "ssl_certificate_key /etc/labfoundry/vcf-offline-depot/certs/depot.key;" in preview
