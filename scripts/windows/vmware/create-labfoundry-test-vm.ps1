@@ -114,6 +114,7 @@ function Write-ConnectionSummary {
     } else {
         Write-SummaryRow -Label "HTTPS trust:" -Value "pass -TrustRootCa to trust this appliance root CA" -ValueColor Yellow
     }
+    Write-SummaryRow -Label "Lab DNS:" -Value "see image\vmware-workstation\README.md > Windows DNS for lab FQDNs" -ValueColor Yellow
     Write-Host ""
 }
 

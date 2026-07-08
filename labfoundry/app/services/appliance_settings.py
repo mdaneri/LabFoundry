@@ -81,9 +81,12 @@ def parse_resolvectl_dns_servers(output: str) -> list[str]:
                 continue
             candidate = candidate.split("#", 1)[0].split("%", 1)[0]
             try:
-                server = str(ip_address(candidate))
+                parsed = ip_address(candidate)
             except ValueError:
                 continue
+            if parsed.is_loopback:
+                continue
+            server = str(parsed)
             if server in seen:
                 continue
             seen.add(server)
@@ -113,7 +116,21 @@ def management_dhcp_dns_context(interfaces: list[PhysicalInterface]) -> tuple[di
     management = management_interface_context(interfaces)
     if management.get("ipv4_method") != "dhcp":
         return management, []
-    return management, observed_management_dhcp_dns_servers(management.get("name", ""))
+    servers = []
+    seen: set[str] = set()
+    for server in observed_management_dhcp_dns_servers(management.get("name", "")):
+        try:
+            parsed = ip_address(server)
+        except ValueError:
+            continue
+        if parsed.is_loopback:
+            continue
+        normalized = str(parsed)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        servers.append(normalized)
+    return management, servers
 
 
 def management_interface_context(interfaces: list[PhysicalInterface]) -> dict[str, str]:

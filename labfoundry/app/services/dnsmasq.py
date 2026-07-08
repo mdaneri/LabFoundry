@@ -323,10 +323,10 @@ def dns_settings_to_dict(settings: DnsSettings, conditional_forwarders: str | No
 
 
 def effective_dns_upstream_servers(settings: DnsSettings, fallback_servers: list[str] | None = None) -> list[str]:
-    configured = split_servers(settings.upstream_servers)
+    configured = _non_loopback_servers(split_servers(settings.upstream_servers))
     if configured:
         return configured
-    return _ordered_unique([server.strip() for server in fallback_servers or [] if server.strip()])
+    return _non_loopback_servers([server.strip() for server in fallback_servers or [] if server.strip()])
 
 
 def dhcp_settings_to_scope(settings: DhcpSettings) -> dict:
@@ -420,7 +420,9 @@ def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord], condi
     for address in split_addresses(settings.listen_address):
         _validate_ip(address, f"DNS listen address {address}", errors)
     for server in split_servers(settings.upstream_servers):
-        _validate_ip(server, f"upstream server {server}", errors)
+        parsed = _validate_ip(server, f"upstream server {server}", errors)
+        if parsed and parsed.is_loopback:
+            errors.append(f"upstream server {server} must not be a loopback address.")
     for forwarder in split_conditional_forwarders(conditional_forwarders):
         domain = forwarder["domain"]
         server = forwarder["server"]
@@ -844,6 +846,24 @@ def _validate_ip(value: str, label: str, errors: list[str], *, version: int | No
         errors.append(f"{label} must be an IPv{version} address.")
         return None
     return parsed
+
+
+def _non_loopback_servers(servers: list[str]) -> list[str]:
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for server in servers:
+        try:
+            parsed = ip_address(server)
+        except ValueError:
+            normalized = server.strip()
+        else:
+            if parsed.is_loopback:
+                continue
+            normalized = str(parsed)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            filtered.append(normalized)
+    return filtered
 
 
 def _valid_cidr(value: str | None, *, version: int | None = None) -> bool:

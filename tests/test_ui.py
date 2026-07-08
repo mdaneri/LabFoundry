@@ -1078,7 +1078,7 @@ def test_parse_resolvectl_dns_servers_handles_systemd_output():
 
     output = """
 Global:
-Link 2 (eth0): 192.168.167.2 2001:4860:4860::8888 fe80::1%eth0 192.168.167.2
+Link 2 (eth0): 127.0.0.1 ::1 192.168.167.2 2001:4860:4860::8888 fe80::1%eth0 192.168.167.2
 """
 
     assert parse_resolvectl_dns_servers(output) == ["192.168.167.2", "2001:4860:4860::8888", "fe80::1"]
@@ -1091,7 +1091,7 @@ def test_settings_management_dhcp_allows_empty_external_dns(client, monkeypatch)
     from labfoundry.app.models import ApplianceSettings, DnsSettings, PhysicalInterface
 
     login(client)
-    monkeypatch.setattr("labfoundry.app.services.appliance_settings.observed_management_dhcp_dns_servers", lambda interface_name: ["192.168.167.2"])
+    monkeypatch.setattr("labfoundry.app.services.appliance_settings.observed_management_dhcp_dns_servers", lambda interface_name: ["127.0.0.1", "::1", "192.168.167.2"])
     with SessionLocal() as db:
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.enabled = False
@@ -1109,6 +1109,9 @@ def test_settings_management_dhcp_allows_empty_external_dns(client, monkeypatch)
     assert "from DHCP" in page.text
     assert 'placeholder="DHCP: 192.168.167.2"' in page.text
     assert "<code>192.168.167.2</code>" in page.text
+    assert 'placeholder="DHCP: 127.0.0.1' not in page.text
+    assert "<code>127.0.0.1</code>" not in page.text
+    assert "<code>::1</code>" not in page.text
     assert ">192.168.167.2</textarea>" not in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
@@ -1138,7 +1141,7 @@ def test_dns_page_uses_management_dhcp_dns_when_upstreams_are_empty(client, monk
     from labfoundry.app.models import DnsSettings, PhysicalInterface
 
     login(client)
-    monkeypatch.setattr("labfoundry.app.services.appliance_settings.observed_management_dhcp_dns_servers", lambda interface_name: ["192.168.167.2"])
+    monkeypatch.setattr("labfoundry.app.services.appliance_settings.observed_management_dhcp_dns_servers", lambda interface_name: ["127.0.0.1", "::1", "192.168.167.2"])
     with SessionLocal() as db:
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.upstream_servers = ""
@@ -1152,8 +1155,13 @@ def test_dns_page_uses_management_dhcp_dns_when_upstreams_are_empty(client, monk
     page = client.get("/dns")
     assert 'placeholder="DHCP: 192.168.167.2"' in page.text
     assert "<code>192.168.167.2</code>" in page.text
+    assert 'placeholder="DHCP: 127.0.0.1' not in page.text
+    assert "<code>127.0.0.1</code>" not in page.text
+    assert "<code>::1</code>" not in page.text
     assert ">192.168.167.2</textarea>" not in page.text
     assert "server=192.168.167.2" in page.text
+    assert "server=127.0.0.1" not in page.text
+    assert "server=::1" not in page.text
 
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
@@ -6632,7 +6640,7 @@ def test_management_dhcp_interface_can_be_saved_as_static_from_observed_addresse
     from labfoundry.app.models import ApplianceSettings, DnsSettings, PhysicalInterface
 
     login(client)
-    monkeypatch.setattr("labfoundry.app.services.appliance_settings.observed_management_dhcp_dns_servers", lambda interface_name: ["192.168.167.2", "192.168.167.3"])
+    monkeypatch.setattr("labfoundry.app.services.appliance_settings.observed_management_dhcp_dns_servers", lambda interface_name: ["127.0.0.1", "::1", "192.168.167.2", "192.168.167.3"])
     with SessionLocal() as db:
         appliance_settings = db.execute(select(ApplianceSettings)).scalar_one()
         appliance_settings.external_dns_servers = ""

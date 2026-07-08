@@ -124,6 +124,101 @@ def public_services_config_text() -> str:
     )
 
 
+def public_services_ca_https_config_text(cert_path: Path, key_path: Path) -> str:
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "# IP-scoped public service front door for non-management interfaces.",
+            "server {",
+            "  # CA portal HTTPS front door.",
+            "  listen 192.168.87.32:443 ssl;",
+            "  server_name ca.labfoundry.internal;",
+            f"  ssl_certificate {cert_path};",
+            f"  ssl_certificate_key {key_path};",
+            "  location = / {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location = /ca {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location ^~ /ca/ {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location = /requests {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location ^~ /requests/ {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location ^~ /static/ {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location = /favicon.ico {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location = /manifest.webmanifest {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location = /service-worker.js {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location / {",
+            "    return 404;",
+            "  }",
+            "}",
+            "",
+        ]
+    )
+
+
+def public_services_ip_https_depot_config_text(cert_path: Path, key_path: Path) -> str:
+    return "\n".join(
+        [
+            "# Managed by LabFoundry. Local changes may be overwritten.",
+            "# IP-scoped public service front door for non-management interfaces.",
+            "server {",
+            "  # IP-scoped HTTPS public services front door.",
+            "  listen 192.168.87.32:443 ssl;",
+            "  server_name _ 192.168.87.32;",
+            f"  ssl_certificate {cert_path};",
+            f"  ssl_certificate_key {key_path};",
+            "  location = /PROD {",
+            "    return 301 /PROD/;",
+            "  }",
+            "  location = /PROD/login {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location = /PROD/logout {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location = /PROD/ {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location ~ ^/PROD/.*/$ {",
+            "    proxy_pass http://127.0.0.1:8000;",
+            "    proxy_set_header X-Forwarded-Proto https;",
+            "  }",
+            "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
+            "    alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;",
+            "  }",
+            "}",
+            "",
+        ]
+    )
+
+
 def test_public_services_helper_validates_staged_nginx_config(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "public-services"
@@ -138,6 +233,80 @@ def test_public_services_helper_validates_staged_nginx_config(monkeypatch, tmp_p
     captured = capsys.readouterr()
     assert result == 0
     assert "validation ok" in captured.out
+
+
+def test_public_services_helper_allows_ip_scoped_depot_https_paths(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "public-services"
+    managed_root = tmp_path / "managed"
+    cert_path = managed_root / "ca-portal" / "certs" / "ca.labfoundry.internal.crt"
+    key_path = managed_root / "ca-portal" / "certs" / "ca.labfoundry.internal.key"
+    cert_path.parent.mkdir(parents=True)
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-public-services.conf"
+    config_path.write_text(public_services_ip_https_depot_config_text(cert_path, key_path), encoding="utf-8")
+    monkeypatch.setattr(helper, "PUBLIC_SERVICES_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "VCF_DEPOT_PROD_PATH", Path("/mnt/labfoundry-vcf-offline-depot/PROD"))
+
+    result = helper._handle_public_services("validate", [str(config_path)])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "validation ok" in captured.out
+
+
+def test_public_services_helper_validates_ca_https_sni_config(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "public-services"
+    managed_root = tmp_path / "managed"
+    cert_path = managed_root / "ca-portal" / "certs" / "ca.labfoundry.internal.crt"
+    key_path = managed_root / "ca-portal" / "certs" / "ca.labfoundry.internal.key"
+    cert_path.parent.mkdir(parents=True)
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry-public-services.conf"
+    config_path.write_text(public_services_ca_https_config_text(cert_path, key_path), encoding="utf-8")
+    monkeypatch.setattr(helper, "PUBLIC_SERVICES_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+
+    result = helper._handle_public_services("validate", [str(config_path)])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "validation ok" in captured.out
+
+
+def test_nginx_site_conflict_detects_duplicate_sni_name_on_same_listener(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    sites_dir = tmp_path / "sites.d"
+    sites_dir.mkdir()
+    existing = sites_dir / "vcf-offline-depot.conf"
+    existing.write_text(
+        "\n".join(
+            [
+                "server {",
+                "  listen 192.168.87.32:443 ssl;",
+                "  server_name ca.labfoundry.internal;",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    candidate = "\n".join(
+        [
+            "server {",
+            "  listen 192.168.87.32:443 ssl;",
+            "  server_name ca.labfoundry.internal;",
+            "}",
+        ]
+    )
+    monkeypatch.setattr(helper, "NGINX_SITES_DIR", sites_dir)
+
+    assert "duplicates server_name ca.labfoundry.internal" in helper._nginx_site_conflict(sites_dir / "public-services.conf", candidate)
 
 
 def test_public_services_helper_rejects_broad_root_and_registry_proxy(monkeypatch, tmp_path, capsys):
@@ -2137,22 +2306,6 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
                 "    proxy_pass http://127.0.0.1:8000;",
                 "  }",
                 "",
-                "  location = /ca {",
-                "    proxy_pass http://127.0.0.1:8000;",
-                "  }",
-                "",
-                "  location ^~ /ca/ {",
-                "    proxy_pass http://127.0.0.1:8000;",
-                "  }",
-                "",
-                "  location = /requests {",
-                "    proxy_pass http://127.0.0.1:8000;",
-                "  }",
-                "",
-                "  location ^~ /requests/ {",
-                "    proxy_pass http://127.0.0.1:8000;",
-                "  }",
-                "",
                 "  location = /PROD {",
                 "    return 301 /PROD/;",
                 "  }",
@@ -2261,22 +2414,6 @@ def test_vcf_offline_depot_helper_writes_htpasswd_for_authenticated_site(monkeyp
                 "  }",
                 "",
                 "  location = /service-worker.js {",
-                "    proxy_pass http://127.0.0.1:8000;",
-                "  }",
-                "",
-                "  location = /ca {",
-                "    proxy_pass http://127.0.0.1:8000;",
-                "  }",
-                "",
-                "  location ^~ /ca/ {",
-                "    proxy_pass http://127.0.0.1:8000;",
-                "  }",
-                "",
-                "  location = /requests {",
-                "    proxy_pass http://127.0.0.1:8000;",
-                "  }",
-                "",
-                "  location ^~ /requests/ {",
                 "    proxy_pass http://127.0.0.1:8000;",
                 "  }",
                 "",

@@ -114,11 +114,36 @@ def test_dnsmasq_renderer_uses_dhcp_upstreams_when_desired_upstreams_empty():
         dns_records=[],
         dhcp_settings=DhcpSettings(enabled=False),
         dhcp_reservations=[],
-        fallback_upstream_servers=["192.168.167.2", "192.168.167.2"],
+        fallback_upstream_servers=["127.0.0.1", "::1", "192.168.167.2", "192.168.167.2"],
     )
 
     assert "server=192.168.167.2" in config
     assert config.count("server=192.168.167.2") == 1
+    assert "server=127.0.0.1" not in config
+    assert "server=::1" not in config
+
+
+def test_dnsmasq_renderer_filters_loopback_configured_upstreams():
+    settings = DnsSettings(
+        enabled=True,
+        listen_interface="eth1",
+        listen_address="192.168.87.200",
+        domain="labfoundry.internal",
+        upstream_servers="127.0.0.1\n::1\n192.168.167.2",
+    )
+    config = render_dnsmasq_config(
+        dns_settings=settings,
+        dns_records=[],
+        dhcp_settings=DhcpSettings(enabled=False),
+        dhcp_reservations=[],
+    )
+    errors = validate_dns_settings(settings, [])
+
+    assert "server=192.168.167.2" in config
+    assert "server=127.0.0.1" not in config
+    assert "server=::1" not in config
+    assert "upstream server 127.0.0.1 must not be a loopback address." in errors
+    assert "upstream server ::1 must not be a loopback address." in errors
 
 
 def test_dnsmasq_renderer_keeps_configured_upstreams_over_dhcp_fallback():

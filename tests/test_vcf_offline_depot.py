@@ -295,10 +295,10 @@ def test_vcf_depot_nginx_config_renders_basic_auth_by_default():
     assert "location = /favicon.ico" in config
     assert "location = /manifest.webmanifest" in config
     assert "location = /service-worker.js" in config
-    assert "location = /ca" in config
-    assert "location ^~ /ca/" in config
-    assert "location = /requests" in config
-    assert "location ^~ /requests/" in config
+    assert "location = /ca" not in config
+    assert "location ^~ /ca/" not in config
+    assert "location = /requests" not in config
+    assert "location ^~ /requests/" not in config
     assert "auth_request /_labfoundry_depot_auth;" in config
     assert "proxy_pass http://127.0.0.1:8000;" in config
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in config
@@ -487,10 +487,10 @@ def test_vcf_depot_nginx_preview_uses_ca_paths_and_static_file_directives():
     assert "location = /favicon.ico" in preview
     assert "location = /manifest.webmanifest" in preview
     assert "location = /service-worker.js" in preview
-    assert "location = /ca" in preview
-    assert "location ^~ /ca/" in preview
-    assert "location = /requests" in preview
-    assert "location ^~ /requests/" in preview
+    assert "location = /ca" not in preview
+    assert "location ^~ /ca/" not in preview
+    assert "location = /requests" not in preview
+    assert "location ^~ /requests/" not in preview
     assert "location = /PROD" in preview
     assert "return 301 /PROD/;" in preview
     assert "location = /PROD/login" in preview

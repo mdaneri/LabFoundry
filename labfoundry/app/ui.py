@@ -705,6 +705,24 @@ def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
         )
     )
 
+    ca_settings = get_ca_settings_row(db)
+    if ca_settings.enabled:
+        ca_portal_hostname = normalize_dns_hostname(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
+        cert_path, key_path, chain_path = ca_service_cert_paths("ca-portal", ca_portal_hostname)
+        specs.append(
+            ManagedCertificateSpec(
+                owner="ca_portal:https",
+                common_name=ca_portal_hostname,
+                dns_names=[ca_portal_hostname],
+                ip_addresses=split_addresses(ca_settings.listen_address),
+                profile_name=CA_SERVER_PROFILE_NAME,
+                description="Managed CA portal HTTPS certificate.",
+                cert_path=cert_path,
+                key_path=key_path,
+                chain_path=chain_path,
+            )
+        )
+
     kms_settings = get_kms_settings_row(db)
     if kms_settings.enabled:
         cert_path, key_path, chain_path = ca_service_cert_paths("kms", kms_settings.server_certificate or kms_settings.hostname)
@@ -2556,10 +2574,14 @@ def public_services_context(db: Session) -> dict[str, Any]:
         vcf_depot_settings=depot_settings,
         vcf_registry_settings=registry_settings,
     )
+    ca_portal_hostname = normalize_dns_hostname(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
+    ca_portal_cert_path, ca_portal_key_path, _ca_portal_chain_path = ca_service_cert_paths("ca-portal", ca_portal_hostname)
     config_preview = render_public_services_nginx_config(
         entries,
         depot_store_path=depot_settings.depot_store_path,
         http_port=int(esxi_boot.get("http_port") or 8080),
+        ca_certificate_path=ca_portal_cert_path,
+        ca_key_path=ca_portal_key_path,
     )
     return {
         "public_service_entries": entries,

@@ -11,6 +11,7 @@ from labfoundry.app.services.networking import normalize_interface_role
 from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_DEFAULT_HOSTNAME,
     VCF_DEPOT_DEFAULT_STORE_PATH,
+    VCF_DEPOT_HTPASSWD_PATH,
     vcf_depot_endpoint,
 )
 from labfoundry.app.services.vcf_private_registry import VCF_REGISTRY_DEFAULT_HOSTNAME, vcf_registry_endpoint
@@ -150,6 +151,9 @@ def render_public_services_nginx_config(
     upstream_host: str = PUBLIC_SERVICES_UPSTREAM_HOST,
     upstream_port: int = PUBLIC_SERVICES_UPSTREAM_PORT,
     http_port: int = PUBLIC_SERVICES_HTTP_PORT,
+    https_port: int = 443,
+    ca_certificate_path: str = "",
+    ca_key_path: str = "",
     depot_store_path: str = VCF_DEPOT_DEFAULT_STORE_PATH,
     esxi_http_base: str = ESXI_PXE_HTTP_BASE,
 ) -> str:
@@ -161,45 +165,256 @@ def render_public_services_nginx_config(
         address = str(entry.get("address") or "").strip()
         service_rows = entry.get("services") or []
         services = {str(service.get("id")) for service in service_rows}
-        if not address or "esxi_pxe" not in services:
+        if not address:
             continue
-        lines.extend(
-            [
-                "",
-                "server {",
-                f"  listen {_nginx_listen(address, http_port)};",
-                f"  server_name {_nginx_server_name(address)};",
-                "  client_max_body_size 1g;",
-                    "",
-                    *_proxy_location("/pxe/esxi/ks/", upstream_host, upstream_port),
-                    "",
-                    *_proxy_location("= /pxe/esxi/boot.ipxe", upstream_host, upstream_port),
-                    "",
-                    "  location = /pxe/esxi {",
-                    "    return 301 /pxe/esxi/;",
-                    "  }",
-                    "",
-                    "  location = /pxe/esxi/ {",
-                    "    default_type text/plain;",
-                    '    return 200 "LabFoundry ESXi PXE HTTP root\\n";',
-                    "  }",
-                    "",
-                    "  location /pxe/esxi/ {",
-                    f"    alias {esxi_http_base.rstrip('/')}/;",
-                    "    autoindex off;",
-                    "  }",
-                ]
+        ca_service = next((service for service in service_rows if str(service.get("id")) == "ca"), None)
+        if ca_service:
+            hostname = _service_dns_names(*(ca_service.get("dns_names") or []))
+            lines.extend(
+                _ca_https_server_lines(
+                    address,
+                    hostname[0] if hostname else CA_DEFAULT_PORTAL_HOSTNAME,
+                    ca_certificate_path=ca_certificate_path,
+                    ca_key_path=ca_key_path,
+                    upstream_host=upstream_host,
+                    upstream_port=upstream_port,
+                    https_port=https_port,
+                )
             )
-        lines.extend(
-            [
-                "",
-                "  location / {",
-                "    return 404;",
-                "  }",
-                "}",
-            ]
-        )
+            depot_service = next((service for service in service_rows if str(service.get("id")) == "vcf_offline_depot"), None)
+            if depot_service:
+                lines.extend(
+                    _ip_scoped_https_server_lines(
+                        address,
+                        ca_certificate_path=ca_certificate_path,
+                        ca_key_path=ca_key_path,
+                        upstream_host=upstream_host,
+                        upstream_port=upstream_port,
+                        https_port=https_port,
+                        depot_store_path=depot_store_path,
+                        depot_auth_required=not bool(depot_service.get("allow_unauthenticated_access")),
+                    )
+                )
+        if "esxi_pxe" in services:
+            lines.extend(_esxi_pxe_http_server_lines(address, upstream_host, upstream_port, http_port, esxi_http_base))
     return "\n".join(lines).strip() + "\n"
+
+
+def _ca_https_server_lines(
+    address: str,
+    hostname: str,
+    *,
+    ca_certificate_path: str,
+    ca_key_path: str,
+    upstream_host: str,
+    upstream_port: int,
+    https_port: int,
+) -> list[str]:
+    return [
+        "",
+        "server {",
+        "  # CA portal HTTPS front door.",
+        f"  listen {_nginx_listen(address, https_port)} ssl;",
+        f"  server_name {hostname};",
+        f"  ssl_certificate {ca_certificate_path};",
+        f"  ssl_certificate_key {ca_key_path};",
+        "  client_max_body_size 1g;",
+        "",
+        *_proxy_location("= /", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /ca", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("^~ /ca/", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /requests", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("^~ /requests/", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("^~ /static/", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /favicon.ico", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /manifest.webmanifest", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /service-worker.js", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        "  location / {",
+        "    return 404;",
+        "  }",
+        "}",
+    ]
+
+
+def _ip_scoped_https_server_lines(
+    address: str,
+    *,
+    ca_certificate_path: str,
+    ca_key_path: str,
+    upstream_host: str,
+    upstream_port: int,
+    https_port: int,
+    depot_store_path: str,
+    depot_auth_required: bool,
+) -> list[str]:
+    return [
+        "",
+        "server {",
+        "  # IP-scoped HTTPS public services front door.",
+        f"  listen {_nginx_listen(address, https_port)} ssl;",
+        f"  server_name {_nginx_server_name(address)};",
+        f"  ssl_certificate {ca_certificate_path};",
+        f"  ssl_certificate_key {ca_key_path};",
+        "  client_max_body_size 1g;",
+        "",
+        *_proxy_location("= /", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /ca", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("^~ /ca/", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /requests", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("^~ /requests/", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("^~ /static/", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /favicon.ico", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /manifest.webmanifest", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /service-worker.js", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_depot_https_location_lines(
+            upstream_host,
+            upstream_port,
+            depot_store_path=depot_store_path,
+            auth_required=depot_auth_required,
+        ),
+        "",
+        "  location / {",
+        "    return 404;",
+        "  }",
+        "}",
+    ]
+
+
+def _depot_https_location_lines(
+    upstream_host: str,
+    upstream_port: int,
+    *,
+    depot_store_path: str,
+    auth_required: bool,
+) -> list[str]:
+    return [
+        "  location = /PROD {",
+        "    return 301 /PROD/;",
+        "  }",
+        "",
+        *_proxy_location("= /PROD/login", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        *_proxy_location("= /PROD/logout", upstream_host, upstream_port, forwarded_proto="https"),
+        "",
+        "  location = /_labfoundry_depot_auth {",
+        "    internal;",
+        f"    proxy_pass http://{upstream_host}:{upstream_port}/PROD/auth-check;",
+        "    proxy_pass_request_body off;",
+        "    proxy_set_header Content-Length \"\";",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Original-URI $request_uri;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location @labfoundry_depot_login {",
+        "    return 303 /PROD/login?next=$request_uri;",
+        "  }",
+        "",
+        "  location = /PROD/ {",
+        *(
+            [
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
+            ]
+            if auth_required
+            else []
+        ),
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_http_version 1.1;",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location ~ ^/PROD/.*/$ {",
+        *(
+            [
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
+            ]
+            if auth_required
+            else []
+        ),
+        f"    proxy_pass http://{upstream_host}:{upstream_port};",
+        "    proxy_http_version 1.1;",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        "  }",
+        "",
+        "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
+        *(
+            [
+                '    auth_basic "LabFoundry VCF Offline Depot";',
+                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
+            ]
+            if auth_required
+            else []
+        ),
+        f"    alias {depot_store_path.rstrip('/')}/PROD/$1;",
+        "    sendfile on;",
+        "    tcp_nopush on;",
+        "    directio 8m;",
+        "    autoindex off;",
+        "    types { }",
+        "    default_type application/octet-stream;",
+        "  }",
+    ]
+
+
+def _esxi_pxe_http_server_lines(address: str, upstream_host: str, upstream_port: int, http_port: int, esxi_http_base: str) -> list[str]:
+    return [
+        "",
+        "server {",
+        f"  listen {_nginx_listen(address, http_port)};",
+        f"  server_name {_nginx_server_name(address)};",
+        "  client_max_body_size 1g;",
+        "",
+        *_proxy_location("/pxe/esxi/ks/", upstream_host, upstream_port),
+        "",
+        *_proxy_location("= /pxe/esxi/boot.ipxe", upstream_host, upstream_port),
+        "",
+        "  location = /pxe/esxi {",
+        "    return 301 /pxe/esxi/;",
+        "  }",
+        "",
+        "  location = /pxe/esxi/ {",
+        "    default_type text/plain;",
+        '    return 200 "LabFoundry ESXi PXE HTTP root\\n";',
+        "  }",
+        "",
+        "  location /pxe/esxi/ {",
+        f"    alias {esxi_http_base.rstrip('/')}/;",
+        "    autoindex off;",
+        "  }",
+        "",
+        "  location / {",
+        "    return 404;",
+        "  }",
+        "}",
+    ]
 
 
 def _entries_for_target(name: str, role: str, *cidrs: str | None) -> list[dict[str, str]]:
@@ -259,7 +474,14 @@ def _nginx_server_name(address: str) -> str:
     return f"_ {normalized}" if parsed.version == 4 else "_"
 
 
-def _proxy_location(path: str, upstream_host: str, upstream_port: int, *, extra_directives: list[str] | None = None) -> list[str]:
+def _proxy_location(
+    path: str,
+    upstream_host: str,
+    upstream_port: int,
+    *,
+    forwarded_proto: str = "http",
+    extra_directives: list[str] | None = None,
+) -> list[str]:
     return [
         f"  location {path} {{",
         *(extra_directives or []),
@@ -268,6 +490,6 @@ def _proxy_location(path: str, upstream_host: str, upstream_port: int, *, extra_
         "    proxy_set_header Host $host;",
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
-        "    proxy_set_header X-Forwarded-Proto http;",
+        f"    proxy_set_header X-Forwarded-Proto {forwarded_proto};",
         "  }",
     ]

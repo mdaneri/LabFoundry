@@ -2136,43 +2136,84 @@ def _public_services_config_errors(path: Path) -> list[str]:
         errors.append("Public services nginx config must not expose a broad server root.")
     if "/registry" in text:
         errors.append("Public services nginx config must not add registry proxy locations.")
-    for forbidden in [
-        "location = / {",
-        "location ^~ /static/",
-        "location = /favicon.ico",
-        "location = /manifest.webmanifest",
-        "location = /requests/login",
-        "location = /requests/logout",
-        "location /ca",
-        "location /requests",
-        "location = /PROD",
-        "location /PROD/",
-        "location ~ ^/PROD/",
-    ]:
-        if forbidden in text:
-            errors.append("Public services HTTP config may serve only ESXi PXE paths.")
-            break
-    if "/PROD/" in text:
+    if "/PROD/" in text or "location = /PROD" in text or "location ~ ^/PROD/" in text:
+        if "IP-scoped HTTPS public services front door." not in text:
+            errors.append("Public services nginx config may expose VCF Offline Depot paths only in the IP-scoped HTTPS front door.")
         aliases = _nginx_directive(text, "alias")
-        prod_aliases = [alias for alias in aliases if _public_services_prod_alias_path(alias) == VCF_DEPOT_PROD_PATH]
-        if not prod_aliases:
-            errors.append("Public services /PROD/ location must use an alias to the depot PROD directory.")
+        prod_alias = next((alias for alias in aliases if _public_services_prod_alias_path(alias) == VCF_DEPOT_PROD_PATH), "")
+        if not prod_alias:
+            errors.append(f"Public services VCF Offline Depot alias must point at {VCF_DEPOT_PROD_PATH}.")
         for required in [
             "location = /PROD",
             "return 301 /PROD/;",
+            "location = /PROD/login",
+            "location = /PROD/logout",
             "location = /PROD/",
             "location ~ ^/PROD/.*/$",
-            "sendfile on;",
-            "autoindex off;",
-            "default_type application/octet-stream;",
+            "location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$",
         ]:
             if required not in text:
-                errors.append(f"Public services depot location must include {required}.")
+                errors.append(f"Public services VCF Offline Depot config must include {required}.")
+    for forbidden in [
+        "location = /favicon.ico",
+        "location = /manifest.webmanifest",
+        "location = /service-worker.js",
+        "location = /requests/login",
+        "location = /requests/logout",
+        "location = /ca",
+        "location ^~ /ca/",
+        "location = /requests",
+        "location ^~ /requests/",
+    ]:
+        if forbidden in text and "CA portal HTTPS front door." not in text:
+            errors.append("Public services HTTP config may serve only ESXi PXE paths.")
+            break
     esxi_http_alias = ESXI_PXE_HTTP_BASE.as_posix().rstrip("/")
     if "location /pxe/esxi/" in text and f"alias {esxi_http_alias}/;" not in text:
         errors.append(f"Public services ESXi PXE location must alias {ESXI_PXE_HTTP_BASE}.")
     if "location /pxe/esxi/ks/" in text and "proxy_pass http://127.0.0.1:8000;" not in text:
         errors.append("Public services ESXi Kickstart location must proxy to LabFoundry.")
+    if "CA portal HTTPS front door." in text:
+        for required in [
+            "location = / {",
+            "location = /ca",
+            "location ^~ /ca/",
+            "location = /requests",
+            "location ^~ /requests/",
+            "location ^~ /static/",
+            "location = /favicon.ico",
+            "location = /manifest.webmanifest",
+            "location = /service-worker.js",
+            "proxy_set_header X-Forwarded-Proto https;",
+        ]:
+            if required not in text:
+                errors.append(f"Public services CA HTTPS config must include {required}.")
+        server_names = _nginx_directive(text, "server_name")
+        for server_name in server_names:
+            for name in server_name.split():
+                normalized = name.strip().strip(".").lower()
+                if normalized == "_":
+                    continue
+                try:
+                    ip_interface(f"{normalized}/32" if ":" not in normalized else f"{normalized}/128")
+                    continue
+                except ValueError:
+                    pass
+                if not HOSTNAME_PATTERN.fullmatch(normalized):
+                    errors.append(f"Public services server_name {name} must be a valid DNS name or address.")
+    for directive, label, private in [
+        ("ssl_certificate", "Public services certificate", False),
+        ("ssl_certificate_key", "Public services private key", True),
+    ]:
+        for value in _nginx_directive(text, directive):
+            try:
+                cert_path = _ca_managed_path(value, directive)
+                if not cert_path.is_file():
+                    errors.append(f"{label} does not exist: {cert_path}")
+                else:
+                    errors.extend(_pem_errors(cert_path.read_text(encoding="utf-8"), label, private_key=private))
+            except (OSError, ValueError) as exc:
+                errors.append(str(exc))
     return errors
 
 
@@ -4458,10 +4499,6 @@ def _vcf_depot_config_errors(path: Path) -> list[str]:
         "location = /favicon.ico",
         "location = /manifest.webmanifest",
         "location = /service-worker.js",
-        "location = /ca",
-        "location ^~ /ca/",
-        "location = /requests",
-        "location ^~ /requests/",
         "location = /PROD",
         "return 301 /PROD/;",
         "location = /PROD/login",
