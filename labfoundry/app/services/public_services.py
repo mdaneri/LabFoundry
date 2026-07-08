@@ -182,7 +182,7 @@ def render_public_services_nginx_config(
                 )
             )
             depot_service = next((service for service in service_rows if str(service.get("id")) == "vcf_offline_depot"), None)
-            if depot_service:
+            if depot_service and _service_port(depot_service, https_port) == https_port:
                 lines.extend(
                     _ip_scoped_https_server_lines(
                         address,
@@ -458,6 +458,13 @@ def _service_dns_names(*values: str | None) -> list[str]:
         names.append(candidate)
         seen.add(candidate)
     return names
+
+
+def _service_port(service: dict[str, Any], default: int) -> int:
+    try:
+        return int(service.get("port") or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _nginx_listen(address: str, port: int) -> str:

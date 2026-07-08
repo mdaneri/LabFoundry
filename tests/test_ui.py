@@ -5391,7 +5391,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "secret-activation-property" not in (job.result or "")
 
 
-def test_vcf_offline_depot_upload_stores_package_without_tar_scan(client, monkeypatch):
+def test_vcf_offline_depot_upload_rejects_malformed_archive_before_saving(client, monkeypatch):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -5417,13 +5417,51 @@ def test_vcf_offline_depot_upload_stores_package_without_tar_scan(client, monkey
         headers={"X-LabFoundry-Autosave": "1"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
-    assert response.json()["tool_version"] == ""
+    assert response.status_code == 400
+    assert "incomplete or invalid" in response.text
     with SessionLocal() as db:
         settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
-        assert settings.tool_archive_path.endswith("vcf-download-tool-9.1.0.test.tar.gz")
+        assert settings.tool_archive_path == ""
         assert settings.tool_version == ""
+
+
+def test_vcf_offline_depot_apply_can_disable_https_without_vcfdt_tool_steps(client, tmp_path):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, VcfDepotDownloadProfile, VcfOfflineDepotSettings
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    make_vcfdt_archive(archive_path)
+    login(client)
+    page = client.get("/vcf-offline-depot")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    with SessionLocal() as db:
+        settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
+        settings.enabled = False
+        settings.tool_archive_path = str(archive_path)
+        profile = VcfDepotDownloadProfile(
+            name="Disabled profile",
+            profile_type="binaries",
+            enabled=False,
+            vcf_version="9.1.0",
+            sku="VCF",
+            binary_type="INSTALL",
+        )
+        db.add(profile)
+        db.commit()
+
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "vcf_offline_depot"})
+
+    assert apply_response.status_code == 200
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
+        assert job.status == "succeeded"
+        assert "validate" in (job.result or "")
+        assert "apply-https" in (job.result or "")
+        assert "stage-tool" not in (job.result or "")
+        assert "generate-software-depot-id" not in (job.result or "")
+        assert "apply-properties" not in (job.result or "")
 
 
 def test_vcf_offline_depot_tool_reset_can_preserve_or_clear_configuration(client, tmp_path, monkeypatch):

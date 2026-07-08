@@ -5442,6 +5442,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         settings = context["vcf_depot_settings"]
         config_path = settings.config_path
         properties_path = VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH
+        enabled_download_profiles = [profile for profile in context["vcf_depot_profiles"] if profile.enabled]
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(VCF_DEPOT_STAGED_CONFIG_PATH, context["vcf_depot_https_config_preview"])
             properties_path = stage_appliance_apply_config(
@@ -5449,7 +5450,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
                 str(context["vcf_depot_application_properties"].get("content") or ""),
             )
         steps = [lambda: adapter.validate_vcf_offline_depot_config(config_path)]
-        if settings.tool_archive_path:
+        if settings.enabled and settings.tool_archive_path and enabled_download_profiles:
             steps.extend(
                 [
                     lambda: adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path),

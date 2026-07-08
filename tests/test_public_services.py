@@ -150,3 +150,27 @@ def test_public_services_nginx_config_skips_non_pxe_http_services():
     assert "server {" not in config
     assert "/PROD/" not in config
     assert "auth_basic" not in config
+
+
+def test_public_services_nginx_config_omits_ip_depot_routes_when_depot_uses_different_port():
+    config = render_public_services_nginx_config(
+        [
+            {
+                "interface": "eth2",
+                "role": "access",
+                "address": "192.168.87.32",
+                "services": [
+                    {"id": "ca"},
+                    {"id": "vcf_offline_depot", "port": 8443},
+                ],
+            },
+        ],
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        ca_certificate_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.crt",
+        ca_key_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.key",
+    )
+
+    assert "CA portal HTTPS front door." in config
+    assert "listen 192.168.87.32:443 ssl;" in config
+    assert "IP-scoped HTTPS public services front door." not in config
+    assert "/PROD/" not in config

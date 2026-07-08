@@ -214,12 +214,7 @@ def validate_vcf_download_tool_archive(archive_path: Path) -> None:
 
 
 def validate_vcf_download_tool_upload_envelope(archive_path: Path) -> None:
-    try:
-        with archive_path.open("rb") as handle:
-            if handle.read(2) != b"\x1f\x8b":
-                raise ValueError(VCF_DEPOT_INVALID_ARCHIVE_MESSAGE)
-    except OSError as exc:
-        raise ValueError(VCF_DEPOT_INVALID_ARCHIVE_MESSAGE) from exc
+    validate_vcf_download_tool_archive(archive_path)
 
 
 def _safe_extract_tar_gz(archive_path: Path, destination: Path) -> None:
