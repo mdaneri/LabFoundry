@@ -1399,7 +1399,7 @@ def vcf_backup_context(db: Session) -> dict:
     }
 
 
-def ntp_context(db: Session) -> dict:
+def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
     settings = get_chrony_settings_row(db)
     if normalize_service_bind_settings(db, settings):
         db.commit()
@@ -1407,7 +1407,7 @@ def ntp_context(db: Session) -> dict:
     available_interfaces = service_bind_options(db)
     config_preview = render_chrony_config(settings)
     validation_errors = validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})
-    status_result = SystemAdapter().read_chronyd_status()
+    status_result = SystemAdapter().read_chronyd_status() if include_runtime_health else None
     return {
         "chrony_settings": settings,
         "chrony_settings_json": chrony_settings_to_dict(settings),
@@ -1420,9 +1420,9 @@ def ntp_context(db: Session) -> dict:
         "ntp_config_preview": config_preview,
         "ntp_validation_errors": validation_errors,
         "ntp_service_status": service_runtime_status(db, "chronyd"),
-        "ntp_chronyc_status": status_result.stdout,
-        "ntp_chronyc_status_error": status_result.stderr if status_result.returncode != 0 else "",
-        "ntp_chronyc_status_dry_run": status_result.dry_run,
+        "ntp_chronyc_status": status_result.stdout if status_result else "Chrony source health is not loaded during page render.",
+        "ntp_chronyc_status_error": status_result.stderr if status_result and status_result.returncode != 0 else "",
+        "ntp_chronyc_status_dry_run": status_result.dry_run if status_result else False,
     }
 
 
@@ -4895,17 +4895,65 @@ def appliance_apply_status(db: Session, unit_id: str) -> dict[str, Any]:
     sidebar_count = len([unit for unit in units if unit["changed"]])
     for unit in units:
         if unit["id"] == unit_id:
-            if unit["validation_errors"]:
-                state = "needs attention"
-                pill = "warn"
-            elif unit["changed"]:
-                state = "pending"
-                pill = "warn"
-            else:
-                state = "current"
-                pill = "good"
-            return {"state": state, "pill": pill, "sidebar_pending_apply_count": sidebar_count, **unit}
+            return appliance_apply_status_from_unit(unit, sidebar_pending_apply_count=sidebar_count)
     return {"state": "unknown", "pill": "muted", "changed": False, "validation_errors": [], "sidebar_pending_apply_count": sidebar_count}
+
+
+def appliance_apply_status_from_unit(unit: dict[str, Any], *, sidebar_pending_apply_count: int | None = None) -> dict[str, Any]:
+    if unit["validation_errors"]:
+        state = "needs attention"
+        pill = "warn"
+    elif unit["changed"]:
+        state = "pending"
+        pill = "warn"
+    else:
+        state = "current"
+        pill = "good"
+    sidebar_count = sidebar_pending_apply_count if sidebar_pending_apply_count is not None else int(bool(unit["changed"]))
+    return {"state": state, "pill": pill, "sidebar_pending_apply_count": sidebar_count, **unit}
+
+
+def dnsmasq_apply_status(db: Session, dnsmasq: dict[str, Any]) -> dict[str, Any]:
+    baselines = load_appliance_apply_baselines(db)
+    unit = make_appliance_apply_unit(
+        unit_id="dnsmasq",
+        label="DNS/DHCP (dnsmasq)",
+        page_url="/dns",
+        context=dnsmasq,
+        summary=[
+            "DNS enabled" if dnsmasq["dns_settings"].enabled else "DNS disabled",
+            "DHCP enabled" if dnsmasq["dhcp_settings"].enabled else "DHCP disabled",
+            f"{len(dnsmasq['dns_records'])} DNS records",
+            f"{len(dnsmasq['dhcp_scopes'])} DHCP scopes",
+            f"{len(dnsmasq['dhcp_reservations'])} reservations",
+        ],
+        validation_errors=dnsmasq["validation_errors"],
+        validation_warnings=dnsmasq["dns_warnings"],
+        config_path=dnsmasq["dns_settings"].config_path,
+        config_preview=dnsmasq["config_preview"],
+        baseline=baselines.get("dnsmasq"),
+    )
+    return appliance_apply_status_from_unit(unit)
+
+
+def chronyd_apply_status(db: Session, ntp: dict[str, Any]) -> dict[str, Any]:
+    baselines = load_appliance_apply_baselines(db)
+    unit = make_appliance_apply_unit(
+        unit_id="chronyd",
+        label="Chrony",
+        page_url="/chrony",
+        context=ntp,
+        summary=[
+            "service enabled" if ntp["chrony_settings"].enabled else "service disabled",
+            f"{len(ntp['chrony_settings_json']['upstream_servers'])} upstream servers",
+            f"{len(ntp['selected_ntp_interfaces'])} listen interfaces",
+        ],
+        validation_errors=ntp["ntp_validation_errors"],
+        config_path=CHRONY_STAGED_CONFIG_PATH,
+        config_preview=ntp["ntp_config_preview"],
+        baseline=baselines.get("chronyd"),
+    )
+    return appliance_apply_status_from_unit(unit)
 
 
 def service_runtime_status(db: Session, service_id: str) -> dict[str, Any]:
@@ -7458,7 +7506,8 @@ def dns_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "dns.html", {"identity": identity, **dnsmasq_context(db), "appliance_apply_status": appliance_apply_status(db, "dnsmasq")})
+    context = dnsmasq_context(db)
+    return render(request, "dns.html", {"identity": identity, **context, "appliance_apply_status": dnsmasq_apply_status(db, context)})
 
 
 @router.post("/dns/settings", response_model=None)
@@ -7956,7 +8005,8 @@ def dhcp_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "dhcp.html", {"identity": identity, **dnsmasq_context(db), "appliance_apply_status": appliance_apply_status(db, "dnsmasq")})
+    context = dnsmasq_context(db)
+    return render(request, "dhcp.html", {"identity": identity, **context, "appliance_apply_status": dnsmasq_apply_status(db, context)})
 
 
 @router.post("/dhcp/settings", response_model=None)
@@ -9234,7 +9284,31 @@ def chrony_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "chrony.html", {"identity": identity, **ntp_context(db), "appliance_apply_status": appliance_apply_status(db, "chronyd")})
+    context = ntp_context(db)
+    return render(request, "chrony.html", {"identity": identity, **context, "appliance_apply_status": chronyd_apply_status(db, context)})
+
+
+@router.get("/chrony/source-health", response_class=JSONResponse, response_model=None)
+def chrony_source_health(identity: Identity = Depends(require_session_identity)) -> JSONResponse:
+    result = SystemAdapter().read_chronyd_status()
+    parsed_status: dict[str, Any] = {}
+    if result.stdout:
+        try:
+            raw_status = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raw_status = {}
+        if isinstance(raw_status, dict):
+            parsed_status = raw_status
+    return JSONResponse(
+        {
+            "ok": result.returncode == 0,
+            "dry_run": result.dry_run,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "status": parsed_status,
+        }
+    )
 
 
 @router.post("/chrony/settings", response_model=None)

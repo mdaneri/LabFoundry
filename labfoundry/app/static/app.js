@@ -3727,6 +3727,113 @@ function initializeChronySettings() {
   });
 }
 
+function formatChronySourceHealthSection(name, section = {}) {
+  const title = name.charAt(0).toUpperCase() + name.slice(1);
+  const returnCode = Number(section.returncode ?? 0);
+  const stdout = String(section.stdout || "").trimEnd();
+  const stderr = String(section.stderr || "").trimEnd();
+  const lines = [`[${title}] returncode=${returnCode}`];
+  if (stdout) {
+    lines.push(stdout);
+  }
+  if (stderr) {
+    lines.push(`stderr: ${stderr}`);
+  }
+  if (!stdout && !stderr) {
+    lines.push("(no output)");
+  }
+  return lines.join("\n");
+}
+
+function formatChronySourceHealthPayload(payload = {}) {
+  const sections = payload.status && typeof payload.status === "object" ? payload.status : {};
+  const names = ["tracking", "sources", "authdata"];
+  if (names.some((name) => sections[name])) {
+    return names.map((name) => formatChronySourceHealthSection(name, sections[name] || {})).join("\n\n");
+  }
+  const stdout = String(payload.stdout || "").trimEnd();
+  const stderr = String(payload.stderr || "").trimEnd();
+  return [stdout, stderr ? `stderr: ${stderr}` : ""].filter(Boolean).join("\n\n") || "No Chrony source health output was returned.";
+}
+
+function setChronySourceHealthStatus(statusElement, text, state) {
+  if (!(statusElement instanceof HTMLElement)) {
+    return;
+  }
+  statusElement.textContent = text;
+  statusElement.classList.toggle("good", state === "good");
+  statusElement.classList.toggle("warn", state === "warn");
+  statusElement.classList.toggle("muted", state === "muted");
+}
+
+function initializeChronySourceHealthModal() {
+  const modal = document.getElementById("chrony-source-health-modal");
+  const output = modal?.querySelector("[data-chrony-source-health-output]");
+  const status = modal?.querySelector("[data-chrony-source-health-status]");
+  const refreshButton = modal?.querySelector("[data-chrony-source-health-refresh]");
+  const closeButton = modal?.querySelector("[data-chrony-source-health-close]");
+  if (!(modal instanceof HTMLDialogElement) || !(output instanceof HTMLElement)) {
+    return;
+  }
+
+  const loadHealth = async () => {
+    setChronySourceHealthStatus(status, "checking", "muted");
+    output.textContent = "Checking chronyc tracking, sources, and authdata...";
+    if (refreshButton instanceof HTMLButtonElement) {
+      refreshButton.disabled = true;
+    }
+    try {
+      const response = await fetch("/chrony/source-health", {
+        method: "GET",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      const payload = await response.json();
+      output.textContent = formatChronySourceHealthPayload(payload);
+      const failedSection = Object.values(payload.status || {}).some((section) => Number(section?.returncode ?? 0) !== 0);
+      if (!response.ok || !payload.ok || failedSection) {
+        setChronySourceHealthStatus(status, "needs attention", "warn");
+      } else if (payload.dry_run) {
+        setChronySourceHealthStatus(status, "dry-run", "muted");
+      } else {
+        setChronySourceHealthStatus(status, "healthy", "good");
+      }
+    } catch (error) {
+      output.textContent = error instanceof Error ? error.message : "Unable to check Chrony source health.";
+      setChronySourceHealthStatus(status, "failed", "warn");
+    } finally {
+      if (refreshButton instanceof HTMLButtonElement) {
+        refreshButton.disabled = false;
+      }
+    }
+  };
+
+  document.querySelectorAll("[data-chrony-source-health-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      if (typeof modal.showModal === "function") {
+        modal.showModal();
+      } else {
+        modal.setAttribute("open", "");
+      }
+      loadHealth();
+    });
+  });
+  if (refreshButton instanceof HTMLButtonElement) {
+    refreshButton.addEventListener("click", loadHealth);
+  }
+  if (closeButton instanceof HTMLButtonElement) {
+    closeButton.addEventListener("click", () => modal.close());
+  }
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      modal.close();
+    }
+  });
+}
+
 function showWanMessage(elementId, message) {
   showCaMessage(elementId, message, "error");
 }
@@ -9439,6 +9546,7 @@ document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
 document.addEventListener("DOMContentLoaded", initializeKmsSettings);
 document.addEventListener("DOMContentLoaded", initializeChronySettings);
+document.addEventListener("DOMContentLoaded", initializeChronySourceHealthModal);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);

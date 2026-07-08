@@ -869,6 +869,9 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     page = client.get("/chrony")
     assert page.status_code == 200
     assert "Chrony Settings" in page.text
+    assert "Check source health" in page.text
+    assert "chrony-source-health-modal" in page.text
+    assert "Click Refresh to check chronyc tracking, sources, and authdata." in page.text
     assert "/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
@@ -902,7 +905,13 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     js = client.get("/static/app.js")
     assert js.status_code == 200
     assert "initializeChronySettings" in js.text
+    assert "initializeChronySourceHealthModal" in js.text
+    assert "/chrony/source-health" in js.text
     assert "updateNtpValidation" in js.text
+
+    health = client.get("/chrony/source-health")
+    assert health.status_code == 200
+    assert "status" in health.json()
 
     assert "External NTP servers" not in client.get("/settings").text
 

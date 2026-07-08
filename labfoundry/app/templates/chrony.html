@@ -39,7 +39,10 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>Chrony Settings</h2>
-        <span class="status-pill {{ ntp_service_status.pill }}">{{ ntp_service_status.label }}</span>
+        <div class="button-row">
+          <span class="status-pill {{ ntp_service_status.pill }}">{{ ntp_service_status.label }}</span>
+          <button class="button secondary compact-button" type="button" data-chrony-source-health-open>Check source health</button>
+        </div>
       </div>
       <form class="form-stack" action="/chrony/settings" method="post" data-autosave-form data-ntp-settings data-autosave-status-id="ntp-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -177,19 +180,22 @@
         <code data-ntp-config-preview>{{ ntp_config_preview }}</code>
       </div>
     </div>
-    <div class="panel">
-      <div class="panel-head">
-        <h2>Source Health</h2>
-        <span class="status-pill {{ 'muted' if ntp_chronyc_status_dry_run else ('warn' if ntp_chronyc_status_error else 'good') }}">{{ "dry-run" if ntp_chronyc_status_dry_run else ("needs attention" if ntp_chronyc_status_error else "available") }}</span>
-      </div>
-      {% if ntp_chronyc_status_error %}
-        <div class="alert warning">{{ ntp_chronyc_status_error }}</div>
-      {% endif %}
-      <div class="terminal-note">
-        <strong>chronyc tracking / sources / authdata</strong>
-        <code>{{ ntp_chronyc_status }}</code>
-      </div>
-    </div>
   </aside>
 </section>
+<dialog id="chrony-source-health-modal" class="preview-modal" aria-labelledby="chrony-source-health-title">
+  <div class="preview-modal-panel">
+    <div class="preview-modal-head">
+      <div>
+        <p class="kicker">Runtime check</p>
+        <h2 id="chrony-source-health-title">Chrony Source Health</h2>
+      </div>
+      <div class="preview-modal-actions">
+        <span class="status-pill muted" data-chrony-source-health-status>not checked</span>
+        <button class="button secondary compact-button" type="button" data-chrony-source-health-refresh>Refresh</button>
+        <button class="button ghost icon-button" type="button" data-chrony-source-health-close aria-label="Close source health" title="Close">x</button>
+      </div>
+    </div>
+    <pre><code data-chrony-source-health-output>Click Refresh to check chronyc tracking, sources, and authdata.</code></pre>
+  </div>
+</dialog>
 {% endblock %}
