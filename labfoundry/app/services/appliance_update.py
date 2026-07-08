@@ -60,10 +60,13 @@ def current_version_info() -> dict[str, str]:
     short_commit = full_commit[:12] if full_commit else ""
     built_at = getattr(__import__("labfoundry"), "__build_time_utc__", "")
     source_dirty = _git_value(["status", "--short"]) != "" if not built_at else False
+    public_label = f"{short_commit[:7]} (branch wheel)" if built_at and short_commit else short_commit
     return {
         "version": __version__,
+        "base_version": __version__.split("+", 1)[0],
         "git_commit": full_commit,
         "git_short": short_commit,
+        "public_label": public_label,
         "built_at": built_at,
         "source_dirty": "true" if source_dirty else "false",
         "python": platform.python_version(),

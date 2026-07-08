@@ -187,6 +187,22 @@ def test_appliance_update_service_version_helpers():
     assert redact_url_userinfo("https://user:token@example.test/simple") == "https://[redacted]@example.test/simple"
 
 
+def test_current_version_info_has_public_branch_wheel_label(monkeypatch):
+    import labfoundry
+    import labfoundry.app.services.appliance_update as appliance_update
+
+    monkeypatch.setattr(labfoundry, "__build_git_commit__", "dd9fca8d9d2b83d4bd39538cbc3727dfa8a82062")
+    monkeypatch.setattr(labfoundry, "__build_time_utc__", "2026-07-08T15:45:54Z")
+    monkeypatch.setattr(appliance_update, "__version__", "0.1.0+gdd9fca8d9d2b")
+    monkeypatch.setattr(appliance_update, "_git_value", lambda _args: "")
+
+    info = appliance_update.current_version_info()
+
+    assert info["base_version"] == "0.1.0"
+    assert info["git_short"] == "dd9fca8d9d2b"
+    assert info["public_label"] == "dd9fca8 (branch wheel)"
+
+
 def test_build_update_wheel_version_helper():
     script_path = Path("scripts/build_update_wheel.py")
     spec = importlib.util.spec_from_file_location("build_update_wheel", script_path)

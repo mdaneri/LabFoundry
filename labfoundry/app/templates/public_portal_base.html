@@ -9,7 +9,7 @@
     <link rel="apple-touch-icon" href="/static/brand/labfoundry-mark.svg">
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/static/app.css?v=public-address-mode-20260708-1">
+    <link rel="stylesheet" href="/static/app.css?v=footer-build-label-20260708-2">
   </head>
   <body>
     <div class="public-portal-shell">
@@ -48,8 +48,8 @@
       <main class="public-portal-main">
         {% block public_content %}{% endblock %}
         <footer class="public-info-footnote" aria-label="Appliance information">
-          <span>LabFoundry {{ current_version_info.version }}</span>
-          <span>{{ current_version_info.git_short or "source checkout" }}</span>
+          <span>LabFoundry {{ current_version_info.base_version|default(current_version_info.version) }}</span>
+          <span>{{ current_version_info.public_label or "source checkout" }}</span>
           <a href="{{ public_github_url }}" target="_blank" rel="noopener" title="GitHub project">
             <svg class="public-info-link-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 1.8a10.2 10.2 0 0 0-3.2 19.9c.5.1.7-.2.7-.5v-1.8c-2.8.6-3.4-1.2-3.4-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.5 2.4 1.1 3 .8.1-.7.4-1.1.7-1.4-2.2-.3-4.6-1.1-4.6-5 0-1.1.4-2 1.1-2.8-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.9 1.1a10 10 0 0 1 5.2 0c2-1.4 2.9-1.1 2.9-1.1.6 1.4.2 2.4.1 2.7.7.8 1.1 1.7 1.1 2.8 0 3.9-2.4 4.7-4.6 5 .4.3.7 1 .7 2v2.5c0 .3.2.6.7.5A10.2 10.2 0 0 0 12 1.8Z"/></svg>
             <span>GitHub</span>
@@ -73,7 +73,7 @@
     </div>
 
     {% block public_after_main %}{% endblock %}
-    <script src="/static/app.js?v=public-address-mode-20260708-1"></script>
+    <script src="/static/app.js?v=footer-build-label-20260708-2"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
   </body>
 </html>

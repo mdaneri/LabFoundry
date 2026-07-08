@@ -41,7 +41,20 @@ def version_with_git(base_version: str, git_commit: str) -> str:
 
 
 def copy_source(target: Path) -> None:
-    ignore = shutil.ignore_patterns(".git", ".venv", ".pytest_cache", "data", "dist", "test-results", "__pycache__", "*.pyc")
+    ignore = shutil.ignore_patterns(
+        ".git",
+        ".venv",
+        ".pytest_cache",
+        "build",
+        "data",
+        "dist",
+        "output",
+        "ovf",
+        "test-results",
+        "test-vms",
+        "__pycache__",
+        "*.pyc",
+    )
     shutil.copytree(ROOT, target, ignore=ignore)
 
 
