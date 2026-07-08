@@ -4639,10 +4639,12 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
         return 2
     tool_path.chmod(tool_path.stat().st_mode | 0o111)
     wrapper_path = VCF_DEPOT_TOOL_DIR / "vcf-download-tool"
+    tool_home = _vcf_download_tool_home(tool_path)
     wrapper_path.write_text(
         "\n".join(
             [
                 "#!/bin/sh",
+                f"cd {shlex_quote(str(tool_home))} || exit 1",
                 f"exec {shlex_quote(str(tool_path))} \"$@\"",
                 "",
             ]

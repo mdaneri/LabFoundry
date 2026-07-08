@@ -2428,7 +2428,9 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert extracted.is_file()
     assert os.access(wrapper, os.X_OK)
     assert os.access(extracted, os.X_OK)
-    assert str(extracted) in wrapper.read_text(encoding="utf-8")
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert f"cd '{extracted.parent.parent}' || exit 1" in wrapper_text
+    assert str(extracted) in wrapper_text
 
 
 def test_vcf_offline_depot_helper_generates_software_depot_id(monkeypatch, tmp_path, capsys):
