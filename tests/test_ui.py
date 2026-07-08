@@ -75,6 +75,10 @@ def test_login_and_dashboard_render(client):
     assert "unpkg.com/htmx" not in response.text
     assert 'body class="bg-slate-100 text-slate-900"' not in response.text
     assert "/static/brand/labfoundry-mark.svg" in response.text
+    assert 'class="management-info-footnote"' in response.text
+    assert "LabFoundry 0.1.0" in response.text
+    assert 'href="/api/docs"' in response.text
+    assert "Python " in response.text
     assert '<link rel="icon" href="/favicon.ico" type="image/svg+xml">' in response.text
     assert '<link rel="manifest" href="/manifest.webmanifest">' in response.text
     assert '<meta name="theme-color" content="#1f4f7a">' in response.text
@@ -123,7 +127,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=public-address-mode-20260708-1" in offline.text
+    assert "/static/app.css?v=footer-build-label-20260708-2" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -136,7 +140,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
     assert 'data-monitor-page' in page.text
-    assert "/static/app.js?v=public-address-mode-20260708-1" in page.text
+    assert "/static/app.js?v=footer-build-label-20260708-2" in page.text
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -7091,7 +7095,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "public-address-mode-20260708-1" in page.text
+    assert "footer-build-label-20260708-2" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

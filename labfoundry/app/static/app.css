@@ -43,7 +43,7 @@ textarea {
   background: #f8fafc;
   color: #0f172a;
   border-right: 1px solid var(--border);
-  padding: 18px 14px;
+  padding: 18px 14px 56px;
   position: sticky;
   top: 0;
   height: 100vh;
@@ -497,7 +497,41 @@ textarea {
 
 .main-pane {
   min-width: 0;
-  padding: 22px;
+  padding: 22px 22px 58px;
+}
+
+.management-info-footnote {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-height: 38px;
+  padding: 8px 22px;
+  border-top: 1px solid rgba(219, 227, 238, 0.92);
+  background: rgba(238, 242, 247, 0.94);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  backdrop-filter: blur(10px);
+}
+
+.management-info-footnote a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #475569;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.management-info-footnote a:hover,
+.management-info-footnote a:focus-visible {
+  color: var(--accent-dark);
 }
 
 .topbar {
@@ -4047,6 +4081,10 @@ textarea {
     height: auto;
   }
 
+  .management-info-footnote {
+    left: 0;
+  }
+
   .nav-stack {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -4095,7 +4133,14 @@ textarea {
 
 @media (max-width: 640px) {
   .main-pane {
-    padding: 14px;
+    padding: 14px 14px 64px;
+  }
+
+  .management-info-footnote {
+    right: 0;
+    left: 0;
+    padding-right: 14px;
+    padding-left: 14px;
   }
 
   .public-portal-header {
