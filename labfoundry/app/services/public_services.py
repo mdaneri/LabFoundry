@@ -367,8 +367,8 @@ def _depot_https_location_lines(
         "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
         *(
             [
-                '    auth_basic "LabFoundry VCF Offline Depot";',
-                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
             ]
             if auth_required
             else []

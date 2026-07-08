@@ -114,7 +114,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v26" in service_worker.text
+    assert "labfoundry-pwa-v30" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
@@ -140,7 +140,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
     assert 'data-monitor-page' in page.text
-    assert "/static/app.js?v=footer-build-label-20260708-2" in page.text
+    assert "/static/app.js?v=vcfdt-auth-request-20260708-1" in page.text
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -5056,6 +5056,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert ">Stage</button>" in page.text
     assert 'data-vcf-depot-credentials-modal-open data-vcf-depot-requires-tool disabled' in page.text
     assert "Choose a credential file or paste credential text." in page.text
+    assert "No Broadcom credentials staged." in page.text
     assert 'action="/vcf-offline-depot/credentials"' in page.text
     assert "vcf-depot-credentials-modal" in page.text
     assert 'data-vcf-depot-credentials-modal-open' in page.text
@@ -5085,6 +5086,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert '<span class="status-pill warn">dry-run</span>' not in page.text
     assert "Activation code" in page.text
     assert "Choose credential file" in page.text
+    assert "no file selected" in page.text
     assert "Choose VCFDT archive" not in page.text
     assert "DNS alias follows the first selected service listener." in page.text
     assert "Server certificate" not in page.text
@@ -5129,6 +5131,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "embeddedEsx-6.7-INT" in page.text
     assert "esxio-9.1-INTL" in page.text
     assert 'href="/appliance-apply"' in page.text
+    assert "vcf-download-tool configuration get --software-depot-id" in page.text
     assert "vcf-download-tool binaries list" in page.text
 
     app_js = client.get("/static/app.js")
@@ -5155,6 +5158,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "updateVcfDepotValidation" in app_js.text
     assert "initializeVcfDepotSoftwareDepotIdGenerator" in app_js.text
     assert "initializeVcfDepotCredentialsPaste" in app_js.text
+    assert "updateVcfDepotCredentialStatus" in app_js.text
+    assert "previewVcfDepotProfileScript" in app_js.text
+    assert 'label: "Preview script"' in app_js.text
+    assert "Runtime files refresh during Appliance Apply or profile download." in app_js.text
     assert "initializeVcfDepotPropertiesEditor" in app_js.text
     assert "initializeCopyValueButtons" in app_js.text
     assert "clearSelectedFileInputs" in app_js.text
@@ -5233,8 +5240,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["valid"] is True
     assert payload["dns_record_action"] == "created"
     assert "listen 192.168.50.1:443 ssl;" in payload["https_config_preview"]
-    assert 'auth_basic "LabFoundry VCF Offline Depot";' in payload["https_config_preview"]
-    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in payload["https_config_preview"]
+    assert "auth_basic" not in payload["https_config_preview"]
+    assert "auth_basic_user_file" not in payload["https_config_preview"]
+    assert "auth_request /_labfoundry_depot_auth;" in payload["https_config_preview"]
+    assert "error_page 401 = @labfoundry_depot_login;" in payload["https_config_preview"]
     assert "location = /PROD/" in payload["https_config_preview"]
     assert "location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$" in payload["https_config_preview"]
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in payload["https_config_preview"]
@@ -5427,6 +5436,97 @@ def test_vcf_offline_depot_upload_rejects_malformed_archive_before_saving(client
         settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
         assert settings.tool_archive_path == ""
         assert settings.tool_version == ""
+
+
+def test_vcf_offline_depot_tool_upload_marks_apply_pending_without_profiles(client, tmp_path, monkeypatch):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.ui import appliance_apply_status, appliance_apply_units, update_appliance_apply_baselines
+
+    monkeypatch.setattr("labfoundry.app.ui.find_local_vcf_download_tool_archive", lambda: None)
+
+    login(client)
+    with SessionLocal() as db:
+        units = appliance_apply_units(db)
+        update_appliance_apply_baselines(db, units, {unit["id"] for unit in units})
+        db.commit()
+        assert appliance_apply_status(db, "vcf_offline_depot")["changed"] is False
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    make_vcfdt_archive(archive_path)
+    page = client.get("/vcf-offline-depot")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/vcf-offline-depot/settings",
+        data={
+            "hostname": "depot.labfoundry.internal",
+            "listen_interface": "eth2",
+            "port": "443",
+            "csrf": csrf,
+        },
+        files={
+            "tool_archive_file": ("vcf-download-tool-9.1.0.test.tar.gz", archive_path.read_bytes(), "application/gzip"),
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
+    pending = client.get("/appliance-apply/status")
+    assert pending.status_code == 200
+    assert pending.json()["pending_count"] > 0
+    with SessionLocal() as db:
+        status = appliance_apply_status(db, "vcf_offline_depot")
+        assert status["changed"] is True
+        unit = next(unit for unit in appliance_apply_units(db) if unit["id"] == "vcf_offline_depot")
+        assert "# VCFDT tool package status" in unit["config_preview"]
+        assert "# Archive: vcf-download-tool-9.1.0.test.tar.gz" in unit["config_preview"]
+
+
+def test_vcf_offline_depot_apply_stages_tool_without_download_profiles(client, tmp_path, monkeypatch):
+    from sqlalchemy import delete, select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, VcfDepotDownloadProfile
+
+    monkeypatch.setattr("labfoundry.app.ui.find_local_vcf_download_tool_archive", lambda: None)
+
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
+    make_vcfdt_archive(archive_path)
+    login(client)
+    with SessionLocal() as db:
+        db.execute(delete(VcfDepotDownloadProfile))
+        db.commit()
+    page = client.get("/vcf-offline-depot")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-offline-depot/settings",
+        data={
+            "enabled": "on",
+            "hostname": "depot.labfoundry.internal",
+            "listen_interface": "eth2",
+            "port": "443",
+            "allow_unauthenticated_access": "on",
+            "csrf": csrf,
+        },
+        files={
+            "tool_archive_file": ("vcf-download-tool-9.1.0.test.tar.gz", archive_path.read_bytes(), "application/gzip"),
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert response.status_code == 200
+    assert response.json()["valid"] is True
+
+    apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "vcf_offline_depot"})
+
+    assert apply_response.status_code == 200
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
+        assert job.status == "succeeded"
+        assert "stage-tool" in (job.result or "")
+        assert "generate-software-depot-id" in (job.result or "")
+        assert "apply-properties" in (job.result or "")
+        assert "vcf-download-tool binaries download" not in (job.result or "")
 
 
 def test_vcf_offline_depot_apply_can_disable_https_without_vcfdt_tool_steps(client, tmp_path):
@@ -5623,6 +5723,12 @@ def test_vcf_offline_depot_accepts_pasted_download_token_and_activation_code(cli
     assert "uploaded-secret-token" not in upload_response.text
     assert runtime_token.read_text(encoding="utf-8") == "uploaded-secret-token"
 
+    staged_page = client.get("/vcf-offline-depot")
+    assert staged_page.status_code == 200
+    assert "download-token.txt" in staged_page.text
+    assert "download token staged" in staged_page.text
+    assert "uploaded-secret-token" not in staged_page.text
+
     with SessionLocal() as db:
         token_name = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_NAME_KEY)).scalar_one()
         token_secret = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOKEN_VALUE_KEY)).scalar_one()
@@ -5712,6 +5818,14 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
     login(client)
     page = client.get("/vcf-offline-depot")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    preview_response = client.get(f"/vcf-offline-depot/profiles/{profile_id}/preview")
+    assert preview_response.status_code == 200
+    preview_payload = preview_response.json()
+    assert preview_payload["profile_name"] == "vcf-install"
+    assert "vcf-download-tool configuration get --software-depot-id" in preview_payload["script"]
+    assert "vcf-download-tool binaries list" in preview_payload["script"]
+    assert preview_payload["script"].index("vcf-download-tool configuration get --software-depot-id") < preview_payload["script"].index("vcf-download-tool binaries list")
+    assert "manual-secret-token" not in preview_response.text
     response = client.post(
         f"/vcf-offline-depot/profiles/{profile_id}/download",
         data={"csrf": csrf},
@@ -5725,9 +5839,11 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
     assert payload["profile_status"] == "ready"
     assert payload["dry_run"] is False
     assert payload["log_path"] == "/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log"
-    assert len(payload["commands"]) == 2
+    assert len(payload["commands"]) == 3
     assert payload["commands"][0]["command"][0] == "/var/lib/labfoundry/vcfDownloadTool/active-tool/bin/vcf-download-tool"
-    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in payload["commands"][0]["command"]
+    assert payload["commands"][0]["command"][1:] == ["configuration", "get", "--software-depot-id"]
+    assert payload["commands"][1]["command"][1:3] == ["binaries", "list"]
+    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in payload["commands"][1]["command"]
     assert "manual-secret-token" not in response.text
 
     with SessionLocal() as db:
@@ -5843,13 +5959,16 @@ def test_vcf_offline_depot_manual_profile_download_accepts_activation_code_witho
     payload = response.json()
     assert payload["status"] == "started"
     assert payload["profile_name"] == "vcf-install"
-    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in payload["commands"][0]["command"]
-    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in payload["commands"][0]["command"]
+    assert payload["commands"][0]["command"][1:] == ["configuration", "get", "--software-depot-id"]
+    assert payload["commands"][1]["command"][1:3] == ["binaries", "list"]
+    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in payload["commands"][1]["command"]
+    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in payload["commands"][1]["command"]
     assert "manual-secret-activation-code" not in response.text
 
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "vcf-depot-download")).scalar_one()
         assert queued == [(job.id, profile_id)]
+        assert "configuration get --software-depot-id" in (job.result or "")
         assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in (job.result or "")
         assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in (job.result or "")
         assert "manual-secret-activation-code" not in (job.result or "")
@@ -7095,7 +7214,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "footer-build-label-20260708-2" in page.text
+    assert "vcfdt-auth-request-20260708-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

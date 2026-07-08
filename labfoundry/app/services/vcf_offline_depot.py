@@ -42,6 +42,7 @@ VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY = "vcf_depot_software_depot_id_gene
 VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY = "vcf_depot_software_depot_id_error"
 VCF_DEPOT_STAGED_TOKEN_FILE = f"{VCF_DEPOT_RUNTIME_TOOL_DIR}/secrets/download-token.txt"
 VCF_DEPOT_STAGED_ACTIVATION_FILE = f"{VCF_DEPOT_RUNTIME_TOOL_DIR}/secrets/activation-code.txt"
+VCF_DEPOT_GET_SOFTWARE_DEPOT_ID_COMMAND = ["vcf-download-tool", "configuration", "get", "--software-depot-id"]
 VCF_DEPOT_STATUS_VALUES = {"planned", "ready", "synced", "blocked"}
 VCF_DEPOT_PROFILE_TYPES = {"binaries", "metadata", "esx"}
 VCF_DEPOT_SKUS = {"VCF", "VVF"}
@@ -564,8 +565,8 @@ def render_nginx_depot_config(
         "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
         *(
             [
-                '    auth_basic "LabFoundry VCF Offline Depot";',
-                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
             ]
             if auth_required
             else []
@@ -658,6 +659,7 @@ def vcfdt_commands_for_profile(
     _append_optional_flag(base, "--component", profile.component)
     _append_optional_flag(base, "--component-version", profile.component_version)
     return [
+        [*VCF_DEPOT_GET_SOFTWARE_DEPOT_ID_COMMAND],
         ["vcf-download-tool", "binaries", "list", *base],
         ["vcf-download-tool", "binaries", "download", f"--depot-store={settings.depot_store_path}", *base],
     ]
@@ -697,8 +699,9 @@ def render_vcfdt_command_preview(
     *,
     download_token_present: bool = True,
     activation_code_present: bool = False,
+    include_disabled_profiles: bool = False,
 ) -> str:
-    enabled_profiles = [profile for profile in profiles if profile.enabled]
+    enabled_profiles = profiles if include_disabled_profiles else [profile for profile in profiles if profile.enabled]
     if not enabled_profiles:
         return "# No enabled VCFDT download profiles are configured.\n"
     lines = [
@@ -741,6 +744,24 @@ def render_vcfdt_command_preview(
         )
     for profile in enabled_profiles:
         lines.extend(["", f"# {profile.name}"])
+        command_profile = profile
+        if include_disabled_profiles and not profile.enabled:
+            command_profile = VcfDepotDownloadProfile(
+                name=profile.name,
+                profile_type=profile.profile_type,
+                sku=profile.sku,
+                vcf_version=profile.vcf_version,
+                binary_type=profile.binary_type,
+                automated_install=profile.automated_install,
+                upgrades_only=profile.upgrades_only,
+                patches_only=profile.patches_only,
+                component=profile.component,
+                component_version=profile.component_version,
+                disabled_platforms=profile.disabled_platforms,
+                enabled=True,
+                status=profile.status,
+                notes=profile.notes,
+            )
         if (profile.profile_type or "binaries") == "esx":
             disabled_platforms = split_vcf_depot_lines(profile.disabled_platforms)
             if disabled_platforms:
@@ -755,7 +776,7 @@ def render_vcfdt_command_preview(
                 )
         for command in vcfdt_commands_for_profile(
             settings,
-            profile,
+            command_profile,
             download_token_present=download_token_present,
             activation_code_present=activation_code_present,
         ):
