@@ -208,8 +208,8 @@ LOCAL_USERS_RESERVED_USERNAMES = {
 }
 
 
-def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, check=False, capture_output=True, text=True)
+def _run(command: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
 
 
 def _run_with_input(command: list[str], input_text: str) -> subprocess.CompletedProcess[str]:
@@ -1785,16 +1785,23 @@ def _chronyd_status() -> int:
         return 0
     payload = {}
     for key, command in {
-        "tracking": [chronyc, "tracking"],
-        "sources": [chronyc, "sources", "-v"],
-        "authdata": [chronyc, "authdata"],
+        "tracking": [chronyc, "-n", "tracking"],
+        "sources": [chronyc, "-n", "sources", "-v"],
+        "authdata": [chronyc, "-n", "authdata"],
     }.items():
-        result = _run(command)
-        payload[key] = {
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
+        try:
+            result = _run(command, timeout=1.5)
+            payload[key] = {
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        except subprocess.TimeoutExpired:
+            payload[key] = {
+                "returncode": 124,
+                "stdout": "",
+                "stderr": "chronyc status command timed out after 1.5 seconds",
+            }
     print(json.dumps(payload, sort_keys=True))
     return 0
 

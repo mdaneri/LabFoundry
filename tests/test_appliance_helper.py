@@ -3298,11 +3298,11 @@ def test_chronyd_helper_disabled_apply_allows_empty_upstream_list(monkeypatch, t
 
 def test_chronyd_helper_status_reads_tracking_sources_and_authdata(monkeypatch, capsys):
     helper = load_helper_module()
-    commands: list[list[str]] = []
+    commands: list[tuple[list[str], float | None]] = []
 
-    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, f"{' '.join(command[1:])} ok\n", "")
+    def fake_run(command: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        commands.append((command, timeout))
+        return subprocess.CompletedProcess(command, 0, f"{' '.join(command[2:])} ok\n", "")
 
     monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/chronyc" if command == "chronyc" else None)
     monkeypatch.setattr(helper, "_run", fake_run)
@@ -3315,10 +3315,27 @@ def test_chronyd_helper_status_reads_tracking_sources_and_authdata(monkeypatch, 
     assert payload["sources"]["stdout"] == "sources -v ok\n"
     assert payload["authdata"]["stdout"] == "authdata ok\n"
     assert commands == [
-        ["/usr/bin/chronyc", "tracking"],
-        ["/usr/bin/chronyc", "sources", "-v"],
-        ["/usr/bin/chronyc", "authdata"],
+        (["/usr/bin/chronyc", "-n", "tracking"], 1.5),
+        (["/usr/bin/chronyc", "-n", "sources", "-v"], 1.5),
+        (["/usr/bin/chronyc", "-n", "authdata"], 1.5),
     ]
+
+
+def test_chronyd_helper_status_reports_timeout_without_blocking(monkeypatch, capsys):
+    helper = load_helper_module()
+
+    def fake_run(command: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/chronyc" if command == "chronyc" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_chronyd("status", []) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tracking"]["returncode"] == 124
+    assert payload["sources"]["returncode"] == 124
+    assert payload["authdata"]["stderr"] == "chronyc status command timed out after 1.5 seconds"
 
 
 def test_appliance_settings_hostname_fallback_writes_etc_hostname(monkeypatch, tmp_path):
