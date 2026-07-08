@@ -41,6 +41,12 @@ powershell.exe -ExecutionPolicy Bypass `
   -IsoChecksum "sha512:<checksum>"
 ```
 
+Before `packer build -force` replaces the Workstation output directory, the
+wrapper checks for an existing output VMX and unregisters it with
+`vmrun -T ws unregister`. The `vmrun.exe` path is resolved through the same
+Workstation discovery path used by the rest of the VMware scripts, and the
+cleanup is scoped to this image target's configured output directory.
+
 For lifecycle/demo images that should use real appliance adapters:
 
 ```powershell
@@ -180,6 +186,49 @@ deployed VM's first boot, not baked into the reusable Packer-built VMX.
 After the VM starts, the wrapper prints a connection summary with the HTTPS
 console URL, Swagger URL, OpenAPI URL, root certificate URL, and
 `ssh admin@<appliance-ip>` command.
+
+### Windows DNS for lab FQDNs
+
+When browsing or testing lab services from the Windows host, use the
+LabFoundry DNS listener as the resolver for the appliance-managed lab domain.
+The namespace should match the DNS/DHCP domain configured in LabFoundry, and
+the name server should be the appliance DNS listen address on the lab network.
+For example, if the lab domain is `labfoundry.internal` and DNS listens on
+`192.168.87.200`, run PowerShell as Administrator:
+
+```powershell
+# Remove existing NRPT rules for labfoundry.internal
+Get-DnsClientNrptRule |
+  Where-Object { $_.Namespace -eq ".labfoundry.internal" } |
+  Remove-DnsClientNrptRule -Force
+
+# Add the correct rule
+Add-DnsClientNrptRule `
+  -Namespace ".labfoundry.internal" `
+  -NameServers "192.168.87.200"
+
+# Clear Windows DNS cache
+Clear-DnsClientCache
+```
+
+Verify the active NRPT rule:
+
+```powershell
+Get-DnsClientNrptRule |
+  Where-Object { $_.Namespace -eq ".labfoundry.internal" }
+```
+
+Then test name resolution and browse with the service FQDN:
+
+```powershell
+Resolve-DnsName depot.labfoundry.internal
+```
+
+Open Edge with the FQDN, for example
+`http://depot.labfoundry.internal/`. If Edge still reports
+`DNS_PROBE_FINISHED_NXDOMAIN`, open `edge://net-internals/#dns` and click
+`Clear host cache`.
+
 On first boot, `labfoundry-data-disks.service` formats blank attached data
 VMDKs, labels them as `LABFOUNDRY_DEPOT` and `LABFOUNDRY_BKUP`, writes
 `/etc/fstab`, and mounts them at `/mnt/labfoundry-vcf-offline-depot` and

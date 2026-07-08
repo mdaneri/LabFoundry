@@ -322,6 +322,13 @@ def dns_settings_to_dict(settings: DnsSettings, conditional_forwarders: str | No
     }
 
 
+def effective_dns_upstream_servers(settings: DnsSettings, fallback_servers: list[str] | None = None) -> list[str]:
+    configured = _non_loopback_servers(split_servers(settings.upstream_servers))
+    if configured:
+        return configured
+    return _non_loopback_servers([server.strip() for server in fallback_servers or [] if server.strip()])
+
+
 def dhcp_settings_to_scope(settings: DhcpSettings) -> dict:
     return {
         "id": 0,
@@ -413,7 +420,9 @@ def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord], condi
     for address in split_addresses(settings.listen_address):
         _validate_ip(address, f"DNS listen address {address}", errors)
     for server in split_servers(settings.upstream_servers):
-        _validate_ip(server, f"upstream server {server}", errors)
+        parsed = _validate_ip(server, f"upstream server {server}", errors)
+        if parsed and parsed.is_loopback:
+            errors.append(f"upstream server {server} must not be a loopback address.")
     for forwarder in split_conditional_forwarders(conditional_forwarders):
         domain = forwarder["domain"]
         server = forwarder["server"]
@@ -619,6 +628,7 @@ def render_dnsmasq_config(
     dhcp_scopes: list[DhcpScope] | None = None,
     dhcp_options: list[DhcpOption] | None = None,
     conditional_forwarders: str | None = None,
+    fallback_upstream_servers: list[str] | None = None,
     esxi_pxe_boot: dict | None = None,
 ) -> str:
     domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
@@ -644,7 +654,7 @@ def render_dnsmasq_config(
         lines.append(f"interface={interface_name}")
     for listen_address in split_addresses(dns_settings.listen_address):
         lines.append(f"listen-address={listen_address}")
-    for server in split_servers(dns_settings.upstream_servers):
+    for server in effective_dns_upstream_servers(dns_settings, fallback_upstream_servers):
         lines.append(f"server={server}")
     for forwarder in split_conditional_forwarders(conditional_forwarders):
         lines.append(f"server=/{forwarder['domain']}/{forwarder['server']}")
@@ -836,6 +846,24 @@ def _validate_ip(value: str, label: str, errors: list[str], *, version: int | No
         errors.append(f"{label} must be an IPv{version} address.")
         return None
     return parsed
+
+
+def _non_loopback_servers(servers: list[str]) -> list[str]:
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for server in servers:
+        try:
+            parsed = ip_address(server)
+        except ValueError:
+            normalized = server.strip()
+        else:
+            if parsed.is_loopback:
+                continue
+            normalized = str(parsed)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            filtered.append(normalized)
+    return filtered
 
 
 def _valid_cidr(value: str | None, *, version: int | None = None) -> bool:

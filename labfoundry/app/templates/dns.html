@@ -294,7 +294,15 @@
             <strong data-derived-listen-addresses>{{ selected_dns_addresses|join(", ") if selected_dns_addresses else "No interface address selected" }}</strong>
           </div>
         </div>
-        <label><span class="field-label"><span>Upstream servers</span><button class="help-icon" type="button" data-help="External DNS resolvers used when a name is not served by LabFoundry records. Enter one server per line.">i</button></span><textarea name="upstream_servers" rows="3">{{ upstream_servers }}</textarea></label>
+        <label><span class="field-label"><span>Upstream servers</span><button class="help-icon" type="button" data-help="External DNS resolvers used when a name is not served by LabFoundry records. Leave empty on management DHCP to use the lease-provided resolver servers during global appliance apply.">i</button></span><textarea name="upstream_servers" rows="3"{% if observed_dhcp_upstream_servers %} placeholder="DHCP: {{ observed_dhcp_upstream_servers|join(', ') }}"{% endif %}>{{ upstream_servers }}</textarea></label>
+        <div class="runtime-source-list {{ 'hidden' if not observed_dhcp_upstream_servers else '' }}" data-dns-dhcp-upstreams>
+          <span>from DHCP</span>
+          <span>
+            {% for server in observed_dhcp_upstream_servers %}
+              <code>{{ server }}</code>
+            {% endfor %}
+          </span>
+        </div>
         <label><span class="field-label"><span>Conditional forwarders</span><button class="help-icon" type="button" data-help="Routes a DNS domain and its subdomains to specific upstream resolvers. Use one domain=server1,server2 entry per line; global upstream servers still handle everything else.">i</button></span><textarea name="conditional_forwarders" rows="3" placeholder="sddc.internal=192.168.10.10,192.168.10.11">{{ conditional_forwarders }}</textarea></label>
         <label><span class="field-label"><span>Cache size</span><button class="help-icon" type="button" data-help="Maximum number of DNS responses dnsmasq keeps in memory to speed repeated lookups.">i</button></span><input type="number" name="cache_size" min="0" value="{{ dns_settings.cache_size }}"></label>
         <label class="switch-field"><span class="field-label"><span>Expand hosts</span><button class="help-icon" type="button" data-help="Adds the primary managed domain to simple hostnames so short names can resolve inside the lab.">i</button></span><input class="switch-input" type="checkbox" name="expand_hosts" {{ "checked" if dns_settings.expand_hosts else "" }}><span class="switch-track" aria-hidden="true"></span></label>

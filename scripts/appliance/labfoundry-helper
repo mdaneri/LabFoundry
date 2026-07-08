@@ -57,14 +57,15 @@ COMMANDS: dict[str, set[str]] = {
     "chronyd": {"validate", "apply"},
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
-    "vcf-offline-depot": {"validate", "stage-tool", "sync", "apply-https", "apply-properties"},
+    "vcf-offline-depot": {"validate", "stage-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties"},
     "esxi-pxe": {"validate", "apply"},
     "public-services": {"validate", "apply"},
     "appliance-update": {"check", "apply", "restart-service"},
     "wan": {"validate", "apply"},
 }
-SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "sync", "apply-https", "relocate-bundles", "restart-service"}
+SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "generate-software-depot-id", "sync", "apply-https", "relocate-bundles", "restart-service"}
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
+NO_PATH_ACTIONS = {("dnsmasq", "leases"), ("dnsmasq", "reload"), ("vcf-offline-depot", "generate-software-depot-id")}
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
 LABFOUNDRY_APPLY_DIR = Path("/var/lib/labfoundry/apply")
 FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
@@ -1105,6 +1106,27 @@ def _render_pxelinux_config(*, kernel_path: str, boot_cfg_path: str) -> str:
     )
 
 
+def _default_esxi_ipxe_script() -> str:
+    return "\n".join(
+        [
+            "#!ipxe",
+            "echo LabFoundry now generates ESXi PXE boot artifacts during global appliance apply.",
+            "echo Legacy custom iPXE script storage is preserved for settings compatibility only.",
+            "shell",
+            "",
+        ]
+    )
+
+
+def _esxi_ipxe_script_text(boot: dict) -> str:
+    text = str(boot.get("ipxe_script") or "").strip()
+    if not text:
+        text = _default_esxi_ipxe_script().strip()
+    if not text.startswith("#!ipxe"):
+        text = "#!ipxe\n" + text
+    return text.rstrip() + "\n"
+
+
 def _write_text(path: Path, text: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -1230,6 +1252,8 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             ldlinux_target = ESXI_TFTP_ROOT / "ldlinux.c32"
             _copy_file(ldlinux_source, ldlinux_target)
             generated_tftp_files.append(str(ldlinux_target))
+        _write_text(ESXI_IPXE_HTTP_SCRIPT_PATH, _esxi_ipxe_script_text(boot))
+        generated_files.append(str(ESXI_IPXE_HTTP_SCRIPT_PATH))
         staged_images: set[str] = set()
         first_mboot_efi: Path | None = None
         first_crypto64: Path | None = None
@@ -1335,6 +1359,7 @@ def _apply_esxi_pxe_manifest(payload: dict) -> int:
             str(boot.get("uefi_second_stage_bootfile") or "mboot.efi"),
             str(boot.get("native_uefi_bootfile") or "mboot.efi"),
             "crypto64.efi",
+            "boot.ipxe",
         ):
             if _simple_pxe_filename(filename):
                 (ESXI_TFTP_ROOT / filename).unlink(missing_ok=True)
@@ -2111,43 +2136,84 @@ def _public_services_config_errors(path: Path) -> list[str]:
         errors.append("Public services nginx config must not expose a broad server root.")
     if "/registry" in text:
         errors.append("Public services nginx config must not add registry proxy locations.")
-    for forbidden in [
-        "location = / {",
-        "location ^~ /static/",
-        "location = /favicon.ico",
-        "location = /manifest.webmanifest",
-        "location = /requests/login",
-        "location = /requests/logout",
-        "location /ca",
-        "location /requests",
-        "location = /PROD",
-        "location /PROD/",
-        "location ~ ^/PROD/",
-    ]:
-        if forbidden in text:
-            errors.append("Public services HTTP config may serve only ESXi PXE paths.")
-            break
-    if "/PROD/" in text:
+    if "/PROD/" in text or "location = /PROD" in text or "location ~ ^/PROD/" in text:
+        if "IP-scoped HTTPS public services front door." not in text:
+            errors.append("Public services nginx config may expose VCF Offline Depot paths only in the IP-scoped HTTPS front door.")
         aliases = _nginx_directive(text, "alias")
-        prod_aliases = [alias for alias in aliases if _public_services_prod_alias_path(alias) == VCF_DEPOT_PROD_PATH]
-        if not prod_aliases:
-            errors.append("Public services /PROD/ location must use an alias to the depot PROD directory.")
+        prod_alias = next((alias for alias in aliases if _public_services_prod_alias_path(alias) == VCF_DEPOT_PROD_PATH), "")
+        if not prod_alias:
+            errors.append(f"Public services VCF Offline Depot alias must point at {VCF_DEPOT_PROD_PATH}.")
         for required in [
             "location = /PROD",
             "return 301 /PROD/;",
+            "location = /PROD/login",
+            "location = /PROD/logout",
             "location = /PROD/",
             "location ~ ^/PROD/.*/$",
-            "sendfile on;",
-            "autoindex off;",
-            "default_type application/octet-stream;",
+            "location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$",
         ]:
             if required not in text:
-                errors.append(f"Public services depot location must include {required}.")
+                errors.append(f"Public services VCF Offline Depot config must include {required}.")
+    for forbidden in [
+        "location = /favicon.ico",
+        "location = /manifest.webmanifest",
+        "location = /service-worker.js",
+        "location = /requests/login",
+        "location = /requests/logout",
+        "location = /ca",
+        "location ^~ /ca/",
+        "location = /requests",
+        "location ^~ /requests/",
+    ]:
+        if forbidden in text and "CA portal HTTPS front door." not in text:
+            errors.append("Public services HTTP config may serve only ESXi PXE paths.")
+            break
     esxi_http_alias = ESXI_PXE_HTTP_BASE.as_posix().rstrip("/")
     if "location /pxe/esxi/" in text and f"alias {esxi_http_alias}/;" not in text:
         errors.append(f"Public services ESXi PXE location must alias {ESXI_PXE_HTTP_BASE}.")
     if "location /pxe/esxi/ks/" in text and "proxy_pass http://127.0.0.1:8000;" not in text:
         errors.append("Public services ESXi Kickstart location must proxy to LabFoundry.")
+    if "CA portal HTTPS front door." in text:
+        for required in [
+            "location = / {",
+            "location = /ca",
+            "location ^~ /ca/",
+            "location = /requests",
+            "location ^~ /requests/",
+            "location ^~ /static/",
+            "location = /favicon.ico",
+            "location = /manifest.webmanifest",
+            "location = /service-worker.js",
+            "proxy_set_header X-Forwarded-Proto https;",
+        ]:
+            if required not in text:
+                errors.append(f"Public services CA HTTPS config must include {required}.")
+        server_names = _nginx_directive(text, "server_name")
+        for server_name in server_names:
+            for name in server_name.split():
+                normalized = name.strip().strip(".").lower()
+                if normalized == "_":
+                    continue
+                try:
+                    ip_interface(f"{normalized}/32" if ":" not in normalized else f"{normalized}/128")
+                    continue
+                except ValueError:
+                    pass
+                if not HOSTNAME_PATTERN.fullmatch(normalized):
+                    errors.append(f"Public services server_name {name} must be a valid DNS name or address.")
+    for directive, label, private in [
+        ("ssl_certificate", "Public services certificate", False),
+        ("ssl_certificate_key", "Public services private key", True),
+    ]:
+        for value in _nginx_directive(text, directive):
+            try:
+                cert_path = _ca_managed_path(value, directive)
+                if not cert_path.is_file():
+                    errors.append(f"{label} does not exist: {cert_path}")
+                else:
+                    errors.extend(_pem_errors(cert_path.read_text(encoding="utf-8"), label, private_key=private))
+            except (OSError, ValueError) as exc:
+                errors.append(str(exc))
     return errors
 
 
@@ -4362,6 +4428,11 @@ def _vcf_depot_auth_username(text: str) -> str:
     return _vcf_depot_config_value(text, "# LabFoundry VCF Offline Depot user:", VCF_DEPOT_DEFAULT_USERNAME) or VCF_DEPOT_DEFAULT_USERNAME
 
 
+def _vcf_depot_prod_alias_path(alias: str) -> Path:
+    normalized = alias.strip().removesuffix("$1").rstrip("/")
+    return Path(normalized)
+
+
 def _listen_address_and_port(value: str) -> tuple[str, int]:
     parts = value.split()
     listen = parts[0] if parts else ""
@@ -4415,17 +4486,26 @@ def _vcf_depot_config_errors(path: Path) -> list[str]:
     if not aliases:
         errors.append("VCF Offline Depot nginx config must include a /PROD/ alias.")
     else:
-        prod_alias = aliases[0]
+        prod_alias = next((alias for alias in aliases if _vcf_depot_prod_alias_path(alias) == VCF_DEPOT_PROD_PATH), aliases[0])
         if not prod_alias.startswith("/"):
             errors.append("VCF Offline Depot /PROD/ alias must be an absolute path.")
-        if not prod_alias.rstrip("/").endswith("/PROD"):
+        if not _vcf_depot_prod_alias_path(prod_alias).as_posix().rstrip("/").endswith("/PROD"):
             errors.append("VCF Offline Depot /PROD/ alias must point at the depot store PROD directory.")
-        if Path(prod_alias.rstrip("/")) != VCF_DEPOT_PROD_PATH:
+        if _vcf_depot_prod_alias_path(prod_alias) != VCF_DEPOT_PROD_PATH:
             errors.append(f"VCF Offline Depot /PROD/ alias must point at {VCF_DEPOT_PROD_PATH}.")
     for required in [
+        "location = / {",
+        "location ^~ /static/",
+        "location = /favicon.ico",
+        "location = /manifest.webmanifest",
+        "location = /service-worker.js",
         "location = /PROD",
         "return 301 /PROD/;",
-        "location ^~ /PROD/",
+        "location = /PROD/login",
+        "location = /PROD/logout",
+        "location = /PROD/",
+        "location ~ ^/PROD/.*/$",
+        "location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$",
         "location /",
         "return 404;",
     ]:
@@ -4530,7 +4610,7 @@ def _remove_vcf_depot_htpasswd() -> None:
 
 def _prepare_vcf_depot_web_tree(text: str) -> None:
     for alias in _nginx_directive(text, "alias"):
-        path = Path(alias.rstrip("/"))
+        path = _vcf_depot_prod_alias_path(alias)
         if path != VCF_DEPOT_PROD_PATH:
             continue
         path.mkdir(parents=True, exist_ok=True)
@@ -4573,6 +4653,19 @@ def _find_vcf_download_tool_binary(extraction_dir: Path) -> Path:
     raise FileNotFoundError("VCF Download Tool archive does not contain a vcf-download-tool executable.")
 
 
+def _parse_vcf_download_tool_version(output: str) -> str:
+    match = re.search(r"\b\d+(?:\.\d+){2,}(?:[-+][A-Za-z0-9._-]+)?\b", output or "")
+    return match.group(0) if match else ""
+
+
+def _vcf_download_tool_version(tool_path: Path) -> str:
+    try:
+        completed = _run([str(tool_path), "--version"])
+    except OSError:
+        return ""
+    return _parse_vcf_download_tool_version("\n".join(part for part in [completed.stdout, completed.stderr] if part))
+
+
 def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
     extraction_dir = VCF_DEPOT_TOOL_DIR / "extracted"
     try:
@@ -4583,10 +4676,12 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
         return 2
     tool_path.chmod(tool_path.stat().st_mode | 0o111)
     wrapper_path = VCF_DEPOT_TOOL_DIR / "vcf-download-tool"
+    tool_home = _vcf_download_tool_home(tool_path)
     wrapper_path.write_text(
         "\n".join(
             [
                 "#!/bin/sh",
+                f"cd {shlex_quote(str(tool_home))} || exit 1",
                 f"exec {shlex_quote(str(tool_path))} \"$@\"",
                 "",
             ]
@@ -4594,6 +4689,7 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
         encoding="utf-8",
     )
     os.chmod(wrapper_path, 0o755)
+    tool_version = _vcf_download_tool_version(wrapper_path)
     print(
         json.dumps(
             {
@@ -4601,6 +4697,59 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
                 "archive": archive_path.name,
                 "tool_home": str(VCF_DEPOT_TOOL_DIR),
                 "executable": str(wrapper_path),
+                "tool_version": tool_version,
+                "version_command": "vcf-download-tool --version",
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _parse_software_depot_id(output: str) -> str:
+    uuid_match = re.search(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", output)
+    if uuid_match:
+        return uuid_match.group(0)
+    for line in output.splitlines():
+        stripped = line.strip()
+        if "vcf-download-tool" in stripped:
+            continue
+        if "software" in stripped.lower() and "depot" in stripped.lower() and "id" in stripped.lower():
+            match = re.search(r"([A-Za-z0-9][A-Za-z0-9._:-]{7,})\s*$", stripped)
+            if match:
+                return match.group(1)
+    for line in output.splitlines():
+        stripped = line.strip()
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,}", stripped) and "vcf-download-tool" not in stripped:
+            return stripped
+    return ""
+
+
+def _generate_vcf_download_tool_software_depot_id() -> int:
+    wrapper_path = VCF_DEPOT_TOOL_DIR / "vcf-download-tool"
+    if not wrapper_path.is_file():
+        print(f"VCF Download Tool executable does not exist: {wrapper_path}", file=sys.stderr)
+        return 2
+    command = [str(wrapper_path), "configuration", "generate", "--software-depot-id"]
+    try:
+        completed = _run_with_input(command, "Y\n")
+    except OSError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    output = "\n".join(part for part in [completed.stdout, completed.stderr] if part)
+    software_depot_id = _parse_software_depot_id(output)
+    if completed.returncode != 0:
+        print(f"VCFDT exited with code {completed.returncode}.", file=sys.stderr)
+        return completed.returncode
+    if not software_depot_id:
+        print("VCFDT did not print a software depot ID.", file=sys.stderr)
+        return 2
+    print(
+        json.dumps(
+            {
+                "vcf_offline_depot": "software depot ID generated",
+                "software_depot_id": software_depot_id,
+                "command": "vcf-download-tool configuration generate --software-depot-id",
             },
             sort_keys=True,
         )
@@ -4669,6 +4818,12 @@ def _handle_vcf_offline_depot(action: str, args: list[str]) -> int:
             print("VCF Download Tool archive must be named vcf-download-tool-*.tar.gz.", file=sys.stderr)
             return 2
         return _stage_vcf_download_tool_archive(archive_path)
+
+    if action == "generate-software-depot-id":
+        if args:
+            print("vcf-offline-depot generate-software-depot-id does not accept arguments", file=sys.stderr)
+            return 2
+        return _generate_vcf_download_tool_software_depot_id()
 
     if action == "apply-properties":
         if len(args) != 1:
@@ -5034,7 +5189,7 @@ def main(argv: list[str]) -> int:
     if group not in COMMANDS or action not in COMMANDS[group]:
         return _usage()
 
-    if action not in {"leases", "reload"} and not args:
+    if (group, action) not in NO_PATH_ACTIONS and not args:
         print(f"{group} {action} requires a config or artifact path", file=sys.stderr)
         return 2
 

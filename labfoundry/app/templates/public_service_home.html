@@ -28,7 +28,14 @@
     {% if public_services %}
       <div class="service-grid">
         {% for service in public_services %}
-          <a class="service-card public-service-card" href="{{ service.href }}" aria-label="Open {{ service.name }}">
+          <a
+            class="service-card public-service-card"
+            href="{{ service.href }}"
+            data-public-service-card
+            data-name-href="{{ service.name_href|default(service.href) }}"
+            data-ip-href="{{ service.ip_href|default(service.href) }}"
+            aria-label="Open {{ service.name }}"
+          >
             <div>
               <strong>{{ service.name }}</strong>
               <small>{{ service.summary }}</small>

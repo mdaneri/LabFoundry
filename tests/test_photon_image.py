@@ -487,6 +487,8 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert 'Write-SummaryRow -Label "Swagger URL:" -Value "https://$IpAddress/api/docs"' in script
     assert 'Write-SummaryRow -Label "Root CA URL:" -Value "https://$IpAddress/ca/downloads/root-ca.pem"' in script
     assert 'Write-SummaryRow -Label "SSH:" -Value "ssh admin@$IpAddress"' in script
+    assert 'Write-SummaryRow -Label "Lab DNS:"' in script
+    assert "Windows DNS for lab FQDNs" in script
     assert "pass -TrustRootCa to trust this appliance root CA" in script
     assert "Pass -WaitForIp to print the HTTPS console" in script
     assert "-ValueColor Yellow" in script
@@ -523,6 +525,11 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "service_vmnet_name = $ServiceVmnetName" in build_script
     assert "Using VMware services network $ServiceVmnetName" in build_script
     assert "prepare-networks.ps1" in build_script
+    assert "Resolve-WorkstationVmrunPath -Path $VmrunPath" in build_script
+    assert "Resolve-WorkstationOutputDirectory -PackerDirectory $PackerDirectory -OutputDirectory $OutputDirectory" in build_script
+    assert "Unregister-ExistingWorkstationTemplate" in build_script
+    assert "'unregister', $resolvedVmx" in build_script
+    assert "Refusing to unregister VMware template outside the configured image output directory" in build_script
     assert 'variable "service_vmnet_name"' in packer_template
     assert '"ethernet1.present"       = "TRUE"' in packer_template
     assert '"ethernet1.vnet"          = var.service_vmnet_name' in packer_template
@@ -530,6 +537,8 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "-TrustRootCa" in docs
     assert "removes stale" in docs
     assert "connection summary" in docs
+    assert "Windows DNS for lab FQDNs" in docs
+    assert "Add-DnsClientNrptRule" in docs
     assert "Swagger URL" in docs
     assert "root certificate URL" in docs
     assert "ssh admin@<appliance-ip>" in docs

@@ -80,11 +80,11 @@ from labfoundry.app.services.appliance_settings import (
     appliance_settings_preview_payload,
     appliance_settings_to_dict,
     is_app_owned_appliance_dns_record,
+    management_dhcp_dns_context,
     management_interface_context,
     normalize_fqdn,
     normalize_multiline_values,
     normalize_service_dns_target_naming,
-    observed_management_dhcp_dns_servers,
     SERVICE_DNS_TARGET_NAMING_CHOICES,
     validate_appliance_settings,
 )
@@ -127,6 +127,7 @@ from labfoundry.app.services.dnsmasq import (
     dhcp_option_to_dict,
     dhcp_scope_to_dict,
     dnsmasq_tag,
+    effective_dns_upstream_servers,
     join_conditional_forwarders,
     join_addresses,
     join_domains,
@@ -347,10 +348,11 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_STAGED_TOKEN_FILE,
     VCF_DEPOT_STAGED_TOOL_DIR,
     VCF_DEPOT_TELEMETRY_CHOICES,
+    VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND,
+    VCF_DEPOT_TOOL_VERSION_SOURCE_KEY,
     VCF_DEPOT_TOKEN_NAME_KEY,
     VCF_DEPOT_TOKEN_VALUE_KEY,
     VCF_DEPOT_UPLOAD_DIR,
-    detect_vcf_download_tool_version,
     find_local_vcf_download_tool_archive,
     generate_vcf_software_depot_id,
     render_nginx_depot_config,
@@ -359,8 +361,9 @@ from labfoundry.app.services.vcf_offline_depot import (
     setting_secret_state,
     vcf_depot_application_properties_from_tool,
     validate_vcf_depot_state,
-    validate_vcf_download_tool_archive,
+    validate_vcf_download_tool_upload_envelope,
     vcf_depot_endpoint,
+    vcf_depot_profile_start_blocker,
     vcf_depot_profile_to_dict,
     vcf_depot_service_state,
     vcf_depot_settings_to_dict,
@@ -685,7 +688,8 @@ def kms_client_common_name(client: KmsClient) -> str:
 def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
     specs: list[ManagedCertificateSpec] = []
     appliance = get_appliance_settings_row(db)
-    management = appliance_settings_management_context(db)
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    management, observed_dhcp_dns_servers = management_dhcp_dns_context(interfaces)
     appliance_cert, appliance_key, appliance_chain = ca_service_cert_paths("https", appliance.fqdn)
     specs.append(
         ManagedCertificateSpec(
@@ -700,6 +704,24 @@ def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
             chain_path=appliance_chain,
         )
     )
+
+    ca_settings = get_ca_settings_row(db)
+    if ca_settings.enabled:
+        ca_portal_hostname = normalize_dns_hostname(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
+        cert_path, key_path, chain_path = ca_service_cert_paths("ca-portal", ca_portal_hostname)
+        specs.append(
+            ManagedCertificateSpec(
+                owner="ca_portal:https",
+                common_name=ca_portal_hostname,
+                dns_names=[ca_portal_hostname],
+                ip_addresses=split_addresses(ca_settings.listen_address),
+                profile_name=CA_SERVER_PROFILE_NAME,
+                description="Managed CA portal HTTPS certificate.",
+                cert_path=cert_path,
+                key_path=key_path,
+                chain_path=chain_path,
+            )
+        )
 
     kms_settings = get_kms_settings_row(db)
     if kms_settings.enabled:
@@ -888,11 +910,18 @@ def get_vcf_offline_depot_settings_row(db: Session, *, reconcile_default_user: b
         settings.updated_at = utcnow()
         db.commit()
         db.refresh(settings)
+    if settings.tool_archive_path and settings.tool_version:
+        version_source = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOOL_VERSION_SOURCE_KEY)).scalar_one_or_none()
+        if not version_source or version_source.value != VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND:
+            settings.tool_version = ""
+            settings.updated_at = utcnow()
+            db.commit()
+            db.refresh(settings)
     if not settings.tool_archive_path:
         archive = find_local_vcf_download_tool_archive()
         if archive is not None:
             settings.tool_archive_path = str(archive)
-            settings.tool_version = detect_vcf_download_tool_version(archive)
+            settings.tool_version = ""
             settings.updated_at = utcnow()
             db.commit()
             db.refresh(settings)
@@ -1588,7 +1617,8 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
     local_dns_enabled = bool(dns_settings.enabled)
     chrony_settings = get_chrony_settings_row(db)
     chrony_enabled = bool(chrony_settings.enabled)
-    management = appliance_settings_management_context(db)
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    management, observed_dhcp_dns_servers = management_dhcp_dns_context(interfaces)
     ca_settings = get_ca_settings_row(db)
     management_https_cert_path, management_https_key_path, _management_https_chain_path = ca_managed_certificate_paths(db, "appliance:https")
     management_https_cert_available = bool(management_https_cert_path and management_https_key_path and ca_certificate_available(db, "appliance:https"))
@@ -1610,11 +1640,8 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         management_https_cert_path=management_https_cert_path,
         management_https_key_path=management_https_key_path,
     )
-    observed_dhcp_dns_servers = (
-        observed_management_dhcp_dns_servers(management.get("name", ""))
-        if appliance_settings_preview["resolver_mode"] == "dhcp" and management.get("ipv4_method") == "dhcp"
-        else []
-    )
+    if appliance_settings_preview["resolver_mode"] != "dhcp":
+        observed_dhcp_dns_servers = []
     return {
         "app_settings": get_settings(),
         "runtime_hostname": socket.gethostname(),
@@ -1745,8 +1772,7 @@ def store_uploaded_vcf_depot_archive(settings: VcfOfflineDepotSettings, archive_
     try:
         with temp_path.open("wb") as destination:
             shutil.copyfileobj(archive_file.file, destination)
-        validate_vcf_download_tool_archive(temp_path)
-        version = detect_vcf_download_tool_version(temp_path)
+        validate_vcf_download_tool_upload_envelope(temp_path)
         temp_path.replace(archive_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1756,7 +1782,7 @@ def store_uploaded_vcf_depot_archive(settings: VcfOfflineDepotSettings, archive_
         if temp_path.exists():
             temp_path.unlink(missing_ok=True)
     settings.tool_archive_path = str(archive_path)
-    settings.tool_version = version
+    settings.tool_version = ""
     return archive_name
 
 
@@ -1777,6 +1803,7 @@ def reset_vcf_depot_tool_staging(db: Session, settings: VcfOfflineDepotSettings,
         VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
         VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
         VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
+        VCF_DEPOT_TOOL_VERSION_SOURCE_KEY,
     ]
     if reset_application_properties:
         keys.extend(
@@ -1812,6 +1839,73 @@ def generate_and_store_vcf_software_depot_id(db: Session, settings: VcfOfflineDe
     error = result.error or "VCFDT software depot ID generation failed."
     set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY, error)
     return {**vcf_depot_software_depot_id_context(db), "error": error}
+
+
+def helper_json_payloads(output: str) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    decoder = json.JSONDecoder()
+    text = output or ""
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        try:
+            payload, end_index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            next_line = text.find("\n", index)
+            if next_line == -1:
+                break
+            index = next_line + 1
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+        index = end_index
+    return payloads
+
+
+def helper_json_payload_with_key(output: str, key: str) -> dict[str, Any]:
+    for payload in reversed(helper_json_payloads(output)):
+        if key in payload:
+            return payload
+    return {}
+
+
+def persist_vcf_depot_metadata_from_apply(db: Session, unit_results: list[dict[str, Any]]) -> None:
+    for result in unit_results:
+        if result.get("unit_id") != "vcf_offline_depot":
+            continue
+        settings = get_vcf_offline_depot_settings_row(db, reconcile_default_user=False)
+        for command in result.get("commands", []):
+            command_parts = [str(part) for part in command.get("command") or []]
+            if command.get("dry_run"):
+                continue
+            stdout = str(command.get("stdout") or "")
+            stderr = str(command.get("stderr") or "")
+            returncode = int(command.get("returncode") or 0)
+            if "stage-tool" in command_parts and returncode == 0:
+                payload = helper_json_payload_with_key(stdout, "tool_version")
+                tool_version = str(payload.get("tool_version") or "").strip()
+                if tool_version and settings.tool_version != tool_version:
+                    settings.tool_version = tool_version
+                    settings.updated_at = utcnow()
+                    set_setting_value(db, VCF_DEPOT_TOOL_VERSION_SOURCE_KEY, VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND)
+            if "generate-software-depot-id" not in command_parts:
+                continue
+            generated_at = utcnow().isoformat()
+            software_depot_id = ""
+            if returncode == 0:
+                payload = helper_json_payload_with_key(stdout, "software_depot_id")
+                software_depot_id = str(payload.get("software_depot_id") or "").strip()
+            if software_depot_id:
+                set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY, software_depot_id)
+                set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY, generated_at)
+                set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY, "")
+            else:
+                error = (stderr or stdout or "VCFDT software depot ID generation failed.").strip()
+                set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY, error)
+        return
 
 
 def vcf_depot_secret_context(db: Session) -> dict[str, object]:
@@ -1989,12 +2083,21 @@ def vcf_offline_depot_context(db: Session) -> dict:
         download_token_present=bool(secrets["download_token_present"]),
         activation_code_present=bool(secrets["activation_code_present"]),
     )
+    profile_rows = [
+        vcf_depot_profile_to_dict(
+            profile,
+            download_token_present=bool(secrets["download_token_present"]),
+            activation_code_present=bool(secrets["activation_code_present"]),
+        )
+        for profile in profiles
+    ]
     return {
         "vcf_depot_settings": settings,
         "vcf_depot_settings_json": vcf_depot_settings_to_dict(settings),
         "vcf_depot_users": users,
         "vcf_depot_profiles": profiles,
-        "vcf_depot_profile_rows": [vcf_depot_profile_to_dict(profile) for profile in profiles],
+        "vcf_depot_profile_rows": profile_rows,
+        "vcf_depot_profile_start_state": {int(row["id"]): row for row in profile_rows if row.get("id") is not None},
         "vcf_depot_available_interfaces": available_interfaces,
         "selected_vcf_depot_interfaces": split_interfaces(settings.listen_interface),
         "selected_vcf_depot_addresses": split_addresses(settings.listen_address),
@@ -2471,7 +2574,15 @@ def public_services_context(db: Session) -> dict[str, Any]:
         vcf_depot_settings=depot_settings,
         vcf_registry_settings=registry_settings,
     )
-    config_preview = render_public_services_nginx_config(entries, depot_store_path=depot_settings.depot_store_path)
+    ca_portal_hostname = normalize_dns_hostname(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
+    ca_portal_cert_path, ca_portal_key_path, _ca_portal_chain_path = ca_service_cert_paths("ca-portal", ca_portal_hostname)
+    config_preview = render_public_services_nginx_config(
+        entries,
+        depot_store_path=depot_settings.depot_store_path,
+        http_port=int(esxi_boot.get("http_port") or 8080),
+        ca_certificate_path=ca_portal_cert_path,
+        ca_key_path=ca_portal_key_path,
+    )
     return {
         "public_service_entries": entries,
         "public_service_config_preview": config_preview,
@@ -2504,7 +2615,8 @@ def public_portal_links_context(db: Session) -> dict[str, str]:
     return {
         "public_management_base_url": base_url,
         "public_management_url": f"{base_url}/" if base_url else "",
-        "public_openapi_url": f"{base_url}/openapi.json" if base_url else "/openapi.json",
+        "public_swagger_url": f"{base_url}/api/docs" if base_url else "/api/docs",
+        "public_openapi_url": f"{base_url}/api/docs" if base_url else "/api/docs",
     }
 
 
@@ -2517,6 +2629,51 @@ def _url_host(value: str) -> str:
     except ValueError:
         return host
     return f"[{parsed}]" if parsed.version == 6 else str(parsed)
+
+
+def _absolute_public_url(scheme: str, host: str, path: str, *, port: int | None = None) -> str:
+    normalized_host = _url_host(host)
+    if not normalized_host:
+        return path
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    default_port = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    port_part = "" if not port or default_port else f":{port}"
+    return f"{scheme}://{normalized_host}{port_part}{normalized_path}"
+
+
+def _public_service_hostname(service: dict[str, Any]) -> str:
+    for value in service.get("dns_names") or []:
+        candidate = str(value or "").strip().strip(".")
+        if candidate:
+            return candidate
+    return ""
+
+
+def public_service_link_variants(service: dict[str, Any], binding: dict[str, str], *, esxi_pxe_boot: dict[str, Any]) -> dict[str, str]:
+    service_id = str(service.get("id") or "")
+    address = str(binding.get("address") or "")
+    hostname = _public_service_hostname(service) or address
+    try:
+        service_port = int(service.get("port") or 0)
+    except (TypeError, ValueError):
+        service_port = 0
+    if service_id == "ca":
+        name_href = _absolute_public_url("https", hostname, "/ca", port=service_port or 443)
+        ip_href = _absolute_public_url("https", address, "/ca", port=service_port or 443)
+    elif service_id == "vcf_offline_depot":
+        name_href = _absolute_public_url("https", hostname, "/PROD/", port=service_port or 443)
+        ip_href = _absolute_public_url("https", address, "/PROD/", port=service_port or 443)
+    elif service_id == "esxi_pxe":
+        try:
+            http_port = int(service_port or esxi_pxe_boot.get("http_port") or 8080)
+        except (TypeError, ValueError):
+            http_port = 8080
+        name_href = _absolute_public_url("http", hostname, "/pxe/esxi/", port=http_port)
+        ip_href = _absolute_public_url("http", address, "/pxe/esxi/", port=http_port)
+    else:
+        name_href = str(service.get("href") or "")
+        ip_href = name_href
+    return {"href": name_href, "name_href": name_href, "ip_href": ip_href}
 
 
 def safe_login_next(value: str | None) -> str:
@@ -2635,11 +2792,19 @@ def public_service_directory_context(db: Session, binding: dict[str, str]) -> di
         vcf_depot_settings=depot_settings,
         vcf_registry_settings=registry_settings,
     )
+    services = [
+        {
+            **service,
+            **public_service_link_variants(service, binding, esxi_pxe_boot=esxi_boot),
+        }
+        for service in services
+    ]
     return {
         "public_interface": binding,
         "public_services": services,
         "public_service_count": len(services),
         "public_ca_service_available": any(service.get("id") == "ca" for service in services),
+        "public_address_mode_switch": bool(services),
         "public_github_url": "https://github.com/mdaneri/LabFoundry",
         "current_version_info": current_version_info(),
         **public_portal_links_context(db),
@@ -2650,6 +2815,14 @@ def request_allows_public_service(db: Session, request: Request, service_id: str
     binding = request_host_interface_binding(request_host_name(request), db)
     if not binding or binding.get("role") == "management":
         return False
+    services = public_service_directory_context(db, binding)["public_services"]
+    return any(service.get("id") == service_id for service in services)
+
+
+def request_public_service_route_allowed(db: Session, request: Request, service_id: str) -> bool:
+    binding = request_host_interface_binding(request_host_name(request), db)
+    if not binding or binding.get("role") == "management":
+        return True
     services = public_service_directory_context(db, binding)["public_services"]
     return any(service.get("id") == service_id for service in services)
 
@@ -2921,6 +3094,10 @@ def dnsmasq_context(db: Session) -> dict:
     dhcp_reservations = db.execute(select(DhcpReservation).order_by(DhcpReservation.hostname)).scalars().all()
     esxi_boot = esxi_pxe_boot_settings(db)
     available_interfaces = service_bind_options(db)
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    management_interface, observed_dhcp_upstream_servers = management_dhcp_dns_context(physical_interfaces)
+    fallback_upstream_servers = observed_dhcp_upstream_servers if not split_servers(dns_settings.upstream_servers) else []
+    effective_upstream_servers = effective_dns_upstream_servers(dns_settings, fallback_upstream_servers)
     vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
     config_preview = render_dnsmasq_config(
         dns_settings=dns_settings,
@@ -2930,6 +3107,7 @@ def dnsmasq_context(db: Session) -> dict:
         dhcp_scopes=dhcp_scopes,
         dhcp_options=dhcp_options,
         conditional_forwarders=conditional_forwarders,
+        fallback_upstream_servers=fallback_upstream_servers,
         esxi_pxe_boot=esxi_boot,
     )
     validation_errors = (
@@ -2939,7 +3117,7 @@ def dnsmasq_context(db: Session) -> dict:
             dhcp_settings,
             dhcp_scopes,
             dhcp_bind_target_families(
-                db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all(),
+                physical_interfaces,
                 vlan_interfaces,
             ),
         )
@@ -2991,6 +3169,9 @@ def dnsmasq_context(db: Session) -> dict:
         "available_dns_addresses": available_dns_listen_addresses(dns_settings, dhcp_settings, available_interfaces, vlan_interfaces),
         "selected_dns_interfaces": split_interfaces(dns_settings.listen_interface),
         "selected_dns_addresses": split_addresses(dns_settings.listen_address),
+        "management_interface": management_interface,
+        "observed_dhcp_upstream_servers": fallback_upstream_servers,
+        "effective_upstream_servers": effective_upstream_servers,
         "config_preview": config_preview,
         "dns_domains": "\n".join(dns_domains),
         "hosts_editor_text": render_hosts_records(dns_records),
@@ -5261,6 +5442,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         settings = context["vcf_depot_settings"]
         config_path = settings.config_path
         properties_path = VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH
+        enabled_download_profiles = [profile for profile in context["vcf_depot_profiles"] if profile.enabled]
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(VCF_DEPOT_STAGED_CONFIG_PATH, context["vcf_depot_https_config_preview"])
             properties_path = stage_appliance_apply_config(
@@ -5268,10 +5450,11 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
                 str(context["vcf_depot_application_properties"].get("content") or ""),
             )
         steps = [lambda: adapter.validate_vcf_offline_depot_config(config_path)]
-        if settings.tool_archive_path:
+        if settings.enabled and settings.tool_archive_path and enabled_download_profiles:
             steps.extend(
                 [
                     lambda: adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path),
+                    lambda: adapter.generate_vcf_offline_depot_software_depot_id(),
                     lambda: adapter.apply_vcf_offline_depot_application_properties(properties_path),
                 ]
             )
@@ -5892,6 +6075,7 @@ def submit_appliance_apply(
     selected_ordered_units = [unit for unit in units if unit["id"] in selected_ids]
     unit_results = [execute_appliance_apply_unit(unit) for unit in selected_ordered_units]
     succeeded = all(result["success"] for result in unit_results)
+    persist_vcf_depot_metadata_from_apply(db, unit_results)
     now = utcnow()
     skipped_changed_units = [
         {"unit_id": unit["id"], "label": unit["label"], "summary": unit["summary"]}
@@ -6958,6 +7142,35 @@ def refresh_physical_interfaces_from_ui(
     return RedirectResponse("/physical-interfaces", status_code=303)
 
 
+def preserve_management_dhcp_dns_on_static_conversion(
+    db: Session,
+    interface: PhysicalInterface,
+    *,
+    new_role: str,
+    old_ipv4_method: str,
+    new_ipv4_method: str,
+) -> list[str]:
+    if new_role != "management" or old_ipv4_method != "dhcp" or new_ipv4_method != "static":
+        return []
+    _management, observed_servers = management_dhcp_dns_context([interface])
+    if not observed_servers:
+        return []
+    preserved: list[str] = []
+    appliance_settings = get_appliance_settings_row(db)
+    dns_settings = get_dns_settings_row(db)
+    if not dns_settings.enabled and not split_servers(appliance_settings.external_dns_servers):
+        appliance_settings.external_dns_servers = join_servers(observed_servers)
+        appliance_settings.updated_at = utcnow()
+        db.add(appliance_settings)
+        preserved.append("appliance resolver DNS")
+    if not split_servers(dns_settings.upstream_servers):
+        dns_settings.upstream_servers = join_servers(observed_servers)
+        dns_settings.updated_at = utcnow()
+        db.add(dns_settings)
+        preserved.append("DNS service forwarders")
+    return preserved
+
+
 @router.post("/physical-interfaces/{interface_id}/edit", response_model=None)
 def edit_physical_interface_from_ui(
     request: Request,
@@ -6992,6 +7205,11 @@ def edit_physical_interface_from_ui(
         return Response("IPv4 DHCP is available only for the management interface.", status_code=422, media_type="text/plain")
     if ipv4_method_value == "dhcp" and ip_cidr.strip():
         return Response("Clear IPv4 CIDR before switching the management interface to DHCP.", status_code=422, media_type="text/plain")
+    admin_state_value = admin_state.strip().lower() or "up"
+    if admin_state_value not in {"up", "down"}:
+        return Response("Interface admin state must be up or down.", status_code=422, media_type="text/plain")
+    if role_value == "management" and admin_state_value != "up":
+        return Response("The management interface must stay enabled.", status_code=422, media_type="text/plain")
     ip_value = None
     if ipv4_method_value == "static":
         ip_value = cidr_for_family(ip_cidr, 4, "Interface IPv4 CIDR")
@@ -7002,13 +7220,21 @@ def edit_physical_interface_from_ui(
         return ipv6_value
     old_ip_cidr = interface.ip_cidr
     old_ipv6_cidr = interface.ipv6_cidr
+    old_ipv4_method = normalize_ipv4_method(interface.ipv4_method)
+    preserved_dhcp_dns = preserve_management_dhcp_dns_on_static_conversion(
+        db,
+        interface,
+        new_role=role_value,
+        old_ipv4_method=old_ipv4_method,
+        new_ipv4_method=ipv4_method_value,
+    )
     interface.role = role_value
     interface.mode = new_mode
     interface.ipv4_method = ipv4_method_value
     interface.ip_cidr = ip_value or None
     interface.ipv6_cidr = ipv6_value or None
     interface.mtu = mtu
-    interface.admin_state = admin_state.strip()
+    interface.admin_state = admin_state_value
     interface.desired_state_source = "user"
     dependent_updates = refresh_interface_dependent_addresses(
         db,
@@ -7019,7 +7245,12 @@ def edit_physical_interface_from_ui(
         actor=identity.username,
     )
     db.commit()
-    detail = f"Refreshed dependent desired-state addresses: {', '.join(dependent_updates)}." if dependent_updates else ""
+    detail_parts = []
+    if dependent_updates:
+        detail_parts.append(f"Refreshed dependent desired-state addresses: {', '.join(dependent_updates)}.")
+    if preserved_dhcp_dns:
+        detail_parts.append(f"Preserved DHCP-provided DNS in desired state: {', '.join(preserved_dhcp_dns)}.")
+    detail = " ".join(detail_parts)
     record_audit(db, actor=identity.username, action="update_physical_interface", resource_type="interface", resource_id=interface.name, detail=detail)
     return RedirectResponse("/physical-interfaces", status_code=303)
 
@@ -7293,6 +7524,8 @@ def update_dns_from_ui(
                 "validation_warnings": context["dns_warnings"],
                 "config_path": context["dns_settings"].config_path,
                 "config_preview": context["config_preview"],
+                "observed_dhcp_upstream_servers": context["observed_dhcp_upstream_servers"],
+                "effective_upstream_servers": context["effective_upstream_servers"],
             }
         )
     return RedirectResponse("/dns", status_code=303)
@@ -8165,6 +8398,8 @@ def public_ca_page(
     identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
+    if not request_public_service_route_allowed(db, request, "ca"):
+        raise HTTPException(status_code=404, detail="CA public service is not available on this interface")
     return render(request, "ca_public.html", {"identity": identity, **public_ca_context(db)})
 
 
@@ -8209,6 +8444,8 @@ def authenticate_ca_portal_session(
 
 @router.get("/ca/login", response_class=HTMLResponse, response_model=None)
 def ca_public_login_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    if not request_public_service_route_allowed(db, request, "ca"):
+        raise HTTPException(status_code=404, detail="CA public service is not available on this interface")
     return ca_public_login_response(request, db=db)
 
 
@@ -8221,6 +8458,8 @@ def ca_public_login(
     next: str = Form("/ca"),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse:
+    if not request_public_service_route_allowed(db, request, "ca"):
+        raise HTTPException(status_code=404, detail="CA public service is not available on this interface")
     return authenticate_ca_portal_session(
         request,
         db,
@@ -8251,15 +8490,21 @@ def public_root_ca_response(db: Session, *, bundle: bool = False) -> Response:
 
 @router.get("/ca/downloads/root-ca.pem", response_model=None)
 def download_public_root_ca(
+    request: Request,
     db: Session = Depends(get_db),
 ) -> Response:
+    if not request_public_service_route_allowed(db, request, "ca"):
+        raise HTTPException(status_code=404, detail="CA public service is not available on this interface")
     return public_root_ca_response(db)
 
 
 @router.get("/ca/downloads/ca-bundle.pem", response_model=None)
 def download_public_ca_bundle(
+    request: Request,
     db: Session = Depends(get_db),
 ) -> Response:
+    if not request_public_service_route_allowed(db, request, "ca"):
+        raise HTTPException(status_code=404, detail="CA public service is not available on this interface")
     return public_root_ca_response(db, bundle=True)
 
 
@@ -8292,6 +8537,8 @@ def ca_portal_requests_page(
     identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
+    if not request_public_service_route_allowed(db, request, "ca"):
+        raise HTTPException(status_code=404, detail="CA public service is not available on this interface")
     if identity is None:
         return ca_request_portal_login_response(request, db=db)
     require_certificate_workflow_identity(identity)
@@ -8307,6 +8554,8 @@ def ca_request_portal_login(
     next: str = Form("/requests"),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse:
+    if not request_public_service_route_allowed(db, request, "ca"):
+        raise HTTPException(status_code=404, detail="CA public service is not available on this interface")
     return authenticate_ca_portal_session(
         request,
         db,
@@ -8418,6 +8667,8 @@ def submit_ca_request_from_portal_alias(
     identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse:
+    if not request_public_service_route_allowed(db, request, "ca"):
+        raise HTTPException(status_code=404, detail="CA public service is not available on this interface")
     if identity is None:
         return ca_request_portal_login_response(request, status_code=401)
     require_certificate_workflow_identity(identity)
@@ -8468,6 +8719,8 @@ def revoke_ca_certificate_from_portal_alias(
     identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse:
+    if not request_public_service_route_allowed(db, request, "ca"):
+        raise HTTPException(status_code=404, detail="CA public service is not available on this interface")
     if identity is None:
         return ca_request_portal_login_response(request, status_code=401)
     require_certificate_workflow_identity(identity)
@@ -9276,9 +9529,6 @@ def update_vcf_offline_depot_settings_from_ui(
     else:
         settings.telemetry_choice = "ENABLE" if telemetry_enabled == "on" else "DISABLE"
     uploaded_archive_name = store_uploaded_vcf_depot_archive(settings, tool_archive_file)
-    software_depot_id_result: dict[str, str] | None = None
-    if uploaded_archive_name:
-        software_depot_id_result = generate_and_store_vcf_software_depot_id(db, settings)
     uploaded_token_name = store_uploaded_vcf_depot_secret(
         db,
         download_token_file,
@@ -9326,7 +9576,6 @@ def update_vcf_offline_depot_settings_from_ui(
         activation_state = context["vcf_depot_activation_code"]
         application_properties = context["vcf_depot_application_properties"]
         software_depot_id = context["vcf_depot_software_depot_id"]
-        software_depot_id_payload = software_depot_id_result or software_depot_id
         return JSONResponse(
             {
                 "status": "saved",
@@ -9344,9 +9593,9 @@ def update_vcf_offline_depot_settings_from_ui(
                 "depot_store_path": saved_settings.depot_store_path,
                 "tool_archive_name": uploaded_archive_name or Path(saved_settings.tool_archive_path).name if saved_settings.tool_archive_path else "",
                 "tool_version": saved_settings.tool_version,
-                "software_depot_id": software_depot_id_payload["id"],
-                "software_depot_id_generated_at": software_depot_id_payload["generated_at"],
-                "software_depot_id_error": software_depot_id_payload["error"],
+                "software_depot_id": software_depot_id["id"],
+                "software_depot_id_generated_at": software_depot_id["generated_at"],
+                "software_depot_id_error": software_depot_id["error"],
                 "download_token_present": token_state.present,
                 "download_token_name": uploaded_token_name or token_state.filename,
                 "download_token_updated_at": token_state.updated_at,
@@ -9390,6 +9639,105 @@ def reset_vcf_depot_tool_from_ui(
         detail="VCFDT package reset; application properties reset." if reset_properties else "VCFDT package reset.",
     )
     db.commit()
+    return RedirectResponse("/vcf-offline-depot", status_code=303)
+
+
+def _store_vcf_depot_credential_from_ui(
+    db: Session,
+    *,
+    credential_type: str,
+    credential_text: str,
+    credential_file: UploadFile | None,
+    actor: str,
+) -> str:
+    if credential_type == "activation_code":
+        display_name = store_uploaded_vcf_depot_secret(
+            db,
+            credential_file,
+            name_key=VCF_DEPOT_ACTIVATION_NAME_KEY,
+            value_key=VCF_DEPOT_ACTIVATION_VALUE_KEY,
+            actor=actor,
+            action="upload_vcf_depot_activation_code",
+        )
+        if not display_name:
+            display_name = store_pasted_vcf_depot_secret(
+                db,
+                credential_text,
+                name_key=VCF_DEPOT_ACTIVATION_NAME_KEY,
+                value_key=VCF_DEPOT_ACTIVATION_VALUE_KEY,
+                display_name="pasted activation code",
+                actor=actor,
+                action="paste_vcf_depot_activation_code",
+            )
+        return display_name
+    if credential_type != "download_token":
+        raise HTTPException(status_code=400, detail="Credential type must be download token or activation code.")
+    display_name = store_uploaded_vcf_depot_secret(
+        db,
+        credential_file,
+        name_key=VCF_DEPOT_TOKEN_NAME_KEY,
+        value_key=VCF_DEPOT_TOKEN_VALUE_KEY,
+        actor=actor,
+        action="upload_vcf_depot_download_token",
+    )
+    if not display_name:
+        display_name = store_pasted_vcf_depot_secret(
+            db,
+            credential_text,
+            name_key=VCF_DEPOT_TOKEN_NAME_KEY,
+            value_key=VCF_DEPOT_TOKEN_VALUE_KEY,
+            display_name="pasted token",
+            actor=actor,
+            action="paste_vcf_depot_download_token",
+        )
+    return display_name
+
+
+@router.post("/vcf-offline-depot/credentials", response_model=None)
+def paste_vcf_depot_credential_from_ui(
+    request: Request,
+    credential_type: str = Form("download_token"),
+    credential_text: str = Form(""),
+    credential_file: UploadFile | None = File(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    display_name = _store_vcf_depot_credential_from_ui(
+        db,
+        credential_type=credential_type,
+        credential_text=credential_text,
+        credential_file=credential_file,
+        actor=identity.username,
+    )
+    db.commit()
+    stage_vcf_depot_runtime_secrets_after_upload(db)
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = vcf_offline_depot_context(db)
+        token_state = context["vcf_depot_download_token"]
+        activation_state = context["vcf_depot_activation_code"]
+        validation_errors = context["vcf_depot_validation_errors"]
+        validation_warnings = context["vcf_depot_validation_warnings"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "credential_type": credential_type,
+                "credential_name": display_name,
+                "download_token_present": token_state.present,
+                "download_token_name": token_state.filename,
+                "download_token_updated_at": token_state.updated_at,
+                "activation_code_present": activation_state.present,
+                "activation_code_name": activation_state.filename,
+                "activation_code_updated_at": activation_state.updated_at,
+                "valid": not validation_errors,
+                "validation_errors": validation_errors,
+                "validation_warnings": validation_warnings,
+                "config_path": context["vcf_depot_settings"].config_path,
+                "https_config_preview": context["vcf_depot_https_config_preview"],
+                "command_preview": context["vcf_depot_command_preview"],
+            }
+        )
     return RedirectResponse("/vcf-offline-depot", status_code=303)
 
 
@@ -9557,28 +9905,26 @@ def generate_vcf_depot_software_depot_id_from_ui(
     settings = get_vcf_offline_depot_settings_row(db)
     if not settings.tool_archive_path:
         raise HTTPException(status_code=400, detail="Upload VCFDT before generating the software depot ID.")
-    result = generate_and_store_vcf_software_depot_id(db, settings)
-    db.commit()
     record_audit(
         db,
         actor=identity.username,
-        action="generate_vcf_depot_software_depot_id",
+        action="request_vcf_depot_software_depot_id_apply",
         resource_type="vcf_offline_depot",
         resource_id=str(settings.id),
-        success=not bool(result["error"]),
-        detail="software depot ID generated" if result["id"] and not result["error"] else "software depot ID generation failed",
+        detail="software depot ID generation is handled by the global appliance apply unit",
     )
+    db.commit()
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         return JSONResponse(
             {
-                "status": "generated" if not result["error"] else "error",
-                "software_depot_id": result["id"],
-                "software_depot_id_generated_at": result["generated_at"],
-                "software_depot_id_error": result["error"],
+                "status": "apply-required",
+                "software_depot_id": "",
+                "software_depot_id_generated_at": "",
+                "software_depot_id_error": "Submit the VCF Offline Depot unit on Appliance Apply to generate or refresh the software depot ID.",
             },
-            status_code=200 if not result["error"] else 400,
+            status_code=409,
         )
-    return RedirectResponse("/vcf-offline-depot", status_code=303)
+    return RedirectResponse("/appliance-apply", status_code=303)
 
 
 @router.post("/vcf-offline-depot/profiles", response_model=None)
@@ -9695,6 +10041,13 @@ def start_vcf_depot_profile_download_from_ui(
     if not profile.enabled:
         raise HTTPException(status_code=400, detail="Enable the VCFDT download profile before starting a download.")
     secrets = vcf_depot_secret_context(db)
+    start_blocker = vcf_depot_profile_start_blocker(
+        profile,
+        download_token_present=bool(secrets["download_token_present"]),
+        activation_code_present=bool(secrets["activation_code_present"]),
+    )
+    if start_blocker:
+        raise HTTPException(status_code=400, detail=start_blocker)
     all_service_interfaces = service_bind_options(db)
     management_interface_names = {
         str(interface["name"])

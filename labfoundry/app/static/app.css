@@ -302,6 +302,40 @@ textarea {
   margin: 0;
 }
 
+.public-address-mode-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(42px, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #f8fafc;
+}
+
+.public-address-mode-toggle button {
+  min-width: 42px;
+  height: 26px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #475569;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.public-address-mode-toggle button[aria-pressed="true"] {
+  background: #dbeafe;
+  color: #1d4ed8;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.public-address-mode-toggle button:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
+}
+
 .button-icon {
   display: block;
   flex: 0 0 auto;
@@ -364,6 +398,12 @@ textarea {
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.python-link-icon path,
+.python-link-icon path:not(:first-child) {
+  fill: currentColor;
+  stroke: none;
 }
 
 .public-login-shell {
@@ -1944,6 +1984,16 @@ textarea {
   background: #ffffff;
   -webkit-user-select: text;
   user-select: text;
+}
+
+.software-depot-id-value {
+  flex: 1 1 22rem;
+  width: min(100%, 22rem);
+  max-width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 .settings-subsection {

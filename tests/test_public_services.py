@@ -9,7 +9,7 @@ def test_public_service_entries_scope_services_to_matching_address():
         PhysicalInterface(name="eth3", role="access", mode="access", ip_cidr="192.168.88.32/24"),
     ]
     ca_settings = CaSettings(enabled=True, listen_interface="eth2", listen_address="192.168.87.32", root_certificate_pem="root")
-    depot_settings = VcfOfflineDepotSettings(enabled=True, listen_interface="eth2", listen_address="192.168.87.32")
+    depot_settings = VcfOfflineDepotSettings(enabled=True, listen_interface="eth2", listen_address="192.168.87.32", port=8443)
     registry_settings = VcfPrivateRegistrySettings(
         enabled=True,
         hostname="registry.labfoundry.internal",
@@ -22,7 +22,7 @@ def test_public_service_entries_scope_services_to_matching_address():
         interfaces=interfaces,
         vlans=[],
         ca_settings=ca_settings,
-        esxi_pxe_boot={"enabled": True, "listen_interface": "eth2", "listen_address": "192.168.87.32"},
+        esxi_pxe_boot={"enabled": True, "listen_interface": "eth2", "listen_address": "192.168.87.32", "http_port": 8081},
         vcf_depot_settings=depot_settings,
         vcf_registry_settings=registry_settings,
     )
@@ -33,18 +33,24 @@ def test_public_service_entries_scope_services_to_matching_address():
     assert by_address["192.168.88.32"] == {"vcf_private_registry"}
     services_by_id = {service["id"]: service for entry in entries for service in entry["services"]}
     assert services_by_id["ca"]["dns_names"] == ["ca.labfoundry.internal"]
+    assert services_by_id["ca"]["port"] == 443
     assert services_by_id["esxi_pxe"]["dns_names"] == ["esxi-pxe.labfoundry.internal"]
+    assert services_by_id["esxi_pxe"]["scheme"] == "http"
+    assert services_by_id["esxi_pxe"]["port"] == 8081
     assert services_by_id["vcf_offline_depot"]["dns_names"] == ["depot.labfoundry.internal"]
+    assert services_by_id["vcf_offline_depot"]["scheme"] == "https"
+    assert services_by_id["vcf_offline_depot"]["port"] == 8443
     assert services_by_id["vcf_offline_depot"]["allow_unauthenticated_access"] is False
     assert "allow_unauthenticated_access" not in services_by_id["esxi_pxe"]
     assert services_by_id["vcf_private_registry"]["dns_names"] == ["registry.labfoundry.internal"]
+    assert services_by_id["vcf_private_registry"]["port"] == 9443
 
     depot_settings.allow_unauthenticated_access = True
     open_entries = public_service_entries(
         interfaces=interfaces,
         vlans=[],
         ca_settings=ca_settings,
-        esxi_pxe_boot={"enabled": True, "listen_interface": "eth2", "listen_address": "192.168.87.32"},
+        esxi_pxe_boot={"enabled": True, "listen_interface": "eth2", "listen_address": "192.168.87.32", "http_port": 8081},
         vcf_depot_settings=depot_settings,
         vcf_registry_settings=registry_settings,
     )
@@ -74,39 +80,56 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
             },
         ],
         depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        ca_certificate_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.crt",
+        ca_key_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.key",
     )
 
+    assert "listen 192.168.87.32:443 ssl;" in config
+    assert "server_name ca.labfoundry.internal;" in config
+    assert "ssl_certificate /etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.crt;" in config
+    assert "ssl_certificate_key /etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.key;" in config
+    assert "IP-scoped HTTPS public services front door." in config
+    assert "server_name _ 192.168.87.32;" in config
+    assert "location = /ca {" in config
+    assert "location ^~ /ca/ {" in config
+    assert "location = /requests {" in config
+    assert "location ^~ /requests/ {" in config
+    assert "location ^~ /static/ {" in config
+    assert "location = /favicon.ico {" in config
+    assert "location = /manifest.webmanifest {" in config
+    assert "location = /service-worker.js {" in config
+    assert "proxy_set_header X-Forwarded-Proto https;" in config
     assert "listen 192.168.87.32:80;" in config
     assert "server_name _ 192.168.87.32;" in config
     assert "listen 192.168.88.32:80;" not in config
     assert "server_name _ 192.168.88.32;" not in config
-    assert "location ^~ /static/ {" not in config
-    assert "location = /favicon.ico {" not in config
-    assert "location = /manifest.webmanifest {" not in config
     assert "location = /requests/login {" not in config
     assert "location = /requests/logout {" not in config
     assert "\n  location = /login {" not in config
     assert "\n  location = /logout {" not in config
-    assert "location /ca {" not in config
-    assert "location /requests {" not in config
     assert "location /pxe/esxi/ks/" in config
+    assert "location = /pxe/esxi/boot.ipxe" in config
+    assert "location = /pxe/esxi {" in config
+    assert "return 301 /pxe/esxi/;" in config
+    assert "location = /pxe/esxi/ {" in config
+    assert "LabFoundry ESXi PXE HTTP root" in config
     assert "alias /var/lib/labfoundry/pxe/http/esxi/;" in config
-    assert "location = /PROD" not in config
-    assert "return 301 /PROD/;" not in config
-    assert "location = /PROD/login {" not in config
-    assert "location = /PROD/logout {" not in config
-    assert "location = /_labfoundry_depot_auth {" not in config
-    assert "proxy_pass http://127.0.0.1:8000/PROD/auth-check;" not in config
-    assert "location @labfoundry_depot_login {" not in config
-    assert "return 303 /PROD/login?next=$request_uri;" not in config
-    assert "location = /PROD/ {" not in config
-    assert "location ~ ^/PROD/.*/$ {" not in config
-    assert "location ~ ^/PROD/(?!login$|logout$)(.+[^/])$ {" not in config
-    assert "auth_request /_labfoundry_depot_auth;" not in config
-    assert "error_page 401 = @labfoundry_depot_login;" not in config
-    assert 'auth_basic "LabFoundry VCF Offline Depot";' not in config
-    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" not in config
-    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" not in config
+    assert "location = /PROD" in config
+    assert "return 301 /PROD/;" in config
+    assert "location = /PROD/login {" in config
+    assert "location = /PROD/logout {" in config
+    assert "location = /_labfoundry_depot_auth {" in config
+    assert "proxy_pass http://127.0.0.1:8000/PROD/auth-check;" in config
+    assert "location @labfoundry_depot_login {" in config
+    assert "return 303 /PROD/login?next=$request_uri;" in config
+    assert "location = /PROD/ {" in config
+    assert "location ~ ^/PROD/.*/$ {" in config
+    assert "location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {" in config
+    assert "auth_request /_labfoundry_depot_auth;" in config
+    assert "error_page 401 = @labfoundry_depot_login;" in config
+    assert 'auth_basic "LabFoundry VCF Offline Depot";' in config
+    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config
+    assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in config
     assert "autoindex off;" in config
     assert "/registry" not in config
 
@@ -127,3 +150,27 @@ def test_public_services_nginx_config_skips_non_pxe_http_services():
     assert "server {" not in config
     assert "/PROD/" not in config
     assert "auth_basic" not in config
+
+
+def test_public_services_nginx_config_omits_ip_depot_routes_when_depot_uses_different_port():
+    config = render_public_services_nginx_config(
+        [
+            {
+                "interface": "eth2",
+                "role": "access",
+                "address": "192.168.87.32",
+                "services": [
+                    {"id": "ca"},
+                    {"id": "vcf_offline_depot", "port": 8443},
+                ],
+            },
+        ],
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        ca_certificate_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.crt",
+        ca_key_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.key",
+    )
+
+    assert "CA portal HTTPS front door." in config
+    assert "listen 192.168.87.32:443 ssl;" in config
+    assert "IP-scoped HTTPS public services front door." not in config
+    assert "/PROD/" not in config

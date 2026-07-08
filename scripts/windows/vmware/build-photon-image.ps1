@@ -132,6 +132,94 @@ function Get-Ipv4AddressFromSubnetOffset {
     return (Get-Ipv4CidrFromSubnetOffset -Subnet $Subnet -Netmask $Netmask -HostOffset $HostOffset) -split '/', 2 | Select-Object -First 1
 }
 
+function Resolve-WorkstationVmrunPath {
+    param([string]$Path)
+
+    if ($Path) {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            throw "vmrun.exe not found: $Path"
+        }
+        return (Resolve-Path -LiteralPath $Path).Path
+    }
+
+    $candidates = @(
+        'C:\Program Files\VMware\VMware Workstation\vmrun.exe',
+        'C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe'
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    $command = Get-Command vmrun -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+    throw 'vmrun.exe was not found. Install VMware Workstation Pro or pass -VmrunPath.'
+}
+
+function Resolve-WorkstationOutputDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$PackerDirectory,
+        [string]$OutputDirectory
+    )
+
+    $effectiveOutput = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+        Join-Path $PackerDirectory 'output\labfoundry-photon-vmware-workstation'
+    } elseif ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
+        $OutputDirectory
+    } else {
+        Join-Path $PackerDirectory $OutputDirectory
+    }
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($effectiveOutput)
+}
+
+function Invoke-WorkstationVmrunBestEffort {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedVmrunPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$FailureMessage
+    )
+
+    & $ResolvedVmrunPath @Arguments | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "$FailureMessage vmrun $($Arguments -join ' ') exited with code $LASTEXITCODE."
+    }
+}
+
+function Unregister-ExistingWorkstationTemplate {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedVmrunPath,
+        [Parameter(Mandatory = $true)][string]$OutputDirectory,
+        [Parameter(Mandatory = $true)][string]$VmName
+    )
+
+    if (-not (Test-Path -LiteralPath $OutputDirectory -PathType Container)) {
+        return
+    }
+
+    $preferredVmx = Join-Path $OutputDirectory "$VmName.vmx"
+    $vmx = if (Test-Path -LiteralPath $preferredVmx -PathType Leaf) {
+        Get-Item -LiteralPath $preferredVmx
+    } else {
+        Get-ChildItem -LiteralPath $OutputDirectory -Filter '*.vmx' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    }
+    if (-not $vmx) {
+        return
+    }
+
+    $resolvedOutput = (Resolve-Path -LiteralPath $OutputDirectory).Path.TrimEnd('\')
+    $resolvedVmx = (Resolve-Path -LiteralPath $vmx.FullName).Path
+    if (-not ($resolvedVmx.StartsWith($resolvedOutput + '\', [System.StringComparison]::OrdinalIgnoreCase))) {
+        throw "Refusing to unregister VMware template outside the configured image output directory: $resolvedVmx"
+    }
+
+    Write-Host "Unregistering existing VMware Workstation template before replacing output: $resolvedVmx"
+    Invoke-WorkstationVmrunBestEffort -ResolvedVmrunPath $ResolvedVmrunPath -Arguments @('-T', 'ws', 'stop', $resolvedVmx, 'hard') -FailureMessage 'Existing template was not running or could not be stopped; continuing to unregister.'
+    Invoke-WorkstationVmrunBestEffort -ResolvedVmrunPath $ResolvedVmrunPath -Arguments @('-T', 'ws', 'unregister', $resolvedVmx) -FailureMessage 'Existing template could not be unregistered before rebuild.'
+}
+
 function Get-WorkstationManagementNetwork {
     param(
         [string]$NetworkName,
@@ -256,6 +344,12 @@ $packerVariables = @{
     vmnet_name         = $VmnetName
     service_vmnet_name = $ServiceVmnetName
     headless           = [bool]$Headless
+}
+
+if (-not $ValidateOnly -and -not $PrepareIsoOnly -and -not $KeepExistingOutput) {
+    $resolvedVmrunPath = Resolve-WorkstationVmrunPath -Path $VmrunPath
+    $workstationOutputDirectory = Resolve-WorkstationOutputDirectory -PackerDirectory $PackerDirectory -OutputDirectory $OutputDirectory
+    Unregister-ExistingWorkstationTemplate -ResolvedVmrunPath $resolvedVmrunPath -OutputDirectory $workstationOutputDirectory -VmName $VmName
 }
 
 Invoke-LabFoundryPhotonImageBuild `
