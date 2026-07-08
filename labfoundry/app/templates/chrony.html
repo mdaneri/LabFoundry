@@ -39,10 +39,7 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>Chrony Settings</h2>
-        <div class="button-row">
-          <span class="status-pill {{ ntp_service_status.pill }}">{{ ntp_service_status.label }}</span>
-          <button class="button secondary compact-button" type="button" data-chrony-source-health-open>Check source health</button>
-        </div>
+        <span class="status-pill {{ ntp_service_status.pill }}">{{ ntp_service_status.label }}</span>
       </div>
       <form class="form-stack" action="/chrony/settings" method="post" data-autosave-form data-ntp-settings data-autosave-status-id="ntp-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -94,9 +91,16 @@
           <input type="number" name="port" value="{{ chrony_settings.port }}" min="123" max="123">
         </label>
         <input type="hidden" name="upstream_servers" value="{{ chrony_settings.upstream_servers }}">
+        <input type="hidden" name="upstream_sources_json" value='{{ chrony_settings_json.upstream_sources | tojson }}' data-chrony-upstreams-json>
         <div class="form-field">
           <span class="field-label"><span>Upstream sources</span><button class="help-icon" type="button" data-help="Chrony time sources used after global appliance apply. Enable NTS per source when the upstream supports Network Time Security; disabled rows stay in desired state but are not rendered.">i</button></span>
-          <table class="data-table compact">
+          <div
+            id="chrony-upstreams-table"
+            class="tabulator-shell chrony-upstreams-table"
+            data-chrony-upstreams='{{ chrony_settings_json.upstream_sources | tojson }}'
+            data-fallback-id="chrony-upstreams-fallback"
+          ></div>
+          <table id="chrony-upstreams-fallback" class="data-table compact dns-fallback-table">
             <thead>
               <tr><th>Source</th><th>NTS</th><th>Max delay</th><th>Enabled</th><th>Description</th></tr>
             </thead>
@@ -128,14 +132,20 @@
           <textarea name="allow_clients" rows="4">{{ chrony_settings.allow_clients }}</textarea>
         </label>
         <label class="switch-field"><span class="field-label"><span>NTS server</span><button class="help-icon" type="button" data-help="Enables Chrony NTS-KE for lab clients using CA-managed certificate and key paths. Host listeners and TCP 4460 firewall rules change only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="nts_server_enabled" {{ "checked" if chrony_settings.nts_server_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-        <label>
-          <span class="field-label"><span>NTS certificate path</span><button class="help-icon" type="button" data-help="Absolute appliance path to the CA-managed server certificate used by Chrony NTS server mode.">i</button></span>
-          <input name="nts_server_cert_path" value="{{ chrony_settings.nts_server_cert_path }}" autocomplete="off">
-        </label>
-        <label>
-          <span class="field-label"><span>NTS key path</span><button class="help-icon" type="button" data-help="Absolute appliance path to the CA-managed private key used by Chrony NTS server mode. The key contents are never rendered in previews.">i</button></span>
-          <input name="nts_server_key_path" value="{{ chrony_settings.nts_server_key_path }}" autocomplete="off">
-        </label>
+        <div class="form-grid">
+          <div class="form-field">
+            <span class="field-label"><span>NTS-KE port</span><button class="help-icon" type="button" data-help="Chrony NTS Key Establishment uses TCP 4460. Firewall apply owns exposure for this port when NTS server mode is enabled.">i</button></span>
+            <div class="derived-field fixed-value-field"><strong>{{ chrony_settings.nts_ke_port }}/tcp</strong></div>
+          </div>
+          <div class="form-field">
+            <span class="field-label"><span>NTS certificate</span><button class="help-icon" type="button" data-help="Read-only CA-managed certificate path derived from the Chrony hostname. CA apply issues the material; Chrony apply consumes only paths.">i</button></span>
+            <div class="derived-field fixed-value-field"><strong>{{ chrony_nts_cert_path }}</strong></div>
+          </div>
+        </div>
+        <div class="form-field">
+          <span class="field-label"><span>NTS key</span><button class="help-icon" type="button" data-help="Read-only CA-managed private key path derived from the Chrony hostname. Private key contents are never rendered in previews or jobs.">i</button></span>
+          <div class="derived-field fixed-value-field"><strong>{{ chrony_nts_key_path }}</strong></div>
+        </div>
         <label class="switch-field"><span class="field-label"><span>Disable command port</span><button class="help-icon" type="button" data-help="Renders cmdport 0 to disable Chrony's network command port. Local LabFoundry status reads still use the allowlisted helper path.">i</button></span><input class="switch-input" type="checkbox" name="command_port_disabled" {{ "checked" if chrony_settings.command_port_disabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <div class="form-grid">
           <label>
@@ -182,20 +192,4 @@
     </div>
   </aside>
 </section>
-<dialog id="chrony-source-health-modal" class="preview-modal" aria-labelledby="chrony-source-health-title">
-  <div class="preview-modal-panel">
-    <div class="preview-modal-head">
-      <div>
-        <p class="kicker">Runtime check</p>
-        <h2 id="chrony-source-health-title">Chrony Source Health</h2>
-      </div>
-      <div class="preview-modal-actions">
-        <span class="status-pill muted" data-chrony-source-health-status>not checked</span>
-        <button class="button secondary compact-button" type="button" data-chrony-source-health-refresh>Refresh</button>
-        <button class="button ghost icon-button" type="button" data-chrony-source-health-close aria-label="Close source health" title="Close">x</button>
-      </div>
-    </div>
-    <pre><code data-chrony-source-health-output>Click Refresh to check chronyc tracking, sources, and authdata.</code></pre>
-  </div>
-</dialog>
 {% endblock %}

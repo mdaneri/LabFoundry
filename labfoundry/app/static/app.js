@@ -2765,6 +2765,11 @@ function initializeServicesTable() {
             window.location.href = `/services/${encodeURIComponent(row.getData().service)}/logs`;
           },
         },
+        {
+          label: "Check Chrony source health",
+          action: () => openChronySourceHealthModal(),
+          disabled: (component) => component.getData().service !== "chronyd",
+        },
       ],
       columns: [
         {
@@ -3652,6 +3657,112 @@ function initializeKmsSettings() {
   });
 }
 
+function chronyBlankUpstreamRow() {
+  return {
+    id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    source: "",
+    enabled: true,
+    use_nts: false,
+    maxdelay: "",
+    description: "",
+    is_new: true,
+  };
+}
+
+function normalizeChronyUpstreamRows(rows = []) {
+  return rows
+    .map((row, index) => ({
+      id: row.id || `source-${index + 1}`,
+      source: String(row.source || "").trim(),
+      enabled: row.enabled !== false,
+      use_nts: Boolean(row.use_nts),
+      maxdelay: String(row.maxdelay || "").trim(),
+      description: String(row.description || "").trim(),
+    }))
+    .filter((row) => row.source);
+}
+
+function syncChronyUpstreamsHiddenInput(table) {
+  const hiddenInput = document.querySelector("[data-chrony-upstreams-json]");
+  if (!(hiddenInput instanceof HTMLInputElement)) {
+    return;
+  }
+  hiddenInput.value = JSON.stringify(normalizeChronyUpstreamRows(table.getData()));
+}
+
+function ensureChronyUpstreamAddRow(table) {
+  const rows = table.getData();
+  const hasBlankRow = rows.some((row) => row.is_new && !String(row.source || "").trim());
+  if (!hasBlankRow) {
+    table.addRow(chronyBlankUpstreamRow(), false);
+  }
+}
+
+function initializeChronyUpstreamsTable() {
+  const tableElement = document.getElementById("chrony-upstreams-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  const hiddenInput = document.querySelector("[data-chrony-upstreams-json]");
+  if (typeof Tabulator === "undefined") {
+    if (fallback instanceof HTMLElement) {
+      fallback.classList.remove("hidden");
+    }
+    return;
+  }
+  try {
+    const parsedRows = JSON.parse(tableElement.dataset.chronyUpstreams || "[]");
+    const rows = normalizeChronyUpstreamRows(parsedRows);
+    rows.push(chronyBlankUpstreamRow());
+    const table = new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "260px",
+      rowHeight: 34,
+      placeholder: "Add an upstream source.",
+      reactiveData: false,
+      columns: [
+        {
+          title: "Source",
+          field: "source",
+          editor: "input",
+          minWidth: 180,
+          formatter: (cell) => {
+            const value = String(cell.getValue() || "");
+            return escapeHtml(value || "+ Add source here");
+          },
+        },
+        { title: "NTS", field: "use_nts", formatter: "tickCross", editor: "tickCross", width: 70, hozAlign: "center" },
+        { title: "Max delay", field: "maxdelay", editor: "input", width: 105, formatter: (cell) => escapeHtml(cell.getValue() || "") },
+        { title: "Enabled", field: "enabled", formatter: "tickCross", editor: "tickCross", width: 92, hozAlign: "center" },
+        { title: "Description", field: "description", editor: "input", minWidth: 170, formatter: (cell) => escapeHtml(cell.getValue() || "") },
+      ],
+    });
+    table.on("cellEdited", (cell) => {
+      const row = cell.getRow();
+      const data = row.getData();
+      if (data.is_new && String(data.source || "").trim()) {
+        row.update({ is_new: false, id: data.id || `source-${Date.now()}` });
+        ensureChronyUpstreamAddRow(table);
+      }
+      syncChronyUpstreamsHiddenInput(table);
+      if (hiddenInput instanceof HTMLInputElement) {
+        hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    syncChronyUpstreamsHiddenInput(table);
+    if (fallback instanceof HTMLElement) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    if (fallback instanceof HTMLElement) {
+      fallback.classList.remove("hidden");
+    }
+  }
+}
+
 function updateChronySettingsPreview(form, payload = {}) {
   updateDerivedListenAddressSummary(form, payload);
   const configPath = document.querySelector("[data-ntp-config-path]");
@@ -3766,6 +3877,23 @@ function setChronySourceHealthStatus(statusElement, text, state) {
   statusElement.classList.toggle("muted", state === "muted");
 }
 
+let chronySourceHealthLoader = null;
+
+function openChronySourceHealthModal() {
+  const modal = document.getElementById("chrony-source-health-modal");
+  if (!(modal instanceof HTMLDialogElement)) {
+    return;
+  }
+  if (typeof modal.showModal === "function") {
+    modal.showModal();
+  } else {
+    modal.setAttribute("open", "");
+  }
+  if (typeof chronySourceHealthLoader === "function") {
+    chronySourceHealthLoader();
+  }
+}
+
 function initializeChronySourceHealthModal() {
   const modal = document.getElementById("chrony-source-health-modal");
   const output = modal?.querySelector("[data-chrony-source-health-output]");
@@ -3807,19 +3935,13 @@ function initializeChronySourceHealthModal() {
       }
     }
   };
+  chronySourceHealthLoader = loadHealth;
 
   document.querySelectorAll("[data-chrony-source-health-open]").forEach((button) => {
     if (!(button instanceof HTMLButtonElement)) {
       return;
     }
-    button.addEventListener("click", () => {
-      if (typeof modal.showModal === "function") {
-        modal.showModal();
-      } else {
-        modal.setAttribute("open", "");
-      }
-      loadHealth();
-    });
+    button.addEventListener("click", openChronySourceHealthModal);
   });
   if (refreshButton instanceof HTMLButtonElement) {
     refreshButton.addEventListener("click", loadHealth);
@@ -9546,6 +9668,7 @@ document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
 document.addEventListener("DOMContentLoaded", initializeKmsSettings);
 document.addEventListener("DOMContentLoaded", initializeChronySettings);
+document.addEventListener("DOMContentLoaded", initializeChronyUpstreamsTable);
 document.addEventListener("DOMContentLoaded", initializeChronySourceHealthModal);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);

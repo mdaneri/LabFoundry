@@ -683,6 +683,11 @@ def ca_service_cert_paths(service_dir: str, certificate_name: str) -> tuple[str,
     return f"{base}.crt", f"{base}.key", f"{base}-chain.pem"
 
 
+def chrony_nts_certificate_paths(settings: ChronySettings) -> tuple[str, str, str]:
+    hostname = normalize_dns_hostname(settings.hostname or CHRONY_DEFAULT_HOSTNAME)
+    return ca_service_cert_paths("chrony", hostname)
+
+
 def kms_client_common_name(client: KmsClient) -> str:
     match = re.search(r"(?:^|,)CN=([^,]+)", client.certificate_subject or "")
     return match.group(1).strip() if match else client.name
@@ -758,6 +763,23 @@ def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
                     chain_path=chain_path,
                 )
             )
+
+    chrony_settings = get_chrony_settings_row(db)
+    if chrony_settings.nts_server_enabled:
+        cert_path, key_path, chain_path = chrony_nts_certificate_paths(chrony_settings)
+        specs.append(
+            ManagedCertificateSpec(
+                owner="chrony:nts",
+                common_name=normalize_dns_hostname(chrony_settings.hostname or CHRONY_DEFAULT_HOSTNAME),
+                dns_names=[normalize_dns_hostname(chrony_settings.hostname or CHRONY_DEFAULT_HOSTNAME)],
+                ip_addresses=split_addresses(chrony_settings.listen_address),
+                profile_name=CA_SERVER_PROFILE_NAME,
+                description="Managed Chrony NTS server certificate.",
+                cert_path=cert_path,
+                key_path=key_path,
+                chain_path=chain_path,
+            )
+        )
 
     depot_settings = get_vcf_offline_depot_settings_row(db)
     if depot_settings.enabled:
@@ -1405,6 +1427,11 @@ def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
         db.commit()
         db.refresh(settings)
     available_interfaces = service_bind_options(db)
+    chrony_nts_cert_path, chrony_nts_key_path, chrony_nts_chain_path = chrony_nts_certificate_paths(settings)
+    if settings.nts_server_enabled:
+        settings.nts_server_cert_path = chrony_nts_cert_path
+        settings.nts_server_key_path = chrony_nts_key_path
+        settings.nts_ke_port = 4460
     config_preview = render_chrony_config(settings)
     validation_errors = validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})
     status_result = SystemAdapter().read_chronyd_status() if include_runtime_health else None
@@ -1423,6 +1450,9 @@ def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
         "ntp_chronyc_status": status_result.stdout if status_result else "Chrony source health is not loaded during page render.",
         "ntp_chronyc_status_error": status_result.stderr if status_result and status_result.returncode != 0 else "",
         "ntp_chronyc_status_dry_run": status_result.dry_run if status_result else False,
+        "chrony_nts_cert_path": chrony_nts_cert_path,
+        "chrony_nts_key_path": chrony_nts_key_path,
+        "chrony_nts_chain_path": chrony_nts_chain_path,
     }
 
 
@@ -9325,6 +9355,7 @@ def update_chrony_settings_from_ui(
     port: int = Form(123),
     upstream_servers: str = Form(""),
     upstream_source: list[str] = Form(default_factory=list),
+    upstream_sources_json: str = Form(""),
     upstream_enabled: list[str] = Form(default_factory=list),
     upstream_use_nts: list[str] = Form(default_factory=list),
     upstream_description: list[str] = Form(default_factory=list),
@@ -9358,23 +9389,46 @@ def update_chrony_settings_from_ui(
     settings.listen_address = selected_addresses
     settings.port = port
     source_rows = []
-    max_rows = max(len(upstream_source), len(upstream_description), len(upstream_maxdelay))
-    enabled_indexes = {int(value) for value in upstream_enabled if str(value).isdigit()}
-    nts_indexes = {int(value) for value in upstream_use_nts if str(value).isdigit()}
-    for index in range(max_rows):
-        source = upstream_source[index].strip() if index < len(upstream_source) else ""
-        if not source:
-            continue
-        source_rows.append(
-            {
-                "id": f"source-{index + 1}",
-                "source": source,
-                "enabled": index in enabled_indexes,
-                "use_nts": index in nts_indexes,
-                "description": upstream_description[index].strip() if index < len(upstream_description) else "",
-                "maxdelay": upstream_maxdelay[index].strip() if index < len(upstream_maxdelay) else "",
-            }
-        )
+    if upstream_sources_json.strip():
+        try:
+            parsed_sources = json.loads(upstream_sources_json)
+        except json.JSONDecodeError:
+            parsed_sources = []
+        if isinstance(parsed_sources, list):
+            for index, item in enumerate(parsed_sources, start=1):
+                if not isinstance(item, dict):
+                    continue
+                source = str(item.get("source") or "").strip()
+                if not source:
+                    continue
+                source_rows.append(
+                    {
+                        "id": str(item.get("id") or f"source-{index}"),
+                        "source": source,
+                        "enabled": bool(item.get("enabled", True)),
+                        "use_nts": bool(item.get("use_nts", False)),
+                        "description": str(item.get("description") or "").strip(),
+                        "maxdelay": str(item.get("maxdelay") or "").strip(),
+                    }
+                )
+    if not source_rows:
+        max_rows = max(len(upstream_source), len(upstream_description), len(upstream_maxdelay))
+        enabled_indexes = {int(value) for value in upstream_enabled if str(value).isdigit()}
+        nts_indexes = {int(value) for value in upstream_use_nts if str(value).isdigit()}
+        for index in range(max_rows):
+            source = upstream_source[index].strip() if index < len(upstream_source) else ""
+            if not source:
+                continue
+            source_rows.append(
+                {
+                    "id": f"source-{index + 1}",
+                    "source": source,
+                    "enabled": index in enabled_indexes,
+                    "use_nts": index in nts_indexes,
+                    "description": upstream_description[index].strip() if index < len(upstream_description) else "",
+                    "maxdelay": upstream_maxdelay[index].strip() if index < len(upstream_maxdelay) else "",
+                }
+            )
     if not source_rows:
         source_rows = [
             {"id": f"legacy-{index}", "source": server, "enabled": True, "use_nts": False, "description": "", "maxdelay": ""}
@@ -9384,8 +9438,9 @@ def update_chrony_settings_from_ui(
     settings.upstream_servers = join_servers([str(row["source"]) for row in source_rows if row.get("enabled")])
     settings.allow_clients = join_allow_clients(split_allow_clients(allow_clients))
     settings.nts_server_enabled = nts_server_enabled == "on"
-    settings.nts_server_cert_path = nts_server_cert_path.strip()
-    settings.nts_server_key_path = nts_server_key_path.strip()
+    chrony_nts_cert_path, chrony_nts_key_path, _chrony_nts_chain_path = chrony_nts_certificate_paths(settings)
+    settings.nts_server_cert_path = chrony_nts_cert_path
+    settings.nts_server_key_path = chrony_nts_key_path
     settings.nts_ke_port = 4460
     settings.command_port_disabled = command_port_disabled == "on"
     settings.minsources = minsources if minsources and minsources > 0 else None
@@ -9413,6 +9468,10 @@ def update_chrony_settings_from_ui(
                 "upstream_servers": context["chrony_settings_json"]["upstream_servers"],
                 "upstream_sources": context["chrony_settings_json"]["upstream_sources"],
                 "allow_clients": saved_settings.allow_clients,
+                "nts_server_enabled": saved_settings.nts_server_enabled,
+                "nts_server_cert_path": saved_settings.nts_server_cert_path,
+                "nts_server_key_path": saved_settings.nts_server_key_path,
+                "nts_ke_port": saved_settings.nts_ke_port,
                 "valid": not context["ntp_validation_errors"],
                 "validation_errors": context["ntp_validation_errors"],
                 "config_path": saved_settings.config_path,

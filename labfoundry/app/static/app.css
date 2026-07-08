@@ -1744,6 +1744,10 @@ textarea {
   overflow: hidden;
 }
 
+.chrony-upstreams-table {
+  min-height: 190px;
+}
+
 .dns-fallback-table {
   margin-top: 10px;
 }

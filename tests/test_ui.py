@@ -860,6 +860,8 @@ def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(c
 
 
 def test_chrony_page_autosave_updates_desired_state_and_preview(client):
+    import json
+
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -869,11 +871,20 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     page = client.get("/chrony")
     assert page.status_code == 200
     assert "Chrony Settings" in page.text
-    assert "Check source health" in page.text
     assert "chrony-source-health-modal" in page.text
-    assert "Click Refresh to check chronyc tracking, sources, and authdata." in page.text
+    assert "Check source health" not in page.text
+    assert "chrony-upstreams-table" in page.text
+    assert "NTS-KE port" in page.text
+    assert "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt" in page.text
     assert "/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    upstream_sources = json.dumps(
+        [
+            {"source": "time.cloudflare.com", "enabled": True, "use_nts": True, "description": "secure", "maxdelay": "0.5"},
+            {"source": "time.google.com", "enabled": True, "use_nts": False, "description": "plain"},
+            {"source": "disabled.example.com", "enabled": False, "use_nts": True, "description": "kept disabled"},
+        ]
+    )
     response = client.post(
         "/chrony/settings",
         data={
@@ -883,8 +894,12 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
             "listen_addresses_present": "1",
             "listen_interfaces": ["eth2"],
             "upstream_servers": "time.cloudflare.com\ntime.google.com",
+            "upstream_sources_json": upstream_sources,
             "allow_clients": "192.168.50.0/24",
             "port": "123",
+            "nts_server_enabled": "on",
+            "nts_server_cert_path": "/tmp/operator-input.crt",
+            "nts_server_key_path": "/tmp/operator-input.key",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -897,15 +912,27 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     assert payload["listen_interfaces"] == ["eth2"]
     assert payload["listen_addresses"] == ["192.168.50.1"]
     assert payload["upstream_servers"] == ["time.cloudflare.com", "time.google.com"]
+    assert payload["upstream_sources"][0]["use_nts"] is True
+    assert payload["upstream_sources"][2]["enabled"] is False
     assert payload["allow_clients"] == "192.168.50.0/24"
+    assert payload["nts_server_enabled"] is True
+    assert payload["nts_server_cert_path"] == "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt"
+    assert payload["nts_server_key_path"] == "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.key"
+    assert payload["nts_ke_port"] == 4460
     assert payload["valid"] is True
-    assert "server time.cloudflare.com iburst" in payload["config_preview"]
+    assert "ntsdumpdir /var/lib/chrony" in payload["config_preview"]
+    assert "server time.cloudflare.com iburst nts maxdelay 0.5" in payload["config_preview"]
     assert "bindaddress 192.168.50.1" in payload["config_preview"]
     assert "allow 192.168.50.0/24" in payload["config_preview"]
+    assert "ntsservercert /etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt" in payload["config_preview"]
+    assert "/tmp/operator-input" not in payload["config_preview"]
     js = client.get("/static/app.js")
     assert js.status_code == 200
     assert "initializeChronySettings" in js.text
+    assert "initializeChronyUpstreamsTable" in js.text
     assert "initializeChronySourceHealthModal" in js.text
+    assert "Check Chrony source health" in js.text
+    assert "openChronySourceHealthModal" in js.text
     assert "/chrony/source-health" in js.text
     assert "updateNtpValidation" in js.text
 
@@ -920,6 +947,7 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
         assert settings.enabled is True
         assert settings.listen_interface == "eth2"
         assert settings.listen_address == "192.168.50.1"
+        assert settings.nts_server_cert_path == "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt"
 
 
 def test_chrony_validation_rejects_enabled_service_without_bind_or_upstreams(client):
@@ -7563,6 +7591,8 @@ def test_services_ui_records_dry_run_action(client):
     assert js.status_code == 200
     assert "initializeServicesTable" in js.text
     assert "submitServiceAction" in js.text
+    assert "Check Chrony source health" in js.text
+    assert "openChronySourceHealthModal" in js.text
     assert 'height: "100%"' in js.text
     assert 'height: "520px"' not in js.text
     assert 'title: "Health"' not in js.text
