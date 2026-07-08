@@ -2187,6 +2187,33 @@ def vcf_depot_secret_snapshot(context: dict[str, Any]) -> str:
     )
 
 
+def vcf_depot_tool_snapshot(context: dict[str, Any]) -> str:
+    settings = context["vcf_depot_settings"]
+    archive_path = Path(settings.tool_archive_path) if settings.tool_archive_path else None
+    archive_name = archive_path.name if archive_path else "not staged"
+    archive_size = "missing"
+    archive_mtime = "missing"
+    if archive_path:
+        try:
+            archive_stat = archive_path.stat()
+            archive_size = str(archive_stat.st_size)
+            archive_mtime = str(archive_stat.st_mtime_ns)
+        except OSError:
+            pass
+    software_depot_id = context["vcf_depot_software_depot_id"]
+    return "\n".join(
+        [
+            "# VCFDT tool package status",
+            f"# Archive: {archive_name}",
+            f"# Archive size bytes: {archive_size if archive_path else 'not staged'}",
+            f"# Archive modified ns: {archive_mtime if archive_path else 'not staged'}",
+            f"# Tool version: {settings.tool_version or 'not detected'}",
+            f"# Software depot ID: {'generated' if software_depot_id.get('id') else 'not generated'}",
+            f"# Software depot ID generated: {software_depot_id.get('generated_at') or 'never'}",
+        ]
+    )
+
+
 def vcf_depot_application_properties_snapshot(context: dict[str, Any]) -> str:
     properties = context["vcf_depot_application_properties"]
     content = str(properties.get("content") or "").strip()
@@ -4884,7 +4911,7 @@ def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
             validation_errors=vcf_depot["vcf_depot_validation_errors"],
             validation_warnings=vcf_depot["vcf_depot_validation_warnings"],
             config_path=vcf_depot["vcf_depot_settings"].config_path,
-            config_preview=f"{vcf_depot['vcf_depot_https_config_preview']}\n\n{vcf_depot_secret_snapshot(vcf_depot)}\n\n{vcf_depot_application_properties_snapshot(vcf_depot)}\n\n# VCFDT command preview\n{vcf_depot['vcf_depot_command_preview']}",
+            config_preview=f"{vcf_depot['vcf_depot_https_config_preview']}\n\n{vcf_depot_tool_snapshot(vcf_depot)}\n\n{vcf_depot_secret_snapshot(vcf_depot)}\n\n{vcf_depot_application_properties_snapshot(vcf_depot)}\n\n# VCFDT command preview\n{vcf_depot['vcf_depot_command_preview']}",
             baseline=baselines.get("vcf_offline_depot"),
         ),
         make_appliance_apply_unit(
@@ -5528,7 +5555,6 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
         settings = context["vcf_depot_settings"]
         config_path = settings.config_path
         properties_path = VCF_DEPOT_STAGED_APPLICATION_PROPERTIES_PATH
-        enabled_download_profiles = [profile for profile in context["vcf_depot_profiles"] if profile.enabled]
         if not adapter.dry_run:
             config_path = stage_appliance_apply_config(VCF_DEPOT_STAGED_CONFIG_PATH, context["vcf_depot_https_config_preview"])
             properties_path = stage_appliance_apply_config(
@@ -5536,7 +5562,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
                 str(context["vcf_depot_application_properties"].get("content") or ""),
             )
         steps = [lambda: adapter.validate_vcf_offline_depot_config(config_path)]
-        if settings.enabled and settings.tool_archive_path and enabled_download_profiles:
+        if settings.enabled and settings.tool_archive_path:
             steps.extend(
                 [
                     lambda: adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path),
@@ -10134,6 +10160,27 @@ def generate_vcf_depot_software_depot_id_from_ui(
             status_code=409,
         )
     return RedirectResponse("/appliance-apply", status_code=303)
+
+
+@router.get("/vcf-offline-depot/profiles/{profile_id}/preview", response_model=None)
+def preview_vcf_depot_profile_from_ui(
+    profile_id: int,
+    _identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    profile = db.get(VcfDepotDownloadProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="VCFDT download profile not found")
+    settings = get_vcf_offline_depot_settings_row(db)
+    secrets = vcf_depot_secret_context(db)
+    script = render_vcfdt_command_preview(
+        settings,
+        [profile],
+        download_token_present=bool(secrets["download_token_present"]),
+        activation_code_present=bool(secrets["activation_code_present"]),
+        include_disabled_profiles=True,
+    )
+    return JSONResponse({"profile_id": profile.id, "profile_name": profile.name, "script": script})
 
 
 @router.post("/vcf-offline-depot/profiles", response_model=None)

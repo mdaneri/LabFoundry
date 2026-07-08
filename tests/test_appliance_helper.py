@@ -2422,7 +2422,7 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
     assert ["systemctl", "enable", "--now", "nginx"] in commands
 
 
-def test_vcf_offline_depot_helper_writes_htpasswd_for_authenticated_site(monkeypatch, tmp_path):
+def test_vcf_offline_depot_helper_uses_auth_request_for_authenticated_site(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "vcf-offline-depot"
     managed_root = tmp_path / "etc" / "labfoundry"
@@ -2430,13 +2430,13 @@ def test_vcf_offline_depot_helper_writes_htpasswd_for_authenticated_site(monkeyp
     cert_path = managed_root / "vcf-offline-depot" / "certs" / "depot.crt"
     key_path = managed_root / "vcf-offline-depot" / "certs" / "depot.key"
     htpasswd_path = managed_root / "nginx" / "htpasswd" / "vcf-offline-depot.htpasswd"
-    shadow_path = tmp_path / "shadow"
     nginx_include = tmp_path / "nginx" / "conf.d" / "labfoundry.conf"
     apply_dir.mkdir(parents=True)
     cert_path.parent.mkdir(parents=True)
     cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
     key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
-    shadow_path.write_text("vcf-depot:$6$rounds=5000$salty$hashvalue:19000:0:99999:7:::\n", encoding="utf-8")
+    htpasswd_path.parent.mkdir(parents=True)
+    htpasswd_path.write_text("vcf-depot:stale-basic-auth-hash\n", encoding="utf-8")
     config_path = apply_dir / "labfoundry-vcf-offline-depot.conf"
     config_path.write_text(
         "\n".join(
@@ -2482,6 +2482,19 @@ def test_vcf_offline_depot_helper_writes_htpasswd_for_authenticated_site(monkeyp
                 "    proxy_pass http://127.0.0.1:8000;",
                 "  }",
                 "",
+                "  location = /_labfoundry_depot_auth {",
+                "    internal;",
+                "    proxy_pass http://127.0.0.1:8000/PROD/auth-check;",
+                "    proxy_pass_request_body off;",
+                "    proxy_set_header Content-Length \"\";",
+                "    proxy_set_header Host $host;",
+                "    proxy_set_header X-Original-URI $request_uri;",
+                "  }",
+                "",
+                "  location @labfoundry_depot_login {",
+                "    return 303 /PROD/login?next=$request_uri;",
+                "  }",
+                "",
                 "  location = /PROD/ {",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
@@ -2495,8 +2508,8 @@ def test_vcf_offline_depot_helper_writes_htpasswd_for_authenticated_site(monkeyp
                 "  }",
                 "",
                 "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
-                '    auth_basic "LabFoundry VCF Offline Depot";',
-                f"    auth_basic_user_file {htpasswd_path};",
+                "    auth_request /_labfoundry_depot_auth;",
+                "    error_page 401 = @labfoundry_depot_login;",
                 "    alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;",
                 "    sendfile on;",
                 "    default_type application/octet-stream;",
@@ -2518,7 +2531,6 @@ def test_vcf_offline_depot_helper_writes_htpasswd_for_authenticated_site(monkeyp
     monkeypatch.setattr(helper, "NGINX_SITES_DIR", site_dir)
     monkeypatch.setattr(helper, "VCF_DEPOT_SITE_PATH", site_dir / "vcf-offline-depot.conf")
     monkeypatch.setattr(helper, "VCF_DEPOT_HTPASSWD_PATH", htpasswd_path)
-    monkeypatch.setattr(helper, "VCF_DEPOT_SHADOW_PATH", shadow_path)
     monkeypatch.setattr(helper, "_prepare_vcf_depot_web_tree", lambda text: None)
     monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/nginx" if command == "nginx" else None)
     monkeypatch.setattr(helper.shutil, "chown", lambda *args, **kwargs: None)
@@ -2528,10 +2540,12 @@ def test_vcf_offline_depot_helper_writes_htpasswd_for_authenticated_site(monkeyp
 
     assert helper._handle_vcf_offline_depot("apply-https", [str(config_path)]) == 0
 
-    assert htpasswd_path.read_text(encoding="utf-8") == "vcf-depot:$6$rounds=5000$salty$hashvalue\n"
+    assert not htpasswd_path.exists()
     site_text = (site_dir / "vcf-offline-depot.conf").read_text(encoding="utf-8")
-    assert 'auth_basic "LabFoundry VCF Offline Depot";' in site_text
-    assert f"auth_basic_user_file {htpasswd_path};" in site_text
+    assert "auth_request /_labfoundry_depot_auth;" in site_text
+    assert "error_page 401 = @labfoundry_depot_login;" in site_text
+    assert "auth_basic" not in site_text
+    assert "auth_basic_user_file" not in site_text
 
 
 def test_vcf_offline_depot_helper_prepares_prod_tree_permissions(monkeypatch, tmp_path):
@@ -2603,7 +2617,11 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
 
     tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
     monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
-    monkeypatch.setattr(helper, "_run", lambda command: subprocess.CompletedProcess(command, 0, "vcf-download-tool 9.1.0.0100.25429019\n", ""))
+    monkeypatch.setattr(
+        helper,
+        "_run_vcfdt_user_command",
+        lambda command: subprocess.CompletedProcess(command, 0, "vcf-download-tool 9.1.0.0100.25429019\n", ""),
+    )
 
     assert helper._handle_vcf_offline_depot("stage-tool", [str(archive_path)]) == 0
     captured = capsys.readouterr()
@@ -2623,6 +2641,29 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert str(extracted) in wrapper_text
 
 
+def test_vcf_offline_depot_helper_prepares_labfoundry_vcfdt_home(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    state_home = tmp_path / "var" / "lib" / "labfoundry"
+    chowned: list[tuple[Path, int, int]] = []
+
+    class Account:
+        pw_dir = str(state_home)
+        pw_uid = 1200
+        pw_gid = 1200
+
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda username: Account())
+    monkeypatch.setattr(helper, "_chown_path", lambda path, uid, gid: chowned.append((path, uid, gid)))
+
+    env, uid, gid = helper._vcfdt_labfoundry_environment()
+
+    assert uid == 1200
+    assert gid == 1200
+    assert env["HOME"] == str(state_home)
+    assert env["XDG_DATA_HOME"] == str(state_home / ".local" / "share")
+    assert (state_home / ".local" / "share" / "vmware" / "vdt").is_dir()
+    assert (state_home / ".local" / "share" / "vmware" / "vdt", 1200, 1200) in chowned
+
+
 def test_vcf_offline_depot_helper_generates_software_depot_id(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
     tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
@@ -2632,12 +2673,12 @@ def test_vcf_offline_depot_helper_generates_software_depot_id(monkeypatch, tmp_p
     wrapper.chmod(0o755)
     commands: list[tuple[list[str], str]] = []
 
-    def fake_run_with_input(command: list[str], text: str) -> subprocess.CompletedProcess[str]:
-        commands.append((command, text))
+    def fake_run_vcfdt(command: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+        commands.append((command, input_text or ""))
         return subprocess.CompletedProcess(command, 0, "Software Depot ID: 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n", "")
 
     monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
-    monkeypatch.setattr(helper, "_run_with_input", fake_run_with_input)
+    monkeypatch.setattr(helper, "_run_vcfdt_user_command", fake_run_vcfdt)
 
     assert helper._handle_vcf_offline_depot("generate-software-depot-id", []) == 0
     captured = capsys.readouterr()
@@ -2672,9 +2713,16 @@ def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypat
     tool_bin = tool_dir / "extracted" / "vcfdt" / "bin" / "vcf-download-tool"
     tool_bin.parent.mkdir(parents=True)
     tool_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    chowned: list[tuple[Path, int, int]] = []
+
+    class Account:
+        pw_uid = 1200
+        pw_gid = 1200
 
     monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda username: Account())
+    monkeypatch.setattr(helper, "_chown_path", lambda path, uid, gid: chowned.append((path, uid, gid)))
 
     assert helper._handle_vcf_offline_depot("apply-properties", [str(properties_path)]) == 0
     captured = capsys.readouterr()
@@ -2682,6 +2730,8 @@ def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypat
     assert payload["vcf_offline_depot"] == "application properties apply complete"
     target = tool_dir / "extracted" / "vcfdt" / "conf" / "application-prodv2.properties"
     assert target.read_text(encoding="utf-8") == properties_path.read_text(encoding="utf-8")
+    assert (target.parent, 1200, 1200) in chowned
+    assert (target, 1200, 1200) in chowned
 
     outside_path = tmp_path / "application-prodv2.properties"
     outside_path.write_text("spring.profiles.active=depot\n", encoding="utf-8")

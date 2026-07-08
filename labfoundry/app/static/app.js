@@ -7706,6 +7706,30 @@ async function startVcfDepotProfileDownload(row, csrf) {
   }
 }
 
+async function previewVcfDepotProfileScript(row) {
+  const data = row.getData();
+  if (data.is_new) {
+    showVcfDepotMessage("Save the VCFDT download profile before previewing its script.");
+    return;
+  }
+  try {
+    const response = await fetch(`/vcf-offline-depot/profiles/${data.id}/preview`, {
+      method: "GET",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || "The VCFDT profile script could not be rendered.");
+    }
+    const sourceCode = document.createElement("code");
+    sourceCode.className = "language-bash";
+    openPreviewModal(`${payload.profile_name || data.name || "VCFDT"} profile script`, payload.script || "", sourceCode);
+  } catch (error) {
+    showVcfDepotMessage(error instanceof Error ? error.message : "The VCFDT profile script could not be rendered.");
+  }
+}
+
 function initializeVcfDepotProfilesTable() {
   const tableElement = document.getElementById("vcf-depot-profiles-table");
   if (!(tableElement instanceof HTMLElement)) {
@@ -7741,6 +7765,11 @@ function initializeVcfDepotProfilesTable() {
       placeholder: "No VCFDT download profiles configured.",
       reactiveData: false,
       rowContextMenu: [
+        {
+          label: "Preview script",
+          action: (_event, row) => previewVcfDepotProfileScript(row),
+          disabled: (component) => Boolean(component.getData().is_new),
+        },
         {
           label: "Start download",
           action: (_event, row) => startVcfDepotProfileDownload(row, csrf),
@@ -7929,8 +7958,6 @@ function updateVcfDepotSummary(form, payload = {}) {
   const toolResetPanels = document.querySelectorAll("[data-vcf-depot-tool-reset-panel], [data-vcf-depot-tool-reset-action]");
   const accessLabel = document.querySelector("[data-vcf-depot-access]");
   const dnsStatus = document.querySelector("[data-vcf-depot-dns-status]");
-  const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
-  const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
   const propertiesStatus = document.querySelector("[data-vcf-depot-properties-status]");
   const softwareDepotGenerateButtons = document.querySelectorAll("[data-vcf-depot-generate-id-modal-open]");
   if (endpoint instanceof HTMLElement) {
@@ -7990,12 +8017,7 @@ function updateVcfDepotSummary(form, payload = {}) {
       }
     });
   }
-  if (tokenStatus instanceof HTMLElement && payload.download_token_present !== undefined) {
-    tokenStatus.textContent = payload.download_token_present ? payload.download_token_name || "token uploaded" : "token not uploaded";
-  }
-  if (activationStatus instanceof HTMLElement && payload.activation_code_present !== undefined) {
-    activationStatus.textContent = payload.activation_code_present ? payload.activation_code_name || "code uploaded" : "code not uploaded";
-  }
+  updateVcfDepotCredentialStatus(payload);
   if (propertiesStatus instanceof HTMLElement && payload.application_properties_source !== undefined) {
     propertiesStatus.textContent = payload.application_properties_updated_at
       ? `${payload.application_properties_source || "operator saved"} · saved`
@@ -8026,6 +8048,41 @@ function updateVcfDepotSummary(form, payload = {}) {
     server_certificate: payload.server_certificate || hostname,
   };
   updateVcfDepotHttpsPreview(livePreviewPayload);
+}
+
+function updateVcfDepotCredentialStatus(payload = {}) {
+  const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
+  const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
+  const credentialsStatus = document.querySelector("[data-vcf-depot-credentials-status]");
+  const currentTokenText = tokenStatus instanceof HTMLElement ? tokenStatus.textContent?.trim() || "" : "";
+  const currentActivationText = activationStatus instanceof HTMLElement ? activationStatus.textContent?.trim() || "" : "";
+  const tokenPresent =
+    payload.download_token_present !== undefined ? Boolean(payload.download_token_present) : Boolean(currentTokenText && currentTokenText !== "token not uploaded");
+  const activationPresent =
+    payload.activation_code_present !== undefined
+      ? Boolean(payload.activation_code_present)
+      : Boolean(currentActivationText && currentActivationText !== "code not uploaded");
+  const tokenName = payload.download_token_name || (tokenPresent ? currentTokenText : "");
+  const activationName = payload.activation_code_name || (activationPresent ? currentActivationText : "");
+
+  if (tokenStatus instanceof HTMLElement && payload.download_token_present !== undefined) {
+    tokenStatus.textContent = tokenPresent ? tokenName || "token uploaded" : "token not uploaded";
+  }
+  if (activationStatus instanceof HTMLElement && payload.activation_code_present !== undefined) {
+    activationStatus.textContent = activationPresent ? activationName || "code uploaded" : "code not uploaded";
+  }
+  if (credentialsStatus instanceof HTMLElement) {
+    const staged = [];
+    if (tokenPresent) {
+      staged.push(`Download token staged${tokenName && tokenName !== "token uploaded" ? `: ${tokenName}` : ""}`);
+    }
+    if (activationPresent) {
+      staged.push(`Activation code staged${activationName && activationName !== "code uploaded" ? `: ${activationName}` : ""}`);
+    }
+    credentialsStatus.textContent = staged.length
+      ? `${staged.join(" · ")}. Runtime files refresh during Appliance Apply or profile download.`
+      : "No Broadcom credentials staged.";
+  }
 }
 
 function setVcfDepotToolDependentActions(toolAvailable) {
@@ -8096,8 +8153,8 @@ function updateVcfDepotHttpsPreview(payload = {}) {
   const authLines = payload.allow_unauthenticated_access
     ? []
     : [
-        '    auth_basic "LabFoundry VCF Offline Depot";',
-        "    auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;",
+        "    auth_request /_labfoundry_depot_auth;",
+        "    error_page 401 = @labfoundry_depot_login;",
       ];
   httpsPreview.textContent = [
     "# Managed by LabFoundry. Local changes may be overwritten.",
@@ -8476,6 +8533,7 @@ function initializeVcfDepotTokenPaste() {
         if (settingsForm instanceof HTMLFormElement) {
           updateVcfDepotSummary(settingsForm, payload);
         }
+        updateVcfDepotCredentialStatus(payload);
         updateVcfDepotValidation(payload);
         if (textarea instanceof HTMLTextAreaElement) {
           textarea.value = "";
@@ -8483,6 +8541,11 @@ function initializeVcfDepotTokenPaste() {
         if (fileInput instanceof HTMLInputElement) {
           fileInput.value = "";
         }
+        form.querySelectorAll("[data-file-upload-name]").forEach((label) => {
+          if (label instanceof HTMLElement) {
+            label.textContent = "no file selected";
+          }
+        });
         if (status instanceof HTMLElement) {
           status.textContent = "Token file staged. Contents are hidden.";
           status.classList.remove("error-text");
@@ -8659,6 +8722,7 @@ function initializeVcfDepotCredentialsPaste() {
         if (settingsForm instanceof HTMLFormElement) {
           updateVcfDepotSummary(settingsForm, payload);
         }
+        updateVcfDepotCredentialStatus(payload);
         updateVcfDepotValidation(payload);
         if (textarea instanceof HTMLTextAreaElement) {
           textarea.value = "";
@@ -8666,6 +8730,11 @@ function initializeVcfDepotCredentialsPaste() {
         if (fileInput instanceof HTMLInputElement) {
           fileInput.value = "";
         }
+        form.querySelectorAll("[data-file-upload-name]").forEach((label) => {
+          if (label instanceof HTMLElement) {
+            label.textContent = "no file selected";
+          }
+        });
         if (status instanceof HTMLElement) {
           const credentialLabel = typeSelect instanceof HTMLSelectElement && typeSelect.value === "activation_code" ? "Activation code" : "Download token";
           status.textContent = `${credentialLabel} staged. Contents are hidden.`;

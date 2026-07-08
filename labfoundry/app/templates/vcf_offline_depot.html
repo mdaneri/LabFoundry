@@ -25,7 +25,7 @@
       <div class="metric">
         <span>Access</span>
         <strong data-vcf-depot-access>{{ "unauthenticated" if vcf_depot_settings.allow_unauthenticated_access else (vcf_depot_settings.http_user.username if vcf_depot_settings.http_user else "user required") }}</strong>
-        <small>{{ "open mirror" if vcf_depot_settings.allow_unauthenticated_access else "HTTP Basic Auth" }}</small>
+        <small>{{ "open mirror" if vcf_depot_settings.allow_unauthenticated_access else "LabFoundry login" }}</small>
       </div>
       <div class="metric">
         <span>VCF Download Tool</span>
@@ -196,7 +196,7 @@
           <input type="number" name="port" value="{{ vcf_depot_settings.port }}" min="1" max="65535">
         </label>
         <label>
-          <span class="field-label"><span>HTTP user</span><button class="help-icon" type="button" data-help="Local LabFoundry user used for VCF Offline Depot HTTP Basic Auth. Apply Local Users after setting or resetting this user's OS password, then apply VCF Offline Depot.">i</button></span>
+          <span class="field-label"><span>HTTP user</span><button class="help-icon" type="button" data-help="Local LabFoundry user label for the authenticated VCF Offline Depot. The HTTPS site uses the LabFoundry login session for protected /PROD/ browsing and downloads.">i</button></span>
           <select name="http_user_id">
             <option value="">Select a user</option>
             {% for user in vcf_depot_users %}
@@ -204,7 +204,7 @@
             {% endfor %}
           </select>
         </label>
-        <label class="switch-field"><span class="field-label"><span>Unauthenticated access</span><button class="help-icon" type="button" data-help="Serves /PROD/ without HTTP Basic Auth. Leave off for normal VCF depot access; enable only for an isolated open mirror. Host services are not changed until global appliance apply runs.">i</button></span><input class="switch-input" type="checkbox" name="allow_unauthenticated_access" {{ "checked" if vcf_depot_settings.allow_unauthenticated_access else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Unauthenticated access</span><button class="help-icon" type="button" data-help="Serves /PROD/ without LabFoundry login. Leave off for normal VCF depot access; enable only for an isolated open mirror. Host services are not changed until global appliance apply runs.">i</button></span><input class="switch-input" type="checkbox" name="allow_unauthenticated_access" {{ "checked" if vcf_depot_settings.allow_unauthenticated_access else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>Telemetry</span><button class="help-icon" type="button" data-help="When enabled, LabFoundry stages the VCF Download Tool telemetry flag as ENABLE. When off, it stages DISABLE. Host commands still run only through global appliance apply or manual profile jobs.">i</button></span><input class="switch-input" type="checkbox" name="telemetry_enabled" {{ "checked" if vcf_depot_settings.telemetry_choice == "ENABLE" else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <div class="derived-field fixed-value-field">
           <span class="field-label"><span>Depot store volume</span><button class="help-icon" type="button" data-help="Fixed appliance volume mount used as the VCFDT --depot-store and HTTPS document root. Attach or size this disk separately from the root filesystem.">i</button></span>
@@ -249,6 +249,16 @@
               <strong><span data-vcf-depot-token-status>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "token not uploaded" }}</span> / <span data-vcf-depot-activation-status>{{ vcf_depot_activation_code.filename if vcf_depot_activation_code.present else "code not uploaded" }}</span></strong>
               <button class="button secondary compact-button" type="button" data-vcf-depot-credentials-modal-open data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Stage</button>
             </span>
+            <small class="muted" data-vcf-depot-credentials-status>
+              {% set staged_credentials = [] %}
+              {% if vcf_depot_download_token.present %}
+                {% set _ = staged_credentials.append("download token staged") %}
+              {% endif %}
+              {% if vcf_depot_activation_code.present %}
+                {% set _ = staged_credentials.append("activation code staged") %}
+              {% endif %}
+              {{ staged_credentials|join(" · ") if staged_credentials else "No Broadcom credentials staged." }}
+            </small>
           </div>
           <div class="settings-action-row">
             <span class="field-label"><span>Application properties</span><button class="help-icon" type="button" data-help="Customizes desired application-prodv2.properties content for the staged VCF Download Tool. Saving updates LabFoundry desired state; global appliance apply installs the configuration.">i</button></span>
@@ -348,7 +358,7 @@
         <span class="field-label"><span>Credential file</span><button class="help-icon" type="button" data-help="Upload the selected credential as a text file. The runtime file path is chosen from the credential type.">i</button></span>
         <span class="file-upload-control">
           <input class="file-upload-input" type="file" name="credential_file" accept=".txt,text/plain" data-file-upload-input>
-          <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose credential file</strong><small data-file-upload-name>not uploaded</small></span></span>
+          <span class="file-upload-surface"><span class="file-upload-copy"><strong>Choose credential file</strong><small data-file-upload-name>no file selected</small></span></span>
         </span>
       </label>
       <label>

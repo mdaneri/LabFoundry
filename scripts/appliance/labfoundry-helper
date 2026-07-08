@@ -66,8 +66,10 @@ COMMANDS: dict[str, set[str]] = {
 SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "generate-software-depot-id", "sync", "apply-https", "relocate-bundles", "restart-service"}
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
 NO_PATH_ACTIONS = {("dnsmasq", "leases"), ("dnsmasq", "reload"), ("chronyd", "status"), ("vcf-offline-depot", "generate-software-depot-id")}
+LABFOUNDRY_SERVICE_USER = "labfoundry"
+LABFOUNDRY_STATE_DIR = Path("/var/lib/labfoundry")
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
-LABFOUNDRY_APPLY_DIR = Path("/var/lib/labfoundry/apply")
+LABFOUNDRY_APPLY_DIR = LABFOUNDRY_STATE_DIR / "apply"
 FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
 FIREWALL_CONFIG_PATH = FIREWALL_CONFIG_DIR / "labfoundry.nft"
 FIREWALL_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-firewall.service")
@@ -214,6 +216,58 @@ def _run(command: list[str], *, timeout: float | None = None) -> subprocess.Comp
 
 def _run_with_input(command: list[str], input_text: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, input=input_text, check=False, capture_output=True, text=True)
+
+
+def _vcfdt_labfoundry_environment() -> tuple[dict[str, str], int | None, int | None]:
+    try:
+        account = pwd.getpwnam(LABFOUNDRY_SERVICE_USER)
+    except KeyError:
+        if os.name == "posix":
+            raise
+        account = None
+    home = Path((getattr(account, "pw_dir", "") if account is not None else "") or str(LABFOUNDRY_STATE_DIR))
+    uid = getattr(account, "pw_uid", None)
+    gid = getattr(account, "pw_gid", None)
+    home_existed = home.exists()
+    vdt_state_dir = home / ".local" / "share" / "vmware" / "vdt"
+    vdt_state_dir.mkdir(parents=True, exist_ok=True)
+    if not home_existed:
+        os.chmod(home, 0o750)
+    for directory in [home / ".local", home / ".local" / "share", home / ".local" / "share" / "vmware", vdt_state_dir]:
+        os.chmod(directory, 0o700)
+    if uid is not None and gid is not None:
+        for directory in [home, home / ".local", home / ".local" / "share", home / ".local" / "share" / "vmware", vdt_state_dir]:
+            _chown_path(directory, uid, gid)
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "LOGNAME": LABFOUNDRY_SERVICE_USER,
+            "USER": LABFOUNDRY_SERVICE_USER,
+            "XDG_DATA_HOME": str(home / ".local" / "share"),
+        }
+    )
+    return env, uid, gid
+
+
+def _run_vcfdt_user_command(command: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    env, uid, gid = _vcfdt_labfoundry_environment()
+    kwargs: dict[str, object] = {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "env": env,
+    }
+    if input_text is not None:
+        kwargs["input"] = input_text
+    if os.name == "posix" and uid is not None and gid is not None:
+        def demote_to_labfoundry() -> None:
+            os.initgroups(LABFOUNDRY_SERVICE_USER, gid)
+            os.setgid(gid)
+            os.setuid(uid)
+
+        kwargs["preexec_fn"] = demote_to_labfoundry
+    return subprocess.run(command, **kwargs)
 
 
 def _run_account_command(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -4644,15 +4698,16 @@ def _vcf_depot_config_errors(path: Path) -> list[str]:
         username = _vcf_depot_auth_username(text)
         if not LOCAL_USERS_USERNAME_PATTERN.fullmatch(username):
             errors.append(f"VCF Offline Depot HTTP user {username} is invalid.")
-        auth_files = _nginx_directive(text, "auth_basic_user_file")
-        if not auth_files:
-            errors.append("Authenticated VCF Offline Depot nginx config must include auth_basic_user_file.")
-        else:
-            auth_file = Path(auth_files[0])
-            if auth_file != VCF_DEPOT_HTPASSWD_PATH:
-                errors.append(f"VCF Offline Depot auth_basic_user_file must be {VCF_DEPOT_HTPASSWD_PATH}.")
+        if "location = /_labfoundry_depot_auth" not in text:
+            errors.append("Authenticated VCF Offline Depot nginx config must include the LabFoundry auth-check location.")
+        if "auth_request /_labfoundry_depot_auth;" not in text:
+            errors.append("Authenticated VCF Offline Depot nginx config must protect /PROD/ with auth_request.")
+        if "error_page 401 = @labfoundry_depot_login;" not in text:
+            errors.append("Authenticated VCF Offline Depot nginx config must redirect unauthenticated requests to the depot login.")
     elif _nginx_directive(text, "auth_basic_user_file"):
         errors.append("Unauthenticated VCF Offline Depot nginx config must not include auth_basic_user_file.")
+    if _nginx_directive(text, "auth_basic") or _nginx_directive(text, "auth_basic_user_file"):
+        errors.append("VCF Offline Depot nginx config must use LabFoundry auth_request instead of nginx Basic Auth.")
     return errors
 
 
@@ -4769,8 +4824,8 @@ def _parse_vcf_download_tool_version(output: str) -> str:
 
 def _vcf_download_tool_version(tool_path: Path) -> str:
     try:
-        completed = _run([str(tool_path), "--version"])
-    except OSError:
+        completed = _run_vcfdt_user_command([str(tool_path), "--version"])
+    except (KeyError, OSError):
         return ""
     return _parse_vcf_download_tool_version("\n".join(part for part in [completed.stdout, completed.stderr] if part))
 
@@ -4841,7 +4896,10 @@ def _generate_vcf_download_tool_software_depot_id() -> int:
         return 2
     command = [str(wrapper_path), "configuration", "generate", "--software-depot-id"]
     try:
-        completed = _run_with_input(command, "Y\n")
+        completed = _run_vcfdt_user_command(command, input_text="Y\n")
+    except KeyError:
+        print("labfoundry service user does not exist.", file=sys.stderr)
+        return 2
     except OSError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -4898,6 +4956,13 @@ def _apply_vcf_download_tool_properties(properties_path: Path) -> int:
     target_path = target_dir / "application-prodv2.properties"
     target_path.write_text(text, encoding="utf-8")
     os.chmod(target_path, 0o640)
+    try:
+        account = pwd.getpwnam(LABFOUNDRY_SERVICE_USER)
+    except KeyError:
+        account = None
+    if account is not None:
+        _chown_path(target_dir, account.pw_uid, account.pw_gid)
+        _chown_path(target_path, account.pw_uid, account.pw_gid)
     print(
         json.dumps(
             {
@@ -4981,16 +5046,7 @@ def _handle_vcf_offline_depot(action: str, args: list[str]) -> int:
             _remove_vcf_depot_htpasswd()
             result = _remove_nginx_site(VCF_DEPOT_SITE_PATH)
         else:
-            if _vcf_depot_auth_required(text):
-                username = _vcf_depot_auth_username(text)
-                user_result = _ensure_vcf_depot_user(username)
-                if user_result != 0:
-                    return user_result
-                htpasswd_result = _write_vcf_depot_htpasswd(username)
-                if htpasswd_result != 0:
-                    return htpasswd_result
-            else:
-                _remove_vcf_depot_htpasswd()
+            _remove_vcf_depot_htpasswd()
             _prepare_vcf_depot_web_tree(text)
             result = _install_nginx_site(VCF_DEPOT_SITE_PATH, text)
         if result != 0:
