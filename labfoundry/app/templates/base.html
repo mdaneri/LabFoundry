@@ -12,10 +12,11 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=dns-chrony-security-20260708-9">
+    <link rel="stylesheet" href="/static/app.css?v=validation-modal-20260709-5">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
+    {% set pending_apply_count = sidebar_pending_apply_count|default(0) %}
     <div class="app-shell">
       <aside class="sidebar">
         <a class="brand" href="/">
@@ -76,7 +77,6 @@
           {% endfor %}
         </nav>
         {% if identity %}
-          {% set pending_apply_count = sidebar_pending_apply_count|default(0) %}
           <div class="sidebar-apply">
             <a class="sidebar-apply-link {% if pending_apply_count %}pending{% else %}current{% endif %} {% if request.url.path == '/appliance-apply' %}active{% endif %}" href="/appliance-apply" data-appliance-apply-sidebar data-pending-count="{{ pending_apply_count }}">
               <span class="sidebar-apply-text">
@@ -92,7 +92,6 @@
       <main class="main-pane">
         <header class="topbar">
           <div>
-            <p class="kicker">Unprivileged control plane</p>
             <h1>{% block page_title %}Dashboard{% endblock %}</h1>
           </div>
           {% if identity %}
@@ -108,7 +107,8 @@
         </header>
 
         {% set page_apply_status = appliance_apply_status|default(None) %}
-        {% if page_apply_status and page_apply_status.changed %}
+        {% set current_page_apply_changed = page_apply_status and page_apply_status.changed %}
+        {% if identity and current_page_apply_changed and request.url.path != '/appliance-apply' %}
           <div class="page-apply-notice {{ 'needs-attention' if page_apply_status.validation_errors else 'pending' }}">
             <div class="page-apply-notice-main">
               <span class="status-pill {{ page_apply_status.pill }}">{{ page_apply_status.state }}</span>
@@ -128,7 +128,7 @@
             <span>GitHub</span>
           </a>
           <a href="/api/docs" title="Swagger UI">
-            <svg class="public-info-link-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M10 13l-2 2 2 2"/><path d="M14 13l2 2-2 2"/></svg>
+            <svg class="public-info-link-icon swagger-link-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M16 0c-8.823 0-16 7.177-16 16s7.177 16 16 16c8.823 0 16-7.177 16-16s-7.177-16-16-16zM16 1.527c7.995 0 14.473 6.479 14.473 14.473s-6.479 14.473-14.473 14.473c-7.995 0-14.473-6.479-14.473-14.473s6.479-14.473 14.473-14.473zM11.161 7.823c-0.188-0.005-0.375 0-0.568 0.005-1.307 0.079-2.093 0.693-2.312 1.964-0.151 0.891-0.125 1.796-0.188 2.692-0.020 0.464-0.067 0.928-0.156 1.38-0.177 0.813-0.525 1.068-1.353 1.109-0.111 0.011-0.22 0.032-0.324 0.057v1.948c1.5 0.073 1.704 0.605 1.823 2.172 0.048 0.573-0.015 1.147 0.021 1.719 0.027 0.543 0.099 1.079 0.208 1.6 0.344 1.432 1.745 1.911 3.433 1.624v-1.713c-0.272 0-0.511 0.005-0.74 0-0.579-0.016-0.792-0.161-0.844-0.713-0.079-0.713-0.057-1.437-0.099-2.156-0.089-1.339-0.235-2.651-1.541-3.5 0.672-0.495 1.161-1.084 1.312-1.865 0.109-0.547 0.177-1.099 0.219-1.651s-0.025-1.12 0.021-1.667c0.077-0.885 0.135-1.249 1.197-1.213 0.161 0 0.317-0.021 0.495-0.036v-1.745c-0.213 0-0.411-0.005-0.604-0.011zM21.287 7.839c-0.365-0.011-0.729 0.016-1.089 0.079v1.697c0.329 0 0.584 0 0.833 0.005 0.439 0.005 0.772 0.177 0.813 0.661 0.041 0.443 0.041 0.891 0.083 1.339 0.089 0.896 0.136 1.796 0.292 2.677 0.136 0.724 0.636 1.265 1.255 1.713-1.088 0.729-1.411 1.776-1.463 2.953-0.032 0.801-0.052 1.615-0.093 2.427-0.037 0.74-0.297 0.979-1.043 0.995-0.208 0.011-0.411 0.027-0.64 0.041v1.74c0.432 0 0.833 0.027 1.235 0 1.239-0.073 1.995-0.677 2.239-1.885 0.104-0.661 0.167-1.333 0.183-2.005 0.041-0.615 0.036-1.235 0.099-1.844 0.093-0.953 0.532-1.349 1.484-1.411 0.089-0.011 0.177-0.032 0.267-0.057v-1.953c-0.161-0.021-0.271-0.037-0.391-0.041-0.713-0.032-1.068-0.272-1.251-0.948-0.109-0.433-0.177-0.876-0.197-1.324-0.052-0.823-0.047-1.656-0.099-2.479-0.109-1.588-1.063-2.339-2.516-2.38zM12.099 14.875c-1.432 0-1.536 2.109-0.115 2.245h0.079c0.609 0.036 1.131-0.427 1.167-1.037v-0.061c0.011-0.62-0.484-1.136-1.104-1.147zM15.979 14.875c-0.593-0.020-1.093 0.448-1.115 1.043 0 0.036 0 0.067 0.005 0.104 0 0.672 0.459 1.099 1.147 1.099 0.677 0 1.104-0.443 1.104-1.136-0.005-0.672-0.459-1.115-1.141-1.109zM19.927 14.875c-0.624-0.011-1.145 0.485-1.167 1.115 0 0.625 0.505 1.131 1.136 1.131h0.011c0.567 0.099 1.135-0.448 1.172-1.104 0.031-0.609-0.521-1.141-1.152-1.141z"/></svg>
             <span>Swagger</span>
           </a>
           <a href="https://www.python.org/" target="_blank" rel="noopener" title="Python website">
@@ -159,11 +159,18 @@
             <h2 id="preview-modal-title">Preview</h2>
           </div>
           <div class="preview-modal-actions">
-            <button class="button secondary icon-button" type="button" data-preview-modal-copy aria-label="Copy preview" title="Copy preview">⧉</button>
             <button class="button ghost icon-button" type="button" data-preview-modal-close aria-label="Close preview" title="Close preview">×</button>
           </div>
         </div>
-        <pre><code data-preview-modal-code></code></pre>
+        <div class="preview-modal-body">
+          <button class="button secondary icon-button preview-modal-copy-button" type="button" data-preview-modal-copy aria-label="Copy preview" title="Copy preview">
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M8 8.75a2 2 0 0 1 2-2h7.25a2 2 0 0 1 2 2V16a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2z"/>
+              <path d="M5.75 15.25H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7.25a2 2 0 0 1 2 2v.75"/>
+            </svg>
+          </button>
+          <pre><code data-preview-modal-code></code></pre>
+        </div>
       </div>
     </dialog>
     <dialog id="chrony-source-health-modal" class="preview-modal" aria-labelledby="chrony-source-health-title">
@@ -176,7 +183,7 @@
           <div class="preview-modal-actions">
             <span class="status-pill muted" data-chrony-source-health-status>not checked</span>
             <button class="button secondary compact-button" type="button" data-chrony-source-health-refresh>Refresh</button>
-            <button class="button ghost icon-button" type="button" data-chrony-source-health-close aria-label="Close source health" title="Close">x</button>
+            <button class="button ghost icon-button" type="button" data-chrony-source-health-close aria-label="Close source health" title="Close">×</button>
           </div>
         </div>
         <pre><code data-chrony-source-health-output>Use the Chrony service menu to check chronyc tracking, sources, and authdata.</code></pre>
@@ -190,7 +197,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=dns-chrony-vcfdt-20260708-6"></script>
+    <script src="/static/app.js?v=validation-modal-20260709-5"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

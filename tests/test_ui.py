@@ -114,7 +114,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v38" in service_worker.text
+    assert "labfoundry-pwa-v52" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -134,7 +134,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=dns-chrony-security-20260708-9" in offline.text
+    assert "/static/app.css?v=validation-modal-20260709-5" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -146,8 +146,22 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "Virtual Machine" in page.text
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
+    assert "Unprivileged control plane" not in page.text
+    assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
-    assert "/static/app.js?v=dns-chrony-vcfdt-20260708-6" in page.text
+    assert "swagger-link-icon" in page.text
+    assert "/static/app.css?v=validation-modal-20260709-5" in page.text
+    assert "/static/app.js?v=validation-modal-20260709-5" in page.text
+    app_css = client.get("/static/app.css")
+    assert app_css.status_code == 200
+    assert ".split-workspace > .wide-panel" in app_css.text
+    assert "min-height: calc(100vh - 144px);" in app_css.text
+    assert "padding: 22px 22px 41px;" in app_css.text
+    assert ".swagger-link-icon" in app_css.text
+    assert ".validation-preview-action" in app_css.text
+    assert ".validation-preview-source" in app_css.text
+    assert ".monitor-chart-panel.has-monitor-table" in app_css.text
+    assert "grid-template-rows: auto minmax(260px, 1fr) minmax(0, auto);" in app_css.text
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -257,6 +271,31 @@ def test_dns_settings_derives_listen_addresses_from_selected_interface(client):
     assert response.status_code == 200, response.text
     assert response.json()["listen_interfaces"] == ["eth9"]
     assert response.json()["listen_addresses"] == ["192.168.90.1", "2001:db8:90::1"]
+
+
+def test_dns_listen_interface_menu_has_empty_state_when_no_interfaces_available(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface, VlanInterface
+
+    login(client)
+    with SessionLocal() as db:
+        for interface in db.query(PhysicalInterface).all():
+            interface.role = "unused"
+            interface.mode = "access"
+            interface.ip_cidr = ""
+            interface.ipv6_cidr = ""
+        for vlan in db.query(VlanInterface).all():
+            vlan.enabled = False
+        db.commit()
+
+    page = client.get("/dns")
+    assert page.status_code == 200
+    assert 'data-tag-empty-message="No interfaces available."' in page.text
+    assert 'data-tag-option=' not in page.text
+
+    app_js = client.get("/static/app.js")
+    assert "data-tag-empty" in app_js.text
+    assert "visibleOptions" in app_js.text
 
 
 def test_forget_missing_physical_interface_deletes_only_stale_rows(client):
@@ -516,6 +555,37 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
     assert pending.json()["label"] == "Review appliance changes"
     assert "pending unit" in pending.json()["detail"]
     assert pending.json()["badge"] == "pending"
+    pending_count = pending.json()["pending_count"]
+
+    import inspect
+
+    from labfoundry.app import ui
+
+    render_source = inspect.getsource(ui.render)
+    assert "appliance_apply_units" not in render_source
+    assert "context.get(\"appliance_apply_status\")" in render_source
+
+    monitor = client.get("/monitor")
+    assert monitor.status_code == 200
+    assert 'data-appliance-apply-sidebar data-pending-count="0"' in monitor.text
+    assert 'class="page-apply-notice' not in monitor.text
+    assert "pending appliance units need review" not in monitor.text
+
+    users = client.get("/users")
+    assert users.status_code == 200
+    assert f'data-appliance-apply-sidebar data-pending-count="{pending_count}"' in users.text
+    assert 'class="page-apply-notice' not in users.text
+    assert "pending appliance units need review" not in users.text
+
+    dns_page = client.get("/dns")
+    assert dns_page.status_code == 200
+    assert 'data-appliance-apply-sidebar data-pending-count="1"' in dns_page.text
+    assert "DNS/DHCP (dnsmasq) has pending appliance changes" in dns_page.text
+    assert "Review and submit them from the global apply workflow." in dns_page.text
+
+    apply_page = client.get("/appliance-apply")
+    assert apply_page.status_code == 200
+    assert "need review" not in apply_page.text
 
 
 def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(client):
@@ -629,7 +699,42 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json" in response.text
     assert "resolver_mode" in response.text
     assert "root_ssh_enabled" in response.text
-    assert 'class="language-json" data-appliance-settings-preview' in response.text
+    assert 'data-config-preview-open' in response.text
+    assert 'data-appliance-settings-preview' in response.text
+    assert 'class="validation-preview-source language-json"' in response.text
+
+
+def test_validation_rails_use_modal_config_previews(client):
+    login(client)
+    pages = {
+        "/settings": ["data-appliance-settings-preview"],
+        "/physical-interfaces": [],
+        "/vlan-interfaces": [],
+        "/routes-wan": [],
+        "/firewall": ["data-firewall-config-preview"],
+        "/dns": ["data-dns-config-preview"],
+        "/dhcp": [],
+        "/chrony": ["data-ntp-config-preview"],
+        "/certificate-authority": ["data-ca-config-preview"],
+        "/kms": ["data-kms-config-preview"],
+        "/esxi-pxe": ["data-esxi-pxe-preview"],
+        "/vcf-offline-depot": ["data-vcf-depot-https-preview"],
+        "/vcf-private-registry": ["data-vcf-registry-harbor-preview", "data-vcf-registry-relocation-preview"],
+        "/vcf-backups": ["data-vcf-config-preview"],
+    }
+
+    for path, preview_hooks in pages.items():
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert 'class="validation-preview-action"' in response.text, path
+        assert "data-config-preview-open" in response.text, path
+        assert "data-config-preview-source" in response.text, path
+        for hook in preview_hooks:
+            assert hook in response.text, path
+
+        validation_markup = response.text.split("<h2>Validation</h2>", 1)[1].split("</aside>", 1)[0]
+        assert 'class="terminal-note"' not in validation_markup, path
+        assert 'class="config-preview"' not in validation_markup, path
 
 
 def test_logging_settings_autosave_updates_preferences(client):
@@ -943,6 +1048,9 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     assert "initializeChronyUpstreamsTable" in js.text
     assert "chronyUpstreamRowHasSource" in js.text
     assert "editable: chronyUpstreamRowHasSource" in js.text
+    assert "function labFoundryBooleanFormatter" in js.text
+    assert 'formatter: "tickCross"' not in js.text
+    assert "formatter: labFoundryBooleanFormatter" in js.text
     assert "const tone = enabled ? \"good\" : \"bad\"" in js.text
     assert "boolean-glyph ${tone}" in js.text
     assert "initializeChronySourceHealthModal" in js.text
@@ -950,6 +1058,9 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     assert "openChronySourceHealthModal" in js.text
     assert "/chrony/source-health" in js.text
     assert "updateNtpValidation" in js.text
+    app_css = client.get("/static/app.css")
+    assert app_css.status_code == 200
+    assert 'tabulator-field="source"' in app_css.text
 
     health = client.get("/chrony/source-health")
     assert health.status_code == 200
@@ -3382,6 +3493,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert dns.text.count('data-tag-editor') >= 1
     assert dns.text.count('data-tag-menu-toggle') >= 1
     assert dns.text.count('data-tag-option=') >= 2
+    assert 'data-tag-empty-message="No interfaces available."' in dns.text
     assert 'placeholder="Add interface..."' in dns.text
     assert 'placeholder="Add listen address..."' not in dns.text
     assert "eth1 - access / trunk" not in dns.text
@@ -3406,6 +3518,10 @@ def test_dns_and_dhcp_pages_render(client):
     assert "rowHeight: 28" in app_js.text
     assert 'field: "host_label"' in app_js.text
     assert "dnsAddRowHintFormatter" in app_js.text
+    assert "pendingNewDnsRecord" in app_js.text
+    assert 'markNewRecordRow(row, "host_label")' in app_js.text
+    assert "dnsRecordDomainFormatter" in app_js.text
+    assert 'field: "domain", formatter: dnsRecordDomainFormatter' in app_js.text
     assert "dnsRecordCellEditable" in app_js.text
     assert app_js.text.count("editable: dnsRecordCellEditable") >= 5
     assert "+ Add record here" in app_js.text
@@ -3425,6 +3541,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert 'textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart"' in app_js.text
     assert 'addEventListener("keydown"' in app_js.text
     assert "event.stopPropagation()" in app_js.text
+    assert "data-tag-empty" in app_js.text
+    assert "No options available." in app_js.text
     assert "LabFoundryCodeMirror.setValue" in app_js.text
     assert "rememberDnsActiveZone(data.domain)" in app_js.text
     assert "dnsZoneTabButtonForDomain(storedDomain)" in app_js.text
@@ -3442,6 +3560,9 @@ def test_dns_and_dhcp_pages_render(client):
     assert "requestConfirmation" in app_js.text
     assert "form[data-confirm-modal]" in app_js.text
     assert "confirm-modal" in app_js.text
+    assert "initializeConfigPreviewActions" in app_js.text
+    assert "[data-config-preview-open]" in app_js.text
+    assert "openPreviewModal(button.dataset.previewTitle" in app_js.text
     assert "initializeAutosaveForms" in app_js.text
     assert "LABFOUNDRY_MUTATING_METHODS" in app_js.text
     assert "scheduleApplianceApplySidebarRefresh" in app_js.text
@@ -3507,11 +3628,13 @@ def test_dns_and_dhcp_pages_render(client):
     assert ".add-row-hint" in app_css.text
     assert ".dhcp-range-tooltip" in app_css.text
     assert ".new-record-row-locked" in app_css.text
+    assert ".new-record-row-pending" in app_css.text
     assert 'tabulator-field="host_label"' in app_css.text
     assert ".alert.warning" in app_css.text
     assert ".tag-editor" in app_css.text
     assert ".tag-add-button" in app_css.text
     assert ".tag-suggestions" in app_css.text
+    assert ".tag-empty-option" in app_css.text
     assert ".autosave-status" in app_css.text
     assert ".appliance-apply-form" in app_css.text
     assert ".apply-change-set-panel" in app_css.text
@@ -3565,6 +3688,54 @@ def test_dns_and_dhcp_pages_render(client):
     reservation_rows = json.loads(html.unescape(reservation_payload))
     assert reservation_rows
     assert all("zone_name" in row for row in reservation_rows)
+
+
+def test_new_record_rows_lock_defaults_until_required_field(client):
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    app_css = client.get("/static/app.css")
+    assert app_css.status_code == 200
+
+    assert "function lockNewRecordColumns" in app_js.text
+    assert "function markNewRecordRow" in app_js.text
+    assert "newRecordRequiredCellEditable" in app_js.text
+    firewall_block = app_js.text[
+        app_js.text.index("function initializeFirewallRulesTable"):
+        app_js.text.index("function managedFirewallStatusFormatter")
+    ]
+    assert 'field: "enabled"' in firewall_block
+    assert 'editor: "tickCross"' in firewall_block
+    assert ".new-record-row-pending" in app_css.text
+    assert ".new-record-primary-cell" in app_css.text
+
+    def function_block(name, next_name):
+        start = app_js.text.index(f"function {name}()")
+        end = app_js.text.index(f"function {next_name}", start)
+        return app_js.text[start:end]
+
+    expected_blocks = [
+        ("initializeFirewallRulesTable", "managedFirewallStatusFormatter", "name"),
+        ("initializeCaCertificatesTable", "initializeFirewallRulesTable", "common_name"),
+        ("initializeKmsKeysTable", "initializeCaSettings", "name"),
+        ("initializeEsxiPxeHostsTable", "initializeHostsFileEditor", "hostname"),
+        ("initializeVcfDepotProfilesTable", "initializeVcfDepotSettings", "name"),
+        ("initializeVcfRegistryBundlesTable", "initializeVcfRegistrySettings", "name"),
+        ("initializeRoutesWanRoutesTable", "initializeRoutesWanPoliciesTable", "destination_cidr"),
+        ("initializeRoutesWanRoutingTable", "initializeRoutesWanNatTable", "name"),
+        ("initializeRoutesWanNatTable", "initializeRoutesWanRoutesTable", "name"),
+        ("initializeRoutesWanPoliciesTable", "showNetworkMessage", "name"),
+    ]
+    for name, next_name, required_field in expected_blocks:
+        block = function_block(name, next_name)
+        assert "columns: lockNewRecordColumns([" in block, name
+        assert f'], "{required_field}"),' in block, name
+        assert f'markNewRecordRow(row, "{required_field}")' in block, name
+
+    dns_block = app_js.text[
+        app_js.text.index("function initializeDnsRecordsTableElement"):
+        app_js.text.index("function initializeDhcpScopesTable")
+    ]
+    assert 'markNewRecordRow(row, "host_label")' in dns_block
 
 
 def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
@@ -6524,6 +6695,7 @@ def test_physical_and_vlan_pages_render(client):
     app_js = client.get("/static/app.js").text
     assert "deleteVlanInterfaceFromMenu" in app_js
     assert "refreshNetworkSideStack" in app_js
+    assert "highlightConfigPreviews(nextSideStack)" in app_js
     assert "networkStateIcon" in app_js
     assert "operStateFormatter" in app_js
     assert "cidrInputEditor" in app_js

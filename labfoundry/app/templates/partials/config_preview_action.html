@@ -1,0 +1,22 @@
+<div class="validation-preview-action" data-config-preview-row>
+  <span class="validation-preview-icon" aria-hidden="true">
+    <svg viewBox="0 0 24 24" focusable="false">
+      <path d="M7 3.75h6.2L17.25 7.8v12.45H7z"/>
+      <path d="M13 3.75V8h4.25"/>
+      <path d="M9.5 13.25h5"/>
+      <path d="M9.5 16h3.25"/>
+    </svg>
+  </span>
+  <div class="validation-preview-meta">
+    <span data-config-preview-label>{{ preview_label|default("Rendered config") }}</span>
+    <strong {% if preview_path_attr|default("") %}{{ preview_path_attr|safe }}{% endif %}>{{ preview_path }}</strong>
+  </div>
+  <button class="button secondary compact-button validation-preview-open" type="button" data-config-preview-open data-preview-title="{{ preview_title|default(preview_label|default('Rendered config')) }}">
+    <span>Open</span>
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 17 17 7"/>
+      <path d="M9 7h8v8"/>
+    </svg>
+  </button>
+  <code class="validation-preview-source {{ preview_code_class|default('') }}" data-config-preview-source {% if preview_data_attr|default("") %}{{ preview_data_attr|safe }}{% endif %}>{{ preview_text }}</code>
+</div>

@@ -345,10 +345,15 @@
       {% if not ca_validation_errors %}
         <p class="muted">The desired CA state passes LabFoundry validation. Appliance validation still runs through the allowlisted CA helper before key or certificate work.</p>
       {% endif %}
-      <div class="terminal-note">
-        <strong>{{ ca_apply_config_path }}</strong>
-        <code class="language-json" data-ca-config-preview>{{ ca_config_preview }}</code>
-      </div>
+      {% set preview_label = "CA apply payload" %}
+      {% set preview_path = ca_apply_config_path %}
+      {% set preview_path_attr = "" %}
+      {% set preview_title = "Certificate Authority rendered config" %}
+      {% set preview_button_label = "config" %}
+      {% set preview_text = ca_config_preview %}
+      {% set preview_data_attr = "data-ca-config-preview" %}
+      {% set preview_code_class = "language-json" %}
+      {% include "partials/config_preview_action.html" %}
     </div>
   </aside>
 </section>

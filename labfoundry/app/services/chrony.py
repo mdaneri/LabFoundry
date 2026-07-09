@@ -67,6 +67,9 @@ def chrony_upstream_sources(settings: ChronySettings) -> list[dict[str, object]]
                 )
     if sources:
         return sources
+    servers = split_servers(settings.upstream_servers)
+    if servers == split_servers(CHRONY_DEFAULT_UPSTREAM_SERVERS):
+        return [dict(source) for source in CHRONY_DEFAULT_UPSTREAM_SOURCE_ROWS]
     return [
         {
             "id": f"legacy-{index}",
@@ -76,7 +79,7 @@ def chrony_upstream_sources(settings: ChronySettings) -> list[dict[str, object]]
             "description": "",
             "maxdelay": "",
         }
-        for index, server in enumerate(split_servers(settings.upstream_servers), start=1)
+        for index, server in enumerate(servers, start=1)
     ]
 
 
