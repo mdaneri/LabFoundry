@@ -120,6 +120,7 @@ from labfoundry.app.security import (
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+    dump_dns_record_data,
     compact_dhcp_range_expression,
     dhcp_bind_target_families,
     dns_domain_warnings,
@@ -284,10 +285,12 @@ from labfoundry.app.services.kms import (
 )
 from labfoundry.app.services.chrony import (
     CHRONY_DEFAULT_HOSTNAME,
-    CHRONY_DEFAULT_UPSTREAM_SERVERS,
     CHRONY_STAGED_CONFIG_PATH,
+    default_chrony_upstream_fields,
+    dump_chrony_upstream_sources,
     join_allow_clients,
     chrony_settings_to_dict,
+    chrony_upstream_sources,
     render_chrony_config,
     split_allow_clients,
     validate_chrony_state,
@@ -680,6 +683,11 @@ def ca_service_cert_paths(service_dir: str, certificate_name: str) -> tuple[str,
     return f"{base}.crt", f"{base}.key", f"{base}-chain.pem"
 
 
+def chrony_nts_certificate_paths(settings: ChronySettings) -> tuple[str, str, str]:
+    hostname = normalize_dns_hostname(settings.hostname or CHRONY_DEFAULT_HOSTNAME)
+    return ca_service_cert_paths("chrony", hostname)
+
+
 def kms_client_common_name(client: KmsClient) -> str:
     match = re.search(r"(?:^|,)CN=([^,]+)", client.certificate_subject or "")
     return match.group(1).strip() if match else client.name
@@ -755,6 +763,23 @@ def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
                     chain_path=chain_path,
                 )
             )
+
+    chrony_settings = get_chrony_settings_row(db)
+    if chrony_settings.nts_server_enabled:
+        cert_path, key_path, chain_path = chrony_nts_certificate_paths(chrony_settings)
+        specs.append(
+            ManagedCertificateSpec(
+                owner="chrony:nts",
+                common_name=normalize_dns_hostname(chrony_settings.hostname or CHRONY_DEFAULT_HOSTNAME),
+                dns_names=[normalize_dns_hostname(chrony_settings.hostname or CHRONY_DEFAULT_HOSTNAME)],
+                ip_addresses=split_addresses(chrony_settings.listen_address),
+                profile_name=CA_SERVER_PROFILE_NAME,
+                description="Managed Chrony NTS server certificate.",
+                cert_path=cert_path,
+                key_path=key_path,
+                chain_path=chain_path,
+            )
+        )
 
     depot_settings = get_vcf_offline_depot_settings_row(db)
     if depot_settings.enabled:
@@ -844,9 +869,11 @@ def get_chrony_settings_row(db: Session) -> ChronySettings:
     settings = db.execute(select(ChronySettings)).scalar_one_or_none()
     if settings is None:
         appliance_settings = get_appliance_settings_row(db)
+        chrony_upstreams = default_chrony_upstream_fields(appliance_settings.ntp_servers)
         settings = ChronySettings(
             hostname=CHRONY_DEFAULT_HOSTNAME,
-            upstream_servers=appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS,
+            upstream_servers=chrony_upstreams["upstream_servers"],
+            upstream_sources_json=chrony_upstreams["upstream_sources_json"],
             config_path=CHRONY_STAGED_CONFIG_PATH,
         )
         db.add(settings)
@@ -982,7 +1009,7 @@ def service_bind_options(db: Session) -> list[dict]:
         mode = normalize_interface_mode(interface.mode)
         role = normalize_interface_role(interface.role)
         addresses = interface_addresses_from_cidrs(interface.ip_cidr, interface.ipv6_cidr)
-        if role == "management" or mode == "trunk" or not addresses:
+        if role in {"management", "unused"} or mode == "trunk" or not addresses:
             continue
         address_label = " / ".join(addresses)
         options.append(
@@ -1004,7 +1031,7 @@ def service_bind_options(db: Session) -> list[dict]:
             continue
         role = normalize_interface_role(vlan.role)
         addresses = interface_addresses_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
-        if role == "management" or not addresses:
+        if role in {"management", "unused"} or not addresses:
             continue
         address_label = " / ".join(addresses)
         options.append(
@@ -1396,14 +1423,20 @@ def vcf_backup_context(db: Session) -> dict:
     }
 
 
-def ntp_context(db: Session) -> dict:
+def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
     settings = get_chrony_settings_row(db)
     if normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
     available_interfaces = service_bind_options(db)
+    chrony_nts_cert_path, chrony_nts_key_path, chrony_nts_chain_path = chrony_nts_certificate_paths(settings)
+    if settings.nts_server_enabled:
+        settings.nts_server_cert_path = chrony_nts_cert_path
+        settings.nts_server_key_path = chrony_nts_key_path
+        settings.nts_ke_port = 4460
     config_preview = render_chrony_config(settings)
     validation_errors = validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})
+    status_result = SystemAdapter().read_chronyd_status() if include_runtime_health else None
     return {
         "chrony_settings": settings,
         "chrony_settings_json": chrony_settings_to_dict(settings),
@@ -1416,6 +1449,12 @@ def ntp_context(db: Session) -> dict:
         "ntp_config_preview": config_preview,
         "ntp_validation_errors": validation_errors,
         "ntp_service_status": service_runtime_status(db, "chronyd"),
+        "ntp_chronyc_status": status_result.stdout if status_result else "Chrony source health is not loaded during page render.",
+        "ntp_chronyc_status_error": status_result.stderr if status_result and status_result.returncode != 0 else "",
+        "ntp_chronyc_status_dry_run": status_result.dry_run if status_result else False,
+        "chrony_nts_cert_path": chrony_nts_cert_path,
+        "chrony_nts_key_path": chrony_nts_key_path,
+        "chrony_nts_chain_path": chrony_nts_chain_path,
     }
 
 
@@ -4091,6 +4130,7 @@ def dns_record_payload(record: DnsRecord, domain: str) -> dict:
         "domain": domain,
         "record_type": record.record_type,
         "address": record.address,
+        "record_data_json": record.record_data_json or "",
         "description": record.description or "",
         "enabled": record.enabled,
         **dns_record_reverse_status(record),
@@ -4914,17 +4954,65 @@ def appliance_apply_status(db: Session, unit_id: str) -> dict[str, Any]:
     sidebar_count = len([unit for unit in units if unit["changed"]])
     for unit in units:
         if unit["id"] == unit_id:
-            if unit["validation_errors"]:
-                state = "needs attention"
-                pill = "warn"
-            elif unit["changed"]:
-                state = "pending"
-                pill = "warn"
-            else:
-                state = "current"
-                pill = "good"
-            return {"state": state, "pill": pill, "sidebar_pending_apply_count": sidebar_count, **unit}
+            return appliance_apply_status_from_unit(unit, sidebar_pending_apply_count=sidebar_count)
     return {"state": "unknown", "pill": "muted", "changed": False, "validation_errors": [], "sidebar_pending_apply_count": sidebar_count}
+
+
+def appliance_apply_status_from_unit(unit: dict[str, Any], *, sidebar_pending_apply_count: int | None = None) -> dict[str, Any]:
+    if unit["validation_errors"]:
+        state = "needs attention"
+        pill = "warn"
+    elif unit["changed"]:
+        state = "pending"
+        pill = "warn"
+    else:
+        state = "current"
+        pill = "good"
+    sidebar_count = sidebar_pending_apply_count if sidebar_pending_apply_count is not None else int(bool(unit["changed"]))
+    return {"state": state, "pill": pill, "sidebar_pending_apply_count": sidebar_count, **unit}
+
+
+def dnsmasq_apply_status(db: Session, dnsmasq: dict[str, Any]) -> dict[str, Any]:
+    baselines = load_appliance_apply_baselines(db)
+    unit = make_appliance_apply_unit(
+        unit_id="dnsmasq",
+        label="DNS/DHCP (dnsmasq)",
+        page_url="/dns",
+        context=dnsmasq,
+        summary=[
+            "DNS enabled" if dnsmasq["dns_settings"].enabled else "DNS disabled",
+            "DHCP enabled" if dnsmasq["dhcp_settings"].enabled else "DHCP disabled",
+            f"{len(dnsmasq['dns_records'])} DNS records",
+            f"{len(dnsmasq['dhcp_scopes'])} DHCP scopes",
+            f"{len(dnsmasq['dhcp_reservations'])} reservations",
+        ],
+        validation_errors=dnsmasq["validation_errors"],
+        validation_warnings=dnsmasq["dns_warnings"],
+        config_path=dnsmasq["dns_settings"].config_path,
+        config_preview=dnsmasq["config_preview"],
+        baseline=baselines.get("dnsmasq"),
+    )
+    return appliance_apply_status_from_unit(unit)
+
+
+def chronyd_apply_status(db: Session, ntp: dict[str, Any]) -> dict[str, Any]:
+    baselines = load_appliance_apply_baselines(db)
+    unit = make_appliance_apply_unit(
+        unit_id="chronyd",
+        label="Chrony",
+        page_url="/chrony",
+        context=ntp,
+        summary=[
+            "service enabled" if ntp["chrony_settings"].enabled else "service disabled",
+            f"{len(ntp['chrony_settings_json']['upstream_servers'])} upstream servers",
+            f"{len(ntp['selected_ntp_interfaces'])} listen interfaces",
+        ],
+        validation_errors=ntp["ntp_validation_errors"],
+        config_path=CHRONY_STAGED_CONFIG_PATH,
+        config_preview=ntp["ntp_config_preview"],
+        baseline=baselines.get("chronyd"),
+    )
+    return appliance_apply_status_from_unit(unit)
 
 
 def service_runtime_status(db: Session, service_id: str) -> dict[str, Any]:
@@ -7476,7 +7564,8 @@ def dns_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "dns.html", {"identity": identity, **dnsmasq_context(db), "appliance_apply_status": appliance_apply_status(db, "dnsmasq")})
+    context = dnsmasq_context(db)
+    return render(request, "dns.html", {"identity": identity, **context, "appliance_apply_status": dnsmasq_apply_status(db, context)})
 
 
 @router.post("/dns/settings", response_model=None)
@@ -7493,6 +7582,10 @@ def update_dns_from_ui(
     cache_size: int = Form(1000),
     expand_hosts: str | None = Form(None),
     authoritative: str | None = Form(None),
+    dnssec_enabled: str | None = Form(None),
+    rebind_protection_enabled: str | None = Form(None),
+    rebind_domain_exemptions: str = Form(""),
+    query_logging_mode: str = Form("off"),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -7534,6 +7627,10 @@ def update_dns_from_ui(
     settings.cache_size = cache_size
     settings.expand_hosts = expand_hosts == "on"
     settings.authoritative = authoritative == "on"
+    settings.dnssec_enabled = dnssec_enabled == "on"
+    settings.rebind_protection_enabled = rebind_protection_enabled == "on"
+    settings.rebind_domain_exemptions = join_domains(split_domains(rebind_domain_exemptions))
+    settings.query_logging_mode = query_logging_mode if query_logging_mode in {"off", "queries-extra"} else "off"
     settings.updated_at = utcnow()
     db.commit()
     record_audit(db, actor=identity.username, action="update_dns_settings", resource_type="dns", resource_id=str(settings.id))
@@ -7552,6 +7649,9 @@ def update_dns_from_ui(
                 "config_preview": context["config_preview"],
                 "observed_dhcp_upstream_servers": context["observed_dhcp_upstream_servers"],
                 "effective_upstream_servers": context["effective_upstream_servers"],
+                "dnssec_enabled": context["dns_settings"].dnssec_enabled,
+                "rebind_protection_enabled": context["dns_settings"].rebind_protection_enabled,
+                "query_logging_mode": context["dns_settings"].query_logging_mode,
             }
         )
     return RedirectResponse("/dns", status_code=303)
@@ -7652,6 +7752,7 @@ def create_dns_record_from_ui(
     hostname = normalize_dns_hostname(hostname, domain)
     record_type = record_type.strip().upper()
     address = address.strip()
+    record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
     if validation_errors:
         return render(
@@ -7666,8 +7767,9 @@ def create_dns_record_from_ui(
         )
     existing = db.execute(
         select(DnsRecord).where(
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type == record_type,
+            func.lower(DnsRecord.hostname) == hostname.lower(),
+            func.lower(DnsRecord.record_type) == record_type.lower(),
+            DnsRecord.address == address,
         )
     ).scalar_one_or_none()
     if existing:
@@ -7685,6 +7787,7 @@ def create_dns_record_from_ui(
         hostname=hostname,
         record_type=record_type,
         address=address,
+        record_data_json=record_data_json,
         description=description or None,
         enabled=enabled == "on",
     )
@@ -7746,6 +7849,7 @@ def edit_dns_record_from_ui(
     hostname = normalize_dns_hostname(hostname, domain)
     record_type = record_type.strip().upper()
     address = address.strip()
+    record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
     if validation_errors:
         return render(
@@ -7761,8 +7865,9 @@ def edit_dns_record_from_ui(
     existing = db.execute(
         select(DnsRecord).where(
             DnsRecord.id != record_id,
-            DnsRecord.hostname == hostname,
-            DnsRecord.record_type == record_type,
+            func.lower(DnsRecord.hostname) == hostname.lower(),
+            func.lower(DnsRecord.record_type) == record_type.lower(),
+            DnsRecord.address == address,
         )
     ).scalar_one_or_none()
     if existing:
@@ -7779,6 +7884,7 @@ def edit_dns_record_from_ui(
     record.hostname = hostname
     record.record_type = record_type
     record.address = address
+    record.record_data_json = record_data_json
     record.description = description or None
     record.enabled = enabled == "on"
     try:
@@ -7839,13 +7945,16 @@ def import_dns_hosts_from_ui(
                 select(DnsRecord).where(
                     DnsRecord.hostname == item["hostname"],
                     DnsRecord.record_type == item["record_type"],
+                    DnsRecord.address == item["address"],
                 )
             ).scalar_one_or_none()
         if existing:
             existing.address = str(item["address"])
+            existing.record_data_json = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             existing.description = str(item["description"] or "")
             existing.enabled = bool(item["enabled"])
         else:
+            item["record_data_json"] = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             db.add(DnsRecord(**item))
     try:
         db.commit()
@@ -7910,13 +8019,16 @@ def import_dns_zone_from_ui(
                 select(DnsRecord).where(
                     DnsRecord.hostname == item["hostname"],
                     DnsRecord.record_type == item["record_type"],
+                    DnsRecord.address == item["address"],
                 )
             ).scalar_one_or_none()
         if existing:
             existing.address = str(item["address"])
+            existing.record_data_json = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             existing.description = str(item["description"] or "")
             existing.enabled = bool(item["enabled"])
         else:
+            item["record_data_json"] = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             db.add(DnsRecord(**item))
     try:
         db.commit()
@@ -7951,7 +8063,8 @@ def dhcp_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "dhcp.html", {"identity": identity, **dnsmasq_context(db), "appliance_apply_status": appliance_apply_status(db, "dnsmasq")})
+    context = dnsmasq_context(db)
+    return render(request, "dhcp.html", {"identity": identity, **context, "appliance_apply_status": dnsmasq_apply_status(db, context)})
 
 
 @router.post("/dhcp/settings", response_model=None)
@@ -9229,7 +9342,31 @@ def chrony_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    return render(request, "chrony.html", {"identity": identity, **ntp_context(db), "appliance_apply_status": appliance_apply_status(db, "chronyd")})
+    context = ntp_context(db)
+    return render(request, "chrony.html", {"identity": identity, **context, "appliance_apply_status": chronyd_apply_status(db, context)})
+
+
+@router.get("/chrony/source-health", response_class=JSONResponse, response_model=None)
+def chrony_source_health(identity: Identity = Depends(require_session_identity)) -> JSONResponse:
+    result = SystemAdapter().read_chronyd_status()
+    parsed_status: dict[str, Any] = {}
+    if result.stdout:
+        try:
+            raw_status = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raw_status = {}
+        if isinstance(raw_status, dict):
+            parsed_status = raw_status
+    return JSONResponse(
+        {
+            "ok": result.returncode == 0,
+            "dry_run": result.dry_run,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "status": parsed_status,
+        }
+    )
 
 
 @router.post("/chrony/settings", response_model=None)
@@ -9245,7 +9382,20 @@ def update_chrony_settings_from_ui(
     listen_address: str = Form(""),
     port: int = Form(123),
     upstream_servers: str = Form(""),
+    upstream_source: list[str] = Form(default_factory=list),
+    upstream_sources_json: str = Form(""),
+    upstream_enabled: list[str] = Form(default_factory=list),
+    upstream_use_nts: list[str] = Form(default_factory=list),
+    upstream_description: list[str] = Form(default_factory=list),
+    upstream_maxdelay: list[str] = Form(default_factory=list),
     allow_clients: str = Form("any"),
+    nts_server_enabled: str | None = Form(None),
+    nts_server_cert_path: str = Form(""),
+    nts_server_key_path: str = Form(""),
+    command_port_disabled: str | None = Form(None),
+    minsources: int | None = Form(None),
+    maxchange_seconds: int | None = Form(None),
+    authselectmode: str = Form(""),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -9266,8 +9416,64 @@ def update_chrony_settings_from_ui(
     settings.listen_interface = selected_interfaces
     settings.listen_address = selected_addresses
     settings.port = port
-    settings.upstream_servers = join_servers(split_servers(upstream_servers))
+    source_rows = []
+    if upstream_sources_json.strip():
+        try:
+            parsed_sources = json.loads(upstream_sources_json)
+        except json.JSONDecodeError:
+            parsed_sources = []
+        if isinstance(parsed_sources, list):
+            for index, item in enumerate(parsed_sources, start=1):
+                if not isinstance(item, dict):
+                    continue
+                source = str(item.get("source") or "").strip()
+                if not source:
+                    continue
+                source_rows.append(
+                    {
+                        "id": str(item.get("id") or f"source-{index}"),
+                        "source": source,
+                        "enabled": bool(item.get("enabled", True)),
+                        "use_nts": bool(item.get("use_nts", False)),
+                        "description": str(item.get("description") or "").strip(),
+                        "maxdelay": str(item.get("maxdelay") or "").strip(),
+                    }
+                )
+    if not source_rows:
+        max_rows = max(len(upstream_source), len(upstream_description), len(upstream_maxdelay))
+        enabled_indexes = {int(value) for value in upstream_enabled if str(value).isdigit()}
+        nts_indexes = {int(value) for value in upstream_use_nts if str(value).isdigit()}
+        for index in range(max_rows):
+            source = upstream_source[index].strip() if index < len(upstream_source) else ""
+            if not source:
+                continue
+            source_rows.append(
+                {
+                    "id": f"source-{index + 1}",
+                    "source": source,
+                    "enabled": index in enabled_indexes,
+                    "use_nts": index in nts_indexes,
+                    "description": upstream_description[index].strip() if index < len(upstream_description) else "",
+                    "maxdelay": upstream_maxdelay[index].strip() if index < len(upstream_maxdelay) else "",
+                }
+            )
+    if not source_rows:
+        source_rows = [
+            {"id": f"legacy-{index}", "source": server, "enabled": True, "use_nts": False, "description": "", "maxdelay": ""}
+            for index, server in enumerate(split_servers(upstream_servers), start=1)
+        ]
+    settings.upstream_sources_json = dump_chrony_upstream_sources(source_rows)
+    settings.upstream_servers = join_servers([str(row["source"]) for row in source_rows if row.get("enabled")])
     settings.allow_clients = join_allow_clients(split_allow_clients(allow_clients))
+    settings.nts_server_enabled = nts_server_enabled == "on"
+    chrony_nts_cert_path, chrony_nts_key_path, _chrony_nts_chain_path = chrony_nts_certificate_paths(settings)
+    settings.nts_server_cert_path = chrony_nts_cert_path
+    settings.nts_server_key_path = chrony_nts_key_path
+    settings.nts_ke_port = 4460
+    settings.command_port_disabled = command_port_disabled == "on"
+    settings.minsources = minsources if minsources and minsources > 0 else None
+    settings.maxchange_seconds = maxchange_seconds if maxchange_seconds and maxchange_seconds > 0 else None
+    settings.authselectmode = authselectmode.strip()
     settings.config_path = CHRONY_STAGED_CONFIG_PATH
     settings.updated_at = utcnow()
     db.add(settings)
@@ -9288,7 +9494,12 @@ def update_chrony_settings_from_ui(
                 "listen_addresses": split_addresses(saved_settings.listen_address),
                 "port": saved_settings.port,
                 "upstream_servers": context["chrony_settings_json"]["upstream_servers"],
+                "upstream_sources": context["chrony_settings_json"]["upstream_sources"],
                 "allow_clients": saved_settings.allow_clients,
+                "nts_server_enabled": saved_settings.nts_server_enabled,
+                "nts_server_cert_path": saved_settings.nts_server_cert_path,
+                "nts_server_key_path": saved_settings.nts_server_key_path,
+                "nts_ke_port": saved_settings.nts_ke_port,
                 "valid": not context["ntp_validation_errors"],
                 "validation_errors": context["ntp_validation_errors"],
                 "config_path": saved_settings.config_path,

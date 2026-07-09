@@ -439,6 +439,58 @@ function escapeHtml(value) {
 }
 
 function dnsRecordTypeLabel(value) {
+  const labels = {
+    A: "A (IPv4)",
+    AAAA: "AAAA (IPv6)",
+    CNAME: "CNAME (alias)",
+    TXT: "TXT",
+    SRV: "SRV",
+    MX: "MX",
+    CAA: "CAA",
+    PTR: "PTR",
+  };
+  if (labels[value]) {
+    return labels[value];
+  }
+  return String(value || "A");
+}
+
+function dnsRecordTypeOptions() {
+  return {
+    A: "A (IPv4)",
+    AAAA: "AAAA (IPv6)",
+    CNAME: "CNAME (alias)",
+    TXT: "TXT",
+    SRV: "SRV",
+    MX: "MX",
+    CAA: "CAA",
+    PTR: "PTR",
+  };
+}
+
+function dnsRecordValueHint(recordType) {
+  if (recordType === "SRV") {
+    return "target port priority weight";
+  }
+  if (recordType === "MX") {
+    return "target preference";
+  }
+  if (recordType === "CAA") {
+    return '0 issue "ca.example"';
+  }
+  if (recordType === "PTR") {
+    return "target hostname";
+  }
+  if (recordType === "TXT") {
+    return "text value";
+  }
+  if (recordType === "CNAME") {
+    return "target hostname";
+  }
+  return "enter value...";
+}
+
+function legacyDnsRecordTypeLabel(value) {
   if (value === "AAAA") {
     return "AAAA (IPv6)";
   }
@@ -2713,6 +2765,11 @@ function initializeServicesTable() {
             window.location.href = `/services/${encodeURIComponent(row.getData().service)}/logs`;
           },
         },
+        {
+          label: "Check Chrony source health",
+          action: () => openChronySourceHealthModal(),
+          disabled: (component) => component.getData().service !== "chronyd",
+        },
       ],
       columns: [
         {
@@ -2919,6 +2976,36 @@ function newUserRow() {
   };
 }
 
+function normalizeUserRoleSelection(value, allowedRoles) {
+  const rawValues = Array.isArray(value) ? value : String(value || "").split(",");
+  const selected = rawValues
+    .map((item) => String(item || "").trim())
+    .filter((item, index, values) => allowedRoles.includes(item) && values.indexOf(item) === index);
+  return selected.length ? selected : ["viewer"];
+}
+
+function userRolesFormatter(cell) {
+  const data = cell.getRow().getData();
+  const roles = Array.isArray(data.roles) && data.roles.length ? data.roles : String(data.roles_text || data.role || "viewer").split(",");
+  return escapeHtml(roles.map((role) => String(role).trim()).filter(Boolean).join(", ") || "viewer");
+}
+
+function syncUserRoleFields(row, roles) {
+  const selectedRoles = Array.isArray(roles) && roles.length ? roles : ["viewer"];
+  const roleText = selectedRoles.join(", ");
+  const data = row.getData();
+  data.role = selectedRoles[0] || "viewer";
+  data.roles = selectedRoles;
+  data.roles_label = roleText;
+  data.roles_text = roleText;
+  row.update({
+    role: data.role,
+    roles: data.roles,
+    roles_label: roleText,
+    roles_text: roleText,
+  });
+}
+
 function hasRequiredUserFields(data) {
   return Boolean((data.username || "").trim());
 }
@@ -2966,6 +3053,8 @@ function initializeUsersTable() {
   }
   const csrf = tableElement.dataset.csrf || "";
   const shells = JSON.parse(tableElement.dataset.shells || '["/sbin/nologin","/bin/bash","/bin/sh"]');
+  const roles = JSON.parse(tableElement.dataset.roles || '["viewer"]');
+  const roleOptions = roleValues(roles);
   const rows = [...JSON.parse(tableElement.dataset.users || "[]"), newUserRow()];
   try {
     new Tabulator(tableElement, {
@@ -3014,10 +3103,15 @@ function initializeUsersTable() {
         },
         {
           title: "Roles",
-          field: "roles_text",
-          editor: "input",
-          formatter: (cell) => escapeHtml(cell.getValue() || "viewer"),
-          cellEdited: (cell) => autoSaveUser(cell, csrf),
+          field: "roles",
+          editor: "list",
+          editorParams: { values: roleOptions, multiselect: true },
+          formatter: userRolesFormatter,
+          cellEdited: (cell) => {
+            const selectedRoles = normalizeUserRoleSelection(cell.getValue(), roles);
+            syncUserRoleFields(cell.getRow(), selectedRoles);
+            autoSaveUser(cell, csrf);
+          },
           minWidth: 190,
         },
         {
@@ -3600,6 +3694,134 @@ function initializeKmsSettings() {
   });
 }
 
+function chronyBlankUpstreamRow() {
+  return {
+    id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    source: "",
+    enabled: false,
+    use_nts: false,
+    maxdelay: "",
+    description: "",
+    is_new: true,
+  };
+}
+
+function chronyUpstreamRowHasSource(cell) {
+  return Boolean(String(cell.getRow().getData().source || "").trim());
+}
+
+function chronyGuardedTickFormatter(cell) {
+  if (!chronyUpstreamRowHasSource(cell)) {
+    return "";
+  }
+  const enabled = Boolean(cell.getValue());
+  const label = enabled ? "true" : "false";
+  const glyph = enabled ? "✓" : "✕";
+  const tone = enabled ? "good" : "bad";
+  return `<span class="boolean-glyph ${tone}" aria-label="${label}">${glyph}</span>`;
+}
+
+function chronyGuardedTextFormatter(cell) {
+  if (!chronyUpstreamRowHasSource(cell)) {
+    return "";
+  }
+  return escapeHtml(cell.getValue() || "");
+}
+
+function normalizeChronyUpstreamRows(rows = []) {
+  return rows
+    .map((row, index) => ({
+      id: row.id || `source-${index + 1}`,
+      source: String(row.source || "").trim(),
+      enabled: row.enabled !== false,
+      use_nts: Boolean(row.use_nts),
+      maxdelay: String(row.maxdelay || "").trim(),
+      description: String(row.description || "").trim(),
+    }))
+    .filter((row) => row.source);
+}
+
+function syncChronyUpstreamsHiddenInput(table) {
+  const hiddenInput = document.querySelector("[data-chrony-upstreams-json]");
+  if (!(hiddenInput instanceof HTMLInputElement)) {
+    return;
+  }
+  hiddenInput.value = JSON.stringify(normalizeChronyUpstreamRows(table.getData()));
+}
+
+function ensureChronyUpstreamAddRow(table) {
+  const rows = table.getData();
+  const hasBlankRow = rows.some((row) => row.is_new && !String(row.source || "").trim());
+  if (!hasBlankRow) {
+    table.addRow(chronyBlankUpstreamRow(), false);
+  }
+}
+
+function initializeChronyUpstreamsTable() {
+  const tableElement = document.getElementById("chrony-upstreams-table");
+  if (!(tableElement instanceof HTMLElement)) {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  const hiddenInput = document.querySelector("[data-chrony-upstreams-json]");
+  if (typeof Tabulator === "undefined") {
+    if (fallback instanceof HTMLElement) {
+      fallback.classList.remove("hidden");
+    }
+    return;
+  }
+  try {
+    const parsedRows = JSON.parse(tableElement.dataset.chronyUpstreams || "[]");
+    const rows = normalizeChronyUpstreamRows(parsedRows);
+    rows.push(chronyBlankUpstreamRow());
+    const table = new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "260px",
+      rowHeight: 34,
+      placeholder: "Add an upstream source.",
+      reactiveData: false,
+      columns: [
+        {
+          title: "Source",
+          field: "source",
+          editor: "input",
+          minWidth: 180,
+          formatter: (cell) => {
+            const value = String(cell.getValue() || "");
+            return escapeHtml(value || "+ Add source here");
+          },
+        },
+        { title: "NTS", field: "use_nts", formatter: chronyGuardedTickFormatter, editor: "tickCross", editable: chronyUpstreamRowHasSource, width: 70, hozAlign: "center" },
+        { title: "Max delay", field: "maxdelay", editor: "input", editable: chronyUpstreamRowHasSource, width: 105, formatter: chronyGuardedTextFormatter },
+        { title: "Enabled", field: "enabled", formatter: chronyGuardedTickFormatter, editor: "tickCross", editable: chronyUpstreamRowHasSource, width: 92, hozAlign: "center" },
+        { title: "Description", field: "description", editor: "input", editable: chronyUpstreamRowHasSource, minWidth: 170, formatter: chronyGuardedTextFormatter },
+      ],
+    });
+    table.on("cellEdited", (cell) => {
+      const row = cell.getRow();
+      const data = row.getData();
+      if (data.is_new && String(data.source || "").trim()) {
+        row.update({ is_new: false, id: data.id || `source-${Date.now()}`, enabled: true });
+        ensureChronyUpstreamAddRow(table);
+      }
+      syncChronyUpstreamsHiddenInput(table);
+      if (hiddenInput instanceof HTMLInputElement) {
+        hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    syncChronyUpstreamsHiddenInput(table);
+    if (fallback instanceof HTMLElement) {
+      fallback.classList.add("hidden");
+    }
+  } catch (error) {
+    if (fallback instanceof HTMLElement) {
+      fallback.classList.remove("hidden");
+    }
+  }
+}
+
 function updateChronySettingsPreview(form, payload = {}) {
   updateDerivedListenAddressSummary(form, payload);
   const configPath = document.querySelector("[data-ntp-config-path]");
@@ -3672,6 +3894,124 @@ function initializeChronySettings() {
       updateChronySettingsPreview(form, payload);
       updateNtpValidation(payload);
     });
+  });
+}
+
+function formatChronySourceHealthSection(name, section = {}) {
+  const title = name.charAt(0).toUpperCase() + name.slice(1);
+  const returnCode = Number(section.returncode ?? 0);
+  const stdout = String(section.stdout || "").trimEnd();
+  const stderr = String(section.stderr || "").trimEnd();
+  const lines = [`[${title}] returncode=${returnCode}`];
+  if (stdout) {
+    lines.push(stdout);
+  }
+  if (stderr) {
+    lines.push(`stderr: ${stderr}`);
+  }
+  if (!stdout && !stderr) {
+    lines.push("(no output)");
+  }
+  return lines.join("\n");
+}
+
+function formatChronySourceHealthPayload(payload = {}) {
+  const sections = payload.status && typeof payload.status === "object" ? payload.status : {};
+  const names = ["tracking", "sources", "authdata"];
+  if (names.some((name) => sections[name])) {
+    return names.map((name) => formatChronySourceHealthSection(name, sections[name] || {})).join("\n\n");
+  }
+  const stdout = String(payload.stdout || "").trimEnd();
+  const stderr = String(payload.stderr || "").trimEnd();
+  return [stdout, stderr ? `stderr: ${stderr}` : ""].filter(Boolean).join("\n\n") || "No Chrony source health output was returned.";
+}
+
+function setChronySourceHealthStatus(statusElement, text, state) {
+  if (!(statusElement instanceof HTMLElement)) {
+    return;
+  }
+  statusElement.textContent = text;
+  statusElement.classList.toggle("good", state === "good");
+  statusElement.classList.toggle("warn", state === "warn");
+  statusElement.classList.toggle("muted", state === "muted");
+}
+
+let chronySourceHealthLoader = null;
+
+function openChronySourceHealthModal() {
+  const modal = document.getElementById("chrony-source-health-modal");
+  if (!(modal instanceof HTMLDialogElement)) {
+    return;
+  }
+  if (typeof modal.showModal === "function") {
+    modal.showModal();
+  } else {
+    modal.setAttribute("open", "");
+  }
+  if (typeof chronySourceHealthLoader === "function") {
+    chronySourceHealthLoader();
+  }
+}
+
+function initializeChronySourceHealthModal() {
+  const modal = document.getElementById("chrony-source-health-modal");
+  const output = modal?.querySelector("[data-chrony-source-health-output]");
+  const status = modal?.querySelector("[data-chrony-source-health-status]");
+  const refreshButton = modal?.querySelector("[data-chrony-source-health-refresh]");
+  const closeButton = modal?.querySelector("[data-chrony-source-health-close]");
+  if (!(modal instanceof HTMLDialogElement) || !(output instanceof HTMLElement)) {
+    return;
+  }
+
+  const loadHealth = async () => {
+    setChronySourceHealthStatus(status, "checking", "muted");
+    output.textContent = "Checking chronyc tracking, sources, and authdata...";
+    if (refreshButton instanceof HTMLButtonElement) {
+      refreshButton.disabled = true;
+    }
+    try {
+      const response = await fetch("/chrony/source-health", {
+        method: "GET",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      const payload = await response.json();
+      output.textContent = formatChronySourceHealthPayload(payload);
+      const failedSection = Object.values(payload.status || {}).some((section) => Number(section?.returncode ?? 0) !== 0);
+      if (!response.ok || !payload.ok || failedSection) {
+        setChronySourceHealthStatus(status, "needs attention", "warn");
+      } else if (payload.dry_run) {
+        setChronySourceHealthStatus(status, "dry-run", "muted");
+      } else {
+        setChronySourceHealthStatus(status, "healthy", "good");
+      }
+    } catch (error) {
+      output.textContent = error instanceof Error ? error.message : "Unable to check Chrony source health.";
+      setChronySourceHealthStatus(status, "failed", "warn");
+    } finally {
+      if (refreshButton instanceof HTMLButtonElement) {
+        refreshButton.disabled = false;
+      }
+    }
+  };
+  chronySourceHealthLoader = loadHealth;
+
+  document.querySelectorAll("[data-chrony-source-health-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", openChronySourceHealthModal);
+  });
+  if (refreshButton instanceof HTMLButtonElement) {
+    refreshButton.addEventListener("click", loadHealth);
+  }
+  if (closeButton instanceof HTMLButtonElement) {
+    closeButton.addEventListener("click", () => modal.close());
+  }
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      modal.close();
+    }
   });
 }
 
@@ -5195,7 +5535,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           field: "record_type",
           editor: "list",
           editable: dnsRecordCellEditable,
-          editorParams: { values: { A: "A (IPv4)", AAAA: "AAAA (IPv6)", CNAME: "CNAME (alias)" } },
+          editorParams: { values: dnsRecordTypeOptions() },
           formatter: (cell) => dnsRecordTypeLabel(cell.getValue()),
           width: 130,
           headerSort: false,
@@ -5206,7 +5546,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           field: "address",
           editor: "input",
           editable: dnsRecordCellEditable,
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "enter value..."),
+          formatter: (cell) => dnsAddRowHintFormatter(cell, dnsRecordValueHint(cell.getRow().getData().record_type)),
           minWidth: 170,
           cellEdited: (cell) => autoSaveDnsRecord(cell, csrf),
         },
@@ -7238,6 +7578,33 @@ function formatVcfDepotChoiceList(cell, values, emptyText) {
   return selected.map((item) => escapeHtml(values[item] || item)).join("<br>");
 }
 
+function formatVcfDepotDisabledPlatforms(cell, values, emptyText) {
+  const selected = vcfDepotListValues(cell.getValue());
+  if (!selected.length) {
+    return `<span class="muted">${escapeHtml(emptyText)}</span>`;
+  }
+  const summaryItems = selected.slice(0, 3).map((item) => escapeHtml(values[item] || item));
+  const summary = [
+    summaryItems.join("<br>"),
+    selected.length > summaryItems.length ? `<span class="muted">+ ${selected.length - summaryItems.length} more</span>` : "",
+  ].filter(Boolean).join("<br>");
+  const rows = selected.map((item) => {
+    const label = values[item] || item;
+    return `<tr><td><code>${escapeHtml(item)}</code></td><td>${escapeHtml(label)}</td></tr>`;
+  }).join("");
+  const ariaLabel = selected.map((item) => values[item] || item).join(", ");
+  return [
+    `<span class="vcf-platform-tooltip" tabindex="0" aria-label="Disabled platforms: ${escapeHtml(ariaLabel)}">`,
+    `<span class="vcf-platform-summary">${summary}</span>`,
+    '<span class="vcf-platform-tip" role="tooltip">',
+    '<strong>Disabled platforms</strong>',
+    '<table><thead><tr><th>Value</th><th>Label</th></tr></thead>',
+    `<tbody>${rows}</tbody></table>`,
+    '</span>',
+    '</span>',
+  ].join("");
+}
+
 function rememberActiveTab(storageKey, targetId) {
   if (!storageKey || !targetId) {
     return;
@@ -7246,17 +7613,6 @@ function rememberActiveTab(storageKey, targetId) {
     window.localStorage.setItem(storageKey, targetId);
   } catch {
     // Tab persistence is a convenience only; private browsing can disable it.
-  }
-}
-
-function vcfDepotRememberActiveTab() {
-  const tabList = document.querySelector("[data-tab-storage-key='labfoundry:vcf-offline-depot:active-tab']");
-  if (!(tabList instanceof HTMLElement)) {
-    return;
-  }
-  const activeButton = tabList.querySelector(".tab-button.active[data-tab-target]");
-  if (activeButton instanceof HTMLElement) {
-    rememberActiveTab(tabList.dataset.tabStorageKey || "", activeButton.dataset.tabTarget || "");
   }
 }
 
@@ -7353,7 +7709,6 @@ async function postVcfDepotProfileAction(url, data, csrf) {
     const plainText = text.trim().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
     throw new Error(plainText || "The VCFDT download profile could not be saved.");
   }
-  vcfDepotRememberActiveTab();
   window.location.reload();
 }
 
@@ -7614,8 +7969,9 @@ function initializeVcfDepotProfilesTable() {
           editorParams: {
             values: esxPlatformValues,
           },
-          formatter: (cell) => formatVcfDepotChoiceList(cell, esxPlatformValues, "none"),
+          formatter: (cell) => formatVcfDepotDisabledPlatforms(cell, esxPlatformValues, "none"),
           minWidth: 190,
+          cssClass: "vcf-platforms-cell",
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
         },
         {
@@ -7816,13 +8172,19 @@ function updateVcfDepotSoftwareDepotId(payload = {}) {
   const softwareDepotId = document.querySelector("[data-vcf-depot-software-depot-id]");
   const softwareDepotCell = document.querySelector("[data-vcf-depot-software-depot-cell]");
   const softwareDepotMessage = document.querySelector("[data-vcf-depot-software-depot-message]");
+  const softwareDepotCopy = document.querySelector("[data-vcf-depot-software-depot-copy]");
   if (softwareDepotId instanceof HTMLElement && payload.software_depot_id !== undefined) {
+    const depotId = payload.software_depot_id || "";
     if (softwareDepotId instanceof HTMLInputElement) {
-      softwareDepotId.value = payload.software_depot_id || "";
+      softwareDepotId.value = depotId;
     } else {
-      softwareDepotId.textContent = payload.software_depot_id || "";
+      softwareDepotId.textContent = depotId;
     }
-    softwareDepotId.classList.toggle("hidden", !payload.software_depot_id);
+    softwareDepotId.classList.toggle("hidden", !depotId);
+    if (softwareDepotCopy instanceof HTMLButtonElement) {
+      softwareDepotCopy.dataset.copyValue = depotId;
+      softwareDepotCopy.classList.toggle("hidden", !depotId);
+    }
     const button = softwareDepotCell?.querySelector("[data-vcf-depot-generate-id-modal-open]");
     if (button instanceof HTMLButtonElement) {
       button.textContent = "↻";
@@ -9456,6 +9818,8 @@ document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
 document.addEventListener("DOMContentLoaded", initializeKmsSettings);
 document.addEventListener("DOMContentLoaded", initializeChronySettings);
+document.addEventListener("DOMContentLoaded", initializeChronyUpstreamsTable);
+document.addEventListener("DOMContentLoaded", initializeChronySourceHealthModal);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);

@@ -135,6 +135,21 @@ class SystemAdapter:
     def validate_chronyd_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("chronyd", "validate", config_path, dry_run_message="dry-run: Chrony validation command recorded")
 
+    def read_chronyd_status(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(
+                ["labfoundry-helper", "chronyd", "status"],
+                json.dumps(
+                    {
+                        "tracking": {"returncode": 0, "stdout": "Reference ID    : 00000000 (dry-run)\nLeap status     : Normal\n", "stderr": ""},
+                        "sources": {"returncode": 0, "stdout": "MS Name/IP address Stratum Poll Reach LastRx Last sample\n", "stderr": ""},
+                        "authdata": {"returncode": 0, "stdout": "Name/IP address Mode KeyID Type KLen Last Atmp NAK Cook CLen\n", "stderr": ""},
+                    },
+                    sort_keys=True,
+                ),
+            )
+        return self._helper_result("chronyd", "status", dry_run_message="dry-run: Chrony status command recorded", use_sudo=False, timeout_seconds=5)
+
     def apply_network_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("network", "apply", config_path, dry_run_message="dry-run: network apply command recorded")
 
@@ -214,7 +229,7 @@ class SystemAdapter:
     def _record_only_result(self, command: list[str], stdout: str) -> AdapterResult:
         return AdapterResult(command=command, dry_run=True, stdout=stdout)
 
-    def _helper_result(self, group: str, action: str, *args: str, dry_run_message: str, use_sudo: bool = True) -> AdapterResult:
+    def _helper_result(self, group: str, action: str, *args: str, dry_run_message: str, use_sudo: bool = True, timeout_seconds: float | None = None) -> AdapterResult:
         display_command = ["labfoundry-helper", group, action, *args]
         if self.dry_run:
             return AdapterResult(command=display_command, dry_run=True, stdout=dry_run_message)
@@ -228,6 +243,7 @@ class SystemAdapter:
                 check=False,
                 capture_output=True,
                 text=True,
+                timeout=timeout_seconds,
             )
         except OSError as exc:
             return AdapterResult(
@@ -235,6 +251,13 @@ class SystemAdapter:
                 dry_run=False,
                 stderr=f"Unable to execute {' '.join(command)}: {exc}",
                 returncode=127,
+            )
+        except subprocess.TimeoutExpired:
+            return AdapterResult(
+                command=command,
+                dry_run=False,
+                stderr=f"{' '.join(command)} timed out after {timeout_seconds} seconds",
+                returncode=124,
             )
         return AdapterResult(
             command=command,

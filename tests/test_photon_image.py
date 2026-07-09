@@ -86,7 +86,10 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'shutil.chown(db_file, user="labfoundry", group="labfoundry")' in bootstrap
     assert 'for path in [ca_apply_path, *ca_apply_path.rglob("*")]' in bootstrap
     assert 'listen 80 default_server;' in bootstrap
+    assert "location = /ca/downloads/root-ca.pem {" in bootstrap
+    assert "location = /ca/downloads/ca-bundle.pem {" in bootstrap
     assert 'return 308 https://$host$request_uri;' in bootstrap
+    assert "location / {{\n    return 308 https://$host$request_uri;" in bootstrap
     assert 'listen 443 ssl default_server;' in bootstrap
     assert 'ssl_certificate {cert_path};' in bootstrap
     assert 'ssl_certificate_key {key_path};' in bootstrap
@@ -97,7 +100,7 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "proxy_set_header X-Real-IP $remote_addr;" in bootstrap
     assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in bootstrap
     assert "proxy_set_header X-Forwarded-Proto https;" in bootstrap
-    assert "proxy_set_header X-Forwarded-Proto http;" not in bootstrap
+    assert "proxy_set_header X-Forwarded-Proto http;" in bootstrap
     assert "proxy_set_header Upgrade $http_upgrade;" in bootstrap
     assert "nginx -t" in script
     assert "systemctl enable --now nginx" in script
@@ -475,7 +478,8 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "Write-SummaryRow" in script
     assert "-ForegroundColor Cyan" in script
     assert "-ForegroundColor DarkGray" in script
-    assert "https://$IpAddress/ca/downloads/root-ca.pem" in script
+    assert "http://$IpAddress/ca/downloads/root-ca.pem" in script
+    assert "-SkipCertificateCheck" not in script
     assert "Cert:\\CurrentUser\\Root" in script
     assert "certutil.exe -user -delstore Root $staleRoot.Thumbprint" in script
     assert "certutil.exe -f -user -addstore Root $rootCerPath" in script
@@ -485,7 +489,7 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert 'Write-SummaryRow -Label "Console URL:" -Value "https://$IpAddress/"' in script
     assert 'Write-SummaryRow -Label "API URL:" -Value "https://$IpAddress/openapi.json"' in script
     assert 'Write-SummaryRow -Label "Swagger URL:" -Value "https://$IpAddress/api/docs"' in script
-    assert 'Write-SummaryRow -Label "Root CA URL:" -Value "https://$IpAddress/ca/downloads/root-ca.pem"' in script
+    assert 'Write-SummaryRow -Label "Root CA URL:" -Value "http://$IpAddress/ca/downloads/root-ca.pem"' in script
     assert 'Write-SummaryRow -Label "SSH:" -Value "ssh admin@$IpAddress"' in script
     assert 'Write-SummaryRow -Label "Lab DNS:"' in script
     assert "Windows DNS for lab FQDNs" in script

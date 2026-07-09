@@ -360,6 +360,10 @@ class DnsSettingsUpdate(BaseModel):
     cache_size: int = Field(default=1000, ge=0, le=100000)
     expand_hosts: bool = True
     authoritative: bool = True
+    dnssec_enabled: bool = False
+    rebind_protection_enabled: bool = False
+    rebind_domain_exemptions: str = ""
+    query_logging_mode: str = "off"
 
 
 class DnsSettingsResponse(DnsSettingsUpdate):
@@ -382,6 +386,7 @@ class DnsRecordResponse(DnsRecordCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    record_data_json: str = ""
     created_at: datetime
 
 

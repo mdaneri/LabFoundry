@@ -1,11 +1,11 @@
-const LABFOUNDRY_CACHE = "labfoundry-pwa-v30";
+const LABFOUNDRY_CACHE = "labfoundry-pwa-v38";
 const LABFOUNDRY_ASSETS = [
   "/manifest.webmanifest",
   "/favicon.ico",
   "/static/offline.html",
-  "/static/app.css?v=footer-build-label-20260708-2",
-  "/static/app.js?v=vcfdt-auth-request-20260708-1",
-  "/static/pwa.js",
+  "/static/app.css?v=dns-chrony-security-20260708-9",
+  "/static/app.js?v=dns-chrony-vcfdt-20260708-6",
+  "/static/pwa.js?v=pwa-20260627-1",
   "/static/brand/labfoundry-mark.svg",
   "/static/brand/labfoundry-appliance-graphic.svg",
   "/static/vendor/tabulator/tabulator.min.css",
@@ -17,7 +17,20 @@ const LABFOUNDRY_ASSETS = [
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(LABFOUNDRY_CACHE).then((cache) => cache.addAll(LABFOUNDRY_ASSETS))
+    caches.open(LABFOUNDRY_CACHE).then((cache) =>
+      Promise.all(
+        LABFOUNDRY_ASSETS.map((asset) =>
+          fetch(asset, { cache: "reload" })
+            .then((response) => {
+              if (!response || !response.ok) {
+                return undefined;
+              }
+              return cache.put(asset, response);
+            })
+            .catch(() => undefined)
+        )
+      )
+    )
   );
   self.skipWaiting();
 });
@@ -39,6 +52,21 @@ function isCacheableAsset(url) {
   );
 }
 
+function hasDownloadLikePath(url) {
+  const lastSegment = url.pathname.split("/").pop() || "";
+  return (
+    url.pathname.startsWith("/ca/downloads/") ||
+    url.pathname.startsWith("/certificate-authority/downloads/") ||
+    url.pathname.startsWith("/api/") ||
+    /\.[A-Za-z0-9]{1,12}$/.test(lastSegment)
+  );
+}
+
+function shouldServeOfflineFallback(request, url) {
+  const accept = request.headers.get("Accept") || "";
+  return accept.includes("text/html") && !hasDownloadLikePath(url);
+}
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
@@ -48,6 +76,9 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (request.mode === "navigate") {
+    if (!shouldServeOfflineFallback(request, url)) {
+      return;
+    }
     event.respondWith(
       fetch(request).catch(() => caches.match("/static/offline.html"))
     );
@@ -63,11 +94,14 @@ self.addEventListener("fetch", (event) => {
       const refresh = fetch(request).then((response) => {
         if (response && response.ok) {
           const copy = response.clone();
-          caches.open(LABFOUNDRY_CACHE).then((cache) => cache.put(request, copy));
+          caches.open(LABFOUNDRY_CACHE).then((cache) => cache.put(request, copy)).catch(() => undefined);
         }
         return response;
-      });
-      return cached || refresh;
+      }).catch(() => undefined);
+      if (cached) {
+        return cached;
+      }
+      return refresh.then((response) => response || new Response("", { status: 504, statusText: "Gateway Timeout" }));
     })
   );
 });

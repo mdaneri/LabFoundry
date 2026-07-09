@@ -7,6 +7,8 @@ import platform
 import re
 import subprocess
 from datetime import datetime, timezone
+from functools import lru_cache
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -55,18 +57,34 @@ def _git_value(args: list[str]) -> str:
     return result.stdout.strip()
 
 
+@lru_cache(maxsize=1)
+def _installed_record_sha256() -> str:
+    try:
+        distribution = importlib_metadata.distribution("labfoundry")
+    except importlib_metadata.PackageNotFoundError:
+        return ""
+    record_text = distribution.read_text("RECORD") or ""
+    if not record_text:
+        return ""
+    return hashlib.sha256(record_text.encode("utf-8")).hexdigest()
+
+
 def current_version_info() -> dict[str, str]:
     full_commit = getattr(__import__("labfoundry"), "__build_git_commit__", "") or _git_value(["rev-parse", "HEAD"])
     short_commit = full_commit[:12] if full_commit else ""
     built_at = getattr(__import__("labfoundry"), "__build_time_utc__", "")
     source_dirty = _git_value(["status", "--short"]) != "" if not built_at else False
     public_label = f"{short_commit[:7]} (branch wheel)" if built_at and short_commit else short_commit
+    installed_sha256 = _installed_record_sha256()
+    if not public_label and installed_sha256:
+        public_label = f"installed sha {installed_sha256[:12]}"
     return {
         "version": __version__,
         "base_version": __version__.split("+", 1)[0],
         "git_commit": full_commit,
         "git_short": short_commit,
         "public_label": public_label,
+        "installed_sha256": installed_sha256,
         "built_at": built_at,
         "source_dirty": "true" if source_dirty else "false",
         "python": platform.python_version(),

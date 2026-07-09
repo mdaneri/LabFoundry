@@ -203,6 +203,21 @@ def test_current_version_info_has_public_branch_wheel_label(monkeypatch):
     assert info["public_label"] == "dd9fca8 (branch wheel)"
 
 
+def test_current_version_info_has_installed_checksum_fallback(monkeypatch):
+    import labfoundry
+    import labfoundry.app.services.appliance_update as appliance_update
+
+    monkeypatch.setattr(labfoundry, "__build_git_commit__", "")
+    monkeypatch.setattr(labfoundry, "__build_time_utc__", "")
+    monkeypatch.setattr(appliance_update, "_git_value", lambda _args: "")
+    monkeypatch.setattr(appliance_update, "_installed_record_sha256", lambda: "abc123def4567890")
+
+    info = appliance_update.current_version_info()
+
+    assert info["public_label"] == "installed sha abc123def456"
+    assert info["installed_sha256"] == "abc123def4567890"
+
+
 def test_build_update_wheel_version_helper():
     script_path = Path("scripts/build_update_wheel.py")
     spec = importlib.util.spec_from_file_location("build_update_wheel", script_path)

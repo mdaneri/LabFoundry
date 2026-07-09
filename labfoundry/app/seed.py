@@ -37,7 +37,7 @@ from labfoundry.app.services.appliance_settings import APPLIANCE_DNS_RECORD_DESC
 from labfoundry.app.services.local_users import DEFAULT_LOCAL_USER_SHELL, POWERSHELL_LOCAL_USER_SHELL, stage_user_os_password
 from labfoundry.app.services.dnsmasq import join_domains, split_domains, validate_dns_record
 from labfoundry.app.services.networking import normalize_interface_mode, normalize_ipv4_method
-from labfoundry.app.services.chrony import CHRONY_DEFAULT_HOSTNAME, CHRONY_DEFAULT_UPSTREAM_SERVERS, CHRONY_STAGED_CONFIG_PATH
+from labfoundry.app.services.chrony import CHRONY_DEFAULT_HOSTNAME, CHRONY_STAGED_CONFIG_PATH, default_chrony_upstream_fields
 from labfoundry.app.services.service_registry import RETIRED_SERVICE_IDS, SERVICE_STATE_DEFAULTS
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
 from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_DEFAULT_USERNAME
@@ -243,9 +243,11 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
 
     chrony_settings = db.execute(select(ChronySettings)).scalar_one_or_none()
     if chrony_settings is None:
+        chrony_upstreams = default_chrony_upstream_fields(_settings_lines(settings.appliance_ntp_servers) or appliance_settings.ntp_servers)
         chrony_settings = ChronySettings(
             hostname=CHRONY_DEFAULT_HOSTNAME,
-            upstream_servers=_settings_lines(settings.appliance_ntp_servers) or appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS,
+            upstream_servers=chrony_upstreams["upstream_servers"],
+            upstream_sources_json=chrony_upstreams["upstream_sources_json"],
             config_path=CHRONY_STAGED_CONFIG_PATH,
         )
         db.add(chrony_settings)

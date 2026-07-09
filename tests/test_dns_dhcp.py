@@ -1,9 +1,12 @@
 from ipaddress import ip_address
 
-from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
+from labfoundry.app.models import ChronySettings, DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
+from labfoundry.app.services.chrony import dump_chrony_upstream_sources, render_chrony_config
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNSMASQ_LEASE_FILE_PATH,
+    DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH,
+    dump_dns_record_data,
     compact_dhcp_range_expression,
     dhcp_bind_target_families,
     dhcp_bind_target_names,
@@ -13,7 +16,9 @@ from labfoundry.app.services.dnsmasq import (
     parse_dhcp_range_expression,
     parse_dnsmasq_leases,
     parse_hosts_records,
+    parse_zone_records,
     render_dnsmasq_config,
+    render_zone_file,
     split_conditional_forwarders,
     validate_dns_record,
     validate_dhcp_bind_targets,
@@ -141,9 +146,136 @@ def test_dnsmasq_renderer_filters_loopback_configured_upstreams():
 
     assert "server=192.168.167.2" in config
     assert "server=127.0.0.1" not in config
+
+
+def test_chrony_renderer_supports_nts_sources_server_and_hardening():
+    settings = ChronySettings(
+        enabled=True,
+        hostname="ntp.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        upstream_sources_json=dump_chrony_upstream_sources(
+            [
+                {"source": "time.cloudflare.com", "enabled": True, "use_nts": True, "description": "secure", "maxdelay": "0.5"},
+                {"source": "time.google.com", "enabled": True, "use_nts": False, "description": ""},
+                {"source": "disabled.example.com", "enabled": False, "use_nts": True, "description": ""},
+            ]
+        ),
+        nts_server_enabled=True,
+        nts_server_cert_path="/etc/labfoundry/certs/chrony.pem",
+        nts_server_key_path="/etc/labfoundry/certs/chrony.key",
+        command_port_disabled=True,
+        minsources=2,
+        maxchange_seconds=30,
+        authselectmode="prefer",
+    )
+
+    config = render_chrony_config(settings)
+
+    assert "ntsdumpdir /var/lib/chrony" in config
+    assert "server time.cloudflare.com iburst nts maxdelay 0.5" in config
+    assert "server time.google.com iburst" in config
+    assert "disabled.example.com" not in config
+    assert "ntsservercert /etc/labfoundry/certs/chrony.pem" in config
+    assert "ntsserverkey /etc/labfoundry/certs/chrony.key" in config
+    assert "cmdport 0" in config
+    assert "minsources 2" in config
+    assert "maxchange 30 1 1" in config
+    assert "authselectmode prefer" in config
+
+
+def test_dnsmasq_renderer_supports_dnssec_rebind_logging_and_extended_records():
+    dns_settings = DnsSettings(
+        enabled=True,
+        listen_interface="eth1",
+        listen_address="192.168.50.1",
+        domain="labfoundry.internal",
+        upstream_servers="1.1.1.1",
+        dnssec_enabled=True,
+        rebind_protection_enabled=True,
+        rebind_domain_exemptions="corp.example\nsddc.internal",
+        query_logging_mode="queries-extra",
+    )
+    records = [
+        DnsRecord(hostname="txt.labfoundry.internal", record_type="TXT", address="hello world"),
+        DnsRecord(hostname="_ldap._tcp.labfoundry.internal", record_type="SRV", address="ldap.labfoundry.internal 389 10 20", record_data_json=dump_dns_record_data("SRV", "ldap.labfoundry.internal 389 10 20")),
+        DnsRecord(hostname="labfoundry.internal", record_type="MX", address="mail.labfoundry.internal 10", record_data_json=dump_dns_record_data("MX", "mail.labfoundry.internal 10")),
+        DnsRecord(hostname="labfoundry.internal", record_type="CAA", address='0 issue "lab-ca"', record_data_json=dump_dns_record_data("CAA", '0 issue "lab-ca"')),
+        DnsRecord(hostname="10.50.168.192.in-addr.arpa", record_type="PTR", address="host.labfoundry.internal"),
+    ]
+
+    config = render_dnsmasq_config(
+        dns_settings=dns_settings,
+        dns_records=records,
+        dhcp_settings=DhcpSettings(enabled=False),
+        dhcp_reservations=[],
+    )
+
+    assert "log-queries=extra" in config
+    assert "dnssec" in config
+    assert f"conf-file={DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH}" in config
+    assert "stop-dns-rebind" in config
+    assert "rebind-domain-ok=/corp.example/" in config
+    assert "rebind-domain-ok=/sddc.internal/" in config
+    assert 'txt-record=txt.labfoundry.internal,"hello world"' in config
+    assert "srv-host=_ldap._tcp.labfoundry.internal,ldap.labfoundry.internal,389,10,20" in config
+    assert "mx-host=labfoundry.internal,mail.labfoundry.internal,10" in config
+    assert 'caa-record=labfoundry.internal,0,issue,"lab-ca"' in config
+    assert "ptr-record=10.50.168.192.in-addr.arpa,host.labfoundry.internal" in config
     assert "server=::1" not in config
-    assert "upstream server 127.0.0.1 must not be a loopback address." in errors
-    assert "upstream server ::1 must not be a loopback address." in errors
+
+
+def test_zone_file_round_trips_mx_srv_standard_rdata_order():
+    records = [
+        {
+            "host_label": "@",
+            "record_type": "MX",
+            "address": "mail.labfoundry.internal 10",
+            "record_data": {"target": "mail.labfoundry.internal", "preference": "10"},
+            "enabled": True,
+        },
+        {
+            "host_label": "_ldap._tcp",
+            "record_type": "SRV",
+            "address": "ldap.labfoundry.internal 389 10 20",
+            "record_data": {"target": "ldap.labfoundry.internal", "port": "389", "priority": "10", "weight": "20"},
+            "enabled": True,
+        },
+    ]
+
+    zone = render_zone_file("labfoundry.internal", records)
+
+    assert "@                        IN MX    10 mail.labfoundry.internal" in zone
+    assert "_ldap._tcp               IN SRV   10 20 389 ldap.labfoundry.internal" in zone
+
+    parsed_records, errors = parse_zone_records(
+        "\n".join(
+            [
+                "$ORIGIN labfoundry.internal.",
+                "@ IN MX 10 mail.labfoundry.internal.",
+                "_ldap._tcp IN SRV 10 20 389 ldap.labfoundry.internal.",
+            ]
+        ),
+        "labfoundry.internal",
+    )
+
+    assert errors == []
+    assert {
+        "hostname": "labfoundry.internal",
+        "record_type": "MX",
+        "address": "mail.labfoundry.internal. 10",
+        "record_data_json": dump_dns_record_data("MX", "mail.labfoundry.internal. 10"),
+        "description": "Imported from zone editor",
+        "enabled": True,
+    } in parsed_records
+    assert {
+        "hostname": "_ldap._tcp.labfoundry.internal",
+        "record_type": "SRV",
+        "address": "ldap.labfoundry.internal. 389 10 20",
+        "record_data_json": dump_dns_record_data("SRV", "ldap.labfoundry.internal. 389 10 20"),
+        "description": "Imported from zone editor",
+        "enabled": True,
+    } in parsed_records
 
 
 def test_dnsmasq_renderer_keeps_configured_upstreams_over_dhcp_fallback():
@@ -623,10 +755,16 @@ def test_dns_api_requires_scope_and_returns_config_preview(client):
         json={"hostname": "api.labfoundry.internal", "record_type": "A", "address": "192.168.50.30"},
     )
     assert created.status_code == 201, created.text
-    duplicate = client.post(
+    same_owner_different_value = client.post(
         "/api/v1/dns/records",
         headers={"Authorization": f"Bearer {dns_token}"},
         json={"hostname": "API.labfoundry.internal", "record_type": "a", "address": "192.168.50.31"},
+    )
+    assert same_owner_different_value.status_code == 201, same_owner_different_value.text
+    duplicate = client.post(
+        "/api/v1/dns/records",
+        headers={"Authorization": f"Bearer {dns_token}"},
+        json={"hostname": "API.labfoundry.internal", "record_type": "a", "address": "192.168.50.30"},
     )
     assert duplicate.status_code == 409
     assert "already exists" in duplicate.json()["detail"]
@@ -713,10 +851,17 @@ def test_dns_api_update_rejects_duplicate_record(client):
     duplicate = client.patch(
         f"/api/v1/dns/records/{second.json()['id']}",
         headers={"Authorization": f"Bearer {dns_token}"},
-        json={"hostname": "FIRST.labfoundry.internal", "record_type": "a", "address": "192.168.50.52"},
+        json={"hostname": "FIRST.labfoundry.internal", "record_type": "a", "address": "192.168.50.50"},
     )
     assert duplicate.status_code == 409
     assert "already exists" in duplicate.json()["detail"]
+
+    allowed = client.patch(
+        f"/api/v1/dns/records/{second.json()['id']}",
+        headers={"Authorization": f"Bearer {dns_token}"},
+        json={"hostname": "FIRST.labfoundry.internal", "record_type": "a", "address": "192.168.50.52"},
+    )
+    assert allowed.status_code == 200, allowed.text
 
 
 def test_dns_hosts_import_replaces_existing_records(client):

@@ -39,16 +39,10 @@
       </div>
     </div>
 
-    <div class="tab-buttons tool-tabs" role="tablist" aria-label="VCF Offline Depot views" data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab">
-      <button class="tab-button active" type="button" role="tab" data-tab-target="vcf-depot-profiles-panel" aria-controls="vcf-depot-profiles-panel" aria-selected="true">Download Profiles</button>
-      <button class="tab-button" type="button" role="tab" data-tab-target="vcf-depot-preview-panel" aria-controls="vcf-depot-preview-panel" aria-selected="false">Preview</button>
-    </div>
-
-    <div class="tab-panels">
-      <div id="vcf-depot-profiles-panel" class="tab-panel active" role="tabpanel">
+    <div id="vcf-depot-profiles-panel">
         <div class="panel-head table-head">
           <div>
-            <h2>VCFDT download profiles</h2>
+            <h2>Download profiles</h2>
             <p class="muted">Each row can be started manually. Development appliances record the VCFDT command intent as a dry-run job.</p>
           </div>
           <div class="inline-action-row">
@@ -128,14 +122,6 @@
             {% endfor %}
           </tbody>
         </table>
-      </div>
-
-      <div id="vcf-depot-preview-panel" class="tab-panel" role="tabpanel" hidden>
-        <div class="terminal-note">
-          <strong>VCFDT command preview</strong>
-          <code data-vcf-depot-command-preview>{{ vcf_depot_command_preview }}</code>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -236,10 +222,15 @@
       </form>
       <div class="settings-list">
           <div><span>Version</span><strong data-vcf-depot-tool-version>{{ vcf_depot_settings.tool_version or "unknown" }}</strong></div>
-          <div class="settings-action-row">
+          <div class="settings-action-row software-depot-id-row">
             <span>Software depot ID</span>
             <span class="setting-inline-actions" data-vcf-depot-software-depot-cell>
-              <input class="readonly-inline-value software-depot-id-value {{ 'hidden' if not vcf_depot_software_depot_id.id else '' }}" type="text" value="{{ vcf_depot_software_depot_id.id }}" readonly data-vcf-depot-software-depot-id aria-label="Software depot ID">
+              <span class="copyable-inline-value">
+                <input class="readonly-inline-value software-depot-id-value {{ 'hidden' if not vcf_depot_software_depot_id.id else '' }}" type="text" value="{{ vcf_depot_software_depot_id.id }}" readonly data-vcf-depot-software-depot-id aria-label="Software depot ID">
+                <button class="button secondary icon-button {{ 'hidden' if not vcf_depot_software_depot_id.id else '' }}" type="button" data-copy-value="{{ vcf_depot_software_depot_id.id }}" data-vcf-depot-software-depot-copy aria-label="Copy software depot ID" title="Copy software depot ID">
+                  <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </span>
               <button class="button secondary icon-button" type="button" aria-label="Refresh software depot ID" title="Refresh software depot ID" data-vcf-depot-generate-id-modal-open data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>↻</button>
             </span>
           </div>

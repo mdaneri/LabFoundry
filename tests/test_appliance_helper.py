@@ -7,6 +7,7 @@ import subprocess
 import tarfile
 import hashlib
 import re
+import stat
 from pathlib import Path
 
 
@@ -1642,6 +1643,59 @@ def test_dnsmasq_helper_validates_staged_config(monkeypatch, tmp_path):
     assert commands == [["/usr/sbin/dnsmasq", "--test", f"--conf-file={config_path}"]]
 
 
+def test_dnsmasq_helper_prepares_dnssec_trust_anchors(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "dnsmasq"
+    anchor_source = tmp_path / "usr" / "share" / "dnsmasq" / "trust-anchors.conf"
+    apply_dir.mkdir(parents=True)
+    anchor_source.parent.mkdir(parents=True)
+    anchor_source.write_text("trust-anchor=.,20326,8,2,abc\n", encoding="utf-8")
+    config_path = apply_dir / "labfoundry.conf"
+    anchor_target = apply_dir / "labfoundry-trust-anchors.conf"
+    config_path.write_text(f"dnssec\nconf-file={anchor_target}\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command == ["/usr/sbin/dnsmasq", "--version"]:
+            return subprocess.CompletedProcess(command, 0, "Compile time options: DNSSEC\n", "")
+        return subprocess.CompletedProcess(command, 0, "dnsmasq: syntax check OK.\n", "")
+
+    monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH", anchor_target)
+    monkeypatch.setattr(helper, "DNSMASQ_DNSSEC_TRUST_ANCHOR_CANDIDATES", [anchor_source])
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/dnsmasq" if command == "dnsmasq" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_dnsmasq("validate", [str(config_path)]) == 0
+
+    assert anchor_target.read_text(encoding="utf-8") == "trust-anchor=.,20326,8,2,abc\n"
+    assert commands == [
+        ["/usr/sbin/dnsmasq", "--version"],
+        ["/usr/sbin/dnsmasq", "--test", f"--conf-file={config_path}"],
+    ]
+
+
+def test_dnsmasq_helper_rejects_dnssec_when_package_lacks_support(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "dnsmasq"
+    apply_dir.mkdir(parents=True)
+    config_path = apply_dir / "labfoundry.conf"
+    config_path.write_text("dnssec\n", encoding="utf-8")
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, "Compile time options: no-DNSSEC\n", "")
+
+    monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/dnsmasq" if command == "dnsmasq" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_dnsmasq("validate", [str(config_path)]) == 2
+    captured = capsys.readouterr()
+    assert "DNSSEC validation is enabled" in captured.err
+    assert "no-DNSSEC" in captured.err
+
+
 def test_dnsmasq_helper_apply_installs_config_dropin_and_enables_service(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "dnsmasq"
@@ -2558,9 +2612,14 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     payload = b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'vcf-download-tool 9.1.0.0100.25429019'; else echo software depot id 8c9506c6-7bdf-44d5-b2e9-50d829d66b99; fi\n"
     with tarfile.open(archive_path, "w:gz") as archive:
         info = tarfile.TarInfo("vcfdt/bin/vcf-download-tool")
-        info.mode = 0o644
+        info.mode = 0o750
         info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
+        jar_payload = b"jar"
+        jar_info = tarfile.TarInfo("vcfdt/lib/lcm-tools-uber.jar")
+        jar_info.mode = 0o640
+        jar_info.size = len(jar_payload)
+        archive.addfile(jar_info, io.BytesIO(jar_payload))
 
     tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
     monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
@@ -2579,10 +2638,15 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert payload["version_command"] == "vcf-download-tool --version"
     wrapper = tool_dir / "vcf-download-tool"
     extracted = tool_dir / "extracted" / "vcfdt" / "bin" / "vcf-download-tool"
+    jar = tool_dir / "extracted" / "vcfdt" / "lib" / "lcm-tools-uber.jar"
     assert wrapper.is_file()
     assert extracted.is_file()
+    assert jar.is_file()
     assert os.access(wrapper, os.X_OK)
     assert os.access(extracted, os.X_OK)
+    if os.name == "posix":
+        assert stat.S_IMODE(extracted.stat().st_mode) == 0o755
+        assert stat.S_IMODE(jar.stat().st_mode) == 0o644
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert f"cd '{extracted.parent.parent}' || exit 1" in wrapper_text
     assert str(extracted) in wrapper_text
@@ -2795,7 +2859,15 @@ def appliance_settings_json(
     return json.dumps(payload)
 
 
-def chronyd_config_text(*, enabled: bool = True, server: str = "time1.google.com", listen_address: str = "192.168.50.1", allow_clients: str = "192.168.50.0/24") -> str:
+def chronyd_config_text(
+    *,
+    enabled: bool = True,
+    server: str = "time1.google.com",
+    listen_address: str = "192.168.50.1",
+    allow_clients: str = "192.168.50.0/24",
+    nts_server_cert_path: str = "",
+    nts_server_key_path: str = "",
+) -> str:
     allow_directives = []
     for entry in allow_clients.replace(",", "\n").splitlines():
         value = entry.strip()
@@ -2815,6 +2887,8 @@ def chronyd_config_text(*, enabled: bool = True, server: str = "time1.google.com
             *([f"server {server} iburst"] if server else []),
             *([f"bindaddress {listen_address}"] if listen_address else []),
             *allow_directives,
+            *([f"ntsservercert {nts_server_cert_path}"] if nts_server_cert_path else []),
+            *([f"ntsserverkey {nts_server_key_path}"] if nts_server_key_path else []),
             "",
         ]
     )
@@ -2971,13 +3045,17 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     assert f"include {nginx_include};" in nginx_main.read_text(encoding="utf-8")
     management_site = nginx_management_site.read_text(encoding="utf-8")
     assert "listen 80 default_server;" in management_site
-    assert "return 308 https://$host$request_uri;" in management_site
+    assert "location = /ca/downloads/root-ca.pem {" in management_site
+    assert "location = /ca/downloads/ca-bundle.pem {" in management_site
+    assert "location / {\n    return 308 https://$host$request_uri;" in management_site
     assert "listen 443 ssl default_server;" in management_site
     assert "client_max_body_size 1g;" in management_site
     assert "client_max_body_size 512m;" not in management_site
     assert f"ssl_certificate {cert_path};" in management_site
     assert f"ssl_certificate_key {key_path};" in management_site
     assert "proxy_pass http://127.0.0.1:8000;" in management_site
+    assert "proxy_set_header X-Forwarded-Proto http;" in management_site
+    assert "proxy_set_header X-Forwarded-Proto https;" in management_site
     root_login = sshd_root_login.read_text(encoding="utf-8")
     assert "PermitRootLogin yes" in root_login
     assert "PasswordAuthentication yes" in root_login
@@ -3247,6 +3325,49 @@ def test_chronyd_helper_apply_installs_config_and_switches_from_timesyncd(monkey
     assert ["systemctl", "restart", "chronyd.service"] in commands
 
 
+def test_chronyd_helper_apply_grants_chrony_group_read_to_nts_key(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "chronyd"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    config_path = apply_dir / "labfoundry-chrony.conf"
+    chrony_conf = tmp_path / "etc" / "chrony.conf"
+    state_dir = tmp_path / "var" / "lib" / "chrony"
+    cert_path = managed_root / "chrony" / "certs" / "ntp.labfoundry.internal.crt"
+    key_path = managed_root / "chrony" / "certs" / "ntp.labfoundry.internal.key"
+    apply_dir.mkdir(parents=True)
+    cert_path.parent.mkdir(parents=True)
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    key_path.chmod(0o600)
+    config_path.write_text(
+        chronyd_config_text(nts_server_cert_path=str(cert_path), nts_server_key_path=str(key_path)),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+    chown_calls: list[tuple[Path, int, int]] = []
+
+    class ChronyGroup:
+        gr_gid = 44
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CHRONY_CONFIG_PATH", chrony_conf)
+    monkeypatch.setattr(helper, "CHRONY_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper.grp, "getgrnam", lambda name: ChronyGroup())
+    monkeypatch.setattr(helper.os, "chown", lambda path, uid, gid: chown_calls.append((Path(path), uid, gid)), raising=False)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_chronyd("apply", [str(config_path)]) == 0
+
+    assert (key_path, 0, 44) in chown_calls
+    if os.name != "nt":
+        assert oct(key_path.stat().st_mode & 0o777) == "0o640"
+    assert ["systemctl", "restart", "chronyd.service"] in commands
+
+
 def test_chronyd_helper_disabled_apply_stops_chronyd_without_installing_config(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "chronyd"
@@ -3291,6 +3412,48 @@ def test_chronyd_helper_disabled_apply_allows_empty_upstream_list(monkeypatch, t
 
     assert not chrony_conf.exists()
     assert commands == [["systemctl", "disable", "--now", "chronyd.service"]]
+
+
+def test_chronyd_helper_status_reads_tracking_sources_and_authdata(monkeypatch, capsys):
+    helper = load_helper_module()
+    commands: list[tuple[list[str], float | None]] = []
+
+    def fake_run(command: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        commands.append((command, timeout))
+        return subprocess.CompletedProcess(command, 0, f"{' '.join(command[2:])} ok\n", "")
+
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/chronyc" if command == "chronyc" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_chronyd("status", []) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["tracking"]["stdout"] == "tracking ok\n"
+    assert payload["sources"]["stdout"] == "sources -v ok\n"
+    assert payload["authdata"]["stdout"] == "authdata ok\n"
+    assert commands == [
+        (["/usr/bin/chronyc", "-n", "tracking"], 1.5),
+        (["/usr/bin/chronyc", "-n", "sources", "-v"], 1.5),
+        (["/usr/bin/chronyc", "-n", "authdata"], 1.5),
+    ]
+
+
+def test_chronyd_helper_status_reports_timeout_without_blocking(monkeypatch, capsys):
+    helper = load_helper_module()
+
+    def fake_run(command: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/chronyc" if command == "chronyc" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_chronyd("status", []) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tracking"]["returncode"] == 124
+    assert payload["sources"]["returncode"] == 124
+    assert payload["authdata"]["stderr"] == "chronyc status command timed out after 1.5 seconds"
 
 
 def test_appliance_settings_hostname_fallback_writes_etc_hostname(monkeypatch, tmp_path):

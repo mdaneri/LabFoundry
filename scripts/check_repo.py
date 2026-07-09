@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Repository-wide syntax and content checks for LabFoundry.
+
+The checker is intentionally lightweight so it can run as a pre-commit hook on
+changed files and as a full-repo smoke test before pushing a branch.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import unquote
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+SKIP_PARTS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "test-results",
+}
+
+SKIP_PREFIXES = (
+    Path("labfoundry/app/static/vendor"),
+    Path("third_party"),
+    Path("VCFDT"),
+    Path("vcfDownloadTool"),
+)
+
+TEXT_SUFFIXES = {
+    ".css",
+    ".htm",
+    ".html",
+    ".js",
+    ".json",
+    ".md",
+    ".ps1",
+    ".py",
+    ".svg",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+
+MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]+\]\(([^)]+)\)")
+
+
+@dataclass(frozen=True)
+class Finding:
+    path: Path
+    message: str
+    line: int | None = None
+
+    def render(self) -> str:
+        display = self.path.relative_to(ROOT) if self.path.is_absolute() else self.path
+        if self.line is None:
+            return f"{display}: {self.message}"
+        return f"{display}:{self.line}: {self.message}"
+
+
+def relative_path(path: Path) -> Path:
+    try:
+        return path.resolve().relative_to(ROOT)
+    except ValueError:
+        return path
+
+
+def should_skip(path: Path) -> bool:
+    rel = relative_path(path)
+    if any(part in SKIP_PARTS for part in rel.parts):
+        return True
+    return any(rel == prefix or rel.is_relative_to(prefix) for prefix in SKIP_PREFIXES)
+
+
+def is_checkable(path: Path) -> bool:
+    return path.suffix.lower() in TEXT_SUFFIXES
+
+
+def collect_files(paths: list[str]) -> list[Path]:
+    if paths:
+        candidates: list[Path] = []
+        for raw in paths:
+            path = Path(raw)
+            if not path.is_absolute():
+                path = ROOT / path
+            if path.is_dir():
+                candidates.extend(path.rglob("*"))
+            elif path.exists():
+                candidates.append(path)
+    else:
+        candidates = list(ROOT.rglob("*"))
+
+    files = []
+    for path in candidates:
+        if path.is_file() and not should_skip(path) and is_checkable(path):
+            files.append(path.resolve())
+    return sorted(set(files), key=lambda item: str(relative_path(item)))
+
+
+def read_text(path: Path) -> tuple[str | None, Finding | None]:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return None, Finding(path, f"cannot read file: {exc}")
+    if b"\x00" in data:
+        return None, Finding(path, "contains NUL bytes")
+    try:
+        return data.decode("utf-8"), None
+    except UnicodeDecodeError as exc:
+        return None, Finding(path, f"must be UTF-8 text: {exc}")
+
+
+def line_for_offset(text: str, offset: int) -> int:
+    return text.count("\n", 0, offset) + 1
+
+
+def check_common_text(path: Path, text: str) -> list[Finding]:
+    findings: list[Finding] = []
+    for index, line in enumerate(text.splitlines(), start=1):
+        if line.startswith("<<<<<<< ") or line == "=======" or line.startswith(">>>>>>> "):
+            findings.append(Finding(path, "contains unresolved merge conflict marker", index))
+    return findings
+
+
+def check_python(path: Path, text: str) -> list[Finding]:
+    try:
+        ast.parse(text, filename=str(path))
+    except SyntaxError as exc:
+        return [Finding(path, exc.msg, exc.lineno)]
+    return []
+
+
+def check_json(path: Path, text: str) -> list[Finding]:
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as exc:
+        return [Finding(path, exc.msg, exc.lineno)]
+    return []
+
+
+def check_toml(path: Path, text: str) -> list[Finding]:
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        return [Finding(path, str(exc))]
+    return []
+
+
+def check_jinja(path: Path, text: str) -> list[Finding]:
+    try:
+        from jinja2 import Environment
+        from jinja2.exceptions import TemplateSyntaxError
+    except ImportError:
+        return [Finding(path, "Jinja2 is required for template checks; run pip install -e .[dev]")]
+
+    env = Environment(extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols"])
+    try:
+        env.parse(text)
+    except TemplateSyntaxError as exc:
+        return [Finding(path, exc.message, exc.lineno)]
+    return []
+
+
+def strip_css_noise(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    text = re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
+    text = re.sub(r"'(?:\\.|[^'\\])*'", "''", text)
+    return text
+
+
+def check_css(path: Path, text: str) -> list[Finding]:
+    findings: list[Finding] = []
+    stack: list[tuple[str, int]] = []
+    pairs = {"{": "}", "(": ")", "[": "]"}
+    closing = {value: key for key, value in pairs.items()}
+    for index, char in enumerate(strip_css_noise(text)):
+        if char in pairs:
+            stack.append((char, line_for_offset(text, index)))
+        elif char in closing:
+            if not stack or stack[-1][0] != closing[char]:
+                findings.append(Finding(path, f"unexpected '{char}'", line_for_offset(text, index)))
+                continue
+            stack.pop()
+    for char, line in stack:
+        findings.append(Finding(path, f"unclosed '{char}'", line))
+    return findings
+
+
+def check_javascript(path: Path) -> list[Finding]:
+    node = shutil.which("node")
+    if node is None:
+        return [Finding(path, "Node.js is required for JavaScript syntax checks")]
+    result = subprocess.run(
+        [node, "--check", str(path)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return []
+    detail = (result.stderr or result.stdout).strip().splitlines()
+    message = detail[-1] if detail else "node --check failed"
+    return [Finding(path, message)]
+
+
+def markdown_link_target_exists(path: Path, target: str) -> bool:
+    target = target.strip()
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1].strip()
+    target = unquote(target)
+    if not target or target.startswith(("#", "/", "http://", "https://", "mailto:")):
+        return True
+    file_part = target.split("#", 1)[0]
+    if not file_part:
+        return True
+    return (path.parent / file_part).exists()
+
+
+def check_markdown(path: Path, text: str) -> list[Finding]:
+    findings: list[Finding] = []
+    in_fence = False
+    fence_line: int | None = None
+    for index, line in enumerate(text.splitlines(), start=1):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            fence_line = index if in_fence else None
+            continue
+        if in_fence:
+            continue
+        for match in MARKDOWN_LINK_RE.finditer(line):
+            target = match.group(1)
+            if not markdown_link_target_exists(path, target):
+                findings.append(Finding(path, f"local Markdown link target not found: {target}", index))
+    if in_fence:
+        findings.append(Finding(path, "unclosed fenced code block", fence_line))
+    return findings
+
+
+def check_file(path: Path) -> list[Finding]:
+    text, error = read_text(path)
+    if error is not None:
+        return [error]
+    assert text is not None
+
+    suffix = path.suffix.lower()
+    findings = check_common_text(path, text)
+    if suffix == ".py":
+        findings.extend(check_python(path, text))
+    elif suffix == ".json":
+        findings.extend(check_json(path, text))
+    elif suffix == ".toml":
+        findings.extend(check_toml(path, text))
+    elif suffix in {".html", ".htm"}:
+        findings.extend(check_jinja(path, text))
+    elif suffix == ".css":
+        findings.extend(check_css(path, text))
+    elif suffix == ".js":
+        findings.extend(check_javascript(path))
+    elif suffix == ".md":
+        findings.extend(check_markdown(path, text))
+    elif suffix == ".svg":
+        findings.extend(check_xmlish_svg(path, text))
+    return findings
+
+
+def check_xmlish_svg(path: Path, text: str) -> list[Finding]:
+    import xml.etree.ElementTree as ET
+
+    try:
+        ET.fromstring(text)
+    except ET.ParseError as exc:
+        return [Finding(path, str(exc))]
+    return []
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run LabFoundry repository checks.")
+    parser.add_argument("paths", nargs="*", help="Optional files or directories to check.")
+    args = parser.parse_args(argv)
+
+    files = collect_files(args.paths)
+    findings: list[Finding] = []
+    for path in files:
+        findings.extend(check_file(path))
+
+    if findings:
+        print(f"Repository checks failed with {len(findings)} issue(s):", file=sys.stderr)
+        for finding in findings:
+            print(f"  - {finding.render()}", file=sys.stderr)
+        return 1
+
+    print(f"Repository checks passed for {len(files)} file(s).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

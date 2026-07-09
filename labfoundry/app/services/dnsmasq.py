@@ -1,3 +1,6 @@
+import json
+import re
+import shlex
 from datetime import datetime, timezone
 from ipaddress import IPv4Address, ip_address, ip_interface, ip_network
 from pathlib import PurePosixPath
@@ -6,7 +9,10 @@ from labfoundry.app.models import DhcpOption, DhcpReservation, DhcpScope, DhcpSe
 
 DNS_CONDITIONAL_FORWARDERS_SETTING_KEY = "dns.conditional_forwarders"
 DNSMASQ_LEASE_FILE_PATH = "/var/lib/labfoundry/dnsmasq/dhcp.leases"
+DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundry-trust-anchors.conf"
 DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX = "Deny DHCP for "
+DNS_RECORD_TYPES = {"A", "AAAA", "CNAME", "TXT", "SRV", "MX", "CAA", "PTR"}
+DNS_HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)*[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
 
 
 def _dhcp_scope_network(scope: DhcpScope):
@@ -157,6 +163,92 @@ def join_domains(domains: list[str]) -> str:
     return "\n".join(split_domains("\n".join(domains)))
 
 
+def record_data(record: DnsRecord) -> dict[str, object]:
+    raw_data = (record.record_data_json or "").strip()
+    if raw_data:
+        try:
+            parsed = json.loads(raw_data)
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            return parsed
+    return dns_record_data_from_value(record.record_type, record.address)
+
+
+def dump_dns_record_data(record_type: str, address: str, data: dict[str, object] | None = None) -> str:
+    payload = data if data is not None else dns_record_data_from_value(record_type, address)
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True) if payload else ""
+
+
+def dns_record_data_from_value(record_type: str, value: str) -> dict[str, object]:
+    normalized_type = record_type.strip().upper()
+    text = value.strip()
+    if normalized_type == "SRV":
+        parts = _split_record_value(text)
+        if len(parts) >= 2:
+            return {
+                "target": parts[0],
+                "port": parts[1],
+                "priority": parts[2] if len(parts) > 2 else "0",
+                "weight": parts[3] if len(parts) > 3 else "0",
+            }
+    if normalized_type == "MX":
+        parts = _split_record_value(text)
+        if len(parts) >= 1:
+            return {
+                "target": parts[0],
+                "preference": parts[1] if len(parts) > 1 else "10",
+            }
+    if normalized_type == "CAA":
+        parts = _split_record_value(text)
+        if len(parts) >= 3:
+            return {"flags": parts[0], "tag": parts[1], "value": " ".join(parts[2:])}
+    return {}
+
+
+def _split_record_value(value: str) -> list[str]:
+    try:
+        parts = shlex.split(value.replace(",", " "))
+    except ValueError:
+        parts = value.replace(",", " ").split()
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _record_data_value(data: dict[str, object], key: str, fallback: str = "") -> str:
+    return str(data.get(key) or fallback).strip()
+
+
+def _quote_dnsmasq_text(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def dns_record_value_for_zone_file(record_type: str, value: str, data: dict[str, object] | None = None) -> str:
+    normalized_type = record_type.strip().upper()
+    payload = data or dns_record_data_from_value(normalized_type, value)
+    if normalized_type == "MX":
+        target = _record_data_value(payload, "target")
+        preference = _record_data_value(payload, "preference", "10")
+        return f"{preference} {target}".strip()
+    if normalized_type == "SRV":
+        priority = _record_data_value(payload, "priority", "0")
+        weight = _record_data_value(payload, "weight", "0")
+        port = _record_data_value(payload, "port")
+        target = _record_data_value(payload, "target")
+        return f"{priority} {weight} {port} {target}".strip()
+    return value
+
+
+def dns_record_value_from_zone_file(record_type: str, value: str) -> str:
+    normalized_type = record_type.strip().upper()
+    parts = _split_record_value(value)
+    if normalized_type == "MX" and len(parts) >= 2:
+        return f"{parts[1]} {parts[0]}"
+    if normalized_type == "SRV" and len(parts) >= 4:
+        return f"{parts[3]} {parts[2]} {parts[0]} {parts[1]}"
+    return value
+
+
 def parse_hosts_records(hosts_text: str) -> tuple[list[dict[str, str | bool | None]], list[str]]:
     records: list[dict[str, str | bool | None]] = []
     errors: list[str] = []
@@ -228,9 +320,12 @@ def render_zone_file(domain: str, records: list[dict]) -> str:
         if record["enabled"] is False:
             continue
         record_type = record["record_type"].upper()
-        if record_type not in {"A", "AAAA", "CNAME"}:
+        if record_type not in DNS_RECORD_TYPES:
             continue
-        lines.append(f"{record['host_label']:<24} IN {record_type:<5} {record['address']}")
+        data = record.get("record_data")
+        payload = data if isinstance(data, dict) else dns_record_data_from_value(record_type, str(record["address"]))
+        value = dns_record_value_for_zone_file(record_type, str(record["address"]), payload)
+        lines.append(f"{record['host_label']:<24} IN {record_type:<5} {value}")
     return "\n".join(lines) + "\n"
 
 
@@ -261,7 +356,11 @@ def parse_zone_records(zone_text: str, domain: str) -> tuple[list[dict[str, str 
             errors.append(f"Line {line_number}: expected a record type and value.")
             continue
         record_type = tokens[0].upper()
-        value = tokens[1].strip().strip(".").lower()
+        if record_type in {"TXT", "SRV", "MX", "CAA"}:
+            value = " ".join(tokens[1:]).strip()
+        else:
+            value = tokens[1].strip().strip(".").lower()
+        value = dns_record_value_from_zone_file(record_type, value)
         hostname = _zone_hostname(host, origin)
         record_errors = validate_dns_record(hostname, record_type, value)
         if record_errors:
@@ -272,6 +371,7 @@ def parse_zone_records(zone_text: str, domain: str) -> tuple[list[dict[str, str 
                 "hostname": hostname,
                 "record_type": record_type,
                 "address": value,
+                "record_data_json": dump_dns_record_data(record_type, value),
                 "description": "Imported from zone editor",
                 "enabled": True,
             }
@@ -317,6 +417,10 @@ def dns_settings_to_dict(settings: DnsSettings, conditional_forwarders: str | No
         "cache_size": settings.cache_size,
         "expand_hosts": settings.expand_hosts,
         "authoritative": settings.authoritative,
+        "dnssec_enabled": settings.dnssec_enabled,
+        "rebind_protection_enabled": settings.rebind_protection_enabled,
+        "rebind_domain_exemptions": settings.rebind_domain_exemptions,
+        "query_logging_mode": settings.query_logging_mode,
         "config_path": settings.config_path,
         "updated_at": settings.updated_at,
     }
@@ -433,7 +537,17 @@ def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord], condi
         _validate_forwarder_server(server, f"conditional forwarder {domain} server", errors)
     for record in records:
         if record.enabled is not False:
-            errors.extend(validate_dns_record(record.hostname, record.record_type, record.address))
+            errors.extend(validate_dns_record(record.hostname, record.record_type, record.address, record_data(record)))
+    if settings.query_logging_mode not in {"off", "queries-extra"}:
+        errors.append("DNS query logging mode must be off or queries-extra.")
+    for raw_domain in (settings.rebind_domain_exemptions or "").replace(",", "\n").splitlines():
+        domain = raw_domain.strip().strip(".").lower()
+        if not domain:
+            continue
+        if any(character.isspace() for character in domain):
+            errors.append(f"DNS rebind exemption {domain} must not contain whitespace.")
+        elif not _valid_dns_hostname(domain):
+            errors.append(f"DNS rebind exemption {domain} must be a valid domain name.")
     if (settings.cache_size or 0) < 0:
         errors.append("DNS cache size must be zero or greater.")
     return errors
@@ -526,11 +640,11 @@ def dns_domain_warnings(domains: list[str]) -> list[str]:
     return warnings
 
 
-def validate_dns_record(hostname: str, record_type: str, address: str) -> list[str]:
+def validate_dns_record(hostname: str, record_type: str, address: str, data: dict[str, object] | None = None) -> list[str]:
     errors: list[str] = []
     normalized_type = record_type.strip().upper()
-    if normalized_type not in {"A", "AAAA", "CNAME"}:
-        errors.append(f"record {hostname} type must be A, AAAA, or CNAME.")
+    if normalized_type not in DNS_RECORD_TYPES:
+        errors.append(f"record {hostname} type must be one of {', '.join(sorted(DNS_RECORD_TYPES))}.")
         return errors
     if normalized_type == "CNAME":
         target = address.strip().strip(".").lower()
@@ -541,6 +655,52 @@ def validate_dns_record(hostname: str, record_type: str, address: str) -> list[s
             errors.append(f"CNAME record {hostname} must point to a hostname, not an IP address.")
         if any(character.isspace() for character in target):
             errors.append(f"CNAME record {hostname} target must not contain whitespace.")
+        if target and not _valid_dns_hostname(target):
+            errors.append(f"CNAME record {hostname} target must be a valid hostname.")
+        return errors
+    if normalized_type == "TXT":
+        if not address.strip():
+            errors.append(f"TXT record {hostname} must include text.")
+        return errors
+    if normalized_type == "PTR":
+        target = address.strip().strip(".").lower()
+        if not target or not _valid_dns_hostname(target):
+            errors.append(f"PTR record {hostname} target must be a valid hostname.")
+        return errors
+    if normalized_type == "MX":
+        payload = data or dns_record_data_from_value(normalized_type, address)
+        target = _record_data_value(payload, "target").strip(".").lower()
+        preference = _record_data_value(payload, "preference", "10")
+        if not target or not _valid_dns_hostname(target):
+            errors.append(f"MX record {hostname} target must be a valid hostname.")
+        if not preference.isdigit() or not 0 <= int(preference) <= 65535:
+            errors.append(f"MX record {hostname} preference must be 0-65535.")
+        return errors
+    if normalized_type == "SRV":
+        payload = data or dns_record_data_from_value(normalized_type, address)
+        target = _record_data_value(payload, "target").strip(".").lower()
+        port = _record_data_value(payload, "port")
+        priority = _record_data_value(payload, "priority", "0")
+        weight = _record_data_value(payload, "weight", "0")
+        if not hostname.startswith("_") or "._" not in hostname:
+            errors.append(f"SRV record {hostname} owner should be _service._proto.name.")
+        if not target or not _valid_dns_hostname(target):
+            errors.append(f"SRV record {hostname} target must be a valid hostname.")
+        for label, value in {"port": port, "priority": priority, "weight": weight}.items():
+            if not value.isdigit() or not 0 <= int(value) <= 65535:
+                errors.append(f"SRV record {hostname} {label} must be 0-65535.")
+        return errors
+    if normalized_type == "CAA":
+        payload = data or dns_record_data_from_value(normalized_type, address)
+        flags = _record_data_value(payload, "flags")
+        tag = _record_data_value(payload, "tag")
+        value = _record_data_value(payload, "value")
+        if not flags.isdigit() or not 0 <= int(flags) <= 255:
+            errors.append(f"CAA record {hostname} flags must be 0-255.")
+        if tag not in {"issue", "issuewild", "iodef"}:
+            errors.append(f"CAA record {hostname} tag must be issue, issuewild, or iodef.")
+        if not value:
+            errors.append(f"CAA record {hostname} value is required.")
         return errors
     parsed_address = _validate_ip(address, f"record {hostname}", errors)
     if not parsed_address:
@@ -642,6 +802,15 @@ def render_dnsmasq_config(
         f"dhcp-leasefile={DNSMASQ_LEASE_FILE_PATH}",
         f"cache-size={dns_settings.cache_size if dns_settings.cache_size is not None else 1000}",
     ]
+    if dns_settings.query_logging_mode == "queries-extra":
+        lines.append("log-queries=extra")
+    if dns_settings.dnssec_enabled:
+        lines.append("dnssec")
+        lines.append(f"conf-file={DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH}")
+    if dns_settings.rebind_protection_enabled:
+        lines.append("stop-dns-rebind")
+        for domain in split_domains(dns_settings.rebind_domain_exemptions):
+            lines.append(f"rebind-domain-ok=/{domain}/")
     for domain in domains:
         lines.append(f"domain={domain}")
         lines.append(f"local=/{domain}/")
@@ -661,11 +830,33 @@ def render_dnsmasq_config(
     for record in dns_records:
         if record.enabled is False:
             continue
-        if record.record_type.upper() in {"A", "AAAA"}:
+        record_type = record.record_type.upper()
+        if record_type in {"A", "AAAA"}:
             # dnsmasq host-record also creates the matching PTR record.
             lines.append(f"host-record={record.hostname},{record.address}")
-        elif record.record_type.upper() == "CNAME":
+        elif record_type == "CNAME":
             lines.append(f"cname={record.hostname},{record.address.strip().strip('.').lower()}")
+        elif record_type == "TXT":
+            lines.append(f"txt-record={record.hostname},{_quote_dnsmasq_text(record.address)}")
+        elif record_type == "PTR":
+            lines.append(f"ptr-record={record.hostname},{record.address.strip().strip('.').lower()}")
+        elif record_type == "MX":
+            data = record_data(record)
+            lines.append(f"mx-host={record.hostname},{_record_data_value(data, 'target').strip().strip('.').lower()},{_record_data_value(data, 'preference', '10')}")
+        elif record_type == "SRV":
+            data = record_data(record)
+            lines.append(
+                "srv-host="
+                f"{record.hostname},{_record_data_value(data, 'target').strip().strip('.').lower()},"
+                f"{_record_data_value(data, 'port')},{_record_data_value(data, 'priority', '0')},{_record_data_value(data, 'weight', '0')}"
+            )
+        elif record_type == "CAA":
+            data = record_data(record)
+            lines.append(
+                "caa-record="
+                f"{record.hostname},{_record_data_value(data, 'flags')},{_record_data_value(data, 'tag')},"
+                f"{_quote_dnsmasq_text(_record_data_value(data, 'value'))}"
+            )
     scope_tags = {scope.id: dnsmasq_tag(scope.name) for scope in scopes}
     if dhcp_settings.enabled:
         if any(scope.enabled is not False and dhcp_scope_address_family(scope) == "ipv6" for scope in scopes):
@@ -903,6 +1094,11 @@ def _is_ip_address(value: str) -> bool:
     return True
 
 
+def _valid_dns_hostname(value: str) -> bool:
+    normalized = value.strip().strip(".").lower()
+    return bool(normalized and DNS_HOSTNAME_PATTERN.fullmatch(normalized))
+
+
 def _validate_forwarder_server(value: str, label: str, errors: list[str]) -> None:
     server = value.strip()
     if "#" in server:
@@ -913,12 +1109,14 @@ def _validate_forwarder_server(value: str, label: str, errors: list[str]) -> Non
 
 
 def _zone_hostname(host: str, origin: str) -> str:
-    normalized = host.strip().strip(".").lower()
+    raw = host.strip().lower()
+    absolute = raw.endswith(".")
+    normalized = raw.strip(".")
     if normalized == "@":
         return origin
     if normalized.endswith(f".{origin}"):
         return normalized
-    if "." in normalized:
+    if absolute:
         return normalized
     return f"{normalized}.{origin}"
 

@@ -130,6 +130,7 @@ from labfoundry.app.services.dnsmasq import (
     dns_domain_warnings,
     dns_settings_to_dict,
     dnsmasq_test_command,
+    dump_dns_record_data,
     effective_dns_upstream_servers,
     join_conditional_forwarders,
     join_domains,
@@ -155,7 +156,7 @@ from labfoundry.app.services.appliance_settings import (
     render_appliance_settings_config,
     validate_appliance_settings,
 )
-from labfoundry.app.services.chrony import CHRONY_DEFAULT_UPSTREAM_SERVERS
+from labfoundry.app.services.chrony import default_chrony_upstream_fields
 from labfoundry.app.services.ca import ca_service_state
 from labfoundry.app.services.firewall import (
     FIREWALL_ACTIONS,
@@ -385,7 +386,11 @@ def get_chrony_settings(db: Session) -> ChronySettings:
     settings = db.execute(select(ChronySettings)).scalar_one_or_none()
     if settings is None:
         appliance_settings = get_appliance_settings(db)
-        settings = ChronySettings(upstream_servers=appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS)
+        chrony_upstreams = default_chrony_upstream_fields(appliance_settings.ntp_servers)
+        settings = ChronySettings(
+            upstream_servers=chrony_upstreams["upstream_servers"],
+            upstream_sources_json=chrony_upstreams["upstream_sources_json"],
+        )
         db.add(settings)
         db.commit()
         db.refresh(settings)
@@ -1454,6 +1459,7 @@ def create_dns_record(
     hostname = payload.hostname.strip().lower()
     record_type = payload.record_type.strip().upper()
     address = payload.address.strip()
+    record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
     if validation_errors:
         raise HTTPException(status_code=422, detail=" ".join(validation_errors))
@@ -1461,6 +1467,7 @@ def create_dns_record(
         select(DnsRecord).where(
             func.lower(DnsRecord.hostname) == hostname,
             func.lower(DnsRecord.record_type) == record_type.lower(),
+            DnsRecord.address == address,
         )
     ).scalar_one_or_none()
     if existing:
@@ -1469,6 +1476,7 @@ def create_dns_record(
         hostname=hostname,
         record_type=record_type,
         address=address,
+        record_data_json=record_data_json,
         description=payload.description,
         enabled=payload.enabled,
     )
@@ -1496,6 +1504,7 @@ def update_dns_record(
     hostname = payload.hostname.strip().lower()
     record_type = payload.record_type.strip().upper()
     address = payload.address.strip()
+    record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
     if validation_errors:
         raise HTTPException(status_code=422, detail=" ".join(validation_errors))
@@ -1504,6 +1513,7 @@ def update_dns_record(
             DnsRecord.id != record_id,
             func.lower(DnsRecord.hostname) == hostname,
             func.lower(DnsRecord.record_type) == record_type.lower(),
+            DnsRecord.address == address,
         )
     ).scalar_one_or_none()
     if existing:
@@ -1511,6 +1521,7 @@ def update_dns_record(
     record.hostname = hostname
     record.record_type = record_type
     record.address = address
+    record.record_data_json = record_data_json
     record.description = payload.description
     record.enabled = payload.enabled
     try:
@@ -1543,13 +1554,16 @@ def import_dns_hosts_file(
                 select(DnsRecord).where(
                     DnsRecord.hostname == item["hostname"],
                     DnsRecord.record_type == item["record_type"],
+                    DnsRecord.address == item["address"],
                 )
             ).scalar_one_or_none()
         if existing:
             existing.address = str(item["address"])
+            existing.record_data_json = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             existing.description = str(item["description"] or "")
             existing.enabled = bool(item["enabled"])
         else:
+            item["record_data_json"] = dump_dns_record_data(str(item["record_type"]), str(item["address"]))
             db.add(DnsRecord(**item))
     try:
         db.commit()
