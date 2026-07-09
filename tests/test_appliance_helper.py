@@ -7,6 +7,7 @@ import subprocess
 import tarfile
 import hashlib
 import re
+import stat
 from pathlib import Path
 
 
@@ -2611,9 +2612,14 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     payload = b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'vcf-download-tool 9.1.0.0100.25429019'; else echo software depot id 8c9506c6-7bdf-44d5-b2e9-50d829d66b99; fi\n"
     with tarfile.open(archive_path, "w:gz") as archive:
         info = tarfile.TarInfo("vcfdt/bin/vcf-download-tool")
-        info.mode = 0o644
+        info.mode = 0o750
         info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
+        jar_payload = b"jar"
+        jar_info = tarfile.TarInfo("vcfdt/lib/lcm-tools-uber.jar")
+        jar_info.mode = 0o640
+        jar_info.size = len(jar_payload)
+        archive.addfile(jar_info, io.BytesIO(jar_payload))
 
     tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
     monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
@@ -2632,10 +2638,15 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert payload["version_command"] == "vcf-download-tool --version"
     wrapper = tool_dir / "vcf-download-tool"
     extracted = tool_dir / "extracted" / "vcfdt" / "bin" / "vcf-download-tool"
+    jar = tool_dir / "extracted" / "vcfdt" / "lib" / "lcm-tools-uber.jar"
     assert wrapper.is_file()
     assert extracted.is_file()
+    assert jar.is_file()
     assert os.access(wrapper, os.X_OK)
     assert os.access(extracted, os.X_OK)
+    if os.name == "posix":
+        assert stat.S_IMODE(extracted.stat().st_mode) == 0o755
+        assert stat.S_IMODE(jar.stat().st_mode) == 0o644
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert f"cd '{extracted.parent.parent}' || exit 1" in wrapper_text
     assert str(extracted) in wrapper_text

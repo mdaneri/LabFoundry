@@ -4828,6 +4828,24 @@ def _safe_extract_archive(archive_path: Path, destination: Path) -> None:
         archive.extractall(destination)
 
 
+def _prepare_vcf_download_tool_tree(extraction_dir: Path) -> None:
+    for root, dirs, files in os.walk(extraction_dir):
+        root_path = Path(root)
+        if root_path.is_symlink():
+            continue
+        root_path.chmod(0o755)
+        for dirname in dirs:
+            child = root_path / dirname
+            if not child.is_symlink():
+                child.chmod(0o755)
+        for filename in files:
+            child = root_path / filename
+            if child.is_symlink():
+                continue
+            mode = child.stat().st_mode
+            child.chmod(0o755 if mode & 0o111 else 0o644)
+
+
 def _find_vcf_download_tool_binary(extraction_dir: Path) -> Path:
     for candidate in [extraction_dir / "vcf-download-tool", extraction_dir / "bin" / "vcf-download-tool"]:
         if candidate.is_file():
@@ -4855,11 +4873,12 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
     extraction_dir = VCF_DEPOT_TOOL_DIR / "extracted"
     try:
         _safe_extract_archive(archive_path, extraction_dir)
+        _prepare_vcf_download_tool_tree(extraction_dir)
         tool_path = _find_vcf_download_tool_binary(extraction_dir)
     except (OSError, tarfile.TarError, ValueError, FileNotFoundError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    tool_path.chmod(tool_path.stat().st_mode | 0o111)
+    tool_path.chmod(0o755)
     wrapper_path = VCF_DEPOT_TOOL_DIR / "vcf-download-tool"
     tool_home = _vcf_download_tool_home(tool_path)
     wrapper_path.write_text(
