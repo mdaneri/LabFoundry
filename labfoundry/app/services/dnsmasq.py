@@ -223,6 +223,32 @@ def _quote_dnsmasq_text(value: str) -> str:
     return f'"{escaped}"'
 
 
+def dns_record_value_for_zone_file(record_type: str, value: str, data: dict[str, object] | None = None) -> str:
+    normalized_type = record_type.strip().upper()
+    payload = data or dns_record_data_from_value(normalized_type, value)
+    if normalized_type == "MX":
+        target = _record_data_value(payload, "target")
+        preference = _record_data_value(payload, "preference", "10")
+        return f"{preference} {target}".strip()
+    if normalized_type == "SRV":
+        priority = _record_data_value(payload, "priority", "0")
+        weight = _record_data_value(payload, "weight", "0")
+        port = _record_data_value(payload, "port")
+        target = _record_data_value(payload, "target")
+        return f"{priority} {weight} {port} {target}".strip()
+    return value
+
+
+def dns_record_value_from_zone_file(record_type: str, value: str) -> str:
+    normalized_type = record_type.strip().upper()
+    parts = _split_record_value(value)
+    if normalized_type == "MX" and len(parts) >= 2:
+        return f"{parts[1]} {parts[0]}"
+    if normalized_type == "SRV" and len(parts) >= 4:
+        return f"{parts[3]} {parts[2]} {parts[0]} {parts[1]}"
+    return value
+
+
 def parse_hosts_records(hosts_text: str) -> tuple[list[dict[str, str | bool | None]], list[str]]:
     records: list[dict[str, str | bool | None]] = []
     errors: list[str] = []
@@ -296,7 +322,10 @@ def render_zone_file(domain: str, records: list[dict]) -> str:
         record_type = record["record_type"].upper()
         if record_type not in DNS_RECORD_TYPES:
             continue
-        lines.append(f"{record['host_label']:<24} IN {record_type:<5} {record['address']}")
+        data = record.get("record_data")
+        payload = data if isinstance(data, dict) else dns_record_data_from_value(record_type, str(record["address"]))
+        value = dns_record_value_for_zone_file(record_type, str(record["address"]), payload)
+        lines.append(f"{record['host_label']:<24} IN {record_type:<5} {value}")
     return "\n".join(lines) + "\n"
 
 
@@ -331,6 +360,7 @@ def parse_zone_records(zone_text: str, domain: str) -> tuple[list[dict[str, str 
             value = " ".join(tokens[1:]).strip()
         else:
             value = tokens[1].strip().strip(".").lower()
+        value = dns_record_value_from_zone_file(record_type, value)
         hostname = _zone_hostname(host, origin)
         record_errors = validate_dns_record(hostname, record_type, value)
         if record_errors:
@@ -1079,12 +1109,14 @@ def _validate_forwarder_server(value: str, label: str, errors: list[str]) -> Non
 
 
 def _zone_hostname(host: str, origin: str) -> str:
-    normalized = host.strip().strip(".").lower()
+    raw = host.strip().lower()
+    absolute = raw.endswith(".")
+    normalized = raw.strip(".")
     if normalized == "@":
         return origin
     if normalized.endswith(f".{origin}"):
         return normalized
-    if "." in normalized:
+    if absolute:
         return normalized
     return f"{normalized}.{origin}"
 

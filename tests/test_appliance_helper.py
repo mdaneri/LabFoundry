@@ -2859,7 +2859,15 @@ def appliance_settings_json(
     return json.dumps(payload)
 
 
-def chronyd_config_text(*, enabled: bool = True, server: str = "time1.google.com", listen_address: str = "192.168.50.1", allow_clients: str = "192.168.50.0/24") -> str:
+def chronyd_config_text(
+    *,
+    enabled: bool = True,
+    server: str = "time1.google.com",
+    listen_address: str = "192.168.50.1",
+    allow_clients: str = "192.168.50.0/24",
+    nts_server_cert_path: str = "",
+    nts_server_key_path: str = "",
+) -> str:
     allow_directives = []
     for entry in allow_clients.replace(",", "\n").splitlines():
         value = entry.strip()
@@ -2879,6 +2887,8 @@ def chronyd_config_text(*, enabled: bool = True, server: str = "time1.google.com
             *([f"server {server} iburst"] if server else []),
             *([f"bindaddress {listen_address}"] if listen_address else []),
             *allow_directives,
+            *([f"ntsservercert {nts_server_cert_path}"] if nts_server_cert_path else []),
+            *([f"ntsserverkey {nts_server_key_path}"] if nts_server_key_path else []),
             "",
         ]
     )
@@ -3312,6 +3322,49 @@ def test_chronyd_helper_apply_installs_config_and_switches_from_timesyncd(monkey
     assert state_dir.exists()
     assert ["systemctl", "disable", "--now", "systemd-timesyncd"] in commands
     assert ["systemctl", "enable", "chronyd.service"] in commands
+    assert ["systemctl", "restart", "chronyd.service"] in commands
+
+
+def test_chronyd_helper_apply_grants_chrony_group_read_to_nts_key(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "chronyd"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    config_path = apply_dir / "labfoundry-chrony.conf"
+    chrony_conf = tmp_path / "etc" / "chrony.conf"
+    state_dir = tmp_path / "var" / "lib" / "chrony"
+    cert_path = managed_root / "chrony" / "certs" / "ntp.labfoundry.internal.crt"
+    key_path = managed_root / "chrony" / "certs" / "ntp.labfoundry.internal.key"
+    apply_dir.mkdir(parents=True)
+    cert_path.parent.mkdir(parents=True)
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    key_path.chmod(0o600)
+    config_path.write_text(
+        chronyd_config_text(nts_server_cert_path=str(cert_path), nts_server_key_path=str(key_path)),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+    chown_calls: list[tuple[Path, int, int]] = []
+
+    class ChronyGroup:
+        gr_gid = 44
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CHRONY_CONFIG_PATH", chrony_conf)
+    monkeypatch.setattr(helper, "CHRONY_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper.grp, "getgrnam", lambda name: ChronyGroup())
+    monkeypatch.setattr(helper.os, "chown", lambda path, uid, gid: chown_calls.append((Path(path), uid, gid)), raising=False)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_chronyd("apply", [str(config_path)]) == 0
+
+    assert (key_path, 0, 44) in chown_calls
+    if os.name != "nt":
+        assert oct(key_path.stat().st_mode & 0o777) == "0o640"
     assert ["systemctl", "restart", "chronyd.service"] in commands
 
 

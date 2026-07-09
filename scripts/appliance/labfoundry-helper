@@ -1832,6 +1832,29 @@ def _install_chronyd_config(config_path: Path) -> None:
     tmp_target.replace(CHRONY_CONFIG_PATH)
 
 
+def _chronyd_nts_server_key_path(config_path: Path) -> Path | None:
+    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith("ntsserverkey "):
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2 and parts[1].strip():
+                return Path(parts[1].strip())
+    return None
+
+
+def _grant_chronyd_nts_server_key_read(config_path: Path) -> Path | None:
+    key_path = _chronyd_nts_server_key_path(config_path)
+    if key_path is None or not key_path.exists():
+        return key_path
+    try:
+        chrony_group = grp.getgrnam("chrony")
+    except KeyError as exc:
+        raise RuntimeError("chrony group not found; cannot grant chronyd access to NTS server key") from exc
+    os.chown(key_path, 0, chrony_group.gr_gid)
+    os.chmod(key_path, 0o640)
+    return key_path
+
+
 def _chronyd_status() -> int:
     chronyc = shutil.which("chronyc")
     if chronyc is None:
@@ -1896,6 +1919,11 @@ def _handle_chronyd(action: str, args: list[str]) -> int:
         print(json.dumps({"chronyd": "apply complete", "enabled": False, "service": "chronyd.service"}, sort_keys=True))
         return 0
     _install_chronyd_config(config_path)
+    try:
+        _grant_chronyd_nts_server_key_read(config_path)
+    except (OSError, RuntimeError) as exc:
+        print(f"chronyd NTS server key permission update failed: {exc}", file=sys.stderr)
+        return 2
     for command in [
         ["systemctl", "disable", "--now", "systemd-timesyncd"],
         ["systemctl", "enable", "chronyd.service"],

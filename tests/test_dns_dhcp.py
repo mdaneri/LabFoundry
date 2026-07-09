@@ -16,7 +16,9 @@ from labfoundry.app.services.dnsmasq import (
     parse_dhcp_range_expression,
     parse_dnsmasq_leases,
     parse_hosts_records,
+    parse_zone_records,
     render_dnsmasq_config,
+    render_zone_file,
     split_conditional_forwarders,
     validate_dns_record,
     validate_dhcp_bind_targets,
@@ -221,6 +223,59 @@ def test_dnsmasq_renderer_supports_dnssec_rebind_logging_and_extended_records():
     assert 'caa-record=labfoundry.internal,0,issue,"lab-ca"' in config
     assert "ptr-record=10.50.168.192.in-addr.arpa,host.labfoundry.internal" in config
     assert "server=::1" not in config
+
+
+def test_zone_file_round_trips_mx_srv_standard_rdata_order():
+    records = [
+        {
+            "host_label": "@",
+            "record_type": "MX",
+            "address": "mail.labfoundry.internal 10",
+            "record_data": {"target": "mail.labfoundry.internal", "preference": "10"},
+            "enabled": True,
+        },
+        {
+            "host_label": "_ldap._tcp",
+            "record_type": "SRV",
+            "address": "ldap.labfoundry.internal 389 10 20",
+            "record_data": {"target": "ldap.labfoundry.internal", "port": "389", "priority": "10", "weight": "20"},
+            "enabled": True,
+        },
+    ]
+
+    zone = render_zone_file("labfoundry.internal", records)
+
+    assert "@                        IN MX    10 mail.labfoundry.internal" in zone
+    assert "_ldap._tcp               IN SRV   10 20 389 ldap.labfoundry.internal" in zone
+
+    parsed_records, errors = parse_zone_records(
+        "\n".join(
+            [
+                "$ORIGIN labfoundry.internal.",
+                "@ IN MX 10 mail.labfoundry.internal.",
+                "_ldap._tcp IN SRV 10 20 389 ldap.labfoundry.internal.",
+            ]
+        ),
+        "labfoundry.internal",
+    )
+
+    assert errors == []
+    assert {
+        "hostname": "labfoundry.internal",
+        "record_type": "MX",
+        "address": "mail.labfoundry.internal. 10",
+        "record_data_json": dump_dns_record_data("MX", "mail.labfoundry.internal. 10"),
+        "description": "Imported from zone editor",
+        "enabled": True,
+    } in parsed_records
+    assert {
+        "hostname": "_ldap._tcp.labfoundry.internal",
+        "record_type": "SRV",
+        "address": "ldap.labfoundry.internal. 389 10 20",
+        "record_data_json": dump_dns_record_data("SRV", "ldap.labfoundry.internal. 389 10 20"),
+        "description": "Imported from zone editor",
+        "enabled": True,
+    } in parsed_records
 
 
 def test_dnsmasq_renderer_keeps_configured_upstreams_over_dhcp_fallback():
