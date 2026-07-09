@@ -2,7 +2,7 @@
 
 LabFoundry separates desired-state editing from appliance enforcement.
 
-Service pages edit desired state. They autosave routine settings and grids, show local validation and rendered config previews, and link to the global apply review. They should not own service-specific apply buttons or service-specific apply submit routes.
+Service pages edit desired state. They autosave routine settings and grids, show local validation, expose rendered config previews through compact preview actions, and link to the global apply review. They should not own service-specific apply buttons or service-specific apply submit routes.
 
 `Appliance Apply` is the global review and submit surface. It lists changed apply units, checks valid changed units by default, and lets an operator unselect any unit that should remain pending.
 
@@ -157,6 +157,12 @@ verbosity and optional external syslog forwarding from Settings.
 Service right rails should show:
 
 - `Pending Appliance Changes`, with status and a link to `/appliance-apply`;
-- `Validation`, with errors, warnings, and rendered config preview.
+- `Validation`, with errors, warnings, and compact rendered config preview actions.
+
+The top pending banner is page-scoped: show it only when the current page's apply unit has changed. The sidebar apply card remains global and may show pending units from other pages.
+
+Validation side rails should not render full config blocks inline. Keep the path/name visible in a compact preview action row and open the shared preview modal for the full rendered text. The hidden source element in that row should retain the existing `data-...-preview` selector so autosave refreshes continue to replace the latest preview content. The global Appliance Apply page is the exception: it can keep current previews and diffs inline because it is the deliberate review-before-submit surface.
+
+Editable Tabulator grids should keep new-record placeholder rows visually incomplete until the required identity field is filled. Only the required first field should be visible and editable at first; generated defaults and secondary cells should stay blank and locked so operators do not mistake a placeholder for a saved complete row.
 
 The global submit button should be labeled `Submit appliance changes`. Avoid reintroducing labels such as `Create appliance apply task`, `DNS Apply`, `DHCP Apply`, `SFTP Apply`, or other service-scoped apply actions.

@@ -222,14 +222,22 @@
           <div role="listitem">{{ warning }}</div>
         {% endfor %}
       </div>
-      <div class="terminal-note">
-        <strong data-vcf-registry-config-path>{{ vcf_registry_settings.config_path }}</strong>
-        <code data-vcf-registry-harbor-preview>{{ vcf_registry_harbor_config_preview }}</code>
-      </div>
-      <div class="terminal-note">
-        <strong>Supervisor Service relocation preview</strong>
-        <code data-vcf-registry-relocation-preview>{{ vcf_registry_relocation_preview }}</code>
-      </div>
+      {% set preview_label = "Harbor config" %}
+      {% set preview_path = vcf_registry_settings.config_path %}
+      {% set preview_path_attr = "data-vcf-registry-config-path" %}
+      {% set preview_title = "VCF Private Registry Harbor config" %}
+      {% set preview_button_label = "config" %}
+      {% set preview_text = vcf_registry_harbor_config_preview %}
+      {% set preview_data_attr = "data-vcf-registry-harbor-preview" %}
+      {% include "partials/config_preview_action.html" %}
+      {% set preview_label = "Relocation preview" %}
+      {% set preview_path = "Supervisor Service relocation preview" %}
+      {% set preview_path_attr = "" %}
+      {% set preview_title = "VCF Private Registry relocation preview" %}
+      {% set preview_button_label = "preview" %}
+      {% set preview_text = vcf_registry_relocation_preview %}
+      {% set preview_data_attr = "data-vcf-registry-relocation-preview" %}
+      {% include "partials/config_preview_action.html" %}
     </div>
   </aside>
 </section>

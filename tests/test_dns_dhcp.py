@@ -1,7 +1,7 @@
 from ipaddress import ip_address
 
 from labfoundry.app.models import ChronySettings, DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
-from labfoundry.app.services.chrony import dump_chrony_upstream_sources, render_chrony_config
+from labfoundry.app.services.chrony import CHRONY_DEFAULT_UPSTREAM_SERVERS, chrony_upstream_sources, dump_chrony_upstream_sources, render_chrony_config
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNSMASQ_LEASE_FILE_PATH,
@@ -182,6 +182,39 @@ def test_chrony_renderer_supports_nts_sources_server_and_hardening():
     assert "minsources 2" in config
     assert "maxchange 30 1 1" in config
     assert "authselectmode prefer" in config
+
+
+def test_chrony_legacy_default_server_fallback_uses_nts_sources():
+    settings = ChronySettings(
+        hostname="ntp.labfoundry.internal",
+        upstream_servers=CHRONY_DEFAULT_UPSTREAM_SERVERS,
+        upstream_sources_json="",
+    )
+
+    sources = chrony_upstream_sources(settings)
+    config = render_chrony_config(settings)
+
+    assert [source["source"] for source in sources] == ["time.cloudflare.com", "nts.netnod.se"]
+    assert [source["use_nts"] for source in sources] == [True, True]
+    assert "server time.cloudflare.com iburst nts" in config
+    assert "server nts.netnod.se iburst nts" in config
+
+
+def test_chrony_custom_server_fallback_remains_plain_ntp():
+    settings = ChronySettings(upstream_servers="time.google.com", upstream_sources_json="")
+
+    sources = chrony_upstream_sources(settings)
+
+    assert sources == [
+        {
+            "id": "legacy-1",
+            "source": "time.google.com",
+            "enabled": True,
+            "use_nts": False,
+            "description": "",
+            "maxdelay": "",
+        }
+    ]
 
 
 def test_dnsmasq_renderer_supports_dnssec_rebind_logging_and_extended_records():

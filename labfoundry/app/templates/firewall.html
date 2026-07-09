@@ -247,10 +247,14 @@
         <p class="muted" data-firewall-validation-message>The desired firewall state passes LabFoundry validation. Appliance validation still runs through the allowlisted nftables helper before apply.</p>
       {% endif %}
       <p class="autosave-status validation-refresh-status" data-firewall-validation-refresh data-state="idle">Preview matches current desired state.</p>
-      <div class="terminal-note">
-        <strong data-firewall-config-path>{{ firewall_settings.config_path }}</strong>
-        <code data-firewall-config-preview>{{ firewall_config_preview }}</code>
-      </div>
+      {% set preview_label = "nftables config" %}
+      {% set preview_path = firewall_settings.config_path %}
+      {% set preview_path_attr = "data-firewall-config-path" %}
+      {% set preview_title = "Firewall rendered config" %}
+      {% set preview_button_label = "config" %}
+      {% set preview_text = firewall_config_preview %}
+      {% set preview_data_attr = "data-firewall-config-preview" %}
+      {% include "partials/config_preview_action.html" %}
     </div>
   </aside>
 </section>

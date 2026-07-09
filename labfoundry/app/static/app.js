@@ -197,6 +197,7 @@ function highlightConfigPreviews(root = document) {
   if (!(root instanceof Document || root instanceof HTMLElement)) {
     return;
   }
+  initializeConfigPreviewActions(root);
   initializeTerminalNoteActions(root);
   root
     .querySelectorAll(
@@ -261,7 +262,7 @@ function initializePreviewModalControls() {
   const code = modal.querySelector("[data-preview-modal-code]");
   copyButton?.addEventListener("click", async () => {
     try {
-      await copyTextToClipboard(code?.textContent || "");
+      await copyTextToClipboard(code?.textContent || "", "Copied", code);
     } catch {
       showTransientGridStatus("Copy failed");
     }
@@ -269,11 +270,41 @@ function initializePreviewModalControls() {
   closeButton?.addEventListener("click", () => {
     modal.close();
   });
-  modal.addEventListener("click", (event) => {
-    if (event.target === modal) {
-      modal.close();
+}
+
+function initializeConfigPreviewActions(root = document) {
+  if (!(root instanceof Document || root instanceof HTMLElement)) {
+    return;
+  }
+  root.querySelectorAll("[data-config-preview-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.configPreviewOpenInitialized === "1") {
+      return;
     }
+    const row = button.closest("[data-config-preview-row]");
+    const code = row?.querySelector("[data-config-preview-source]");
+    if (!(row instanceof HTMLElement) || !(code instanceof HTMLElement)) {
+      return;
+    }
+    button.dataset.configPreviewOpenInitialized = "1";
+    button.addEventListener("click", () => {
+      const label = row.querySelector("[data-config-preview-label]")?.textContent?.trim() || "Rendered config";
+      openPreviewModal(button.dataset.previewTitle || label, code.textContent || "", code);
+    });
   });
+}
+
+function appendButtonIcon(button, paths) {
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("class", "button-icon");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("aria-hidden", "true");
+  icon.setAttribute("focusable", "false");
+  paths.forEach((pathData) => {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", pathData);
+    icon.append(path);
+  });
+  button.replaceChildren(icon);
 }
 
 function initializeTerminalNoteActions(root = document) {
@@ -295,15 +326,18 @@ function initializeTerminalNoteActions(root = document) {
     const copyButton = document.createElement("button");
     copyButton.className = "button secondary icon-button";
     copyButton.type = "button";
-    copyButton.textContent = "⧉";
     copyButton.setAttribute("aria-label", "Copy preview");
     copyButton.setAttribute("title", "Copy preview");
+    appendButtonIcon(copyButton, [
+      "M8 8.75a2 2 0 0 1 2-2h7.25a2 2 0 0 1 2 2V16a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2z",
+      "M5.75 15.25H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7.25a2 2 0 0 1 2 2v.75",
+    ]);
     const openButton = document.createElement("button");
     openButton.className = "button secondary icon-button";
     openButton.type = "button";
-    openButton.textContent = "↗";
     openButton.setAttribute("aria-label", "Open preview");
     openButton.setAttribute("title", "Open preview");
+    appendButtonIcon(openButton, ["M7 17 17 7", "M9 7h8v8"]);
     actions.append(copyButton, openButton);
     note.prepend(actions);
     copyButton.addEventListener("click", async () => {
@@ -438,6 +472,14 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function labFoundryBooleanFormatter(cell) {
+  const enabled = Boolean(cell.getValue());
+  const label = enabled ? "true" : "false";
+  const glyph = enabled ? "✓" : "✕";
+  const tone = enabled ? "good" : "bad";
+  return `<span class="boolean-glyph ${tone}" aria-label="${label}" title="${label}">${glyph}</span>`;
+}
+
 function dnsRecordTypeLabel(value) {
   const labels = {
     A: "A (IPv4)",
@@ -507,6 +549,59 @@ function dnsAddRowHintFormatter(cell, emptyText) {
     return `<span class="add-row-hint">${escapeHtml(emptyText)}</span>`;
   }
   return escapeHtml(value);
+}
+
+function newRecordRequiredValue(data, field) {
+  return String(data?.[field] ?? "").trim();
+}
+
+function newRecordRequiredCellEditable(cell, requiredField) {
+  const data = cell.getRow().getData();
+  return !data.is_new || cell.getField() === requiredField || Boolean(newRecordRequiredValue(data, requiredField));
+}
+
+function markNewRecordRow(row, requiredField) {
+  const data = row.getData();
+  const isNew = Boolean(data.is_new);
+  const isPending = isNew && !newRecordRequiredValue(data, requiredField);
+  const element = row.getElement();
+  element.classList.toggle("new-record-row", isNew);
+  element.classList.toggle("new-record-row-pending", isPending);
+  row.getCells().forEach((cell) => {
+    cell.getElement().classList.toggle("new-record-primary-cell", cell.getField() === requiredField);
+  });
+}
+
+function lockNewRecordColumns(columns, requiredField) {
+  return columns.map((column) => {
+    const originalEditable = column.editable;
+    return {
+      ...column,
+      editable: (cell) => {
+        const baseEditable = typeof originalEditable === "function" ? originalEditable(cell) : originalEditable !== false;
+        return baseEditable && newRecordRequiredCellEditable(cell, requiredField);
+      },
+    };
+  });
+}
+
+function reformatPendingNewRecord(cell) {
+  const row = cell.getRow();
+  if (row.getData().is_new) {
+    row.reformat();
+  }
+}
+
+function pendingNewDnsRecord(data) {
+  return Boolean(data?.is_new && !String(data.host_label ?? "").trim());
+}
+
+function dnsRecordDomainFormatter(cell) {
+  const data = cell.getRow().getData();
+  if (pendingNewDnsRecord(data)) {
+    return "";
+  }
+  return escapeHtml(cell.getValue());
 }
 
 let dhcpRangeTooltip = null;
@@ -762,6 +857,9 @@ async function autoSaveDnsRecord(cell, csrf) {
   const data = row.getData();
   if (data.is_new) {
     const field = cell.getField();
+    if (field === "host_label") {
+      row.reformat();
+    }
     if (field === "record_type" && data.suggested_ipv4) {
       if (data.record_type !== "A" && data.address === data.suggested_ipv4) {
         await row.update({ address: "", ...dnsRecordReverseStatus({ ...data, address: "" }) });
@@ -843,6 +941,18 @@ function showTransientGridStatus(message) {
   }, 1400);
 }
 
+function selectElementText(element) {
+  const selection = window.getSelection();
+  if (!selection || !(element instanceof HTMLElement)) {
+    return false;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return !selection.isCollapsed;
+}
+
 function copyTextWithTextareaFallback(value) {
   const textarea = document.createElement("textarea");
   textarea.value = value;
@@ -856,26 +966,34 @@ function copyTextWithTextareaFallback(value) {
   textarea.setSelectionRange(0, value.length);
   const copied = document.execCommand("copy");
   textarea.remove();
-  if (!copied) {
-    throw new Error("Copy command failed.");
-  }
+  return copied;
 }
 
-async function copyTextToClipboard(text, successMessage = "Copied") {
+async function copyTextToClipboard(text, successMessage = "Copied", fallbackSelectionElement = null) {
   const value = String(text || "");
   if (!value) {
     return;
   }
-  if (window.isSecureContext && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+  let copied = false;
+  if (window.isSecureContext && window.navigator?.clipboard && typeof window.navigator.clipboard.writeText === "function") {
     try {
-      await navigator.clipboard.writeText(value);
+      await window.navigator.clipboard.writeText(value);
+      copied = true;
     } catch {
-      copyTextWithTextareaFallback(value);
+      copied = copyTextWithTextareaFallback(value);
     }
   } else {
-    copyTextWithTextareaFallback(value);
+    copied = copyTextWithTextareaFallback(value);
   }
-  showTransientGridStatus(successMessage);
+  if (copied) {
+    showTransientGridStatus(successMessage);
+    return;
+  }
+  if (selectElementText(fallbackSelectionElement)) {
+    showTransientGridStatus("Selected");
+    return;
+  }
+  throw new Error("Copy command failed.");
 }
 
 function selectCopyButtonFallbackText(button) {
@@ -1779,6 +1897,7 @@ async function autoSaveEsxiHost(cell, csrf) {
   }
   if (data.is_new) {
     if (!hasRequiredEsxiHostFields(data)) {
+      reformatPendingNewRecord(cell);
       return;
     }
     try {
@@ -1928,6 +2047,7 @@ async function autoSaveCaProfile(cell, csrf) {
   const data = row.getData();
   if (data.is_new) {
     if (!hasRequiredCaProfileFields(data)) {
+      reformatPendingNewRecord(cell);
       return;
     }
     try {
@@ -1980,6 +2100,7 @@ async function autoSaveCaCertificate(cell, csrf) {
   const data = row.getData();
   if (data.is_new) {
     if (!hasRequiredCaCertificateFields(data)) {
+      reformatPendingNewRecord(cell);
       return;
     }
     try {
@@ -2053,7 +2174,7 @@ function initializeCaProfilesTable() {
           action: (event, row) => deleteCaProfileFromMenu(row, csrf),
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -2102,7 +2223,7 @@ function initializeCaProfilesTable() {
         {
           title: "SAN",
           field: "san_required",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 80,
@@ -2112,7 +2233,7 @@ function initializeCaProfilesTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 100,
@@ -2127,9 +2248,9 @@ function initializeCaProfilesTable() {
           minWidth: 220,
           cellEdited: (cell) => autoSaveCaProfile(cell, csrf),
         },
-      ],
+      ], "name"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "name");
       },
     });
     if (fallback) {
@@ -2170,7 +2291,7 @@ function initializeCaCertificatesTable() {
           action: (event, row) => deleteCaCertificateFromMenu(row, csrf),
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Common name",
           field: "common_name",
@@ -2222,7 +2343,7 @@ function initializeCaCertificatesTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 100,
@@ -2262,9 +2383,9 @@ function initializeCaCertificatesTable() {
           minWidth: 220,
           cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
         },
-      ],
+      ], "common_name"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "common_name");
       },
     });
     if (fallback) {
@@ -2423,6 +2544,7 @@ async function autoSaveFirewallRule(cell, csrf) {
   const data = row.getData();
   if (data.is_new) {
     if (!hasRequiredFirewallRuleFields(data)) {
+      reformatPendingNewRecord(cell);
       return;
     }
     try {
@@ -2490,14 +2612,14 @@ function initializeFirewallRulesTable() {
   const groupOptions = firewallGroupOptions(groups);
   const groupValueFormatter = firewallGroupFormatter(groupOptions);
   const rows = [...JSON.parse(tableElement.dataset.rules || "[]"), newFirewallRuleRow(interfaces[0] || "")];
-  const tableHeight = `${Math.min(Math.max(rows.length * 42 + 42, 90), 240)}px`;
+  const tableHeight = `${Math.min(Math.max(rows.length * 28 + 34, 90), 240)}px`;
   try {
     new Tabulator(tableElement, {
       data: rows,
       index: "id",
       layout: "fitColumns",
       height: tableHeight,
-      rowHeight: 42,
+      rowHeight: 28,
       placeholder: "No firewall rules configured.",
       reactiveData: false,
       rowContextMenu: [
@@ -2507,7 +2629,7 @@ function initializeFirewallRulesTable() {
           disabled: (_component) => _component.getData().is_new,
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -2568,16 +2690,16 @@ function initializeFirewallRulesTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
-          editor: true,
+          formatter: labFoundryBooleanFormatter,
+          editor: "tickCross",
           hozAlign: "center",
           width: 95,
           cellEdited: (cell) => autoSaveFirewallRule(cell, csrf),
         },
         { title: "Description", field: "description", editor: "input", cellEdited: (cell) => autoSaveFirewallRule(cell, csrf) },
-      ],
+      ], "name"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "name");
       },
     });
     if (fallback) {
@@ -2642,7 +2764,7 @@ function initializeManagedFirewallRulesTable() {
       index: "id",
       layout: "fitColumns",
       height: "100%",
-      rowHeight: 42,
+      rowHeight: 28,
       placeholder: "No managed service rules.",
       reactiveData: false,
       columns: [
@@ -2664,7 +2786,7 @@ function initializeManagedFirewallRulesTable() {
         { title: "Ports", field: "destination_port", width: 120 },
         { title: "Interface", field: "interface_name", width: 120 },
         { title: "Priority", field: "priority", width: 100 },
-        { title: "Enabled", field: "enabled", formatter: "tickCross", hozAlign: "center", width: 95 },
+        { title: "Enabled", field: "enabled", formatter: labFoundryBooleanFormatter, hozAlign: "center", width: 95 },
         { title: "Description", field: "description" },
       ],
       rowFormatter: (row) => {
@@ -2788,7 +2910,7 @@ function initializeServicesTable() {
         {
           title: "Startup",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           width: 125,
           hozAlign: "center",
@@ -3093,7 +3215,7 @@ function initializeUsersTable() {
           disabled: (component) => component.getData().is_new || component.getData().is_current,
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Username",
           field: "username",
@@ -3125,7 +3247,7 @@ function initializeUsersTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           hozAlign: "center",
           width: 110,
         },
@@ -3149,9 +3271,9 @@ function initializeUsersTable() {
           formatter: (cell) => (cell.getValue() ? '<span class="status-pill good">current</span>' : ""),
           width: 110,
         },
-      ],
+      ], "username"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "username");
       },
     });
     if (fallback) {
@@ -3263,6 +3385,7 @@ async function autoSaveKmsKey(cell, csrf) {
   const data = row.getData();
   if (data.is_new) {
     if (!hasRequiredKmsKeyFields(data)) {
+      reformatPendingNewRecord(cell);
       return;
     }
     try {
@@ -3358,7 +3481,7 @@ function initializeKmsClientsTable() {
           action: (event, row) => deleteKmsClientFromMenu(row, csrf),
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -3394,7 +3517,7 @@ function initializeKmsClientsTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 100,
@@ -3409,9 +3532,9 @@ function initializeKmsClientsTable() {
           minWidth: 220,
           cellEdited: (cell) => autoSaveKmsClient(cell, csrf),
         },
-      ],
+      ], "name"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "name");
       },
     });
     if (fallback) {
@@ -3454,7 +3577,7 @@ function initializeKmsKeysTable() {
           action: (event, row) => deleteKmsKeyFromMenu(row, csrf),
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -3506,7 +3629,7 @@ function initializeKmsKeysTable() {
         {
           title: "Exportable",
           field: "exportable",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 110,
@@ -3516,7 +3639,7 @@ function initializeKmsKeysTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 100,
@@ -3531,9 +3654,9 @@ function initializeKmsKeysTable() {
           minWidth: 220,
           cellEdited: (cell) => autoSaveKmsKey(cell, csrf),
         },
-      ],
+      ], "name"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "name");
       },
     });
     if (fallback) {
@@ -3644,26 +3767,26 @@ function updateKmsValidation(payload = {}) {
   status.textContent = errors.length ? "needs attention" : "valid";
   status.classList.toggle("good", errors.length === 0);
   status.classList.toggle("warn", errors.length > 0);
-  const terminalNote = validationPanel.querySelector(".terminal-note");
+  const previewAnchor = validationPanel.querySelector("[data-config-preview-row]");
   let errorBox = validationPanel.querySelector("[data-kms-validation-errors]");
   const validMessage = validationPanel.querySelector("[data-kms-validation-message]");
   if (errors.length === 0) {
     errorBox?.remove();
-    if (!(validMessage instanceof HTMLElement) && terminalNote instanceof HTMLElement) {
+    if (!(validMessage instanceof HTMLElement)) {
       const message = document.createElement("p");
       message.className = "muted";
       message.setAttribute("data-kms-validation-message", "");
       message.textContent = "The desired KMS state passes LabFoundry validation. Appliance validation still runs through the allowlisted KMS helper before PyKMIP changes are applied.";
-      validationPanel.insertBefore(message, terminalNote);
+      validationPanel.insertBefore(message, previewAnchor);
     }
     return;
   }
   validMessage?.remove();
-  if (!(errorBox instanceof HTMLElement) && terminalNote instanceof HTMLElement) {
+  if (!(errorBox instanceof HTMLElement)) {
     errorBox = document.createElement("div");
     errorBox.className = "alert error";
     errorBox.setAttribute("data-kms-validation-errors", "");
-    validationPanel.insertBefore(errorBox, terminalNote);
+    validationPanel.insertBefore(errorBox, previewAnchor);
   }
   if (errorBox instanceof HTMLElement) {
     errorBox.innerHTML = "";
@@ -3714,11 +3837,7 @@ function chronyGuardedTickFormatter(cell) {
   if (!chronyUpstreamRowHasSource(cell)) {
     return "";
   }
-  const enabled = Boolean(cell.getValue());
-  const label = enabled ? "true" : "false";
-  const glyph = enabled ? "✓" : "✕";
-  const tone = enabled ? "good" : "bad";
-  return `<span class="boolean-glyph ${tone}" aria-label="${label}">${glyph}</span>`;
+  return labFoundryBooleanFormatter(cell);
 }
 
 function chronyGuardedTextFormatter(cell) {
@@ -3782,7 +3901,7 @@ function initializeChronyUpstreamsTable() {
       rowHeight: 34,
       placeholder: "Add an upstream source.",
       reactiveData: false,
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Source",
           field: "source",
@@ -3790,14 +3909,17 @@ function initializeChronyUpstreamsTable() {
           minWidth: 180,
           formatter: (cell) => {
             const value = String(cell.getValue() || "");
-            return escapeHtml(value || "+ Add source here");
+            return dnsAddRowHintFormatter(cell, value || "+ Add source here");
           },
         },
         { title: "NTS", field: "use_nts", formatter: chronyGuardedTickFormatter, editor: "tickCross", editable: chronyUpstreamRowHasSource, width: 70, hozAlign: "center" },
         { title: "Max delay", field: "maxdelay", editor: "input", editable: chronyUpstreamRowHasSource, width: 105, formatter: chronyGuardedTextFormatter },
         { title: "Enabled", field: "enabled", formatter: chronyGuardedTickFormatter, editor: "tickCross", editable: chronyUpstreamRowHasSource, width: 92, hozAlign: "center" },
         { title: "Description", field: "description", editor: "input", editable: chronyUpstreamRowHasSource, minWidth: 170, formatter: chronyGuardedTextFormatter },
-      ],
+      ], "source"),
+      rowFormatter: (row) => {
+        markNewRecordRow(row, "source");
+      },
     });
     table.on("cellEdited", (cell) => {
       const row = cell.getRow();
@@ -3853,26 +3975,26 @@ function updateNtpValidation(payload = {}) {
   status.textContent = errors.length ? "needs attention" : "valid";
   status.classList.toggle("good", errors.length === 0);
   status.classList.toggle("warn", errors.length > 0);
-  const terminalNote = validationPanel.querySelector(".terminal-note");
+  const previewAnchor = validationPanel.querySelector("[data-config-preview-row]");
   let errorBox = validationPanel.querySelector("[data-ntp-validation-errors]");
   const validMessage = validationPanel.querySelector("[data-ntp-validation-message]");
   if (errors.length === 0) {
     errorBox?.remove();
-    if (!(validMessage instanceof HTMLElement) && terminalNote instanceof HTMLElement) {
+    if (!(validMessage instanceof HTMLElement)) {
       const message = document.createElement("p");
       message.className = "muted";
       message.setAttribute("data-ntp-validation-message", "");
       message.textContent = "The desired Chrony state passes LabFoundry validation. Appliance validation still runs through the allowlisted Chrony helper before apply.";
-      validationPanel.insertBefore(message, terminalNote);
+      validationPanel.insertBefore(message, previewAnchor);
     }
     return;
   }
   validMessage?.remove();
-  if (!(errorBox instanceof HTMLElement) && terminalNote instanceof HTMLElement) {
+  if (!(errorBox instanceof HTMLElement)) {
     errorBox = document.createElement("ul");
     errorBox.className = "error-list";
     errorBox.setAttribute("data-ntp-validation-errors", "");
-    validationPanel.insertBefore(errorBox, terminalNote);
+    validationPanel.insertBefore(errorBox, previewAnchor);
   }
   if (errorBox instanceof HTMLElement) {
     errorBox.innerHTML = "";
@@ -4008,11 +4130,6 @@ function initializeChronySourceHealthModal() {
   if (closeButton instanceof HTMLButtonElement) {
     closeButton.addEventListener("click", () => modal.close());
   }
-  modal.addEventListener("click", (event) => {
-    if (event.target === modal) {
-      modal.close();
-    }
-  });
 }
 
 function showWanMessage(elementId, message) {
@@ -4149,6 +4266,7 @@ async function autoSaveWanRoute(cell, csrf) {
   const data = row.getData();
   if (data.is_new) {
     if (!hasRequiredWanRouteFields(data)) {
+      reformatPendingNewRecord(cell);
       return;
     }
     try {
@@ -4181,6 +4299,7 @@ async function autoSaveWanPolicy(cell, csrf) {
   const data = row.getData();
   if (data.is_new) {
     if (!hasRequiredWanPolicyFields(data)) {
+      reformatPendingNewRecord(cell);
       return;
     }
     try {
@@ -4213,6 +4332,7 @@ async function autoSaveWanNatRule(cell, csrf) {
   const data = row.getData();
   if (data.is_new) {
     if (!hasRequiredWanNatFields(data)) {
+      reformatPendingNewRecord(cell);
       return;
     }
     try {
@@ -4248,6 +4368,7 @@ async function autoSaveWanRoutingRule(cell, csrf) {
   }
   if (data.is_new) {
     if (!hasRequiredWanRoutingFields(data)) {
+      reformatPendingNewRecord(cell);
       return;
     }
     try {
@@ -4393,7 +4514,7 @@ function initializeRoutesWanRoutingTable() {
           disabled: (component) => component.getData().is_new || component.getData().generated,
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -4450,7 +4571,7 @@ function initializeRoutesWanRoutingTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           editable: (cell) => !cell.getRow().getData().generated,
           hozAlign: "center",
@@ -4466,10 +4587,10 @@ function initializeRoutesWanRoutingTable() {
           minWidth: 190,
           cellEdited: (cell) => autoSaveWanRoutingRule(cell, csrf),
         },
-      ],
+      ], "name"),
       rowFormatter: (row) => {
         const data = row.getData();
-        row.getElement().classList.toggle("new-record-row", Boolean(data.is_new));
+        markNewRecordRow(row, "name");
         row.getElement().classList.toggle("readonly-row", Boolean(data.generated));
       },
     });
@@ -4512,7 +4633,7 @@ function initializeRoutesWanNatTable() {
           disabled: (component) => component.getData().is_new,
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -4541,7 +4662,7 @@ function initializeRoutesWanNatTable() {
         {
           title: "Masq",
           field: "masquerade",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 90,
@@ -4558,7 +4679,7 @@ function initializeRoutesWanNatTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 100,
@@ -4566,9 +4687,9 @@ function initializeRoutesWanNatTable() {
           cellEdited: (cell) => autoSaveWanNatRule(cell, csrf),
         },
         { title: "Description", field: "description", editor: "input", minWidth: 180, cellEdited: (cell) => autoSaveWanNatRule(cell, csrf) },
-      ],
+      ], "name"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "name");
       },
     });
     if (fallback) {
@@ -4612,7 +4733,7 @@ function initializeRoutesWanRoutesTable() {
           disabled: (component) => component.getData().is_new,
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Destination",
           field: "destination_cidr",
@@ -4657,16 +4778,16 @@ function initializeRoutesWanRoutesTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 100,
           headerSort: false,
           cellEdited: (cell) => autoSaveWanRoute(cell, csrf),
         },
-      ],
+      ], "destination_cidr"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "destination_cidr");
       },
     });
     if (fallback) {
@@ -4705,7 +4826,7 @@ function initializeRoutesWanPoliciesTable() {
           disabled: (component) => component.getData().is_new,
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -4724,7 +4845,7 @@ function initializeRoutesWanPoliciesTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 100,
@@ -4732,9 +4853,9 @@ function initializeRoutesWanPoliciesTable() {
           cellEdited: (cell) => autoSaveWanPolicy(cell, csrf),
         },
         { title: "Description", field: "description", editor: "input", minWidth: 180, cellEdited: (cell) => autoSaveWanPolicy(cell, csrf) },
-      ],
+      ], "name"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "name");
       },
     });
     if (fallback) {
@@ -4999,6 +5120,7 @@ async function refreshNetworkSideStack() {
   const nextSideStack = nextDocument.querySelector("aside.side-stack");
   if (nextSideStack instanceof HTMLElement) {
     currentSideStack.replaceWith(nextSideStack);
+    highlightConfigPreviews(nextSideStack);
   }
 }
 
@@ -5391,7 +5513,7 @@ function initializeVlanInterfacesTable() {
           action: (event, row) => deleteVlanInterfaceFromMenu(row, csrf),
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -5472,9 +5594,9 @@ function initializeVlanInterfacesTable() {
           headerSort: false,
           cellEdited: (cell) => autoSaveVlanInterface(cell, csrf),
         },
-      ],
+      ], "vlan_id"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "vlan_id");
         row.getElement().classList.toggle("locked-record-row", Boolean(row.getData().parent_missing));
       },
     });
@@ -5529,7 +5651,7 @@ function initializeDnsRecordsTableElement(tableElement) {
           minWidth: 180,
           cellEdited: (cell) => autoSaveDnsRecord(cell, csrf),
         },
-        { title: "Domain", field: "domain", minWidth: 190, headerSort: false },
+        { title: "Domain", field: "domain", formatter: dnsRecordDomainFormatter, minWidth: 190, headerSort: false },
         {
           title: "Family",
           field: "record_type",
@@ -5560,7 +5682,7 @@ function initializeDnsRecordsTableElement(tableElement) {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           editable: dnsRecordCellEditable,
           hozAlign: "center",
@@ -5579,8 +5701,7 @@ function initializeDnsRecordsTableElement(tableElement) {
         },
       ],
       rowFormatter: (row) => {
-        const element = row.getElement();
-        element.classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "host_label");
       },
     });
     if (fallback) {
@@ -5758,7 +5879,7 @@ function initializeDhcpScopesTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           editable: (cell) => dhcpScopeCellEditable(cell, existingScopeNames),
           hozAlign: "center",
@@ -5839,7 +5960,7 @@ function initializeDhcpOptionsTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 100,
@@ -5937,7 +6058,7 @@ function initializeDhcpReservationsTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           editable: dhcpReservationCellEditable,
           hozAlign: "center",
@@ -6000,7 +6121,7 @@ function initializeEsxiPxeHostsTable() {
           action: (event, row) => deleteEsxiHost(row, csrf),
         },
       ] : false,
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Host",
           field: "hostname",
@@ -6079,17 +6200,17 @@ function initializeEsxiPxeHostsTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: canWrite ? "tickCross" : false,
           hozAlign: "center",
           width: 100,
           headerSort: false,
           cellEdited: (cell) => autoSaveEsxiHost(cell, csrf),
         },
-      ],
+      ], "hostname"),
       rowFormatter: (row) => {
         const data = row.getData();
-        row.getElement().classList.toggle("new-record-row", Boolean(data.is_new));
+        markNewRecordRow(row, "hostname");
         row.getElement().classList.toggle("managed-record-row", Boolean(data.is_default));
       },
     });
@@ -6589,7 +6710,7 @@ function updateFirewallDesiredState(payload = {}) {
     status.classList.toggle("good", valid);
     status.classList.toggle("warn", !valid);
   }
-  const terminalNote = validationPanel.querySelector(".terminal-note");
+  const previewAnchor = validationPanel.querySelector("[data-config-preview-row]");
   let errorList = validationPanel.querySelector("[data-firewall-validation-errors]");
   let message = validationPanel.querySelector("[data-firewall-validation-message]");
   if (valid) {
@@ -6600,7 +6721,7 @@ function updateFirewallDesiredState(payload = {}) {
       message = document.createElement("p");
       message.className = "muted";
       message.setAttribute("data-firewall-validation-message", "");
-      validationPanel.insertBefore(message, terminalNote);
+      validationPanel.insertBefore(message, previewAnchor);
     }
     message.textContent =
       "The desired firewall state passes LabFoundry validation. Appliance validation still runs through the allowlisted nftables helper before apply.";
@@ -6612,7 +6733,7 @@ function updateFirewallDesiredState(payload = {}) {
       errorList = document.createElement("ul");
       errorList.className = "error-list";
       errorList.setAttribute("data-firewall-validation-errors", "");
-      validationPanel.insertBefore(errorList, terminalNote);
+      validationPanel.insertBefore(errorList, previewAnchor);
     }
     errorList.innerHTML = "";
     errors.forEach((error) => {
@@ -7140,7 +7261,7 @@ function updateVcfBackupValidation(payload = {}) {
     highlightConfigPreviewElement(configPreview);
   }
   if (validationPanel instanceof HTMLElement && payload.valid !== undefined) {
-    const terminalNote = validationPanel.querySelector(".terminal-note");
+    const previewAnchor = validationPanel.querySelector("[data-config-preview-row]");
     let errorList = validationPanel.querySelector("[data-vcf-validation-errors]");
     let message = validationPanel.querySelector("[data-vcf-validation-message]");
     if (payload.valid) {
@@ -7151,7 +7272,7 @@ function updateVcfBackupValidation(payload = {}) {
         message = document.createElement("p");
         message.className = "muted";
         message.setAttribute("data-vcf-validation-message", "");
-        validationPanel.insertBefore(message, terminalNote);
+        validationPanel.insertBefore(message, previewAnchor);
       }
       message.textContent = "The desired VCF backup SFTP state passes LabFoundry validation. Appliance validation still runs through the allowlisted OpenSSH helper before apply.";
     } else {
@@ -7162,7 +7283,7 @@ function updateVcfBackupValidation(payload = {}) {
         errorList = document.createElement("ul");
         errorList.className = "error-list";
         errorList.setAttribute("data-vcf-validation-errors", "");
-        validationPanel.insertBefore(errorList, terminalNote);
+        validationPanel.insertBefore(errorList, previewAnchor);
       }
       errorList.innerHTML = "";
       errors.forEach((error) => {
@@ -7253,6 +7374,7 @@ async function autoSaveVcfRegistryBundle(cell, csrf) {
   const row = cell.getRow();
   const data = row.getData();
   if (data.is_new && !hasRequiredVcfRegistryBundleFields(data)) {
+    reformatPendingNewRecord(cell);
     return;
   }
   const url = data.is_new ? "/vcf-private-registry/bundles" : `/vcf-private-registry/bundles/${data.id}/edit`;
@@ -7311,7 +7433,7 @@ function initializeVcfRegistryBundlesTable() {
           action: (_event, row) => deleteVcfRegistryBundleFromMenu(row, csrf),
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -7347,7 +7469,7 @@ function initializeVcfRegistryBundlesTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 95,
@@ -7362,9 +7484,9 @@ function initializeVcfRegistryBundlesTable() {
           minWidth: 180,
           cellEdited: (cell) => autoSaveVcfRegistryBundle(cell, csrf),
         },
-      ],
+      ], "name"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "name");
       },
     });
     if (fallback) {
@@ -7452,7 +7574,7 @@ function updateVcfRegistryValidation(payload = {}) {
     highlightConfigPreviewElement(relocationPreview);
   }
   if (validationPanel instanceof HTMLElement && payload.valid !== undefined) {
-    const firstTerminalNote = validationPanel.querySelector(".terminal-note");
+    const previewAnchor = validationPanel.querySelector("[data-config-preview-row]");
     let errorList = validationPanel.querySelector("[data-vcf-registry-validation-errors]");
     let message = validationPanel.querySelector("[data-vcf-registry-validation-message]");
     let warningList = validationPanel.querySelector("[data-vcf-registry-validation-warnings]");
@@ -7464,7 +7586,7 @@ function updateVcfRegistryValidation(payload = {}) {
         message = document.createElement("p");
         message.className = "muted";
         message.setAttribute("data-vcf-registry-validation-message", "");
-        validationPanel.insertBefore(message, firstTerminalNote);
+        validationPanel.insertBefore(message, previewAnchor);
       }
       message.textContent = "The desired VCF private registry state passes LabFoundry validation. Appliance validation still runs through the allowlisted Harbor helper before apply.";
     } else {
@@ -7475,7 +7597,7 @@ function updateVcfRegistryValidation(payload = {}) {
         errorList = document.createElement("ul");
         errorList.className = "error-list";
         errorList.setAttribute("data-vcf-registry-validation-errors", "");
-        validationPanel.insertBefore(errorList, firstTerminalNote);
+        validationPanel.insertBefore(errorList, previewAnchor);
       }
       errorList.innerHTML = "";
       errors.forEach((error) => {
@@ -7488,7 +7610,7 @@ function updateVcfRegistryValidation(payload = {}) {
       warningList = document.createElement("ul");
       warningList.className = "warning-list";
       warningList.setAttribute("data-vcf-registry-validation-warnings", "");
-      validationPanel.insertBefore(warningList, firstTerminalNote);
+      validationPanel.insertBefore(warningList, previewAnchor);
     }
     warningList.innerHTML = "";
     warnings.forEach((warning) => {
@@ -7716,6 +7838,7 @@ async function autoSaveVcfDepotProfile(cell, csrf) {
   const row = cell.getRow();
   const data = row.getData();
   if (data.is_new && !hasRequiredVcfDepotProfileFields(data)) {
+    reformatPendingNewRecord(cell);
     return;
   }
   const url = data.is_new ? "/vcf-offline-depot/profiles" : `/vcf-offline-depot/profiles/${data.id}/edit`;
@@ -7857,7 +7980,7 @@ function initializeVcfDepotProfilesTable() {
           action: (_event, row) => deleteVcfDepotProfileFromMenu(row, csrf),
         },
       ],
-      columns: [
+      columns: lockNewRecordColumns([
         {
           title: "Name",
           field: "name",
@@ -7914,7 +8037,7 @@ function initializeVcfDepotProfilesTable() {
         {
           title: "Automated",
           field: "automated_install",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 105,
@@ -7924,7 +8047,7 @@ function initializeVcfDepotProfilesTable() {
         {
           title: "Upgrades only",
           field: "upgrades_only",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 120,
@@ -7934,7 +8057,7 @@ function initializeVcfDepotProfilesTable() {
         {
           title: "Patches only",
           field: "patches_only",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 115,
@@ -7977,7 +8100,7 @@ function initializeVcfDepotProfilesTable() {
         {
           title: "Enabled",
           field: "enabled",
-          formatter: "tickCross",
+          formatter: labFoundryBooleanFormatter,
           editor: "tickCross",
           hozAlign: "center",
           width: 95,
@@ -7992,9 +8115,9 @@ function initializeVcfDepotProfilesTable() {
           width: 110,
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
         },
-      ],
+      ], "name"),
       rowFormatter: (row) => {
-        row.getElement().classList.toggle("new-record-row", Boolean(row.getData().is_new));
+        markNewRecordRow(row, "name");
       },
     });
     if (fallback) {
@@ -8432,7 +8555,7 @@ function updateVcfDepotValidation(payload = {}) {
     highlightConfigPreviewElement(commandPreview);
   }
   if (validationPanel instanceof HTMLElement && payload.valid !== undefined) {
-    const terminalNote = validationPanel.querySelector(".terminal-note");
+    const previewAnchor = validationPanel.querySelector("[data-config-preview-row]");
     let errorList = validationPanel.querySelector("[data-vcf-depot-validation-errors]");
     let message = validationPanel.querySelector("[data-vcf-depot-validation-message]");
     let warningList = validationPanel.querySelector("[data-vcf-depot-validation-warnings]");
@@ -8444,7 +8567,7 @@ function updateVcfDepotValidation(payload = {}) {
         message = document.createElement("p");
         message.className = "muted";
         message.setAttribute("data-vcf-depot-validation-message", "");
-        validationPanel.insertBefore(message, terminalNote);
+        validationPanel.insertBefore(message, previewAnchor);
       }
       message.textContent = "The desired VCF Offline Depot state passes LabFoundry validation. Appliance validation still runs through the allowlisted depot helper before apply.";
     } else {
@@ -8455,7 +8578,7 @@ function updateVcfDepotValidation(payload = {}) {
         errorList = document.createElement("ul");
         errorList.className = "error-list";
         errorList.setAttribute("data-vcf-depot-validation-errors", "");
-        validationPanel.insertBefore(errorList, terminalNote);
+        validationPanel.insertBefore(errorList, previewAnchor);
       }
       errorList.innerHTML = "";
       errors.forEach((error) => {
@@ -8468,7 +8591,7 @@ function updateVcfDepotValidation(payload = {}) {
       warningList = document.createElement("ul");
       warningList.className = "warning-list";
       warningList.setAttribute("data-vcf-depot-validation-warnings", "");
-      validationPanel.insertBefore(warningList, terminalNote);
+      validationPanel.insertBefore(warningList, previewAnchor);
     }
     warningList.innerHTML = "";
     warnings.forEach((warning) => {
@@ -9066,13 +9189,29 @@ function initializeTagEditors() {
         return;
       }
       const selected = currentValues().map((item) => item.toLowerCase());
+      let visibleOptions = 0;
       menu.querySelectorAll("[data-tag-option]").forEach((option) => {
         if (!(option instanceof HTMLElement)) {
           return;
         }
         const value = option.getAttribute("data-tag-option") || "";
-        option.classList.toggle("hidden", selected.includes(value.toLowerCase()));
+        const isHidden = selected.includes(value.toLowerCase());
+        option.classList.toggle("hidden", isHidden);
+        if (!isHidden) {
+          visibleOptions += 1;
+        }
       });
+      const emptyMessage = menu.dataset.tagEmptyMessage || "No options available.";
+      let emptyState = menu.querySelector("[data-tag-empty]");
+      if (!(emptyState instanceof HTMLElement)) {
+        emptyState = document.createElement("div");
+        emptyState.className = "tag-empty-option";
+        emptyState.setAttribute("data-tag-empty", "");
+        emptyState.setAttribute("role", "note");
+        menu.append(emptyState);
+      }
+      emptyState.textContent = emptyMessage;
+      emptyState.classList.toggle("hidden", visibleOptions > 0);
     };
 
     const displayLabelForValue = (value) => {
