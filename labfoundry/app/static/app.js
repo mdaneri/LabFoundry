@@ -2976,6 +2976,36 @@ function newUserRow() {
   };
 }
 
+function normalizeUserRoleSelection(value, allowedRoles) {
+  const rawValues = Array.isArray(value) ? value : String(value || "").split(",");
+  const selected = rawValues
+    .map((item) => String(item || "").trim())
+    .filter((item, index, values) => allowedRoles.includes(item) && values.indexOf(item) === index);
+  return selected.length ? selected : ["viewer"];
+}
+
+function userRolesFormatter(cell) {
+  const data = cell.getRow().getData();
+  const roles = Array.isArray(data.roles) && data.roles.length ? data.roles : String(data.roles_text || data.role || "viewer").split(",");
+  return escapeHtml(roles.map((role) => String(role).trim()).filter(Boolean).join(", ") || "viewer");
+}
+
+function syncUserRoleFields(row, roles) {
+  const selectedRoles = Array.isArray(roles) && roles.length ? roles : ["viewer"];
+  const roleText = selectedRoles.join(", ");
+  const data = row.getData();
+  data.role = selectedRoles[0] || "viewer";
+  data.roles = selectedRoles;
+  data.roles_label = roleText;
+  data.roles_text = roleText;
+  row.update({
+    role: data.role,
+    roles: data.roles,
+    roles_label: roleText,
+    roles_text: roleText,
+  });
+}
+
 function hasRequiredUserFields(data) {
   return Boolean((data.username || "").trim());
 }
@@ -3023,6 +3053,8 @@ function initializeUsersTable() {
   }
   const csrf = tableElement.dataset.csrf || "";
   const shells = JSON.parse(tableElement.dataset.shells || '["/sbin/nologin","/bin/bash","/bin/sh"]');
+  const roles = JSON.parse(tableElement.dataset.roles || '["viewer"]');
+  const roleOptions = roleValues(roles);
   const rows = [...JSON.parse(tableElement.dataset.users || "[]"), newUserRow()];
   try {
     new Tabulator(tableElement, {
@@ -3071,10 +3103,15 @@ function initializeUsersTable() {
         },
         {
           title: "Roles",
-          field: "roles_text",
-          editor: "input",
-          formatter: (cell) => escapeHtml(cell.getValue() || "viewer"),
-          cellEdited: (cell) => autoSaveUser(cell, csrf),
+          field: "roles",
+          editor: "list",
+          editorParams: { values: roleOptions, multiselect: true },
+          formatter: userRolesFormatter,
+          cellEdited: (cell) => {
+            const selectedRoles = normalizeUserRoleSelection(cell.getValue(), roles);
+            syncUserRoleFields(cell.getRow(), selectedRoles);
+            autoSaveUser(cell, csrf);
+          },
           minWidth: 190,
         },
         {

@@ -114,7 +114,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v37" in service_worker.text
+    assert "labfoundry-pwa-v38" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -147,7 +147,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
     assert 'data-monitor-page' in page.text
-    assert "/static/app.js?v=dns-chrony-vcfdt-20260708-5" in page.text
+    assert "/static/app.js?v=dns-chrony-vcfdt-20260708-6" in page.text
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -2924,6 +2924,7 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "admin" in users.text
     assert "vcf-backup" in users.text
     assert "vcf-depot" in users.text
+    assert "data-roles=" in users.text
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
@@ -2934,6 +2935,12 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "operator" in created.text
     assert "/bin/bash" in created.text
     assert "disabled" in created.text
+    multi_role_created = client.post(
+        "/users",
+        data={"username": "multi-role", "roles": ["service-admin", "certificate-operator"], "shell": "/sbin/nologin", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert multi_role_created.status_code == 303
     stale_role_created = client.post(
         "/users",
         data={"username": "demote-me", "role": "viewer", "roles": "admin", "shell": "/sbin/nologin", "csrf": csrf},
@@ -2946,6 +2953,8 @@ def test_local_users_page_separates_ldap_authentication(client):
     from labfoundry.app.models import User
 
     with SessionLocal() as db:
+        multi_role_user = db.execute(select(User).where(User.username == "multi-role")).scalar_one()
+        assert multi_role_user.roles_json == '["service-admin", "certificate-operator"]'
         demote_user = db.execute(select(User).where(User.username == "demote-me")).scalar_one()
         assert "admin" in demote_user.roles_json
         demote_user_id = demote_user.id
@@ -2975,6 +2984,11 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "disableUserFromMenu" in app_js.text
     assert "Disable user" in app_js.text
     users_table_js = app_js.text.split("function initializeUsersTable()", 1)[1].split("function initializeUserPasswordForm()", 1)[0]
+    roles_column_js = users_table_js.split('title: "Roles"', 1)[1].split('title: "Shell"', 1)[0]
+    assert 'field: "roles"' in roles_column_js
+    assert 'editor: "list"' in roles_column_js
+    assert "multiselect: true" in roles_column_js
+    assert "syncUserRoleFields" in roles_column_js
     enabled_column_js = users_table_js.split('title: "Enabled"', 1)[1].split('title: "OS account"', 1)[0]
     assert "editor:" not in enabled_column_js
     assert "validatePasswordMatch" in app_js.text
