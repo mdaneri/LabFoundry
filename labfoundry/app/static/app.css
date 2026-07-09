@@ -1738,6 +1738,26 @@ textarea {
   white-space: nowrap;
 }
 
+.boolean-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.boolean-glyph.good {
+  color: #15803d;
+}
+
+.boolean-glyph.bad {
+  color: #b91c1c;
+}
+
 .tabulator-shell {
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -1746,6 +1766,10 @@ textarea {
 
 .chrony-upstreams-table {
   min-height: 190px;
+}
+
+.chrony-upstreams-section {
+  margin-top: 14px;
 }
 
 .dns-fallback-table {

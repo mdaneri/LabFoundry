@@ -10,7 +10,26 @@ from labfoundry.app.services.dnsmasq import split_addresses, split_interfaces, s
 
 
 CHRONY_DEFAULT_HOSTNAME = "ntp.labfoundry.internal"
-CHRONY_DEFAULT_UPSTREAM_SERVERS = "time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com"
+CHRONY_LEGACY_GOOGLE_UPSTREAM_SERVERS = "time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com"
+CHRONY_DEFAULT_UPSTREAM_SOURCE_ROWS: list[dict[str, object]] = [
+    {
+        "id": "cloudflare-nts",
+        "source": "time.cloudflare.com",
+        "enabled": True,
+        "use_nts": True,
+        "description": "Cloudflare public NTS",
+        "maxdelay": "",
+    },
+    {
+        "id": "netnod-nts",
+        "source": "nts.netnod.se",
+        "enabled": True,
+        "use_nts": True,
+        "description": "Netnod public NTS",
+        "maxdelay": "",
+    },
+]
+CHRONY_DEFAULT_UPSTREAM_SERVERS = "\n".join(str(source["source"]) for source in CHRONY_DEFAULT_UPSTREAM_SOURCE_ROWS)
 CHRONY_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf"
 CHRONY_EFFECTIVE_CONFIG_PATH = "/etc/chrony.conf"
 CHRONY_DRIFT_PATH = "/var/lib/chrony/drift"
@@ -78,6 +97,23 @@ def dump_chrony_upstream_sources(sources: list[dict[str, object]]) -> str:
             }
         )
     return json.dumps(normalized, separators=(",", ":"), sort_keys=True)
+
+
+CHRONY_DEFAULT_UPSTREAM_SOURCES_JSON = dump_chrony_upstream_sources(CHRONY_DEFAULT_UPSTREAM_SOURCE_ROWS)
+
+
+def default_chrony_upstream_fields(raw_servers: str | None = None) -> dict[str, str]:
+    servers = split_servers(raw_servers or "")
+    legacy_servers = split_servers(CHRONY_LEGACY_GOOGLE_UPSTREAM_SERVERS)
+    if not servers or servers == legacy_servers:
+        return {
+            "upstream_servers": CHRONY_DEFAULT_UPSTREAM_SERVERS,
+            "upstream_sources_json": CHRONY_DEFAULT_UPSTREAM_SOURCES_JSON,
+        }
+    return {
+        "upstream_servers": "\n".join(servers),
+        "upstream_sources_json": "",
+    }
 
 
 def enabled_chrony_sources(settings: ChronySettings) -> list[dict[str, object]]:

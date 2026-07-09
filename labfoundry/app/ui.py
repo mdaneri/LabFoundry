@@ -285,8 +285,8 @@ from labfoundry.app.services.kms import (
 )
 from labfoundry.app.services.chrony import (
     CHRONY_DEFAULT_HOSTNAME,
-    CHRONY_DEFAULT_UPSTREAM_SERVERS,
     CHRONY_STAGED_CONFIG_PATH,
+    default_chrony_upstream_fields,
     dump_chrony_upstream_sources,
     join_allow_clients,
     chrony_settings_to_dict,
@@ -869,9 +869,11 @@ def get_chrony_settings_row(db: Session) -> ChronySettings:
     settings = db.execute(select(ChronySettings)).scalar_one_or_none()
     if settings is None:
         appliance_settings = get_appliance_settings_row(db)
+        chrony_upstreams = default_chrony_upstream_fields(appliance_settings.ntp_servers)
         settings = ChronySettings(
             hostname=CHRONY_DEFAULT_HOSTNAME,
-            upstream_servers=appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS,
+            upstream_servers=chrony_upstreams["upstream_servers"],
+            upstream_sources_json=chrony_upstreams["upstream_sources_json"],
             config_path=CHRONY_STAGED_CONFIG_PATH,
         )
         db.add(settings)

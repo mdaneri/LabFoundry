@@ -281,7 +281,7 @@ class ApplianceSettings(Base):
     root_ssh_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     service_dns_target_naming: Mapped[str] = mapped_column(String(20), default="ip")
     external_dns_servers: Mapped[str] = mapped_column(Text, default="1.1.1.1\n9.9.9.9")
-    ntp_servers: Mapped[str] = mapped_column(Text, default="time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com")
+    ntp_servers: Mapped[str] = mapped_column(Text, default="time.cloudflare.com\nnts.netnod.se")
     config_path: Mapped[str] = mapped_column(String(240), default="/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -295,8 +295,11 @@ class ChronySettings(Base):
     listen_interface: Mapped[str] = mapped_column(String(240), default="")
     listen_address: Mapped[str] = mapped_column(String(240), default="")
     port: Mapped[int] = mapped_column(Integer, default=123)
-    upstream_servers: Mapped[str] = mapped_column(Text, default="time1.google.com\ntime2.google.com\ntime3.google.com\ntime4.google.com")
-    upstream_sources_json: Mapped[str] = mapped_column(Text, default="")
+    upstream_servers: Mapped[str] = mapped_column(Text, default="time.cloudflare.com\nnts.netnod.se")
+    upstream_sources_json: Mapped[str] = mapped_column(
+        Text,
+        default='[{"description":"Cloudflare public NTS","enabled":true,"id":"cloudflare-nts","maxdelay":"","source":"time.cloudflare.com","use_nts":true},{"description":"Netnod public NTS","enabled":true,"id":"netnod-nts","maxdelay":"","source":"nts.netnod.se","use_nts":true}]',
+    )
     allow_clients: Mapped[str] = mapped_column(Text, default="any")
     nts_server_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     nts_server_cert_path: Mapped[str] = mapped_column(String(300), default="")

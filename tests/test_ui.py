@@ -114,7 +114,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v35" in service_worker.text
+    assert "labfoundry-pwa-v37" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -134,7 +134,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=dns-chrony-security-20260708-7" in offline.text
+    assert "/static/app.css?v=dns-chrony-security-20260708-9" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -147,7 +147,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
     assert 'data-monitor-page' in page.text
-    assert "/static/app.js?v=dns-chrony-vcfdt-20260708-3" in page.text
+    assert "/static/app.js?v=dns-chrony-vcfdt-20260708-5" in page.text
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -881,7 +881,10 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     assert "chrony-source-health-modal" in page.text
     assert "Check source health" not in page.text
     assert "chrony-upstreams-table" in page.text
+    assert page.text.index('id="chrony-upstreams-table"') < page.text.index('<aside class="side-stack">')
     assert "NTS-KE port" in page.text
+    assert 'type="number" value="4460" min="4460" max="4460" readonly aria-label="NTS-KE port"' in page.text
+    assert "4460/tcp" not in page.text
     assert "NTP port" in page.text
     assert "NTS key" not in page.text
     assert "/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf" in page.text
@@ -938,6 +941,10 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     assert js.status_code == 200
     assert "initializeChronySettings" in js.text
     assert "initializeChronyUpstreamsTable" in js.text
+    assert "chronyUpstreamRowHasSource" in js.text
+    assert "editable: chronyUpstreamRowHasSource" in js.text
+    assert "const tone = enabled ? \"good\" : \"bad\"" in js.text
+    assert "boolean-glyph ${tone}" in js.text
     assert "initializeChronySourceHealthModal" in js.text
     assert "Check Chrony source health" in js.text
     assert "openChronySourceHealthModal" in js.text

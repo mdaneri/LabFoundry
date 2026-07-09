@@ -156,7 +156,7 @@ from labfoundry.app.services.appliance_settings import (
     render_appliance_settings_config,
     validate_appliance_settings,
 )
-from labfoundry.app.services.chrony import CHRONY_DEFAULT_UPSTREAM_SERVERS
+from labfoundry.app.services.chrony import default_chrony_upstream_fields
 from labfoundry.app.services.ca import ca_service_state
 from labfoundry.app.services.firewall import (
     FIREWALL_ACTIONS,
@@ -386,7 +386,11 @@ def get_chrony_settings(db: Session) -> ChronySettings:
     settings = db.execute(select(ChronySettings)).scalar_one_or_none()
     if settings is None:
         appliance_settings = get_appliance_settings(db)
-        settings = ChronySettings(upstream_servers=appliance_settings.ntp_servers or CHRONY_DEFAULT_UPSTREAM_SERVERS)
+        chrony_upstreams = default_chrony_upstream_fields(appliance_settings.ntp_servers)
+        settings = ChronySettings(
+            upstream_servers=chrony_upstreams["upstream_servers"],
+            upstream_sources_json=chrony_upstreams["upstream_sources_json"],
+        )
         db.add(settings)
         db.commit()
         db.refresh(settings)

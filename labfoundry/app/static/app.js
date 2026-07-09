@@ -3661,12 +3661,34 @@ function chronyBlankUpstreamRow() {
   return {
     id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     source: "",
-    enabled: true,
+    enabled: false,
     use_nts: false,
     maxdelay: "",
     description: "",
     is_new: true,
   };
+}
+
+function chronyUpstreamRowHasSource(cell) {
+  return Boolean(String(cell.getRow().getData().source || "").trim());
+}
+
+function chronyGuardedTickFormatter(cell) {
+  if (!chronyUpstreamRowHasSource(cell)) {
+    return "";
+  }
+  const enabled = Boolean(cell.getValue());
+  const label = enabled ? "true" : "false";
+  const glyph = enabled ? "✓" : "✕";
+  const tone = enabled ? "good" : "bad";
+  return `<span class="boolean-glyph ${tone}" aria-label="${label}">${glyph}</span>`;
+}
+
+function chronyGuardedTextFormatter(cell) {
+  if (!chronyUpstreamRowHasSource(cell)) {
+    return "";
+  }
+  return escapeHtml(cell.getValue() || "");
 }
 
 function normalizeChronyUpstreamRows(rows = []) {
@@ -3734,17 +3756,17 @@ function initializeChronyUpstreamsTable() {
             return escapeHtml(value || "+ Add source here");
           },
         },
-        { title: "NTS", field: "use_nts", formatter: "tickCross", editor: "tickCross", width: 70, hozAlign: "center" },
-        { title: "Max delay", field: "maxdelay", editor: "input", width: 105, formatter: (cell) => escapeHtml(cell.getValue() || "") },
-        { title: "Enabled", field: "enabled", formatter: "tickCross", editor: "tickCross", width: 92, hozAlign: "center" },
-        { title: "Description", field: "description", editor: "input", minWidth: 170, formatter: (cell) => escapeHtml(cell.getValue() || "") },
+        { title: "NTS", field: "use_nts", formatter: chronyGuardedTickFormatter, editor: "tickCross", editable: chronyUpstreamRowHasSource, width: 70, hozAlign: "center" },
+        { title: "Max delay", field: "maxdelay", editor: "input", editable: chronyUpstreamRowHasSource, width: 105, formatter: chronyGuardedTextFormatter },
+        { title: "Enabled", field: "enabled", formatter: chronyGuardedTickFormatter, editor: "tickCross", editable: chronyUpstreamRowHasSource, width: 92, hozAlign: "center" },
+        { title: "Description", field: "description", editor: "input", editable: chronyUpstreamRowHasSource, minWidth: 170, formatter: chronyGuardedTextFormatter },
       ],
     });
     table.on("cellEdited", (cell) => {
       const row = cell.getRow();
       const data = row.getData();
       if (data.is_new && String(data.source || "").trim()) {
-        row.update({ is_new: false, id: data.id || `source-${Date.now()}` });
+        row.update({ is_new: false, id: data.id || `source-${Date.now()}`, enabled: true });
         ensureChronyUpstreamAddRow(table);
       }
       syncChronyUpstreamsHiddenInput(table);
