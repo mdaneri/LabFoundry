@@ -114,7 +114,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v52" in service_worker.text
+    assert "labfoundry-pwa-v53" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -134,7 +134,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=validation-modal-20260709-5" in offline.text
+    assert "/static/app.css?v=vcfdt-apply-20260709-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -150,8 +150,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=validation-modal-20260709-5" in page.text
-    assert "/static/app.js?v=validation-modal-20260709-5" in page.text
+    assert "/static/app.css?v=vcfdt-apply-20260709-1" in page.text
+    assert "/static/app.js?v=vcfdt-apply-20260709-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -6221,6 +6221,9 @@ def test_vcf_offline_depot_manual_profile_download_accepts_activation_code_witho
 
     login(client)
     page = client.get("/vcf-offline-depot")
+    assert "activation-code.txt" in page.text
+    assert "token not uploaded" not in page.text
+    assert "activation code staged" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
         f"/vcf-offline-depot/profiles/{profile_id}/download",

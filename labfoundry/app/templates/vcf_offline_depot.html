@@ -237,7 +237,7 @@
           <div class="settings-action-row">
             <span class="field-label"><span>Broadcom credentials</span><button class="help-icon" type="button" data-help="Stages either a Broadcom download token or activation code as desired-state secret material. Contents stay hidden and runtime files are refreshed by apply or manual profile jobs.">i</button></span>
             <span class="setting-inline-actions">
-              <strong><span data-vcf-depot-token-status>{{ vcf_depot_download_token.filename if vcf_depot_download_token.present else "token not uploaded" }}</span> / <span data-vcf-depot-activation-status>{{ vcf_depot_activation_code.filename if vcf_depot_activation_code.present else "code not uploaded" }}</span></strong>
+              <strong><span data-vcf-depot-token-status>{% if vcf_depot_download_token.present %}{{ vcf_depot_download_token.filename }}{% elif not vcf_depot_activation_code.present %}token not uploaded{% endif %}</span><span data-vcf-depot-credential-separator>{{ " / " if vcf_depot_download_token.present and vcf_depot_activation_code.present else "" }}</span><span data-vcf-depot-activation-status>{% if vcf_depot_activation_code.present %}{{ vcf_depot_activation_code.filename }}{% elif not vcf_depot_download_token.present %}code not uploaded{% endif %}</span></strong>
               <button class="button secondary compact-button" type="button" data-vcf-depot-credentials-modal-open data-vcf-depot-requires-tool {{ "disabled" if not vcf_depot_settings.tool_archive_path else "" }}>Stage</button>
             </span>
             <small class="muted" data-vcf-depot-credentials-status>

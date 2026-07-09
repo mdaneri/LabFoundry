@@ -8251,6 +8251,7 @@ function updateVcfDepotSummary(form, payload = {}) {
 function updateVcfDepotCredentialStatus(payload = {}) {
   const tokenStatus = document.querySelector("[data-vcf-depot-token-status]");
   const activationStatus = document.querySelector("[data-vcf-depot-activation-status]");
+  const credentialSeparator = document.querySelector("[data-vcf-depot-credential-separator]");
   const credentialsStatus = document.querySelector("[data-vcf-depot-credentials-status]");
   const currentTokenText = tokenStatus instanceof HTMLElement ? tokenStatus.textContent?.trim() || "" : "";
   const currentActivationText = activationStatus instanceof HTMLElement ? activationStatus.textContent?.trim() || "" : "";
@@ -8264,10 +8265,13 @@ function updateVcfDepotCredentialStatus(payload = {}) {
   const activationName = payload.activation_code_name || (activationPresent ? currentActivationText : "");
 
   if (tokenStatus instanceof HTMLElement && payload.download_token_present !== undefined) {
-    tokenStatus.textContent = tokenPresent ? tokenName || "token uploaded" : "token not uploaded";
+    tokenStatus.textContent = tokenPresent ? tokenName || "token uploaded" : activationPresent ? "" : "token not uploaded";
   }
   if (activationStatus instanceof HTMLElement && payload.activation_code_present !== undefined) {
-    activationStatus.textContent = activationPresent ? activationName || "code uploaded" : "code not uploaded";
+    activationStatus.textContent = activationPresent ? activationName || "code uploaded" : tokenPresent ? "" : "code not uploaded";
+  }
+  if (credentialSeparator instanceof HTMLElement) {
+    credentialSeparator.textContent = tokenPresent && activationPresent ? " / " : tokenPresent || activationPresent ? "" : " / ";
   }
   if (credentialsStatus instanceof HTMLElement) {
     const staged = [];
@@ -9573,11 +9577,12 @@ function initializeApplianceApplyProgress() {
     return row;
   };
 
-  form.addEventListener("submit", (event) => {
+  form.addEventListener("submit", async (event) => {
     const units = selectedUnits();
     if (!units.length) {
       return;
     }
+    event.preventDefault();
     if (title instanceof HTMLElement) {
       title.textContent = "Submitting appliance changes";
     }
@@ -9590,6 +9595,35 @@ function initializeApplianceApplyProgress() {
       button.disabled = true;
       button.textContent = "Submitting...";
     });
+    try {
+      const response = await fetch(form.action || window.location.href, {
+        method: (form.method || "POST").toUpperCase(),
+        body: new FormData(form),
+        credentials: "same-origin",
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        throw new Error(text.trim().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ") || "Appliance changes could not be submitted.");
+      }
+      document.open();
+      document.write(text);
+      document.close();
+    } catch (error) {
+      if (title instanceof HTMLElement) {
+        title.textContent = "Apply response interrupted";
+      }
+      if (detail instanceof HTMLElement) {
+        detail.textContent =
+          error instanceof Error
+            ? error.message
+            : "The browser did not receive a complete apply response. Reload the page to check the latest appliance apply task.";
+      }
+      steps.replaceChildren(...units.map((unit) => renderStep(unit, "Check latest task", "waiting")));
+      submitButtons.forEach((button) => {
+        button.disabled = false;
+        button.textContent = "Submit appliance changes";
+      });
+    }
   });
 }
 

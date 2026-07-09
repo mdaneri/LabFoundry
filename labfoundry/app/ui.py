@@ -5568,8 +5568,8 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
             steps.extend(
                 [
                     lambda: adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path),
-                    lambda: adapter.generate_vcf_offline_depot_software_depot_id(),
                     lambda: adapter.apply_vcf_offline_depot_application_properties(properties_path),
+                    lambda: adapter.generate_vcf_offline_depot_software_depot_id(),
                 ]
             )
         steps.extend(

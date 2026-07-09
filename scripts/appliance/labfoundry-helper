@@ -63,7 +63,17 @@ COMMANDS: dict[str, set[str]] = {
     "appliance-update": {"check", "apply", "restart-service"},
     "wan": {"validate", "apply"},
 }
-SYSTEMD_RUN_REAL_ACTIONS = {"apply", "reload", "stage-tool", "generate-software-depot-id", "sync", "apply-https", "relocate-bundles", "restart-service"}
+SYSTEMD_RUN_REAL_ACTIONS = {
+    "apply",
+    "reload",
+    "stage-tool",
+    "generate-software-depot-id",
+    "sync",
+    "apply-https",
+    "apply-properties",
+    "relocate-bundles",
+    "restart-service",
+}
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
 NO_PATH_ACTIONS = {("dnsmasq", "leases"), ("dnsmasq", "reload"), ("chronyd", "status"), ("vcf-offline-depot", "generate-software-depot-id")}
 LABFOUNDRY_SERVICE_USER = "labfoundry"
@@ -172,6 +182,7 @@ SSHD_ROOT_LOGIN_CONFIG_PATH = SSHD_CONFIG_DIR / "labfoundry-root-login.conf"
 VCF_DEPOT_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-offline-depot")
 VCF_DEPOT_SITE_PATH = NGINX_SITES_DIR / "vcf-offline-depot.conf"
 VCF_DEPOT_TOOL_DIR = Path("/opt/labfoundry/vcf-download-tool")
+VCF_DEPOT_RUNTIME_TOOL_DIR = Path("/var/lib/labfoundry/vcfDownloadTool/active-tool")
 VCF_DEPOT_STORE_PATH = Path("/mnt/labfoundry-vcf-offline-depot")
 VCF_DEPOT_PROD_PATH = VCF_DEPOT_STORE_PATH / "PROD"
 VCF_DEPOT_DEFAULT_USERNAME = "vcf-depot"
@@ -5019,23 +5030,28 @@ def _apply_vcf_download_tool_properties(properties_path: Path) -> int:
     if not text.strip():
         print("VCF Download Tool application properties cannot be empty.", file=sys.stderr)
         return 2
-    target_dir = _vcf_download_tool_home(tool_path) / "conf"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / "application-prodv2.properties"
-    target_path.write_text(text, encoding="utf-8")
-    os.chmod(target_path, 0o640)
+    target_paths = [
+        _vcf_download_tool_home(tool_path) / "conf" / "application-prodv2.properties",
+        VCF_DEPOT_RUNTIME_TOOL_DIR / "conf" / "application-prodv2.properties",
+    ]
+    for target_path in target_paths:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(text, encoding="utf-8")
+        os.chmod(target_path, 0o640)
     try:
         account = pwd.getpwnam(LABFOUNDRY_SERVICE_USER)
     except KeyError:
         account = None
     if account is not None:
-        _chown_path(target_dir, account.pw_uid, account.pw_gid)
-        _chown_path(target_path, account.pw_uid, account.pw_gid)
+        for target_path in target_paths:
+            _chown_path(target_path.parent, account.pw_uid, account.pw_gid)
+            _chown_path(target_path, account.pw_uid, account.pw_gid)
     print(
         json.dumps(
             {
                 "vcf_offline_depot": "application properties apply complete",
-                "config_path": str(target_path),
+                "config_path": str(target_paths[0]),
+                "runtime_config_path": str(target_paths[1]),
             },
             sort_keys=True,
         )

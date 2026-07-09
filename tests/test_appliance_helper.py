@@ -2724,6 +2724,7 @@ def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypat
     tool_bin = tool_dir / "extracted" / "vcfdt" / "bin" / "vcf-download-tool"
     tool_bin.parent.mkdir(parents=True)
     tool_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    runtime_tool_dir = tmp_path / "var" / "lib" / "labfoundry" / "vcfDownloadTool" / "active-tool"
     chowned: list[tuple[Path, int, int]] = []
 
     class Account:
@@ -2732,6 +2733,7 @@ def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypat
 
     monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_tool_dir)
     monkeypatch.setattr(helper.pwd, "getpwnam", lambda username: Account())
     monkeypatch.setattr(helper, "_chown_path", lambda path, uid, gid: chowned.append((path, uid, gid)))
 
@@ -2740,9 +2742,15 @@ def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypat
     payload = json.loads(captured.out)
     assert payload["vcf_offline_depot"] == "application properties apply complete"
     target = tool_dir / "extracted" / "vcfdt" / "conf" / "application-prodv2.properties"
+    runtime_target = runtime_tool_dir / "conf" / "application-prodv2.properties"
+    assert payload["config_path"] == str(target)
+    assert payload["runtime_config_path"] == str(runtime_target)
     assert target.read_text(encoding="utf-8") == properties_path.read_text(encoding="utf-8")
+    assert runtime_target.read_text(encoding="utf-8") == properties_path.read_text(encoding="utf-8")
     assert (target.parent, 1200, 1200) in chowned
     assert (target, 1200, 1200) in chowned
+    assert (runtime_target.parent, 1200, 1200) in chowned
+    assert (runtime_target, 1200, 1200) in chowned
 
     outside_path = tmp_path / "application-prodv2.properties"
     outside_path.write_text("spring.profiles.active=depot\n", encoding="utf-8")
