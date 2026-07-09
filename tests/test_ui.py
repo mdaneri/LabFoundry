@@ -114,7 +114,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v32" in service_worker.text
+    assert "labfoundry-pwa-v35" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -134,7 +134,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=dns-chrony-security-20260708-4" in offline.text
+    assert "/static/app.css?v=dns-chrony-security-20260708-7" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -147,7 +147,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
     assert 'data-monitor-page' in page.text
-    assert "/static/app.js?v=vcfdt-auth-request-20260708-1" in page.text
+    assert "/static/app.js?v=dns-chrony-vcfdt-20260708-3" in page.text
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -882,7 +882,8 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     assert "Check source health" not in page.text
     assert "chrony-upstreams-table" in page.text
     assert "NTS-KE port" in page.text
-    assert "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt" in page.text
+    assert "NTP port" in page.text
+    assert "NTS key" not in page.text
     assert "/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     upstream_sources = json.dumps(
@@ -3965,9 +3966,18 @@ def test_firewall_preview_derives_dns_dhcp_rule_from_dhcp_scope_vlan(client):
 
 def test_dns_listen_options_include_access_and_vlans_not_trunks(client):
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import VlanInterface
+    from labfoundry.app.models import PhysicalInterface, VlanInterface
 
     with SessionLocal() as db:
+        db.add(
+            PhysicalInterface(
+                name="eth9",
+                mac_address="00:15:5d:00:00:99",
+                role="unused",
+                mode="access",
+                ip_cidr="192.168.90.1/24",
+            )
+        )
         db.add(
             VlanInterface(
                 name="eth1.60",
@@ -3975,6 +3985,16 @@ def test_dns_listen_options_include_access_and_vlans_not_trunks(client):
                 vlan_id=60,
                 ip_cidr="192.168.60.1/24",
                 role="services",
+                enabled=True,
+            )
+        )
+        db.add(
+            VlanInterface(
+                name="eth1.70",
+                parent_interface="eth1",
+                vlan_id=70,
+                ip_cidr="192.168.70.1/24",
+                role="unused",
                 enabled=True,
             )
         )
@@ -3987,7 +4007,11 @@ def test_dns_listen_options_include_access_and_vlans_not_trunks(client):
     assert "eth2 - access / access / 192.168.50.1" in page.text
     assert "eth1.60 - VLAN 60 on eth1 / services / 192.168.60.1" in page.text
     assert "eth1 - access / trunk" not in page.text
+    assert "eth9 - unused / access / 192.168.90.1" not in page.text
+    assert "eth1.70 - VLAN 70 on eth1 / unused / 192.168.70.1" not in page.text
     assert 'data-tag-option="eth1.60"' in page.text
+    assert 'data-tag-option="eth9"' not in page.text
+    assert 'data-tag-option="eth1.70"' not in page.text
     assert 'data-tag-option="192.168.60.1"' not in page.text
 
 
@@ -5085,7 +5109,9 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert page.status_code == 200
     assert "VCF Offline Depot" in page.text
     assert "HTTPS Repository" not in page.text
-    assert "Download Profiles" in page.text
+    assert "Download profiles" in page.text
+    assert 'role="tab" data-tab-target="vcf-depot-preview-panel"' not in page.text
+    assert 'data-vcf-depot-command-preview' not in page.text
     assert "Tool & Credentials" not in page.text
     assert "Review appliance changes" in page.text
     assert "VCF Download Tool" in page.text
@@ -5147,11 +5173,13 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "depot-port-telemetry-row" not in page.text
     assert 'data-vcf-depot-software-depot-cell' in page.text
     assert 'data-vcf-depot-software-depot-id' in page.text
+    assert 'data-vcf-depot-software-depot-copy' in page.text
+    assert 'Copy software depot ID' in page.text
     assert 'data-autosave-upload-progress' in page.text
     assert "not generated" not in page.text
     assert "<span>Tool file</span>" not in page.text
     assert 'data-vcf-depot-tool-name' not in page.text
-    assert 'data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab"' in page.text
+    assert 'data-tab-storage-key="labfoundry:vcf-offline-depot:active-tab"' not in page.text
     assert "/mnt/labfoundry-vcf-offline-depot" in page.text
     assert "Depot store volume" in page.text
     assert page.text.count("fixed-value-field") >= 1
@@ -5165,6 +5193,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Listen addresses" in page.text
     assert "service-bind-editor" in page.text
     assert 'data-service-bind-address="192.168.50.1"' in page.text
+    assert '<div class="settings-action-row software-depot-id-row">' in page.text
     assert '<input class="readonly-inline-value software-depot-id-value hidden" type="text" value="" readonly data-vcf-depot-software-depot-id aria-label="Software depot ID">' in page.text
     assert 'action="/vcf-offline-depot/settings"' in page.text
     assert 'data-autosave-status-id="vcf-depot-settings-status"' in page.text
@@ -5175,9 +5204,6 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "embeddedEsx-6.7-INT" in page.text
     assert "esxio-9.1-INTL" in page.text
     assert 'href="/appliance-apply"' in page.text
-    assert "vcf-download-tool configuration get --software-depot-id" in page.text
-    assert "vcf-download-tool binaries list" in page.text
-
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "initializeVcfDepotSettings" in app_js.text
@@ -5186,7 +5212,11 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "componentValues" in app_js.text
     assert "esxPlatformValues" in app_js.text
     assert "vcfDepotDisabledPlatformsEditor" in app_js.text
-    assert "vcfDepotRememberActiveTab" in app_js.text
+    assert "formatVcfDepotDisabledPlatforms" in app_js.text
+    assert "vcf-platform-tooltip" in app_js.text
+    assert "Disabled platforms: ${escapeHtml(ariaLabel)}" in app_js.text
+    assert 'cssClass: "vcf-platforms-cell"' in app_js.text
+    assert "vcfDepotRememberActiveTab" not in app_js.text
     assert "tabulator-checklist-option" in app_js.text
     assert "tool staged" in app_js.text
     assert "DNS alias and target records created for this endpoint." in app_js.text
@@ -5214,6 +5244,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "copyTextWithTextareaFallback" in app_js.text
     assert "window.isSecureContext" in app_js.text
     assert "softwareDepotId instanceof HTMLInputElement" in app_js.text
+    assert "softwareDepotCopy.dataset.copyValue = depotId" in app_js.text
     assert "setVcfDepotToolDependentActions" in app_js.text
     assert "startVcfDepotProfileDownload" in app_js.text
     assert 'label: "Start download"' in app_js.text
@@ -5228,6 +5259,12 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert ".tabulator-checklist-editor" in app_css.text
     assert ".inline-action-row" in app_css.text
     assert ".setting-inline-actions" in app_css.text
+    assert ".software-depot-id-row" in app_css.text
+    assert ".copyable-inline-value" in app_css.text
+    assert ".vcf-platform-tooltip" in app_css.text
+    assert ".vcf-platform-tip table" in app_css.text
+    assert ".vcf-platforms-cell" in app_css.text
+    assert ".tabulator-cell.vcf-platforms-cell:hover .vcf-platform-tip" in app_css.text
     assert ".readonly-inline-value" in app_css.text
     assert ".software-depot-id-value" in app_css.text
     assert ".icon-button" in app_css.text

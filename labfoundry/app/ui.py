@@ -1007,7 +1007,7 @@ def service_bind_options(db: Session) -> list[dict]:
         mode = normalize_interface_mode(interface.mode)
         role = normalize_interface_role(interface.role)
         addresses = interface_addresses_from_cidrs(interface.ip_cidr, interface.ipv6_cidr)
-        if role == "management" or mode == "trunk" or not addresses:
+        if role in {"management", "unused"} or mode == "trunk" or not addresses:
             continue
         address_label = " / ".join(addresses)
         options.append(
@@ -1029,7 +1029,7 @@ def service_bind_options(db: Session) -> list[dict]:
             continue
         role = normalize_interface_role(vlan.role)
         addresses = interface_addresses_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
-        if role == "management" or not addresses:
+        if role in {"management", "unused"} or not addresses:
             continue
         address_label = " / ".join(addresses)
         options.append(

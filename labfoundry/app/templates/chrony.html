@@ -44,10 +44,21 @@
       <form class="form-stack" action="/chrony/settings" method="post" data-autosave-form data-ntp-settings data-autosave-status-id="ntp-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats Chrony as enabled desired state. The host service changes only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if chrony_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>NTS server</span><button class="help-icon" type="button" data-help="Enables Chrony NTS-KE for lab clients using CA-managed certificate material. Host listeners and TCP 4460 firewall rules change only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="nts_server_enabled" {{ "checked" if chrony_settings.nts_server_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="compact-service-field">
           <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="DNS name lab clients can use for the NTP endpoint. It is recorded in desired state and previews; DNS records remain owned by the DNS page.">i</button></span>
           <input name="hostname" value="{{ chrony_settings.hostname }}" autocomplete="off">
         </label>
+        <div class="form-grid compact-form-grid chrony-port-grid">
+          <label>
+            <span class="field-label"><span>NTP port</span><button class="help-icon" type="button" data-help="NTP uses UDP 123. LabFoundry keeps Chrony fixed on this protocol port for predictable firewall and client behavior.">i</button></span>
+            <input type="number" name="port" value="{{ chrony_settings.port }}" min="123" max="123">
+          </label>
+          <label>
+            <span class="field-label"><span>NTS-KE port</span><button class="help-icon" type="button" data-help="Chrony NTS Key Establishment uses TCP 4460. Firewall apply owns exposure for this port when NTS server mode is enabled.">i</button></span>
+            <input type="text" value="{{ chrony_settings.nts_ke_port }}/tcp" readonly aria-label="NTS-KE port">
+          </label>
+        </div>
         <input type="hidden" name="listen_interfaces_present" value="1">
         <div class="service-bind-editor stacked-service-bind-editor" data-service-bind>
           <div class="form-field">
@@ -86,10 +97,6 @@
             </div>
           </div>
         </div>
-        <label class="compact-service-field">
-          <span class="field-label"><span>Port</span><button class="help-icon" type="button" data-help="NTP uses UDP 123. LabFoundry keeps Chrony fixed on this protocol port for predictable firewall and client behavior.">i</button></span>
-          <input type="number" name="port" value="{{ chrony_settings.port }}" min="123" max="123">
-        </label>
         <input type="hidden" name="upstream_servers" value="{{ chrony_settings.upstream_servers }}">
         <input type="hidden" name="upstream_sources_json" value='{{ chrony_settings_json.upstream_sources | tojson }}' data-chrony-upstreams-json>
         <div class="form-field">
@@ -131,23 +138,8 @@
           <span class="field-label"><span>Allowed clients</span><button class="help-icon" type="button" data-help="Use any or one IPv4/IPv6 CIDR per line for Chrony allow rules. Firewall source groups can still narrow UDP 123 exposure during Firewall apply.">i</button></span>
           <textarea name="allow_clients" rows="4">{{ chrony_settings.allow_clients }}</textarea>
         </label>
-        <label class="switch-field"><span class="field-label"><span>NTS server</span><button class="help-icon" type="button" data-help="Enables Chrony NTS-KE for lab clients using CA-managed certificate and key paths. Host listeners and TCP 4460 firewall rules change only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="nts_server_enabled" {{ "checked" if chrony_settings.nts_server_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-        <div class="form-grid">
-          <div class="form-field">
-            <span class="field-label"><span>NTS-KE port</span><button class="help-icon" type="button" data-help="Chrony NTS Key Establishment uses TCP 4460. Firewall apply owns exposure for this port when NTS server mode is enabled.">i</button></span>
-            <div class="derived-field fixed-value-field"><strong>{{ chrony_settings.nts_ke_port }}/tcp</strong></div>
-          </div>
-          <div class="form-field">
-            <span class="field-label"><span>NTS certificate</span><button class="help-icon" type="button" data-help="Read-only CA-managed certificate path derived from the Chrony hostname. CA apply issues the material; Chrony apply consumes only paths.">i</button></span>
-            <div class="derived-field fixed-value-field"><strong>{{ chrony_nts_cert_path }}</strong></div>
-          </div>
-        </div>
-        <div class="form-field">
-          <span class="field-label"><span>NTS key</span><button class="help-icon" type="button" data-help="Read-only CA-managed private key path derived from the Chrony hostname. Private key contents are never rendered in previews or jobs.">i</button></span>
-          <div class="derived-field fixed-value-field"><strong>{{ chrony_nts_key_path }}</strong></div>
-        </div>
         <label class="switch-field"><span class="field-label"><span>Disable command port</span><button class="help-icon" type="button" data-help="Renders cmdport 0 to disable Chrony's network command port. Local LabFoundry status reads still use the allowlisted helper path.">i</button></span><input class="switch-input" type="checkbox" name="command_port_disabled" {{ "checked" if chrony_settings.command_port_disabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-        <div class="form-grid">
+        <div class="form-grid compact-form-grid">
           <label>
             <span class="field-label"><span>Minimum sources</span><button class="help-icon" type="button" data-help="Optional Chrony minsources value. Leave blank for Chrony's default source-selection behavior.">i</button></span>
             <input type="number" name="minsources" min="1" value="{{ chrony_settings.minsources or '' }}">

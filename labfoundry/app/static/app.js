@@ -7519,6 +7519,33 @@ function formatVcfDepotChoiceList(cell, values, emptyText) {
   return selected.map((item) => escapeHtml(values[item] || item)).join("<br>");
 }
 
+function formatVcfDepotDisabledPlatforms(cell, values, emptyText) {
+  const selected = vcfDepotListValues(cell.getValue());
+  if (!selected.length) {
+    return `<span class="muted">${escapeHtml(emptyText)}</span>`;
+  }
+  const summaryItems = selected.slice(0, 3).map((item) => escapeHtml(values[item] || item));
+  const summary = [
+    summaryItems.join("<br>"),
+    selected.length > summaryItems.length ? `<span class="muted">+ ${selected.length - summaryItems.length} more</span>` : "",
+  ].filter(Boolean).join("<br>");
+  const rows = selected.map((item) => {
+    const label = values[item] || item;
+    return `<tr><td><code>${escapeHtml(item)}</code></td><td>${escapeHtml(label)}</td></tr>`;
+  }).join("");
+  const ariaLabel = selected.map((item) => values[item] || item).join(", ");
+  return [
+    `<span class="vcf-platform-tooltip" tabindex="0" aria-label="Disabled platforms: ${escapeHtml(ariaLabel)}">`,
+    `<span class="vcf-platform-summary">${summary}</span>`,
+    '<span class="vcf-platform-tip" role="tooltip">',
+    '<strong>Disabled platforms</strong>',
+    '<table><thead><tr><th>Value</th><th>Label</th></tr></thead>',
+    `<tbody>${rows}</tbody></table>`,
+    '</span>',
+    '</span>',
+  ].join("");
+}
+
 function rememberActiveTab(storageKey, targetId) {
   if (!storageKey || !targetId) {
     return;
@@ -7527,17 +7554,6 @@ function rememberActiveTab(storageKey, targetId) {
     window.localStorage.setItem(storageKey, targetId);
   } catch {
     // Tab persistence is a convenience only; private browsing can disable it.
-  }
-}
-
-function vcfDepotRememberActiveTab() {
-  const tabList = document.querySelector("[data-tab-storage-key='labfoundry:vcf-offline-depot:active-tab']");
-  if (!(tabList instanceof HTMLElement)) {
-    return;
-  }
-  const activeButton = tabList.querySelector(".tab-button.active[data-tab-target]");
-  if (activeButton instanceof HTMLElement) {
-    rememberActiveTab(tabList.dataset.tabStorageKey || "", activeButton.dataset.tabTarget || "");
   }
 }
 
@@ -7634,7 +7650,6 @@ async function postVcfDepotProfileAction(url, data, csrf) {
     const plainText = text.trim().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
     throw new Error(plainText || "The VCFDT download profile could not be saved.");
   }
-  vcfDepotRememberActiveTab();
   window.location.reload();
 }
 
@@ -7895,8 +7910,9 @@ function initializeVcfDepotProfilesTable() {
           editorParams: {
             values: esxPlatformValues,
           },
-          formatter: (cell) => formatVcfDepotChoiceList(cell, esxPlatformValues, "none"),
+          formatter: (cell) => formatVcfDepotDisabledPlatforms(cell, esxPlatformValues, "none"),
           minWidth: 190,
+          cssClass: "vcf-platforms-cell",
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
         },
         {
@@ -8097,13 +8113,19 @@ function updateVcfDepotSoftwareDepotId(payload = {}) {
   const softwareDepotId = document.querySelector("[data-vcf-depot-software-depot-id]");
   const softwareDepotCell = document.querySelector("[data-vcf-depot-software-depot-cell]");
   const softwareDepotMessage = document.querySelector("[data-vcf-depot-software-depot-message]");
+  const softwareDepotCopy = document.querySelector("[data-vcf-depot-software-depot-copy]");
   if (softwareDepotId instanceof HTMLElement && payload.software_depot_id !== undefined) {
+    const depotId = payload.software_depot_id || "";
     if (softwareDepotId instanceof HTMLInputElement) {
-      softwareDepotId.value = payload.software_depot_id || "";
+      softwareDepotId.value = depotId;
     } else {
-      softwareDepotId.textContent = payload.software_depot_id || "";
+      softwareDepotId.textContent = depotId;
     }
-    softwareDepotId.classList.toggle("hidden", !payload.software_depot_id);
+    softwareDepotId.classList.toggle("hidden", !depotId);
+    if (softwareDepotCopy instanceof HTMLButtonElement) {
+      softwareDepotCopy.dataset.copyValue = depotId;
+      softwareDepotCopy.classList.toggle("hidden", !depotId);
+    }
     const button = softwareDepotCell?.querySelector("[data-vcf-depot-generate-id-modal-open]");
     if (button instanceof HTMLButtonElement) {
       button.textContent = "↻";
