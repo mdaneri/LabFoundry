@@ -2434,6 +2434,24 @@ def _management_proxy_location(upstream_host: str, upstream_port: int, forwarded
     ]
 
 
+def _management_ca_download_locations(upstream_host: str, upstream_port: int) -> list[str]:
+    lines: list[str] = []
+    for path in ("/ca/downloads/root-ca.pem", "/ca/downloads/ca-bundle.pem"):
+        lines.extend(
+            [
+                f"  location = {path} {{",
+                f"    proxy_pass http://{upstream_host}:{upstream_port};",
+                "    proxy_http_version 1.1;",
+                "    proxy_set_header Host $host;",
+                "    proxy_set_header X-Real-IP $remote_addr;",
+                "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+                "    proxy_set_header X-Forwarded-Proto http;",
+                "  }",
+            ]
+        )
+    return lines
+
+
 def _management_nginx_config(payload: dict, cert_path: Path | None = None, key_path: Path | None = None) -> str:
     fqdn = str(payload["fqdn"])
     https_enabled = bool(payload.get("management_https_enabled"))
@@ -2459,7 +2477,10 @@ def _management_nginx_config(payload: dict, cert_path: Path | None = None, key_p
             "server {",
             f"  listen {public_http_port} default_server;",
             "  server_name _;",
-            "  return 308 https://$host$request_uri;",
+            *_management_ca_download_locations(upstream_host, upstream_port),
+            "  location / {",
+            "    return 308 https://$host$request_uri;",
+            "  }",
             "}",
             "",
             "server {",

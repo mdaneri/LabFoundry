@@ -51,9 +51,9 @@ function Install-ApplianceRootCa {
 
     $rootPemPath = Join-Path $env:TEMP "labfoundry-$Name-root-ca.pem"
     $rootCerPath = Join-Path $env:TEMP "labfoundry-$Name-root-ca.cer"
-    $rootUrl = "https://$IpAddress/ca/downloads/root-ca.pem"
+    $rootUrl = "http://$IpAddress/ca/downloads/root-ca.pem"
     Write-Host "Downloading LabFoundry root CA from $rootUrl"
-    Invoke-WebRequest -Uri $rootUrl -SkipCertificateCheck -UseBasicParsing -TimeoutSec 30 -OutFile $rootPemPath
+    Invoke-WebRequest -Uri $rootUrl -UseBasicParsing -TimeoutSec 30 -OutFile $rootPemPath
 
     $pem = Get-Content -LiteralPath $rootPemPath -Raw
     $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::CreateFromPem($pem)
@@ -107,7 +107,7 @@ function Write-ConnectionSummary {
     Write-SummaryRow -Label "Console URL:" -Value "https://$IpAddress/"
     Write-SummaryRow -Label "API URL:" -Value "https://$IpAddress/openapi.json"
     Write-SummaryRow -Label "Swagger URL:" -Value "https://$IpAddress/api/docs"
-    Write-SummaryRow -Label "Root CA URL:" -Value "https://$IpAddress/ca/downloads/root-ca.pem"
+    Write-SummaryRow -Label "Root CA URL:" -Value "http://$IpAddress/ca/downloads/root-ca.pem"
     Write-SummaryRow -Label "SSH:" -Value "ssh admin@$IpAddress"
     if ($RootCaTrusted) {
         Write-SummaryRow -Label "HTTPS trust:" -Value "LabFoundry root CA imported for current user" -ValueColor Green
@@ -124,7 +124,7 @@ if ($SkipLabNetworkAdapters -and $IncludeLabNetworkAdapters) {
     throw "Pass either -SkipLabNetworkAdapters or -IncludeLabNetworkAdapters, not both."
 }
 if ($TrustRootCa -and $NoStart) {
-    throw "Pass -TrustRootCa only when the VM will be started, because the script must fetch the appliance root CA over HTTPS."
+    throw "Pass -TrustRootCa only when the VM will be started, because the script must fetch the appliance root CA from the running appliance."
 }
 
 $effectiveSkipLabNetworkAdapters = -not $IncludeLabNetworkAdapters

@@ -70,7 +70,25 @@ def write_nginx_management_config(*, fqdn: str, cert_path: str, key_path: str) -
 server {{
   listen 80 default_server;
   server_name _;
-  return 308 https://$host$request_uri;
+  location = /ca/downloads/root-ca.pem {{
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto http;
+  }}
+  location = /ca/downloads/ca-bundle.pem {{
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto http;
+  }}
+  location / {{
+    return 308 https://$host$request_uri;
+  }}
 }}
 
 server {{
