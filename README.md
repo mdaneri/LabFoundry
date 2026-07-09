@@ -172,6 +172,28 @@ pip install -e ".[dev]"
 uvicorn labfoundry.app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
+Run the repository syntax/content checks before committing broad UI, template,
+or documentation changes:
+
+```bash
+python scripts/check_repo.py
+```
+
+Install the local pre-commit hook to run the same checks automatically against
+changed Python, Jinja/HTML, Markdown, CSS, JavaScript, JSON, TOML, YAML,
+PowerShell, and SVG files:
+
+```bash
+pre-commit install
+pre-commit run --all-files
+```
+
+The checker is intentionally syntax-first: Python AST parsing, Jinja template
+parsing, `node --check` for JavaScript, structural CSS balancing, JSON/TOML
+parsing, Markdown fence/local-link checks, SVG XML parsing, UTF-8 validation,
+and unresolved merge-conflict marker detection. It skips vendored static assets,
+bundled third-party payloads, build output, and test-result artifacts.
+
 Run from Windows PowerShell using the WSL development virtualenv:
 
 ```powershell
