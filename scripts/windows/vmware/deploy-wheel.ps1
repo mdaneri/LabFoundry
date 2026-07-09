@@ -7,7 +7,10 @@ param(
     [string]$SshUser = 'admin',
     [string]$RemoteDirectory = '/tmp',
     [string]$Python = 'python',
+    [int]$ReadinessTimeoutSeconds = 60,
+    [int]$ReadinessPollSeconds = 2,
     [switch]$SkipBuild,
+    [switch]$SkipHelperSync,
     [string]$WheelPath = '',
     [switch]$SkipHostCheck
 )
@@ -170,7 +173,12 @@ if (-not $SkipBuild) {
 
 $resolvedWheelPath = Get-WheelPath -Path $WheelPath -Root $resolvedRepoRoot
 $wheelName = Split-Path -Leaf $resolvedWheelPath
+$helperPath = Join-Path $resolvedRepoRoot 'scripts\appliance\labfoundry-helper'
+if (-not $SkipHelperSync -and -not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
+    throw "LabFoundry helper script not found: $helperPath"
+}
 $remoteWheelPath = "$($RemoteDirectory.TrimEnd('/'))/$wheelName"
+$remoteHelperPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-helper"
 $remoteScriptPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-deploy-wheel.sh"
 
 if (-not $IpAddress) {
@@ -190,6 +198,9 @@ $deployScript = @'
 set -eu
 
 wheel="${1:?wheel path required}"
+timeout_seconds="${2:-60}"
+poll_seconds="${3:-2}"
+helper_path="${4:-}"
 venv="/opt/labfoundry/.venv"
 python="$venv/bin/python"
 
@@ -199,12 +210,24 @@ if [ ! -x "$python" ]; then
 fi
 
 "$python" -m pip install --force-reinstall --no-deps "$wheel"
+if [ -n "$helper_path" ]; then
+    install -o root -g root -m 0755 "$helper_path" /opt/labfoundry/bin/labfoundry-helper
+    sed -i 's/\r$//' /opt/labfoundry/bin/labfoundry-helper
+fi
 find "$venv" -type d -exec chmod 755 {} \;
 find "$venv" -type f -exec chmod 644 {} \;
 find "$venv/bin" -type f -exec chmod 755 {} \;
 systemctl restart labfoundry
 systemctl is-active labfoundry
-curl -f http://127.0.0.1:8000/openapi.json >/dev/null
+deadline=$(( $(date +%s) + timeout_seconds ))
+while ! curl -fsS http://127.0.0.1:8000/openapi.json >/dev/null; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "LabFoundry service is active, but loopback OpenAPI did not become reachable within ${timeout_seconds}s." >&2
+        journalctl -u labfoundry -n 80 --no-pager >&2 || true
+        exit 1
+    fi
+    sleep "$poll_seconds"
+done
 echo "LabFoundry service restarted and loopback OpenAPI is reachable."
 '@
 
@@ -214,11 +237,16 @@ $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) "labfoundry-deploy-whe
 try {
     Write-Host "Uploading wheel to $SshUser@$IpAddress`:$remoteWheelPath"
     Invoke-CheckedCommand -FilePath 'scp' -Arguments @($resolvedWheelPath, "${SshUser}@${IpAddress}:$remoteWheelPath")
+    if (-not $SkipHelperSync) {
+        Write-Host "Uploading appliance helper to $SshUser@$IpAddress`:$remoteHelperPath"
+        Invoke-CheckedCommand -FilePath 'scp' -Arguments @($helperPath, "${SshUser}@${IpAddress}:$remoteHelperPath")
+    }
     Write-Host "Uploading remote installer to $SshUser@$IpAddress`:$remoteScriptPath"
     Invoke-CheckedCommand -FilePath 'scp' -Arguments @($tempScript, "${SshUser}@${IpAddress}:$remoteScriptPath")
 
     Write-Host "Installing wheel and restarting labfoundry.service..."
-    Invoke-CheckedCommand -FilePath 'ssh' -Arguments @('-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath'")
+    $remoteHelperArgument = if ($SkipHelperSync) { '' } else { $remoteHelperPath }
+    Invoke-CheckedCommand -FilePath 'ssh' -Arguments @('-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument'")
 
     if (-not $SkipHostCheck) {
         Write-Host "Checking host-facing OpenAPI..."

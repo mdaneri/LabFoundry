@@ -101,6 +101,35 @@ scripts intentionally do not rewrite global Workstation vmnet configuration
 because `vnetlib.exe` behavior is version-sensitive and can affect unrelated
 VMs.
 
+## Local Wheel Deploy
+
+After a code change that does not require rebuilding the Photon image, deploy a
+fresh LabFoundry wheel to a running VMware test appliance with:
+
+```powershell
+.\scripts\windows\vmware\deploy-wheel.ps1 -IpAddress 192.168.167.10
+```
+
+When the IP should be resolved from VMware Tools, pass the VMX path as a named
+argument:
+
+```powershell
+.\scripts\windows\vmware\deploy-wheel.ps1 `
+  -VmxPath "image\vmware-workstation\test-vms\LabFoundry-VMware\LabFoundry-VMware.vmx"
+```
+
+Do not pipe the VMX path or put the `.vmx` path on a line by itself; PowerShell
+will try to run that file and report a pipeline/document execution error. The
+helper builds `python -m pip wheel . -w dist`, uploads the newest
+`labfoundry-*.whl` with `scp`, installs it into `/opt/labfoundry/.venv`,
+syncs `scripts/appliance/labfoundry-helper` to
+`/opt/labfoundry/bin/labfoundry-helper`, restores virtualenv permissions,
+restarts `labfoundry.service`, and verifies `/openapi.json` from inside the
+guest and from the Windows host. The helper sync is required for appliance
+apply fixes because the privileged helper is installed outside the Python
+virtualenv and is not updated by `pip install`. If the app takes longer to
+become reachable after restart, pass `-ReadinessTimeoutSeconds 120`.
+
 ## OVF / OVA Export
 
 After a VMware image build, export a deployable OVF folder and OVA archive:

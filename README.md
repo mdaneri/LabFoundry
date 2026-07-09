@@ -624,6 +624,33 @@ powershell.exe -ExecutionPolicy Bypass `
   -WaitForIp
 ```
 
+To deploy the current repo to an existing VMware test appliance without
+rebuilding the image, use the wheel deploy helper. If you already know the
+appliance IP, this is the most direct path:
+
+```powershell
+.\scripts\windows\vmware\deploy-wheel.ps1 -IpAddress 192.168.167.10
+```
+
+If you want the helper to resolve the guest IP from VMware Tools, pass the VMX
+path as the `-VmxPath` argument:
+
+```powershell
+.\scripts\windows\vmware\deploy-wheel.ps1 `
+  -VmxPath "image\vmware-workstation\test-vms\LabFoundry-VMware\LabFoundry-VMware.vmx"
+```
+
+Do not pipe the VMX path or put it on a separate line by itself; PowerShell will
+try to execute the `.vmx` file. The helper builds `python -m pip wheel . -w
+dist`, uploads the latest `labfoundry-*.whl` with `scp`, installs it into
+`/opt/labfoundry/.venv`, syncs `scripts/appliance/labfoundry-helper` to
+`/opt/labfoundry/bin/labfoundry-helper`, restores virtualenv permissions,
+restarts `labfoundry.service`, and verifies both guest loopback and host-facing
+`/openapi.json`. Helper sync matters because the privileged helper is installed
+outside the Python virtualenv and is not replaced by `pip install`. If the app
+takes longer to import after reinstalling the wheel, increase the readiness wait
+with `-ReadinessTimeoutSeconds 120`.
+
 Pass `-IncludeLabNetworkAdapters` only after `VMnet2`, `VMnet3`, and `VMnet4`
 exist for the SiteA, WAN/SiteB, and trunk-like validation networks.
 
