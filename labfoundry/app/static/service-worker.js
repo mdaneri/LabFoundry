@@ -1,4 +1,4 @@
-const LABFOUNDRY_CACHE = "labfoundry-pwa-v31";
+const LABFOUNDRY_CACHE = "labfoundry-pwa-v32";
 const LABFOUNDRY_ASSETS = [
   "/manifest.webmanifest",
   "/favicon.ico",
@@ -17,7 +17,20 @@ const LABFOUNDRY_ASSETS = [
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(LABFOUNDRY_CACHE).then((cache) => cache.addAll(LABFOUNDRY_ASSETS))
+    caches.open(LABFOUNDRY_CACHE).then((cache) =>
+      Promise.all(
+        LABFOUNDRY_ASSETS.map((asset) =>
+          fetch(asset, { cache: "reload" })
+            .then((response) => {
+              if (!response || !response.ok) {
+                return undefined;
+              }
+              return cache.put(asset, response);
+            })
+            .catch(() => undefined)
+        )
+      )
+    )
   );
   self.skipWaiting();
 });
@@ -81,11 +94,14 @@ self.addEventListener("fetch", (event) => {
       const refresh = fetch(request).then((response) => {
         if (response && response.ok) {
           const copy = response.clone();
-          caches.open(LABFOUNDRY_CACHE).then((cache) => cache.put(request, copy));
+          caches.open(LABFOUNDRY_CACHE).then((cache) => cache.put(request, copy)).catch(() => undefined);
         }
         return response;
-      });
-      return cached || refresh;
+      }).catch(() => undefined);
+      if (cached) {
+        return cached;
+      }
+      return refresh.then((response) => response || new Response("", { status: 504, statusText: "Gateway Timeout" }));
     })
   );
 });
