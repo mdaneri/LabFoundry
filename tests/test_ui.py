@@ -114,10 +114,15 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v30" in service_worker.text
+    assert "labfoundry-pwa-v31" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
     assert 'caches.match("/static/offline.html")' in service_worker.text
     assert 'request.method !== "GET"' in service_worker.text
+    assert 'url.pathname.startsWith("/ca/downloads/")' in service_worker.text
+    assert 'url.pathname.startsWith("/certificate-authority/downloads/")' in service_worker.text
+    assert 'url.pathname.startsWith("/api/")' in service_worker.text
+    assert "hasDownloadLikePath(url)" in service_worker.text
+    assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
 
     registration = client.get("/static/pwa.js")
@@ -127,7 +132,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=footer-build-label-20260708-2" in offline.text
+    assert "/static/app.css?v=dns-chrony-security-20260708-4" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
