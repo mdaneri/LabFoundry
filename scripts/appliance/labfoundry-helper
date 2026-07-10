@@ -2448,6 +2448,8 @@ def _handle_public_services(action: str, args: list[str]) -> int:
         if "server {" not in text:
             result = _remove_nginx_site(NGINX_PUBLIC_SERVICES_SITE_PATH)
         else:
+            if _vcf_depot_auth_required(text) and _write_vcf_depot_htpasswd(_vcf_depot_auth_username(text)) != 0:
+                return 2
             result = _install_nginx_site(NGINX_PUBLIC_SERVICES_SITE_PATH, text)
         if result != 0:
             return result
@@ -4762,12 +4764,16 @@ def _vcf_depot_config_errors(path: Path) -> list[str]:
             errors.append("Authenticated VCF Offline Depot nginx config must include the LabFoundry auth-check location.")
         if "auth_request /_labfoundry_depot_auth;" not in text:
             errors.append("Authenticated VCF Offline Depot nginx config must protect /PROD/ with auth_request.")
+        if "satisfy any;" not in text:
+            errors.append("Authenticated VCF Offline Depot nginx config must allow browser sessions or HTTPS Basic Authentication.")
+        if 'auth_basic "VCF Offline Depot";' not in text:
+            errors.append("Authenticated VCF Offline Depot nginx config must enable HTTPS Basic Authentication.")
+        if f"auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};" not in text:
+            errors.append("Authenticated VCF Offline Depot nginx config must use the managed password file.")
         if "error_page 401 = @labfoundry_depot_login;" not in text:
             errors.append("Authenticated VCF Offline Depot nginx config must redirect unauthenticated requests to the depot login.")
     elif _nginx_directive(text, "auth_basic_user_file"):
         errors.append("Unauthenticated VCF Offline Depot nginx config must not include auth_basic_user_file.")
-    if _nginx_directive(text, "auth_basic") or _nginx_directive(text, "auth_basic_user_file"):
-        errors.append("VCF Offline Depot nginx config must use LabFoundry auth_request instead of nginx Basic Auth.")
     return errors
 
 
@@ -5130,7 +5136,12 @@ def _handle_vcf_offline_depot(action: str, args: list[str]) -> int:
             _remove_vcf_depot_htpasswd()
             result = _remove_nginx_site(VCF_DEPOT_SITE_PATH)
         else:
-            _remove_vcf_depot_htpasswd()
+            if _vcf_depot_auth_required(text):
+                username = _vcf_depot_auth_username(text)
+                if username and _write_vcf_depot_htpasswd(username) != 0:
+                    return 2
+            else:
+                _remove_vcf_depot_htpasswd()
             _prepare_vcf_depot_web_tree(text)
             result = _install_nginx_site(VCF_DEPOT_SITE_PATH, text)
         if result != 0:

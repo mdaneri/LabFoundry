@@ -2423,7 +2423,7 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
     assert ["systemctl", "enable", "--now", "nginx"] in commands
 
 
-def test_vcf_offline_depot_helper_uses_auth_request_for_authenticated_site(monkeypatch, tmp_path):
+def test_vcf_offline_depot_helper_uses_browser_session_or_basic_auth_for_authenticated_site(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "vcf-offline-depot"
     managed_root = tmp_path / "etc" / "labfoundry"
@@ -2497,18 +2497,27 @@ def test_vcf_offline_depot_helper_uses_auth_request_for_authenticated_site(monke
                 "  }",
                 "",
                 "  location = /PROD/ {",
+                "    satisfy any;",
+                '    auth_basic "VCF Offline Depot";',
+                f"    auth_basic_user_file {htpasswd_path};",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
                 "    proxy_pass http://127.0.0.1:8000;",
                 "  }",
                 "",
                 "  location ~ ^/PROD/.*/$ {",
+                "    satisfy any;",
+                '    auth_basic "VCF Offline Depot";',
+                f"    auth_basic_user_file {htpasswd_path};",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
                 "    proxy_pass http://127.0.0.1:8000;",
                 "  }",
                 "",
                 "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
+                "    satisfy any;",
+                '    auth_basic "VCF Offline Depot";',
+                f"    auth_basic_user_file {htpasswd_path};",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
                 "    alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;",
@@ -2538,15 +2547,21 @@ def test_vcf_offline_depot_helper_uses_auth_request_for_authenticated_site(monke
     monkeypatch.setattr(helper.pwd, "getpwnam", lambda username: object())
     monkeypatch.setattr(helper.grp, "getgrnam", lambda group: (_ for _ in ()).throw(KeyError(group)))
     monkeypatch.setattr(helper, "_run", lambda command: subprocess.CompletedProcess(command, 0, "", ""))
+    monkeypatch.setattr(
+        helper,
+        "_write_vcf_depot_htpasswd",
+        lambda username: (htpasswd_path.write_text(f"{username}:fresh-shadow-hash\n", encoding="utf-8"), 0)[1],
+    )
 
     assert helper._handle_vcf_offline_depot("apply-https", [str(config_path)]) == 0
 
-    assert not htpasswd_path.exists()
+    assert htpasswd_path.read_text(encoding="utf-8") == "vcf-depot:fresh-shadow-hash\n"
     site_text = (site_dir / "vcf-offline-depot.conf").read_text(encoding="utf-8")
     assert "auth_request /_labfoundry_depot_auth;" in site_text
     assert "error_page 401 = @labfoundry_depot_login;" in site_text
-    assert "auth_basic" not in site_text
-    assert "auth_basic_user_file" not in site_text
+    assert "satisfy any;" in site_text
+    assert 'auth_basic "VCF Offline Depot";' in site_text
+    assert f"auth_basic_user_file {htpasswd_path};" in site_text
 
 
 def test_vcf_offline_depot_helper_prepares_prod_tree_permissions(monkeypatch, tmp_path):

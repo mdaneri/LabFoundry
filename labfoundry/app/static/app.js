@@ -8708,6 +8708,9 @@ function updateVcfDepotHttpsPreview(payload = {}) {
   const authLines = payload.allow_unauthenticated_access
     ? []
     : [
+        "    satisfy any;",
+        '    auth_basic "VCF Offline Depot";',
+        "    auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;",
         "    auth_request /_labfoundry_depot_auth;",
         "    error_page 401 = @labfoundry_depot_login;",
       ];
@@ -8837,6 +8840,9 @@ function updateVcfDepotHttpsPreview(payload = {}) {
     ...(payload.allow_unauthenticated_access
       ? []
       : [
+          "    satisfy any;",
+          '    auth_basic "VCF Offline Depot";',
+          "    auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;",
           "    auth_request /_labfoundry_depot_auth;",
           "    error_page 401 = @labfoundry_depot_login;",
         ]),
@@ -8845,12 +8851,16 @@ function updateVcfDepotHttpsPreview(payload = {}) {
     "    proxy_set_header X-Real-IP $remote_addr;",
     "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
     "    proxy_set_header X-Forwarded-Proto https;",
+    "    proxy_set_header X-LabFoundry-Depot-Basic-User $remote_user;",
     "  }",
     "",
     "  location ~ ^/PROD/.*/$ {",
     ...(payload.allow_unauthenticated_access
       ? []
       : [
+          "    satisfy any;",
+          '    auth_basic "VCF Offline Depot";',
+          "    auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;",
           "    auth_request /_labfoundry_depot_auth;",
           "    error_page 401 = @labfoundry_depot_login;",
         ]),
@@ -8859,6 +8869,7 @@ function updateVcfDepotHttpsPreview(payload = {}) {
     "    proxy_set_header X-Real-IP $remote_addr;",
     "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
     "    proxy_set_header X-Forwarded-Proto https;",
+    "    proxy_set_header X-LabFoundry-Depot-Basic-User $remote_user;",
     "  }",
     "",
     "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",

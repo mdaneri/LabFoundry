@@ -115,7 +115,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v53" in service_worker.text
+    assert "labfoundry-pwa-v59" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -135,7 +135,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcfdt-apply-20260709-1" in offline.text
+    assert "/static/app.css?v=depot-basic-auth-20260710-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -151,8 +151,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=vcfdt-apply-20260709-1" in page.text
-    assert "/static/app.js?v=vcfdt-apply-20260709-1" in page.text
+    assert "/static/app.css?v=depot-basic-auth-20260710-1" in page.text
+    assert "/static/app.js?v=depot-basic-auth-20260710-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -4410,7 +4410,7 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ApplianceSettings, CaSettings, PhysicalInterface, Setting, VcfOfflineDepotSettings, VcfPrivateRegistrySettings
+    from labfoundry.app.models import ApplianceSettings, CaSettings, PhysicalInterface, Setting, User, VcfOfflineDepotSettings, VcfPrivateRegistrySettings
 
     depot_store = tmp_path / "depot"
     prod_root = depot_store / "PROD"
@@ -4449,6 +4449,8 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
         depot_settings.listen_address = "192.168.87.32"
         depot_settings.port = 8443
         depot_settings.depot_store_path = str(depot_store)
+        depot_settings.http_user = db.execute(select(User).where(User.username == "vcf-depot")).scalar_one()
+        depot_settings.http_user.enabled = True
 
         registry_settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one()
         registry_settings.enabled = True
@@ -4548,6 +4550,15 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
 
     unrelated_depot_auth_check = client.get("/PROD/auth-check", headers={"host": "192.168.88.32"})
     assert unrelated_depot_auth_check.status_code == 401
+
+    client.cookies.clear()
+    basic_depot_browser = client.get(
+        "/PROD/",
+        headers={"host": "192.168.87.32", "X-LabFoundry-Depot-Basic-User": "vcf-depot"},
+        follow_redirects=False,
+    )
+    assert basic_depot_browser.status_code == 200
+    assert "VCF Offline Depot" in basic_depot_browser.text
 
     with SessionLocal() as db:
         depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
@@ -5514,8 +5525,9 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["valid"] is True
     assert payload["dns_record_action"] == "created"
     assert "listen 192.168.50.1:443 ssl;" in payload["https_config_preview"]
-    assert "auth_basic" not in payload["https_config_preview"]
-    assert "auth_basic_user_file" not in payload["https_config_preview"]
+    assert 'auth_basic "VCF Offline Depot";' in payload["https_config_preview"]
+    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in payload["https_config_preview"]
+    assert "satisfy any;" in payload["https_config_preview"]
     assert "auth_request /_labfoundry_depot_auth;" in payload["https_config_preview"]
     assert "error_page 401 = @labfoundry_depot_login;" in payload["https_config_preview"]
     assert "location = /PROD/" in payload["https_config_preview"]
