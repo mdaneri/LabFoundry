@@ -152,6 +152,19 @@
 - The VCF Backup config preview should make the host-side volume and VCF remote directory clear, and OpenSSH should use `ForceCommand internal-sftp -d /backups` when chroot is enabled.
 - VCF Backup OpenSSH enforcement should remain a user-scoped `Match User` drop-in; do not make it a broad global `sshd` port/listen-address rewrite.
 
+## VCF Helper
+
+- VCF Helper lives under VCF Workflows at `/vcf-helper`. Keep deployment component sets versioned; current targets are `VCF 9.1` with all 17 catalog components and `VVF 9.1` with `vc01`, `ops01`, `vsp01`, `fleetlcm`, `shared01`, and `license`.
+- Domain choices must come from managed DNS zones. Prefix and suffix are optional hostname fragments; normalize them consistently and validate every generated FQDN before writing any records.
+- Starting address input is one IPv4 or IPv6 CIDR. IPv4 creates A records and IPv6 creates AAAA records. Allocate sequential usable addresses inside that network, skip occupied DNS addresses of the selected family, and also skip IPv4 DHCP reservation addresses.
+- Treat generation as one transaction. Existing FQDNs are skipped without modification, and insufficient address capacity or any validation error must create no records. Return created and skipped rows with assigned or existing A/AAAA addresses in fetch responses.
+- Keep component descriptions role-specific, such as `vCenter` and `VCF Automation`. Store helper ownership separately in structured DNS record metadata with source `vcf_helper` and the component hostname; do not replace role descriptions with a generic generated-by label.
+- Deletion must require shared modal confirmation and remove only matching helper-owned A/AAAA records for the selected deployment, prefix, suffix, and domain. Preserve unrelated/manual records. Legacy records without metadata may be removed only when their description exactly matches the expected component description.
+- The FQDN modal stays open after creation so assigned addresses remain reviewable. When every displayed FQDN has an A or AAAA address, replace the create action with `Done` and hide `Cancel`. Enable deletion only when at least one displayed FQDN has an associated address.
+- Keep the modal compact and free of horizontal overflow. Deployment, prefix, and suffix controls should remain short, the IP/prefix control should have more width for IPv6 CIDRs, and edge help tooltips must open inward or downward so their complete text remains inside the modal.
+- VCF Helper edits DNS desired state only. Runtime enforcement remains owned by the global `DNS/DHCP (dnsmasq)` Appliance Apply unit; do not add a VCF Helper apply route or invoke `dnsmasq` directly.
+- Maintain the operator contract in `docs/vcf-helper.md` and focused `tests/test_ui.py` coverage whenever catalogs, allocation, ownership, deletion, modal state, or API responses change.
+
 ## VCF Offline Depot
 
 - VCF Offline Depot is a static HTTP(S) depot endpoint backed by nginx and the fixed appliance volume mount `/mnt/labfoundry-vcf-offline-depot`.

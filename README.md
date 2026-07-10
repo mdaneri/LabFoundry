@@ -246,6 +246,10 @@ status: disabled until VCF Backups is enabled and Local Users apply creates the 
 
 Set/reset this account from `Users`, then apply Local Users before exposing the SFTP endpoint beyond a development lab.
 
+## VCF Helper
+
+VCF Helper at `/vcf-helper` generates DNS desired state for the versioned `VCF 9.1` and `VVF 9.1` deployment catalogs. Operators choose optional hostname prefix/suffix values, a managed DNS zone, and a starting IPv4 or IPv6 CIDR. The helper creates sequential A or AAAA records for missing component FQDNs, skips existing FQDNs without modification, avoids occupied DNS addresses and IPv4 DHCP reservations, and fails transactionally when the selected network cannot fit every missing record. Existing A/AAAA addresses remain visible in the modal. Generated records keep role-specific descriptions and structured VCF Helper ownership metadata so confirmed deletion removes only matching helper-owned records. Creation and deletion update desired state only; submit the changed `DNS/DHCP (dnsmasq)` unit through global `Appliance Apply` to change the runtime service. See [`docs/vcf-helper.md`](docs/vcf-helper.md) for catalogs, allocation rules, modal behavior, and API routes.
+
 Default local VCF Offline Depot HTTP user:
 
 ```text

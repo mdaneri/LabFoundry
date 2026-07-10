@@ -1,0 +1,105 @@
+# VCF Helper
+
+VCF Helper prepares the DNS desired state required by VMware Cloud Foundation
+(VCF) and VMware vSphere Foundation (VVF) deployments. It is available under
+`VCF Workflows` at `/vcf-helper`.
+
+The helper creates DNS records in LabFoundry. It does not reload `dnsmasq` or
+change the appliance directly. Review and submit the changed `DNS/DHCP
+(dnsmasq)` unit through the global `/appliance-apply` workflow after generation
+or deletion.
+
+## Generate FQDNs
+
+Open `Generated VCF FQDNs` and select:
+
+- the deployment catalog;
+- an optional hostname prefix and suffix;
+- a domain from the DNS zones managed by LabFoundry;
+- a starting IPv4 or IPv6 address with its CIDR prefix, such as
+  `192.168.50.100/24` or `2001:db8:50::100/64`.
+
+The preview updates as the deployment, prefix, suffix, or domain changes. A
+generated hostname is formed as:
+
+```text
+<prefix><catalog hostname><suffix>.<managed domain>
+```
+
+For example, prefix `lab-`, hostname `vc01`, suffix `-mgmt`, and domain
+`example.internal` produce `lab-vc01-mgmt.example.internal`.
+
+Creating records requires confirmation. The modal remains open after creation
+so assigned addresses can be reviewed. When every displayed FQDN has an A or
+AAAA address, the primary action changes to `Done`; `Done` closes the modal.
+
+## Deployment Catalogs
+
+The catalog is versioned so later VCF and VVF releases can define different
+component sets without changing existing selections.
+
+| Hostname | Component description | VCF 9.1 | VVF 9.1 |
+| --- | --- | --- | --- |
+| `vc01` | vCenter | Yes | Yes |
+| `nsx01` | NSX Manager cluster | Yes | No |
+| `nsx02` | NSX Manager appliance 1 | Yes | No |
+| `nsx03` | NSX Manager appliance 2 | Yes | No |
+| `nsx04` | NSX Manager appliance 3 | Yes | No |
+| `ops01` | VCF Operations primary node | Yes | Yes |
+| `ops02` | VCF Operations replica node | Yes | No |
+| `ops03` | VCF Operations data node | Yes | No |
+| `collector` | Cloud Proxy | Yes | No |
+| `auto-vip` | VCF Automation | Yes | No |
+| `auto-platform` | VCF Automation Runtime | Yes | No |
+| `sddcm` | SDDC Manager | Yes | No |
+| `vsp01` | VCF services runtime | Yes | Yes |
+| `fleetlcm` | Fleet components | Yes | Yes |
+| `shared01` | Instance components | Yes | Yes |
+| `vidb` | Identity Broker | Yes | No |
+| `license` | License Server | Yes | Yes |
+
+## Address Allocation
+
+An IPv4 starting CIDR creates A records. An IPv6 starting CIDR creates AAAA
+records. Allocation starts at the entered address and advances sequentially
+within that network.
+
+LabFoundry skips:
+
+- addresses already used by DNS records of the selected address family;
+- IPv4 addresses used by DHCP reservations;
+- generated FQDNs that already exist as any DNS record type.
+
+Existing FQDNs are never overwritten. Existing A and AAAA addresses are shown
+in the preview when available. If the remaining network cannot provide an
+address for every missing FQDN, allocation fails transactionally and creates
+no records.
+
+IPv4 network and broadcast addresses are not allocatable. The IPv6 network
+address is treated as the subnet-router anycast address and is not allocatable.
+
+## Record Ownership And Deletion
+
+New records use the catalog component description, such as `vCenter` or `VCF
+Automation`, as the DNS record description. Helper ownership is stored
+separately in structured record metadata with source `vcf_helper` and the
+catalog component hostname.
+
+`Delete generated records` is enabled only when at least one displayed FQDN has
+an A or AAAA address. Deletion requires confirmation and removes only records
+owned by VCF Helper for the selected deployment, prefix, suffix, and domain.
+Unrelated or manually created records are preserved. Legacy helper records
+without ownership metadata are removed only when their description exactly
+matches the expected component description.
+
+## Routes And Responses
+
+- `GET /vcf-helper` renders the helper page.
+- `POST /vcf-helper/generated-fqdns` validates and creates missing records.
+- `POST /vcf-helper/generated-fqdns/delete` deletes matching helper-owned
+  records.
+
+Fetch responses report created, skipped, deleted, and preserved rows with their
+assigned addresses, plus validation or allocation errors. All mutations use the
+existing authenticated session, CSRF validation, audit logging, and DNS desired
+state model.

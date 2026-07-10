@@ -157,6 +157,7 @@ UI_PATH_SCOPES = [
     ("/kms", "read:kms", "write:kms"),
     ("/chrony", "read:services", "write:services"),
     ("/esxi-pxe", "read:esxi-pxe", "write:esxi-pxe"),
+    ("/vcf-helper", "read:dns", "write:dns"),
     ("/vcf-offline-depot", "read:repository", "write:repository"),
     ("/vcf-private-registry", "read:vcf-registry", "write:vcf-registry"),
     ("/vcf-backups", "read:vcf-backups", "write:vcf-backups"),

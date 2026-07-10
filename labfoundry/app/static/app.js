@@ -7180,6 +7180,353 @@ function initializeDnsSettings() {
   });
 }
 
+function vcfFqdnRowsElement() {
+  const rows = document.querySelector("[data-vcf-fqdn-rows]");
+  return rows instanceof HTMLElement ? rows : null;
+}
+
+function vcfFqdnComponents() {
+  const rows = vcfFqdnRowsElement();
+  if (!rows) {
+    return [];
+  }
+  const target = document.querySelector("[data-vcf-fqdn-target]");
+  try {
+    const targetComponents = JSON.parse(rows.dataset.targetComponents || "{}");
+    const selectedTarget = target instanceof HTMLSelectElement ? target.value : "";
+    if (selectedTarget && targetComponents && typeof targetComponents === "object" && Array.isArray(targetComponents[selectedTarget])) {
+      return targetComponents[selectedTarget];
+    }
+    const parsed = JSON.parse(rows.dataset.components || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function vcfFqdnTargetLabel() {
+  const target = document.querySelector("[data-vcf-fqdn-target]");
+  if (!(target instanceof HTMLSelectElement)) {
+    return "VCF";
+  }
+  return target.selectedOptions[0]?.textContent?.trim() || target.value || "VCF";
+}
+
+function vcfFqdnExistingData() {
+  const rows = vcfFqdnRowsElement();
+  if (!rows) {
+    return { fqdns: [], addressRecords: {} };
+  }
+  try {
+    const fqdns = JSON.parse(rows.dataset.existingFqdns || "[]");
+    const addressRecords = JSON.parse(rows.dataset.existingAddressRecords || rows.dataset.existingARecords || "{}");
+    return {
+      fqdns: Array.isArray(fqdns) ? fqdns : [],
+      addressRecords: addressRecords && typeof addressRecords === "object" && !Array.isArray(addressRecords) ? addressRecords : {},
+    };
+  } catch {
+    return { fqdns: [], addressRecords: {} };
+  }
+}
+
+function vcfFqdnHostLabel(component, prefix, suffix) {
+  return `${String(prefix || "").trim().toLowerCase()}${component.host || ""}${String(suffix || "").trim().toLowerCase()}`;
+}
+
+function vcfFqdnForComponent(component, domain, prefix, suffix) {
+  const hostLabel = vcfFqdnHostLabel(component, prefix, suffix);
+  const zone = String(domain || "").trim().replace(/\.$/, "").toLowerCase();
+  if (!hostLabel || !zone) {
+    return "";
+  }
+  return `${hostLabel}.${zone}`;
+}
+
+function vcfFqdnAddressFor(fqdn, payload = {}) {
+  const created = Array.isArray(payload.created) ? payload.created : [];
+  const skipped = Array.isArray(payload.skipped) ? payload.skipped : [];
+  const existing = vcfFqdnExistingData();
+  const createdRow = created.find((row) => row.fqdn === fqdn);
+  if (createdRow?.address) {
+    return createdRow.address;
+  }
+  const skippedRow = skipped.find((row) => row.fqdn === fqdn);
+  if (skippedRow?.address) {
+    return skippedRow.address;
+  }
+  const existingAddresses = existing.addressRecords[fqdn];
+  if (Array.isArray(existingAddresses) && existingAddresses.length) {
+    return existingAddresses.join(", ");
+  }
+  return "";
+}
+
+function vcfFqdnCurrentFqdns() {
+  const domain = document.querySelector("[data-vcf-fqdn-domain]");
+  const target = document.querySelector("[data-vcf-fqdn-target]");
+  const prefix = document.querySelector("[data-vcf-fqdn-prefix]");
+  const suffix = document.querySelector("[data-vcf-fqdn-suffix]");
+  if (!(domain instanceof HTMLSelectElement) || !(target instanceof HTMLSelectElement)) {
+    return [];
+  }
+  const prefixValue = prefix instanceof HTMLInputElement ? prefix.value : "";
+  const suffixValue = suffix instanceof HTMLInputElement ? suffix.value : "";
+  return vcfFqdnComponents()
+    .map((component) => vcfFqdnForComponent(component, domain.value, prefixValue, suffixValue))
+    .filter(Boolean);
+}
+
+function vcfFqdnHasAnyAddress(payload = {}) {
+  return vcfFqdnCurrentFqdns().some((fqdn) => Boolean(vcfFqdnAddressFor(fqdn, payload)));
+}
+
+function vcfFqdnRowsHaveAddresses(payload = {}) {
+  const fqdns = vcfFqdnCurrentFqdns();
+  return fqdns.length > 0 && fqdns.every((fqdn) => Boolean(vcfFqdnAddressFor(fqdn, payload)));
+}
+
+function updateVcfFqdnActions(payload = {}) {
+  const submit = document.querySelector("[data-vcf-fqdn-submit]");
+  const cancelButton = document.querySelector("[data-vcf-fqdn-modal-cancel]");
+  const deleteButton = document.querySelector("[data-vcf-fqdn-delete]");
+  const complete = vcfFqdnRowsHaveAddresses(payload);
+  if (submit instanceof HTMLButtonElement) {
+    submit.textContent = complete ? "Done" : "Create DNS records";
+    submit.dataset.complete = complete ? "1" : "0";
+  }
+  if (cancelButton instanceof HTMLButtonElement) {
+    cancelButton.hidden = complete;
+  }
+  if (deleteButton instanceof HTMLButtonElement) {
+    deleteButton.disabled = !vcfFqdnHasAnyAddress(payload);
+  }
+}
+
+function vcfFqdnApplyDeletionPayload(payload = {}) {
+  const rows = vcfFqdnRowsElement();
+  if (!rows) {
+    return;
+  }
+  const deleted = Array.isArray(payload.deleted) ? payload.deleted : [];
+  if (!deleted.length) {
+    return;
+  }
+  const deletedFqdns = new Set(deleted.map((row) => row.fqdn).filter(Boolean));
+  const existing = vcfFqdnExistingData();
+  rows.dataset.existingFqdns = JSON.stringify(existing.fqdns.filter((fqdn) => !deletedFqdns.has(fqdn)));
+  const nextAddressRecords = { ...existing.addressRecords };
+  deletedFqdns.forEach((fqdn) => {
+    delete nextAddressRecords[fqdn];
+  });
+  rows.dataset.existingAddressRecords = JSON.stringify(nextAddressRecords);
+}
+
+function vcfFqdnRowStatus(fqdn, payload = {}) {
+  const address = vcfFqdnAddressFor(fqdn, payload);
+  if (address) {
+    return address;
+  }
+  const skipped = Array.isArray(payload.skipped) ? payload.skipped : [];
+  const existing = vcfFqdnExistingData();
+  const skippedRow = skipped.find((row) => row.fqdn === fqdn);
+  if (skippedRow || existing.fqdns.includes(fqdn)) {
+    return "existing record skipped";
+  }
+  return "allocated on confirm";
+}
+
+function renderVcfFqdnRows(payload = {}) {
+  const rows = vcfFqdnRowsElement();
+  const domain = document.querySelector("[data-vcf-fqdn-domain]");
+  const target = document.querySelector("[data-vcf-fqdn-target]");
+  const prefix = document.querySelector("[data-vcf-fqdn-prefix]");
+  const suffix = document.querySelector("[data-vcf-fqdn-suffix]");
+  if (!rows || !(domain instanceof HTMLSelectElement) || !(target instanceof HTMLSelectElement)) {
+    return;
+  }
+  const prefixValue = prefix instanceof HTMLInputElement ? prefix.value : "";
+  const suffixValue = suffix instanceof HTMLInputElement ? suffix.value : "";
+  rows.innerHTML = "";
+  vcfFqdnComponents().forEach((component) => {
+    const fqdn = vcfFqdnForComponent(component, domain.value, prefixValue, suffixValue);
+    const row = document.createElement("tr");
+    const componentCell = document.createElement("td");
+    const fqdnCell = document.createElement("td");
+    const statusCell = document.createElement("td");
+    componentCell.textContent = component.description || component.host || "";
+    fqdnCell.textContent = fqdn;
+    statusCell.textContent = vcfFqdnRowStatus(fqdn, payload);
+    if (statusCell.textContent === "existing record skipped" || statusCell.textContent === "allocated on confirm") {
+      statusCell.className = "muted";
+    }
+    row.append(componentCell, fqdnCell, statusCell);
+    rows.append(row);
+  });
+  updateVcfFqdnActions(payload);
+}
+
+function setVcfFqdnMessage(selector, messages, type = "error") {
+  const element = document.querySelector(selector);
+  if (!(element instanceof HTMLElement)) {
+    return;
+  }
+  const values = Array.isArray(messages) ? messages : [messages];
+  element.innerHTML = "";
+  values.filter(Boolean).forEach((message) => {
+    const item = document.createElement("div");
+    item.textContent = message;
+    element.append(item);
+  });
+  element.classList.toggle("hidden", values.filter(Boolean).length === 0);
+  element.classList.toggle("error", type === "error");
+  element.classList.toggle("success", type === "success");
+}
+
+function initializeVcfFqdnGenerator() {
+  const modal = document.getElementById("vcf-fqdn-modal");
+  const form = document.querySelector("[data-vcf-fqdn-form]");
+  if (!(modal instanceof HTMLDialogElement) || !(form instanceof HTMLFormElement)) {
+    return;
+  }
+  const submit = form.querySelector("[data-vcf-fqdn-submit]");
+  const deleteButton = form.querySelector("[data-vcf-fqdn-delete]");
+  const clearButton = form.querySelector("[data-vcf-fqdn-clear]");
+  const controls = form.querySelectorAll("[data-vcf-fqdn-target], [data-vcf-fqdn-prefix], [data-vcf-fqdn-suffix], [data-vcf-fqdn-domain]");
+  let currentPayload = {};
+  document.querySelectorAll("[data-vcf-fqdn-modal-open]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      currentPayload = {};
+      setVcfFqdnMessage("[data-vcf-fqdn-errors]", []);
+      setVcfFqdnMessage("[data-vcf-fqdn-result]", [], "success");
+      renderVcfFqdnRows(currentPayload);
+      modal.showModal();
+    });
+  });
+  document.querySelectorAll("[data-vcf-fqdn-modal-cancel]").forEach((button) => {
+    if (button instanceof HTMLButtonElement) {
+      button.addEventListener("click", () => modal.close("cancel"));
+    }
+  });
+  controls.forEach((control) => {
+    control.addEventListener("input", () => {
+      currentPayload = {};
+      renderVcfFqdnRows(currentPayload);
+    });
+    control.addEventListener("change", () => {
+      currentPayload = {};
+      renderVcfFqdnRows(currentPayload);
+    });
+  });
+  if (clearButton instanceof HTMLButtonElement) {
+    clearButton.addEventListener("click", () => {
+      const prefix = form.querySelector("[data-vcf-fqdn-prefix]");
+      const suffix = form.querySelector("[data-vcf-fqdn-suffix]");
+      if (prefix instanceof HTMLInputElement) {
+        prefix.value = "";
+      }
+      if (suffix instanceof HTMLInputElement) {
+        suffix.value = "";
+      }
+      currentPayload = {};
+      renderVcfFqdnRows(currentPayload);
+    });
+  }
+  const setActionsDisabled = (disabled) => {
+    if (submit instanceof HTMLButtonElement) {
+      submit.disabled = disabled;
+    }
+    if (deleteButton instanceof HTMLButtonElement) {
+      deleteButton.disabled = disabled;
+    }
+  };
+  const submitRequest = async (url, action) => {
+    setVcfFqdnMessage("[data-vcf-fqdn-errors]", []);
+    setVcfFqdnMessage("[data-vcf-fqdn-result]", [], "success");
+    setActionsDisabled(true);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        body: new FormData(form),
+        credentials: "same-origin",
+        headers: {
+          "X-LabFoundry-VCF-Helper": "1",
+        },
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        setVcfFqdnMessage("[data-vcf-fqdn-errors]", payload.errors || `Generated VCF FQDNs could not be ${action}.`);
+        return null;
+      }
+      return payload;
+    } catch (error) {
+      setVcfFqdnMessage("[data-vcf-fqdn-errors]", error instanceof Error ? error.message : `Generated VCF FQDNs could not be ${action}.`);
+      return null;
+    } finally {
+      setActionsDisabled(false);
+      updateVcfFqdnActions(currentPayload);
+    }
+  };
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (submit instanceof HTMLButtonElement && submit.dataset.complete === "1") {
+      modal.close("done");
+      window.location.reload();
+      return;
+    }
+    const domain = form.querySelector("[data-vcf-fqdn-domain]");
+    const zone = domain instanceof HTMLSelectElement ? domain.value : "the selected domain";
+    const confirmed = await requestConfirmation({
+      title: "Create generated VCF DNS records?",
+      message: `Create missing DNS A or AAAA records for ${vcfFqdnComponents().length} ${vcfFqdnTargetLabel()} components in ${zone}? Existing FQDNs remain unchanged, and allocation stays inside the selected IP subnet.`,
+      label: "Create DNS records",
+    });
+    if (confirmed) {
+      const payload = await submitRequest(form.action, "created");
+      if (payload) {
+        currentPayload = payload;
+        renderVcfFqdnRows(currentPayload);
+        const createdCount = Array.isArray(payload.created) ? payload.created.length : 0;
+        const skippedCount = Array.isArray(payload.skipped) ? payload.skipped.length : 0;
+        setVcfFqdnMessage(
+          "[data-vcf-fqdn-result]",
+          `Created ${createdCount} DNS records${skippedCount ? `; skipped ${skippedCount} existing records` : ""}.`,
+          "success"
+        );
+      }
+    }
+  });
+  if (deleteButton instanceof HTMLButtonElement) {
+    deleteButton.addEventListener("click", async () => {
+      const domain = form.querySelector("[data-vcf-fqdn-domain]");
+      const zone = domain instanceof HTMLSelectElement ? domain.value : "the selected domain";
+      const confirmed = await requestConfirmation({
+        title: "Delete generated VCF DNS records?",
+        message: `Delete VCF Helper A or AAAA records matching the current deployment, prefix, suffix, and ${zone} domain? Unrelated and skipped existing records are preserved. The appliance changes only after global Appliance Apply.`,
+        label: "Delete DNS records",
+      });
+      if (confirmed) {
+        const payload = await submitRequest(`${form.action}/delete`, "deleted");
+        if (payload) {
+          vcfFqdnApplyDeletionPayload(payload);
+          currentPayload = { skipped: Array.isArray(payload.preserved) ? payload.preserved : [] };
+          renderVcfFqdnRows(currentPayload);
+          const deletedCount = Array.isArray(payload.deleted) ? payload.deleted.length : 0;
+          const preservedCount = Array.isArray(payload.preserved) ? payload.preserved.length : 0;
+          setVcfFqdnMessage(
+            "[data-vcf-fqdn-result]",
+            `Deleted ${deletedCount} VCF Helper DNS records${preservedCount ? `; preserved ${preservedCount} unrelated records` : ""}.`,
+            "success"
+          );
+        }
+      }
+    });
+  }
+  renderVcfFqdnRows(currentPayload);
+}
+
 function updateVcfBackupDerivedAddress(form, payload = {}) {
   const portInput = form.querySelector('input[name="port"]');
   const { interfaceLabel: bindInterfaceLabel, address, addresses, addressLabel } = serviceBindSelection(form, payload);
@@ -10021,6 +10368,7 @@ document.addEventListener("DOMContentLoaded", initializeAutosaveForms);
 document.addEventListener("DOMContentLoaded", initializeApplianceSettings);
 document.addEventListener("DOMContentLoaded", initializeFirewallSettings);
 document.addEventListener("DOMContentLoaded", initializeDnsSettings);
+document.addEventListener("DOMContentLoaded", initializeVcfFqdnGenerator);
 document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);

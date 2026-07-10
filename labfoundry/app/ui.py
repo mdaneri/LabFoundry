@@ -9,7 +9,7 @@ import socket
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
-from ipaddress import IPv4Address, IPv4Network, ip_address, ip_interface, ip_network
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address, ip_interface, ip_network
 from pathlib import Path, PurePosixPath
 from secrets import token_urlsafe
 from typing import Any
@@ -120,6 +120,7 @@ from labfoundry.app.security import (
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
+    DNS_HOSTNAME_PATTERN,
     dump_dns_record_data,
     compact_dhcp_range_expression,
     dhcp_bind_target_families,
@@ -138,6 +139,7 @@ from labfoundry.app.services.dnsmasq import (
     parse_dnsmasq_leases,
     parse_dhcp_range_expression,
     parse_zone_records,
+    record_data,
     render_hosts_records,
     render_zone_file,
     render_zone_hosts_records,
@@ -3977,6 +3979,13 @@ def ipv4_address_or_none(value: str | None) -> IPv4Address | None:
     return address if isinstance(address, IPv4Address) else None
 
 
+def ip_address_or_none(value: str | None) -> IPv4Address | IPv6Address | None:
+    try:
+        return ip_address((value or "").strip())
+    except ValueError:
+        return None
+
+
 def ipv4_range(start: str | None, end: str | None) -> set[IPv4Address]:
     start_address = ipv4_address_or_none(start)
     end_address = ipv4_address_or_none(end)
@@ -4191,6 +4200,333 @@ def save_dns_domains(settings: DnsSettings, domains: list[str]) -> None:
 def records_for_domain(db: Session, domain: str) -> list[DnsRecord]:
     records = db.execute(select(DnsRecord).order_by(DnsRecord.hostname)).scalars().all()
     return [record for record in records if matching_domain(record.hostname, [domain]) == domain]
+
+
+VCF_GENERATED_FQDN_COMPONENTS = [
+    {"host": "vc01", "description": "vCenter"},
+    {"host": "nsx01", "description": "NSX Manager cluster"},
+    {"host": "nsx02", "description": "NSX Manager appliance 1"},
+    {"host": "nsx03", "description": "NSX Manager appliance 2"},
+    {"host": "nsx04", "description": "NSX Manager appliance 3"},
+    {"host": "ops01", "description": "VCF Operations primary node"},
+    {"host": "ops02", "description": "VCF Operations replica node"},
+    {"host": "ops03", "description": "VCF Operations data node"},
+    {"host": "collector", "description": "Cloud Proxy"},
+    {"host": "auto-vip", "description": "VCF Automation"},
+    {"host": "auto-platform", "description": "VCF Automation Runtime"},
+    {"host": "sddcm", "description": "SDDC Manager"},
+    {"host": "vsp01", "description": "VCF services runtime"},
+    {"host": "fleetlcm", "description": "Fleet components"},
+    {"host": "shared01", "description": "Instance components"},
+    {"host": "vidb", "description": "Identity Broker"},
+    {"host": "license", "description": "License Server"},
+]
+
+VCF_HELPER_TARGET_OPTIONS = [
+    {"value": "vcf-9.1", "label": "VCF 9.1", "hosts": [component["host"] for component in VCF_GENERATED_FQDN_COMPONENTS]},
+    {"value": "vvf-9.1", "label": "VVF 9.1", "hosts": ["vc01", "ops01", "vsp01", "fleetlcm", "shared01", "license"]},
+]
+VCF_HELPER_TARGET_LABELS = {target["value"]: target["label"] for target in VCF_HELPER_TARGET_OPTIONS}
+VCF_HELPER_TARGET_HOSTS = {target["value"]: set(target["hosts"]) for target in VCF_HELPER_TARGET_OPTIONS}
+VCF_HELPER_DEFAULT_TARGET = "vcf-9.1"
+
+
+def normalize_vcf_helper_target(target: str) -> str:
+    return target.strip().lower() or VCF_HELPER_DEFAULT_TARGET
+
+
+def vcf_helper_target_components(target: str) -> list[dict[str, str]]:
+    normalized_target = normalize_vcf_helper_target(target)
+    hosts = VCF_HELPER_TARGET_HOSTS.get(normalized_target)
+    if hosts is None:
+        return []
+    return [component for component in VCF_GENERATED_FQDN_COMPONENTS if component["host"] in hosts]
+
+
+def vcf_helper_target_component_map() -> dict[str, list[dict[str, str]]]:
+    return {target["value"]: vcf_helper_target_components(target["value"]) for target in VCF_HELPER_TARGET_OPTIONS}
+
+
+def vcf_generated_host_label(base_host: str, prefix: str, suffix: str) -> str:
+    return f"{prefix.strip().lower()}{base_host}{suffix.strip().lower()}"
+
+
+def vcf_generated_fqdn_preview(domain: str, prefix: str = "", suffix: str = "", target: str = VCF_HELPER_DEFAULT_TARGET) -> list[dict[str, str]]:
+    return [
+        {
+            "host": component["host"],
+            "host_label": vcf_generated_host_label(component["host"], prefix, suffix),
+            "fqdn": normalize_dns_hostname(vcf_generated_host_label(component["host"], prefix, suffix), domain),
+            "description": component["description"],
+        }
+        for component in vcf_helper_target_components(target)
+    ]
+
+
+def occupied_vcf_helper_addresses(record_type: str, db: Session) -> set[IPv4Address | IPv6Address]:
+    normalized_type = record_type.strip().upper()
+    occupied: set[IPv4Address | IPv6Address] = set()
+    for record in db.execute(select(DnsRecord).where(func.upper(DnsRecord.record_type) == normalized_type)).scalars().all():
+        address = ip_address_or_none(record.address)
+        if normalized_type == "A" and isinstance(address, IPv4Address):
+            occupied.add(address)
+        if normalized_type == "AAAA" and isinstance(address, IPv6Address):
+            occupied.add(address)
+    if normalized_type == "A":
+        occupied.update(
+            address
+            for address in [
+                ipv4_address_or_none(reservation.ip_address)
+                for reservation in db.execute(select(DhcpReservation)).scalars().all()
+            ]
+            if address is not None
+        )
+    return occupied
+
+
+def vcf_helper_existing_address_records(records: list[DnsRecord]) -> dict[str, list[str]]:
+    addresses: dict[str, list[str]] = {}
+    for record in records:
+        if record.record_type.strip().upper() not in {"A", "AAAA"}:
+            continue
+        if ip_address_or_none(record.address) is None:
+            continue
+        fqdn = record.hostname.strip().strip(".").lower()
+        if record.address not in addresses.setdefault(fqdn, []):
+            addresses[fqdn].append(record.address)
+    return addresses
+
+
+def vcf_helper_start_network(
+    start_ipv4: str,
+    network_prefix: str = "",
+) -> tuple[IPv4Address | IPv6Address | None, IPv4Network | IPv6Network | None, str | None]:
+    candidate = start_ipv4.strip()
+    if "/" not in candidate and network_prefix.strip():
+        candidate = f"{candidate}/{network_prefix.strip().removeprefix('/')}"
+    try:
+        interface = ip_interface(candidate)
+    except ValueError:
+        return None, None, "Starting IP / prefix must be a valid IPv4 or IPv6 CIDR, such as 192.168.50.100/24 or 2001:db8::100/64."
+    network = interface.network
+    start_address = interface.ip
+    if isinstance(start_address, IPv4Address):
+        if network.prefixlen > 30:
+            return None, None, "IPv4 network prefix must be a CIDR prefix from /0 through /30."
+        if start_address == network.network_address or start_address == network.broadcast_address:
+            return None, None, f"Starting IPv4 address must be a usable host address in {network}."
+    elif isinstance(start_address, IPv6Address):
+        if network.prefixlen > 127:
+            return None, None, "IPv6 network prefix must be a CIDR prefix from /0 through /127."
+        if start_address == network.network_address:
+            return None, None, f"Starting IPv6 address must not be the subnet-router anycast address in {network}."
+    else:
+        return None, None, "Starting IP / prefix must be a valid IPv4 or IPv6 CIDR."
+    return start_address, network, None
+
+
+def next_available_vcf_address(
+    candidate: IPv4Address | IPv6Address,
+    occupied: set[IPv4Address | IPv6Address],
+    network: IPv4Network | IPv6Network,
+) -> IPv4Address | IPv6Address | None:
+    current = int(candidate)
+    last_host = int(network.broadcast_address) - 1 if isinstance(candidate, IPv4Address) else int(network.broadcast_address)
+    while current <= last_host:
+        address = IPv4Address(current) if isinstance(candidate, IPv4Address) else IPv6Address(current)
+        if address not in occupied:
+            return address
+        current += 1
+    return None
+
+
+def allocate_vcf_generated_records(
+    db: Session,
+    *,
+    target: str,
+    domain: str,
+    prefix: str,
+    suffix: str,
+    start_ipv4: str,
+    network_prefix: str,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[str]]:
+    domains = dns_domains_for_settings(get_dns_settings_row(db))
+    normalized_domain = domain.strip().strip(".").lower()
+    if normalized_domain not in domains:
+        return [], [], [f"DNS domain {normalized_domain or '(blank)'} is not managed by LabFoundry."]
+    normalized_target = normalize_vcf_helper_target(target)
+    if normalized_target not in VCF_HELPER_TARGET_LABELS:
+        return [], [], [f"VCF Helper target {target or '(blank)'} is not supported."]
+    start_address, network, network_error = vcf_helper_start_network(start_ipv4, network_prefix)
+    if network_error or start_address is None or network is None:
+        return [], [], [network_error or "Starting IP / prefix is invalid."]
+    record_type = "AAAA" if isinstance(start_address, IPv6Address) else "A"
+
+    preview_rows = vcf_generated_fqdn_preview(normalized_domain, prefix, suffix, normalized_target)
+    errors: list[str] = []
+    for row in preview_rows:
+        if not row["host_label"]:
+            errors.append(f"{row['description']} generated hostname cannot be empty.")
+            continue
+        if not DNS_HOSTNAME_PATTERN.match(row["fqdn"]):
+            errors.append(f"{row['description']} generated FQDN {row['fqdn']} is not a valid DNS hostname.")
+            continue
+        errors.extend(validate_dns_record(row["fqdn"], record_type, str(start_address)))
+    if errors:
+        return [], [], errors
+
+    existing_records = db.execute(select(DnsRecord)).scalars().all()
+    existing_fqdns = {record.hostname.strip().strip(".").lower() for record in existing_records}
+    existing_address_records = vcf_helper_existing_address_records(existing_records)
+    skipped = [
+        {**row, **({"address": ", ".join(existing_address_records[row["fqdn"]])} if row["fqdn"] in existing_address_records else {})}
+        for row in preview_rows
+        if row["fqdn"] in existing_fqdns
+    ]
+    rows_to_create = [row for row in preview_rows if row["fqdn"] not in existing_fqdns]
+    occupied = occupied_vcf_helper_addresses(record_type, db)
+    created: list[dict[str, str]] = []
+    next_candidate = start_address
+    for row in rows_to_create:
+        assigned = next_available_vcf_address(next_candidate, occupied, network)
+        if assigned is None:
+            address_family = "IPv6" if record_type == "AAAA" else "IPv4"
+            return [], skipped, [f"Not enough available {address_family} addresses remain in {network} after the starting address."]
+        row_with_address = {**row, "address": str(assigned), "record_type": record_type}
+        validation_errors = validate_dns_record(row_with_address["fqdn"], record_type, row_with_address["address"])
+        if validation_errors:
+            return [], skipped, validation_errors
+        created.append(row_with_address)
+        occupied.add(assigned)
+        if isinstance(assigned, IPv6Address):
+            next_candidate = IPv6Address(int(assigned) + 1) if int(assigned) < int(network.broadcast_address) else assigned
+        else:
+            next_candidate = IPv4Address(int(assigned) + 1)
+    return created, skipped, []
+
+
+def create_vcf_generated_dns_records(
+    db: Session,
+    *,
+    target: str,
+    domain: str,
+    prefix: str,
+    suffix: str,
+    start_ipv4: str,
+    network_prefix: str,
+    actor: str,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[str]]:
+    created, skipped, errors = allocate_vcf_generated_records(
+        db,
+        target=target,
+        domain=domain,
+        prefix=prefix,
+        suffix=suffix,
+        start_ipv4=start_ipv4,
+        network_prefix=network_prefix,
+    )
+    if errors:
+        return [], skipped, errors
+    for row in created:
+        record_type = row["record_type"]
+        db.add(
+            DnsRecord(
+                hostname=row["fqdn"],
+                record_type=record_type,
+                address=row["address"],
+                record_data_json=dump_dns_record_data(
+                    record_type,
+                    row["address"],
+                    {"source": "vcf_helper", "component": row["host"]},
+                ),
+                description=row["description"],
+                enabled=True,
+            )
+        )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return [], skipped, ["Generated VCF FQDNs conflict with existing DNS records."]
+    record_audit(
+        db,
+        actor=actor,
+        action="generate_vcf_fqdns",
+        resource_type="dns_record",
+        detail=f"Created {len(created)} {VCF_HELPER_TARGET_LABELS[normalize_vcf_helper_target(target)]} DNS records; skipped {len(skipped)} existing records in {domain.strip().strip('.').lower()}.",
+    )
+    return created, skipped, []
+
+
+def delete_vcf_generated_dns_records(
+    db: Session,
+    *,
+    target: str,
+    domain: str,
+    prefix: str,
+    suffix: str,
+    actor: str,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[str]]:
+    domains = dns_domains_for_settings(get_dns_settings_row(db))
+    normalized_domain = domain.strip().strip(".").lower()
+    if normalized_domain not in domains:
+        return [], [], [f"DNS domain {normalized_domain or '(blank)'} is not managed by LabFoundry."]
+    normalized_target = normalize_vcf_helper_target(target)
+    if normalized_target not in VCF_HELPER_TARGET_LABELS:
+        return [], [], [f"VCF Helper target {target or '(blank)'} is not supported."]
+
+    preview_rows = vcf_generated_fqdn_preview(normalized_domain, prefix, suffix, normalized_target)
+    rows_by_fqdn = {row["fqdn"]: row for row in preview_rows}
+    matching_records = db.execute(
+        select(DnsRecord).where(
+            func.lower(DnsRecord.hostname).in_(list(rows_by_fqdn)),
+            func.upper(DnsRecord.record_type).in_(["A", "AAAA"]),
+        )
+    ).scalars().all()
+    deleted: list[dict[str, str]] = []
+    preserved: list[dict[str, str]] = []
+    for record in matching_records:
+        row = rows_by_fqdn.get(record.hostname.strip().strip(".").lower())
+        if row is None:
+            continue
+        metadata = record_data(record)
+        helper_owned = metadata.get("source") == "vcf_helper"
+        legacy_helper_record = not metadata and (record.description or "") == row["description"]
+        result_row = {**row, "address": record.address, "record_type": record.record_type.strip().upper()}
+        if helper_owned or legacy_helper_record:
+            db.delete(record)
+            deleted.append(result_row)
+        else:
+            preserved.append(result_row)
+    db.commit()
+    record_audit(
+        db,
+        actor=actor,
+        action="delete_vcf_fqdns",
+        resource_type="dns_record",
+        detail=f"Deleted {len(deleted)} {VCF_HELPER_TARGET_LABELS[normalized_target]} DNS records; preserved {len(preserved)} unrelated records in {normalized_domain}.",
+    )
+    return deleted, preserved, []
+
+
+def vcf_helper_context(db: Session) -> dict[str, Any]:
+    domains = dns_domains_for_settings(get_dns_settings_row(db))
+    default_domain = domains[0] if domains else "labfoundry.internal"
+    records = db.execute(select(DnsRecord).order_by(DnsRecord.hostname)).scalars().all()
+    reservations = db.execute(select(DhcpReservation).order_by(DhcpReservation.hostname)).scalars().all()
+    scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
+    suggested_start_ipv4 = dns_record_suggested_ipv4(records, default_domain, scopes, reservations)
+    return {
+        "dns_domain_options": domains,
+        "vcf_helper_target_options": VCF_HELPER_TARGET_OPTIONS,
+        "vcf_helper_default_target": VCF_HELPER_DEFAULT_TARGET,
+        "vcf_helper_target_components": vcf_helper_target_component_map(),
+        "vcf_helper_default_domain": default_domain,
+        "vcf_helper_rows": vcf_generated_fqdn_preview(default_domain, target=VCF_HELPER_DEFAULT_TARGET),
+        "vcf_helper_existing_fqdns": sorted(record.hostname.strip().strip(".").lower() for record in records),
+        "vcf_helper_existing_address_records": vcf_helper_existing_address_records(records),
+        "vcf_helper_default_start_ipv4": f"{suggested_start_ipv4}/24" if suggested_start_ipv4 else "",
+    }
 
 
 APPLIANCE_APPLY_BASELINES_KEY = "appliance_apply.baselines.v1"
@@ -9700,6 +10036,102 @@ def delete_kms_key_from_ui(
 @router.get("/https-repository", response_model=None)
 def legacy_https_repository_redirect(identity: Identity = Depends(require_session_identity)) -> RedirectResponse:
     return RedirectResponse("/vcf-offline-depot", status_code=307)
+
+
+@router.get("/vcf-helper", response_class=HTMLResponse, response_model=None)
+def vcf_helper_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    context = dnsmasq_context(db)
+    return render(request, "vcf_helper.html", {"identity": identity, **vcf_helper_context(db), "appliance_apply_status": dnsmasq_apply_status(db, context)})
+
+
+@router.post("/vcf-helper/generated-fqdns", response_model=None)
+def generate_vcf_fqdns_from_ui(
+    request: Request,
+    target: str = Form(VCF_HELPER_DEFAULT_TARGET),
+    domain: str = Form(...),
+    prefix: str = Form(""),
+    suffix: str = Form(""),
+    start_ipv4: str = Form(...),
+    network_prefix: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    created, skipped, errors = create_vcf_generated_dns_records(
+        db,
+        target=target,
+        domain=domain,
+        prefix=prefix,
+        suffix=suffix,
+        start_ipv4=start_ipv4,
+        network_prefix=network_prefix,
+        actor=identity.username,
+    )
+    if request.headers.get("X-LabFoundry-VCF-Helper") == "1":
+        return JSONResponse(
+            {
+                "status": "error" if errors else "saved",
+                "created": created,
+                "skipped": skipped,
+                "errors": errors,
+            },
+            status_code=422 if errors else 200,
+        )
+    dns_context = dnsmasq_context(db)
+    page_context = {
+        "identity": identity,
+        **vcf_helper_context(db),
+        "appliance_apply_status": dnsmasq_apply_status(db, dns_context),
+    }
+    if errors:
+        return render(request, "vcf_helper.html", {**page_context, "vcf_helper_errors": errors}, status_code=422)
+    return render(request, "vcf_helper.html", {**page_context, "vcf_helper_result": {"created": created, "skipped": skipped}})
+
+
+@router.post("/vcf-helper/generated-fqdns/delete", response_model=None)
+def delete_vcf_fqdns_from_ui(
+    request: Request,
+    target: str = Form(VCF_HELPER_DEFAULT_TARGET),
+    domain: str = Form(...),
+    prefix: str = Form(""),
+    suffix: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | HTMLResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    deleted, preserved, errors = delete_vcf_generated_dns_records(
+        db,
+        target=target,
+        domain=domain,
+        prefix=prefix,
+        suffix=suffix,
+        actor=identity.username,
+    )
+    if request.headers.get("X-LabFoundry-VCF-Helper") == "1":
+        return JSONResponse(
+            {
+                "status": "error" if errors else "deleted",
+                "deleted": deleted,
+                "preserved": preserved,
+                "errors": errors,
+            },
+            status_code=422 if errors else 200,
+        )
+    dns_context = dnsmasq_context(db)
+    page_context = {
+        "identity": identity,
+        **vcf_helper_context(db),
+        "appliance_apply_status": dnsmasq_apply_status(db, dns_context),
+    }
+    if errors:
+        return render(request, "vcf_helper.html", {**page_context, "vcf_helper_errors": errors}, status_code=422)
+    return render(request, "vcf_helper.html", {**page_context, "vcf_helper_delete_result": {"deleted": deleted, "preserved": preserved}})
 
 
 @router.get("/vcf-offline-depot", response_class=HTMLResponse, response_model=None)
