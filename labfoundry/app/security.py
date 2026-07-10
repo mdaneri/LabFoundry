@@ -160,7 +160,7 @@ UI_PATH_SCOPES = [
     ("/vcf-trust/root-ca", "read:ca", "write:ca"),
     ("/vcf-trust", "read:dashboard", "write:ca"),
     ("/vcf-helper/trust-root-ca", "read:ca", "write:ca"),
-    ("/vcf-helper", "read:dashboard", "write:dns"),
+    ("/vcf-helper", "read:dns", "write:dns"),
     ("/vcf-offline-depot", "read:repository", "write:repository"),
     ("/vcf-private-registry", "read:vcf-registry", "write:vcf-registry"),
     ("/vcf-backups", "read:vcf-backups", "write:vcf-backups"),

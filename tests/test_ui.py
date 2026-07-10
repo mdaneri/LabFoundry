@@ -4718,6 +4718,25 @@ def test_certificate_operator_uses_request_page_without_console_access(client):
         assert issued.revocation_reason == "rotation"
 
 
+def test_certificate_operator_cannot_render_vcf_helper_dns_inventory(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Role, User
+    from labfoundry.app.security import roles_to_json
+
+    with SessionLocal() as db:
+        admin = db.execute(select(User).where(User.username == "admin")).scalar_one()
+        admin.role = Role.CERTIFICATE_OPERATOR.value
+        admin.roles_json = roles_to_json([Role.CERTIFICATE_OPERATOR.value])
+        db.commit()
+
+    login(client)
+    response = client.get("/vcf-helper")
+    assert response.status_code == 403
+    assert "Missing required scope: read:dns" in response.text
+
+
 def test_ca_apply_payload_leaves_csr_private_key_empty():
     import json
 
