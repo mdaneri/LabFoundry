@@ -95,6 +95,7 @@ def public_services_for_address(
                 "scheme": "https",
                 "port": int(vcf_depot_settings.port or 443),
                 "allow_unauthenticated_access": bool(vcf_depot_settings.allow_unauthenticated_access),
+                "http_username": vcf_depot_settings.http_user.username if vcf_depot_settings.http_user else "",
                 "dns_names": _service_dns_names(vcf_depot_settings.hostname or VCF_DEPOT_DEFAULT_HOSTNAME),
             }
         )
@@ -193,6 +194,7 @@ def render_public_services_nginx_config(
                         https_port=https_port,
                         depot_store_path=depot_store_path,
                         depot_auth_required=not bool(depot_service.get("allow_unauthenticated_access")),
+                        depot_http_username=str(depot_service.get("http_username") or ""),
                     )
                 )
         if "esxi_pxe" in services:
@@ -255,6 +257,7 @@ def _ip_scoped_https_server_lines(
     https_port: int,
     depot_store_path: str,
     depot_auth_required: bool,
+    depot_http_username: str,
 ) -> list[str]:
     return [
         "",
@@ -289,6 +292,7 @@ def _ip_scoped_https_server_lines(
             upstream_port,
             depot_store_path=depot_store_path,
             auth_required=depot_auth_required,
+            http_username=depot_http_username,
         ),
         "",
         "  location / {",
@@ -304,8 +308,10 @@ def _depot_https_location_lines(
     *,
     depot_store_path: str,
     auth_required: bool,
+    http_username: str,
 ) -> list[str]:
     return [
+        f"  # LabFoundry VCF Offline Depot user: {http_username}" if auth_required else "  # LabFoundry VCF Offline Depot unauthenticated access: true",
         "  location = /PROD {",
         "    return 301 /PROD/;",
         "  }",
@@ -333,6 +339,9 @@ def _depot_https_location_lines(
         "  location = /PROD/ {",
         *(
             [
+                "    satisfy any;",
+                '    auth_basic "VCF Offline Depot";',
+                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
             ]
@@ -345,11 +354,15 @@ def _depot_https_location_lines(
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
         "    proxy_set_header X-Forwarded-Proto https;",
+        "    proxy_set_header X-LabFoundry-Depot-Basic-User $remote_user;",
         "  }",
         "",
         "  location ~ ^/PROD/.*/$ {",
         *(
             [
+                "    satisfy any;",
+                '    auth_basic "VCF Offline Depot";',
+                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
             ]
@@ -362,11 +375,15 @@ def _depot_https_location_lines(
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
         "    proxy_set_header X-Forwarded-Proto https;",
+        "    proxy_set_header X-LabFoundry-Depot-Basic-User $remote_user;",
         "  }",
         "",
         "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
         *(
             [
+                "    satisfy any;",
+                '    auth_basic "VCF Offline Depot";',
+                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
             ]

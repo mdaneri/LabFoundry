@@ -6226,7 +6226,14 @@ def public_depot_browser(
     if depot_path and not depot_path.endswith("/"):
         raise HTTPException(status_code=404, detail="Depot path not found")
     settings = get_vcf_offline_depot_settings_row(db)
-    if identity is None and not settings.allow_unauthenticated_access:
+    basic_username = request.headers.get("X-LabFoundry-Depot-Basic-User", "").strip()
+    basic_authenticated = bool(
+        basic_username
+        and settings.http_user
+        and settings.http_user.enabled
+        and basic_username == settings.http_user.username
+    )
+    if identity is None and not settings.allow_unauthenticated_access and not basic_authenticated:
         next_path = "/PROD/" + depot_path if depot_path else "/PROD/"
         return RedirectResponse(f"/PROD/login?next={quote(next_path, safe='/')}", status_code=303)
     return render(request, "depot_browser.html", {"identity": identity, **_depot_browser_context(db, depot_path.rstrip("/"))})

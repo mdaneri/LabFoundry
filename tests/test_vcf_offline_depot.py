@@ -288,8 +288,10 @@ def test_vcf_depot_nginx_config_renders_labfoundry_auth_request_by_default():
     config = render_nginx_depot_config(settings)
 
     assert "# LabFoundry VCF Offline Depot user: vcf-depot" in config
-    assert "auth_basic" not in config
-    assert "auth_basic_user_file" not in config
+    assert "satisfy any;" in config
+    assert 'auth_basic "VCF Offline Depot";' in config
+    assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config
+    assert "proxy_set_header X-LabFoundry-Depot-Basic-User $remote_user;" in config
     assert "location = /PROD/" in config
     assert "location ^~ /static/" in config
     assert "location = /favicon.ico" in config

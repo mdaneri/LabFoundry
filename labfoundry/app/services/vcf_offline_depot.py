@@ -533,6 +533,9 @@ def render_nginx_depot_config(
         "  location = /PROD/ {",
         *(
             [
+                "    satisfy any;",
+                '    auth_basic "VCF Offline Depot";',
+                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
             ]
@@ -544,11 +547,15 @@ def render_nginx_depot_config(
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
         "    proxy_set_header X-Forwarded-Proto https;",
+        "    proxy_set_header X-LabFoundry-Depot-Basic-User $remote_user;",
         "  }",
         "",
         "  location ~ ^/PROD/.*/$ {",
         *(
             [
+                "    satisfy any;",
+                '    auth_basic "VCF Offline Depot";',
+                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
             ]
@@ -560,11 +567,15 @@ def render_nginx_depot_config(
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
         "    proxy_set_header X-Forwarded-Proto https;",
+        "    proxy_set_header X-LabFoundry-Depot-Basic-User $remote_user;",
         "  }",
         "",
         "  location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {",
         *(
             [
+                "    satisfy any;",
+                '    auth_basic "VCF Offline Depot";',
+                f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
                 "    auth_request /_labfoundry_depot_auth;",
                 "    error_page 401 = @labfoundry_depot_login;",
             ]
