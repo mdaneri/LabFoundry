@@ -3079,6 +3079,7 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     assert "proxy_pass http://127.0.0.1:8000;" in management_site
     assert "proxy_set_header X-Forwarded-Proto http;" in management_site
     assert "proxy_set_header X-Forwarded-Proto https;" in management_site
+    assert 'proxy_set_header X-LabFoundry-Depot-Basic-User "";' in management_site
     root_login = sshd_root_login.read_text(encoding="utf-8")
     assert "PermitRootLogin yes" in root_login
     assert "PasswordAuthentication yes" in root_login
@@ -3137,6 +3138,7 @@ def test_appliance_settings_helper_writes_http_management_proxy_without_https(mo
     assert "ssl_certificate" not in management_site
     assert "proxy_pass http://127.0.0.1:8000;" in management_site
     assert "proxy_set_header X-Forwarded-Proto http;" in management_site
+    assert 'proxy_set_header X-LabFoundry-Depot-Basic-User "";' in management_site
     root_login = nginx_paths["sshd_root_login"].read_text(encoding="utf-8")
     assert "PermitRootLogin no" in root_login
     assert "PasswordAuthentication yes" not in root_login

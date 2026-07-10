@@ -2469,6 +2469,7 @@ def _management_proxy_location(upstream_host: str, upstream_port: int, forwarded
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
         f"    proxy_set_header X-Forwarded-Proto {forwarded_proto};",
+        '    proxy_set_header X-LabFoundry-Depot-Basic-User "";',
         "    proxy_set_header Upgrade $http_upgrade;",
         '    proxy_set_header Connection "upgrade";',
         "  }",
