@@ -3585,6 +3585,83 @@ textarea {
   width: min(920px, calc(100vw - 32px));
 }
 
+.vcf-fqdn-modal.confirm-modal.wide-modal {
+  width: min(960px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+.vcf-fqdn-controls {
+  grid-template-columns:
+    minmax(104px, 0.72fr)
+    minmax(88px, 0.62fr)
+    minmax(88px, 0.62fr)
+    minmax(170px, 1.18fr)
+    minmax(220px, 1.56fr);
+}
+
+.vcf-fqdn-modal .confirm-modal-panel {
+  min-width: 0;
+  max-height: calc(100vh - 32px);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.vcf-fqdn-modal .confirm-modal-body,
+.vcf-fqdn-modal .vcf-fqdn-modal-head,
+.vcf-fqdn-modal .confirm-modal-actions,
+.vcf-fqdn-controls > label {
+  min-width: 0;
+}
+
+.vcf-fqdn-modal .vcf-fqdn-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.vcf-fqdn-modal .vcf-fqdn-table th,
+.vcf-fqdn-modal .vcf-fqdn-table td {
+  overflow-wrap: anywhere;
+}
+
+.vcf-fqdn-controls > label:first-child .help-icon::after {
+  left: 0;
+  transform: none;
+}
+
+.vcf-fqdn-controls > label:last-child .help-icon::after {
+  top: calc(100% + 8px);
+  right: 0;
+  bottom: auto;
+  left: auto;
+  transform: none;
+}
+
+.vcf-fqdn-modal .confirm-modal-actions [data-vcf-fqdn-delete] {
+  margin-right: auto;
+}
+
+.vcf-fqdn-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.vcf-fqdn-modal-head h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.vcf-fqdn-table td:nth-child(2) {
+  font-weight: 600;
+}
+
+.vcf-helper-workspace .info-band .button-row {
+  align-self: center;
+}
+
 .confirm-modal::backdrop {
   background: rgba(15, 23, 42, 0.32);
 }

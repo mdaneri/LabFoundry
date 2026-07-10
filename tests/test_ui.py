@@ -52,6 +52,7 @@ def test_login_and_dashboard_render(client):
         "/certificate-authority",
         "/kms",
         "/esxi-pxe",
+        "/vcf-helper",
         "/vcf-offline-depot",
         "/vcf-private-registry",
         "/vcf-backups",
@@ -8950,6 +8951,519 @@ def test_dns_zone_warns_for_local_domain(client):
     assert "RFC 6761" in refreshed.text
     assert "IANA Special-Use Domain Names registry" in refreshed.text
     assert "ICANN/IANA private-use TLD selection" in refreshed.text
+
+
+def test_vcf_helper_page_renders_domain_dropdown(client):
+    from pathlib import Path
+
+    login(client)
+    page = client.get("/dns")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    created = client.post("/dns/zones", data={"domain": "vcf.internal", "csrf": csrf}, follow_redirects=False)
+    assert created.status_code == 303
+
+    response = client.get("/vcf-helper")
+
+    assert response.status_code == 200
+    assert "Generated VCF FQDNs" in response.text
+    assert 'href="/vcf-helper"' in response.text
+    assert '<option value="labfoundry.internal"' in response.text
+    assert '<option value="vcf.internal"' in response.text
+    assert 'name="target"' in response.text
+    assert '<option value="vcf-9.1" selected>VCF 9.1</option>' in response.text
+    assert '<option value="vvf-9.1" >VVF 9.1</option>' in response.text
+    assert "data-target-components=" in response.text
+    assert 'name="start_ipv4"' in response.text
+    assert "Starting IP / prefix" in response.text
+    assert 'placeholder="192.168.50.100/24 or 2001:db8::100/64"' in response.text
+    assert "Assigned IP" in response.text
+    assert "Assigned IPv4" not in response.text
+    assert 'name="network_prefix"' not in response.text
+    assert "Delete generated records" in response.text
+    app_js = Path("labfoundry/app/static/app.js").read_text()
+    assert "[data-vcf-fqdn-target]" in app_js
+    assert 'submit.textContent = complete ? "Done" : "Create DNS records"' in app_js
+    assert 'modal.close("done")' in app_js
+
+
+def test_vcf_helper_generates_dns_records_with_component_descriptions(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-helper/generated-fqdns",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "",
+            "suffix": "",
+            "start_ipv4": "192.168.210.10/24",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["created"]) == 17
+    assert payload["created"][0] == {
+        "host": "vc01",
+        "host_label": "vc01",
+        "fqdn": "vc01.labfoundry.internal",
+        "description": "vCenter",
+        "address": "192.168.210.10",
+        "record_type": "A",
+    }
+    with SessionLocal() as db:
+        vc_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "vc01.labfoundry.internal")).scalar_one()
+        automation = db.execute(select(DnsRecord).where(DnsRecord.hostname == "auto-vip.labfoundry.internal")).scalar_one()
+        license_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "license.labfoundry.internal")).scalar_one()
+        assert vc_record.record_type == "A"
+        assert vc_record.address == "192.168.210.10"
+        assert vc_record.description == "vCenter"
+        assert automation.description == "VCF Automation"
+        assert license_record.description == "License Server"
+
+
+def test_vcf_helper_vvf_target_generates_subset(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-helper/generated-fqdns",
+        data={
+            "target": "vvf-9.1",
+            "domain": "labfoundry.internal",
+            "prefix": "vvf",
+            "suffix": "",
+            "start_ipv4": "192.168.211.10/24",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["host"] for row in payload["created"]] == ["vc01", "ops01", "vsp01", "fleetlcm", "shared01", "license"]
+    assert [row["address"] for row in payload["created"]] == [
+        "192.168.211.10",
+        "192.168.211.11",
+        "192.168.211.12",
+        "192.168.211.13",
+        "192.168.211.14",
+        "192.168.211.15",
+    ]
+    with SessionLocal() as db:
+        nsx = db.execute(select(DnsRecord).where(DnsRecord.hostname == "vvfnsx01.labfoundry.internal")).scalar_one_or_none()
+        vcenter = db.execute(select(DnsRecord).where(DnsRecord.hostname == "vvfvc01.labfoundry.internal")).scalar_one()
+        license_record = db.execute(select(DnsRecord).where(DnsRecord.hostname == "vvflicense.labfoundry.internal")).scalar_one()
+        assert nsx is None
+        assert vcenter.description == "vCenter"
+        assert license_record.description == "License Server"
+
+
+def test_vcf_helper_shows_existing_address_record_addresses_in_preview(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                DnsRecord(
+                    hostname="vc01.labfoundry.internal",
+                    record_type="A",
+                    address="192.168.219.55",
+                    description="existing vCenter",
+                    enabled=True,
+                ),
+                DnsRecord(
+                    hostname="vc01.labfoundry.internal",
+                    record_type="AAAA",
+                    address="2001:db8:219::55",
+                    description="existing vCenter IPv6",
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    response = client.get("/vcf-helper")
+
+    assert response.status_code == 200
+    assert 'data-existing-address-records=' in response.text
+    assert '"vc01.labfoundry.internal": ["192.168.219.55", "2001:db8:219::55"]' in response.text
+    assert "192.168.219.55" in response.text
+    assert "2001:db8:219::55" in response.text
+
+
+def test_vcf_helper_prefix_suffix_and_ip_collision_skips(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpReservation, DnsRecord
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(DnsRecord(hostname="pvc01a.labfoundry.internal", record_type="A", address="192.168.220.90", description="manual", enabled=True))
+        db.add(DnsRecord(hostname="occupied.labfoundry.internal", record_type="A", address="192.168.220.10", description="manual", enabled=True))
+        db.add(DhcpReservation(hostname="reserved.labfoundry.internal", mac_address="02:00:00:00:22:11", ip_address="192.168.220.11", enabled=True))
+        db.commit()
+
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-helper/generated-fqdns",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "p",
+            "suffix": "a",
+            "start_ipv4": "192.168.220.10/24",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["fqdn"] for row in payload["skipped"]] == ["pvc01a.labfoundry.internal"]
+    assert payload["skipped"][0]["address"] == "192.168.220.90"
+    assert payload["created"][0]["fqdn"] == "pnsx01a.labfoundry.internal"
+    assert payload["created"][0]["address"] == "192.168.220.12"
+    with SessionLocal() as db:
+        skipped = db.execute(select(DnsRecord).where(DnsRecord.hostname == "pvc01a.labfoundry.internal")).scalar_one()
+        created = db.execute(select(DnsRecord).where(DnsRecord.hostname == "pnsx01a.labfoundry.internal")).scalar_one()
+        assert skipped.address == "192.168.220.90"
+        assert skipped.description == "manual"
+        assert created.address == "192.168.220.12"
+        assert created.description == "NSX Manager cluster"
+
+
+def test_vcf_helper_ipv6_generation_creates_aaaa_records_and_skips_collisions(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(DnsRecord(hostname="v6vc01.labfoundry.internal", record_type="AAAA", address="2001:db8:240::99", description="manual IPv6", enabled=True))
+        db.add(DnsRecord(hostname="occupied6.labfoundry.internal", record_type="AAAA", address="2001:db8:240::10", description="manual IPv6", enabled=True))
+        db.commit()
+
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-helper/generated-fqdns",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "v6",
+            "suffix": "",
+            "start_ipv4": "2001:db8:240::10/64",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["skipped"][0]["fqdn"] == "v6vc01.labfoundry.internal"
+    assert payload["skipped"][0]["address"] == "2001:db8:240::99"
+    assert payload["created"][0]["fqdn"] == "v6nsx01.labfoundry.internal"
+    assert payload["created"][0]["record_type"] == "AAAA"
+    assert payload["created"][0]["address"] == "2001:db8:240::11"
+    with SessionLocal() as db:
+        created = db.execute(select(DnsRecord).where(DnsRecord.hostname == "v6nsx01.labfoundry.internal")).scalar_one()
+        skipped = db.execute(select(DnsRecord).where(DnsRecord.hostname == "v6vc01.labfoundry.internal")).scalar_one()
+        assert created.record_type == "AAAA"
+        assert created.address == "2001:db8:240::11"
+        assert created.description == "NSX Manager cluster"
+        assert skipped.address == "2001:db8:240::99"
+        assert skipped.description == "manual IPv6"
+
+
+def test_vcf_helper_insufficient_addresses_creates_nothing(client):
+    from sqlalchemy import func, select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    with SessionLocal() as db:
+        before = db.scalar(select(func.count()).select_from(DnsRecord))
+
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-helper/generated-fqdns",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "edge",
+            "suffix": "",
+            "start_ipv4": "255.255.255.250/24",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert response.status_code == 422
+    assert "Not enough available IPv4 addresses remain in 255.255.255.0/24" in response.text
+    with SessionLocal() as db:
+        after = db.scalar(select(func.count()).select_from(DnsRecord))
+        assert after == before
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "edgevc01.labfoundry.internal")).scalar_one_or_none() is None
+
+
+def test_vcf_helper_insufficient_ipv6_addresses_creates_nothing(client):
+    from sqlalchemy import func, select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    with SessionLocal() as db:
+        before = db.scalar(select(func.count()).select_from(DnsRecord))
+
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-helper/generated-fqdns",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "edge6",
+            "suffix": "",
+            "start_ipv4": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/127",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert response.status_code == 422
+    assert "Not enough available IPv6 addresses remain in ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/127" in response.text
+    with SessionLocal() as db:
+        after = db.scalar(select(func.count()).select_from(DnsRecord))
+        assert after == before
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "edge6vc01.labfoundry.internal")).scalar_one_or_none() is None
+
+
+def test_vcf_helper_rejects_network_or_broadcast_start_address(client):
+    from sqlalchemy import func, select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    with SessionLocal() as db:
+        before = db.scalar(select(func.count()).select_from(DnsRecord))
+
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-helper/generated-fqdns",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "boundary",
+            "suffix": "",
+            "start_ipv4": "192.168.230.0/24",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert response.status_code == 422
+    assert "must be a usable host address in 192.168.230.0/24" in response.text
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(DnsRecord)) == before
+
+
+def test_vcf_helper_delete_removes_owned_records_and_preserves_skipped_existing(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(
+            DnsRecord(
+                hostname="delvc01.labfoundry.internal",
+                record_type="A",
+                address="192.168.231.90",
+                description="manual record",
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    created = client.post(
+        "/vcf-helper/generated-fqdns",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "del",
+            "suffix": "",
+            "start_ipv4": "192.168.231.10/24",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+    assert created.status_code == 200
+    assert len(created.json()["created"]) == 16
+    assert len(created.json()["skipped"]) == 1
+
+    deleted = client.post(
+        "/vcf-helper/generated-fqdns/delete",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "del",
+            "suffix": "",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert deleted.status_code == 200
+    payload = deleted.json()
+    assert len(payload["deleted"]) == 16
+    assert [row["fqdn"] for row in payload["preserved"]] == ["delvc01.labfoundry.internal"]
+    with SessionLocal() as db:
+        manual = db.execute(select(DnsRecord).where(DnsRecord.hostname == "delvc01.labfoundry.internal")).scalar_one()
+        removed = db.execute(select(DnsRecord).where(DnsRecord.hostname == "delnsx01.labfoundry.internal")).scalar_one_or_none()
+        assert manual.address == "192.168.231.90"
+        assert manual.description == "manual record"
+        assert removed is None
+
+
+def test_vcf_helper_delete_vvf_target_removes_only_subset(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    created = client.post(
+        "/vcf-helper/generated-fqdns",
+        data={
+            "target": "vcf-9.1",
+            "domain": "labfoundry.internal",
+            "prefix": "vdel",
+            "suffix": "",
+            "start_ipv4": "192.168.233.10/24",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+    assert created.status_code == 200
+    assert len(created.json()["created"]) == 17
+
+    deleted = client.post(
+        "/vcf-helper/generated-fqdns/delete",
+        data={
+            "target": "vvf-9.1",
+            "domain": "labfoundry.internal",
+            "prefix": "vdel",
+            "suffix": "",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert deleted.status_code == 200
+    assert [row["host"] for row in deleted.json()["deleted"]] == ["vc01", "ops01", "vsp01", "fleetlcm", "shared01", "license"]
+    with SessionLocal() as db:
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "vdelvc01.labfoundry.internal")).scalar_one_or_none() is None
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "vdelnsx01.labfoundry.internal")).scalar_one() is not None
+
+
+def test_vcf_helper_delete_recognizes_legacy_generated_records(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(
+            DnsRecord(
+                hostname="legacyvc01.labfoundry.internal",
+                record_type="A",
+                address="192.168.232.10",
+                record_data_json="",
+                description="vCenter",
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-helper/generated-fqdns/delete",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "legacy",
+            "suffix": "",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert response.status_code == 200
+    assert [row["fqdn"] for row in response.json()["deleted"]] == ["legacyvc01.labfoundry.internal"]
+    with SessionLocal() as db:
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "legacyvc01.labfoundry.internal")).scalar_one_or_none() is None
+
+
+def test_vcf_helper_delete_removes_owned_aaaa_records(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsRecord
+    from labfoundry.app.services.dnsmasq import dump_dns_record_data
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(
+            DnsRecord(
+                hostname="ipv6delvc01.labfoundry.internal",
+                record_type="AAAA",
+                address="2001:db8:232::10",
+                record_data_json=dump_dns_record_data("AAAA", "2001:db8:232::10", {"source": "vcf_helper", "component": "vc01"}),
+                description="vCenter",
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/vcf-helper/generated-fqdns/delete",
+        data={
+            "domain": "labfoundry.internal",
+            "prefix": "ipv6del",
+            "suffix": "",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Helper": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["deleted"][0]["record_type"] == "AAAA"
+    with SessionLocal() as db:
+        assert db.execute(select(DnsRecord).where(DnsRecord.hostname == "ipv6delvc01.labfoundry.internal")).scalar_one_or_none() is None
 
 
 def test_duplicate_dns_record_form_shows_conflict(client):

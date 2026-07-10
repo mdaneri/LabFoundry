@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block page_title %}VCF Helper{% endblock %}
+{% block content %}
+<section class="split-workspace vcf-helper-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>VCF Helper</h2>
+        <p class="muted">Generate deployment helpers for VMware Cloud Foundation and save the resulting desired state in LabFoundry.</p>
+      </div>
+    </div>
+
+    {% if vcf_helper_errors %}
+      <div class="alert error">
+        {% for error in vcf_helper_errors %}
+          <div>{{ error }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {% if vcf_helper_result %}
+      <div class="alert success">
+        Created {{ vcf_helper_result.created|length }} DNS records{% if vcf_helper_result.skipped %}; skipped {{ vcf_helper_result.skipped|length }} existing records{% endif %}.
+      </div>
+    {% endif %}
+    {% if vcf_helper_delete_result %}
+      <div class="alert success">
+        Deleted {{ vcf_helper_delete_result.deleted|length }} VCF Helper DNS records{% if vcf_helper_delete_result.preserved %}; preserved {{ vcf_helper_delete_result.preserved|length }} unrelated records{% endif %}.
+      </div>
+    {% endif %}
+
+    <div class="metric-grid service-summary-grid">
+      <div class="metric">
+        <span>Managed domains</span>
+        <strong>{{ dns_domain_options|length }}</strong>
+        <small>{{ dns_domain_options|join(", ") }}</small>
+      </div>
+      <div class="metric">
+        <span>Generated names</span>
+        <strong>{{ vcf_helper_rows|length }}</strong>
+        <small>A or AAAA records created as DNS desired state</small>
+      </div>
+      <div class="metric">
+        <span>Next IP hint</span>
+        <strong>{{ vcf_helper_default_start_ipv4 or "enter manually" }}</strong>
+        <small>existing DNS addresses and DHCP reservations are skipped</small>
+      </div>
+    </div>
+
+    <section class="info-band">
+      <div>
+        <h2>Generated VCF FQDNs</h2>
+        <p class="muted">Use the modal to choose a DNS zone and starting IP/prefix. Existing FQDNs stay untouched; new records are applied later through global Appliance Apply.</p>
+      </div>
+      <div class="button-row">
+        <a class="button secondary" href="/dns">Review DNS</a>
+        <button class="button primary" type="button" data-vcf-fqdn-modal-open>Generated VCF FQDNs</button>
+      </div>
+    </section>
+  </div>
+
+  <aside class="side-stack">
+    {% include "partials/appliance_apply_status.html" %}
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>DNS Boundary</h2>
+        <span class="status-pill muted">desired state</span>
+      </div>
+      <div class="settings-list compact-settings-list">
+        <div><span>Record type</span><strong>A or AAAA</strong><small>IPv4 or IPv6</small></div>
+        <div><span>Runtime apply</span><strong>dnsmasq</strong><small>global Appliance Apply</small></div>
+        <div><span>Conflicts</span><strong>skip existing</strong><small>no overwrite</small></div>
+      </div>
+    </div>
+  </aside>
+</section>
+
+<dialog id="vcf-fqdn-modal" class="confirm-modal wide-modal vcf-fqdn-modal" aria-labelledby="vcf-fqdn-modal-title">
+  <form class="confirm-modal-panel form-stack" action="/vcf-helper/generated-fqdns" method="post" data-vcf-fqdn-form>
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="confirm-modal-body">
+      <p class="kicker">VCF Helper</p>
+      <h2 id="vcf-fqdn-modal-title">Pre-fill Generated FQDNs</h2>
+      <div class="form-grid vcf-fqdn-controls">
+        <label>
+          <span class="field-label"><span>Deployment</span><button class="help-icon" type="button" data-help="Select the VMware Cloud Foundation or VMware vSphere Foundation version to generate the required DNS names for that deployment type.">i</button></span>
+          <select name="target" data-vcf-fqdn-target>
+            {% for target in vcf_helper_target_options %}
+              <option value="{{ target.value }}" {{ "selected" if target.value == vcf_helper_default_target else "" }}>{{ target.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span class="field-label"><span>Prefix</span><button class="help-icon" type="button" data-help="Optional text added before every generated VCF hostname. The resulting name is saved only as DNS desired state.">i</button></span>
+          <input name="prefix" placeholder="prefix" data-vcf-fqdn-prefix>
+        </label>
+        <label>
+          <span class="field-label"><span>Suffix</span><button class="help-icon" type="button" data-help="Optional text added after every generated VCF hostname, before the selected DNS domain.">i</button></span>
+          <input name="suffix" placeholder="suffix" data-vcf-fqdn-suffix>
+        </label>
+        <label>
+          <span class="field-label"><span>Domain Name</span><button class="help-icon" type="button" data-help="Managed DNS zone that receives the generated VCF A or AAAA records. Add zones on the DNS page.">i</button></span>
+          <select name="domain" data-vcf-fqdn-domain>
+            {% for domain in dns_domain_options %}
+              <option value="{{ domain }}" {{ "selected" if domain == vcf_helper_default_domain else "" }}>{{ domain }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span class="field-label"><span>Starting IP / prefix</span><button class="help-icon" type="button" data-help="First candidate IPv4 or IPv6 address and CIDR prefix, such as 192.168.50.100/24 or 2001:db8::100/64. LabFoundry skips DNS addresses and DHCP reservations and allocates only usable addresses inside this subnet.">i</button></span>
+          <input name="start_ipv4" value="{{ vcf_helper_default_start_ipv4 }}" placeholder="192.168.50.100/24 or 2001:db8::100/64" data-vcf-fqdn-start-ipv4>
+        </label>
+      </div>
+
+      <div class="vcf-fqdn-modal-head">
+        <div>
+          <h3>Generated FQDNs</h3>
+          <p class="muted">Creation and deletion both require confirmation. Existing unrelated FQDNs are skipped and never overwritten.</p>
+        </div>
+        <button class="button tiny ghost" type="button" data-vcf-fqdn-clear>Clear pattern</button>
+      </div>
+      <div class="alert error hidden" data-vcf-fqdn-errors></div>
+      <div class="alert success hidden" data-vcf-fqdn-result></div>
+      <table class="data-table compact vcf-fqdn-table">
+        <thead>
+          <tr><th>Component</th><th>Generated FQDN</th><th>Assigned IP</th></tr>
+        </thead>
+        <tbody
+          data-vcf-fqdn-rows
+          data-components='{{ vcf_helper_rows | tojson }}'
+          data-target-components='{{ vcf_helper_target_components | tojson }}'
+          data-existing-fqdns='{{ vcf_helper_existing_fqdns | tojson }}'
+          data-existing-address-records='{{ vcf_helper_existing_address_records | tojson }}'
+        >
+          {% for row in vcf_helper_rows %}
+            <tr>
+              <td>{{ row.description }}</td>
+              <td>{{ row.fqdn }}</td>
+              {% set existing_addresses = vcf_helper_existing_address_records.get(row.fqdn, []) %}
+              <td{% if not existing_addresses %} class="muted"{% endif %}>{{ existing_addresses|join(", ") if existing_addresses else ("existing record skipped" if row.fqdn in vcf_helper_existing_fqdns else "allocated on confirm") }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="confirm-modal-actions">
+      <button class="button danger" type="button" data-vcf-fqdn-delete>Delete generated records</button>
+      <button class="button ghost" value="cancel" type="button" data-vcf-fqdn-modal-cancel>Cancel</button>
+      <button class="button primary" type="submit" data-vcf-fqdn-submit>Create DNS records</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}

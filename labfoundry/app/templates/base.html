@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=vcfdt-apply-20260709-1">
+    <link rel="stylesheet" href="/static/app.css?v=vcf-helper-20260710-8">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -52,6 +52,7 @@
             ]),
             ("VCF Workflows", [
               ("ESXi PXE", "/esxi-pxe", "read:esxi-pxe"),
+              ("VCF Helper", "/vcf-helper", "read:dns"),
               ("VCF Offline Depot", "/vcf-offline-depot", "read:repository"),
               ("VCF Private Registry", "/vcf-private-registry", "read:vcf-registry"),
               ("VCF Backups", "/vcf-backups", "read:vcf-backups")
@@ -197,7 +198,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=vcfdt-apply-20260709-1"></script>
+    <script src="/static/app.js?v=vcf-helper-20260710-8"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>
