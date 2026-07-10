@@ -115,7 +115,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v64" in service_worker.text
+    assert "labfoundry-pwa-v65" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -135,7 +135,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-trust-modal-20260710-1" in offline.text
+    assert "/static/app.css?v=vcf-helper-action-bands-20260710-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -151,7 +151,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=vcf-trust-modal-20260710-1" in page.text
+    assert "/static/app.css?v=vcf-helper-action-bands-20260710-1" in page.text
     assert "/static/app.js?v=vcf-trust-modal-20260710-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
@@ -8981,6 +8981,10 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert 'href="/vcf-helper"' in response.text
     visible_workspace = response.text.split('<dialog id="vcf-trust-modal"', 1)[0]
     assert "VCF Certificate Trust" in visible_workspace
+    assert "Review DNS" not in visible_workspace
+    assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 2
+    assert 'data-vcf-fqdn-modal-open aria-haspopup="dialog" aria-controls="vcf-fqdn-modal"' in visible_workspace
+    assert 'aria-controls="vcf-trust-modal"' in visible_workspace
     assert "Root CA subject" not in visible_workspace
     assert '<option value="labfoundry.internal"' in response.text
     assert '<option value="vcf.internal"' in response.text
