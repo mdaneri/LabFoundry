@@ -115,7 +115,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v59" in service_worker.text
+    assert "labfoundry-pwa-v64" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -135,7 +135,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=depot-basic-auth-20260710-1" in offline.text
+    assert "/static/app.css?v=vcf-trust-modal-20260710-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -151,8 +151,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=depot-basic-auth-20260710-1" in page.text
-    assert "/static/app.js?v=depot-basic-auth-20260710-1" in page.text
+    assert "/static/app.css?v=vcf-trust-modal-20260710-1" in page.text
+    assert "/static/app.js?v=vcf-trust-modal-20260710-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -8979,6 +8979,9 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert response.status_code == 200
     assert "Generated VCF FQDNs" in response.text
     assert 'href="/vcf-helper"' in response.text
+    visible_workspace = response.text.split('<dialog id="vcf-trust-modal"', 1)[0]
+    assert "VCF Certificate Trust" in visible_workspace
+    assert "Root CA subject" not in visible_workspace
     assert '<option value="labfoundry.internal"' in response.text
     assert '<option value="vcf.internal"' in response.text
     assert 'name="target"' in response.text
@@ -8996,6 +8999,115 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert "[data-vcf-fqdn-target]" in app_js
     assert 'submit.textContent = complete ? "Done" : "Create DNS records"' in app_js
     assert 'modal.close("done")' in app_js
+
+
+def test_vcf_helper_renders_certificate_trust_modal(client):
+    from pathlib import Path
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.services.ca import ensure_root_ca_material
+    from labfoundry.app.ui import get_ca_settings_row
+
+    login(client)
+    with SessionLocal() as db:
+        settings = get_ca_settings_row(db)
+        settings.enabled = True
+        ensure_root_ca_material(settings)
+        db.commit()
+
+    response = client.get("/vcf-helper")
+
+    assert response.status_code == 200
+    assert "VCF Certificate Trust" in response.text
+    assert 'action="/vcf-trust/root-ca"' in response.text
+    assert 'name="snapshot_acknowledged"' in response.text
+    assert 'name="ssh_private_key"' in response.text
+    assert "SHA-256 fingerprint" in response.text
+    assert "data-vcf-trust-form" in response.text
+    assert "data-vcf-trust-host-key-confirmation" in response.text
+    assert '<dialog id="vcf-trust-modal"' in response.text
+    assert '<dialog id="vcf-trust-modal" class="confirm-modal wide-modal" aria-labelledby="vcf-trust-modal-title" open' not in response.text
+    app_js = Path("labfoundry/app/static/app.js").read_text()
+    assert 'headers: { "X-LabFoundry-VCF-Trust": "1" }' in app_js
+    assert "Your entries remain in this form" in app_js
+    assert 'window.location.assign(payload.redirect || "/vcf-helper?vcf_trust=1")' in app_js
+
+    legacy = client.get("/vcf-trust", follow_redirects=False)
+    assert legacy.status_code == 307
+    assert legacy.headers["location"] == "/vcf-helper?vcf_trust=1"
+
+
+def test_vcf_trust_requires_tofu_confirmation_then_queues_without_persisting_credentials(client, monkeypatch):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, VcfTrustTarget
+    from labfoundry.app.services.ca import ensure_root_ca_material
+    from labfoundry.app.ui import get_ca_settings_row
+    import labfoundry.app.ui as ui
+
+    login(client)
+    with SessionLocal() as db:
+        settings = get_ca_settings_row(db)
+        settings.enabled = True
+        ensure_root_ca_material(settings)
+        db.commit()
+    monkeypatch.setattr(ui, "discover_ssh_host_key", lambda _address, _port: "SHA256:verified-host-key")
+    queued = []
+    monkeypatch.setattr(ui, "queue_vcf_trust_job", lambda job_id, target_id, credentials, ca: queued.append((job_id, target_id, credentials, ca)))
+    csrf = client.get("/vcf-helper").text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    credentials = {
+        "address": "vcf-installer.example.test",
+        "ssh_port": "22",
+        "api_username": "administrator@vsphere.local",
+        "api_password": "api-super-secret",
+        "ssh_auth_method": "password",
+        "ssh_password": "ssh-super-secret",
+        "root_password": "root-super-secret",
+        "snapshot_acknowledged": "on",
+        "csrf": csrf,
+    }
+
+    awaiting = client.post(
+        "/vcf-trust/root-ca",
+        data=credentials,
+        headers={"X-LabFoundry-VCF-Trust": "1"},
+    )
+
+    assert awaiting.status_code == 409
+    assert awaiting.json() == {
+        "status": "host-key-confirmation-required",
+        "address": "vcf-installer.example.test",
+        "ssh_port": 22,
+        "fingerprint": "SHA256:verified-host-key",
+        "previous_fingerprint": "",
+        "replacement": False,
+    }
+    with SessionLocal() as db:
+        assert db.execute(select(Job).where(Job.type == "vcf-ca-trust")).scalars().all() == []
+        assert db.execute(select(VcfTrustTarget)).scalars().all() == []
+
+    confirmed = client.post(
+        "/vcf-trust/root-ca",
+        data={
+            **credentials,
+            "confirmed_host_key": "SHA256:verified-host-key",
+        },
+        headers={"X-LabFoundry-VCF-Trust": "1"},
+    )
+
+    assert confirmed.status_code == 202
+    assert confirmed.json()["status"] == "queued"
+    assert confirmed.json()["redirect"] == "/vcf-helper?vcf_trust=1"
+    assert len(queued) == 1
+    assert queued[0][2].api_password == "api-super-secret"
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "vcf-ca-trust")).scalar_one()
+        target = db.execute(select(VcfTrustTarget)).scalar_one()
+        assert job.status == "pending"
+        assert target.ssh_host_key_fingerprint == "SHA256:verified-host-key"
+        persisted = "\n".join([job.result or "", target.last_result, target.address])
+        assert "super-secret" not in persisted
 
 
 def test_vcf_helper_generates_dns_records_with_component_descriptions(client):

@@ -603,6 +603,25 @@ class VcfBackupSettings(Base):
     sftp_user: Mapped[User | None] = relationship()
 
 
+class VcfTrustTarget(Base):
+    __tablename__ = "vcf_trust_targets"
+    __table_args__ = (UniqueConstraint("address", "ssh_port", name="uq_vcf_trust_target_address_port"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    address: Mapped[str] = mapped_column(String(240), index=True)
+    ssh_port: Mapped[int] = mapped_column(Integer, default=22)
+    appliance_role: Mapped[str] = mapped_column(String(40), default="")
+    appliance_version: Mapped[str] = mapped_column(String(80), default="")
+    ssh_host_key_fingerprint: Mapped[str] = mapped_column(String(160), default="")
+    last_ca_fingerprint: Mapped[str] = mapped_column(String(128), default="")
+    last_result: Mapped[str] = mapped_column(String(80), default="")
+    last_job_id: Mapped[str] = mapped_column(String(40), default="")
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class VcfPrivateRegistrySettings(Base):
     __tablename__ = "vcf_private_registry_settings"
 

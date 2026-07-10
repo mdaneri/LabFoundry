@@ -1,0 +1,85 @@
+<dialog id="vcf-trust-modal" class="confirm-modal wide-modal" aria-labelledby="vcf-trust-modal-title" {% if vcf_trust_host_key_confirmation or vcf_trust_auto_open %}data-vcf-trust-auto-open{% endif %}>
+  <form class="confirm-modal-panel form-stack" action="/vcf-trust/root-ca" method="post" enctype="multipart/form-data" data-vcf-trust-form>
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="confirmed_host_key" value="{{ vcf_trust_host_key_confirmation.fingerprint if vcf_trust_host_key_confirmation else '' }}" data-vcf-trust-confirmed-host-key>
+    <input type="hidden" name="awaiting_job_id" value="">
+    <div class="confirm-modal-body">
+      <p class="kicker">Remote VCF maintenance</p>
+      <h2 id="vcf-trust-modal-title">VCF Certificate Trust</h2>
+      <p class="muted">Deploy the active LabFoundry root CA to one VCF 9 Installer or SDDC Manager appliance.</p>
+
+      {% if vcf_trust_errors %}
+        <div class="alert error">{% for error in vcf_trust_errors %}<div>{{ error }}</div>{% endfor %}</div>
+      {% endif %}
+      {% if vcf_trust_ca %}
+        <div class="settings-list compact-settings-list">
+          <div><span>Root CA subject</span><strong>{{ vcf_trust_ca.subject }}</strong></div>
+          <div><span>Expires</span><strong>{{ vcf_trust_ca.expires_at }}</strong></div>
+          <div><span>SHA-256 fingerprint</span><strong class="mono-text">{{ vcf_trust_ca.fingerprint }}</strong></div>
+        </div>
+      {% else %}
+        <div class="alert error">{{ vcf_trust_ca_error }}</div>
+      {% endif %}
+
+      <div class="panel-head">
+        <h3>Latest trust task</h3>
+        <span class="status-pill {{ 'good' if latest_vcf_trust_job and latest_vcf_trust_job.status in ['succeeded', 'no-op'] else 'warn' if latest_vcf_trust_job else 'muted' }}"{% if latest_vcf_trust_job %} data-vcf-trust-job-status="{{ latest_vcf_trust_job.status }}"{% endif %}>{{ latest_vcf_trust_job.status if latest_vcf_trust_job else "none" }}</span>
+      </div>
+      {% if latest_vcf_trust_job %}
+        <div class="settings-list compact-settings-list">
+          <div><span>Job</span><strong>{{ latest_vcf_trust_job.id }}</strong></div>
+          <div><span>Target</span><strong>{{ latest_vcf_trust_result.target or "unknown" }}</strong></div>
+          <div><span>State</span><strong>{{ latest_vcf_trust_result.state or latest_vcf_trust_job.status }}</strong></div>
+          <div><span>Progress</span><strong>{{ latest_vcf_trust_job.progress_percent }}%</strong></div>
+          {% if latest_vcf_trust_job.error %}<div><span>Attention</span><strong>{{ latest_vcf_trust_job.error }}</strong></div>{% endif %}
+        </div>
+      {% endif %}
+
+      {% if vcf_trust_targets %}
+        <div class="panel-head"><h3>VCF trust targets</h3></div>
+        <table class="data-table compact">
+          <thead><tr><th>VCF appliance</th><th>Context</th><th>Last CA</th><th>Result</th></tr></thead>
+          <tbody>
+            {% for target in vcf_trust_targets %}
+              <tr>
+                <td>{{ target.address }}:{{ target.ssh_port }}</td>
+                <td>{{ target.appliance_role or "not detected" }}{% if target.appliance_version %} {{ target.appliance_version }}{% endif %}</td>
+                <td class="mono-text">{{ target.last_ca_fingerprint or "none" }}</td>
+                <td><span class="status-pill {{ 'good' if target.last_result in ['succeeded', 'no-op'] else 'warn' }}">{{ target.last_result or "never" }}</span></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+
+      <div class="panel-head"><h3>Run trust task</h3></div>
+      <div class="alert warn{% if not vcf_trust_host_key_confirmation %} hidden{% endif %}" data-vcf-trust-host-key-confirmation>
+        {% if vcf_trust_host_key_confirmation %}
+          <strong>{{ "Changed" if vcf_trust_host_key_confirmation.replacement else "First-seen" }} SSH host key</strong>
+          <div>Verify the VCF console fingerprint before continuing: <span class="mono-text">{{ vcf_trust_host_key_confirmation.fingerprint }}</span></div>
+          {% if vcf_trust_host_key_confirmation.previous_fingerprint %}<div>Previously pinned: <span class="mono-text">{{ vcf_trust_host_key_confirmation.previous_fingerprint }}</span></div>{% endif %}
+          <div>Confirm the fingerprint to queue the task.</div>
+        {% endif %}
+      </div>
+      <div class="alert error hidden" data-vcf-trust-form-errors></div>
+      <div class="form-grid">
+        <label><span class="field-label"><span>VCF appliance IP or FQDN</span><button class="help-icon" type="button" data-help="The VCF 9 Installer or SDDC Manager appliance that receives the LabFoundry root CA.">i</button></span><input name="address" value="{{ vcf_trust_host_key_confirmation.address if vcf_trust_host_key_confirmation else '' }}" required></label>
+        <label><span class="field-label"><span>SSH port</span><button class="help-icon" type="button" data-help="SSH listener used by the vcf account for the post-import service restart. The API uses HTTPS on port 443.">i</button></span><input name="ssh_port" type="number" min="1" max="65535" value="{{ vcf_trust_host_key_confirmation.ssh_port if vcf_trust_host_key_confirmation else 22 }}" required></label>
+        <label><span class="field-label"><span>API administrator</span><button class="help-icon" type="button" data-help="VCF identity used only to obtain a temporary API token and call the trusted-certificate API. It is never stored.">i</button></span><input name="api_username" autocomplete="username" required></label>
+        <label><span class="field-label"><span>API password</span><button class="help-icon" type="button" data-help="One-time VCF API password. It is never written to jobs, logs, audits, or the database.">i</button></span><input name="api_password" type="password" autocomplete="new-password" required></label>
+        <label><span class="field-label"><span>SSH authentication</span><button class="help-icon" type="button" data-help="Authenticate the vcf account with a one-time password or uploaded private key.">i</button></span><select name="ssh_auth_method" data-vcf-trust-auth-method><option value="password">Password</option><option value="private-key">Private key</option></select></label>
+        <label data-vcf-trust-password-field><span class="field-label"><span>vcf SSH password</span><button class="help-icon" type="button" data-help="One-time password for SSH as vcf. This is separate from the root password used by su.">i</button></span><input name="ssh_password" type="password" autocomplete="new-password"></label>
+        <label class="hidden" data-vcf-trust-key-field><span class="field-label"><span>vcf SSH private key</span><button class="help-icon" type="button" data-help="PEM or OpenSSH private key held in memory only for this task.">i</button></span><input name="ssh_private_key" type="file" accept=".pem,.key,text/plain"></label>
+        <label class="hidden" data-vcf-trust-key-field><span class="field-label"><span>Key passphrase</span><button class="help-icon" type="button" data-help="Optional one-time private-key passphrase. It is never persisted.">i</button></span><input name="ssh_private_key_passphrase" type="password" autocomplete="new-password"></label>
+        <label><span class="field-label"><span>Root password</span><button class="help-icon" type="button" data-help="One-time root password supplied to su. It is never persisted.">i</button></span><input name="root_password" type="password" autocomplete="new-password" required></label>
+      </div>
+      <label class="switch-field"><span class="field-label"><span>Snapshot exists</span><button class="help-icon" type="button" data-help="Broadcom requires a current snapshot before changing the VCF trust store.">i</button></span><input class="switch-input" type="checkbox" name="snapshot_acknowledged" required><span class="switch-track" aria-hidden="true"></span></label>
+      <div{% if not (vcf_trust_host_key_confirmation and vcf_trust_host_key_confirmation.replacement) %} class="hidden"{% endif %} data-vcf-trust-replace-row><label class="switch-field"><span class="field-label"><span>Replace pinned host key</span><button class="help-icon" type="button" data-help="Confirms that the changed SSH host key was independently verified.">i</button></span><input class="switch-input" type="checkbox" name="replace_host_key" data-vcf-trust-replace-host-key {% if vcf_trust_host_key_confirmation and vcf_trust_host_key_confirmation.replacement %}required{% endif %}><span class="switch-track" aria-hidden="true"></span></label></div>
+      <p class="muted">VCF 9.x only. Installer imports complete after API verification; SDDC Manager imports also restart and verify its services. Credentials remain only in this browser form and the in-memory task.</p>
+    </div>
+    <div class="confirm-modal-actions">
+      <button class="button ghost" type="button" data-vcf-trust-cancel>Close</button>
+      <button class="button primary" type="submit" data-vcf-trust-submit>{{ "Confirm host key and start" if vcf_trust_host_key_confirmation else "Run trust task" }}</button>
+    </div>
+  </form>
+</dialog>

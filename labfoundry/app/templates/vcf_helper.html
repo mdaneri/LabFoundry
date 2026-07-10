@@ -27,7 +27,6 @@
         Deleted {{ vcf_helper_delete_result.deleted|length }} VCF Helper DNS records{% if vcf_helper_delete_result.preserved %}; preserved {{ vcf_helper_delete_result.preserved|length }} unrelated records{% endif %}.
       </div>
     {% endif %}
-
     <div class="metric-grid service-summary-grid">
       <div class="metric">
         <span>Managed domains</span>
@@ -54,8 +53,10 @@
       <div class="button-row">
         <a class="button secondary" href="/dns">Review DNS</a>
         <button class="button primary" type="button" data-vcf-fqdn-modal-open>Generated VCF FQDNs</button>
+        <button class="button secondary" type="button" onclick="document.getElementById('vcf-trust-modal').showModal()" {% if vcf_trust_ca_error %}disabled{% endif %}>VCF Certificate Trust</button>
       </div>
     </section>
+
   </div>
 
   <aside class="side-stack">
@@ -73,6 +74,8 @@
     </div>
   </aside>
 </section>
+
+{% include "partials/vcf_trust_modal.html" %}
 
 <dialog id="vcf-fqdn-modal" class="confirm-modal wide-modal vcf-fqdn-modal" aria-labelledby="vcf-fqdn-modal-title">
   <form class="confirm-modal-panel form-stack" action="/vcf-helper/generated-fqdns" method="post" data-vcf-fqdn-form>

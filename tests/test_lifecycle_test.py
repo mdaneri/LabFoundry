@@ -161,6 +161,23 @@ def test_routing_probe_commands_cover_block_allow_and_route_role_paths():
     assert "ip route replace 192.168.60.0/24 via 172.31.50.1 dev eth1" in client_b
 
 
+def test_host_state_checks_verify_vcf_trust_runtime_dependencies(monkeypatch):
+    lifecycle = load_lifecycle_module()
+    args = lifecycle.parse_args(["--password", "test"])
+    captured = {}
+
+    def fake_run_host_checks(_args, checks):
+        captured.update(checks)
+        return checks
+
+    monkeypatch.setattr(lifecycle, "run_host_checks", fake_run_host_checks)
+
+    lifecycle.host_state_checks(args)
+
+    assert "/opt/labfoundry/.venv/bin/python" in captured["vcf_trust_dependencies"]
+    assert "import httpx, paramiko" in captured["vcf_trust_dependencies"]
+
+
 def test_esxi_pxe_payload_uses_dhcp_lifecycle_host():
     lifecycle = load_lifecycle_module()
     args = lifecycle.parse_args(["--password", "test", "--pxe-test-mode", "esxi", "--pxe-client-mac", "00:50:56:20:01:02"])

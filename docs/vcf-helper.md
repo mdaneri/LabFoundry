@@ -1,13 +1,16 @@
 # VCF Helper
 
-VCF Helper prepares the DNS desired state required by VMware Cloud Foundation
-(VCF) and VMware vSphere Foundation (VVF) deployments. It is available under
-`VCF Workflows` at `/vcf-helper`.
+VCF Helper prepares deployment DNS desired state. It is available under `VCF
+Workflows` at `/vcf-helper`.
 
 The helper creates DNS records in LabFoundry. It does not reload `dnsmasq` or
 change the appliance directly. Review and submit the changed `DNS/DHCP
 (dnsmasq)` unit through the global `/appliance-apply` workflow after generation
 or deletion.
+
+The `VCF Certificate Trust` button opens the separate remote certificate task
+in a modal without mixing CA details into the main DNS helper workspace. See
+[VCF Certificate Trust](vcf-trust.md).
 
 ## Generate FQDNs
 
