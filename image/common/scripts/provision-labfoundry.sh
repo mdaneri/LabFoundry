@@ -107,6 +107,8 @@ install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/local-us
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/chronyd"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-backups"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-offline-depot"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/vcfDownloadTool/active-tool"
+install -d -o labfoundry -g labfoundry -m 0700 "$LABFOUNDRY_STATE/vcfDownloadTool/active-tool/secrets"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/dnsmasq"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/kms"
 install -d -o root -g root -m 0755 "$LABFOUNDRY_STATE/users"

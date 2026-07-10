@@ -33,6 +33,7 @@ def test_photon_provisioning_management_network_matches_eth0_only():
     assert main.index("refresh_startup_host_inventory(db, environment=settings.environment)") < main.index("ensure_ca_state(db)")
     assert "if include_examples:" in seed
     assert "management_https_enabled=appliance_mode" in seed
+    assert 'install -d -o labfoundry -g labfoundry -m 0700 "$LABFOUNDRY_STATE/vcfDownloadTool/active-tool/secrets"' in script
 
 
 def test_photon_provisioning_installs_default_nginx_management_proxy():

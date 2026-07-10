@@ -152,7 +152,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=vcf-helper-action-bands-20260710-1" in page.text
-    assert "/static/app.js?v=vcf-trust-modal-20260710-1" in page.text
+    assert "/static/app.js?v=vlan-add-row-20260710-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -6725,6 +6725,8 @@ def test_physical_and_vlan_pages_render(client):
     assert "For standard access-mode NICs, assign IPv4/IPv6 CIDR on Physical Interfaces instead." in vlans.text
     assert "vlan-interfaces-table" in vlans.text
     assert "+ Add VLAN here" in client.get("/static/app.js").text
+    vlan_table_js = client.get("/static/app.js").text.split("function initializeVlanInterfacesTable()", 1)[1].split("function initializeDnsRecordsTable()", 1)[0]
+    assert vlan_table_js.index('field: "vlan_id"') < vlan_table_js.index("+ Add VLAN here")
     assert 'data-parent-options=\'[{"label": "eth1 - access - trunk' in vlans.text
     assert "data-parent-options" in vlans.text
     app_js = client.get("/static/app.js").text

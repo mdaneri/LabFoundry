@@ -5041,6 +5041,9 @@ def _apply_vcf_download_tool_properties(properties_path: Path) -> int:
         _vcf_download_tool_home(tool_path) / "conf" / "application-prodv2.properties",
         VCF_DEPOT_RUNTIME_TOOL_DIR / "conf" / "application-prodv2.properties",
     ]
+    runtime_secrets_dir = VCF_DEPOT_RUNTIME_TOOL_DIR / "secrets"
+    runtime_secrets_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(runtime_secrets_dir, 0o700)
     for target_path in target_paths:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(text, encoding="utf-8")
@@ -5050,6 +5053,8 @@ def _apply_vcf_download_tool_properties(properties_path: Path) -> int:
     except KeyError:
         account = None
     if account is not None:
+        _chown_path(VCF_DEPOT_RUNTIME_TOOL_DIR, account.pw_uid, account.pw_gid)
+        _chown_path(runtime_secrets_dir, account.pw_uid, account.pw_gid)
         for target_path in target_paths:
             _chown_path(target_path.parent, account.pw_uid, account.pw_gid)
             _chown_path(target_path, account.pw_uid, account.pw_gid)

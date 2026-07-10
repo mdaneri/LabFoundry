@@ -5520,13 +5520,12 @@ function initializeVlanInterfacesTable() {
           formatter: (cell) => {
             const data = cell.getRow().getData();
             if (data.is_new) {
-              return '<span class="add-row-hint">+ Add VLAN here</span>';
+              return "";
             }
             return escapeHtml(cell.getValue());
           },
           minWidth: 140,
           headerSort: false,
-          cellClick: (event, cell) => editNewRowCell(cell, "vlan_id"),
         },
         {
           title: "Parent",
@@ -5547,6 +5546,13 @@ function initializeVlanInterfacesTable() {
           title: "VLAN ID",
           field: "vlan_id",
           editor: "number",
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.is_new && !String(cell.getValue() ?? "").trim()) {
+              return '<span class="add-row-hint">+ Add VLAN here</span>';
+            }
+            return escapeHtml(cell.getValue());
+          },
           width: 100,
           cellEdited: (cell) => autoSaveVlanInterface(cell, csrf),
         },

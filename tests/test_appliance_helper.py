@@ -2741,6 +2741,7 @@ def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypat
     tool_bin.write_text("#!/bin/sh\n", encoding="utf-8")
     runtime_tool_dir = tmp_path / "var" / "lib" / "labfoundry" / "vcfDownloadTool" / "active-tool"
     chowned: list[tuple[Path, int, int]] = []
+    chmodded: list[tuple[Path, int]] = []
 
     class Account:
         pw_uid = 1200
@@ -2751,6 +2752,8 @@ def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypat
     monkeypatch.setattr(helper, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_tool_dir)
     monkeypatch.setattr(helper.pwd, "getpwnam", lambda username: Account())
     monkeypatch.setattr(helper, "_chown_path", lambda path, uid, gid: chowned.append((path, uid, gid)))
+    real_chmod = helper.os.chmod
+    monkeypatch.setattr(helper.os, "chmod", lambda path, mode: (chmodded.append((Path(path), mode)), real_chmod(path, mode))[1])
 
     assert helper._handle_vcf_offline_depot("apply-properties", [str(properties_path)]) == 0
     captured = capsys.readouterr()
@@ -2766,6 +2769,9 @@ def test_vcf_offline_depot_helper_applies_vcfdt_application_properties(monkeypat
     assert (target, 1200, 1200) in chowned
     assert (runtime_target.parent, 1200, 1200) in chowned
     assert (runtime_target, 1200, 1200) in chowned
+    assert (runtime_tool_dir, 1200, 1200) in chowned
+    assert (runtime_tool_dir / "secrets", 1200, 1200) in chowned
+    assert (runtime_tool_dir / "secrets", 0o700) in chmodded
 
     outside_path = tmp_path / "application-prodv2.properties"
     outside_path.write_text("spring.profiles.active=depot\n", encoding="utf-8")
