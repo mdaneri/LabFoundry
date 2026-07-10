@@ -163,6 +163,16 @@ function Invoke-HostOpenApiCheck {
     }
 }
 
+function Get-SshConnectionArguments {
+    param([string]$ControlPath)
+
+    return @(
+        '-o', 'ControlMaster=auto',
+        '-o', 'ControlPersist=60',
+        '-o', "ControlPath=$ControlPath"
+    )
+}
+
 $resolvedRepoRoot = Resolve-RepoRoot -Path $RepoRoot
 
 if (-not $SkipBuild) {
@@ -231,22 +241,25 @@ done
 echo "LabFoundry service restarted and loopback OpenAPI is reachable."
 '@
 
-$tempScript = Join-Path ([System.IO.Path]::GetTempPath()) "labfoundry-deploy-wheel-$([guid]::NewGuid().ToString('N')).sh"
+$tempDeployDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "labfoundry-deploy-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $tempDeployDirectory | Out-Null
+$tempScript = Join-Path $tempDeployDirectory 'labfoundry-deploy-wheel.sh'
 [System.IO.File]::WriteAllText($tempScript, ($deployScript -replace "`r?`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+$sshControlPath = Join-Path ([System.IO.Path]::GetTempPath()) "lf-ssh-$([guid]::NewGuid().ToString('N')).sock"
+$sshConnectionArguments = Get-SshConnectionArguments -ControlPath $sshControlPath
 
 try {
-    Write-Host "Uploading wheel to $SshUser@$IpAddress`:$remoteWheelPath"
-    Invoke-CheckedCommand -FilePath 'scp' -Arguments @($resolvedWheelPath, "${SshUser}@${IpAddress}:$remoteWheelPath")
+    $uploadPaths = @($resolvedWheelPath)
     if (-not $SkipHelperSync) {
-        Write-Host "Uploading appliance helper to $SshUser@$IpAddress`:$remoteHelperPath"
-        Invoke-CheckedCommand -FilePath 'scp' -Arguments @($helperPath, "${SshUser}@${IpAddress}:$remoteHelperPath")
+        $uploadPaths += $helperPath
     }
-    Write-Host "Uploading remote installer to $SshUser@$IpAddress`:$remoteScriptPath"
-    Invoke-CheckedCommand -FilePath 'scp' -Arguments @($tempScript, "${SshUser}@${IpAddress}:$remoteScriptPath")
+    $uploadPaths += $tempScript
+    Write-Host "Uploading deployment files to $SshUser@$IpAddress`:$RemoteDirectory"
+    Invoke-CheckedCommand -FilePath 'scp' -Arguments @($sshConnectionArguments + $uploadPaths + "${SshUser}@${IpAddress}:$RemoteDirectory/")
 
     Write-Host "Installing wheel and restarting labfoundry.service..."
     $remoteHelperArgument = if ($SkipHelperSync) { '' } else { $remoteHelperPath }
-    Invoke-CheckedCommand -FilePath 'ssh' -Arguments @('-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument'")
+    Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument'")
 
     if (-not $SkipHostCheck) {
         Write-Host "Checking host-facing OpenAPI..."
@@ -255,5 +268,7 @@ try {
 
     Write-Host "Deployed $wheelName to $IpAddress and verified labfoundry.service."
 } finally {
-    Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+    & ssh @sshConnectionArguments -O exit "${SshUser}@${IpAddress}" 2>$null | Out-Null
+    Remove-Item -LiteralPath $tempDeployDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $sshControlPath -Force -ErrorAction SilentlyContinue
 }
