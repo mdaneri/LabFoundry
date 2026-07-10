@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
+import paramiko
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
@@ -63,6 +64,7 @@ from labfoundry.app.models import (
     VcfOfflineDepotSettings,
     VcfPrivateRegistrySettings,
     VcfRegistryBundle,
+    VcfTrustTarget,
     VlanInterface,
     WanPolicy,
     utcnow,
@@ -176,6 +178,16 @@ from labfoundry.app.services.ca import (
     safe_certificate_name,
     split_multiline,
     validate_ca_state,
+)
+from labfoundry.app.services.vcf_trust import (
+    RootCaInfo,
+    VcfTrustCredentials,
+    VcfTrustError,
+    VcfTrustPartialError,
+    discover_ssh_host_key,
+    execute_vcf_trust,
+    root_ca_info,
+    sanitized_result,
 )
 from labfoundry.app.secrets import decrypt_secret, secret_key_status
 from labfoundry.app.services.networking import (
@@ -4529,6 +4541,154 @@ def vcf_helper_context(db: Session) -> dict[str, Any]:
     }
 
 
+def vcf_trust_context(db: Session) -> dict[str, Any]:
+    try:
+        trust_ca = root_ca_info(get_ca_settings_row(db))
+        trust_ca_error = ""
+    except VcfTrustError as exc:
+        trust_ca = None
+        trust_ca_error = str(exc)
+    trust_targets = db.execute(select(VcfTrustTarget).order_by(desc(VcfTrustTarget.updated_at))).scalars().all()
+    latest_trust_job = db.execute(
+        select(Job)
+        .where(Job.type == "vcf-ca-trust", Job.status != "awaiting-host-key-confirmation")
+        .order_by(desc(Job.created_at))
+    ).scalars().first()
+    return {
+        "vcf_trust_ca": trust_ca,
+        "vcf_trust_ca_error": trust_ca_error,
+        "vcf_trust_targets": trust_targets,
+        "vcf_trusted_target_count": sum(target.last_result in {"succeeded", "no-op"} for target in trust_targets),
+        "latest_vcf_trust_job": latest_trust_job,
+        "latest_vcf_trust_result": json.loads(latest_trust_job.result or "{}") if latest_trust_job else {},
+    }
+
+
+def _vcf_trust_target(db: Session, address: str, ssh_port: int) -> VcfTrustTarget:
+    target = db.execute(
+        select(VcfTrustTarget).where(VcfTrustTarget.address == address, VcfTrustTarget.ssh_port == ssh_port)
+    ).scalar_one_or_none()
+    if target is None:
+        target = VcfTrustTarget(address=address, ssh_port=ssh_port)
+        db.add(target)
+        db.flush()
+    return target
+
+
+def run_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCredentials, ca: RootCaInfo) -> None:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        target = db.get(VcfTrustTarget, target_id)
+        if not job or not target:
+            return
+        job.status = JobStatus.RUNNING.value
+        job.started_at = utcnow()
+        target.last_attempted_at = job.started_at
+        target.last_job_id = job.id
+        db.commit()
+
+        def update(percent: int, state: str) -> None:
+            job.progress_percent = percent
+            job.result = sanitized_result(
+                address=target.address,
+                ssh_port=target.ssh_port,
+                ca=ca,
+                state=state,
+                host_key_fingerprint=target.ssh_host_key_fingerprint,
+            )
+            db.commit()
+
+        success = False
+        try:
+            outcome = execute_vcf_trust(
+                address=target.address,
+                ssh_port=target.ssh_port,
+                expected_host_key=target.ssh_host_key_fingerprint,
+                credentials=credentials,
+                ca=ca,
+                progress=update,
+            )
+            finished = utcnow()
+            job.status = "no-op" if outcome["outcome"] == "no-op" else JobStatus.SUCCEEDED.value
+            job.progress_percent = 100
+            job.finished_at = finished
+            job.error = None
+            job.result = sanitized_result(
+                address=target.address,
+                ssh_port=target.ssh_port,
+                ca=ca,
+                state=job.status,
+                host_key_fingerprint=target.ssh_host_key_fingerprint,
+                **outcome,
+            )
+            target.appliance_role = str(outcome.get("role") or "")
+            target.appliance_version = str(outcome.get("version") or "")
+            target.last_ca_fingerprint = ca.fingerprint
+            target.last_result = job.status
+            target.last_succeeded_at = finished
+            target.updated_at = finished
+            success = True
+            db.commit()
+        except VcfTrustPartialError as exc:
+            finished = utcnow()
+            job.status = "partial-failure"
+            job.progress_percent = 100
+            job.finished_at = finished
+            job.error = str(exc)
+            job.result = sanitized_result(
+                address=target.address,
+                ssh_port=target.ssh_port,
+                ca=ca,
+                state="partial-failure",
+                host_key_fingerprint=target.ssh_host_key_fingerprint,
+                certificate_installed=True,
+                manual_recovery_required=True,
+            )
+            target.last_ca_fingerprint = ca.fingerprint
+            target.last_result = "partial-failure"
+            target.updated_at = finished
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - background task must persist a sanitized terminal state.
+            finished = utcnow()
+            safe_error = str(exc) if isinstance(exc, VcfTrustError) else "VCF trust task failed unexpectedly."
+            job.status = JobStatus.FAILED.value
+            job.progress_percent = 100
+            job.finished_at = finished
+            job.error = safe_error
+            job.result = sanitized_result(
+                address=target.address,
+                ssh_port=target.ssh_port,
+                ca=ca,
+                state="failed",
+                host_key_fingerprint=target.ssh_host_key_fingerprint,
+            )
+            target.last_result = "failed"
+            target.updated_at = finished
+            db.commit()
+        record_audit(
+            db,
+            actor=job.created_by,
+            action="import_vcf_root_ca",
+            resource_type="job",
+            resource_id=job.id,
+            success=success,
+            detail=(
+                f"target={target.address}:{target.ssh_port}; role={target.appliance_role or 'unknown'}; "
+                f"version={target.appliance_version or 'unknown'}; ca_fingerprint={ca.fingerprint}; "
+                f"snapshot_acknowledged=true; result={target.last_result}"
+            ),
+        )
+
+
+def queue_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCredentials, ca: RootCaInfo) -> None:
+    threading.Thread(
+        target=run_vcf_trust_job,
+        args=(job_id, target_id, credentials, ca),
+        name=f"vcf-ca-trust-{job_id}",
+        daemon=True,
+    ).start()
+
+
 APPLIANCE_APPLY_BASELINES_KEY = "appliance_apply.baselines.v1"
 APPLIANCE_APPLY_UNIT_IDS = {
     "local_users",
@@ -6056,7 +6216,7 @@ def root(
     request: Request,
     identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
-) -> HTMLResponse | RedirectResponse:
+) -> HTMLResponse | RedirectResponse | JSONResponse:
     binding = request_host_interface_binding(request_host_name(request), db)
     if binding and binding.get("role") != "management":
         return render(request, "public_service_home.html", {"identity": identity, **public_service_directory_context(db, binding)})
@@ -10052,7 +10212,180 @@ def vcf_helper_page(
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     context = dnsmasq_context(db)
-    return render(request, "vcf_helper.html", {"identity": identity, **vcf_helper_context(db), "appliance_apply_status": dnsmasq_apply_status(db, context)})
+    return render(
+        request,
+        "vcf_helper.html",
+        {
+            "identity": identity,
+            **vcf_helper_context(db),
+            **vcf_trust_context(db),
+            "vcf_trust_auto_open": request.query_params.get("vcf_trust") == "1",
+            "appliance_apply_status": dnsmasq_apply_status(db, context),
+        },
+    )
+
+
+@router.get("/vcf-trust", response_class=HTMLResponse, response_model=None)
+def vcf_trust_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    return RedirectResponse("/vcf-helper?vcf_trust=1", status_code=307)
+
+
+@router.post("/vcf-trust/root-ca", response_model=None)
+@router.post("/vcf-helper/trust-root-ca", response_model=None)
+def trust_vcf_root_ca_from_ui(
+    request: Request,
+    address: str = Form(...),
+    ssh_port: int = Form(22),
+    api_username: str = Form(...),
+    api_password: str = Form(...),
+    ssh_auth_method: str = Form("password"),
+    ssh_password: str = Form(""),
+    ssh_private_key: UploadFile | None = File(None),
+    ssh_private_key_passphrase: str = Form(""),
+    root_password: str = Form(...),
+    snapshot_acknowledged: str | None = Form(None),
+    confirmed_host_key: str = Form(""),
+    replace_host_key: str | None = Form(None),
+    awaiting_job_id: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse | RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    normalized_address = address.strip().strip("[]")
+    errors: list[str] = []
+    if not normalized_address or any(character.isspace() for character in normalized_address) or "/" in normalized_address:
+        errors.append("Enter one VCF appliance IP address or hostname.")
+    if ssh_port < 1 or ssh_port > 65535:
+        errors.append("SSH port must be between 1 and 65535.")
+    if snapshot_acknowledged != "on":
+        errors.append("Confirm that a current snapshot exists before starting this remote change.")
+    if not api_username.strip() or not api_password:
+        errors.append("VCF API administrator credentials are required.")
+    if not root_password:
+        errors.append("The appliance root password is required for su elevation.")
+    private_key_text = ""
+    if ssh_auth_method == "private-key":
+        if ssh_private_key and ssh_private_key.filename:
+            private_key_bytes = ssh_private_key.file.read(65537)
+            if len(private_key_bytes) > 65536:
+                errors.append("SSH private keys must be 64 KiB or smaller.")
+            else:
+                try:
+                    private_key_text = private_key_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    errors.append("The SSH private key must be UTF-8 PEM or OpenSSH text.")
+        if not private_key_text:
+            errors.append("Upload the vcf user's SSH private key.")
+    elif ssh_auth_method != "password":
+        errors.append("Select password or private-key SSH authentication.")
+    elif not ssh_password:
+        errors.append("The vcf SSH password is required.")
+    try:
+        ca = root_ca_info(get_ca_settings_row(db))
+    except VcfTrustError as exc:
+        errors.append(str(exc))
+        ca = None
+
+    discovered_host_key = ""
+    if not errors:
+        try:
+            discovered_host_key = discover_ssh_host_key(normalized_address, ssh_port)
+        except (OSError, VcfTrustError, paramiko.SSHException) as exc:
+            errors.append(f"Could not read the VCF appliance SSH host key: {exc}")
+
+    target = _vcf_trust_target(db, normalized_address, ssh_port) if normalized_address and 0 < ssh_port <= 65535 else None
+    pinned = target.ssh_host_key_fingerprint if target else ""
+    confirmation_required = bool(discovered_host_key and (not pinned or discovered_host_key != pinned))
+    confirmation_valid = bool(
+        confirmation_required
+        and confirmed_host_key == discovered_host_key
+        and (not pinned or replace_host_key == "on")
+    )
+    if not errors and confirmation_required and not confirmation_valid:
+        confirmation = {
+            "address": normalized_address,
+            "ssh_port": ssh_port,
+            "fingerprint": discovered_host_key,
+            "previous_fingerprint": pinned,
+            "replacement": bool(pinned),
+        }
+        if request.headers.get("X-LabFoundry-VCF-Trust") == "1":
+            return JSONResponse(
+                {
+                    "status": "host-key-confirmation-required",
+                    **confirmation,
+                },
+                status_code=409,
+            )
+        page_context = {
+            "identity": identity,
+            **vcf_helper_context(db),
+            **vcf_trust_context(db),
+            "vcf_trust_auto_open": True,
+            "appliance_apply_status": dnsmasq_apply_status(db, dnsmasq_context(db)),
+            "vcf_trust_host_key_confirmation": confirmation,
+        }
+        return render(request, "vcf_helper.html", page_context, status_code=409)
+
+    if errors:
+        if request.headers.get("X-LabFoundry-VCF-Trust") == "1":
+            return JSONResponse({"status": "error", "errors": errors}, status_code=422)
+        page_context = {
+            "identity": identity,
+            **vcf_helper_context(db),
+            **vcf_trust_context(db),
+            "vcf_trust_auto_open": True,
+            "appliance_apply_status": dnsmasq_apply_status(db, dnsmasq_context(db)),
+            "vcf_trust_errors": errors,
+        }
+        return render(request, "vcf_helper.html", page_context, status_code=422)
+
+    assert target is not None and ca is not None
+    if confirmation_required:
+        target.ssh_host_key_fingerprint = discovered_host_key
+    elif not target.ssh_host_key_fingerprint:
+        target.ssh_host_key_fingerprint = discovered_host_key
+    target.updated_at = utcnow()
+    job = db.get(Job, awaiting_job_id) if awaiting_job_id else None
+    if not job or job.type != "vcf-ca-trust" or job.created_by != identity.username:
+        job = Job(id=f"job_{uuid4().hex[:12]}", type="vcf-ca-trust", status=JobStatus.PENDING.value, created_by=identity.username)
+        db.add(job)
+    else:
+        job.status = JobStatus.PENDING.value
+    job.result = sanitized_result(
+        address=normalized_address,
+        ssh_port=ssh_port,
+        ca=ca,
+        state="queued",
+        host_key_fingerprint=target.ssh_host_key_fingerprint,
+    )
+    target.last_job_id = job.id
+    db.commit()
+    credentials = VcfTrustCredentials(
+        api_username=api_username.strip(),
+        api_password=api_password,
+        ssh_password=ssh_password if ssh_auth_method == "password" else "",
+        ssh_private_key=private_key_text,
+        ssh_private_key_passphrase=ssh_private_key_passphrase if ssh_auth_method == "private-key" else "",
+        root_password=root_password,
+    )
+    record_audit(
+        db,
+        actor=identity.username,
+        action="queue_vcf_root_ca_import",
+        resource_type="job",
+        resource_id=job.id,
+        detail=f"target={normalized_address}:{ssh_port}; ca_fingerprint={ca.fingerprint}; snapshot_acknowledged=true",
+    )
+    queue_vcf_trust_job(job.id, target.id, credentials, ca)
+    if request.headers.get("X-LabFoundry-VCF-Trust") == "1":
+        return JSONResponse({"status": "queued", "job_id": job.id, "redirect": "/vcf-helper?vcf_trust=1"}, status_code=202)
+    return RedirectResponse("/vcf-helper?vcf_trust=1", status_code=303)
 
 
 @router.post("/vcf-helper/generated-fqdns", response_model=None)

@@ -3658,8 +3658,53 @@ textarea {
   font-weight: 600;
 }
 
-.vcf-helper-workspace .info-band .button-row {
-  align-self: center;
+.vcf-helper-action-bands {
+  display: grid;
+  gap: 12px;
+}
+
+.vcf-helper-action-band {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.vcf-helper-action-band:hover,
+.vcf-helper-action-band:focus-visible {
+  border-color: var(--primary);
+  background: var(--surface);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+}
+
+.vcf-helper-action-band:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.vcf-helper-action-band:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.vcf-helper-action-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.vcf-helper-action-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.vcf-helper-action-arrow {
+  color: var(--primary);
+  font-size: 20px;
+  font-weight: 700;
 }
 
 .confirm-modal::backdrop {

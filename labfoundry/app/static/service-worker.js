@@ -1,10 +1,10 @@
-const LABFOUNDRY_CACHE = "labfoundry-pwa-v59";
+const LABFOUNDRY_CACHE = "labfoundry-pwa-v65";
 const LABFOUNDRY_ASSETS = [
   "/manifest.webmanifest",
   "/favicon.ico",
   "/static/offline.html",
-  "/static/app.css?v=depot-basic-auth-20260710-1",
-  "/static/app.js?v=depot-basic-auth-20260710-1",
+  "/static/app.css?v=vcf-helper-action-bands-20260710-1",
+  "/static/app.js?v=vcf-trust-modal-20260710-1",
   "/static/pwa.js?v=pwa-20260627-1",
   "/static/brand/labfoundry-mark.svg",
   "/static/brand/labfoundry-appliance-graphic.svg",

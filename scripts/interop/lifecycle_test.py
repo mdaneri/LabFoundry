@@ -1493,6 +1493,10 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
     site_ip = str(ip_interface(args.site_cidr).ip)
     checks = {
         **routing_host_check_commands(args),
+        "vcf_trust_dependencies": (
+            "/opt/labfoundry/.venv/bin/python -c "
+            "'import httpx, paramiko; print(httpx.__version__, paramiko.__version__)'"
+        ),
         "ca": "test -f /etc/labfoundry/ca/ca-bundle.pem && openssl x509 -in /etc/labfoundry/ca/root-ca.pem -noout -subject",
         "kms_files": (
             "for path in "

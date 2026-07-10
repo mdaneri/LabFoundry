@@ -10335,6 +10335,138 @@ function initializeHistoryBackButtons() {
   });
 }
 
+function initializeVcfTrustForm() {
+  const form = document.querySelector("[data-vcf-trust-form]");
+  const selector = document.querySelector("[data-vcf-trust-auth-method]");
+  if (!(form instanceof HTMLFormElement) || !(selector instanceof HTMLSelectElement)) {
+    return;
+  }
+  const dialog = document.getElementById("vcf-trust-modal");
+  const passwordFields = document.querySelectorAll("[data-vcf-trust-password-field]");
+  const keyFields = document.querySelectorAll("[data-vcf-trust-key-field]");
+  const passwordInput = form.querySelector('[name="ssh_password"]');
+  const keyInput = form.querySelector('[name="ssh_private_key"]');
+  const confirmedHostKey = form.querySelector("[data-vcf-trust-confirmed-host-key]");
+  const confirmation = form.querySelector("[data-vcf-trust-host-key-confirmation]");
+  const errors = form.querySelector("[data-vcf-trust-form-errors]");
+  const replaceRow = form.querySelector("[data-vcf-trust-replace-row]");
+  const replaceHostKey = form.querySelector("[data-vcf-trust-replace-host-key]");
+  const submit = form.querySelector("[data-vcf-trust-submit]");
+  const cancel = form.querySelector("[data-vcf-trust-cancel]");
+  const update = () => {
+    const useKey = selector.value === "private-key";
+    passwordFields.forEach((field) => field.classList.toggle("hidden", useKey));
+    keyFields.forEach((field) => field.classList.toggle("hidden", !useKey));
+    if (passwordInput instanceof HTMLInputElement) {
+      passwordInput.required = !useKey;
+    }
+    if (keyInput instanceof HTMLInputElement) {
+      keyInput.required = useKey;
+    }
+  };
+  const resetConfirmation = () => {
+    if (confirmedHostKey instanceof HTMLInputElement) {
+      confirmedHostKey.value = "";
+    }
+    confirmation?.classList.add("hidden");
+    replaceRow?.classList.add("hidden");
+    if (replaceHostKey instanceof HTMLInputElement) {
+      replaceHostKey.checked = false;
+      replaceHostKey.required = false;
+    }
+    if (submit instanceof HTMLButtonElement) {
+      submit.textContent = "Run trust task";
+    }
+  };
+  selector.addEventListener("change", update);
+  cancel?.addEventListener("click", () => {
+    form.reset();
+    update();
+    resetConfirmation();
+    if (dialog instanceof HTMLDialogElement) {
+      dialog.close();
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    errors?.classList.add("hidden");
+    if (submit instanceof HTMLButtonElement) {
+      submit.disabled = true;
+      submit.textContent = confirmedHostKey instanceof HTMLInputElement && confirmedHostKey.value
+        ? "Queueing task..."
+        : "Checking SSH host key...";
+    }
+    try {
+      const response = await fetch(form.action, {
+        method: "POST",
+        body: new FormData(form),
+        credentials: "same-origin",
+        headers: { "X-LabFoundry-VCF-Trust": "1" },
+      });
+      const payload = await response.json();
+      if (response.status === 409 && payload.status === "host-key-confirmation-required") {
+        if (confirmedHostKey instanceof HTMLInputElement) {
+          confirmedHostKey.value = payload.fingerprint || "";
+        }
+        if (confirmation instanceof HTMLElement) {
+          const title = document.createElement("strong");
+          title.textContent = payload.replacement ? "Changed SSH host key" : "First-seen SSH host key";
+          const fingerprint = document.createElement("div");
+          fingerprint.textContent = `Verify this fingerprint against the VCF console: ${payload.fingerprint || "unknown"}`;
+          const action = document.createElement("div");
+          action.textContent = "Your entries remain in this form. Confirm the fingerprint to queue and run the task.";
+          confirmation.replaceChildren(title, fingerprint, action);
+          confirmation.classList.remove("hidden");
+        }
+        replaceRow?.classList.toggle("hidden", !payload.replacement);
+        if (replaceHostKey instanceof HTMLInputElement) {
+          replaceHostKey.required = Boolean(payload.replacement);
+        }
+        if (submit instanceof HTMLButtonElement) {
+          submit.disabled = false;
+          submit.textContent = "Confirm host key and start task";
+        }
+        return;
+      }
+      if (!response.ok) {
+        const messages = Array.isArray(payload.errors) ? payload.errors : [payload.error || "The VCF trust task could not be queued."];
+        if (errors instanceof HTMLElement) {
+          errors.textContent = messages.join(" ");
+          errors.classList.remove("hidden");
+        }
+        if (submit instanceof HTMLButtonElement) {
+          submit.disabled = false;
+          submit.textContent = "Run trust task";
+        }
+        return;
+      }
+      if (submit instanceof HTMLButtonElement) {
+        submit.textContent = "Task queued";
+      }
+      window.location.assign(payload.redirect || "/vcf-helper?vcf_trust=1");
+    } catch (_error) {
+      if (errors instanceof HTMLElement) {
+        errors.textContent = "The request could not be completed. Check connectivity and try again.";
+        errors.classList.remove("hidden");
+      }
+      if (submit instanceof HTMLButtonElement) {
+        submit.disabled = false;
+        submit.textContent = "Run trust task";
+      }
+    }
+  });
+  update();
+  if (dialog instanceof HTMLDialogElement && dialog.hasAttribute("data-vcf-trust-auto-open") && !dialog.open) {
+    dialog.showModal();
+  }
+
+  const statusCard = document.querySelector("[data-vcf-trust-job-status]");
+  const activeStatus = statusCard?.getAttribute("data-vcf-trust-job-status") || "";
+  if (["pending", "running"].includes(activeStatus)) {
+    window.setTimeout(() => window.location.reload(), 2000);
+  }
+}
+
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
@@ -10380,6 +10512,7 @@ document.addEventListener("DOMContentLoaded", initializeApplianceSettings);
 document.addEventListener("DOMContentLoaded", initializeFirewallSettings);
 document.addEventListener("DOMContentLoaded", initializeDnsSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfFqdnGenerator);
+document.addEventListener("DOMContentLoaded", initializeVcfTrustForm);
 document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);
