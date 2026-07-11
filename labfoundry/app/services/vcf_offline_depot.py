@@ -384,6 +384,13 @@ def vcf_depot_profile_to_dict(
         download_token_present=download_token_present,
         activation_code_present=activation_code_present,
     )
+    download_mode = (
+        "patches_only"
+        if profile.patches_only
+        else "upgrades_only"
+        if profile.upgrades_only
+        else "automated_install"
+    )
     return {
         "id": profile.id,
         "name": profile.name,
@@ -394,6 +401,7 @@ def vcf_depot_profile_to_dict(
         "automated_install": profile.automated_install,
         "upgrades_only": profile.upgrades_only,
         "patches_only": profile.patches_only,
+        "download_mode": download_mode,
         "component": component,
         "component_label": VCF_DEPOT_COMPONENTS.get(component, component),
         "component_version": profile.component_version,

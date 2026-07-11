@@ -2083,6 +2083,18 @@ def vcf_depot_download_job_rows(
     return rows, total
 
 
+def vcf_depot_active_download_job(db: Session) -> Job | None:
+    return db.scalars(
+        select(Job)
+        .where(
+            Job.type == "vcf-depot-download",
+            Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+        )
+        .order_by(desc(Job.created_at))
+        .limit(1)
+    ).first()
+
+
 def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
     ca_settings = get_ca_settings_row(db)
     uploaded_bundle = uploaded_vcf_registry_ca_bundle(db)
@@ -2207,6 +2219,12 @@ def vcf_offline_depot_context(db: Session) -> dict:
         )
         for profile in profiles
     ]
+    active_download_job = vcf_depot_active_download_job(db)
+    if active_download_job is not None:
+        blocker = f"Wait for VCFDT task {active_download_job.id} to finish before starting another download."
+        for row in profile_rows:
+            row["download_active"] = True
+            row["active_task_blocker"] = blocker
     return {
         "vcf_depot_settings": settings,
         "vcf_depot_settings_json": vcf_depot_settings_to_dict(settings),
@@ -2436,6 +2454,16 @@ def append_vcf_depot_task_log(job_id: str, profile_name: str, text: str) -> None
     append_vcf_depot_log(text)
 
 
+def resolve_vcf_depot_download_mode_flags(*flags: str | None) -> tuple[bool, bool, bool]:
+    selected = tuple(flag == "on" for flag in flags)
+    if sum(selected) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose only one VCFDT download mode: automated install, upgrades only, or patches only.",
+        )
+    return selected if any(selected) else (True, False, False)
+
+
 def archive_vcf_depot_task_log(job_id: str, profile_name: str) -> Path:
     active_log_path = filesystem_path(VCF_DEPOT_VDT_LOG_PATH)
     task_log_path = vcf_depot_task_log_path(job_id, profile_name)
@@ -2469,6 +2497,13 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
                 download_token_present=bool(secrets["download_token_present"]),
                 activation_code_present=bool(secrets["activation_code_present"]),
             )
+            generated_script = render_vcfdt_command_preview(
+                settings,
+                [profile],
+                download_token_present=bool(secrets["download_token_present"]),
+                activation_code_present=bool(secrets["activation_code_present"]),
+                include_disabled_profiles=True,
+            )
             tool_path = prepare_vcf_depot_runtime(settings, db)
             command_results: list[dict[str, Any]] = []
             append_vcf_depot_task_log(
@@ -2476,7 +2511,9 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
                 profile.name,
                 "\n".join(
                     [
-                        "",
+                        "===== Generated VCFDT script =====",
+                        generated_script.rstrip(),
+                        "===== Task output =====",
                         f"===== LabFoundry VCFDT job {job_id} started {started.isoformat()} =====",
                         f"profile={profile.name}",
                         f"tool={tool_path}",
@@ -10632,8 +10669,18 @@ def vcf_offline_depot_task_status(
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     tasks, total = vcf_depot_download_job_rows(db, page=page, page_size=size)
+    active_job = vcf_depot_active_download_job(db)
     last_page = max(1, (total + size - 1) // size)
-    return JSONResponse({"data": tasks, "tasks": tasks, "total": total, "last_page": last_page})
+    return JSONResponse(
+        {
+            "data": tasks,
+            "tasks": tasks,
+            "last_page": last_page,
+            "last_row": total,
+            "download_active": active_job is not None,
+            "active_job_id": active_job.id if active_job is not None else "",
+        }
+    )
 
 
 @router.post("/vcf-offline-depot/settings", response_model=None)
@@ -11133,6 +11180,9 @@ def create_vcf_depot_profile_from_ui(
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
     verify_csrf(request, csrf)
+    automated_install_selected, upgrades_only_selected, patches_only_selected = resolve_vcf_depot_download_mode_flags(
+        automated_install, upgrades_only, patches_only
+    )
     settings = get_vcf_offline_depot_settings_row(db)
     profile = VcfDepotDownloadProfile(
         name=name.strip(),
@@ -11140,9 +11190,9 @@ def create_vcf_depot_profile_from_ui(
         sku=sku.strip() or "VCF",
         vcf_version=vcf_version.strip() or "9.1.0",
         binary_type=binary_type.strip() or "INSTALL",
-        automated_install=automated_install == "on",
-        upgrades_only=upgrades_only == "on",
-        patches_only=patches_only == "on",
+        automated_install=automated_install_selected,
+        upgrades_only=upgrades_only_selected,
+        patches_only=patches_only_selected,
         component=component.strip(),
         component_version=component_version.strip(),
         disabled_platforms=disabled_platforms.strip(),
@@ -11183,6 +11233,9 @@ def edit_vcf_depot_profile_from_ui(
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
     verify_csrf(request, csrf)
+    automated_install_selected, upgrades_only_selected, patches_only_selected = resolve_vcf_depot_download_mode_flags(
+        automated_install, upgrades_only, patches_only
+    )
     profile = db.get(VcfDepotDownloadProfile, profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="VCFDT download profile not found.")
@@ -11192,9 +11245,9 @@ def edit_vcf_depot_profile_from_ui(
     profile.sku = sku.strip() or "VCF"
     profile.vcf_version = vcf_version.strip() or "9.1.0"
     profile.binary_type = binary_type.strip() or "INSTALL"
-    profile.automated_install = automated_install == "on"
-    profile.upgrades_only = upgrades_only == "on"
-    profile.patches_only = patches_only == "on"
+    profile.automated_install = automated_install_selected
+    profile.upgrades_only = upgrades_only_selected
+    profile.patches_only = patches_only_selected
     profile.component = component.strip()
     profile.component_version = component_version.strip()
     profile.disabled_platforms = disabled_platforms.strip()
@@ -11224,11 +11277,12 @@ def start_vcf_depot_profile_download_from_ui(
     profile = db.get(VcfDepotDownloadProfile, profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="VCFDT download profile not found.")
-    active_job = db.execute(
-        select(Job).where(Job.type == "vcf-depot-download", Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]))
-    ).scalar_one_or_none()
+    active_job = vcf_depot_active_download_job(db)
     if active_job is not None:
-        raise HTTPException(status_code=409, detail=f"VCFDT task {active_job.id} is already running.")
+        raise HTTPException(
+            status_code=409,
+            detail=f"VCFDT task {active_job.id} is already running. Wait for it to finish before starting another download.",
+        )
     if not profile.enabled:
         raise HTTPException(status_code=400, detail="Enable the VCFDT download profile before starting a download.")
     secrets = vcf_depot_secret_context(db)

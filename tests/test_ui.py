@@ -5449,8 +5449,12 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert 'ajaxURL: "/vcf-offline-depot/tasks/status"' in app_js.text
     assert 'paginationMode: "remote"' in app_js.text
     assert "paginationSize: 10" in app_js.text
-    assert "paginationSizeSelector: [10, 25, 50, 100]" in app_js.text
-    assert "window.setInterval(refreshVcfDepotTasksTable, 500)" in app_js.text
+    tasks_table_js = app_js.text.split("function initializeVcfDepotTasksTable", 1)[1].split("function ", 1)[0]
+    assert 'height: "380px"' in tasks_table_js
+    assert "paginationSizeSelector" not in app_js.text
+    assert "await vcfDepotTasksTable.replaceData()" in app_js.text
+    assert "reloadData" not in app_js.text
+    assert "window.setInterval(refreshVcfDepotTasksTable, 2000)" in app_js.text
     assert "vcfDepotTasksRefreshPending" in app_js.text
     assert "openVcfDepotTaskLog" in app_js.text
     assert 'window.Prism.languages["labfoundry-log"]' in app_js.text
@@ -5501,12 +5505,26 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "softwareDepotCopy.dataset.copyValue = depotId" in app_js.text
     assert "setVcfDepotToolDependentActions" in app_js.text
     assert "startVcfDepotProfileDownload" in app_js.text
+    start_download_js = app_js.text.split("async function startVcfDepotProfileDownload", 1)[1].split("async function ", 1)[0]
+    assert "window.location.reload()" not in start_download_js
+    assert "setVcfDepotDownloadActive(true, payload.job_id)" in start_download_js
+    assert "await vcfDepotTasksTable.setPage(1)" in start_download_js
+    assert "await refreshVcfDepotTasksTable()" in start_download_js
+    assert 'title: "Download mode"' in app_js.text
+    assert 'field: "download_mode"' in app_js.text
+    assert 'standard: "Standard"' not in app_js.text
+    assert 'data.download_mode || "automated_install"' in app_js.text
+    assert 'title: "Automated"' not in app_js.text
+    assert 'title: "Upgrades only"' not in app_js.text
+    assert 'title: "Patches only"' not in app_js.text
     assert "Download job ${payload.job_id}" not in app_js.text
     assert 'label: "Start download"' in app_js.text
     profiles_table_js = app_js.text.split("function initializeVcfDepotProfilesTable", 1)[1]
     assert profiles_table_js.index('title: "Name"') < profiles_table_js.index('title: "Start"') < profiles_table_js.index('title: "Type"')
     assert "rowHeight: 34" in profiles_table_js.split("columns:", 1)[0]
     assert "!data.can_start" in profiles_table_js
+    assert "data.download_active" in profiles_table_js
+    assert "setVcfDepotDownloadActive" in app_js.text
     assert "data.start_blocker" in profiles_table_js
 
     app_css = client.get("/static/app.css")
@@ -5514,6 +5532,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert ".tabulator-checklist-editor" in app_css.text
     assert ".inline-action-row" in app_css.text
     assert ".setting-inline-actions" in app_css.text
+    assert "overflow-wrap: anywhere" in app_css.text
+    assert ".setting-inline-actions .button" in app_css.text
     assert ".software-depot-id-row" in app_css.text
     assert ".copyable-inline-value" in app_css.text
     assert ".vcf-platform-tooltip" in app_css.text
@@ -6236,6 +6256,9 @@ def test_vcf_offline_depot_accepts_pasted_download_token_and_activation_code(cli
 
 
 def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, monkeypatch):
+    import html
+    import json
+
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -6270,6 +6293,18 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
     login(client)
     page = client.get("/vcf-offline-depot")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    conflicting_mode_response = client.post(
+        f"/vcf-offline-depot/profiles/{profile_id}/edit",
+        data={
+            "csrf": csrf,
+            "name": "vcf-install",
+            "profile_type": "binaries",
+            "automated_install": "on",
+            "upgrades_only": "on",
+        },
+    )
+    assert conflicting_mode_response.status_code == 400
+    assert "Choose only one VCFDT download mode" in conflicting_mode_response.text
     preview_response = client.get(f"/vcf-offline-depot/profiles/{profile_id}/preview")
     assert preview_response.status_code == 200
     preview_payload = preview_response.json()
@@ -6297,6 +6332,22 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
     assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in payload["commands"][0]["command"]
     assert "manual-secret-token" not in response.text
 
+    concurrent_response = client.post(
+        f"/vcf-offline-depot/profiles/{profile_id}/download",
+        data={"csrf": csrf},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    assert concurrent_response.status_code == 409
+    assert payload["job_id"] in concurrent_response.json()["detail"]
+    assert "Wait for it to finish" in concurrent_response.json()["detail"]
+
+    active_page = client.get("/vcf-offline-depot")
+    active_rows_payload = active_page.text.split("data-profiles='", 1)[1].split("'", 1)[0]
+    active_rows = json.loads(html.unescape(active_rows_payload))
+    active_row = next(item for item in active_rows if item["id"] == profile_id)
+    assert active_row["download_active"] is True
+    assert payload["job_id"] in active_row["active_task_blocker"]
+
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "vcf-depot-download")).scalar_one()
         profile = db.get(VcfDepotDownloadProfile, profile_id)
@@ -6323,6 +6374,9 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
     assert task_log_payload.json()["text"] == "No task log is available."
     task_status_payload = client.get("/vcf-offline-depot/tasks/status")
     assert task_status_payload.status_code == 200
+    assert task_status_payload.json()["last_row"] >= 1
+    assert task_status_payload.json()["download_active"] is True
+    assert task_status_payload.json()["active_job_id"] == payload["job_id"]
     task_row = next(task for task in task_status_payload.json()["tasks"] if task["id"] == payload["job_id"])
     assert task_row["status"] == "pending"
     assert task_row["progress_percent"] == "0"

@@ -2098,9 +2098,16 @@ textarea {
 }
 
 .setting-inline-actions strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 1.25;
+  text-align: right;
+}
+
+.setting-inline-actions .button {
+  flex: 0 0 auto;
 }
 
 .copyable-inline-value {

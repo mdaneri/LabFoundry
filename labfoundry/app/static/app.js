@@ -8126,6 +8126,7 @@ function newVcfDepotProfileRow() {
     automated_install: true,
     upgrades_only: false,
     patches_only: false,
+    download_mode: "automated_install",
     component: "",
     component_version: "",
     disabled_platforms: [],
@@ -8263,11 +8264,16 @@ function vcfDepotDisabledPlatformsEditor(cell, onRendered, success, cancel, edit
 async function postVcfDepotProfileAction(url, data, csrf) {
   const body = new FormData();
   body.set("csrf", csrf);
+  const downloadMode = data.download_mode || "automated_install";
+  body.set(downloadMode, "on");
   for (const [key, value] of Object.entries(data)) {
     if (["id", "is_new", "created_at", "updated_at"].includes(key)) {
       continue;
     }
-    if (["enabled", "automated_install", "upgrades_only", "patches_only"].includes(key)) {
+    if (["automated_install", "upgrades_only", "patches_only", "download_mode"].includes(key)) {
+      continue;
+    }
+    if (key === "enabled") {
       if (value) {
         body.set(key, "on");
       }
@@ -8337,6 +8343,10 @@ async function startVcfDepotProfileDownload(row, csrf) {
     showVcfDepotMessage("Enable the VCFDT download profile before starting a download.");
     return;
   }
+  if (data.download_active) {
+    showVcfDepotMessage(data.active_task_blocker || "Wait for the active VCFDT task to finish before starting another download.");
+    return;
+  }
   if (!data.can_start) {
     showVcfDepotMessage(data.start_blocker || "Stage Broadcom credentials before starting this VCFDT download profile.");
     return;
@@ -8354,8 +8364,18 @@ async function startVcfDepotProfileDownload(row, csrf) {
     if (!response.ok) {
       throw new Error(payload.detail || "The VCFDT download job could not be started.");
     }
-    row.update({ status: payload.profile_status || data.status });
-    window.location.reload();
+    const blocker = `Wait for VCFDT task ${payload.job_id} to finish before starting another download.`;
+    await row.update({
+      status: payload.profile_status || data.status,
+      download_active: true,
+      active_task_blocker: blocker,
+    });
+    setVcfDepotDownloadActive(true, payload.job_id);
+    if (vcfDepotTasksTable) {
+      await vcfDepotTasksTable.setPage(1);
+      await refreshVcfDepotTasksTable();
+    }
+    showVcfDepotMessage(`VCFDT task ${payload.job_id} started for ${payload.profile_name}.`, "success");
   } catch (error) {
     showVcfDepotMessage(error instanceof Error ? error.message : "The VCFDT download job could not be started.");
   }
@@ -8385,6 +8405,23 @@ async function previewVcfDepotProfileScript(row) {
   }
 }
 
+let vcfDepotProfilesTable = null;
+
+function setVcfDepotDownloadActive(active, activeJobId = "") {
+  if (!vcfDepotProfilesTable) {
+    return;
+  }
+  const blocker = active
+    ? `Wait for VCFDT task ${activeJobId || "in progress"} to finish before starting another download.`
+    : "";
+  vcfDepotProfilesTable.getRows().forEach((row) => {
+    const data = row.getData();
+    if (!data.is_new) {
+      row.update({ download_active: active, active_task_blocker: blocker });
+    }
+  });
+}
+
 function initializeVcfDepotProfilesTable() {
   const tableElement = document.getElementById("vcf-depot-profiles-table");
   if (!(tableElement instanceof HTMLElement)) {
@@ -8411,7 +8448,7 @@ function initializeVcfDepotProfilesTable() {
     newVcfDepotProfileRow(),
   ];
   try {
-    new Tabulator(tableElement, {
+    vcfDepotProfilesTable = new Tabulator(tableElement, {
       data: rows,
       index: "id",
       layout: "fitColumns",
@@ -8452,8 +8489,9 @@ function initializeVcfDepotProfilesTable() {
           field: "start",
           formatter: (cell) => {
             const data = cell.getRow().getData();
-            const disabled = data.is_new || !data.enabled || !data.can_start ? " disabled" : "";
-            const title = data.start_blocker ? ` title="${escapeHtml(data.start_blocker)}"` : "";
+            const disabled = data.is_new || data.download_active || !data.enabled || !data.can_start ? " disabled" : "";
+            const blocker = data.active_task_blocker || data.start_blocker;
+            const title = blocker ? ` title="${escapeHtml(blocker)}"` : "";
             return `<button class="button tiny secondary" type="button" data-vcf-depot-start-download${disabled}${title}>Start</button>`;
           },
           width: 90,
@@ -8503,33 +8541,22 @@ function initializeVcfDepotProfilesTable() {
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
         },
         {
-          title: "Automated",
-          field: "automated_install",
-          formatter: labFoundryBooleanFormatter,
-          editor: "tickCross",
-          hozAlign: "center",
-          width: 105,
-          headerSort: false,
-          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
-        },
-        {
-          title: "Upgrades only",
-          field: "upgrades_only",
-          formatter: labFoundryBooleanFormatter,
-          editor: "tickCross",
-          hozAlign: "center",
-          width: 120,
-          headerSort: false,
-          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
-        },
-        {
-          title: "Patches only",
-          field: "patches_only",
-          formatter: labFoundryBooleanFormatter,
-          editor: "tickCross",
-          hozAlign: "center",
-          width: 115,
-          headerSort: false,
+          title: "Download mode",
+          field: "download_mode",
+          editor: "list",
+          editorParams: {
+            values: {
+              automated_install: "Automated install",
+              upgrades_only: "Upgrades only",
+              patches_only: "Patches only",
+            },
+          },
+          formatter: (cell) => ({
+            automated_install: "Automated install",
+            upgrades_only: "Upgrades only",
+            patches_only: "Patches only",
+          })[cell.getValue()] || "Automated install",
+          minWidth: 150,
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
         },
         {
@@ -8600,7 +8627,7 @@ async function refreshVcfDepotTasksTable() {
   }
   vcfDepotTasksRefreshPending = true;
   try {
-    await vcfDepotTasksTable.reloadData();
+    await vcfDepotTasksTable.replaceData();
   } catch (error) {
     showVcfDepotMessage(error instanceof Error ? error.message : "Unable to refresh VCFDT tasks.");
   } finally {
@@ -8622,11 +8649,14 @@ function initializeVcfDepotTasksTable() {
       pagination: true,
       paginationMode: "remote",
       paginationSize: 10,
-      paginationSizeSelector: [10, 25, 50, 100],
       paginationCounter: "rows",
       dataSendParams: { page: "page", size: "size" },
-      ajaxResponse: (_url, _params, response) => response,
+      ajaxResponse: (_url, _params, response) => {
+        setVcfDepotDownloadActive(Boolean(response.download_active), response.active_job_id || "");
+        return response;
+      },
       layout: "fitColumns",
+      height: "380px",
       placeholder: "No VCFDT tasks have been executed.",
       rowContextMenu: [
         {
@@ -8663,7 +8693,7 @@ function initializeVcfDepotTasksTable() {
     if (vcfDepotTasksRefreshInterval) {
       window.clearInterval(vcfDepotTasksRefreshInterval);
     }
-    vcfDepotTasksRefreshInterval = window.setInterval(refreshVcfDepotTasksTable, 500);
+    vcfDepotTasksRefreshInterval = window.setInterval(refreshVcfDepotTasksTable, 2000);
   } catch (error) {
     showVcfDepotMessage(error instanceof Error ? error.message : "VCFDT tasks could not render. Showing the fallback table.");
   }
