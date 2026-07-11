@@ -37,6 +37,7 @@ VCF_DEPOT_ACTIVATION_NAME_KEY = "vcf_depot_activation_code_name"
 VCF_DEPOT_ACTIVATION_VALUE_KEY = "vcf_depot_activation_code_value"
 VCF_DEPOT_TOOL_VERSION_SOURCE_KEY = "vcf_depot_tool_version_source"
 VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND = "vcf-download-tool --version"
+VCF_DEPOT_RUNTIME_RESET_PENDING_KEY = "vcf_depot_runtime_reset_pending"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY = "vcf_depot_software_depot_id"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY = "vcf_depot_software_depot_id_generated_at"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY = "vcf_depot_software_depot_id_error"
@@ -383,6 +384,13 @@ def vcf_depot_profile_to_dict(
         download_token_present=download_token_present,
         activation_code_present=activation_code_present,
     )
+    download_mode = (
+        "patches_only"
+        if profile.patches_only
+        else "upgrades_only"
+        if profile.upgrades_only
+        else "automated_install"
+    )
     return {
         "id": profile.id,
         "name": profile.name,
@@ -393,6 +401,7 @@ def vcf_depot_profile_to_dict(
         "automated_install": profile.automated_install,
         "upgrades_only": profile.upgrades_only,
         "patches_only": profile.patches_only,
+        "download_mode": download_mode,
         "component": component,
         "component_label": VCF_DEPOT_COMPONENTS.get(component, component),
         "component_version": profile.component_version,
@@ -669,11 +678,7 @@ def vcfdt_commands_for_profile(
         base.append("--patches-only")
     _append_optional_flag(base, "--component", profile.component)
     _append_optional_flag(base, "--component-version", profile.component_version)
-    return [
-        [*VCF_DEPOT_GET_SOFTWARE_DEPOT_ID_COMMAND],
-        ["vcf-download-tool", "binaries", "list", *base],
-        ["vcf-download-tool", "binaries", "download", f"--depot-store={settings.depot_store_path}", *base],
-    ]
+    return [["vcf-download-tool", "binaries", "download", f"--depot-store={settings.depot_store_path}", *base]]
 
 
 def _shell_arg(arg: str, settings: VcfOfflineDepotSettings) -> str:

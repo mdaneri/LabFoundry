@@ -2637,7 +2637,12 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
         archive.addfile(jar_info, io.BytesIO(jar_payload))
 
     tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
+    runtime_tool_dir = tmp_path / "var" / "lib" / "labfoundry" / "vcfDownloadTool" / "active-tool"
+    (runtime_tool_dir / "secrets").mkdir(parents=True)
+    (runtime_tool_dir / "secrets" / "download-token.txt").write_text("secret", encoding="utf-8")
+    (runtime_tool_dir / "stale.jar").write_text("stale", encoding="utf-8")
     monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_tool_dir)
     monkeypatch.setattr(
         helper,
         "_run_vcfdt_user_command",
@@ -2649,6 +2654,7 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     payload = json.loads(captured.out)
     assert payload["vcf_offline_depot"] == "stage-tool complete"
     assert payload["executable"] == str(tool_dir / "vcf-download-tool")
+    assert payload["runtime_executable"] == str(runtime_tool_dir / "vcf-download-tool")
     assert payload["tool_version"] == "9.1.0.0100.25429019"
     assert payload["version_command"] == "vcf-download-tool --version"
     wrapper = tool_dir / "vcf-download-tool"
@@ -2657,6 +2663,11 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert wrapper.is_file()
     assert extracted.is_file()
     assert jar.is_file()
+    assert (runtime_tool_dir / "bin" / "vcf-download-tool").is_file()
+    assert (runtime_tool_dir / "vcf-download-tool").is_file()
+    assert (runtime_tool_dir / "lib" / "lcm-tools-uber.jar").is_file()
+    assert (runtime_tool_dir / "secrets" / "download-token.txt").is_file()
+    assert not (runtime_tool_dir / "stale.jar").exists()
     assert os.access(wrapper, os.X_OK)
     assert os.access(extracted, os.X_OK)
     if os.name == "posix":
@@ -2665,6 +2676,60 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert f"cd '{extracted.parent.parent}' || exit 1" in wrapper_text
     assert str(extracted) in wrapper_text
+
+
+def test_vcf_offline_depot_helper_preserves_root_level_runtime_executable(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.root.tar.gz"
+    payload = b"#!/bin/sh\necho 'vcf-download-tool 9.1.0'\n"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = tarfile.TarInfo("vcf-download-tool")
+        info.mode = 0o750
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
+    runtime_tool_dir = tmp_path / "var" / "lib" / "labfoundry" / "vcfDownloadTool" / "active-tool"
+    monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_tool_dir)
+    monkeypatch.setattr(
+        helper,
+        "_run_vcfdt_user_command",
+        lambda command: subprocess.CompletedProcess(command, 0, "vcf-download-tool 9.1.0\n", ""),
+    )
+
+    assert helper._handle_vcf_offline_depot("stage-tool", [str(archive_path)]) == 0
+    capsys.readouterr()
+    wrapper = runtime_tool_dir / "vcf-download-tool"
+    preserved = runtime_tool_dir / "vcf-download-tool.real"
+    assert wrapper.is_file()
+    assert preserved.read_bytes() == payload
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert str(preserved) in wrapper_text
+    assert f'exec {wrapper} "$@"' not in wrapper_text
+
+
+def test_vcf_offline_depot_helper_resets_staged_and_active_tool_trees(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
+    runtime_tool_dir = tmp_path / "var" / "lib" / "labfoundry" / "vcfDownloadTool" / "active-tool"
+    (tool_dir / "extracted").mkdir(parents=True)
+    (tool_dir / "extracted" / "stale.jar").write_text("stale", encoding="utf-8")
+    (runtime_tool_dir / "bin").mkdir(parents=True)
+    (runtime_tool_dir / "bin" / "vcf-download-tool").write_text("stale", encoding="utf-8")
+    (runtime_tool_dir / "secrets").mkdir()
+    (runtime_tool_dir / "secrets" / "download-token.txt").write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_tool_dir)
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda _username: (_ for _ in ()).throw(KeyError()))
+
+    assert helper._handle_vcf_offline_depot("reset-tool", []) == 0
+
+    assert not tool_dir.exists()
+    assert runtime_tool_dir.is_dir()
+    assert list(runtime_tool_dir.iterdir()) == [runtime_tool_dir / "secrets"]
+    assert list((runtime_tool_dir / "secrets").iterdir()) == []
+    assert json.loads(capsys.readouterr().out)["vcf_offline_depot"] == "tool runtime reset complete"
 
 
 def test_vcf_offline_depot_helper_prepares_labfoundry_vcfdt_home(monkeypatch, tmp_path):
@@ -2692,8 +2757,8 @@ def test_vcf_offline_depot_helper_prepares_labfoundry_vcfdt_home(monkeypatch, tm
 
 def test_vcf_offline_depot_helper_generates_software_depot_id(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
-    tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
-    wrapper = tool_dir / "vcf-download-tool"
+    runtime_tool_dir = tmp_path / "var" / "lib" / "labfoundry" / "vcfDownloadTool" / "active-tool"
+    wrapper = runtime_tool_dir / "vcf-download-tool"
     wrapper.parent.mkdir(parents=True)
     wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
     wrapper.chmod(0o755)
@@ -2703,7 +2768,7 @@ def test_vcf_offline_depot_helper_generates_software_depot_id(monkeypatch, tmp_p
         commands.append((command, input_text or ""))
         return subprocess.CompletedProcess(command, 0, "Software Depot ID: 8c9506c6-7bdf-44d5-b2e9-50d829d66b99\n", "")
 
-    monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_tool_dir)
     monkeypatch.setattr(helper, "_run_vcfdt_user_command", fake_run_vcfdt)
 
     assert helper._handle_vcf_offline_depot("generate-software-depot-id", []) == 0

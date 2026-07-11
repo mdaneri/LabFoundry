@@ -190,6 +190,9 @@ class SystemAdapter:
         helper_archive_path = str(Path(archive_path).resolve()) if not archive_path.startswith("/") else archive_path
         return self._helper_result("vcf-offline-depot", "stage-tool", helper_archive_path, dry_run_message="dry-run: VCF Download Tool extraction command recorded")
 
+    def reset_vcf_offline_depot_tool(self) -> AdapterResult:
+        return self._helper_result("vcf-offline-depot", "reset-tool", dry_run_message="dry-run: VCF Download Tool runtime reset command recorded")
+
     def generate_vcf_offline_depot_software_depot_id(self) -> AdapterResult:
         return self._helper_result(
             "vcf-offline-depot",

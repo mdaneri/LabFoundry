@@ -459,31 +459,38 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
         db.add(VcfPrivateRegistrySettings())
     if db.execute(select(VcfOfflineDepotSettings)).first() is None:
         db.add(VcfOfflineDepotSettings())
-    if include_examples and db.execute(select(VcfDepotDownloadProfile)).first() is None:
+    if db.execute(select(VcfDepotDownloadProfile)).first() is None:
         db.add_all(
             [
                 VcfDepotDownloadProfile(
-                    name="VCF 9.1 install binaries",
+                    name="Binaries",
                     profile_type="binaries",
                     sku="VCF",
                     vcf_version="9.1.0",
                     binary_type="INSTALL",
                     automated_install=True,
-                    enabled=True,
+                    enabled=False,
                     status="planned",
                 ),
                 VcfDepotDownloadProfile(
-                    name="VCF metadata",
+                    name="Metadata",
                     profile_type="metadata",
+                    sku="VCF",
+                    vcf_version="9.1.0",
+                    binary_type="INSTALL",
+                    automated_install=True,
                     enabled=False,
                     status="planned",
                 ),
                 VcfDepotDownloadProfile(
-                    name="ESX patches",
+                    name="Esx",
                     profile_type="esx",
+                    sku="VCF",
+                    vcf_version="9.1.0",
+                    binary_type="INSTALL",
+                    automated_install=True,
                     enabled=False,
                     status="planned",
-                    disabled_platforms="esxio-9.1-INTL\narmEsx-9.1-INTL",
                 ),
             ]
         )

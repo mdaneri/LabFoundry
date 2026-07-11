@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block page_title %}VCF Offline Depot{% endblock %}
 {% block content %}
-<section class="split-workspace">
+<section class="split-workspace vcf-offline-depot-workspace">
   <div class="panel wide-panel">
     <div class="panel-head">
       <div>
@@ -46,22 +46,10 @@
             <p class="muted">Each row can be started manually. Development appliances record the VCFDT command intent as a dry-run job.</p>
           </div>
           <div class="inline-action-row">
-            <a class="text-link" href="/logs">View logs</a>
             <span class="status-pill muted">{{ vcf_depot_profiles|length }} rows</span>
           </div>
         </div>
         <div id="vcf-depot-profile-error" class="alert error hidden"></div>
-        {% if vcf_depot_download_jobs %}
-          <div class="compact-settings-list download-job-list">
-            {% for job in vcf_depot_download_jobs %}
-              <div>
-                <span>{{ job.profile_name or job.id }}</span>
-                <strong>{{ job.status }}</strong>
-                <small>{{ "dry-run" if job.dry_run == "yes" else "real" }} · {{ job.created_at }}</small>
-              </div>
-            {% endfor %}
-          </div>
-        {% endif %}
         <div
           id="vcf-depot-profiles-table"
           class="tabulator-shell"
@@ -77,13 +65,14 @@
               <th>Name</th>
               <th>Start</th>
               <th>Type</th>
+              <th>Enabled</th>
               <th>SKU</th>
               <th>VCF version</th>
               <th>Binary type</th>
               <th>Patch-only</th>
               <th>Component</th>
               <th>Disabled ESX platforms</th>
-              <th>Enabled</th>
+              <th>Last run</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -99,13 +88,14 @@
                   </form>
                 </td>
                 <td>{{ profile.profile_type }}</td>
+                <td>{{ "yes" if profile.enabled else "no" }}</td>
                 <td>{{ profile.sku }}</td>
                 <td>{{ profile.vcf_version }}</td>
                 <td>{{ profile.binary_type }}</td>
                 <td>{{ "yes" if profile.patches_only else "no" }}</td>
                 <td>{{ profile.component or "all components" }}</td>
                 <td>{{ profile.disabled_platforms.replace("\n", ", ") if profile.disabled_platforms else "none" }}</td>
-                <td>{{ "yes" if profile.enabled else "no" }}</td>
+                <td>{{ {"planned": "Never run", "ready": "Running", "synced": "Succeeded", "blocked": "Failed"}.get(profile.status, "Unknown") }}</td>
                 <td>
                   <form
                     action="/vcf-offline-depot/profiles/{{ profile.id }}/delete"
@@ -119,6 +109,33 @@
                   </form>
                 </td>
               </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <div class="panel-head table-head subsection-head">
+          <div>
+            <h2>VCFDT tasks</h2>
+            <p class="muted">Execution history for manual VCF Download Tool profile tasks.</p>
+          </div>
+        </div>
+        <div id="vcf-depot-tasks-table" class="tabulator-shell" data-tasks='{{ vcf_depot_download_jobs | tojson }}' data-fallback-id="vcf-depot-tasks-fallback"></div>
+        <table id="vcf-depot-tasks-fallback" class="data-table compact">
+          <thead>
+            <tr><th>Task</th><th>Profile</th><th>State</th><th>Mode</th><th>Created</th><th>Started</th><th>Finished</th></tr>
+          </thead>
+          <tbody>
+            {% for job in vcf_depot_download_jobs %}
+              <tr>
+                <td><code>{{ job.id }}</code></td>
+                <td>{{ job.profile_name or "Unknown profile" }}</td>
+                <td><span class="status-pill {{ 'success' if job.status == 'succeeded' else 'error' if job.status == 'failed' else 'warn' }}">{{ job.status }}</span></td>
+                <td>{{ "dry-run" if job.dry_run == "yes" else "real" }}</td>
+                <td>{{ job.created_at or "—" }}</td>
+                <td>{{ job.started_at or "—" }}</td>
+                <td>{{ job.finished_at or "—" }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="7" class="muted">No VCFDT tasks have been executed.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -214,7 +231,7 @@
           </div>
           <button class="button danger compact-button {{ '' if vcf_depot_settings.tool_archive_path else 'hidden' }}" type="button" data-vcf-depot-tool-reset-modal-open data-vcf-depot-tool-reset-action>Reset</button>
           <div class="vcfdt-tool-reset-note {{ '' if vcf_depot_settings.tool_archive_path else 'hidden' }}" data-vcf-depot-tool-reset-panel>
-            <small class="muted">Reset clears the staged VCFDT package and generated software depot metadata. Appliance files are changed only by the global apply workflow.</small>
+            <small class="muted">Reset clears the staged VCFDT package, Broadcom credentials, generated metadata, and disables download profiles. Appliance files are changed only by the global apply workflow.</small>
           </div>
             <progress class="upload-progress" value="0" max="100" data-autosave-upload-progress hidden></progress>
         </div>
@@ -302,13 +319,26 @@
     </div>
   </aside>
 </section>
+<dialog id="vcf-depot-task-log-modal" class="confirm-modal" aria-labelledby="vcf-depot-task-log-modal-title">
+  <div class="confirm-modal-panel form-stack">
+    <div class="confirm-modal-body">
+      <p class="kicker">VCF Offline Depot</p>
+      <h2 id="vcf-depot-task-log-modal-title" data-vcf-depot-task-log-title>VCFDT task log</h2>
+      <p class="muted" data-vcf-depot-task-log-meta></p>
+      <div class="terminal-note vcfdt-task-log-preview" data-terminal-note-open="false"><pre><code class="language-labfoundry-log" data-vcf-depot-task-log-content>Loading task log…</code></pre></div>
+    </div>
+    <div class="confirm-modal-actions">
+      <button class="button secondary" type="button" data-vcf-depot-task-log-close>Close</button>
+    </div>
+  </div>
+</dialog>
 <dialog id="vcf-depot-tool-reset-modal" class="confirm-modal" aria-labelledby="vcf-depot-tool-reset-modal-title">
   <form class="confirm-modal-panel form-stack" action="/vcf-offline-depot/tool/reset" method="post">
     <input type="hidden" name="csrf" value="{{ csrf_token }}">
     <div class="confirm-modal-body">
       <p class="kicker">VCF Offline Depot</p>
       <h2 id="vcf-depot-tool-reset-modal-title">Reset VCFDT package</h2>
-      <p class="muted">This removes the staged VCF Download Tool package and generated software depot metadata from LabFoundry desired state. It does not mutate appliance runtime files until a later global apply or job updates them.</p>
+      <p class="muted">This removes the staged VCF Download Tool package, saved Broadcom download token or activation code, and generated software depot metadata from LabFoundry desired state, and disables all download profiles. It does not mutate appliance runtime files until global appliance apply removes the staged and active tool trees.</p>
       <label class="checkbox-row">
         <input type="checkbox" name="reset_application_properties">
         <span>Also reset saved application-prodv2.properties configuration</span>
