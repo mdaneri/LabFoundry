@@ -2095,6 +2095,33 @@ def vcf_depot_active_download_job(db: Session) -> Job | None:
     ).first()
 
 
+def recover_interrupted_vcf_depot_download_jobs(db: Session) -> int:
+    jobs = db.scalars(
+        select(Job).where(
+            Job.type == "vcf-depot-download",
+            Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+        )
+    ).all()
+    if not jobs:
+        return 0
+    finished = utcnow()
+    for job in jobs:
+        job.status = JobStatus.FAILED.value
+        job.finished_at = finished
+        job.progress_percent = 100
+        job.error = "Interrupted by a LabFoundry restart before completion. Start the download again."
+        try:
+            profile_id = int(json.loads(job.result or "{}").get("profile_id"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            profile_id = 0
+        profile = db.get(VcfDepotDownloadProfile, profile_id) if profile_id else None
+        if profile is not None:
+            profile.status = "blocked"
+            profile.updated_at = finished
+    db.commit()
+    return len(jobs)
+
+
 def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
     ca_settings = get_ca_settings_row(db)
     uploaded_bundle = uploaded_vcf_registry_ca_bundle(db)
@@ -2164,7 +2191,11 @@ def vcf_private_registry_context(db: Session) -> dict:
 
 def vcf_depot_tool_installed(settings: VcfOfflineDepotSettings) -> bool:
     if get_settings().environment == "appliance":
-        return bool(settings.tool_archive_path) and filesystem_path(PurePosixPath(VCF_DEPOT_RUNTIME_TOOL_DIR) / "bin" / "vcf-download-tool").is_file()
+        runtime_home = filesystem_path(VCF_DEPOT_RUNTIME_TOOL_DIR)
+        return bool(settings.tool_archive_path) and any(
+            candidate.is_file()
+            for candidate in (runtime_home / "bin" / "vcf-download-tool", runtime_home / "vcf-download-tool")
+        )
     return bool(settings.tool_archive_path and Path(settings.tool_archive_path).is_file())
 
 

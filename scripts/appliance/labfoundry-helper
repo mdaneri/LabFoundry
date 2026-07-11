@@ -4958,6 +4958,10 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
     runtime_tool_path = _find_vcf_download_tool_binary(runtime_tool_home)
     runtime_tool_path.chmod(0o755)
     runtime_wrapper_path = runtime_tool_home / "vcf-download-tool"
+    if runtime_tool_path == runtime_wrapper_path:
+        preserved_runtime_tool_path = runtime_tool_home / "vcf-download-tool.real"
+        runtime_tool_path.replace(preserved_runtime_tool_path)
+        runtime_tool_path = preserved_runtime_tool_path
     runtime_wrapper_path.write_text(
         "\n".join(
             [

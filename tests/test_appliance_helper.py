@@ -2678,6 +2678,37 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert str(extracted) in wrapper_text
 
 
+def test_vcf_offline_depot_helper_preserves_root_level_runtime_executable(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.root.tar.gz"
+    payload = b"#!/bin/sh\necho 'vcf-download-tool 9.1.0'\n"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = tarfile.TarInfo("vcf-download-tool")
+        info.mode = 0o750
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
+    runtime_tool_dir = tmp_path / "var" / "lib" / "labfoundry" / "vcfDownloadTool" / "active-tool"
+    monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_tool_dir)
+    monkeypatch.setattr(
+        helper,
+        "_run_vcfdt_user_command",
+        lambda command: subprocess.CompletedProcess(command, 0, "vcf-download-tool 9.1.0\n", ""),
+    )
+
+    assert helper._handle_vcf_offline_depot("stage-tool", [str(archive_path)]) == 0
+    capsys.readouterr()
+    wrapper = runtime_tool_dir / "vcf-download-tool"
+    preserved = runtime_tool_dir / "vcf-download-tool.real"
+    assert wrapper.is_file()
+    assert preserved.read_bytes() == payload
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert str(preserved) in wrapper_text
+    assert f'exec {wrapper} "$@"' not in wrapper_text
+
+
 def test_vcf_offline_depot_helper_resets_staged_and_active_tool_trees(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
     tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"

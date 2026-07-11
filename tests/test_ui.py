@@ -6382,6 +6382,61 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
     assert task_row["progress_percent"] == "0"
 
 
+def test_vcf_offline_depot_startup_recovers_interrupted_download(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, VcfDepotDownloadProfile
+    from labfoundry.app.ui import recover_interrupted_vcf_depot_download_jobs
+
+    with SessionLocal() as db:
+        profile = VcfDepotDownloadProfile(name="interrupted", profile_type="binaries", enabled=True, status="ready")
+        db.add(profile)
+        db.flush()
+        db.add(
+            Job(
+                id="job_interrupted_vcfdt",
+                type="vcf-depot-download",
+                status=JobStatus.RUNNING.value,
+                created_by="admin",
+                progress_percent=35,
+                result=json.dumps({"profile_id": profile.id, "profile_name": profile.name}),
+            )
+        )
+        db.commit()
+
+        assert recover_interrupted_vcf_depot_download_jobs(db) == 1
+        job = db.get(Job, "job_interrupted_vcfdt")
+        db.refresh(profile)
+        assert job is not None
+        assert job.status == JobStatus.FAILED.value
+        assert job.progress_percent == 100
+        assert job.finished_at is not None
+        assert "restart" in (job.error or "")
+        assert profile.status == "blocked"
+        assert recover_interrupted_vcf_depot_download_jobs(db) == 0
+
+
+def test_vcf_offline_depot_root_runtime_wrapper_counts_as_installed(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from pathlib import Path
+
+    from labfoundry.app import ui
+    from labfoundry.app.models import VcfOfflineDepotSettings
+
+    runtime_home = tmp_path / "active-tool"
+    runtime_home.mkdir()
+    (runtime_home / "vcf-download-tool").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(ui, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_home)
+    monkeypatch.setattr(ui, "filesystem_path", lambda path: Path(path))
+    monkeypatch.setattr(ui, "get_settings", lambda: SimpleNamespace(environment="appliance"))
+    settings = VcfOfflineDepotSettings(tool_archive_path="/var/lib/labfoundry/uploads/vcfdt.tar.gz")
+
+    assert ui.vcf_depot_tool_installed(settings) is True
+
+
 def test_vcf_offline_depot_profile_credentials_block_start_not_apply(client, tmp_path):
     import html
     import json
