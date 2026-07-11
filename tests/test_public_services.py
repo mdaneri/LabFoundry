@@ -120,13 +120,13 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "location = /PROD/logout {" in config
     assert "location = /_labfoundry_depot_auth {" in config
     assert "proxy_pass http://127.0.0.1:8000/PROD/auth-check;" in config
-    assert "location @labfoundry_depot_login {" in config
-    assert "return 303 /PROD/login?next=$request_uri;" in config
+    assert "location = /_labfoundry_depot_login {" in config
+    assert "proxy_pass http://127.0.0.1:8000/PROD/auth-failure;" in config
     assert "location = /PROD/ {" in config
     assert "location ~ ^/PROD/.*/$ {" in config
     assert "location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$ {" in config
     assert "auth_request /_labfoundry_depot_auth;" in config
-    assert "error_page 401 = @labfoundry_depot_login;" in config
+    assert "error_page 401 = /_labfoundry_depot_login;" in config
     assert "satisfy any;" in config
     assert 'auth_basic "VCF Offline Depot";' in config
     assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in config

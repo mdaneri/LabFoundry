@@ -74,6 +74,16 @@ class SystemAdapter:
     def apply_local_users_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("local-users", "apply", config_path, dry_run_message="dry-run: local users apply command recorded")
 
+    def authenticate_local_user(self, username: str, password: str) -> AdapterResult:
+        return self._helper_result(
+            "local-users",
+            "authenticate",
+            username,
+            dry_run_message="dry-run: local user authentication is unavailable",
+            input_text=f"{password}\n",
+            dry_run_returncode=1,
+        )
+
     def local_users_status(self, config_path: str) -> AdapterResult:
         if self.dry_run:
             return AdapterResult(command=["labfoundry-helper", "local-users", "status", config_path], dry_run=True, stdout='{"users":[],"status":"dry-run"}')
@@ -232,22 +242,35 @@ class SystemAdapter:
     def _record_only_result(self, command: list[str], stdout: str) -> AdapterResult:
         return AdapterResult(command=command, dry_run=True, stdout=stdout)
 
-    def _helper_result(self, group: str, action: str, *args: str, dry_run_message: str, use_sudo: bool = True, timeout_seconds: float | None = None) -> AdapterResult:
+    def _helper_result(
+        self,
+        group: str,
+        action: str,
+        *args: str,
+        dry_run_message: str,
+        use_sudo: bool = True,
+        timeout_seconds: float | None = None,
+        input_text: str | None = None,
+        dry_run_returncode: int = 0,
+    ) -> AdapterResult:
         display_command = ["labfoundry-helper", group, action, *args]
         if self.dry_run:
-            return AdapterResult(command=display_command, dry_run=True, stdout=dry_run_message)
+            return AdapterResult(command=display_command, dry_run=True, stdout=dry_run_message, returncode=dry_run_returncode)
 
         command = [self.HELPER_PATH, group, action, "--real", *args]
         if use_sudo:
             command = ["sudo", "-n", *command]
+        run_kwargs: dict[str, object] = {
+            "check": False,
+            "capture_output": True,
+            "text": True,
+        }
+        if timeout_seconds is not None:
+            run_kwargs["timeout"] = timeout_seconds
+        if input_text is not None:
+            run_kwargs["input"] = input_text
         try:
-            completed = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
+            completed = subprocess.run(command, **run_kwargs)
         except OSError as exc:
             return AdapterResult(
                 command=command,

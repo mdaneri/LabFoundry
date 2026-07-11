@@ -302,7 +302,8 @@ def test_vcf_depot_nginx_config_renders_labfoundry_auth_request_by_default():
     assert "location = /requests" not in config
     assert "location ^~ /requests/" not in config
     assert "auth_request /_labfoundry_depot_auth;" in config
-    assert "error_page 401 = @labfoundry_depot_login;" in config
+    assert "proxy_pass http://127.0.0.1:8000/PROD/auth-failure;" in config
+    assert "error_page 401 = /_labfoundry_depot_login;" in config
     assert "proxy_pass http://127.0.0.1:8000;" in config
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in config
 

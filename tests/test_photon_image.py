@@ -791,12 +791,15 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
         "kms",
         "appliance_settings",
         "vcf_backups",
+        "vcf_offline_depot",
+        "public_services",
     ]
     assert plan["interfaces"]["vlan"]["name"] == "eth2.50"
     assert plan["interfaces"]["client_ca_request"]["name"] == "eth3"
     assert plan["interfaces"]["client_ca_request"]["ip_cidr"] == "192.168.49.20/24"
     assert "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification" in plan["checks"]
     assert "VCF Backup desired state, local user sync, SFTP listener, and client probe" in plan["checks"]
+    assert "VCF Offline Depot browser login, curl/wget Basic auth, and Local Users password rotation" in plan["checks"]
     assert plan["pxe_boot"]["enabled"] is False
     assert plan["pxe_boot"]["mode"] == "linux"
 
