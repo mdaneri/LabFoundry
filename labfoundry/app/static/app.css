@@ -955,6 +955,10 @@ textarea {
   align-self: start;
 }
 
+.vcf-offline-depot-workspace > .side-stack .detail-panel {
+  position: static;
+}
+
 .left-stack {
   display: grid;
   gap: 14px;
@@ -3763,6 +3767,35 @@ textarea {
 #vcf-depot-properties-modal .confirm-modal-panel {
   max-height: calc(100vh - 32px);
   overflow: hidden;
+}
+
+#vcf-depot-task-log-modal {
+  width: min(1120px, calc(100vw - 48px));
+  max-width: none;
+}
+
+#vcf-depot-task-log-modal .confirm-modal-panel {
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+}
+
+#vcf-depot-task-log-modal .confirm-modal-body {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.vcfdt-task-log-preview {
+  min-height: 0;
+  max-height: 65vh;
+  margin-top: 0;
+  overflow: auto;
+}
+
+.vcfdt-task-log-preview pre,
+.vcfdt-task-log-preview code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 #vcf-depot-properties-modal .confirm-modal-body {

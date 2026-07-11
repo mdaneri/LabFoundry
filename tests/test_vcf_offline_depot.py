@@ -402,9 +402,9 @@ def test_vcf_depot_command_preview_uses_staged_secret_paths():
 
     preview = render_vcfdt_command_preview(settings, profiles)
 
-    assert "vcf-download-tool configuration get --software-depot-id" in preview
-    assert "vcf-download-tool binaries list" in preview
-    assert preview.index("vcf-download-tool configuration get --software-depot-id") < preview.index("vcf-download-tool binaries list")
+    assert "vcf-download-tool configuration get --software-depot-id" not in preview
+    assert "vcf-download-tool binaries list" not in preview
+    assert "vcf-download-tool binaries download" in preview
     assert "--depot-store=/mnt/labfoundry-vcf-offline-depot" in preview
     assert "VCFDT_HOME=/var/lib/labfoundry/vcfDownloadTool/active-tool" in preview
     assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" in preview
@@ -436,11 +436,9 @@ def test_vcf_depot_download_profiles_use_activation_code_when_no_token_is_staged
 
     commands = vcfdt_commands_for_profile(settings, profile, download_token_present=False, activation_code_present=True)
 
-    assert commands[0] == ["vcf-download-tool", "configuration", "get", "--software-depot-id"]
-    assert commands[1][0:3] == ["vcf-download-tool", "binaries", "list"]
-    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in commands[1]
-    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in commands[1]
-    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in commands[2]
+    assert commands[0][0:3] == ["vcf-download-tool", "binaries", "download"]
+    assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in commands[0]
+    assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in commands[0]
 
 
 def test_vcf_depot_command_preview_supports_patch_only_profiles():

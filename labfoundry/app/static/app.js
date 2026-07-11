@@ -151,6 +151,27 @@ function registerLabFoundryPrismLanguages() {
       punctuation: /[\[\](),;]/,
     };
   }
+  if (!window.Prism.languages["labfoundry-log"]) {
+    window.Prism.languages["labfoundry-log"] = {
+      error: {
+        pattern: /(^|\n)(?:ERROR|FATAL|Caused by:).*/,
+        lookbehind: true,
+        alias: "important",
+      },
+      command: {
+        pattern: /(^|\n)\$ .*/,
+        lookbehind: true,
+        alias: "function",
+      },
+      timestamp: /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/,
+      stack: {
+        pattern: /^\s+at\s+.+$/m,
+        alias: "comment",
+      },
+      number: /\b\d+(?:\.\d+)*\b/,
+      punctuation: /[()[\]{}:]/,
+    };
+  }
 }
 
 function previewLanguageForText(text, element) {
@@ -338,7 +359,10 @@ function initializeTerminalNoteActions(root = document) {
     openButton.setAttribute("aria-label", "Open preview");
     openButton.setAttribute("title", "Open preview");
     appendButtonIcon(openButton, ["M7 17 17 7", "M9 7h8v8"]);
-    actions.append(copyButton, openButton);
+    actions.append(copyButton);
+    if (note.dataset.terminalNoteOpen !== "false") {
+      actions.append(openButton);
+    }
     note.prepend(actions);
     copyButton.addEventListener("click", async () => {
       try {
@@ -347,7 +371,9 @@ function initializeTerminalNoteActions(root = document) {
         showTransientGridStatus("Copy failed");
       }
     });
-    openButton.addEventListener("click", () => openPreviewModal(terminalNoteTitle(note), code.textContent || "", code));
+    if (note.dataset.terminalNoteOpen !== "false") {
+      openButton.addEventListener("click", () => openPreviewModal(terminalNoteTitle(note), code.textContent || "", code));
+    }
   });
 }
 
@@ -8103,7 +8129,7 @@ function newVcfDepotProfileRow() {
     component: "",
     component_version: "",
     disabled_platforms: [],
-    enabled: true,
+    enabled: false,
     status: "planned",
     notes: "",
     is_new: true,
@@ -8329,7 +8355,7 @@ async function startVcfDepotProfileDownload(row, csrf) {
       throw new Error(payload.detail || "The VCFDT download job could not be started.");
     }
     row.update({ status: payload.profile_status || data.status });
-    showVcfDepotMessage(`Download job ${payload.job_id} ${payload.dry_run ? "recorded" : "started"} for ${payload.profile_name}.`, "success");
+    window.location.reload();
   } catch (error) {
     showVcfDepotMessage(error instanceof Error ? error.message : "The VCFDT download job could not be started.");
   }
@@ -8444,6 +8470,16 @@ function initializeVcfDepotProfilesTable() {
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
         },
         {
+          title: "Enabled",
+          field: "enabled",
+          formatter: labFoundryBooleanFormatter,
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 95,
+          headerSort: false,
+          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+        },
+        {
           title: "SKU",
           field: "sku",
           editor: "list",
@@ -8530,22 +8566,16 @@ function initializeVcfDepotProfilesTable() {
           cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
         },
         {
-          title: "Enabled",
-          field: "enabled",
-          formatter: labFoundryBooleanFormatter,
-          editor: "tickCross",
-          hozAlign: "center",
-          width: 95,
-          headerSort: false,
-          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
-        },
-        {
-          title: "Status",
+          title: "Last run",
           field: "status",
-          editor: "list",
-          editorParams: { values: { planned: "planned", ready: "ready", synced: "synced", blocked: "blocked" } },
+          formatter: (cell) => ({
+            planned: "Never run",
+            ready: "Running",
+            synced: "Succeeded",
+            blocked: "Failed",
+          })[cell.getValue()] || "Unknown",
           width: 110,
-          cellEdited: (cell) => autoSaveVcfDepotProfile(cell, csrf),
+          headerSort: false,
         },
       ], "name"),
       rowFormatter: (row) => {
@@ -8557,6 +8587,143 @@ function initializeVcfDepotProfilesTable() {
     }
   } catch (error) {
     showVcfDepotMessage(error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
+  }
+}
+
+let vcfDepotTasksTable = null;
+let vcfDepotTasksRefreshInterval = null;
+let vcfDepotTasksRefreshPending = false;
+
+async function refreshVcfDepotTasksTable() {
+  if (!vcfDepotTasksTable || vcfDepotTasksRefreshPending) {
+    return;
+  }
+  vcfDepotTasksRefreshPending = true;
+  try {
+    await vcfDepotTasksTable.reloadData();
+  } catch (error) {
+    showVcfDepotMessage(error instanceof Error ? error.message : "Unable to refresh VCFDT tasks.");
+  } finally {
+    vcfDepotTasksRefreshPending = false;
+  }
+}
+
+function initializeVcfDepotTasksTable() {
+  const tableElement = document.getElementById("vcf-depot-tasks-table");
+  if (!(tableElement instanceof HTMLElement) || typeof window.Tabulator !== "function") {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  try {
+    const tasks = JSON.parse(tableElement.dataset.tasks || "[]");
+    vcfDepotTasksTable = new window.Tabulator(tableElement, {
+      data: tasks,
+      ajaxURL: "/vcf-offline-depot/tasks/status",
+      pagination: true,
+      paginationMode: "remote",
+      paginationSize: 10,
+      paginationSizeSelector: [10, 25, 50, 100],
+      paginationCounter: "rows",
+      dataSendParams: { page: "page", size: "size" },
+      ajaxResponse: (_url, _params, response) => response,
+      layout: "fitColumns",
+      placeholder: "No VCFDT tasks have been executed.",
+      rowContextMenu: [
+        {
+          label: "View log",
+          action: (_event, row) => {
+            const logUrl = row.getData().log_url;
+            if (logUrl) {
+              openVcfDepotTaskLog(logUrl);
+            }
+          },
+        },
+      ],
+      columns: [
+        { title: "Task", field: "id", minWidth: 190, formatter: (cell) => `<code>${escapeHtml(cell.getValue())}</code>` },
+        { title: "Profile", field: "profile_name", minWidth: 130, formatter: (cell) => escapeHtml(cell.getValue() || "Unknown profile") },
+        {
+          title: "State",
+          field: "status",
+          width: 105,
+          headerSort: false,
+          formatter: (cell) => {
+            const value = String(cell.getValue() || "unknown");
+            const pill = value === "succeeded" ? "success" : value === "failed" ? "error" : "warn";
+            return `<span class="status-pill ${pill}">${escapeHtml(value)}</span>`;
+          },
+        },
+        { title: "Mode", field: "dry_run", width: 90, formatter: (cell) => cell.getValue() === "yes" ? "dry-run" : "real" },
+        { title: "Created", field: "created_at", minWidth: 210 },
+        { title: "Started", field: "started_at", minWidth: 210, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Finished", field: "finished_at", minWidth: 210, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+      ],
+    });
+    fallback?.classList.add("hidden");
+    if (vcfDepotTasksRefreshInterval) {
+      window.clearInterval(vcfDepotTasksRefreshInterval);
+    }
+    vcfDepotTasksRefreshInterval = window.setInterval(refreshVcfDepotTasksTable, 500);
+  } catch (error) {
+    showVcfDepotMessage(error instanceof Error ? error.message : "VCFDT tasks could not render. Showing the fallback table.");
+  }
+}
+
+let vcfDepotTaskLogRefreshTimer = null;
+
+async function openVcfDepotTaskLog(logUrl) {
+  const modal = document.getElementById("vcf-depot-task-log-modal");
+  const content = document.querySelector("[data-vcf-depot-task-log-content]");
+  const title = document.querySelector("[data-vcf-depot-task-log-title]");
+  const meta = document.querySelector("[data-vcf-depot-task-log-meta]");
+  if (!(modal instanceof HTMLDialogElement) || !(content instanceof HTMLElement)) {
+    return;
+  }
+  content.textContent = "Loading task log…";
+  if (vcfDepotTaskLogRefreshTimer) {
+    window.clearTimeout(vcfDepotTaskLogRefreshTimer);
+    vcfDepotTaskLogRefreshTimer = null;
+  }
+  modal.showModal();
+  const loadLog = async () => {
+    try {
+      const response = await fetch(logUrl, { headers: { "X-LabFoundry-Task-Log": "1" } });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || "Unable to load the VCFDT task log.");
+      }
+      if (title instanceof HTMLElement) {
+        title.textContent = `${payload.profile_name || "Unknown profile"} task log`;
+      }
+      if (meta instanceof HTMLElement) {
+        meta.textContent = `${payload.job_id} · ${payload.status} · ${payload.updated_at || "not written"}`;
+      }
+      content.textContent = payload.text || "No task log is available.";
+      registerLabFoundryPrismLanguages();
+      if (window.Prism && typeof window.Prism.highlightElement === "function") {
+        window.Prism.highlightElement(content);
+      }
+      if (modal.open && ["pending", "running"].includes(payload.status)) {
+        vcfDepotTaskLogRefreshTimer = window.setTimeout(loadLog, 2000);
+      }
+    } catch (error) {
+      content.textContent = error instanceof Error ? error.message : "Unable to load the VCFDT task log.";
+    }
+  };
+  await loadLog();
+}
+
+function initializeVcfDepotTaskLogModal() {
+  const modal = document.getElementById("vcf-depot-task-log-modal");
+  const closeButton = document.querySelector("[data-vcf-depot-task-log-close]");
+  if (modal instanceof HTMLDialogElement && closeButton instanceof HTMLButtonElement) {
+    closeButton.addEventListener("click", () => {
+      if (vcfDepotTaskLogRefreshTimer) {
+        window.clearTimeout(vcfDepotTaskLogRefreshTimer);
+        vcfDepotTaskLogRefreshTimer = null;
+      }
+      modal.close();
+    });
   }
 }
 
@@ -9068,6 +9235,9 @@ function initializeVcfDepotSettings() {
       const payload = event.detail || {};
       updateVcfDepotSummary(form, payload);
       updateVcfDepotValidation(payload);
+      if (payload.tool_archive_uploaded) {
+        window.location.reload();
+      }
     });
     refresh();
   });
@@ -10570,6 +10740,8 @@ document.addEventListener("DOMContentLoaded", initializeChronyUpstreamsTable);
 document.addEventListener("DOMContentLoaded", initializeChronySourceHealthModal);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotTasksTable);
+document.addEventListener("DOMContentLoaded", initializeVcfDepotTaskLogModal);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeManagedFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallSourceGroupManager);

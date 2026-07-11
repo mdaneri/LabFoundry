@@ -37,6 +37,7 @@ VCF_DEPOT_ACTIVATION_NAME_KEY = "vcf_depot_activation_code_name"
 VCF_DEPOT_ACTIVATION_VALUE_KEY = "vcf_depot_activation_code_value"
 VCF_DEPOT_TOOL_VERSION_SOURCE_KEY = "vcf_depot_tool_version_source"
 VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND = "vcf-download-tool --version"
+VCF_DEPOT_RUNTIME_RESET_PENDING_KEY = "vcf_depot_runtime_reset_pending"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY = "vcf_depot_software_depot_id"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY = "vcf_depot_software_depot_id_generated_at"
 VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY = "vcf_depot_software_depot_id_error"
@@ -669,11 +670,7 @@ def vcfdt_commands_for_profile(
         base.append("--patches-only")
     _append_optional_flag(base, "--component", profile.component)
     _append_optional_flag(base, "--component-version", profile.component_version)
-    return [
-        [*VCF_DEPOT_GET_SOFTWARE_DEPOT_ID_COMMAND],
-        ["vcf-download-tool", "binaries", "list", *base],
-        ["vcf-download-tool", "binaries", "download", f"--depot-store={settings.depot_store_path}", *base],
-    ]
+    return [["vcf-download-tool", "binaries", "download", f"--depot-store={settings.depot_store_path}", *base]]
 
 
 def _shell_arg(arg: str, settings: VcfOfflineDepotSettings) -> str:

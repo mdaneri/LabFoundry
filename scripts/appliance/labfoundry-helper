@@ -57,7 +57,7 @@ COMMANDS: dict[str, set[str]] = {
     "chronyd": {"validate", "apply", "status"},
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
-    "vcf-offline-depot": {"validate", "stage-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties"},
+    "vcf-offline-depot": {"validate", "stage-tool", "reset-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties"},
     "esxi-pxe": {"validate", "apply"},
     "public-services": {"validate", "apply"},
     "appliance-update": {"check", "apply", "restart-service"},
@@ -67,6 +67,7 @@ SYSTEMD_RUN_REAL_ACTIONS = {
     "apply",
     "reload",
     "stage-tool",
+    "reset-tool",
     "generate-software-depot-id",
     "sync",
     "apply-https",
@@ -75,7 +76,7 @@ SYSTEMD_RUN_REAL_ACTIONS = {
     "restart-service",
 }
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
-NO_PATH_ACTIONS = {("dnsmasq", "leases"), ("dnsmasq", "reload"), ("chronyd", "status"), ("vcf-offline-depot", "generate-software-depot-id")}
+NO_PATH_ACTIONS = {("dnsmasq", "leases"), ("dnsmasq", "reload"), ("chronyd", "status"), ("vcf-offline-depot", "generate-software-depot-id"), ("vcf-offline-depot", "reset-tool")}
 LABFOUNDRY_SERVICE_USER = "labfoundry"
 LABFOUNDRY_STATE_DIR = Path("/var/lib/labfoundry")
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
@@ -4939,7 +4940,44 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
         encoding="utf-8",
     )
     os.chmod(wrapper_path, 0o755)
-    tool_version = _vcf_download_tool_version(wrapper_path)
+    runtime_tool_home = VCF_DEPOT_RUNTIME_TOOL_DIR
+    runtime_tool_home.mkdir(parents=True, exist_ok=True)
+    for existing in runtime_tool_home.iterdir():
+        if existing.name in {"log", "secrets"}:
+            continue
+        if existing.is_dir():
+            shutil.rmtree(existing)
+        else:
+            existing.unlink()
+    for child in tool_home.iterdir():
+        target = runtime_tool_home / child.name
+        if child.is_dir():
+            shutil.copytree(child, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(child, target)
+    runtime_tool_path = _find_vcf_download_tool_binary(runtime_tool_home)
+    runtime_tool_path.chmod(0o755)
+    runtime_wrapper_path = runtime_tool_home / "vcf-download-tool"
+    runtime_wrapper_path.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"cd {shlex_quote(str(_vcf_download_tool_home(runtime_tool_path)))} || exit 1",
+                f"exec {shlex_quote(str(runtime_tool_path))} \"$@\"",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(runtime_wrapper_path, 0o755)
+    try:
+        account = pwd.getpwnam(LABFOUNDRY_SERVICE_USER)
+    except KeyError:
+        account = None
+    if account is not None:
+        for runtime_path in [runtime_tool_home, *runtime_tool_home.rglob("*")]:
+            _chown_path(runtime_path, account.pw_uid, account.pw_gid)
+    tool_version = _vcf_download_tool_version(runtime_wrapper_path)
     print(
         json.dumps(
             {
@@ -4947,12 +4985,33 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
                 "archive": archive_path.name,
                 "tool_home": str(VCF_DEPOT_TOOL_DIR),
                 "executable": str(wrapper_path),
+                "runtime_executable": str(runtime_wrapper_path),
                 "tool_version": tool_version,
                 "version_command": "vcf-download-tool --version",
             },
             sort_keys=True,
         )
     )
+    return 0
+
+
+def _reset_vcf_download_tool_runtime() -> int:
+    for directory in [VCF_DEPOT_TOOL_DIR, VCF_DEPOT_RUNTIME_TOOL_DIR]:
+        if directory.exists():
+            shutil.rmtree(directory)
+    VCF_DEPOT_RUNTIME_TOOL_DIR.mkdir(parents=True, exist_ok=True)
+    runtime_secrets_dir = VCF_DEPOT_RUNTIME_TOOL_DIR / "secrets"
+    runtime_secrets_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(VCF_DEPOT_RUNTIME_TOOL_DIR, 0o750)
+    os.chmod(runtime_secrets_dir, 0o700)
+    try:
+        account = pwd.getpwnam(LABFOUNDRY_SERVICE_USER)
+    except KeyError:
+        account = None
+    if account is not None:
+        _chown_path(VCF_DEPOT_RUNTIME_TOOL_DIR, account.pw_uid, account.pw_gid)
+        _chown_path(runtime_secrets_dir, account.pw_uid, account.pw_gid)
+    print(json.dumps({"vcf_offline_depot": "tool runtime reset complete"}, sort_keys=True))
     return 0
 
 
@@ -4976,7 +5035,7 @@ def _parse_software_depot_id(output: str) -> str:
 
 
 def _generate_vcf_download_tool_software_depot_id() -> int:
-    wrapper_path = VCF_DEPOT_TOOL_DIR / "vcf-download-tool"
+    wrapper_path = VCF_DEPOT_RUNTIME_TOOL_DIR / "vcf-download-tool"
     if not wrapper_path.is_file():
         print(f"VCF Download Tool executable does not exist: {wrapper_path}", file=sys.stderr)
         return 2
@@ -5076,6 +5135,11 @@ def shlex_quote(value: str) -> str:
 
 
 def _handle_vcf_offline_depot(action: str, args: list[str]) -> int:
+    if action == "reset-tool":
+        if args:
+            print("vcf-offline-depot reset-tool does not accept arguments", file=sys.stderr)
+            return 2
+        return _reset_vcf_download_tool_runtime()
     if action == "stage-tool":
         if len(args) != 1:
             print("vcf-offline-depot stage-tool requires exactly one archive path", file=sys.stderr)

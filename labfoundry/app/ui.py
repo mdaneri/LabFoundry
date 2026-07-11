@@ -355,6 +355,7 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_LEGACY_STORE_PATH,
     VCF_DEPOT_PROFILE_TYPES,
     VCF_DEPOT_RUNTIME_TOOL_DIR,
+    VCF_DEPOT_RUNTIME_RESET_PENDING_KEY,
     VCF_DEPOT_SKUS,
     VCF_DEPOT_STAGED_ACTIVATION_FILE,
     VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
@@ -438,6 +439,7 @@ APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 TEMPLATES_DIR = APP_DIR / "templates"
 VCF_DEPOT_VDT_LOG_PATH = PurePosixPath("/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log")
+VCF_DEPOT_TASK_LOG_DIR = PurePosixPath("/var/lib/labfoundry/vcfDownloadTool/task-logs")
 LABFOUNDRY_APP_LOG_PATH = get_settings().app_log_path
 KMS_SERVER_LOG_PATH = Path("/var/log/labfoundry/kms/server.log")
 APPLY_LOGGER = logging.getLogger("labfoundry.appliance_apply")
@@ -966,6 +968,28 @@ def get_vcf_offline_depot_settings_row(db: Session, *, reconcile_default_user: b
             settings.updated_at = utcnow()
             db.commit()
             db.refresh(settings)
+    if not settings.tool_archive_path:
+        stale_credentials = db.execute(
+            select(Setting).where(
+                Setting.key.in_(
+                    [
+                        VCF_DEPOT_TOKEN_NAME_KEY,
+                        VCF_DEPOT_TOKEN_VALUE_KEY,
+                        VCF_DEPOT_ACTIVATION_NAME_KEY,
+                        VCF_DEPOT_ACTIVATION_VALUE_KEY,
+                    ]
+                )
+            )
+        ).scalars().all()
+        if stale_credentials:
+            for credential in stale_credentials:
+                db.delete(credential)
+            set_setting_value(db, VCF_DEPOT_RUNTIME_RESET_PENDING_KEY, "1")
+            db.commit()
+        runtime_tool_path = Path(VCF_DEPOT_RUNTIME_TOOL_DIR) / "vcf-download-tool"
+        if runtime_tool_path.exists() and not setting_value(db, VCF_DEPOT_RUNTIME_RESET_PENDING_KEY):
+            set_setting_value(db, VCF_DEPOT_RUNTIME_RESET_PENDING_KEY, "1")
+            db.commit()
     return settings
 
 
@@ -1852,11 +1876,19 @@ def reset_vcf_depot_tool_staging(db: Session, settings: VcfOfflineDepotSettings,
     settings.tool_archive_path = ""
     settings.tool_version = ""
     settings.updated_at = utcnow()
+    for profile in db.execute(select(VcfDepotDownloadProfile)).scalars().all():
+        profile.enabled = False
+        profile.status = "planned"
+        profile.updated_at = utcnow()
     keys = [
         VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
         VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
         VCF_DEPOT_SOFTWARE_DEPOT_ID_ERROR_KEY,
         VCF_DEPOT_TOOL_VERSION_SOURCE_KEY,
+        VCF_DEPOT_TOKEN_NAME_KEY,
+        VCF_DEPOT_TOKEN_VALUE_KEY,
+        VCF_DEPOT_ACTIVATION_NAME_KEY,
+        VCF_DEPOT_ACTIVATION_VALUE_KEY,
     ]
     if reset_application_properties:
         keys.extend(
@@ -1868,6 +1900,7 @@ def reset_vcf_depot_tool_staging(db: Session, settings: VcfOfflineDepotSettings,
         )
     for setting in db.execute(select(Setting).where(Setting.key.in_(keys))).scalars().all():
         db.delete(setting)
+    set_setting_value(db, VCF_DEPOT_RUNTIME_RESET_PENDING_KEY, "1")
 
 
 def vcf_depot_software_depot_id_context(db: Session) -> dict[str, str]:
@@ -1937,6 +1970,10 @@ def persist_vcf_depot_metadata_from_apply(db: Session, unit_results: list[dict[s
             stdout = str(command.get("stdout") or "")
             stderr = str(command.get("stderr") or "")
             returncode = int(command.get("returncode") or 0)
+            if returncode == 0 and ("reset-tool" in command_parts or "stage-tool" in command_parts):
+                pending_reset = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_RUNTIME_RESET_PENDING_KEY)).scalar_one_or_none()
+                if pending_reset is not None:
+                    db.delete(pending_reset)
             if "stage-tool" in command_parts and returncode == 0:
                 payload = helper_json_payload_with_key(stdout, "tool_version")
                 tool_version = str(payload.get("tool_version") or "").strip()
@@ -2000,13 +2037,22 @@ def vcf_depot_application_properties_context(db: Session, settings: VcfOfflineDe
     }
 
 
-def vcf_depot_download_job_rows(db: Session) -> list[dict[str, str]]:
+def vcf_depot_download_job_rows(
+    db: Session,
+    *,
+    page: int = 1,
+    page_size: int = 10,
+) -> tuple[list[dict[str, str]], int]:
+    total = int(
+        db.scalar(select(func.count()).select_from(Job).where(Job.type == "vcf-depot-download")) or 0
+    )
     jobs = (
         db.execute(
             select(Job)
             .where(Job.type == "vcf-depot-download")
             .order_by(desc(Job.created_at))
-            .limit(5)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
         )
         .scalars()
         .all()
@@ -2027,10 +2073,14 @@ def vcf_depot_download_job_rows(db: Session) -> list[dict[str, str]]:
                 "status": job.status,
                 "profile_name": profile_name,
                 "created_at": job.created_at.isoformat() if job.created_at else "",
+                "started_at": job.started_at.isoformat() if job.started_at else "",
+                "finished_at": job.finished_at.isoformat() if job.finished_at else "",
+                "progress_percent": str(job.progress_percent),
                 "dry_run": "yes" if dry_run else "no",
+                "log_url": f"/vcf-offline-depot/tasks/{job.id}/log",
             }
         )
-    return rows
+    return rows, total
 
 
 def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
@@ -2100,12 +2150,25 @@ def vcf_private_registry_context(db: Session) -> dict:
     }
 
 
+def vcf_depot_tool_installed(settings: VcfOfflineDepotSettings) -> bool:
+    if get_settings().environment == "appliance":
+        return bool(settings.tool_archive_path) and filesystem_path(PurePosixPath(VCF_DEPOT_RUNTIME_TOOL_DIR) / "bin" / "vcf-download-tool").is_file()
+    return bool(settings.tool_archive_path and Path(settings.tool_archive_path).is_file())
+
+
 def vcf_offline_depot_context(db: Session) -> dict:
     settings = get_vcf_offline_depot_settings_row(db)
     if normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
     profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
+    if not vcf_depot_tool_installed(settings):
+        changed_profiles = [profile for profile in profiles if profile.enabled]
+        for profile in changed_profiles:
+            profile.enabled = False
+            profile.updated_at = utcnow()
+        if changed_profiles:
+            db.commit()
     users = db.execute(select(User).order_by(User.username)).scalars().all()
     all_service_interfaces = service_bind_options(db)
     available_interfaces = vcf_depot_service_bind_options(db)
@@ -2164,12 +2227,13 @@ def vcf_offline_depot_context(db: Session) -> dict:
         "vcf_depot_https_key_path": depot_key_path,
         "vcf_depot_command_preview": command_preview,
         "vcf_depot_application_properties": application_properties,
-        "vcf_depot_download_jobs": vcf_depot_download_job_rows(db),
+        "vcf_depot_download_jobs": vcf_depot_download_job_rows(db)[0],
         "vcf_depot_validation_errors": validation_errors,
         "vcf_depot_validation_warnings": validation_warnings,
         "vcf_depot_download_token": secrets["download_token"],
         "vcf_depot_activation_code": secrets["activation_code"],
         "vcf_depot_software_depot_id": software_depot_id,
+        "vcf_depot_runtime_reset_pending": bool(setting_value(db, VCF_DEPOT_RUNTIME_RESET_PENDING_KEY)),
         "vcf_depot_download_token_present": secrets["download_token_present"],
         "vcf_depot_activation_code_present": secrets["activation_code_present"],
         "vcf_depot_profile_types": sorted(VCF_DEPOT_PROFILE_TYPES),
@@ -2226,6 +2290,7 @@ def vcf_depot_tool_snapshot(context: dict[str, Any]) -> str:
             f"# Tool version: {settings.tool_version or 'not detected'}",
             f"# Software depot ID: {'generated' if software_depot_id.get('id') else 'not generated'}",
             f"# Software depot ID generated: {software_depot_id.get('generated_at') or 'never'}",
+            f"# Runtime reset pending: {'yes' if context.get('vcf_depot_runtime_reset_pending') else 'no'}",
         ]
     )
 
@@ -2358,6 +2423,28 @@ def append_vcf_depot_log(text: str) -> None:
             handle.write("\n")
 
 
+def vcf_depot_task_log_reference(job_id: str, profile_name: str = "") -> PurePosixPath:
+    profile_slug = re.sub(r"[^a-z0-9]+", "-", profile_name.lower()).strip("-") or "task"
+    return VCF_DEPOT_TASK_LOG_DIR / f"{job_id}-{profile_slug}.log"
+
+
+def vcf_depot_task_log_path(job_id: str, profile_name: str = "") -> Path:
+    return filesystem_path(vcf_depot_task_log_reference(job_id, profile_name))
+
+
+def append_vcf_depot_task_log(job_id: str, profile_name: str, text: str) -> None:
+    append_vcf_depot_log(text)
+
+
+def archive_vcf_depot_task_log(job_id: str, profile_name: str) -> Path:
+    active_log_path = filesystem_path(VCF_DEPOT_VDT_LOG_PATH)
+    task_log_path = vcf_depot_task_log_path(job_id, profile_name)
+    task_log_path.parent.mkdir(parents=True, exist_ok=True)
+    if active_log_path.exists():
+        active_log_path.replace(task_log_path)
+    return task_log_path
+
+
 def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
     with SessionLocal() as db:
         job = db.get(Job, job_id)
@@ -2372,6 +2459,9 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
         if not job or not profile:
             return
         try:
+            active_log_path = filesystem_path(VCF_DEPOT_VDT_LOG_PATH)
+            active_log_path.parent.mkdir(parents=True, exist_ok=True)
+            active_log_path.write_text("", encoding="utf-8")
             secrets = vcf_depot_secret_context(db)
             commands = vcfdt_commands_for_profile(
                 settings,
@@ -2381,7 +2471,9 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
             )
             tool_path = prepare_vcf_depot_runtime(settings, db)
             command_results: list[dict[str, Any]] = []
-            append_vcf_depot_log(
+            append_vcf_depot_task_log(
+                job_id,
+                profile.name,
                 "\n".join(
                     [
                         "",
@@ -2396,7 +2488,7 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
             for index, command in enumerate(commands, start=1):
                 runtime_command = vcf_depot_runtime_command(command, tool_path)
                 command_line = " ".join(shlex.quote(value) for value in runtime_command)
-                append_vcf_depot_log(f"$ {command_line}\n")
+                append_vcf_depot_task_log(job_id, profile.name, f"$ {command_line}\n")
                 completed = subprocess.run(
                     runtime_command,
                     cwd=str(vcf_download_tool_home(tool_path)),
@@ -2405,9 +2497,9 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
                     text=True,
                 )
                 if completed.stdout:
-                    append_vcf_depot_log(completed.stdout)
+                    append_vcf_depot_task_log(job_id, profile.name, completed.stdout)
                 if completed.stderr:
-                    append_vcf_depot_log(completed.stderr)
+                    append_vcf_depot_task_log(job_id, profile.name, completed.stderr)
                 command_results.append(
                     {
                         "command": runtime_command,
@@ -2429,7 +2521,8 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
             job.finished_at = finished
             job.progress_percent = 100
             job.error = None
-            append_vcf_depot_log(f"===== LabFoundry VCFDT job {job_id} succeeded {finished.isoformat()} =====\n")
+            append_vcf_depot_task_log(job_id, profile.name, f"===== LabFoundry VCFDT job {job_id} succeeded {finished.isoformat()} =====\n")
+            archive_vcf_depot_task_log(job_id, profile.name)
             db.commit()
         except Exception as exc:  # noqa: BLE001 - background worker must persist failures instead of crashing silently.
             finished = utcnow()
@@ -2439,8 +2532,9 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
             job.finished_at = finished
             job.progress_percent = 100
             job.error = str(exc)
-            append_vcf_depot_log(f"ERROR: {exc}\n")
-            append_vcf_depot_log(f"===== LabFoundry VCFDT job {job_id} failed {finished.isoformat()} =====\n")
+            append_vcf_depot_task_log(job_id, profile.name, f"ERROR: {exc}\n")
+            append_vcf_depot_task_log(job_id, profile.name, f"===== LabFoundry VCFDT job {job_id} failed {finished.isoformat()} =====\n")
+            archive_vcf_depot_task_log(job_id, profile.name)
             db.commit()
 
 
@@ -6068,6 +6162,8 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
                     lambda: adapter.generate_vcf_offline_depot_software_depot_id(),
                 ]
             )
+        elif not settings.tool_archive_path:
+            steps.append(lambda: adapter.reset_vcf_offline_depot_tool())
         steps.extend(
             [
                 lambda: adapter.sync_vcf_offline_depot(config_path),
@@ -10485,6 +10581,61 @@ def vcf_offline_depot_page(
     return render(request, "vcf_offline_depot.html", {"identity": identity, **vcf_offline_depot_context(db), "appliance_apply_status": appliance_apply_status(db, "vcf_offline_depot")})
 
 
+@router.get("/vcf-offline-depot/tasks/{job_id}/log", response_class=HTMLResponse, response_model=None)
+def vcf_offline_depot_task_log_page(
+    job_id: str,
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    job = db.get(Job, job_id)
+    if job is None or job.type != "vcf-depot-download":
+        raise HTTPException(status_code=404, detail="VCFDT task not found.")
+    profile_name = ""
+    try:
+        profile_name = str(json.loads(job.result or "{}").get("profile_name") or "")
+    except json.JSONDecodeError:
+        pass
+    if job.status in {JobStatus.PENDING.value, JobStatus.RUNNING.value}:
+        task_log = tail_fixed_log_file(VCF_DEPOT_VDT_LOG_PATH)
+    else:
+        task_log = tail_fixed_log_file(Path(str(json.loads(job.result or "{}").get("log_path") or vcf_depot_task_log_path(job.id, profile_name))))
+    if request.headers.get("X-LabFoundry-Task-Log") == "1":
+        return JSONResponse(
+            {
+                "job_id": job.id,
+                "profile_name": profile_name,
+                "status": job.status,
+                "path": task_log["path"],
+                "updated_at": task_log.get("updated_at", ""),
+                "available": task_log["available"],
+                "text": "\n".join(task_log["lines"]) if task_log["available"] else "No task log is available.",
+            }
+        )
+    return render(
+        request,
+        "vcf_offline_depot_task_log.html",
+        {
+            "identity": identity,
+            "job": job,
+            "profile_name": profile_name,
+            "task_log": task_log,
+        },
+    )
+
+
+@router.get("/vcf-offline-depot/tasks/status", response_model=None)
+def vcf_offline_depot_task_status(
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=5, le=100),
+    _identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    tasks, total = vcf_depot_download_job_rows(db, page=page, page_size=size)
+    last_page = max(1, (total + size - 1) // size)
+    return JSONResponse({"data": tasks, "tasks": tasks, "total": total, "last_page": last_page})
+
+
 @router.post("/vcf-offline-depot/settings", response_model=None)
 def update_vcf_offline_depot_settings_from_ui(
     request: Request,
@@ -10603,6 +10754,7 @@ def update_vcf_offline_depot_settings_from_ui(
                 "server_certificate": saved_settings.server_certificate,
                 "depot_store_path": saved_settings.depot_store_path,
                 "tool_archive_name": uploaded_archive_name or Path(saved_settings.tool_archive_path).name if saved_settings.tool_archive_path else "",
+                "tool_archive_uploaded": bool(uploaded_archive_name),
                 "tool_version": saved_settings.tool_version,
                 "software_depot_id": software_depot_id["id"],
                 "software_depot_id_generated_at": software_depot_id["generated_at"],
@@ -10981,6 +11133,7 @@ def create_vcf_depot_profile_from_ui(
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
     verify_csrf(request, csrf)
+    settings = get_vcf_offline_depot_settings_row(db)
     profile = VcfDepotDownloadProfile(
         name=name.strip(),
         profile_type=profile_type.strip() or "binaries",
@@ -10993,7 +11146,7 @@ def create_vcf_depot_profile_from_ui(
         component=component.strip(),
         component_version=component_version.strip(),
         disabled_platforms=disabled_platforms.strip(),
-        enabled=enabled == "on",
+        enabled=enabled == "on" and vcf_depot_tool_installed(settings),
         status=status.strip() or "planned",
         notes=notes.strip() or None,
     )
@@ -11033,6 +11186,7 @@ def edit_vcf_depot_profile_from_ui(
     profile = db.get(VcfDepotDownloadProfile, profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="VCFDT download profile not found.")
+    settings = get_vcf_offline_depot_settings_row(db)
     profile.name = name.strip()
     profile.profile_type = profile_type.strip() or "binaries"
     profile.sku = sku.strip() or "VCF"
@@ -11044,7 +11198,7 @@ def edit_vcf_depot_profile_from_ui(
     profile.component = component.strip()
     profile.component_version = component_version.strip()
     profile.disabled_platforms = disabled_platforms.strip()
-    profile.enabled = enabled == "on"
+    profile.enabled = enabled == "on" and vcf_depot_tool_installed(settings)
     profile.status = status.strip() or "planned"
     profile.notes = notes.strip() or None
     profile.updated_at = utcnow()
@@ -11070,6 +11224,11 @@ def start_vcf_depot_profile_download_from_ui(
     profile = db.get(VcfDepotDownloadProfile, profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="VCFDT download profile not found.")
+    active_job = db.execute(
+        select(Job).where(Job.type == "vcf-depot-download", Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]))
+    ).scalar_one_or_none()
+    if active_job is not None:
+        raise HTTPException(status_code=409, detail=f"VCFDT task {active_job.id} is already running.")
     if not profile.enabled:
         raise HTTPException(status_code=400, detail="Enable the VCFDT download profile before starting a download.")
     secrets = vcf_depot_secret_context(db)
@@ -11110,18 +11269,19 @@ def start_vcf_depot_profile_download_from_ui(
     if not commands:
         raise HTTPException(status_code=400, detail="The VCFDT download profile did not produce any commands.")
     now = utcnow()
+    job_id = f"job_{uuid4().hex[:12]}"
     job_result = {
         "profile_id": profile.id,
         "profile_name": profile.name,
         "profile_type": profile.profile_type,
         "dry_run": False,
         "system_adapter_dry_run": system_dry_run,
-        "log_path": str(VCF_DEPOT_VDT_LOG_PATH),
+        "log_path": str(vcf_depot_task_log_reference(job_id, profile.name)),
         "commands": commands,
         "validation_warnings": validation_warnings,
     }
     job = Job(
-        id=f"job_{uuid4().hex[:12]}",
+        id=job_id,
         type="vcf-depot-download",
         status=JobStatus.PENDING.value,
         created_by=identity.username,
@@ -11141,7 +11301,7 @@ def start_vcf_depot_profile_download_from_ui(
         action="start_vcf_depot_profile_download",
         resource_type="job",
         resource_id=job.id,
-        detail=f"profile={profile.name}; log={VCF_DEPOT_VDT_LOG_PATH}",
+        detail=f"profile={profile.name}; log={vcf_depot_task_log_reference(job.id, profile.name)}",
     )
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         return JSONResponse(
@@ -11154,7 +11314,7 @@ def start_vcf_depot_profile_download_from_ui(
                 "profile_status": profile.status,
                 "dry_run": False,
                 "system_adapter_dry_run": system_dry_run,
-                "log_path": str(VCF_DEPOT_VDT_LOG_PATH),
+                "log_path": str(vcf_depot_task_log_reference(job.id, profile.name)),
                 "commands": commands,
                 "validation_warnings": validation_warnings,
             }
