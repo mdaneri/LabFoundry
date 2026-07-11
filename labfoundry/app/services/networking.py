@@ -120,8 +120,8 @@ def vlan_interface_to_dict(vlan: VlanInterface, parent_missing: bool = False) ->
     }
 
 
-def trunk_parent_option(interface: PhysicalInterface) -> dict[str, str]:
-    label_parts = [interface.name, normalize_interface_role(interface.role), "trunk"]
+def trunk_parent_option(interface: PhysicalInterface) -> dict[str, str | int]:
+    label_parts = [interface.name, "trunk"]
     if interface.inventory_source == "host":
         label_parts.append("host NIC")
     if interface.mac_address:
@@ -129,6 +129,7 @@ def trunk_parent_option(interface: PhysicalInterface) -> dict[str, str]:
     return {
         "name": interface.name,
         "label": " - ".join(label_parts),
+        "mtu": interface.mtu,
     }
 
 

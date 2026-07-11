@@ -115,7 +115,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v65" in service_worker.text
+    assert "labfoundry-pwa-v71" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -135,7 +135,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-helper-action-bands-20260710-1" in offline.text
+    assert "/static/app.css?v=vlan-row-cleanup-20260710-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -151,8 +151,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=vcf-helper-action-bands-20260710-1" in page.text
-    assert "/static/app.js?v=vlan-add-row-20260710-1" in page.text
+    assert "/static/app.css?v=vlan-row-cleanup-20260710-1" in page.text
+    assert "/static/app.js?v=trunk-address-lock-20260710-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -6724,17 +6724,31 @@ def test_physical_and_vlan_pages_render(client):
     assert "VLAN Interfaces" in vlans.text
     assert "For standard access-mode NICs, assign IPv4/IPv6 CIDR on Physical Interfaces instead." in vlans.text
     assert "vlan-interfaces-table" in vlans.text
-    assert "+ Add VLAN here" in client.get("/static/app.js").text
-    vlan_table_js = client.get("/static/app.js").text.split("function initializeVlanInterfacesTable()", 1)[1].split("function initializeDnsRecordsTable()", 1)[0]
-    assert vlan_table_js.index('field: "vlan_id"') < vlan_table_js.index("+ Add VLAN here")
-    assert 'data-parent-options=\'[{"label": "eth1 - access - trunk' in vlans.text
-    assert "data-parent-options" in vlans.text
     app_js = client.get("/static/app.js").text
+    assert "+ Add VLAN" in app_js
+    vlan_table_js = app_js.split("function initializeVlanInterfacesTable()", 1)[1].split("function initializeDnsRecordsTable()", 1)[0]
+    assert vlan_table_js.index('field: "add_vlan"') < vlan_table_js.index('field: "vlan_id"') < vlan_table_js.index('field: "parent_interface"') < vlan_table_js.index('field: "name"')
+    assert 'cellClick: (event, cell) => activateNewVlanRow(cell)' in vlan_table_js
+    assert 'markNewRecordRow(row, "vlan_id", "add_vlan")' in vlan_table_js
+    assert "async function activateNewVlanRow(cell)" in client.get("/static/app.js").text
+    assert "data.is_activated" in client.get("/static/app.js").text
+    assert "const parentMtus = Object.fromEntries" in vlan_table_js
+    assert "newVlanInterfaceRow(defaultParent, defaultMtu)" in vlan_table_js
+    assert "autoSaveVlanParent(cell, csrf, parentMtus)" in vlan_table_js
+    assert "autoSaveVlanId(cell, csrf)" in vlan_table_js
+    assert "function vlanDerivedName(data)" in app_js
+    assert 'data-parent-options=\'[{"label": "eth1 - trunk' in vlans.text
+    assert "data-parent-options" in vlans.text
     assert "deleteVlanInterfaceFromMenu" in app_js
     assert "refreshNetworkSideStack" in app_js
     assert "highlightConfigPreviews(nextSideStack)" in app_js
     assert "networkStateIcon" in app_js
     assert "operStateFormatter" in app_js
+    assert "physicalRoleFormatter" in app_js
+    assert 'editable: (cell) => cell.getRow().getData().mode !== "trunk"' in app_js
+    assert app_js.count('editable: (cell) => cell.getRow().getData().mode !== "trunk"') >= 3
+    assert 'role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_cidr: ""' in app_js
+    assert "data.requires_activation && !data.is_activated" in app_js
     assert "cidrInputEditor" in app_js
     assert "isValidCidr" in app_js
     assert 'editorParams: { family: "ipv4", placeholder: "192.168.50.1/24" }' in app_js
@@ -6744,6 +6758,7 @@ def test_physical_and_vlan_pages_render(client):
     assert ".network-state-icon.down" in app_css
     assert ".network-state-icon.missing" in app_css
     assert ".invalid-cidr-input" in app_css
+    assert ".vlan-interfaces-table .tabulator-row.new-record-row .new-record-primary-cell" in app_css
     assert "Review appliance changes" in vlans.text
     assert "/var/lib/labfoundry/apply/network/labfoundry-network.conf" in vlans.text
 
@@ -7039,6 +7054,37 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
         assert pxe_listen.value == "192.168.50.1"
 
 
+def test_physical_interface_trunk_mode_clears_non_applicable_role(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+
+    login(client)
+    page = client.get("/physical-interfaces")
+    rows = json.loads(html.unescape(page.text.split("data-interfaces='", 1)[1].split("'", 1)[0]))
+    interface_id = next(row["id"] for row in rows if row["name"] == "eth2")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        f"/physical-interfaces/{interface_id}/edit",
+        data={"role": "access", "mode": "trunk", "ipv4_method": "dhcp", "ip_cidr": "192.168.50.1/24", "ipv6_cidr": "fd00:50::1/64", "mtu": "1500", "admin_state": "up", "csrf": csrf},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.id == interface_id)).scalar_one()
+        assert interface.mode == "trunk"
+        assert interface.role == "unused"
+        assert interface.ipv4_method == "static"
+        assert interface.ip_cidr is None
+        assert interface.ipv6_cidr is None
+
+
 def test_physical_interface_link_type_locked_when_vlans_exist(client):
     import html
     import json
@@ -7291,6 +7337,7 @@ def test_vlan_page_prefers_real_trunk_parent_when_inventory_has_eth2(client):
                 PhysicalInterface(
                     name="eth2",
                     mac_address="00:15:5d:01:1d:1c",
+                    mtu=9000,
                     role="access",
                     mode="trunk",
                     inventory_source="host",
@@ -7312,9 +7359,9 @@ def test_vlan_page_prefers_real_trunk_parent_when_inventory_has_eth2(client):
     payload = page.text.split("data-parent-options='", 1)[1].split("'", 1)[0]
     options = json.loads(html.unescape(payload))
 
-    assert options == [{"name": "eth2", "label": "eth2 - access - trunk - host NIC - 00:15:5d:01:1d:1c"}]
-    assert "eth2 - access - trunk - host NIC" in page.text
-    assert "eth1 - access - trunk" not in page.text
+    assert options == [{"name": "eth2", "label": "eth2 - trunk - host NIC - 00:15:5d:01:1d:1c", "mtu": 9000}]
+    assert "eth2 - trunk - host NIC" in page.text
+    assert "eth2 - access - trunk" not in page.text
 
 
 def test_vlan_page_disables_missing_parent_vlan(client):
@@ -7369,7 +7416,7 @@ def test_vlan_page_disables_missing_parent_vlan(client):
 
     parent_payload = page.text.split("data-parent-options='", 1)[1].split("'", 1)[0]
     options = json.loads(html.unescape(parent_payload))
-    assert options == [{"name": "eth2", "label": "eth2 - access - trunk - host NIC - 00:15:5d:01:1d:1c"}]
+    assert options == [{"name": "eth2", "label": "eth2 - trunk - host NIC - 00:15:5d:01:1d:1c", "mtu": 1500}]
 
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(

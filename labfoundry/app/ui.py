@@ -7816,8 +7816,8 @@ def edit_physical_interface_from_ui(
             status_code=409,
             media_type="text/plain",
         )
-    role_value = normalize_interface_role(role)
-    ipv4_method_value = normalize_ipv4_method(ipv4_method)
+    role_value = "unused" if new_mode == "trunk" else normalize_interface_role(role)
+    ipv4_method_value = "static" if new_mode == "trunk" else normalize_ipv4_method(ipv4_method)
     if ipv4_method_value == "dhcp" and role_value != "management":
         return Response("IPv4 DHCP is available only for the management interface.", status_code=422, media_type="text/plain")
     if ipv4_method_value == "dhcp" and ip_cidr.strip():
@@ -7828,13 +7828,15 @@ def edit_physical_interface_from_ui(
     if role_value == "management" and admin_state_value != "up":
         return Response("The management interface must stay enabled.", status_code=422, media_type="text/plain")
     ip_value = None
-    if ipv4_method_value == "static":
+    if new_mode != "trunk" and ipv4_method_value == "static":
         ip_value = cidr_for_family(ip_cidr, 4, "Interface IPv4 CIDR")
         if isinstance(ip_value, Response):
             return ip_value
-    ipv6_value = cidr_for_family(ipv6_cidr, 6, "Interface IPv6 CIDR")
-    if isinstance(ipv6_value, Response):
-        return ipv6_value
+    ipv6_value = None
+    if new_mode != "trunk":
+        ipv6_value = cidr_for_family(ipv6_cidr, 6, "Interface IPv6 CIDR")
+        if isinstance(ipv6_value, Response):
+            return ipv6_value
     old_ip_cidr = interface.ip_cidr
     old_ipv6_cidr = interface.ipv6_cidr
     old_ipv4_method = normalize_ipv4_method(interface.ipv4_method)

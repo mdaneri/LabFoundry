@@ -1866,12 +1866,22 @@ textarea {
   background: #dbeafe;
 }
 
-.tabulator .tabulator-row.new-record-row-pending .tabulator-cell:not(.new-record-primary-cell) {
+.vlan-interfaces-table .tabulator-row.new-record-row .new-record-primary-cell {
+  background: transparent;
+}
+
+.tabulator .tabulator-row.new-record-row .new-record-action-cell {
+  color: var(--accent-dark);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.tabulator .tabulator-row.new-record-row-pending .tabulator-cell:not(.new-record-primary-cell):not(.new-record-action-cell) {
   color: transparent;
   cursor: not-allowed;
 }
 
-.tabulator .tabulator-row.new-record-row-pending .tabulator-cell:not(.new-record-primary-cell) > * {
+.tabulator .tabulator-row.new-record-row-pending .tabulator-cell:not(.new-record-primary-cell):not(.new-record-action-cell) > * {
   visibility: hidden;
 }
 

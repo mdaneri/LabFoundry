@@ -557,18 +557,22 @@ function newRecordRequiredValue(data, field) {
 
 function newRecordRequiredCellEditable(cell, requiredField) {
   const data = cell.getRow().getData();
-  return !data.is_new || cell.getField() === requiredField || Boolean(newRecordRequiredValue(data, requiredField));
+  if (data.requires_activation && !data.is_activated) {
+    return false;
+  }
+  return !data.is_new || data.is_activated || cell.getField() === requiredField || Boolean(newRecordRequiredValue(data, requiredField));
 }
 
-function markNewRecordRow(row, requiredField) {
+function markNewRecordRow(row, requiredField, actionField = "") {
   const data = row.getData();
   const isNew = Boolean(data.is_new);
-  const isPending = isNew && !newRecordRequiredValue(data, requiredField);
+  const isPending = isNew && !data.is_activated && !newRecordRequiredValue(data, requiredField);
   const element = row.getElement();
   element.classList.toggle("new-record-row", isNew);
   element.classList.toggle("new-record-row-pending", isPending);
   row.getCells().forEach((cell) => {
     cell.getElement().classList.toggle("new-record-primary-cell", cell.getField() === requiredField);
+    cell.getElement().classList.toggle("new-record-action-cell", Boolean(actionField) && cell.getField() === actionField);
   });
 }
 
@@ -4916,7 +4920,7 @@ async function postNetworkAction(url, data, csrf, options = {}) {
   }
 }
 
-function newVlanInterfaceRow(defaultParent = "eth1") {
+function newVlanInterfaceRow(defaultParent = "eth1", defaultMtu = 1500) {
   return {
     id: "__new__",
     name: "",
@@ -4924,10 +4928,12 @@ function newVlanInterfaceRow(defaultParent = "eth1") {
     vlan_id: "",
     ip_cidr: "",
     ipv6_cidr: "",
-    mtu: 1500,
+    mtu: defaultMtu,
     role: "access",
     enabled: true,
     is_new: true,
+    is_activated: false,
+    requires_activation: true,
   };
 }
 
@@ -5093,6 +5099,59 @@ function editNewRowCell(cell, fieldName) {
   if (target && typeof target.edit === "function") {
     target.edit();
   }
+}
+
+async function activateNewVlanRow(cell) {
+  const row = cell.getRow();
+  const data = row.getData();
+  if (!data.is_new) {
+    return;
+  }
+  data.is_activated = true;
+  row.reformat();
+  row.getElement().classList.remove("new-record-row-pending");
+  const vlanIdCell = row.getCell("vlan_id");
+  if (vlanIdCell && typeof vlanIdCell.edit === "function") {
+    vlanIdCell.edit();
+  }
+}
+
+function physicalRoleFormatter(cell) {
+  if (cell.getRow().getData().mode === "trunk") {
+    return "";
+  }
+  return escapeHtml(cell.getValue());
+}
+
+async function autoSaveVlanParent(cell, csrf, parentMtus) {
+  const row = cell.getRow();
+  const data = row.getData();
+  if (data.is_new) {
+    const parentMtu = Number(parentMtus[data.parent_interface]);
+    if (Number.isInteger(parentMtu) && parentMtu > 0) {
+      await row.update({ mtu: parentMtu });
+    }
+  }
+  await updateVlanDerivedName(row);
+  await autoSaveVlanInterface(cell, csrf);
+}
+
+function vlanDerivedName(data) {
+  const parent = String(data.parent_interface || "").trim();
+  const vlanId = String(data.vlan_id || "").trim();
+  return parent && vlanId ? `${parent}.${vlanId}` : "";
+}
+
+async function updateVlanDerivedName(row) {
+  const name = vlanDerivedName(row.getData());
+  if (row.getData().name !== name) {
+    await row.update({ name });
+  }
+}
+
+async function autoSaveVlanId(cell, csrf) {
+  await updateVlanDerivedName(cell.getRow());
+  await autoSaveVlanInterface(cell, csrf);
 }
 
 function roleValues(options) {
@@ -5395,15 +5454,21 @@ function initializePhysicalInterfacesTable() {
           title: "IPv4 CIDR",
           field: "ip_cidr",
           editor: (cell, onRendered, success, cancel, editorParams) => {
-            if (cell.getRow().getData().ipv4_method === "dhcp") {
+            const data = cell.getRow().getData();
+            if (data.mode === "trunk" || data.ipv4_method === "dhcp") {
               cancel();
               return document.createElement("span");
             }
             return cidrInputEditor(cell, onRendered, success, cancel, editorParams);
           },
           editorParams: { family: "ipv4", placeholder: "192.168.50.1/24" },
+          editable: (cell) => cell.getRow().getData().mode !== "trunk",
           formatter: (cell) => {
-            if (cell.getRow().getData().ipv4_method === "dhcp") {
+            const data = cell.getRow().getData();
+            if (data.mode === "trunk") {
+              return "";
+            }
+            if (data.ipv4_method === "dhcp") {
               return '<span class="status-pill muted">DHCP</span>';
             }
             return dnsAddRowHintFormatter(cell, "192.168.50.1/24");
@@ -5416,7 +5481,8 @@ function initializePhysicalInterfacesTable() {
           field: "ipv6_cidr",
           editor: cidrInputEditor,
           editorParams: { family: "ipv6", placeholder: "fd00:50::1/64" },
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "fd00:50::1/64"),
+          editable: (cell) => cell.getRow().getData().mode !== "trunk",
+          formatter: (cell) => (cell.getRow().getData().mode === "trunk" ? "" : dnsAddRowHintFormatter(cell, "fd00:50::1/64")),
           minWidth: 180,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
@@ -5425,6 +5491,8 @@ function initializePhysicalInterfacesTable() {
           field: "role",
           editor: "list",
           editorParams: { values: roleOptions },
+          editable: (cell) => cell.getRow().getData().mode !== "trunk",
+          formatter: physicalRoleFormatter,
           width: 125,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
@@ -5446,7 +5514,13 @@ function initializePhysicalInterfacesTable() {
             }
           },
           minWidth: 220,
-          cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
+          cellEdited: async (cell) => {
+            if (cell.getValue() === "trunk") {
+              await cell.getRow().update({ role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_cidr: "" });
+            }
+            await autoSavePhysicalInterface(cell, csrf);
+            cell.getRow().reformat();
+          },
         },
         {
           title: "MTU",
@@ -5496,8 +5570,10 @@ function initializeVlanInterfacesTable() {
   const parentOptions = parentOptionRows.map((item) => (typeof item === "string" ? { name: item, label: item } : item));
   const roleOptions = roleValues(JSON.parse(tableElement.dataset.roleOptions || "[]"));
   const parentValues = Object.fromEntries(parentOptions.map((item) => [item.name, item.label || item.name]));
+  const parentMtus = Object.fromEntries(parentOptions.map((item) => [item.name, Number(item.mtu) || 1500]));
   const defaultParent = parentOptions[0]?.name || "";
-  const rows = [...JSON.parse(tableElement.dataset.vlans || "[]"), newVlanInterfaceRow(defaultParent)];
+  const defaultMtu = parentMtus[defaultParent] || 1500;
+  const rows = [...JSON.parse(tableElement.dataset.vlans || "[]"), newVlanInterfaceRow(defaultParent, defaultMtu)];
   try {
     new Tabulator(tableElement, {
       data: rows,
@@ -5515,17 +5591,26 @@ function initializeVlanInterfacesTable() {
       ],
       columns: lockNewRecordColumns([
         {
-          title: "Name",
-          field: "name",
+          title: "Add VLAN +",
+          field: "add_vlan",
           formatter: (cell) => {
             const data = cell.getRow().getData();
             if (data.is_new) {
-              return "";
+              return '<span class="add-row-hint">+ Add VLAN</span>';
             }
-            return escapeHtml(cell.getValue());
+            return "";
           },
-          minWidth: 140,
+          width: 115,
           headerSort: false,
+          editable: false,
+          cellClick: (event, cell) => activateNewVlanRow(cell),
+        },
+        {
+          title: "VLAN ID",
+          field: "vlan_id",
+          editor: "number",
+          width: 100,
+          cellEdited: (cell) => autoSaveVlanId(cell, csrf),
         },
         {
           title: "Parent",
@@ -5540,21 +5625,15 @@ function initializeVlanInterfacesTable() {
             return escapeHtml(value);
           },
           minWidth: 120,
-          cellEdited: (cell) => autoSaveVlanInterface(cell, csrf),
+          cellEdited: (cell) => autoSaveVlanParent(cell, csrf, parentMtus),
         },
         {
-          title: "VLAN ID",
-          field: "vlan_id",
-          editor: "number",
-          formatter: (cell) => {
-            const data = cell.getRow().getData();
-            if (data.is_new && !String(cell.getValue() ?? "").trim()) {
-              return '<span class="add-row-hint">+ Add VLAN here</span>';
-            }
-            return escapeHtml(cell.getValue());
-          },
-          width: 100,
-          cellEdited: (cell) => autoSaveVlanInterface(cell, csrf),
+          title: "Name",
+          field: "name",
+          formatter: (cell) => escapeHtml(cell.getValue()),
+          minWidth: 140,
+          headerSort: false,
+          editable: false,
         },
         {
           title: "IPv4 CIDR",
@@ -5602,7 +5681,7 @@ function initializeVlanInterfacesTable() {
         },
       ], "vlan_id"),
       rowFormatter: (row) => {
-        markNewRecordRow(row, "vlan_id");
+        markNewRecordRow(row, "vlan_id", "add_vlan");
         row.getElement().classList.toggle("locked-record-row", Boolean(row.getData().parent_missing));
       },
     });
