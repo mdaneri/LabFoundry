@@ -6483,6 +6483,8 @@ def depot_login_page(
     identity: Identity | None = Depends(get_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse | RedirectResponse:
+    if not request_allows_public_service(db, request, "vcf_offline_depot"):
+        raise HTTPException(status_code=404, detail="VCF Offline Depot is not available on this interface")
     return_to = safe_depot_login_next(next)
     if identity:
         return RedirectResponse(return_to, status_code=303)
@@ -6498,22 +6500,25 @@ def depot_login(
     next: str = Form("/PROD/"),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | HTMLResponse:
+    if not request_allows_public_service(db, request, "vcf_offline_depot"):
+        raise HTTPException(status_code=404, detail="VCF Offline Depot is not available on this interface")
     return_to = safe_depot_login_next(next)
-    return authenticate_ca_portal_session(
-        request,
-        db,
-        username=username,
-        password=password,
-        csrf=csrf,
-        next_path=return_to,
-        failure_response=lambda failed_request, *, error=None, status_code=200: depot_login_response(
-            failed_request,
-            return_to=return_to,
-            error=error,
-            status_code=status_code,
-            db=db,
-        ),
-    )
+    verify_csrf(request, csrf)
+    user = authenticate_user(db, username, password)
+    if user is None:
+        settings = get_vcf_offline_depot_settings_row(db)
+        selected_user = settings.http_user
+        if selected_user and selected_user.enabled and username == selected_user.username:
+            authentication = SystemAdapter().authenticate_local_user(username, password)
+            if authentication.returncode == 0 and not authentication.dry_run:
+                user = selected_user
+    if user is None:
+        record_audit(db, actor=username, action="vcf_depot_login_failed", resource_type="auth", success=False)
+        return depot_login_response(request, return_to=return_to, error="Invalid username or password", status_code=401, db=db)
+    request.session["user_id"] = user.id
+    request.session[SESSION_APPLIANCE_INSTANCE_SESSION_KEY] = ensure_appliance_instance_id(db)
+    record_audit(db, actor=user.username, action="vcf_depot_login", resource_type="auth")
+    return RedirectResponse(return_to, status_code=303)
 
 
 @router.post("/PROD/logout", response_model=None)
@@ -6537,8 +6542,21 @@ def depot_auth_check(
     return Response(status_code=401)
 
 
+@router.get("/PROD/auth-failure", response_model=None)
+@router.head("/PROD/auth-failure", response_model=None)
+def depot_auth_failure(request: Request, db: Session = Depends(get_db)) -> Response:
+    if not request_allows_public_service(db, request, "vcf_offline_depot"):
+        return Response(status_code=401)
+    if "text/html" in request.headers.get("accept", "").lower():
+        return_to = safe_depot_login_next(request.headers.get("X-Original-URI"))
+        return RedirectResponse(f"/PROD/login?next={quote(return_to, safe='/')}", status_code=303)
+    return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="VCF Offline Depot"'})
+
+
 @router.get("/PROD/", response_class=HTMLResponse, response_model=None)
+@router.head("/PROD/", response_class=HTMLResponse, response_model=None)
 @router.get("/PROD/{depot_path:path}", response_class=HTMLResponse, response_model=None)
+@router.head("/PROD/{depot_path:path}", response_class=HTMLResponse, response_model=None)
 def public_depot_browser(
     request: Request,
     depot_path: str = "",

@@ -100,3 +100,32 @@ def test_real_vcf_backup_apply_uses_sudo_helper(monkeypatch):
         "/var/lib/labfoundry/apply/vcf-backups/labfoundry-vcf-backups-sshd.conf",
     ]
     assert commands == [result.command]
+
+
+def test_real_local_user_authentication_passes_password_only_on_stdin(monkeypatch):
+    import labfoundry.app.adapters.system as system_adapter
+
+    calls: list[tuple[list[str], str | None]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs.get("input")))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(system_adapter.subprocess, "run", fake_run)
+
+    password = "Depot-user1!"
+    result = SystemAdapter(dry_run=False).authenticate_local_user("vcf-depot", password)
+
+    assert result.returncode == 0
+    assert result.command == ["sudo", "-n", SystemAdapter.HELPER_PATH, "local-users", "authenticate", "--real", "vcf-depot"]
+    assert calls == [(result.command, f"{password}\n")]
+    assert password not in " ".join(result.command)
+    assert password not in result.stdout
+    assert password not in result.stderr
+
+
+def test_dry_run_local_user_authentication_fails_closed():
+    result = SystemAdapter(dry_run=True).authenticate_local_user("vcf-depot", "Depot-user1!")
+
+    assert result.returncode == 1
+    assert result.dry_run is True

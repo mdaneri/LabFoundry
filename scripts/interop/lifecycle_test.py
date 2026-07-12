@@ -130,6 +130,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--client-a-hostkey", default="")
     parser.add_argument("--client-b-hostkey", default="")
     parser.add_argument("--vcf-backup-password", default="VMware01!Test")
+    parser.add_argument("--vcf-depot-password", default="VMware01!Depot")
+    parser.add_argument("--vcf-depot-new-password", default="VMware02!Depot")
     parser.add_argument("--allow-dry-run", action="store_true", help="Allow apply units to report dry-run instead of failing.")
     parser.add_argument("--skip-client-checks", action="store_true")
     parser.add_argument("--export-settings-backup", default="", help="Write a settings backup archive after the full lifecycle run passes.")
@@ -472,7 +474,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "url": args.client_ca_request_url or args.appliance_url,
             },
         },
-        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "ca", "kms", "appliance_settings", "vcf_backups"],
+        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "ca", "kms", "appliance_settings", "vcf_backups", "vcf_offline_depot", "public_services"],
         "pxe_boot": {
             "enabled": bool(args.pxe_client_mac),
             "mode": args.pxe_test_mode,
@@ -488,6 +490,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification",
             "KMS desired state, DNS/firewall apply, PyKMIP service, and TLS client-certificate probe",
             "VCF Backup desired state, local user sync, SFTP listener, and client probe",
+            "VCF Offline Depot browser login, curl/wget Basic auth, and Local Users password rotation",
             "ESXi PXE desired state, DHCP boot options, TFTP artifacts, and Hyper-V PXE VM smoke",
             "client DNS/DHCP/routing probes",
         ],
@@ -1270,6 +1273,63 @@ def stage_vcf_backup_password(client: HttpClient, args: argparse.Namespace) -> d
     return {"username": "vcf-backup", "password_staged": True, "method": "ui"}
 
 
+def stage_vcf_depot_password(client: HttpClient, args: argparse.Namespace, password: str | None = None) -> dict[str, Any]:
+    password = password or args.vcf_depot_password
+    status, body, _headers = client.request("GET", "/users")
+    if status >= 400:
+        raise LifecycleError(f"GET /users failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    user_id = extract_user_id_from_users_page(body, "vcf-depot")
+    status, reset_body, _headers = client.request(
+        "POST",
+        f"/users/{user_id}/password",
+        form={"password": password, "confirm_password": password, "csrf": csrf},
+        follow_redirects=False,
+    )
+    if status not in {200, 302, 303}:
+        raise LifecycleError(f"VCF depot user password staging failed with HTTP {status}: {reset_body[:500]}")
+    return {"username": "vcf-depot", "password_staged": True, "method": "ui"}
+
+
+def configure_vcf_offline_depot(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    stage_vcf_depot_password(client, args)
+    status, body, _headers = client.request("GET", "/vcf-offline-depot")
+    if status >= 400:
+        raise LifecycleError(f"GET /vcf-offline-depot failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    user_id = extract_user_id_from_users_page(client.request("GET", "/users")[1], "vcf-depot")
+    hostname = f"depot.{args.domain}"
+    status, response_body, _headers = client.request(
+        "POST",
+        "/vcf-offline-depot/settings",
+        form={
+            "enabled": "on",
+            "hostname": hostname,
+            "listen_interface": args.site_interface,
+            "port": "443",
+            "http_user_id": user_id,
+            "telemetry_choice": "DISABLE",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    if status >= 400:
+        raise LifecycleError(f"VCF Offline Depot settings update failed with HTTP {status}: {response_body[:500]}")
+    payload = json.loads(response_body)
+    non_certificate_errors = [
+        error for error in payload.get("validation_errors", [])
+        if "CA-managed HTTPS certificate" not in str(error)
+    ]
+    if non_certificate_errors:
+        raise LifecycleError(f"VCF Offline Depot desired state is invalid: {non_certificate_errors}")
+    return {
+        "hostname": payload.get("endpoint") or hostname,
+        "listen_address": payload.get("listen_address"),
+        "http_username": payload.get("http_username"),
+        "config_path": payload.get("config_path"),
+    }
+
+
 def configure_vcf_backups(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
     status, body, _headers = client.request("GET", "/vcf-backups")
     if status >= 400:
@@ -1555,6 +1615,76 @@ def vcf_backup_client_check(args: argparse.Namespace) -> dict[str, Any]:
     result = ssh_command(args.client_a_host, args, command, role="client", redact_values=[password])
     require_success(result, "client A VCF Backup SFTP probe")
     return {"client_a_sftp": result, "target": f"vcf-backup@{site_ip}:22"}
+
+
+def vcf_depot_auth_check(client: HttpClient, args: argparse.Namespace, password: str | None = None) -> dict[str, Any]:
+    password = password or args.vcf_depot_password
+    site_ip = str(ip_interface(args.site_cidr).ip)
+    depot_url = f"https://{site_ip}"
+    depot_client = HttpClient(depot_url)
+    status, login_body, _headers = depot_client.request("GET", "/PROD/login?next=/PROD/")
+    if status != 200:
+        raise LifecycleError(f"VCF depot login page failed with HTTP {status}")
+    csrf = extract_csrf(login_body)
+    status, _body, headers = depot_client.request(
+        "POST",
+        "/PROD/login",
+        form={"username": "vcf-depot", "password": password, "csrf": csrf, "next": "/PROD/"},
+        follow_redirects=False,
+    )
+    location = next((value for key, value in headers.items() if key.lower() == "location"), "")
+    if status != 303 or location != "/PROD/":
+        raise LifecycleError(f"VCF depot browser login failed with HTTP {status}")
+    browser_status, browser_body, _headers = depot_client.request("GET", "/PROD/")
+    if browser_status != 200 or "VCF Offline Depot" not in browser_body:
+        raise LifecycleError(f"VCF depot browser session failed with HTTP {browser_status}")
+
+    basic_value = base64.b64encode(f"vcf-depot:{password}".encode("utf-8")).decode("ascii")
+    basic_headers = {"Authorization": f"Basic {basic_value}", "Accept": "*/*"}
+    invalid_value = base64.b64encode(b"vcf-depot:not-the-password").decode("ascii")
+    invalid_status = HttpClient(depot_url).request(
+        "GET", "/PROD/", headers={"Authorization": f"Basic {invalid_value}", "Accept": "*/*"}, follow_redirects=False
+    )[0]
+    if invalid_status != 401:
+        raise LifecycleError(f"VCF depot invalid Basic auth returned HTTP {invalid_status}, expected 401")
+    basic_status, _basic_body, _headers = HttpClient(depot_url).request("GET", "/PROD/", headers=basic_headers, follow_redirects=False)
+    if basic_status != 200:
+        raise LifecycleError(f"VCF depot valid Basic auth failed with HTTP {basic_status}")
+
+    artifact_command = "install -d -m 0755 /mnt/labfoundry-vcf-offline-depot/PROD && printf lifecycle-auth-ok >/mnt/labfoundry-vcf-offline-depot/PROD/lifecycle-auth.txt"
+    artifact_result = ssh_command(args.appliance_ssh_host, args, sudo_command(args, artifact_command), role="appliance")
+    require_success(artifact_result, "VCF depot lifecycle artifact creation")
+    if args.skip_client_checks or not args.client_a_host:
+        return {"browser_status": browser_status, "basic_status": basic_status, "invalid_status": invalid_status, "artifact": artifact_result}
+    quoted_password = shell_single_quote(password)
+    command = (
+        f"curl -kfsS -u vcf-depot:{quoted_password} {depot_url}/PROD/lifecycle-auth.txt | grep -F lifecycle-auth-ok; "
+        f"wget -qO- --no-check-certificate --user=vcf-depot --password={quoted_password} {depot_url}/PROD/lifecycle-auth.txt | grep -F lifecycle-auth-ok"
+    )
+    client_result = ssh_command(args.client_a_host, args, command, role="client", redact_values=[password])
+    require_success(client_result, "client A VCF depot curl and wget probes")
+    return {
+        "browser_status": browser_status,
+        "basic_status": basic_status,
+        "invalid_status": invalid_status,
+        "artifact": artifact_result,
+        "client_a": client_result,
+        "target": f"{depot_url}/PROD/lifecycle-auth.txt",
+    }
+
+
+def rotate_vcf_depot_password_without_depot_apply(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    stage = stage_vcf_depot_password(client, args, args.vcf_depot_new_password)
+    apply = apply_units(client, ["local_users"], args)
+    site_ip = str(ip_interface(args.site_cidr).ip)
+    old_value = base64.b64encode(f"vcf-depot:{args.vcf_depot_password}".encode("utf-8")).decode("ascii")
+    old_status = HttpClient(f"https://{site_ip}").request(
+        "GET", "/PROD/", headers={"Authorization": f"Basic {old_value}", "Accept": "*/*"}, follow_redirects=False
+    )[0]
+    if old_status != 401:
+        raise LifecycleError(f"Old VCF depot password returned HTTP {old_status}, expected 401 after Local Users apply")
+    verification = vcf_depot_auth_check(client, args, args.vcf_depot_new_password)
+    return {"stage": stage, "apply": apply, "old_password_status": old_status, "new_password": verification}
 
 
 def shell_single_quote(value: str) -> str:
@@ -2050,6 +2180,7 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "configure-firewall-wan", configure_firewall_wan, client, args)
     run_step(results, "configure-ca", configure_ca, client, args)
     run_step(results, "configure-vcf-backups", configure_vcf_backups, client, args)
+    run_step(results, "configure-vcf-offline-depot", configure_vcf_offline_depot, client, args)
     run_step(results, "configure-kms", configure_kms, client, args)
     run_step(
         results,
@@ -2061,12 +2192,15 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     )
     run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
+    run_step(results, "apply-vcf-offline-depot-unit", apply_units, client, ["dnsmasq", "firewall", "vcf_offline_depot", "public_services"], args)
     run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "wan", "kms"], args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
     run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)
     run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)
     run_step(results, "vcf-backup-client-check", vcf_backup_client_check, args)
+    run_step(results, "vcf-depot-auth-check", vcf_depot_auth_check, client, args)
+    run_step(results, "vcf-depot-password-rotation", rotate_vcf_depot_password_without_depot_apply, client, args)
     run_step(results, "configure-management-https", configure_management_https, client, args)
     run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings"], args)
     run_step(results, "management-https-check", management_https_check, client, args)
@@ -2097,6 +2231,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
     run_step(results, "appliance-health", appliance_health, client, args)
     run_step(results, "restore-settings-backup", restore_settings_backup, client, args)
     run_step(results, "stage-vcf-backup-password", stage_vcf_backup_password, client, args)
+    run_step(results, "stage-vcf-depot-password", stage_vcf_depot_password, client, args)
     run_step(
         results,
         "apply-connectivity-units",
@@ -2106,6 +2241,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
         args,
     )
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
+    run_step(results, "apply-vcf-offline-depot-unit", apply_units, client, ["dnsmasq", "firewall", "vcf_offline_depot", "public_services"], args)
     run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "wan", "kms"], args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
@@ -2117,6 +2253,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
     run_step(results, "export-restored-settings-backup", export_settings_backup, client, args, restored_archive_path)
     run_step(results, "restored-ca-archive-baseline-check", restored_ca_archive_baseline_check, args, restored_archive_path)
     run_step(results, "vcf-backup-client-check", vcf_backup_client_check, args)
+    run_step(results, "vcf-depot-auth-check", vcf_depot_auth_check, client, args)
     run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings"], args)
     run_step(results, "management-https-check", management_https_check, client, args)
 

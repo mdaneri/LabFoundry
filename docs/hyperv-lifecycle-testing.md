@@ -168,6 +168,10 @@ The lifecycle runner records structured evidence in
 - VCF Backups SFTP desired state, `vcf-backup` Local Users password staging and
   OS sync, global `vcf_backups` appliance apply, OpenSSH drop-in host state, and
   a client-side SFTP probe from Client A to the SiteA appliance address
+- VCF Offline Depot desired state, selected `vcf-depot` Local Users password
+  staging, browser-session login, curl and wget Basic-auth artifact downloads,
+  and password rotation proven through Local Users apply without reapplying the
+  depot service
 - client-side DNS/DHCP/routing probes when client SSH addresses are available
 - settings backup export, appliance redeploy, settings restore, restored
   desired-state apply, downloaded Client A certificate comparison, and restored

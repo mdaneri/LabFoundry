@@ -9,6 +9,9 @@ time after validation and rollback behavior are reviewed.
 from __future__ import annotations
 
 import json
+import ctypes
+import ctypes.util
+import hmac
 import os
 import re
 import shutil
@@ -47,7 +50,7 @@ except ModuleNotFoundError:
 
 COMMANDS: dict[str, set[str]] = {
     "staging": {"prepare"},
-    "local-users": {"validate", "apply", "status"},
+    "local-users": {"validate", "apply", "status", "authenticate"},
     "appliance-settings": {"validate", "apply"},
     "network": {"validate", "apply"},
     "firewall": {"validate", "apply"},
@@ -77,6 +80,7 @@ SYSTEMD_RUN_REAL_ACTIONS = {
 }
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
 NO_PATH_ACTIONS = {("dnsmasq", "leases"), ("dnsmasq", "reload"), ("chronyd", "status"), ("vcf-offline-depot", "generate-software-depot-id"), ("vcf-offline-depot", "reset-tool")}
+NON_PATH_ARGUMENT_ACTIONS = {("local-users", "authenticate")}
 LABFOUNDRY_SERVICE_USER = "labfoundry"
 LABFOUNDRY_STATE_DIR = Path("/var/lib/labfoundry")
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
@@ -2357,6 +2361,8 @@ def _public_services_config_errors(path: Path) -> list[str]:
         ]:
             if required not in text:
                 errors.append(f"Public services VCF Offline Depot config must include {required}.")
+        if _vcf_depot_auth_required(text) and "proxy_pass http://127.0.0.1:8000/PROD/auth-failure;" not in text:
+            errors.append("Authenticated public services VCF Offline Depot config must return 401 to non-browser clients.")
     for forbidden in [
         "location = /favicon.ico",
         "location = /manifest.webmanifest",
@@ -3124,6 +3130,21 @@ def _local_user_status_rows(users: list[dict]) -> list[dict[str, object]]:
 
 
 def _handle_local_users(action: str, args: list[str]) -> int:
+    if action == "authenticate":
+        if len(args) != 1 or not LOCAL_USERS_USERNAME_PATTERN.fullmatch(args[0]):
+            return 1
+        password = sys.stdin.readline().removesuffix("\n").removesuffix("\r")
+        try:
+            password_hash = _shadow_hash_for_user(args[0])
+            crypt_library_name = ctypes.util.find_library("crypt") or "libcrypt.so.1"
+            crypt_library = ctypes.CDLL(crypt_library_name)
+            crypt_library.crypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            crypt_library.crypt.restype = ctypes.c_char_p
+            candidate = crypt_library.crypt(password.encode("utf-8"), password_hash.encode("utf-8"))
+            candidate_hash = candidate.decode("utf-8") if candidate else ""
+        except (OSError, UnicodeError, ValueError):
+            return 1
+        return 0 if candidate_hash and not candidate_hash.startswith("*") and hmac.compare_digest(candidate_hash, password_hash) else 1
     if len(args) != 1:
         print(f"local-users {action} requires exactly one staged JSON config path", file=sys.stderr)
         return 2
@@ -3204,6 +3225,9 @@ def _handle_local_users(action: str, args: list[str]) -> int:
                 return faillock_result
             unlocked.append(username)
         applied.append(username)
+    refresh_result = _refresh_existing_vcf_depot_htpasswd()
+    if refresh_result != 0:
+        return refresh_result
     print(
         json.dumps(
             {
@@ -4772,8 +4796,10 @@ def _vcf_depot_config_errors(path: Path) -> list[str]:
             errors.append("Authenticated VCF Offline Depot nginx config must enable HTTPS Basic Authentication.")
         if f"auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};" not in text:
             errors.append("Authenticated VCF Offline Depot nginx config must use the managed password file.")
-        if "error_page 401 = @labfoundry_depot_login;" not in text:
+        if "error_page 401 = /_labfoundry_depot_login;" not in text:
             errors.append("Authenticated VCF Offline Depot nginx config must redirect unauthenticated requests to the depot login.")
+        if "proxy_pass http://127.0.0.1:8000/PROD/auth-failure;" not in text:
+            errors.append("Authenticated VCF Offline Depot nginx config must return 401 to non-browser clients.")
     elif _nginx_directive(text, "auth_basic_user_file"):
         errors.append("Unauthenticated VCF Offline Depot nginx config must not include auth_basic_user_file.")
     return errors
@@ -4806,6 +4832,16 @@ def _shadow_hash_for_user(username: str) -> str:
 def _write_vcf_depot_htpasswd(username: str) -> int:
     try:
         password_hash = _shadow_hash_for_user(username)
+        _write_vcf_depot_htpasswd_entry(username, password_hash)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    return 0
+
+
+def _write_vcf_depot_htpasswd_entry(username: str, password_hash: str) -> None:
+    temp_path: Path | None = None
+    try:
         VCF_DEPOT_HTPASSWD_PATH.parent.mkdir(parents=True, exist_ok=True)
         try:
             grp.getgrnam("nginx")
@@ -4827,6 +4863,23 @@ def _write_vcf_depot_htpasswd(username: str) -> int:
             shutil.chown(temp_path, user="root")
         os.chmod(temp_path, file_mode)
         temp_path.replace(VCF_DEPOT_HTPASSWD_PATH)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def _refresh_existing_vcf_depot_htpasswd() -> int:
+    if not VCF_DEPOT_HTPASSWD_PATH.is_file():
+        return 0
+    try:
+        username = VCF_DEPOT_HTPASSWD_PATH.read_text(encoding="utf-8").split(":", 1)[0].strip()
+        if not LOCAL_USERS_USERNAME_PATTERN.fullmatch(username):
+            raise ValueError("VCF Offline Depot managed password file has an invalid username.")
+        try:
+            password_hash = _shadow_hash_for_user(username)
+        except ValueError:
+            password_hash = "!"
+        _write_vcf_depot_htpasswd_entry(username, password_hash)
     except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -5529,7 +5582,7 @@ def main(argv: list[str]) -> int:
 
     normalized_args: list[str] = []
     try:
-        normalized_args = [_validate_path(arg) for arg in args]
+        normalized_args = args if (group, action) in NON_PATH_ARGUMENT_ACTIONS else [_validate_path(arg) for arg in args]
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2

@@ -332,8 +332,14 @@ def _depot_https_location_lines(
         "    proxy_set_header X-Forwarded-Proto https;",
         "  }",
         "",
-        "  location @labfoundry_depot_login {",
-        "    return 303 /PROD/login?next=$request_uri;",
+        "  location = /_labfoundry_depot_login {",
+        "    internal;",
+        f"    proxy_pass http://{upstream_host}:{upstream_port}/PROD/auth-failure;",
+        "    proxy_pass_request_body off;",
+        "    proxy_set_header Content-Length \"\";",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Original-URI $request_uri;",
+        "    proxy_set_header X-Forwarded-Proto https;",
         "  }",
         "",
         "  location = /PROD/ {",
@@ -343,7 +349,7 @@ def _depot_https_location_lines(
                 '    auth_basic "VCF Offline Depot";',
                 f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
                 "    auth_request /_labfoundry_depot_auth;",
-                "    error_page 401 = @labfoundry_depot_login;",
+                "    error_page 401 = /_labfoundry_depot_login;",
             ]
             if auth_required
             else []
@@ -364,7 +370,7 @@ def _depot_https_location_lines(
                 '    auth_basic "VCF Offline Depot";',
                 f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
                 "    auth_request /_labfoundry_depot_auth;",
-                "    error_page 401 = @labfoundry_depot_login;",
+                "    error_page 401 = /_labfoundry_depot_login;",
             ]
             if auth_required
             else []
@@ -385,7 +391,7 @@ def _depot_https_location_lines(
                 '    auth_basic "VCF Offline Depot";',
                 f"    auth_basic_user_file {VCF_DEPOT_HTPASSWD_PATH};",
                 "    auth_request /_labfoundry_depot_auth;",
-                "    error_page 401 = @labfoundry_depot_login;",
+                "    error_page 401 = /_labfoundry_depot_login;",
             ]
             if auth_required
             else []

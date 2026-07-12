@@ -1986,6 +1986,86 @@ def test_local_users_helper_creates_deletes_and_sets_password_without_leaking(mo
     assert "minlen = 12" in pwquality_path.read_text(encoding="utf-8")
 
 
+def test_local_users_helper_authenticates_shadow_password_without_leaking(monkeypatch, capsys):
+    helper = load_helper_module()
+
+    class FakeCrypt:
+        argtypes = None
+        restype = None
+
+        def __call__(self, password: bytes, password_hash: bytes) -> bytes:
+            return password_hash if password == b"Depot-user1!" else b"$6$not-a-match"
+
+    class FakeCryptLibrary:
+        crypt = FakeCrypt()
+
+    monkeypatch.setattr(helper, "_shadow_hash_for_user", lambda username: "$6$rounds=5000$valid-hash")
+    monkeypatch.setattr(helper.ctypes.util, "find_library", lambda name: "libcrypt.so.1")
+    monkeypatch.setattr(helper.ctypes, "CDLL", lambda name: FakeCryptLibrary())
+
+    monkeypatch.setattr(helper.sys, "stdin", io.StringIO("Depot-user1!\n"))
+    assert helper.main(["labfoundry-helper", "local-users", "authenticate", "--real", "vcf-depot"]) == 0
+    valid_output = capsys.readouterr()
+    assert "Depot-user1!" not in valid_output.out
+    assert "valid-hash" not in valid_output.out
+
+    monkeypatch.setattr(helper.sys, "stdin", io.StringIO("wrong-password\n"))
+    assert helper.main(["labfoundry-helper", "local-users", "authenticate", "--real", "vcf-depot"]) == 1
+    invalid_output = capsys.readouterr()
+    assert "wrong-password" not in invalid_output.out
+    assert "valid-hash" not in invalid_output.out
+
+
+def test_local_users_helper_authentication_rejects_locked_missing_and_unsupported_hashes(monkeypatch):
+    helper = load_helper_module()
+
+    for error in (
+        "VCF Offline Depot OS user is locked.",
+        "VCF Offline Depot OS user is missing.",
+    ):
+        def reject_shadow(username: str, message: str = error) -> str:
+            raise ValueError(message)
+
+        monkeypatch.setattr(helper, "_shadow_hash_for_user", reject_shadow)
+        monkeypatch.setattr(helper.sys, "stdin", io.StringIO("Depot-user1!\n"))
+        assert helper.main(["labfoundry-helper", "local-users", "authenticate", "--real", "vcf-depot"]) == 1
+
+    class UnsupportedCrypt:
+        argtypes = None
+        restype = None
+
+        def __call__(self, password: bytes, password_hash: bytes) -> bytes:
+            return b"*0"
+
+    monkeypatch.setattr(helper, "_shadow_hash_for_user", lambda username: "$y$unsupported")
+    monkeypatch.setattr(helper.ctypes.util, "find_library", lambda name: "libcrypt.so.1")
+    monkeypatch.setattr(helper.ctypes, "CDLL", lambda name: type("Library", (), {"crypt": UnsupportedCrypt()})())
+    monkeypatch.setattr(helper.sys, "stdin", io.StringIO("Depot-user1!\n"))
+    assert helper.main(["labfoundry-helper", "local-users", "authenticate", "--real", "vcf-depot"]) == 1
+
+
+def test_local_users_helper_refreshes_existing_depot_htpasswd_and_fails_closed(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    htpasswd_path = tmp_path / "nginx" / "htpasswd" / "vcf-offline-depot.htpasswd"
+    htpasswd_path.parent.mkdir(parents=True)
+    htpasswd_path.write_text("vcf-depot:$6$stale\n", encoding="utf-8")
+
+    monkeypatch.setattr(helper, "VCF_DEPOT_HTPASSWD_PATH", htpasswd_path)
+    monkeypatch.setattr(helper.shutil, "chown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(helper.os, "chmod", lambda *args, **kwargs: None)
+    monkeypatch.setattr(helper, "_shadow_hash_for_user", lambda username: "$6$fresh")
+
+    assert helper._refresh_existing_vcf_depot_htpasswd() == 0
+    assert htpasswd_path.read_text(encoding="utf-8") == "vcf-depot:$6$fresh\n"
+
+    def locked_user(username: str) -> str:
+        raise ValueError("locked")
+
+    monkeypatch.setattr(helper, "_shadow_hash_for_user", locked_user)
+    assert helper._refresh_existing_vcf_depot_htpasswd() == 0
+    assert htpasswd_path.read_text(encoding="utf-8") == "vcf-depot:!\n"
+
+
 def test_local_users_helper_applies_per_user_shell(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "local-users"
@@ -2492,8 +2572,14 @@ def test_vcf_offline_depot_helper_uses_browser_session_or_basic_auth_for_authent
                 "    proxy_set_header X-Original-URI $request_uri;",
                 "  }",
                 "",
-                "  location @labfoundry_depot_login {",
-                "    return 303 /PROD/login?next=$request_uri;",
+                "  location = /_labfoundry_depot_login {",
+                "    internal;",
+                "    proxy_pass http://127.0.0.1:8000/PROD/auth-failure;",
+                "    proxy_pass_request_body off;",
+                "    proxy_set_header Content-Length \"\";",
+                "    proxy_set_header Host $host;",
+                "    proxy_set_header X-Original-URI $request_uri;",
+                "    proxy_set_header X-Forwarded-Proto https;",
                 "  }",
                 "",
                 "  location = /PROD/ {",
@@ -2501,7 +2587,7 @@ def test_vcf_offline_depot_helper_uses_browser_session_or_basic_auth_for_authent
                 '    auth_basic "VCF Offline Depot";',
                 f"    auth_basic_user_file {htpasswd_path};",
                 "    auth_request /_labfoundry_depot_auth;",
-                "    error_page 401 = @labfoundry_depot_login;",
+                "    error_page 401 = /_labfoundry_depot_login;",
                 "    proxy_pass http://127.0.0.1:8000;",
                 "  }",
                 "",
@@ -2510,7 +2596,7 @@ def test_vcf_offline_depot_helper_uses_browser_session_or_basic_auth_for_authent
                 '    auth_basic "VCF Offline Depot";',
                 f"    auth_basic_user_file {htpasswd_path};",
                 "    auth_request /_labfoundry_depot_auth;",
-                "    error_page 401 = @labfoundry_depot_login;",
+                "    error_page 401 = /_labfoundry_depot_login;",
                 "    proxy_pass http://127.0.0.1:8000;",
                 "  }",
                 "",
@@ -2519,7 +2605,7 @@ def test_vcf_offline_depot_helper_uses_browser_session_or_basic_auth_for_authent
                 '    auth_basic "VCF Offline Depot";',
                 f"    auth_basic_user_file {htpasswd_path};",
                 "    auth_request /_labfoundry_depot_auth;",
-                "    error_page 401 = @labfoundry_depot_login;",
+                "    error_page 401 = /_labfoundry_depot_login;",
                 "    alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;",
                 "    sendfile on;",
                 "    default_type application/octet-stream;",
@@ -2558,7 +2644,8 @@ def test_vcf_offline_depot_helper_uses_browser_session_or_basic_auth_for_authent
     assert htpasswd_path.read_text(encoding="utf-8") == "vcf-depot:fresh-shadow-hash\n"
     site_text = (site_dir / "vcf-offline-depot.conf").read_text(encoding="utf-8")
     assert "auth_request /_labfoundry_depot_auth;" in site_text
-    assert "error_page 401 = @labfoundry_depot_login;" in site_text
+    assert "error_page 401 = /_labfoundry_depot_login;" in site_text
+    assert "proxy_pass http://127.0.0.1:8000/PROD/auth-failure;" in site_text
     assert "satisfy any;" in site_text
     assert 'auth_basic "VCF Offline Depot";' in site_text
     assert f"auth_basic_user_file {htpasswd_path};" in site_text

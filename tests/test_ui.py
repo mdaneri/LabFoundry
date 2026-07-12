@@ -115,7 +115,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v71" in service_worker.text
+    assert "labfoundry-pwa-v72" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -4406,7 +4406,7 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert "PRIVATE KEY" not in root.text
 
 
-def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
+def test_public_service_home_is_scoped_to_called_ip(client, tmp_path, monkeypatch):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -4541,8 +4541,84 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
     assert 'action="/PROD/login"' in depot_login.text
     assert 'name="next" value="/PROD/"' in depot_login.text
 
+    from labfoundry.app.adapters.system import AdapterResult
+
+    authentication_calls: list[str] = []
+
+    class DepotAuthenticationAdapter:
+        dry_run = False
+
+        def authenticate_local_user(self, username: str, password: str) -> AdapterResult:
+            authentication_calls.append(username)
+            return AdapterResult(
+                command=["labfoundry-helper", "local-users", "authenticate", username],
+                dry_run=False,
+                returncode=0 if username == "vcf-depot" and password == "Depot-user1!" else 1,
+            )
+
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter", DepotAuthenticationAdapter)
+    depot_csrf = depot_login.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    depot_signed_in = client.post(
+        "/PROD/login",
+        headers={"host": "192.168.87.32"},
+        data={"username": "vcf-depot", "password": "Depot-user1!", "csrf": depot_csrf, "next": "/PROD/"},
+        follow_redirects=False,
+    )
+    assert depot_signed_in.status_code == 303
+    assert depot_signed_in.headers["location"] == "/PROD/"
+    assert authentication_calls == ["vcf-depot"]
+    assert client.get("/PROD/auth-check", headers={"host": "192.168.87.32"}).status_code == 204
+    client.cookies.clear()
+
+    wrong_login = client.get("/PROD/login", headers={"host": "192.168.87.32"})
+    wrong_csrf = wrong_login.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    rejected = client.post(
+        "/PROD/login",
+        headers={"host": "192.168.87.32"},
+        data={"username": "vcf-depot", "password": "wrong-password", "csrf": wrong_csrf, "next": "https://example.test/"},
+    )
+    assert rejected.status_code == 401
+    assert "Invalid username or password" in rejected.text
+    assert "wrong-password" not in rejected.text
+
+    client.cookies.clear()
+    admin_login = client.get("/PROD/login", headers={"host": "192.168.87.32"})
+    admin_csrf = admin_login.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    admin_signed_in = client.post(
+        "/PROD/login",
+        headers={"host": "192.168.87.32"},
+        data={"username": "admin", "password": "labfoundry-admin", "csrf": admin_csrf, "next": "/PROD/"},
+        follow_redirects=False,
+    )
+    assert admin_signed_in.status_code == 303
+    client.cookies.clear()
+
+    assert client.get("/PROD/login", headers={"host": "192.168.167.10"}).status_code == 404
+
     depot_auth_check = client.get("/PROD/auth-check", headers={"host": "192.168.87.32"})
     assert depot_auth_check.status_code == 401
+
+    cli_auth_failure = client.get(
+        "/PROD/auth-failure",
+        headers={"host": "192.168.87.32", "accept": "application/octet-stream", "X-Original-URI": "/PROD/COMP/manifest.json"},
+        follow_redirects=False,
+    )
+    assert cli_auth_failure.status_code == 401
+    assert cli_auth_failure.headers["www-authenticate"] == 'Basic realm="VCF Offline Depot"'
+    cli_head_auth_failure = client.head(
+        "/PROD/auth-failure",
+        headers={"host": "192.168.87.32", "accept": "*/*", "X-Original-URI": "/PROD/"},
+        follow_redirects=False,
+    )
+    assert cli_head_auth_failure.status_code == 401
+    assert cli_head_auth_failure.headers["www-authenticate"] == 'Basic realm="VCF Offline Depot"'
+    browser_auth_failure = client.get(
+        "/PROD/auth-failure",
+        headers={"host": "192.168.87.32", "accept": "text/html", "X-Original-URI": "/PROD/COMP/"},
+        follow_redirects=False,
+    )
+    assert browser_auth_failure.status_code == 303
+    assert browser_auth_failure.headers["location"] == "/PROD/login?next=/PROD/COMP/"
 
     login(client)
     signed_in_depot_auth_check = client.get("/PROD/auth-check", headers={"host": "192.168.87.32"})
@@ -4559,6 +4635,13 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path):
     )
     assert basic_depot_browser.status_code == 200
     assert "VCF Offline Depot" in basic_depot_browser.text
+    basic_depot_head = client.head(
+        "/PROD/",
+        headers={"host": "192.168.87.32", "X-LabFoundry-Depot-Basic-User": "vcf-depot"},
+        follow_redirects=False,
+    )
+    assert basic_depot_head.status_code == 200
+    assert basic_depot_head.content == b""
 
     with SessionLocal() as db:
         depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
@@ -5608,7 +5691,8 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "auth_basic_user_file /etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd;" in payload["https_config_preview"]
     assert "satisfy any;" in payload["https_config_preview"]
     assert "auth_request /_labfoundry_depot_auth;" in payload["https_config_preview"]
-    assert "error_page 401 = @labfoundry_depot_login;" in payload["https_config_preview"]
+    assert "error_page 401 = /_labfoundry_depot_login;" in payload["https_config_preview"]
+    assert "proxy_pass http://127.0.0.1:8000/PROD/auth-failure;" in payload["https_config_preview"]
     assert "location = /PROD/" in payload["https_config_preview"]
     assert "location ~ ^/PROD/(?!login$|logout$|auth-check$)(.+[^/])$" in payload["https_config_preview"]
     assert "alias /mnt/labfoundry-vcf-offline-depot/PROD/$1;" in payload["https_config_preview"]
@@ -7843,7 +7927,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "vcfdt-auth-request-20260708-1" in page.text
+    assert "depot-auth-20260711-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
