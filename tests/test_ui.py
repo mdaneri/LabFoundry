@@ -218,6 +218,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
+    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-3" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -2813,7 +2814,14 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
         assert db.execute(select(CaCertificate)).scalars().all() == []
         assert db.execute(select(KmsClient)).scalars().all() == []
         assert db.execute(select(KmsKey)).scalars().all() == []
-        assert db.execute(select(VcfDepotDownloadProfile)).scalars().all() == []
+        depot_profiles = db.execute(
+            select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)
+        ).scalars().all()
+        assert [(profile.name, profile.profile_type, profile.enabled) for profile in depot_profiles] == [
+            ("Binaries", "binaries", False),
+            ("Esx", "esx", False),
+            ("Metadata", "metadata", False),
+        ]
         marker = db.execute(select(Setting).where(Setting.key == SEED_EXAMPLES_SETTING_KEY)).scalar_one()
         assert marker.value == "false"
         seed_initial_data(db)
@@ -2821,7 +2829,14 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
         dns_records = db.execute(select(DnsRecord)).scalars().all()
         assert len(dns_records) == 1
         assert dns_records[0].hostname == "labfoundry.labfoundry.internal"
-        assert db.execute(select(VcfDepotDownloadProfile)).scalars().all() == []
+        depot_profiles = db.execute(
+            select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)
+        ).scalars().all()
+        assert [(profile.name, profile.profile_type, profile.enabled) for profile in depot_profiles] == [
+            ("Binaries", "binaries", False),
+            ("Esx", "esx", False),
+            ("Metadata", "metadata", False),
+        ]
         services = db.execute(select(ServiceState)).scalars().all()
         assert services
         assert all(not service.running and not service.enabled and service.health == "unconfigured" for service in services)
@@ -4345,7 +4360,7 @@ def test_certificate_authority_page_renders(client):
     assert 'href="/appliance-apply"' in ca.text
     assert "Review appliance changes" in ca.text
     assert "labfoundry-ca.json" in ca.text
-    assert 'class="language-json"' in ca.text
+    assert 'class="validation-preview-source language-json"' in ca.text
     assert "data-confirm-modal" in ca.text
     assert '<strong>/etc/labfoundry/ca</strong>' in ca.text
     assert "fixed-value-field" in ca.text
@@ -5634,7 +5649,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "paginationSize: 10" in app_js.text
     tasks_table_js = app_js.text.split("function initializeVcfDepotTasksTable", 1)[1].split("function ", 1)[0]
     assert 'height: "380px"' in tasks_table_js
-    assert "paginationSizeSelector" not in app_js.text
+    assert "paginationSizeSelector" not in tasks_table_js
     assert "await vcfDepotTasksTable.replaceData()" in app_js.text
     assert "reloadData" not in app_js.text
     assert "window.setInterval(refreshVcfDepotTasksTable, 2000)" in app_js.text
@@ -8027,7 +8042,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "depot-auth-20260711-1" in page.text
+    assert "vcf-helper-tasks-layout-20260713-3" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -10583,7 +10598,7 @@ def test_zone_file_import_error_preserves_pasted_zone_text(client):
     login(client)
     page = client.get("/dns")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-    zone_text = "$ORIGIN labfoundry.internal.\nbadrecord IN TXT unsupported\n"
+    zone_text = "$ORIGIN labfoundry.internal.\nbadrecord IN BOGUS unsupported\n"
 
     imported = client.post(
         "/dns/zones/import",
@@ -10598,7 +10613,9 @@ def test_zone_file_import_error_preserves_pasted_zone_text(client):
     assert imported.status_code == 422
     assert "Import Zone File" in imported.text
     assert "Line 2:" in imported.text
-    assert "badrecord IN TXT unsupported" in imported.text
+    assert "badrecord IN BOGUS unsupported" in imported.text
+
+
 def test_vcf_sddc_inventory_requires_tls_confirmation_and_redacts_credentials(client, monkeypatch):
     from labfoundry.app import ui
     from labfoundry.app.services.vcf_sddc_deployment import OvaDescriptor, OvfProperty
