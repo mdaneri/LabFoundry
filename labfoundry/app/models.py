@@ -605,7 +605,7 @@ class VcfBackupSettings(Base):
 
 class VcfTrustTarget(Base):
     __tablename__ = "vcf_trust_targets"
-    __table_args__ = (UniqueConstraint("address", "ssh_port", name="uq_vcf_trust_target_address_port"),)
+    __table_args__ = (UniqueConstraint("address", "api_port", name="uq_vcf_trust_target_address_api_port"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     address: Mapped[str] = mapped_column(String(240), index=True)

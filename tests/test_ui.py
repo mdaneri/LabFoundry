@@ -9732,6 +9732,24 @@ def test_vcf_trust_requires_tls_confirmation_then_queues_without_persisting_cred
         persisted = "\n".join([job.result or "", target.last_result, target.address])
         assert "super-secret" not in persisted
 
+    second_port = client.post(
+        "/vcf-trust/root-ca",
+        data={
+            **credentials,
+            "address": "vcf-installer.example.test:8443",
+            "confirmed_tls_fingerprint": "AA:BB",
+        },
+        headers={"X-LabFoundry-VCF-Trust": "1"},
+    )
+
+    assert second_port.status_code == 202
+    with SessionLocal() as db:
+        targets = db.execute(select(VcfTrustTarget).order_by(VcfTrustTarget.api_port)).scalars().all()
+        assert [(target.address, target.api_port) for target in targets] == [
+            ("vcf-installer.example.test", 443),
+            ("vcf-installer.example.test", 8443),
+        ]
+
 
 def test_vcf_trust_rejects_mismatched_confirmed_tls_fingerprint(client, monkeypatch):
     from labfoundry.app.database import SessionLocal
@@ -9810,6 +9828,52 @@ def test_vcf_trust_job_preserves_cancelled_state_at_progress_checkpoint(client, 
         assert job.progress_percent == 100
         assert "cancelled" in (job.result or "")
         assert target.last_result == "cancelled"
+
+
+def test_vcf_target_depot_job_preserves_cancelled_state_at_progress_checkpoint(client, monkeypatch):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus
+    from labfoundry.app.services.vcf_depot_target import LocalDepotEndpoint
+    import labfoundry.app.ui as ui
+
+    login(client)
+    with SessionLocal() as db:
+        job = Job(id="job_depot_cancel", type="vcf-offline-depot-target-config", status=JobStatus.PENDING.value, created_by="admin")
+        db.add(job)
+        db.commit()
+
+    monkeypatch.setattr(
+        ui,
+        "_local_depot_endpoint",
+        lambda _db: LocalDepotEndpoint(hostname="depot.labfoundry.internal", port=443, url="https://depot.labfoundry.internal", username="depot"),
+    )
+
+    def fake_configure(*_args, progress, **_kwargs):
+        with SessionLocal() as db:
+            job = db.get(Job, "job_depot_cancel")
+            job.status = JobStatus.CANCELLED.value
+            db.commit()
+        progress(55, "syncing-metadata")
+        raise AssertionError("progress should raise before depot sync continues")
+
+    monkeypatch.setattr(ui, "configure_target_depot", fake_configure)
+
+    ui.run_vcf_target_depot_job(
+        "job_depot_cancel",
+        address="vcf-installer.example.test",
+        port=443,
+        api_username="admin",
+        api_password="api",
+        depot_password="depot",
+        replace_existing=True,
+        expected_fingerprint="AA:BB",
+    )
+
+    with SessionLocal() as db:
+        job = db.get(Job, "job_depot_cancel")
+        assert job.status == JobStatus.CANCELLED.value
+        assert job.progress_percent == 100
+        assert "cancelled" in (job.result or "")
 
 
 def test_vcf_helper_generates_dns_records_with_component_descriptions(client):
@@ -10633,6 +10697,64 @@ def test_vcf_sddc_endpoint_address_parses_inline_port():
     assert ui._split_vcf_endpoint_address_port("vc.example:8443") == ("vc.example", 8443)
     assert ui._split_vcf_endpoint_address_port("https://vc.example/sdk", None) == ("vc.example", 443)
     assert ui._split_vcf_endpoint_address_port("[2001:db8::10]:9443") == ("2001:db8::10", 9443)
+
+
+def test_vcf_sddc_deploy_waits_on_ip_before_new_dns_name(client, monkeypatch):
+    from labfoundry.app import ui
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus
+    from labfoundry.app.services.vcf_sddc_deployment import OvaDescriptor
+
+    login(client)
+    with SessionLocal() as db:
+        db.add(Job(id="job_sddc_ip_first", type="vcf-sddc-manager-deploy", status=JobStatus.PENDING.value, created_by="admin"))
+        db.commit()
+
+    descriptor = OvaDescriptor(
+        path="/mnt/labfoundry-vcf-offline-depot/PROD/COMP/SDDC_MANAGER_VCF/test.ova",
+        relative_path="test.ova",
+        filename="test.ova",
+        size_bytes=10,
+        vm_name="sddc-test",
+        ovf_member="test.ovf",
+        manifest_member="test.mf",
+        networks=[],
+        properties=[],
+        files=[],
+    )
+    waited_on = []
+    monkeypatch.setattr(ui, "inspect_ova", lambda *_args, **_kwargs: descriptor)
+    monkeypatch.setattr(ui, "deploy_ova", lambda *_args, **_kwargs: {"vm_name": "sddc-test", "guest_ip": "192.168.87.18"})
+    monkeypatch.setattr(ui, "_wait_for_vcf_api", lambda address, *_args, **_kwargs: waited_on.append(address) or {"role": "SddcManager", "version": "9.1.0.0"})
+
+    ui.run_vcf_sddc_deployment_job(
+        "job_sddc_ip_first",
+        ova_path=descriptor.path,
+        endpoint="esxi.example.test",
+        endpoint_username="root",
+        endpoint_password="vsphere-secret",
+        endpoint_fingerprint="AA:BB",
+        destination={"resource_pool_id": "ha-root-pool", "datastore_id": "datastore1", "network_ids": {}},
+        vm_name="sddc-test",
+        disk_provisioning="thin",
+        power_on=True,
+        property_values={
+            "LOCAL_USER_PASSWORD": "local-secret",
+            "vami.hostname": "sddcm.labfoundry.internal",
+            "ip0": "192.168.87.19",
+        },
+        add_dns=True,
+        apply_trust=False,
+        configure_offline_depot=False,
+        depot_password="",
+    )
+
+    assert waited_on == ["192.168.87.18"]
+    with SessionLocal() as db:
+        job = db.get(Job, "job_sddc_ip_first")
+        assert job.status == JobStatus.SUCCEEDED.value
+        assert '"target": "192.168.87.18"' in (job.result or "")
+        assert "sddcm.labfoundry.internal" in (job.result or "")
 
 
 def test_vcf_sddc_deploy_requires_ipv4_ova_properties(client, monkeypatch):

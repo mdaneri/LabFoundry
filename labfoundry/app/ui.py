@@ -5050,7 +5050,7 @@ def run_vcf_target_depot_job(
             local = _local_depot_endpoint(db)
 
             def update(percent: int, state: str) -> None:
-                _update_job(job, db, percent, state)
+                _update_cancelable_job(job, db, percent, state)
 
             outcome = configure_target_depot(
                 address,
@@ -5063,11 +5063,18 @@ def run_vcf_target_depot_job(
                 port=port,
                 expected_fingerprint=expected_fingerprint,
             )
+            _raise_if_job_cancelled(job, db)
             job.status = JobStatus.SUCCEEDED.value if outcome["configuration"] == "updated" else "no-op"
             job.finished_at = utcnow()
             job.error = None
             _update_job(job, db, 100, job.status, target=address, port=port, **outcome)
             success = True
+        except JobCancelled:
+            job.status = JobStatus.CANCELLED.value
+            job.finished_at = utcnow()
+            job.error = "Task cancelled by operator."
+            _update_job(job, db, 100, "cancelled", target=address, port=port)
+            success = False
         except VcfDepotTargetPartialError as exc:
             job.status = "partial-failure"
             job.finished_at = utcnow()
@@ -5171,7 +5178,7 @@ def _configure_deployed_target_depot(
     local = _local_depot_endpoint(db)
 
     def update(percent: int, state: str) -> None:
-        _update_job(job, db, min(99, 90 + int(percent / 10)), f"depot-{state}")
+        _update_cancelable_job(job, db, min(99, 90 + int(percent / 10)), f"depot-{state}")
 
     return configure_target_depot(
         address,
@@ -5284,7 +5291,7 @@ def run_vcf_sddc_deployment_job(
                     detail=f"vm_name={vm_name}; target=powered-off; snapshot_skipped=true; result={job.status}",
                 )
                 return
-            target_address = fqdn or str(result.get("guest_ip") or property_values.get("ip0") or "")
+            target_address = str(result.get("guest_ip") or property_values.get("ip0") or property_values.get("ipv6") or fqdn or "")
             if not target_address:
                 raise VcfSddcDeploymentError("The VM powered on, but no VCF API address was available.")
             _update_job(job, db, 82, "waiting-for-vcf-api", vm=result, target=target_address, fqdn=fqdn)
@@ -5299,7 +5306,7 @@ def run_vcf_sddc_deployment_job(
                 tls_fingerprint = tls_sha256_fingerprint(target_address, 443)
 
                 def trust_update(percent: int, state: str) -> None:
-                    _update_job(job, db, 90 + int(percent / 12), f"trust-{state}")
+                    _update_cancelable_job(job, db, 90 + int(percent / 12), f"trust-{state}")
 
                 trust_result = _execute_deployed_target_trust(
                     target_address,
@@ -5332,7 +5339,7 @@ def run_vcf_sddc_deployment_job(
         except VcfSddcPostImportError as exc:
             vm_created = True
             imported = dict(exc.vm_result)
-            target_address = str(imported.get("guest_ip") or property_values.get("ip0") or property_values.get("vami.hostname") or target_address or "")
+            target_address = str(imported.get("guest_ip") or property_values.get("ip0") or property_values.get("ipv6") or property_values.get("vami.hostname") or target_address or "")
             job.status = "partial-failure"
             job.finished_at = utcnow()
             job.error = str(exc)
