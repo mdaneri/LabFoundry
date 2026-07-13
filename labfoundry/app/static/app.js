@@ -18,6 +18,7 @@ document.addEventListener("click", (event) => {
 const DNS_ACTIVE_ZONE_STORAGE_KEY = "labfoundry:dns:active-zone";
 const PUBLIC_ADDRESS_MODE_COOKIE = "labfoundry_public_address_mode";
 const LABFOUNDRY_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const labFoundryDnsRecordTables = new WeakMap();
 let applianceApplySidebarRefreshTimer = 0;
 
 function labFoundryRequestMethod(input, init = {}) {
@@ -431,6 +432,20 @@ function clearTableError() {
   }
   element.textContent = "";
   element.classList.add("hidden");
+}
+
+function redrawDnsRecordTables(root = document) {
+  if (!(root instanceof Document || root instanceof HTMLElement)) {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    root.querySelectorAll(".dns-records-table").forEach((tableElement) => {
+      const table = labFoundryDnsRecordTables.get(tableElement);
+      if (table && typeof table.redraw === "function") {
+        table.redraw(true);
+      }
+    });
+  });
 }
 
 async function postDnsRecordAction(url, data, csrf, options = {}) {
@@ -5738,7 +5753,7 @@ function initializeDnsRecordsTableElement(tableElement) {
   const csrf = tableElement.dataset.csrf || "";
 
   try {
-    new Tabulator(tableElement, {
+    const table = new Tabulator(tableElement, {
       data: records,
       index: "id",
       layout: "fitColumns",
@@ -5815,9 +5830,11 @@ function initializeDnsRecordsTableElement(tableElement) {
         markNewRecordRow(row, "host_label");
       },
     });
+    labFoundryDnsRecordTables.set(tableElement, table);
     if (fallback) {
       fallback.classList.add("hidden");
     }
+    redrawDnsRecordTables(tableElement);
   } catch (error) {
     showTableError(error instanceof Error ? error.message : "Tabulator could not render. Showing the fallback table.");
   }
@@ -10473,6 +10490,7 @@ function initializeTabs() {
           item.setAttribute("hidden", "");
         }
       });
+      redrawDnsRecordTables(panel);
     });
   });
   const storedDomain = storedDnsActiveZone();

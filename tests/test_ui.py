@@ -206,7 +206,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v73" in service_worker.text
+    assert "labfoundry-pwa-v74" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -226,7 +226,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-2" in offline.text
+    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-3" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -242,8 +242,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-2" in page.text
-    assert "/static/app.js?v=vcf-helper-tasks-layout-20260713-2" in page.text
+    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-3" in page.text
+    assert "/static/app.js?v=vcf-helper-tasks-layout-20260713-3" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3629,6 +3629,10 @@ def test_dns_and_dhcp_pages_render(client):
     assert 'cell.getField() === "host_label"' in app_js.text
     assert "DNS_ACTIVE_ZONE_STORAGE_KEY" in app_js.text
     assert "initializeCodeMirrorEditors" in app_js.text
+    assert "const labFoundryDnsRecordTables = new WeakMap()" in app_js.text
+    assert "function redrawDnsRecordTables" in app_js.text
+    assert "labFoundryDnsRecordTables.set(tableElement, table)" in app_js.text
+    assert "redrawDnsRecordTables(panel)" in app_js.text
     assert "installCodeMirrorPlainTextFallback" in app_js.text
     assert 'textarea.dataset.codemirrorLanguage !== "labfoundry-kickstart"' in app_js.text
     assert 'addEventListener("keydown"' in app_js.text
@@ -3706,6 +3710,11 @@ def test_dns_and_dhcp_pages_render(client):
     assert "data-ca-config-preview" in app_js.text
     assert "data-ca-derived-address" not in app_js.text
     assert "initializeServiceBindEditors" in app_js.text
+    app_css = client.get("/static/app.css")
+    assert app_css.status_code == 200
+    assert ".tab-panel {\n  min-width: 0;\n}" in app_css.text
+    assert ".dns-records-table {\n  width: 100%;\n  max-width: 100%;" in app_css.text
+    assert ".dns-records-table .tabulator-tableholder {\n  overflow-x: auto;" in app_css.text
     assert "data-tag-single" in app_js.text
     assert "X-LabFoundry-Autosave" in app_js.text
     assert "tag-editor:change" in app_js.text

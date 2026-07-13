@@ -12,6 +12,7 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipHelperSync,
     [string]$WheelPath = '',
+    [string]$SshPassword = $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD,
     [switch]$SkipHostCheck
 )
 
@@ -177,6 +178,147 @@ function Get-SshConnectionArguments {
     )
 }
 
+function Invoke-PasswordBackedDeploy {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonCommand,
+        [Parameter(Mandatory = $true)][string]$HostAddress,
+        [Parameter(Mandatory = $true)][string]$UserName,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][string]$LocalWheelPath,
+        [string]$LocalHelperPath = '',
+        [Parameter(Mandatory = $true)][string]$LocalScriptPath,
+        [Parameter(Mandatory = $true)][string]$RemoteDirectoryPath,
+        [Parameter(Mandatory = $true)][string]$RemoteWheel,
+        [string]$RemoteHelper = '',
+        [Parameter(Mandatory = $true)][string]$RemoteScript,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)][int]$PollSeconds,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+    )
+
+    $pythonDeploy = Join-Path (Split-Path -Parent $LocalScriptPath) 'labfoundry-paramiko-deploy.py'
+    $pythonDeploySource = @'
+import argparse
+import os
+import pathlib
+import shlex
+import sys
+
+try:
+    import paramiko
+except ImportError as exc:
+    raise SystemExit(
+        "Paramiko is required when -SshPassword is used. "
+        "Install the LabFoundry Python dependencies or rerun without -SshPassword to use ssh/scp."
+    ) from exc
+
+
+def shell_quote(value):
+    return shlex.quote(str(value))
+
+
+def sanitized(value, password):
+    return value.replace(password, "[redacted]") if password else value
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--host", required=True)
+parser.add_argument("--user", required=True)
+parser.add_argument("--local-wheel", required=True)
+parser.add_argument("--local-helper", default="")
+parser.add_argument("--local-script", required=True)
+parser.add_argument("--remote-dir", required=True)
+parser.add_argument("--remote-wheel", required=True)
+parser.add_argument("--remote-helper", default="")
+parser.add_argument("--remote-script", required=True)
+parser.add_argument("--timeout", type=int, required=True)
+parser.add_argument("--poll", type=int, required=True)
+args = parser.parse_args()
+
+password = os.environ.get("LABFOUNDRY_DEPLOY_SSH_PASSWORD", "")
+if not password:
+    raise SystemExit("LABFOUNDRY_DEPLOY_SSH_PASSWORD is required for password-backed deployment.")
+
+uploads = [
+    (pathlib.Path(args.local_wheel), args.remote_wheel),
+    (pathlib.Path(args.local_script), args.remote_script),
+]
+if args.local_helper:
+    uploads.append((pathlib.Path(args.local_helper), args.remote_helper))
+
+client = paramiko.SSHClient()
+client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+client.connect(
+    hostname=args.host,
+    username=args.user,
+    password=password,
+    timeout=15,
+    banner_timeout=15,
+    auth_timeout=15,
+)
+try:
+    sftp = client.open_sftp()
+    try:
+        for local_path, remote_path in uploads:
+            if not local_path.exists():
+                raise SystemExit(f"Local deploy input is missing: {local_path}")
+            sftp.put(str(local_path), remote_path)
+        sftp.chmod(args.remote_script, 0o755)
+    finally:
+        sftp.close()
+
+    remote_helper_argument = args.remote_helper if args.local_helper else ""
+    command = (
+        "sudo -S -p '' sh "
+        f"{shell_quote(args.remote_script)} "
+        f"{shell_quote(args.remote_wheel)} "
+        f"{shell_quote(args.timeout)} "
+        f"{shell_quote(args.poll)} "
+        f"{shell_quote(remote_helper_argument)}"
+    )
+    stdin, stdout, stderr = client.exec_command(command, get_pty=True, timeout=args.timeout + 60)
+    stdin.write(password + "\n")
+    stdin.flush()
+    stdout_text = stdout.read().decode("utf-8", "replace")
+    stderr_text = stderr.read().decode("utf-8", "replace")
+    exit_code = stdout.channel.recv_exit_status()
+    if stdout_text.strip():
+        print(sanitized(stdout_text, password).strip())
+    if stderr_text.strip():
+        print(sanitized(stderr_text, password).strip(), file=sys.stderr)
+    if exit_code:
+        raise SystemExit(exit_code)
+finally:
+    client.close()
+'@
+    [System.IO.File]::WriteAllText($pythonDeploy, ($pythonDeploySource -replace "`r?`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+
+    $previousPassword = $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD
+    try {
+        $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD = $Password
+        Invoke-CheckedCommand -FilePath $PythonCommand -WorkingDirectory $WorkingDirectory -Arguments @(
+            $pythonDeploy,
+            '--host', $HostAddress,
+            '--user', $UserName,
+            '--local-wheel', $LocalWheelPath,
+            '--local-helper', $LocalHelperPath,
+            '--local-script', $LocalScriptPath,
+            '--remote-dir', $RemoteDirectoryPath,
+            '--remote-wheel', $RemoteWheel,
+            '--remote-helper', $RemoteHelper,
+            '--remote-script', $RemoteScript,
+            '--timeout', "$TimeoutSeconds",
+            '--poll', "$PollSeconds"
+        )
+    } finally {
+        if ($null -eq $previousPassword) {
+            Remove-Item Env:\LABFOUNDRY_DEPLOY_SSH_PASSWORD -ErrorAction SilentlyContinue
+        } else {
+            $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD = $previousPassword
+        }
+    }
+}
+
 $resolvedRepoRoot = Resolve-RepoRoot -Path $RepoRoot
 
 if (-not $SkipBuild) {
@@ -204,8 +346,10 @@ if (-not $IpAddress) {
     $IpAddress = Get-GuestIpAddress -ResolvedVmrun $resolvedVmrun -ResolvedVmxPath $resolvedVmxPath
 }
 
-Test-RequiredCommand -Name 'scp' | Out-Null
-Test-RequiredCommand -Name 'ssh' | Out-Null
+if (-not $SshPassword) {
+    Test-RequiredCommand -Name 'scp' | Out-Null
+    Test-RequiredCommand -Name 'ssh' | Out-Null
+}
 
 $deployScript = @'
 #!/bin/sh
@@ -258,12 +402,33 @@ try {
         $uploadPaths += $helperPath
     }
     $uploadPaths += $tempScript
-    Write-Host "Uploading deployment files to $SshUser@$IpAddress`:$RemoteDirectory"
-    Invoke-CheckedCommand -FilePath 'scp' -Arguments @($sshConnectionArguments + $uploadPaths + "${SshUser}@${IpAddress}:$RemoteDirectory/")
 
-    Write-Host "Installing wheel and restarting labfoundry.service..."
     $remoteHelperArgument = if ($SkipHelperSync) { '' } else { $remoteHelperPath }
-    Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument'")
+    $localHelperArgument = if ($SkipHelperSync) { '' } else { $helperPath }
+    if ($SshPassword) {
+        Write-Host "Uploading deployment files to $SshUser@$IpAddress`:$RemoteDirectory with password-backed SSH"
+        Invoke-PasswordBackedDeploy `
+            -PythonCommand $Python `
+            -HostAddress $IpAddress `
+            -UserName $SshUser `
+            -Password $SshPassword `
+            -LocalWheelPath $resolvedWheelPath `
+            -LocalHelperPath $localHelperArgument `
+            -LocalScriptPath $tempScript `
+            -RemoteDirectoryPath $RemoteDirectory `
+            -RemoteWheel $remoteWheelPath `
+            -RemoteHelper $remoteHelperArgument `
+            -RemoteScript $remoteScriptPath `
+            -TimeoutSeconds $ReadinessTimeoutSeconds `
+            -PollSeconds $ReadinessPollSeconds `
+            -WorkingDirectory $resolvedRepoRoot
+    } else {
+        Write-Host "Uploading deployment files to $SshUser@$IpAddress`:$RemoteDirectory"
+        Invoke-CheckedCommand -FilePath 'scp' -Arguments @($sshConnectionArguments + $uploadPaths + "${SshUser}@${IpAddress}:$RemoteDirectory/")
+
+        Write-Host "Installing wheel and restarting labfoundry.service..."
+        Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument'")
+    }
 
     if (-not $SkipHostCheck) {
         Write-Host "Checking host-facing OpenAPI..."
