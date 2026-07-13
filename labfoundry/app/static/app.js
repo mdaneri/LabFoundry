@@ -11059,8 +11059,9 @@ function initializeVcfTrustForm() {
     inspectedTls = payload.tls_fingerprint || payload.fingerprint || "";
     if (reviewTarget instanceof HTMLElement) reviewTarget.textContent = payload.address || form.elements.address.value || "";
     if (reviewPort instanceof HTMLElement) reviewPort.textContent = String(payload.port || "443");
-    if (reviewRole instanceof HTMLElement) reviewRole.textContent = payload.appliance?.role || "unknown";
-    if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = payload.appliance?.version || "unknown";
+    const pendingTlsConfirmation = inspectedTls && !payload.appliance;
+    if (reviewRole instanceof HTMLElement) reviewRole.textContent = payload.appliance?.role || (pendingTlsConfirmation ? "After TLS confirmation" : "Not inspected yet");
+    if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = payload.appliance?.version || (pendingTlsConfirmation ? "After TLS confirmation" : "Not inspected yet");
     if (tlsFingerprint instanceof HTMLElement) tlsFingerprint.textContent = inspectedTls;
     tlsConfirmation?.classList.toggle("hidden", !inspectedTls);
     if (tlsCheckbox instanceof HTMLInputElement) {
@@ -11124,9 +11125,23 @@ function initializeVcfTrustForm() {
       dialog.close();
     }
   });
-  tlsCheckbox?.addEventListener("change", () => {
+  tlsCheckbox?.addEventListener("change", async () => {
     if (!(confirmedTls instanceof HTMLInputElement) || !(tlsCheckbox instanceof HTMLInputElement)) return;
     confirmedTls.value = tlsCheckbox.checked ? inspectedTls : "";
+    if (!tlsCheckbox.checked || !inspectedTls) {
+      if (reviewRole instanceof HTMLElement) reviewRole.textContent = inspectedTls ? "After TLS confirmation" : "Not inspected yet";
+      if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = inspectedTls ? "After TLS confirmation" : "Not inspected yet";
+      return;
+    }
+    if (reviewRole instanceof HTMLElement) reviewRole.textContent = "Inspecting…";
+    if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = "Inspecting…";
+    const ready = await inspectTarget();
+    if (!ready) {
+      confirmedTls.value = "";
+      tlsCheckbox.checked = false;
+      if (reviewRole instanceof HTMLElement) reviewRole.textContent = "After TLS confirmation";
+      if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = "After TLS confirmation";
+    }
   });
   next?.addEventListener("click", async () => {
     if (currentStep === "target") {

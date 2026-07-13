@@ -4046,7 +4046,19 @@ textarea {
 }
 
 .task-detail-facts {
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 18px;
+  row-gap: 0;
+}
+
+.task-detail-facts div {
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: start;
+}
+
+.task-detail-facts strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .task-result-details {
@@ -4077,6 +4089,12 @@ textarea {
 
 .task-log-pre {
   white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  .task-detail-facts {
+    grid-template-columns: 1fr;
+  }
 }
 
 #vcf-depot-properties-modal .confirm-modal-body {

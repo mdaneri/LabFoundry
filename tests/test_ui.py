@@ -163,6 +163,8 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert "data-task-row-menu-toggle" not in app_js
     app_css = Path("labfoundry/app/static/app.css").read_text()
     assert ".tasks-panel {\n  display: grid;\n  gap: 14px;\n  grid-template-rows: auto minmax(0, 1fr);" in app_css
+    assert ".task-detail-facts {\n  grid-template-columns: repeat(2, minmax(0, 1fr));" in app_css
+    assert ".task-detail-facts div {\n  grid-template-columns: 92px minmax(0, 1fr);" in app_css
     assert ".task-row-menu" not in app_css
 
     status_response = client.get("/tasks/status?job_id=job_taskgrid001")
@@ -9722,6 +9724,7 @@ def test_vcf_helper_renders_certificate_trust_modal(client):
     assert "SHA-256 fingerprint" in response.text
     assert "data-vcf-trust-form" in response.text
     assert "data-vcf-trust-step-nav" in response.text
+    assert 'name="api_username" value="admin@local"' in response.text
     assert 'data-vcf-trust-step="target"' in response.text
     assert 'data-vcf-trust-step="api"' in response.text
     assert 'data-vcf-trust-step="review"' in response.text
@@ -9735,6 +9738,7 @@ def test_vcf_helper_renders_certificate_trust_modal(client):
     assert 'headers: { "X-LabFoundry-VCF-Trust": "1" }' in app_js
     assert "/vcf-helper/trust-root-ca/inspect-target" in app_js
     assert "window.location.assign(payload.redirect || `/tasks?job_id=" in app_js
+    assert "After TLS confirmation" in app_js
     assert "data-vcf-trust-auth-method" not in app_js
 
     legacy = client.get("/vcf-trust", follow_redirects=False)
