@@ -54,16 +54,18 @@ COMMANDS: dict[str, set[str]] = {
     "appliance-settings": {"validate", "apply"},
     "network": {"validate", "apply"},
     "firewall": {"validate", "apply"},
-    "dnsmasq": {"validate", "apply", "reload", "leases"},
+    "dnsmasq": {"validate", "apply", "reload", "leases", "logs"},
     "ca": {"validate", "apply"},
     "kms": {"validate", "apply"},
-    "chronyd": {"validate", "apply", "status"},
+    "chronyd": {"validate", "apply", "status", "logs", "capabilities"},
+    "nginx": {"logs"},
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
     "vcf-offline-depot": {"validate", "stage-tool", "reset-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties"},
     "esxi-pxe": {"validate", "apply"},
     "public-services": {"validate", "apply"},
     "appliance-update": {"check", "apply", "restart-service"},
+    "appliance-power": {"reboot", "shutdown"},
     "wan": {"validate", "apply"},
 }
 SYSTEMD_RUN_REAL_ACTIONS = {
@@ -79,7 +81,19 @@ SYSTEMD_RUN_REAL_ACTIONS = {
     "restart-service",
 }
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
-NO_PATH_ACTIONS = {("dnsmasq", "leases"), ("dnsmasq", "reload"), ("chronyd", "status"), ("vcf-offline-depot", "generate-software-depot-id"), ("vcf-offline-depot", "reset-tool")}
+NO_PATH_ACTIONS = {
+    ("dnsmasq", "leases"),
+    ("dnsmasq", "logs"),
+    ("dnsmasq", "reload"),
+    ("chronyd", "status"),
+    ("chronyd", "logs"),
+    ("chronyd", "capabilities"),
+    ("nginx", "logs"),
+    ("appliance-power", "reboot"),
+    ("appliance-power", "shutdown"),
+    ("vcf-offline-depot", "generate-software-depot-id"),
+    ("vcf-offline-depot", "reset-tool"),
+}
 NON_PATH_ARGUMENT_ACTIONS = {("local-users", "authenticate")}
 LABFOUNDRY_SERVICE_USER = "labfoundry"
 LABFOUNDRY_STATE_DIR = Path("/var/lib/labfoundry")
@@ -744,6 +758,19 @@ def _read_dnsmasq_leases() -> int:
     return 0
 
 
+def _systemd_unit_logs(unit: str) -> int:
+    journalctl = shutil.which("journalctl")
+    if journalctl is None:
+        print("journalctl command not found", file=sys.stderr)
+        return 127
+    result = _run([journalctl, "-u", unit, "-n", "500", "--no-pager", "--output=short-iso"])
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
+    return result.returncode
+
+
 def _write_management_resolver(servers: list[str], domains: list[str]) -> None:
     if NETWORKD_MGMT_CONFIG_PATH.is_file():
         lines = NETWORKD_MGMT_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
@@ -799,6 +826,11 @@ def _configure_local_resolver() -> subprocess.CompletedProcess[str]:
 
 
 def _handle_dnsmasq(action: str, args: list[str]) -> int:
+    if action == "logs":
+        if args:
+            print("dnsmasq logs does not accept a path", file=sys.stderr)
+            return 2
+        return _systemd_unit_logs("dnsmasq.service")
     if action == "leases":
         if args:
             print("dnsmasq leases does not accept a path", file=sys.stderr)
@@ -1760,6 +1792,7 @@ def _chronyd_config_errors(path: Path) -> list[str]:
     allow_entries: list[str] = []
     nts_server_cert = ""
     nts_server_key = ""
+    nts_requested = False
     enabled = _chronyd_config_enabled(path)
 
     def add_allow_entry(value: str) -> None:
@@ -1780,6 +1813,7 @@ def _chronyd_config_errors(path: Path) -> list[str]:
                 errors.append("chronyd server lines must include a server.")
             else:
                 servers.append(parts[1])
+                nts_requested = nts_requested or "nts" in {part.lower() for part in parts[2:]}
         elif lower.startswith("bindaddress "):
             parts = line.split()
             if len(parts) < 2:
@@ -1793,9 +1827,11 @@ def _chronyd_config_errors(path: Path) -> list[str]:
         elif lower.startswith("ntsservercert "):
             parts = line.split(maxsplit=1)
             nts_server_cert = parts[1].strip() if len(parts) == 2 else ""
+            nts_requested = True
         elif lower.startswith("ntsserverkey "):
             parts = line.split(maxsplit=1)
             nts_server_key = parts[1].strip() if len(parts) == 2 else ""
+            nts_requested = True
         elif lower.startswith("# labfoundry chrony client allow list:"):
             for item in line.split(":", 1)[1].replace(",", "\n").splitlines():
                 add_allow_entry(item)
@@ -1826,6 +1862,10 @@ def _chronyd_config_errors(path: Path) -> list[str]:
         for label, value in {"certificate": nts_server_cert, "key": nts_server_key}.items():
             if value and not Path(value).is_absolute():
                 errors.append(f"chronyd NTS server {label} path must be absolute.")
+            elif value and not Path(value).is_file():
+                errors.append(f"chronyd NTS server {label} does not exist: {value}")
+    if enabled and nts_requested and not _chronyd_supports_nts():
+        errors.append("installed chronyd does not support NTS; use an NTS-capable appliance image before enabling NTS sources or server mode.")
     if allow_entries:
         if "all" in allow_entries and len(allow_entries) > 1:
             errors.append("chronyd client allow list can use 'all' only by itself.")
@@ -1837,6 +1877,18 @@ def _chronyd_config_errors(path: Path) -> list[str]:
             except ValueError:
                 errors.append(f"chronyd client allow entry {entry} must be 'all' or a valid IPv4/IPv6 CIDR.")
     return errors
+
+
+def _chronyd_supports_nts() -> bool:
+    chronyd = shutil.which("chronyd")
+    if chronyd is None:
+        return False
+    try:
+        result = _run([chronyd, "-v"], timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    features = f"{result.stdout}\n{result.stderr}"
+    return result.returncode == 0 and "+NTS" in features.split()
 
 
 def _install_chronyd_config(config_path: Path) -> None:
@@ -1899,7 +1951,46 @@ def _chronyd_status() -> int:
     return 0
 
 
+def _chronyd_logs() -> int:
+    return _systemd_unit_logs("chronyd.service")
+
+
+def _handle_nginx(action: str, args: list[str]) -> int:
+    if action != "logs":
+        print(f"unsupported nginx action: {action}", file=sys.stderr)
+        return 2
+    if args:
+        print("nginx logs does not accept a path", file=sys.stderr)
+        return 2
+    return _systemd_unit_logs("nginx.service")
+
+
+def _chronyd_capabilities() -> int:
+    chronyd = shutil.which("chronyd")
+    if chronyd is None:
+        print(json.dumps({"nts": False, "error": "chronyd command not found"}, sort_keys=True))
+        return 0
+    try:
+        result = _run([chronyd, "-v"], timeout=2)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(json.dumps({"nts": False, "error": str(exc)}, sort_keys=True))
+        return 0
+    version_text = f"{result.stdout}\n{result.stderr}".strip()
+    print(json.dumps({"nts": result.returncode == 0 and "+NTS" in version_text.split(), "version": version_text}, sort_keys=True))
+    return 0
+
+
 def _handle_chronyd(action: str, args: list[str]) -> int:
+    if action == "capabilities":
+        if args:
+            print("chronyd capabilities does not accept a path", file=sys.stderr)
+            return 2
+        return _chronyd_capabilities()
+    if action == "logs":
+        if args:
+            print("chronyd logs does not accept a path", file=sys.stderr)
+            return 2
+        return _chronyd_logs()
     if action == "status":
         if args:
             print("chronyd status does not accept a path", file=sys.stderr)
@@ -5521,6 +5612,39 @@ def _restart_labfoundry_service_after_update() -> int:
     return result.returncode
 
 
+def _schedule_appliance_power(action: str) -> int:
+    systemctl = _command_path("systemctl")
+    systemd_run = shutil.which("systemd-run")
+    if systemctl is None:
+        print("systemctl command not found", file=sys.stderr)
+        return 127
+    if systemd_run is None:
+        print("systemd-run command not found; refusing an immediate appliance power action", file=sys.stderr)
+        return 127
+    systemctl_action = "reboot" if action == "reboot" else "poweroff"
+    unit_suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    result = _run(
+        [
+            systemd_run,
+            "--quiet",
+            "--on-active=5",
+            f"--unit=labfoundry-{action}-{unit_suffix}",
+            systemctl,
+            systemctl_action,
+        ]
+    )
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _handle_appliance_power(action: str, args: list[str]) -> int:
+    if args:
+        print(f"appliance-power {action} does not accept a path", file=sys.stderr)
+        return 2
+    return _schedule_appliance_power(action)
+
+
 def _handle_appliance_update(action: str, args: list[str]) -> int:
     try:
         config_path = _validate_appliance_update_config_path(args[0])
@@ -5625,6 +5749,8 @@ def main(argv: list[str]) -> int:
         return _handle_kms(action, normalized_args)
     if group == "chronyd":
         return _handle_chronyd(action, normalized_args)
+    if group == "nginx":
+        return _handle_nginx(action, normalized_args)
     if group == "vcf-backups":
         return _handle_vcf_backups(action, normalized_args)
     if group == "vcf-offline-depot":
@@ -5633,6 +5759,8 @@ def main(argv: list[str]) -> int:
         return _handle_public_services(action, normalized_args)
     if group == "appliance-update":
         return _handle_appliance_update(action, normalized_args)
+    if group == "appliance-power":
+        return _handle_appliance_power(action, normalized_args)
 
     print("real helper execution is not implemented for this apply unit", file=sys.stderr)
     return 78

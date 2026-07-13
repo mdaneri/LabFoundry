@@ -80,7 +80,15 @@ def test_login_and_dashboard_render(client):
     app_js = Path("labfoundry/app/static/app.js").read_text()
     assert "function initializeServerTime()" in app_js
     assert 'window.setInterval(sync, 60000)' in app_js
-    assert 'title="Roles: admin">User admin</span>' in response.text
+    assert "data-account-menu" in response.text
+    assert 'aria-label="Open account menu for admin"' in response.text
+    assert "About" in response.text
+    assert "Sign out (admin)" in response.text
+    assert 'action="/appliance/power/reboot"' in response.text
+    assert 'action="/appliance/power/shutdown"' in response.text
+    assert 'data-confirm-title="Reboot LabFoundry appliance?"' in response.text
+    assert 'data-confirm-title="Shut down LabFoundry appliance?"' in response.text
+    assert 'id="about-modal"' in response.text
     assert '<span class="role-chip">admin</span>' not in response.text
     assert 'href="/logs"' in response.text
     assert 'href="/audit-log"' not in response.text
@@ -106,6 +114,103 @@ def test_login_and_dashboard_render(client):
     assert favicon.headers["content-type"].startswith("image/svg+xml")
 
 
+def test_appliance_power_action_creates_task_before_scheduling(client, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import AuditEvent, Job, JobStatus
+    from labfoundry.app.ui import SystemAdapter
+
+    observed: list[tuple[str, str]] = []
+
+    def fake_schedule(_self, action: str) -> AdapterResult:
+        with SessionLocal() as db:
+            job = db.execute(select(Job).where(Job.type == f"appliance-{action}")).scalar_one()
+            observed.append((job.status, action))
+        return AdapterResult(
+            command=["sudo", "-n", SystemAdapter.HELPER_PATH, "appliance-power", action, "--real"],
+            dry_run=False,
+            stdout="scheduled",
+        )
+
+    monkeypatch.setattr(SystemAdapter, "schedule_appliance_power", fake_schedule)
+    login(client)
+    page = client.get("/dashboard")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/appliance/power/reboot",
+        data={"csrf": csrf},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/tasks?job_id=job_")
+    assert observed == [(JobStatus.RUNNING.value, "reboot")]
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-reboot")).scalar_one()
+        payload = json.loads(job.result or "{}")
+        assert job.status == JobStatus.SUCCEEDED.value
+        assert job.progress_percent == 100
+        assert payload["action"] == "reboot"
+        assert payload["scheduled"] is True
+        assert payload["delay_seconds"] == 5
+        actions = set(db.execute(select(AuditEvent.action).where(AuditEvent.resource_id == job.id)).scalars())
+        assert actions == {"submit_appliance_reboot", "schedule_appliance_reboot"}
+
+    tasks = client.get(response.headers["location"])
+    assert tasks.status_code == 200
+    assert "Appliance Reboot" in tasks.text
+
+
+def test_account_menu_uses_defined_opaque_surface_tokens():
+    from pathlib import Path
+
+    app_css = Path("labfoundry/app/static/app.css").read_text(encoding="utf-8")
+    menu_css = app_css.split(".account-menu {", 1)[1].split(".inline-help-row", 1)[0]
+
+    assert "var(--panel)" not in menu_css
+    assert "var(--primary)" not in menu_css
+    assert menu_css.count("background: var(--surface);") == 2
+    assert "border-color: var(--accent);" in menu_css
+
+
+def test_appliance_shutdown_task_reports_helper_failure(client, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus
+    from labfoundry.app.ui import SystemAdapter
+
+    monkeypatch.setattr(
+        SystemAdapter,
+        "schedule_appliance_power",
+        lambda _self, action: AdapterResult(
+            command=["labfoundry-helper", "appliance-power", action],
+            dry_run=False,
+            stderr="systemd-run unavailable",
+            returncode=127,
+        ),
+    )
+    login(client)
+    page = client.get("/dashboard")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post("/appliance/power/shutdown", data={"csrf": csrf}, follow_redirects=False)
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-shutdown")).scalar_one()
+        payload = json.loads(job.result or "{}")
+        assert job.status == JobStatus.FAILED.value
+        assert job.error == "Appliance shutdown scheduling failed."
+        assert payload["scheduled"] is False
 def test_tasks_page_lists_redacts_logs_and_cancels(client):
     import json
     from pathlib import Path
@@ -270,8 +375,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=vcf-wizard-tls-20260713-1" in service_worker.text
-    assert "/static/app.js?v=vcf-wizard-tls-20260713-1" in service_worker.text
+    assert "/static/app.css?v=account-power-menu-20260713-3" in service_worker.text
+    assert "/static/app.js?v=account-power-menu-20260713-3" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -280,7 +385,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-wizard-tls-20260713-1" in offline.text
+    assert "/static/app.css?v=account-power-menu-20260713-3" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -296,8 +401,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=vcf-wizard-tls-20260713-1" in page.text
-    assert "/static/app.js?v=vcf-wizard-tls-20260713-1" in page.text
+    assert "/static/app.css?v=account-power-menu-20260713-3" in page.text
+    assert "/static/app.js?v=account-power-menu-20260713-3" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -848,6 +953,11 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert 'data-config-preview-open' in response.text
     assert 'data-appliance-settings-preview' in response.text
     assert 'class="validation-preview-source language-json"' in response.text
+    assert 'class="settings-list validation-settings-list"' in response.text
+    app_css = client.get("/static/app.css")
+    assert ".validation-settings-list div" in app_css.text
+    assert "grid-template-columns: minmax(0, 130px) minmax(0, 1fr);" in app_css.text
+    assert "overflow-wrap: anywhere;" in app_css.text
 
 
 def test_validation_rails_use_modal_config_previews(client):
@@ -1117,15 +1227,47 @@ def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(c
         assert "ntp_servers" not in status["config_preview"]
 
 
-def test_chrony_page_autosave_updates_desired_state_and_preview(client):
+def test_chrony_page_autosave_updates_desired_state_and_preview(client, monkeypatch):
     import json
 
     from sqlalchemy import select
 
+    from labfoundry.app.adapters.system import AdapterResult
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ChronySettings
+    from labfoundry.app.models import CaCertificate, CaSettings, ChronySettings
 
+    supported = AdapterResult(
+        command=["labfoundry-helper", "chronyd", "capabilities"],
+        dry_run=False,
+        stdout=(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-13T18:00:00+00:00",
+                    "helper": "labfoundry-helper",
+                    "group": "chronyd",
+                    "action": "capabilities",
+                    "args": [],
+                    "dry_run": False,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+            + json.dumps({"nts": True, "version": "chronyd version 4.6 (+NTS)"}, sort_keys=True)
+            + "\n"
+        ),
+    )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_chronyd_capabilities",
+        lambda _self: supported,
+    )
     login(client)
+    with SessionLocal() as db:
+        ca_settings = db.execute(select(CaSettings)).scalar_one_or_none()
+        if ca_settings is None:
+            ca_settings = CaSettings()
+            db.add(ca_settings)
+        ca_settings.enabled = True
+        db.commit()
     page = client.get("/chrony")
     assert page.status_code == 200
     assert "Chrony Settings" in page.text
@@ -1207,6 +1349,8 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert 'tabulator-field="source"' in app_css.text
+    assert ".side-stack .help-icon::after" in app_css.text
+    assert "right: 0;" in app_css.text
 
     health = client.get("/chrony/source-health")
     assert health.status_code == 200
@@ -1216,10 +1360,105 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client):
 
     with SessionLocal() as db:
         settings = db.execute(select(ChronySettings)).scalar_one()
+        managed_certificate = db.execute(select(CaCertificate).where(CaCertificate.managed_owner == "chrony:nts")).scalar_one()
         assert settings.enabled is True
         assert settings.listen_interface == "eth2"
         assert settings.listen_address == "192.168.50.1"
         assert settings.nts_server_cert_path == "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt"
+        assert managed_certificate.status == "issued"
+        assert managed_certificate.cert_path == settings.nts_server_cert_path
+
+
+def test_chrony_disables_and_rejects_nts_when_runtime_does_not_support_it(client, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import AuditEvent, ChronySettings
+    from labfoundry.app.services.chrony import chrony_upstream_sources, dump_chrony_upstream_sources
+
+    unsupported = AdapterResult(
+        command=["labfoundry-helper", "chronyd", "capabilities"],
+        dry_run=False,
+        stdout=json.dumps({"nts": False, "version": "chronyd version 4.3 (-NTS)"}),
+    )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_chronyd_capabilities",
+        lambda _self: unsupported,
+    )
+    login(client)
+    with SessionLocal() as db:
+        settings = db.execute(select(ChronySettings)).scalar_one()
+        settings.nts_server_enabled = True
+        settings.upstream_sources_json = dump_chrony_upstream_sources(
+            [
+                {
+                    "id": "cloudflare-nts",
+                    "source": "time.cloudflare.com",
+                    "enabled": True,
+                    "use_nts": True,
+                    "description": "Cloudflare public NTS",
+                }
+            ]
+        )
+        db.commit()
+
+    page = client.get("/chrony")
+
+    assert page.status_code == 200
+    assert 'data-chrony-nts-supported="false"' in page.text
+    assert "Installed chronyd has no NTS support." in page.text
+    assert "NTS unavailable" in page.text
+    assert "NTS server (disabled)" in page.text
+    assert 'class="switch-field disabled-field" aria-disabled="true"' in page.text
+    assert 'name="nts_server_enabled" disabled' in page.text
+    assert 'name="upstream_use_nts" value="0" disabled' in page.text
+    assert 'readonly disabled aria-label="NTS-KE port"' in page.text
+
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/chrony/settings",
+        data={
+            "enabled": "on",
+            "hostname": "ntp.labfoundry.internal",
+            "listen_interfaces_present": "1",
+            "listen_addresses_present": "1",
+            "listen_interfaces": ["eth2"],
+            "upstream_sources_json": json.dumps(
+                [
+                    {
+                        "source": "time.cloudflare.com",
+                        "enabled": True,
+                        "use_nts": True,
+                    }
+                ]
+            ),
+            "allow_clients": "any",
+            "port": "123",
+            "nts_server_enabled": "on",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["nts_supported"] is False
+    assert payload["nts_server_enabled"] is False
+    assert payload["upstream_sources"][0]["use_nts"] is False
+    assert "ntsdumpdir" not in payload["config_preview"]
+    assert "server time.cloudflare.com iburst nts" not in payload["config_preview"]
+
+    with SessionLocal() as db:
+        settings = db.execute(select(ChronySettings)).scalar_one()
+        assert settings.nts_server_enabled is False
+        assert all(source["use_nts"] is False for source in chrony_upstream_sources(settings))
+        audit = db.execute(
+            select(AuditEvent).where(AuditEvent.action == "disable_unsupported_chrony_nts")
+        ).scalar_one()
+        assert audit.actor == "system"
 
 
 def test_chrony_validation_rejects_enabled_service_without_bind_or_upstreams(client):
@@ -3489,8 +3728,9 @@ def test_audit_log_renders(client):
     assert "ui_login" in logs.text
 
 
-def test_logs_page_renders_fixed_source_tabs_and_redacts_vcfdt_log(client, tmp_path, monkeypatch):
-    vcfdt_log = tmp_path / "vdt.log"
+def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client, tmp_path, monkeypatch):
+    from labfoundry.app.adapters.system import AdapterResult
+
     app_log = tmp_path / "labfoundry.log"
     kms_log = tmp_path / "kms.log"
     jwt_segment = (
@@ -3498,14 +3738,41 @@ def test_logs_page_renders_fixed_source_tabs_and_redacts_vcfdt_log(client, tmp_p
         "eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIiwiaWF0IjoxNzgyNDQ1MzcxfQ."
         "signatureSegmentLongEnoughToLookLikeJwt"
     )
-    vcfdt_log.write_text(
-        f"download started\ntoken=secret-download-token\nGET https://dl.broadcom.com/{jwt_segment}/PROD/file.json\ndownload complete\n",
+    app_log.write_text(
+        "\n".join([*(f"app line {index}" for index in range(120)), "token=secret-download-token", f"GET https://dl.broadcom.com/{jwt_segment}/PROD/file.json"]),
         encoding="utf-8",
     )
-    app_log.write_text("app ready\n", encoding="utf-8")
-    monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_VDT_LOG_PATH", vcfdt_log)
     monkeypatch.setattr("labfoundry.app.ui.LABFOUNDRY_APP_LOG_PATH", app_log)
     monkeypatch.setattr("labfoundry.app.ui.KMS_SERVER_LOG_PATH", kms_log)
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_dnsmasq_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "dnsmasq", "logs"],
+            dry_run=False,
+            stdout=(
+                "dnsmasq[10]: query[A] example.test from 192.0.2.10\n"
+                "dnsmasq-dhcp[10]: DHCPACK(eth1) 192.0.2.20 client\n"
+                "dnsmasq-tftp[10]: sent /var/lib/labfoundry/pxe/tftp/snponly.efi to 192.0.2.20\n"
+                "password=do-not-render\n"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_chronyd_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "chronyd", "logs"],
+            dry_run=False,
+            stdout="chronyd ready\nprivate_key=do-not-render\n",
+        ),
+    )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_nginx_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "nginx", "logs"],
+            dry_run=False,
+            stdout="nginx[20]: management request completed\nrequest_token=do-not-render\n",
+        ),
+    )
 
     login(client)
     response = client.get("/logs")
@@ -3513,18 +3780,75 @@ def test_logs_page_renders_fixed_source_tabs_and_redacts_vcfdt_log(client, tmp_p
     assert response.status_code == 200
     assert "Logs" in response.text
     assert 'data-tab-storage-key="labfoundry:logs:active-tab"' in response.text
-    assert "VCFDT" in response.text
+    assert "VCFDT" not in response.text
     assert "LabFoundry App" in response.text
+    assert "DNS" in response.text
+    assert "DHCP" in response.text
+    assert "TFTP" in response.text
     assert "KMS" in response.text
+    assert "Chrony" in response.text
+    assert "Nginx" in response.text
     assert "Audit Events" in response.text
     assert "logs-audit-panel" in response.text
-    assert str(vcfdt_log) in response.text
-    assert "download started" in response.text
+    assert 'data-log-source-tab="dnsmasq-dns"' in response.text
+    assert 'title="dnsmasq.service journal: DNS and service messages"' in response.text
+    assert 'data-log-source-tab="dnsmasq-dhcp"' in response.text
+    assert 'title="dnsmasq.service journal: DHCP messages"' in response.text
+    assert 'data-log-source-tab="dnsmasq-tftp"' in response.text
+    assert 'title="dnsmasq.service journal: TFTP messages"' in response.text
+    assert 'data-log-source-tab="nginx"' in response.text
+    assert 'title="systemd journal: nginx.service"' in response.text
+    assert 'data-log-source-tab="kms"' in response.text
+    kms_tab = response.text.split('data-log-source-tab="kms"', 1)[1].split("</button>", 1)[0]
+    assert 'aria-disabled="true"' in kms_tab
+    assert "disabled" in kms_tab
+    assert "data-log-availability" not in response.text
+    assert 'data-log-lines aria-label="Log lines"' in response.text
+    assert '<option value="100" selected>100</option>' in response.text
+    assert '<option value="200" >200</option>' in response.text
+    assert '<option value="500" >500</option>' in response.text
+    assert "Auto-refresh 5s" in response.text
+    toolbar = response.text.split('<div class="logs-toolbar">', 1)[1].split("</div>", 1)[0]
+    assert toolbar.index("data-log-refresh-status") < toolbar.index("data-log-lines")
+    assert "logs-refresh-status" in toolbar
     assert "token= [redacted]" in response.text
     assert "https://dl.broadcom.com/[redacted-token]/PROD/file.json" in response.text
     assert "secret-download-token" not in response.text
     assert jwt_segment not in response.text
+    assert "chronyd ready" in response.text
+    assert "query[A] example.test" in response.text
+    assert "DHCPACK(eth1)" in response.text
+    assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in response.text
+    assert "private_key= [redacted]" in response.text
+    assert "management request completed" in response.text
+    assert "request_token= [redacted]" in response.text
+    assert "password= [redacted]" in response.text
+    assert "do-not-render" not in response.text
     assert "Log file has not been written yet." in response.text
+
+    data_response = client.get("/logs/data?lines=500")
+    assert data_response.status_code == 200
+    payload = data_response.json()
+    assert payload["line_count"] == 500
+    assert [source["id"] for source in payload["sources"]] == ["app", "dnsmasq-dns", "dnsmasq-dhcp", "dnsmasq-tftp", "chrony", "nginx", "kms"]
+    assert "query[A] example.test" in "\n".join(payload["sources"][1]["lines"])
+    assert "DHCPACK(eth1)" not in "\n".join(payload["sources"][1]["lines"])
+    assert "DHCPACK(eth1)" in "\n".join(payload["sources"][2]["lines"])
+    assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in "\n".join(payload["sources"][3]["lines"])
+    assert len(payload["sources"][0]["lines"]) == 122
+    assert "secret-download-token" not in "\n".join(payload["sources"][0]["lines"])
+
+    invalid_response = client.get("/logs/data?lines=240")
+    assert invalid_response.status_code == 200
+    assert invalid_response.json()["line_count"] == 100
+
+    js = client.get("/static/app.js")
+    assert "function initializeLogsPage" in js.text
+    assert 'window.setInterval(refresh, 5000)' in js.text
+    assert 'labfoundry:logs:line-count' in js.text
+    assert "refreshQueued = true" in js.text
+    assert "tabButton.disabled = !source.available" in js.text
+    assert "activeButton.disabled" in js.text
 
 
 def test_configure_logging_writes_main_app_log(tmp_path, monkeypatch):
@@ -3596,18 +3920,41 @@ def test_record_audit_writes_redacted_operational_log(client, tmp_path, monkeypa
 def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
     from pathlib import PurePosixPath
 
-    monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_VDT_LOG_PATH", PurePosixPath("/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log"))
+    from labfoundry.app.adapters.system import AdapterResult
+
     monkeypatch.setattr("labfoundry.app.ui.LABFOUNDRY_APP_LOG_PATH", PurePosixPath("/var/log/labfoundry/labfoundry.log"))
     monkeypatch.setattr("labfoundry.app.ui.KMS_SERVER_LOG_PATH", PurePosixPath("/var/log/labfoundry/kms/server.log"))
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_dnsmasq_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "dnsmasq", "logs"], dry_run=True, stdout="No host dnsmasq journal is read in development mode."
+        ),
+    )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_chronyd_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "chronyd", "logs"], dry_run=True, stdout="No host Chrony journal is read in development mode."
+        ),
+    )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_nginx_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "nginx", "logs"], dry_run=True, stdout="No host Nginx journal is read in development mode."
+        ),
+    )
 
     login(client)
     response = client.get("/logs")
 
     assert response.status_code == 200
-    assert "VCFDT" in response.text
+    assert "VCFDT" not in response.text
     assert "LabFoundry App" in response.text
+    assert "DNS" in response.text
+    assert "DHCP" in response.text
+    assert "TFTP" in response.text
     assert "Audit Events" in response.text
-    assert "/var/lib/labfoundry/vcfDownloadTool/active-tool/log/vdt.log" in response.text
+    assert "Chrony" in response.text
+    assert "Nginx" in response.text
     assert "Log file has not been written yet." in response.text
 
 
@@ -8095,7 +8442,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "vcf-wizard-tls-20260713-1" in page.text
+    assert "account-power-menu-20260713-3" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

@@ -142,7 +142,7 @@
           Local DNS is disabled. External DNS servers are required for appliance resolver apply.
         {% endif %}
       </div>
-      <div class="settings-list">
+      <div class="settings-list validation-settings-list">
         <div><span>Management interface</span><strong data-appliance-settings-management>{{ management_interface.name or "not found" }}{% if management_interface.ip %} / {{ management_interface.ip }}{% endif %}</strong></div>
         <div><span>Management UI/API</span><strong>{{ "HTTPS" if appliance_settings.management_https_enabled else "HTTP" }}{% if appliance_settings.management_https_enabled and management_https_cert_path %} / {{ management_https_cert_path }}{% endif %}</strong></div>
         <div><span>Root SSH</span><strong data-appliance-settings-root-ssh>{{ "enabled" if appliance_settings.root_ssh_enabled else "disabled" }}</strong></div>
