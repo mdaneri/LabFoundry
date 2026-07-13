@@ -40,6 +40,7 @@ def init_db() -> None:
     _ensure_sqlite_dns_security_columns()
     _ensure_sqlite_ca_columns()
     _ensure_sqlite_vcf_depot_columns()
+    _ensure_sqlite_vcf_trust_columns()
     _ensure_sqlite_esxi_pxe_columns()
 
 
@@ -295,6 +296,110 @@ def _ensure_sqlite_vcf_depot_columns() -> None:
             for name, definition in depot_columns.items():
                 if name not in depot_existing:
                     connection.execute(text(f"ALTER TABLE vcf_offline_depot_settings ADD COLUMN {name} {definition}"))
+
+
+def _ensure_sqlite_vcf_trust_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "vcf_trust_targets" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("vcf_trust_targets")}
+    columns = {
+        "api_port": "INTEGER DEFAULT 443",
+        "tls_fingerprint": "VARCHAR(160) DEFAULT ''",
+    }
+    with engine.begin() as connection:
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE vcf_trust_targets ADD COLUMN {name} {definition}"))
+        indexes = connection.execute(text("PRAGMA index_list('vcf_trust_targets')")).fetchall()
+        has_legacy_unique = False
+        has_api_unique = False
+        for index in indexes:
+            index_name = index[1]
+            is_unique = bool(index[2])
+            if not is_unique:
+                continue
+            index_columns = [row[2] for row in connection.execute(text(f"PRAGMA index_info('{index_name}')")).fetchall()]
+            if index_columns == ["address", "ssh_port"]:
+                has_legacy_unique = True
+            if index_columns == ["address", "api_port"]:
+                has_api_unique = True
+        if has_legacy_unique and not has_api_unique:
+            connection.execute(text("ALTER TABLE vcf_trust_targets RENAME TO vcf_trust_targets_legacy_unique"))
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE vcf_trust_targets (
+                        id INTEGER NOT NULL,
+                        address VARCHAR(240) NOT NULL,
+                        ssh_port INTEGER NOT NULL,
+                        api_port INTEGER NOT NULL,
+                        appliance_role VARCHAR(40) NOT NULL,
+                        appliance_version VARCHAR(80) NOT NULL,
+                        ssh_host_key_fingerprint VARCHAR(160) NOT NULL,
+                        tls_fingerprint VARCHAR(160) NOT NULL,
+                        last_ca_fingerprint VARCHAR(128) NOT NULL,
+                        last_result VARCHAR(80) NOT NULL,
+                        last_job_id VARCHAR(40) NOT NULL,
+                        last_attempted_at DATETIME,
+                        last_succeeded_at DATETIME,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        PRIMARY KEY (id),
+                        CONSTRAINT uq_vcf_trust_target_address_api_port UNIQUE (address, api_port)
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO vcf_trust_targets (
+                        id,
+                        address,
+                        ssh_port,
+                        api_port,
+                        appliance_role,
+                        appliance_version,
+                        ssh_host_key_fingerprint,
+                        tls_fingerprint,
+                        last_ca_fingerprint,
+                        last_result,
+                        last_job_id,
+                        last_attempted_at,
+                        last_succeeded_at,
+                        created_at,
+                        updated_at
+                    )
+                    SELECT
+                        id,
+                        address,
+                        COALESCE(ssh_port, 22),
+                        COALESCE(api_port, 443),
+                        COALESCE(appliance_role, ''),
+                        COALESCE(appliance_version, ''),
+                        COALESCE(ssh_host_key_fingerprint, ''),
+                        COALESCE(tls_fingerprint, ''),
+                        COALESCE(last_ca_fingerprint, ''),
+                        COALESCE(last_result, ''),
+                        COALESCE(last_job_id, ''),
+                        last_attempted_at,
+                        last_succeeded_at,
+                        COALESCE(created_at, CURRENT_TIMESTAMP),
+                        COALESCE(updated_at, CURRENT_TIMESTAMP)
+                    FROM vcf_trust_targets_legacy_unique
+                    WHERE id IN (
+                        SELECT MIN(id)
+                        FROM vcf_trust_targets_legacy_unique
+                        GROUP BY address, COALESCE(api_port, 443)
+                    )
+                    """
+                )
+            )
+            connection.execute(text("DROP TABLE vcf_trust_targets_legacy_unique"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vcf_trust_targets_address ON vcf_trust_targets (address)"))
 
 
 def _ensure_sqlite_esxi_pxe_columns() -> None:

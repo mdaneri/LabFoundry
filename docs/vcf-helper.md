@@ -3,14 +3,44 @@
 VCF Helper prepares deployment DNS desired state. It is available under `VCF
 Workflows` at `/vcf-helper`.
 
-The helper creates DNS records in LabFoundry. It does not reload `dnsmasq` or
-change the appliance directly. Review and submit the changed `DNS/DHCP
+The helper creates DNS records in LabFoundry, deploys SDDC Manager OVAs, and
+configures VCF 9 appliances to use the applied local offline depot. DNS does
+not reload `dnsmasq` or change the appliance directly. Review and submit the changed `DNS/DHCP
 (dnsmasq)` unit through the global `/appliance-apply` workflow after generation
 or deletion.
 
 The `VCF Certificate Trust` button opens the separate remote certificate task
 in a modal without mixing CA details into the main DNS helper workspace. See
 [VCF Certificate Trust](vcf-trust.md).
+
+## Deploy SDDC Manager
+
+`Deploy SDDC Manager` becomes available when a valid OVA is present beneath
+`/mnt/labfoundry-vcf-offline-depot/PROD/COMP/SDDC_MANAGER_VCF`. LabFoundry
+validates the OVA manifest, reads its user-configurable OVF properties, confirms
+the vCenter or ESXi TLS fingerprint, discovers destination inventory, and
+streams the disks through a vSphere NFC lease. It refuses duplicate VM names,
+powers on the VM, and waits up to 90 minutes for the VCF API.
+
+The form can optionally add managed DNS desired state, deploy LabFoundry CA
+trust, and configure the local offline depot. Trust uses the VCF API only.
+New-VM trust does not require a snapshot because redeployment is the recovery
+path. All vSphere, OVF, VCF API, and depot passwords remain transient.
+
+## Configure VCF Offline Depot
+
+The standalone helper is available only when the local depot is enabled,
+applied, CA-backed, has a generated software depot ID, and has a selected HTTP
+user. Its wizard confirms the target HTTPS fingerprint, detects VCF Installer
+or SDDC Manager 9.x, collects the one-time depot HTTP password, and reads the
+current sanitized depot configuration. Replacing a different depot requires
+explicit confirmation.
+
+LabFoundry calls `PUT /v1/system/settings/depot`, triggers metadata refresh with
+`PATCH /v1/system/settings/depot/depot-sync-info`, and polls the matching GET
+endpoint for up to 60 minutes. It asks for the local depot user's password for
+each run and never stores it. Certificate trust is not implicit; configure it
+separately when the target does not yet trust the LabFoundry CA.
 
 ## Generate FQDNs
 
@@ -101,6 +131,12 @@ matches the expected component description.
 - `POST /vcf-helper/generated-fqdns` validates and creates missing records.
 - `POST /vcf-helper/generated-fqdns/delete` deletes matching helper-owned
   records.
+- `POST /vcf-helper/sddc-manager/inventory` confirms TLS and discovers vSphere inventory.
+- `POST /vcf-helper/sddc-manager/deploy` queues an OVA deployment.
+- `GET /vcf-helper/sddc-manager/tasks/{job_id}` reports deployment progress.
+- `POST /vcf-helper/offline-depot/inspect-target` previews remote depot state.
+- `POST /vcf-helper/offline-depot/configure` queues remote depot configuration.
+- `GET /vcf-helper/offline-depot/tasks/{job_id}` reports configuration and sync progress.
 
 Fetch responses report created, skipped, deleted, and preserved rows with their
 assigned addresses, plus validation or allocation errors. All mutations use the

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import compileall
 import importlib
+import importlib.metadata
 import os
 import platform
 import sys
@@ -23,6 +24,8 @@ DEPENDENCY_IMPORTS = [
     "pydantic_settings",
     "sqlalchemy",
     "uvicorn",
+    "pyVmomi",
+    "com.vmware.vcenter",
 ]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +48,11 @@ def main() -> int:
         for module_name in DEPENDENCY_IMPORTS:
             importlib.import_module(module_name)
             print(f"import ok: {module_name}")
+        vcf_sdk_version = importlib.metadata.version("vcf-sdk")
+        if vcf_sdk_version != "9.1.0.0":
+            print(f"VCF SDK 9.1.0.0 is required; found {vcf_sdk_version}", file=sys.stderr)
+            return 1
+        print(f"vcf-sdk={vcf_sdk_version}")
 
         from labfoundry.app.config import get_settings
 

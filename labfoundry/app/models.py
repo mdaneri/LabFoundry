@@ -605,14 +605,16 @@ class VcfBackupSettings(Base):
 
 class VcfTrustTarget(Base):
     __tablename__ = "vcf_trust_targets"
-    __table_args__ = (UniqueConstraint("address", "ssh_port", name="uq_vcf_trust_target_address_port"),)
+    __table_args__ = (UniqueConstraint("address", "api_port", name="uq_vcf_trust_target_address_api_port"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     address: Mapped[str] = mapped_column(String(240), index=True)
     ssh_port: Mapped[int] = mapped_column(Integer, default=22)
+    api_port: Mapped[int] = mapped_column(Integer, default=443)
     appliance_role: Mapped[str] = mapped_column(String(40), default="")
     appliance_version: Mapped[str] = mapped_column(String(80), default="")
     ssh_host_key_fingerprint: Mapped[str] = mapped_column(String(160), default="")
+    tls_fingerprint: Mapped[str] = mapped_column(String(160), default="")
     last_ca_fingerprint: Mapped[str] = mapped_column(String(128), default="")
     last_result: Mapped[str] = mapped_column(String(80), default="")
     last_job_id: Mapped[str] = mapped_column(String(40), default="")

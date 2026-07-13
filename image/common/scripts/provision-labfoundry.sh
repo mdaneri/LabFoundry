@@ -20,6 +20,8 @@ LABFOUNDRY_GUEST_PLATFORM="${LABFOUNDRY_GUEST_PLATFORM:-hyperv}"
 LABFOUNDRY_IMAGE_ASSET_DIR="${LABFOUNDRY_IMAGE_ASSET_DIR:-image/hyperv}"
 LABFOUNDRY_PIP_GLOBAL_INDEX="${LABFOUNDRY_PIP_GLOBAL_INDEX:-}"
 LABFOUNDRY_PIP_GLOBAL_INDEX_URL="${LABFOUNDRY_PIP_GLOBAL_INDEX_URL:-}"
+LABFOUNDRY_POWERCLI_MODULE_SOURCE="${LABFOUNDRY_POWERCLI_MODULE_SOURCE:-}"
+LABFOUNDRY_POWERCLI_VERSION="${LABFOUNDRY_POWERCLI_VERSION:-9.1.0.25380678}"
 BOOTSTRAP_USERNAME="${LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME:-admin}"
 BOOTSTRAP_PASSWORD="${LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD:-}"
 BOOTSTRAP_SHELL="${LABFOUNDRY_BOOTSTRAP_ADMIN_SHELL:-/usr/bin/pwsh}"
@@ -80,6 +82,22 @@ case "$LABFOUNDRY_GUEST_PLATFORM" in
     ;;
 esac
 tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony ipxe syslinux nginx powershell
+
+log_step "installing VCF PowerCLI $LABFOUNDRY_POWERCLI_VERSION"
+export LABFOUNDRY_POWERCLI_VERSION
+if [ -n "$LABFOUNDRY_POWERCLI_MODULE_SOURCE" ]; then
+  if [ ! -d "$LABFOUNDRY_POWERCLI_MODULE_SOURCE" ]; then
+    echo "LABFOUNDRY_POWERCLI_MODULE_SOURCE must be a directory containing an offline PowerShell module bundle" >&2
+    exit 2
+  fi
+  install -d -o root -g root -m 0755 /usr/local/share/powershell/Modules
+  cp -R "$LABFOUNDRY_POWERCLI_MODULE_SOURCE"/. /usr/local/share/powershell/Modules/
+else
+  pwsh -NoLogo -NoProfile -NonInteractive -Command \
+    '$ErrorActionPreference = "Stop"; Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; try { Install-Module -Name VCF.PowerCLI -RequiredVersion $env:LABFOUNDRY_POWERCLI_VERSION -Repository PSGallery -Scope AllUsers -Force -AllowClobber -AcceptLicense -Confirm:$false } finally { Set-PSRepository -Name PSGallery -InstallationPolicy Untrusted }'
+fi
+pwsh -NoLogo -NoProfile -NonInteractive -Command \
+  '$ErrorActionPreference = "Stop"; $module = Get-Module -Name VCF.PowerCLI -ListAvailable | Where-Object Version -eq $env:LABFOUNDRY_POWERCLI_VERSION | Select-Object -First 1; if (-not $module) { throw "VCF.PowerCLI $env:LABFOUNDRY_POWERCLI_VERSION is not installed" }; Import-Module $module.Path -Force; if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { throw "Connect-VIServer is not available" }; Write-Host "VCF.PowerCLI $($module.Version) verified"'
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
@@ -148,6 +166,8 @@ build_time_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 photon_release=$(cat /etc/photon-release 2>/dev/null || true)
 kernel=$(uname -r)
 python=$(python3 --version 2>&1)
+powershell=$(pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()')
+powercli=$(pwsh -NoLogo -NoProfile -NonInteractive -Command '(Get-Module -Name VCF.PowerCLI -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1).Version.ToString()')
 package_update=tdnf -y update completed during image provisioning
 final_mgmt_address=$LABFOUNDRY_MGMT_ADDRESS
 final_mgmt_gateway=$LABFOUNDRY_MGMT_GATEWAY
@@ -194,6 +214,8 @@ fi
 python3 -m venv "$LABFOUNDRY_HOME/.venv"
 write_pip_config "$LABFOUNDRY_HOME/.venv/pip.conf"
 "$LABFOUNDRY_HOME/.venv/bin/python" -m pip install "$LABFOUNDRY_HOME"
+"$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/scripts/check_photon_compatibility.py"
+printf 'vcf_sdk=%s\n' "$("$LABFOUNDRY_HOME/.venv/bin/python" -c 'from importlib.metadata import version; print(version("vcf-sdk"))')" >>/etc/labfoundry/build-info
 
 SECRET_KEY="$("$LABFOUNDRY_HOME/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(48))')"
 SECRETS_KEY="$("$LABFOUNDRY_HOME/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(48))')"

@@ -47,6 +47,10 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "tdnf -y install" in script and "nginx" in script
     assert "tdnf -y install" in script and "chrony" in script
     assert "tdnf -y install" in script and "powershell" in script
+    assert "VCF.PowerCLI" in script
+    assert "9.1.0.25380678" in script
+    assert "Connect-VIServer" in script
+    assert "LABFOUNDRY_POWERCLI_MODULE_SOURCE" in script
     assert "tdnf -y install" in script and "ipxe" in script
     assert "tdnf -y install" in script and "syslinux" in script
     assert "IPXE_BOOTLOADER_SOURCE_DIR=\"$LABFOUNDRY_HOME/third_party/ipxe/bootloaders\"" in script
@@ -548,6 +552,25 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "root certificate URL" in docs
     assert "ssh admin@<appliance-ip>" in docs
     assert "adds a second `vmxnet3` adapter on `-ServiceVmnetName`" in docs
+
+
+def test_vmware_deploy_wheel_supports_password_backed_noninteractive_deploy():
+    script = Path("scripts/windows/vmware/deploy-wheel.ps1").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "[string]$SshPassword = $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD" in script
+    assert "function Invoke-PasswordBackedDeploy" in script
+    assert "import paramiko" in script
+    assert "LABFOUNDRY_DEPLOY_SSH_PASSWORD" in script
+    assert "client.set_missing_host_key_policy(paramiko.AutoAddPolicy())" in script
+    assert "sudo -S -p '' sh" in script
+    assert "sanitized(stdout_text, password)" in script
+    assert "if (-not $SshPassword) {" in script
+    assert "Test-RequiredCommand -Name 'scp'" in script
+    assert "Invoke-PasswordBackedDeploy `" in script
+    assert "-SshPassword '<admin-password>'" in readme
+    assert "Without a password, it preserves the original `scp`/`ssh` key or agent" in readme
+    assert "workflow." in readme
 
 
 def test_lifecycle_hyperv_script_does_not_cleanup_without_explicit_flag():

@@ -175,7 +175,11 @@ def test_host_state_checks_verify_vcf_trust_runtime_dependencies(monkeypatch):
     lifecycle.host_state_checks(args)
 
     assert "/opt/labfoundry/.venv/bin/python" in captured["vcf_trust_dependencies"]
-    assert "import httpx, paramiko" in captured["vcf_trust_dependencies"]
+    assert "import httpx" in captured["vcf_trust_dependencies"]
+    assert "paramiko" not in captured["vcf_trust_dependencies"]
+    assert 'version("vcf-sdk") == "9.1.0.0"' in captured["vcf_automation_tooling"]
+    assert "VCF.PowerCLI" in captured["vcf_automation_tooling"]
+    assert "Connect-VIServer" in captured["vcf_automation_tooling"]
 
 
 def test_esxi_pxe_payload_uses_dhcp_lifecycle_host():

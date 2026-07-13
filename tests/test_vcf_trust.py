@@ -51,7 +51,6 @@ def test_root_ca_info_rejects_disabled_ca():
 
 def test_execute_vcf_trust_is_idempotent_without_restart(monkeypatch):
     _settings, ca = root_ca()
-    restarted: list[bool] = []
 
     class FakeApi:
         def __init__(self, *_args, **_kwargs):
@@ -70,24 +69,21 @@ def test_execute_vcf_trust_is_idempotent_without_restart(monkeypatch):
             return [{"certificate": ca.pem}]
 
     monkeypatch.setattr(vcf_trust, "VcfApiClient", FakeApi)
-    monkeypatch.setattr(vcf_trust, "restart_vcf_services", lambda *_args, **_kwargs: restarted.append(True))
 
     result = vcf_trust.execute_vcf_trust(
         address="vcf.example.test",
-        ssh_port=22,
-        expected_host_key="SHA256:test",
-        credentials=vcf_trust.VcfTrustCredentials("admin", "api-secret", root_password="root-secret"),
+        port=443,
+        expected_tls_fingerprint="AA:BB",
+        credentials=vcf_trust.VcfTrustCredentials("admin", "api-secret"),
         ca=ca,
     )
 
     assert result["outcome"] == "no-op"
-    assert restarted == []
 
 
-def test_execute_vcf_trust_imports_restarts_and_verifies(monkeypatch):
+def test_execute_vcf_trust_imports_and_verifies_sddc_manager_without_ssh(monkeypatch):
     _settings, ca = root_ca()
     certificates: list[dict[str, str]] = []
-    restarted: list[bool] = []
 
     class FakeApi:
         def __init__(self, *_args, **_kwargs):
@@ -109,31 +105,27 @@ def test_execute_vcf_trust_imports_restarts_and_verifies(monkeypatch):
             certificates.append({"certificate": pem})
 
     monkeypatch.setattr(vcf_trust, "VcfApiClient", FakeApi)
-    monkeypatch.setattr(vcf_trust, "restart_vcf_services", lambda *_args, **_kwargs: restarted.append(True))
 
     result = vcf_trust.execute_vcf_trust(
         address="vcf.example.test",
-        ssh_port=22,
-        expected_host_key="SHA256:test",
-        credentials=vcf_trust.VcfTrustCredentials("admin", "api-secret", root_password="root-secret"),
+        port=443,
+        expected_tls_fingerprint="AA:BB",
+        credentials=vcf_trust.VcfTrustCredentials("admin", "api-secret"),
         ca=ca,
-        recovery_delay=0,
     )
 
     assert result == {
         "role": "SddcManager",
         "version": "9.0.1.0",
         "outcome": "installed",
-        "restart": "completed",
+        "restart": "not-required",
         "verified": True,
     }
-    assert restarted == [True]
 
 
 def test_execute_vcf_trust_installer_import_does_not_restart(monkeypatch):
     _settings, ca = root_ca()
     certificates: list[dict[str, str]] = []
-    restarted: list[bool] = []
 
     class FakeApi:
         def __init__(self, *_args, **_kwargs):
@@ -155,23 +147,21 @@ def test_execute_vcf_trust_installer_import_does_not_restart(monkeypatch):
             certificates.append({"certificate": pem})
 
     monkeypatch.setattr(vcf_trust, "VcfApiClient", FakeApi)
-    monkeypatch.setattr(vcf_trust, "restart_vcf_services", lambda *_args, **_kwargs: restarted.append(True))
 
     result = vcf_trust.execute_vcf_trust(
         address="installer.example.test",
-        ssh_port=22,
-        expected_host_key="SHA256:test",
-        credentials=vcf_trust.VcfTrustCredentials("admin", "secret", root_password="root"),
+        port=443,
+        expected_tls_fingerprint="AA:BB",
+        credentials=vcf_trust.VcfTrustCredentials("admin", "secret"),
         ca=ca,
     )
 
-    assert result["restart"] == "not-applicable"
-    assert restarted == []
+    assert result["restart"] == "not-required"
 
 
 def test_sanitized_result_contains_no_credentials():
     _settings, ca = root_ca()
-    result = vcf_trust.sanitized_result(address="10.0.0.5", ssh_port=22, ca=ca, state="queued")
+    result = vcf_trust.sanitized_result(address="10.0.0.5", port=443, ca=ca, state="queued")
 
     assert "password" not in result.lower()
     assert "private" not in result.lower()
@@ -216,14 +206,8 @@ def test_vcf_api_client_brackets_ipv6_literal():
         api.client.close()
 
 
-def test_load_private_key_supports_uploaded_rsa_pem():
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pem = key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode()
+def test_vcf_api_client_rejects_changed_tls_fingerprint(monkeypatch):
+    monkeypatch.setattr(vcf_trust, "tls_sha256_fingerprint", lambda _address, _port: "AA:BB")
 
-    loaded = vcf_trust.load_private_key(pem)
-
-    assert loaded.get_name() == "ssh-rsa"
+    with pytest.raises(vcf_trust.VcfTrustError, match="TLS certificate changed"):
+        vcf_trust.VcfApiClient("vcf.example.test", "admin", "secret", expected_fingerprint="CC:DD")

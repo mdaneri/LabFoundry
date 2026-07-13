@@ -248,7 +248,7 @@ Set/reset this account from `Users`, then apply Local Users before exposing the 
 
 ## VCF Helper
 
-VCF Helper at `/vcf-helper` generates DNS desired state for the versioned `VCF 9.1` and `VVF 9.1` deployment catalogs. DNS creation and deletion remain desired-state only; submit the changed `DNS/DHCP (dnsmasq)` unit through global `Appliance Apply` to change the runtime service. Its `VCF Certificate Trust` button opens a modal that imports the active LabFoundry root CA into VCF 9 appliances without persisting supplied credentials. See [`docs/vcf-helper.md`](docs/vcf-helper.md) for DNS generation and [`docs/vcf-trust.md`](docs/vcf-trust.md) for remote CA deployment.
+VCF Helper at `/vcf-helper` generates DNS desired state, deploys SDDC Manager OVAs found under `/mnt/labfoundry-vcf-offline-depot/PROD/COMP/SDDC_MANAGER_VCF`, imports the active LabFoundry root CA into VCF 9 appliances, and configures an existing VCF Installer or SDDC Manager to use the applied local VCF Offline Depot. OVA deployment and remote depot configuration are monitored background jobs; target and depot credentials remain transient. DNS creation remains desired-state only and is enforced through global `Appliance Apply`. See [`docs/vcf-helper.md`](docs/vcf-helper.md) and [`docs/vcf-trust.md`](docs/vcf-trust.md).
 
 Default local VCF Offline Depot HTTP user:
 
@@ -333,7 +333,7 @@ The MVP follows these boundaries:
 - System adapters default to dry-run mode.
 - On appliance startup, Physical Interfaces automatically refresh read-only Linux NIC inventory from Photon/Hyper-V and persist the observed host facts. Operators can also refresh inventory manually; observed host facts are separate from desired interface state and do not create an appliance apply job. Host NIC reconciliation matches by MAC address before Linux interface name so removing a NIC and rebooting cannot move desired state to a different adapter; removed host NICs are made inert, dependent VLANs are disabled, service listener interfaces and listener addresses are pruned or disabled when no listener remains, and the cleanup is written to the app log and audit events.
 - Real network apply is Photon `systemd-networkd` backed: it stages LabFoundry's desired network state, installs LabFoundry-owned `.network`/`.netdev` files under `/etc/systemd/network/`, reloads networkd, reconfigures non-management links, and reconciles VLAN links. The appliance image's default `00-labfoundry-mgmt.network` matches only `eth0`, LabFoundry retires Photon catchall network defaults, and apply keeps management explicit while avoiding blind management-link reconfiguration. Management source networks use the management route table; access and route networks use the lab route table.
-- Photon image provisioning installs Photon's `powershell` package and creates the bootstrap admin OS account under `/var/lib/labfoundry/users` with `/usr/bin/pwsh`, using the same bootstrap admin password as the initial web login.
+- Photon image provisioning installs Photon's `powershell` package, system-wide `VCF.PowerCLI` `9.1.0.25380678`, and Python `vcf-sdk` `9.1.0.0`. It verifies `Connect-VIServer`, records tool versions in `/etc/labfoundry/build-info`, and creates the bootstrap admin OS account under `/var/lib/labfoundry/users` with `/usr/bin/pwsh`. PowerCLI is for interactive administration and reviewed future workflows; the web service does not expose arbitrary PowerShell execution.
 - Local Users apply stages `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`, creates or updates enabled local users under `/var/lib/labfoundry/users` with their desired shell, removes disabled or removed managed users with `userdel -r`, handles staged unlock requests with `passwd -u` and `faillock --reset`, writes the desired PAM/pwquality password policy, and clears in-memory pending OS passwords only after a successful real apply.
 - Appliance Settings apply stages `/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json`, sets the OS hostname to the appliance FQDN, configures the management resolver for local or external DNS mode, manages root SSH login through `/etc/ssh/sshd_config.d/labfoundry-root-login.conf`, and can switch the management UI to CA-backed HTTPS through nginx plus a loopback-only `labfoundry.service` override. Chrony owns appliance time service desired state and NTP enforcement.
 - Certificate Authority apply stages `/var/lib/labfoundry/apply/ca/labfoundry-ca.json`, validates CA/certificate material, writes public CA bundles and service certificates under `/etc/labfoundry`, and keeps private keys out of previews, logs, and job results.
@@ -633,7 +633,9 @@ rebuilding the image, use the wheel deploy helper. If you already know the
 appliance IP, this is the most direct path:
 
 ```powershell
-.\scripts\windows\vmware\deploy-wheel.ps1 -IpAddress 192.168.167.10
+.\scripts\windows\vmware\deploy-wheel.ps1 `
+  -IpAddress 192.168.167.10 `
+  -SshPassword '<admin-password>'
 ```
 
 If you want the helper to resolve the guest IP from VMware Tools, pass the VMX
@@ -641,19 +643,24 @@ path as the `-VmxPath` argument:
 
 ```powershell
 .\scripts\windows\vmware\deploy-wheel.ps1 `
-  -VmxPath "image\vmware-workstation\test-vms\LabFoundry-VMware\LabFoundry-VMware.vmx"
+  -VmxPath "image\vmware-workstation\test-vms\LabFoundry-VMware\LabFoundry-VMware.vmx" `
+  -SshPassword '<admin-password>'
 ```
 
 Do not pipe the VMX path or put it on a separate line by itself; PowerShell will
 try to execute the `.vmx` file. The helper builds `python -m pip wheel . -w
-dist`, uploads the latest `labfoundry-*.whl` with `scp`, installs it into
+dist`, uploads the latest `labfoundry-*.whl`, installs it into
 `/opt/labfoundry/.venv`, syncs `scripts/appliance/labfoundry-helper` to
 `/opt/labfoundry/bin/labfoundry-helper`, restores virtualenv permissions,
 restarts `labfoundry.service`, and verifies both guest loopback and host-facing
-`/openapi.json`. Helper sync matters because the privileged helper is installed
-outside the Python virtualenv and is not replaced by `pip install`. If the app
-takes longer to import after reinstalling the wheel, increase the readiness wait
-with `-ReadinessTimeoutSeconds 120`.
+`/openapi.json`. With `-SshPassword`, the helper uses the local Python runtime
+and Paramiko so SSH and sudo do not prompt interactively; you can also set
+`LABFOUNDRY_DEPLOY_SSH_PASSWORD` instead of passing the password on the command
+line. Without a password, it preserves the original `scp`/`ssh` key or agent
+workflow. Helper sync matters because the privileged helper is installed outside
+the Python virtualenv and is not replaced by `pip install`. If the app takes
+longer to import after reinstalling the wheel, increase the readiness wait with
+`-ReadinessTimeoutSeconds 120`.
 
 Pass `-IncludeLabNetworkAdapters` only after `VMnet2`, `VMnet3`, and `VMnet4`
 exist for the SiteA, WAN/SiteB, and trunk-like validation networks.

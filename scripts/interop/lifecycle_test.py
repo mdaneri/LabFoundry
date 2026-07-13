@@ -1555,7 +1555,14 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
         **routing_host_check_commands(args),
         "vcf_trust_dependencies": (
             "/opt/labfoundry/.venv/bin/python -c "
-            "'import httpx, paramiko; print(httpx.__version__, paramiko.__version__)'"
+            "'import httpx; print(httpx.__version__)'"
+        ),
+        "vcf_automation_tooling": (
+            "/opt/labfoundry/.venv/bin/python -c "
+            "'from importlib.metadata import version; assert version(\"vcf-sdk\") == \"9.1.0.0\"' && "
+            "pwsh -NoLogo -NoProfile -NonInteractive -Command "
+            "'$m = Get-Module VCF.PowerCLI -ListAvailable | Where-Object Version -eq \"9.1.0.25380678\" | Select-Object -First 1; "
+            "if (-not $m) { exit 1 }; Import-Module $m.Path -Force; if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { exit 1 }'"
         ),
         "ca": "test -f /etc/labfoundry/ca/ca-bundle.pem && openssl x509 -in /etc/labfoundry/ca/root-ca.pem -noout -subject",
         "kms_files": (

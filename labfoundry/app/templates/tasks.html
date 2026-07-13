@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block page_title %}Tasks{% endblock %}
+
+{% block content %}
+<section class="panel tasks-panel" data-tasks-page data-selected-task-id="{{ selected_task_id }}" data-csrf="{{ csrf_token }}" data-tasks='{{ task_rows | tojson }}'>
+  <div class="panel-head">
+    <div>
+      <h2>Tasks</h2>
+      <p class="muted">Current and historical LabFoundry background work. Select a row to inspect details, cancel active work, or view the redacted task log.</p>
+    </div>
+    <span class="status-pill muted" data-tasks-count>{{ task_rows|length }} tasks</span>
+  </div>
+
+  <div class="task-grid-shell">
+    <div id="tasks-table" class="tabulator-shell" data-fallback-id="tasks-fallback"></div>
+    <table id="tasks-fallback" class="data-table compact">
+      <thead>
+        <tr><th>Status</th><th>Task</th><th>State</th><th>Progress</th><th>Created</th><th>Finished</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for task in task_rows %}
+          <tr>
+            <td><span class="status-pill {{ task.status_pill }}">{{ task.status }}</span></td>
+            <td><code>{{ task.id }}</code><br><span class="muted">{{ task.type_label }}</span></td>
+            <td>{{ task.state }}</td>
+            <td>{{ task.progress_percent }}%</td>
+            <td>{{ task.created_at or "—" }}</td>
+            <td>{{ task.finished_at or "—" }}</td>
+            <td><a class="button secondary compact-button" href="/tasks?job_id={{ task.id }}">Open</a></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7" class="muted">No tasks have been recorded yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<dialog id="task-detail-modal" class="confirm-modal wide-modal task-modal" aria-labelledby="task-detail-title">
+  <div class="confirm-modal-panel form-stack">
+    <div class="confirm-modal-body">
+      <p class="kicker">Task detail</p>
+      <div class="task-modal-title-row">
+        <h2 id="task-detail-title" data-task-detail-title>Task</h2>
+        <span class="status-pill muted" data-task-detail-status>unknown</span>
+      </div>
+      <p class="muted" data-task-detail-summary></p>
+      <div class="settings-list compact-settings-list task-detail-facts" data-task-detail-facts></div>
+      <div class="alert error hidden" data-task-detail-error></div>
+      <details class="task-result-details">
+        <summary>Redacted result payload</summary>
+        <pre><code data-task-detail-result>{}</code></pre>
+      </details>
+    </div>
+    <div class="confirm-modal-actions">
+      <button class="button danger hidden" type="button" data-task-detail-cancel>Cancel task</button>
+      <button class="button secondary" type="button" data-task-detail-log>View log</button>
+      <button class="button ghost" type="button" data-task-detail-close>Close</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="task-log-modal" class="confirm-modal wide-modal task-modal" aria-labelledby="task-log-title">
+  <div class="confirm-modal-panel form-stack">
+    <div class="confirm-modal-body">
+      <p class="kicker">Task log</p>
+      <h2 id="task-log-title" data-task-log-title>Task log</h2>
+      <p class="muted" data-task-log-meta></p>
+      <pre class="task-log-pre"><code data-task-log-content>Loading task log…</code></pre>
+    </div>
+    <div class="confirm-modal-actions">
+      <button class="button ghost" type="button" data-task-log-close>Close</button>
+    </div>
+  </div>
+</dialog>
+{% endblock %}

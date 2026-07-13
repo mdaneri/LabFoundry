@@ -302,7 +302,8 @@ Provisioning creates the bootstrap admin OS account under
 `/var/lib/labfoundry/users/<admin>` with `/usr/bin/pwsh` and sets the same
 bootstrap password used for the initial web login, so the admin account exists
 on Photon before first appliance apply. The image installs Photon's
-`powershell` package for this shell and grants the bootstrap admin normal
+`powershell` package for this shell, installs system-wide VCF PowerCLI
+`9.1.0.25380678`, installs `vcf-sdk==9.1.0.0` in the LabFoundry virtualenv, and grants the bootstrap admin normal
 password-backed sudo through `/etc/sudoers.d/labfoundry-bootstrap-admin`.
 
 VCF Backups desired state is OpenSSH-backed. Provisioning leaves the default
