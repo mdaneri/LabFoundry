@@ -635,7 +635,7 @@ textarea {
   padding: 4px 9px 4px 5px;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--panel);
+  background: var(--surface);
   color: var(--text);
   font-size: 12px;
   font-weight: 800;
@@ -646,7 +646,7 @@ textarea {
 .account-menu-trigger:hover,
 .account-menu-trigger:focus-visible,
 .account-menu[open] .account-menu-trigger {
-  border-color: var(--primary);
+  border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
   outline: none;
 }
@@ -685,7 +685,7 @@ textarea {
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--panel);
+  background: var(--surface);
   box-shadow: 0 16px 36px rgba(15, 23, 42, 0.18);
 }
 

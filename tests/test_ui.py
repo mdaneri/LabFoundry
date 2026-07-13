@@ -166,6 +166,18 @@ def test_appliance_power_action_creates_task_before_scheduling(client, monkeypat
     assert "Appliance Reboot" in tasks.text
 
 
+def test_account_menu_uses_defined_opaque_surface_tokens():
+    from pathlib import Path
+
+    app_css = Path("labfoundry/app/static/app.css").read_text(encoding="utf-8")
+    menu_css = app_css.split(".account-menu {", 1)[1].split(".inline-help-row", 1)[0]
+
+    assert "var(--panel)" not in menu_css
+    assert "var(--primary)" not in menu_css
+    assert menu_css.count("background: var(--surface);") == 2
+    assert "border-color: var(--accent);" in menu_css
+
+
 def test_appliance_shutdown_task_reports_helper_failure(client, monkeypatch):
     import json
 
@@ -363,8 +375,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=account-power-menu-20260713-1" in service_worker.text
-    assert "/static/app.js?v=account-power-menu-20260713-1" in service_worker.text
+    assert "/static/app.css?v=account-power-menu-20260713-2" in service_worker.text
+    assert "/static/app.js?v=account-power-menu-20260713-2" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -373,7 +385,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=account-power-menu-20260713-1" in offline.text
+    assert "/static/app.css?v=account-power-menu-20260713-2" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -389,8 +401,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=account-power-menu-20260713-1" in page.text
-    assert "/static/app.js?v=account-power-menu-20260713-1" in page.text
+    assert "/static/app.css?v=account-power-menu-20260713-2" in page.text
+    assert "/static/app.js?v=account-power-menu-20260713-2" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -8359,7 +8371,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "account-power-menu-20260713-1" in page.text
+    assert "account-power-menu-20260713-2" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
