@@ -3734,7 +3734,12 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
         lambda _self: AdapterResult(
             command=["labfoundry-helper", "dnsmasq", "logs"],
             dry_run=False,
-            stdout="dnsmasq ready\npassword=do-not-render\n",
+            stdout=(
+                "dnsmasq[10]: query[A] example.test from 192.0.2.10\n"
+                "dnsmasq-dhcp[10]: DHCPACK(eth1) 192.0.2.20 client\n"
+                "dnsmasq-tftp[10]: sent /var/lib/labfoundry/pxe/tftp/snponly.efi to 192.0.2.20\n"
+                "password=do-not-render\n"
+            ),
         ),
     )
     monkeypatch.setattr(
@@ -3754,13 +3759,19 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert 'data-tab-storage-key="labfoundry:logs:active-tab"' in response.text
     assert "VCFDT" not in response.text
     assert "LabFoundry App" in response.text
-    assert "dnsmasq" in response.text
+    assert "DNS" in response.text
+    assert "DHCP" in response.text
+    assert "TFTP" in response.text
     assert "KMS" in response.text
     assert "Chrony" in response.text
     assert "Audit Events" in response.text
     assert "logs-audit-panel" in response.text
-    assert 'data-log-source-tab="dnsmasq"' in response.text
-    assert 'title="systemd journal: dnsmasq.service"' in response.text
+    assert 'data-log-source-tab="dnsmasq-dns"' in response.text
+    assert 'title="dnsmasq.service journal: DNS and service messages"' in response.text
+    assert 'data-log-source-tab="dnsmasq-dhcp"' in response.text
+    assert 'title="dnsmasq.service journal: DHCP messages"' in response.text
+    assert 'data-log-source-tab="dnsmasq-tftp"' in response.text
+    assert 'title="dnsmasq.service journal: TFTP messages"' in response.text
     assert 'data-log-source-tab="kms"' in response.text
     kms_tab = response.text.split('data-log-source-tab="kms"', 1)[1].split("</button>", 1)[0]
     assert 'aria-disabled="true"' in kms_tab
@@ -3779,7 +3790,9 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "secret-download-token" not in response.text
     assert jwt_segment not in response.text
     assert "chronyd ready" in response.text
-    assert "dnsmasq ready" in response.text
+    assert "query[A] example.test" in response.text
+    assert "DHCPACK(eth1)" in response.text
+    assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in response.text
     assert "private_key= [redacted]" in response.text
     assert "password= [redacted]" in response.text
     assert "do-not-render" not in response.text
@@ -3789,7 +3802,11 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert data_response.status_code == 200
     payload = data_response.json()
     assert payload["line_count"] == 500
-    assert [source["id"] for source in payload["sources"]] == ["app", "dnsmasq", "chrony", "kms"]
+    assert [source["id"] for source in payload["sources"]] == ["app", "dnsmasq-dns", "dnsmasq-dhcp", "dnsmasq-tftp", "chrony", "kms"]
+    assert "query[A] example.test" in "\n".join(payload["sources"][1]["lines"])
+    assert "DHCPACK(eth1)" not in "\n".join(payload["sources"][1]["lines"])
+    assert "DHCPACK(eth1)" in "\n".join(payload["sources"][2]["lines"])
+    assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in "\n".join(payload["sources"][3]["lines"])
     assert len(payload["sources"][0]["lines"]) == 122
     assert "secret-download-token" not in "\n".join(payload["sources"][0]["lines"])
 
@@ -3898,7 +3915,9 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
     assert response.status_code == 200
     assert "VCFDT" not in response.text
     assert "LabFoundry App" in response.text
-    assert "dnsmasq" in response.text
+    assert "DNS" in response.text
+    assert "DHCP" in response.text
+    assert "TFTP" in response.text
     assert "Audit Events" in response.text
     assert "Chrony" in response.text
     assert "Log file has not been written yet." in response.text

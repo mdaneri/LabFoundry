@@ -6710,14 +6710,18 @@ def journal_log_source(
     result: AdapterResult,
     *,
     max_lines: int,
+    line_filter: Callable[[str], bool] | None = None,
+    path_label: str | None = None,
 ) -> dict[str, Any]:
     available = result.returncode == 0 and not result.dry_run
     text = redact_config_preview(result.stdout or "") if available else ""
     all_lines = text.splitlines()
+    if line_filter is not None:
+        all_lines = [line for line in all_lines if line_filter(line)]
     return {
         "id": source_id,
         "label": label,
-        "path": f"systemd journal: {unit}",
+        "path": path_label or f"systemd journal: {unit}",
         "available": available,
         "lines": all_lines[-max_lines:],
         "size_bytes": len(text.encode("utf-8")),
@@ -6727,16 +6731,51 @@ def journal_log_source(
     }
 
 
+def dnsmasq_log_category(line: str) -> str:
+    if re.search(r"\bdnsmasq-dhcp(?:\[\d+\])?:", line):
+        return "dhcp"
+    if re.search(r"\bdnsmasq-tftp(?:\[\d+\])?:", line):
+        return "tftp"
+    return "dns"
+
+
 def log_sources_context(*, max_lines: int = 100) -> list[dict[str, Any]]:
     line_count = normalized_log_line_count(max_lines)
     adapter = SystemAdapter()
+    dnsmasq_logs = adapter.read_dnsmasq_logs()
     return [
         {
             "id": "app",
             "label": "LabFoundry App",
             **tail_fixed_log_file(LABFOUNDRY_APP_LOG_PATH, max_lines=line_count),
         },
-        journal_log_source("dnsmasq", "dnsmasq", "dnsmasq.service", adapter.read_dnsmasq_logs(), max_lines=line_count),
+        journal_log_source(
+            "dnsmasq-dns",
+            "DNS",
+            "dnsmasq.service",
+            dnsmasq_logs,
+            max_lines=line_count,
+            line_filter=lambda line: dnsmasq_log_category(line) == "dns",
+            path_label="dnsmasq.service journal: DNS and service messages",
+        ),
+        journal_log_source(
+            "dnsmasq-dhcp",
+            "DHCP",
+            "dnsmasq.service",
+            dnsmasq_logs,
+            max_lines=line_count,
+            line_filter=lambda line: dnsmasq_log_category(line) == "dhcp",
+            path_label="dnsmasq.service journal: DHCP messages",
+        ),
+        journal_log_source(
+            "dnsmasq-tftp",
+            "TFTP",
+            "dnsmasq.service",
+            dnsmasq_logs,
+            max_lines=line_count,
+            line_filter=lambda line: dnsmasq_log_category(line) == "tftp",
+            path_label="dnsmasq.service journal: TFTP messages",
+        ),
         journal_log_source("chrony", "Chrony", "chronyd.service", adapter.read_chronyd_logs(), max_lines=line_count),
         {
             "id": "kms",
