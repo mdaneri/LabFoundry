@@ -1239,7 +1239,22 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client, monkeypa
     supported = AdapterResult(
         command=["labfoundry-helper", "chronyd", "capabilities"],
         dry_run=False,
-        stdout=json.dumps({"nts": True, "version": "chronyd version 4.6 (+NTS)"}),
+        stdout=(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-13T18:00:00+00:00",
+                    "helper": "labfoundry-helper",
+                    "group": "chronyd",
+                    "action": "capabilities",
+                    "args": [],
+                    "dry_run": False,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+            + json.dumps({"nts": True, "version": "chronyd version 4.6 (+NTS)"}, sort_keys=True)
+            + "\n"
+        ),
     )
     monkeypatch.setattr(
         "labfoundry.app.ui.SystemAdapter.read_chronyd_capabilities",

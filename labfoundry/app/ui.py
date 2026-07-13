@@ -1486,17 +1486,35 @@ def vcf_backup_context(db: Session) -> dict:
     }
 
 
+def chronyd_capabilities_payload(result: AdapterResult) -> dict[str, Any]:
+    if result.returncode != 0:
+        return {}
+    text = result.stdout or ""
+    decoder = json.JSONDecoder()
+    index = 0
+    capabilities: dict[str, Any] = {}
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        try:
+            payload, index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(payload, dict) and "nts" in payload:
+            capabilities = payload
+    return capabilities
+
+
 def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
     settings = get_chrony_settings_row(db)
     if normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
     capability_result = SystemAdapter().read_chronyd_capabilities()
-    try:
-        chrony_capabilities = json.loads(capability_result.stdout or "{}")
-    except json.JSONDecodeError:
-        chrony_capabilities = {}
-    chrony_nts_supported = capability_result.returncode == 0 and bool(chrony_capabilities.get("nts"))
+    chrony_capabilities = chronyd_capabilities_payload(capability_result)
+    chrony_nts_supported = bool(chrony_capabilities.get("nts"))
     if not chrony_nts_supported:
         upstream_sources = chrony_upstream_sources(settings)
         nts_state_changed = settings.nts_server_enabled or any(bool(source.get("use_nts")) for source in upstream_sources)
@@ -11002,11 +11020,8 @@ def update_chrony_settings_from_ui(
     verify_csrf(request, csrf)
     settings = get_chrony_settings_row(db)
     capability_result = SystemAdapter().read_chronyd_capabilities()
-    try:
-        chrony_capabilities = json.loads(capability_result.stdout or "{}")
-    except json.JSONDecodeError:
-        chrony_capabilities = {}
-    chrony_nts_supported = capability_result.returncode == 0 and bool(chrony_capabilities.get("nts"))
+    chrony_capabilities = chronyd_capabilities_payload(capability_result)
+    chrony_nts_supported = bool(chrony_capabilities.get("nts"))
     selected_interfaces, selected_addresses = resolve_service_bind_targets(
         db,
         [*listen_interfaces, listen_interface],
