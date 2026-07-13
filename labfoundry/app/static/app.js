@@ -10577,11 +10577,11 @@ function initializeLogsPage() {
         if (!(panel instanceof HTMLElement)) {
           return;
         }
-        const availability = panel.querySelector("[data-log-availability]");
-        if (availability instanceof HTMLElement) {
-          availability.textContent = source.available ? "available" : "not found";
-          availability.classList.toggle("good", Boolean(source.available));
-          availability.classList.toggle("muted", !source.available);
+        const tabButton = root.querySelector(`[data-log-source-tab="${CSS.escape(String(source.id || ""))}"]`);
+        if (tabButton instanceof HTMLButtonElement) {
+          tabButton.disabled = !source.available;
+          tabButton.setAttribute("aria-disabled", source.available ? "false" : "true");
+          tabButton.title = `${String(source.path || source.label || "Log source")}${source.available ? "" : " (unavailable)"}`;
         }
         const meta = panel.querySelector("[data-log-meta]");
         if (meta instanceof HTMLElement) {
@@ -10601,6 +10601,13 @@ function initializeLogsPage() {
             : String(source.error || "Log file has not been written yet.");
         }
       });
+      const activeButton = root.querySelector("[role='tablist'] .tab-button.active");
+      if (activeButton instanceof HTMLButtonElement && activeButton.disabled) {
+        const nextButton = root.querySelector("[role='tablist'] .tab-button:not(:disabled)");
+        if (nextButton instanceof HTMLButtonElement) {
+          nextButton.click();
+        }
+      }
       if (refreshStatus instanceof HTMLElement) {
         refreshStatus.textContent = `Auto-refresh 5s · updated ${new Date().toLocaleTimeString()}`;
       }

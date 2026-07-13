@@ -9,6 +9,8 @@
         <p class="muted">Read-only appliance log sources with sensitive lines redacted before rendering.</p>
       </div>
       <div class="logs-toolbar">
+        <span class="status-pill muted logs-refresh-status" data-log-refresh-status>Auto-refresh 5s</span>
+        <span class="status-pill muted">{{ log_sources|length }} sources</span>
         <label class="logs-line-selector">
           <span class="field-label"><span>Lines</span><button class="help-icon" type="button" data-help="Select the number of most recent lines shown for every log source. The page refreshes the selected tail automatically every 5 seconds.">i</button></span>
           <select data-log-lines aria-label="Log lines">
@@ -17,39 +19,35 @@
             {% endfor %}
           </select>
         </label>
-        <span class="status-pill muted" data-log-refresh-status>Auto-refresh 5s</span>
-        <span class="status-pill muted">{{ log_sources|length }} sources</span>
       </div>
     </div>
 
+    {% set active_log_tab = namespace(id="") %}
+    {% for source in log_sources %}
+      {% if not active_log_tab.id and source.available %}
+        {% set active_log_tab.id = source.id %}
+      {% endif %}
+    {% endfor %}
+    {% if not active_log_tab.id %}
+      {% set active_log_tab.id = "audit" %}
+    {% endif %}
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="Log sources" data-tab-storage-key="labfoundry:logs:active-tab">
       {% for source in log_sources %}
-        {% if loop.first %}
-          <button class="tab-button active" type="button" role="tab" data-tab-target="logs-{{ source.id }}-panel" aria-selected="true">{{ source.label }}</button>
-        {% else %}
-          <button class="tab-button" type="button" role="tab" data-tab-target="logs-{{ source.id }}-panel" aria-selected="false">{{ source.label }}</button>
-        {% endif %}
+        <button class="tab-button {{ 'active' if active_log_tab.id == source.id else '' }}" type="button" role="tab" data-tab-target="logs-{{ source.id }}-panel" data-log-source-tab="{{ source.id }}" aria-selected="{{ 'true' if active_log_tab.id == source.id else 'false' }}" aria-disabled="{{ 'false' if source.available else 'true' }}" title="{{ source.path }}{{ '' if source.available else ' (unavailable)' }}" {{ "disabled" if not source.available else "" }}>{{ source.label }}</button>
       {% endfor %}
-      <button class="tab-button" type="button" role="tab" data-tab-target="logs-audit-panel" aria-controls="logs-audit-panel" aria-selected="false">Audit Events</button>
+      <button class="tab-button {{ 'active' if active_log_tab.id == 'audit' else '' }}" type="button" role="tab" data-tab-target="logs-audit-panel" aria-controls="logs-audit-panel" aria-selected="{{ 'true' if active_log_tab.id == 'audit' else 'false' }}">Audit Events</button>
     </div>
 
     <div class="tab-panels">
       {% for source in log_sources %}
-        <div id="logs-{{ source.id }}-panel" class="tab-panel {{ 'active' if loop.first else '' }}" role="tabpanel" data-log-source-id="{{ source.id }}" {{ "hidden" if not loop.first else "" }}>
-          <div class="panel-head compact">
-            <div>
-              <h2>{{ source.label }}</h2>
-              <p class="muted">{{ source.path }}</p>
-            </div>
-            <span class="status-pill {{ 'good' if source.available else 'muted' }}" data-log-availability>{{ "available" if source.available else "not found" }}</span>
-          </div>
+        <div id="logs-{{ source.id }}-panel" class="tab-panel {{ 'active' if active_log_tab.id == source.id else '' }}" role="tabpanel" data-log-source-id="{{ source.id }}" {{ "hidden" if active_log_tab.id != source.id else "" }}>
           <div class="terminal-note">
             <strong data-log-meta>{{ source.size_bytes }} bytes{% if source.updated_at %} · {{ source.updated_at }}{% endif %}{% if source.truncated %} · tail view{% endif %}</strong>
             <code data-log-lines-output>{{ source.lines | join('\n') if source.available else source.error or "Log file has not been written yet." }}</code>
           </div>
         </div>
       {% endfor %}
-      <div id="logs-audit-panel" class="tab-panel" role="tabpanel" hidden>
+      <div id="logs-audit-panel" class="tab-panel {{ 'active' if active_log_tab.id == 'audit' else '' }}" role="tabpanel" {{ "hidden" if active_log_tab.id != 'audit' else "" }}>
         <div class="panel-head compact">
           <div>
             <h2>Audit Events</h2>
