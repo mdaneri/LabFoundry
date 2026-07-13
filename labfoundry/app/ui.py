@@ -6,17 +6,18 @@ import re
 import shlex
 import shutil
 import socket
+import ssl
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address, ip_interface, ip_network
 from pathlib import Path, PurePosixPath
 from secrets import token_urlsafe
-from typing import Any
-from urllib.parse import quote
+from typing import Any, Callable
+from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
-import paramiko
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
@@ -181,13 +182,32 @@ from labfoundry.app.services.ca import (
 )
 from labfoundry.app.services.vcf_trust import (
     RootCaInfo,
+    VcfApiClient,
     VcfTrustCredentials,
     VcfTrustError,
-    VcfTrustPartialError,
-    discover_ssh_host_key,
     execute_vcf_trust,
+    inspect_vcf_trust_target,
     root_ca_info,
     sanitized_result,
+)
+from labfoundry.app.services.vcf_sddc_deployment import (
+    SDDC_MANAGER_OVA_ROOT,
+    VcfSddcDeploymentCancelled,
+    VcfSddcDeploymentError,
+    VcfSddcPostImportError,
+    deploy_ova,
+    inspect_ova,
+    normalize_disk_provisioning,
+    ova_inventory,
+    tls_sha256_fingerprint,
+    vsphere_inventory,
+)
+from labfoundry.app.services.vcf_depot_target import (
+    LocalDepotEndpoint,
+    VcfDepotTargetError,
+    VcfDepotTargetPartialError,
+    configure_target_depot,
+    inspect_target_depot,
 )
 from labfoundry.app.secrets import decrypt_secret, secret_key_status
 from labfoundry.app.services.networking import (
@@ -498,6 +518,11 @@ def require_admin_identity(identity: Identity) -> None:
 def require_certificate_workflow_identity(identity: Identity) -> None:
     if not (identity.has_role(Role.ADMIN.value) or identity.has_role(Role.CERTIFICATE_OPERATOR.value)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Certificate operator role required")
+
+
+def require_vcf_helper_write(identity: Identity) -> None:
+    if not (identity.has_role(Role.ADMIN.value) or identity.has_role(Role.SERVICE_ADMIN.value)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Service administrator role required")
 
 
 def roles_from_form(primary_role_value: str = "", roles: list[str] | None = None, roles_text: str = "") -> list[str]:
@@ -2118,6 +2143,29 @@ def recover_interrupted_vcf_depot_download_jobs(db: Session) -> int:
         if profile is not None:
             profile.status = "blocked"
             profile.updated_at = finished
+    db.commit()
+    return len(jobs)
+
+
+def recover_interrupted_vcf_helper_jobs(db: Session) -> int:
+    jobs = db.scalars(
+        select(Job).where(
+            Job.type.in_(["vcf-sddc-manager-deploy", "vcf-offline-depot-target-config"]),
+            Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+        )
+    ).all()
+    if not jobs:
+        return 0
+    finished = utcnow()
+    for job in jobs:
+        job.status = JobStatus.FAILED.value
+        job.finished_at = finished
+        job.progress_percent = 100
+        job.error = "Interrupted by a LabFoundry restart. Transient credentials were discarded; submit the helper task again."
+        payload = _job_payload(job)
+        payload["state"] = "failed"
+        payload["interrupted"] = True
+        job.result = json.dumps(payload, sort_keys=True)
     db.commit()
     return len(jobs)
 
@@ -4234,6 +4282,62 @@ def dns_record_suggested_ipv4(records: list[DnsRecord], domain: str, dhcp_scopes
     return ""
 
 
+def vcf_sddc_dhcp_assignment_scope(scope: DhcpScope, records: list[DnsRecord], reservations: list[DhcpReservation]) -> dict[str, Any] | None:
+    if not scope.enabled or scope.address_family.strip().lower() != "ipv4":
+        return None
+    network = dhcp_scope_network(scope)
+    gateway = ipv4_address_or_none(scope.site_address)
+    if network is None or gateway is None:
+        return None
+    range_errors, parsed_ranges = parse_dhcp_range_expression(scope)
+    ranges = parsed_ranges if not range_errors else []
+    occupied = {
+        address
+        for address in [ipv4_address_or_none(record.address) for record in records if record.record_type.strip().upper() == "A"]
+        if address is not None
+    }
+    occupied.update(
+        address
+        for address in [ipv4_address_or_none(reservation.ip_address) for reservation in reservations if reservation.enabled is not False]
+        if address is not None
+    )
+    occupied.add(gateway)
+    suggested = ""
+    for candidate in network.hosts():
+        if candidate in occupied:
+            continue
+        if any(start <= candidate <= end for start, end in ranges):
+            continue
+        suggested = str(candidate)
+        break
+    return {
+        "id": scope.id,
+        "name": scope.name,
+        "domain_name": scope.domain_name.strip().strip(".").lower(),
+        "gateway": str(gateway),
+        "prefix_length": int(scope.prefix_length or 24),
+        "netmask": str(network.netmask),
+        "dns_server": scope.dns_server.strip(),
+        "ntp_server": scope.ntp_server.strip(),
+        "suggested_ipv4": suggested,
+        "network": network.with_prefixlen,
+        "range_expression": compact_dhcp_range_expression(scope),
+    }
+
+
+def vcf_sddc_dhcp_assignment_context(db: Session) -> dict[str, Any]:
+    settings = get_dhcp_settings_row(db)
+    if not settings.enabled:
+        return {"available": False, "reasons": ["Enable DHCP desired state."], "scopes": []}
+    records = db.execute(select(DnsRecord).order_by(DnsRecord.hostname)).scalars().all()
+    reservations = db.execute(select(DhcpReservation).order_by(DhcpReservation.hostname)).scalars().all()
+    scopes = db.execute(select(DhcpScope).order_by(DhcpScope.name)).scalars().all()
+    scope_rows = [row for scope in scopes if (row := vcf_sddc_dhcp_assignment_scope(scope, records, reservations))]
+    if not scope_rows:
+        return {"available": False, "reasons": ["Create at least one enabled IPv4 DHCP IP zone."], "scopes": []}
+    return {"available": True, "reasons": [], "scopes": scope_rows}
+
+
 def validate_vlan_form_values(
     parent_interface: str,
     vlan_id: str,
@@ -4700,7 +4804,571 @@ def vcf_helper_context(db: Session) -> dict[str, Any]:
         "vcf_helper_existing_fqdns": sorted(record.hostname.strip().strip(".").lower() for record in records),
         "vcf_helper_existing_address_records": vcf_helper_existing_address_records(records),
         "vcf_helper_default_start_ipv4": f"{suggested_start_ipv4}/24" if suggested_start_ipv4 else "",
+        **vcf_sddc_helper_context(db),
     }
+
+
+def local_vcf_depot_target_context(db: Session) -> dict[str, Any]:
+    settings = get_vcf_offline_depot_settings_row(db)
+    software_depot = vcf_depot_software_depot_id_context(db)
+    apply_state = appliance_apply_status(db, "vcf_offline_depot")
+    username = settings.http_user.username if settings.http_user else ""
+    endpoint = vcf_depot_endpoint(settings)
+    url = f"https://{endpoint}"
+    reasons: list[str] = []
+    if not settings.enabled:
+        reasons.append("Enable VCF Offline Depot.")
+    if apply_state.get("changed"):
+        reasons.append("Apply the current VCF Offline Depot desired state.")
+    if not software_depot.get("id"):
+        reasons.append("Generate the software depot ID through Appliance Apply.")
+    if not username:
+        reasons.append("Select a VCF Offline Depot HTTP user.")
+    if not ca_certificate_available(db, "vcf_offline_depot:https"):
+        reasons.append("Issue the CA-managed VCF Offline Depot HTTPS certificate.")
+    nginx_active = backing_systemd_unit_active("nginx.service")
+    if get_settings().environment == "appliance" and nginx_active is not True:
+        reasons.append("The appliance nginx service is not active.")
+    return {
+        "available": not reasons,
+        "reasons": reasons,
+        "hostname": settings.hostname.strip(),
+        "port": int(settings.port or 443),
+        "url": url,
+        "username": username,
+        "software_depot_id": software_depot.get("id", ""),
+    }
+
+
+def vcf_sddc_helper_context(db: Session) -> dict[str, Any]:
+    try:
+        inventory = ova_inventory()
+        inventory_error = ""
+    except OSError as exc:
+        inventory = []
+        inventory_error = str(exc)
+    latest_deploy = db.execute(
+        select(Job).where(Job.type == "vcf-sddc-manager-deploy").order_by(desc(Job.created_at))
+    ).scalars().first()
+    latest_depot = db.execute(
+        select(Job).where(Job.type == "vcf-offline-depot-target-config").order_by(desc(Job.created_at))
+    ).scalars().first()
+    return {
+        "vcf_sddc_ovas": inventory,
+        "vcf_sddc_ova_root": str(SDDC_MANAGER_OVA_ROOT),
+        "vcf_sddc_inventory_error": inventory_error,
+        "vcf_sddc_dhcp_assignment": vcf_sddc_dhcp_assignment_context(db),
+        "vcf_sddc_latest_job": latest_deploy,
+        "vcf_sddc_latest_result": json.loads(latest_deploy.result or "{}") if latest_deploy else {},
+        "vcf_target_depot": local_vcf_depot_target_context(db),
+        "vcf_target_depot_latest_job": latest_depot,
+        "vcf_target_depot_latest_result": json.loads(latest_depot.result or "{}") if latest_depot else {},
+    }
+
+
+def _job_payload(job: Job) -> dict[str, Any]:
+    try:
+        return dict(json.loads(job.result or "{}"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
+class JobCancelled(RuntimeError):
+    pass
+
+
+ACTIVE_JOB_STATUSES = {JobStatus.PENDING.value, JobStatus.RUNNING.value}
+TASK_SECRET_KEY_RE = re.compile(r"(password|passwd|secret|token|credential|authorization|activation|private[_-]?key|api[_-]?key)", re.IGNORECASE)
+TASK_SECRET_VALUE_RE = re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----|sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{12,})", re.IGNORECASE)
+
+
+def _raise_if_job_cancelled(job: Job, db: Session) -> None:
+    db.refresh(job)
+    if job.status == JobStatus.CANCELLED.value:
+        raise JobCancelled("Task was cancelled by an operator.")
+
+
+def _update_job(job: Job, db: Session, percent: int, state: str, **values: Any) -> None:
+    payload = _job_payload(job)
+    payload.update(values)
+    payload["state"] = state
+    job.progress_percent = max(0, min(100, percent))
+    job.result = json.dumps(payload, sort_keys=True)
+    db.commit()
+
+
+def _update_cancelable_job(job: Job, db: Session, percent: int, state: str, **values: Any) -> None:
+    _raise_if_job_cancelled(job, db)
+    _update_job(job, db, percent, state, **values)
+
+
+def _redact_task_value(value: Any, *, key: str = "") -> Any:
+    if key and TASK_SECRET_KEY_RE.search(key):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {str(item_key): _redact_task_value(item_value, key=str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [_redact_task_value(item) for item in value]
+    if isinstance(value, str):
+        if TASK_SECRET_VALUE_RE.search(value):
+            return "[redacted]"
+        return value
+    return value
+
+
+def _task_status_pill(status_value: str) -> str:
+    if status_value in {JobStatus.SUCCEEDED.value, "no-op"}:
+        return "good"
+    if status_value in {JobStatus.FAILED.value, "partial-failure"}:
+        return "warn"
+    if status_value == JobStatus.CANCELLED.value:
+        return "muted"
+    if status_value in ACTIVE_JOB_STATUSES:
+        return "warn"
+    return "muted"
+
+
+def _task_type_label(job_type: str) -> str:
+    labels = {
+        "appliance-apply": "Appliance Apply",
+        "appliance-update": "Appliance Update",
+        "vcf-sddc-manager-deploy": "Deploy SDDC Manager",
+        "vcf-offline-depot-target-config": "Configure VCF Offline Depot",
+        "vcf-ca-trust": "VCF Certificate Trust",
+        "vcf-depot-download": "VCF Depot Download",
+    }
+    return labels.get(job_type, job_type.replace("-", " ").title())
+
+
+def _task_time_label(value: datetime | None) -> str:
+    if not value:
+        return ""
+    return value.isoformat()
+
+
+def _task_row(job: Job) -> dict[str, Any]:
+    raw_result = _job_payload(job)
+    result = _redact_task_value(raw_result)
+    status_value = str(job.status or "")
+    state = str(result.get("state") or status_value)
+    summary = str(result.get("target") or result.get("fqdn") or result.get("vm_name") or result.get("profile_name") or "")
+    if not summary and isinstance(result.get("vm"), dict):
+        summary = str(result["vm"].get("vm_name") or result["vm"].get("guest_ip") or "")
+    error = _redact_task_value(job.error or "")
+    return {
+        "id": job.id,
+        "type": job.type,
+        "type_label": _task_type_label(job.type),
+        "status": status_value,
+        "status_pill": _task_status_pill(status_value),
+        "state": state,
+        "summary": summary,
+        "created_by": job.created_by,
+        "created_at": _task_time_label(job.created_at),
+        "started_at": _task_time_label(job.started_at),
+        "finished_at": _task_time_label(job.finished_at),
+        "progress_percent": max(0, min(100, int(job.progress_percent or 0))),
+        "result": result,
+        "result_json": json.dumps(result, indent=2, sort_keys=True),
+        "error": error,
+        "can_cancel": status_value in ACTIVE_JOB_STATUSES,
+    }
+
+
+def _task_log_lines(job: Job, db: Session) -> list[str]:
+    row = _task_row(job)
+    lines = [
+        f"Job: {row['id']}",
+        f"Type: {row['type_label']} ({row['type']})",
+        f"Status: {row['status']}",
+        f"State: {row['state']}",
+        f"Progress: {row['progress_percent']}%",
+        f"Created: {row['created_at'] or 'not recorded'} by {row['created_by']}",
+        f"Started: {row['started_at'] or 'not started'}",
+        f"Finished: {row['finished_at'] or 'not finished'}",
+    ]
+    if row["summary"]:
+        lines.append(f"Summary: {row['summary']}")
+    if row["error"]:
+        lines.append(f"Error: {row['error']}")
+    result = row["result"]
+    if isinstance(result, dict):
+        for key, value in result.items():
+            if key == "log_lines" and isinstance(value, list):
+                lines.append("")
+                lines.append("Job log lines:")
+                lines.extend(str(item) for item in value)
+                continue
+            if key in {"state"}:
+                continue
+            lines.append(f"{key}: {json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value}")
+    audit_events = db.execute(
+        select(AuditEvent).where(AuditEvent.resource_type == "job", AuditEvent.resource_id == job.id).order_by(AuditEvent.created_at)
+    ).scalars().all()
+    if audit_events:
+        lines.append("")
+        lines.append("Audit events:")
+        for event in audit_events:
+            detail = _redact_task_value(event.detail or "")
+            outcome = "success" if event.success else "failed"
+            lines.append(f"{event.created_at.isoformat()} {event.action} {outcome} {detail}".rstrip())
+    return [str(_redact_task_value(line)) for line in lines]
+
+
+def _local_depot_endpoint(db: Session) -> LocalDepotEndpoint:
+    context = local_vcf_depot_target_context(db)
+    if not context["available"]:
+        raise VcfDepotTargetError(" ".join(context["reasons"]))
+    return LocalDepotEndpoint(
+        hostname=str(context["hostname"]),
+        port=int(context["port"]),
+        url=str(context["url"]),
+        username=str(context["username"]),
+    )
+
+
+def run_vcf_target_depot_job(
+    job_id: str,
+    *,
+    address: str,
+    port: int,
+    api_username: str,
+    api_password: str,
+    depot_password: str,
+    replace_existing: bool,
+    expected_fingerprint: str,
+) -> None:
+    with SessionLocal() as db:
+        configure_operational_logging(db)
+        job = db.get(Job, job_id)
+        if not job:
+            return
+        job.status = JobStatus.RUNNING.value
+        job.started_at = utcnow()
+        db.commit()
+        try:
+            local = _local_depot_endpoint(db)
+
+            def update(percent: int, state: str) -> None:
+                _update_job(job, db, percent, state)
+
+            outcome = configure_target_depot(
+                address,
+                api_username,
+                api_password,
+                local,
+                depot_password,
+                replace_existing=replace_existing,
+                progress=update,
+                port=port,
+                expected_fingerprint=expected_fingerprint,
+            )
+            job.status = JobStatus.SUCCEEDED.value if outcome["configuration"] == "updated" else "no-op"
+            job.finished_at = utcnow()
+            job.error = None
+            _update_job(job, db, 100, job.status, target=address, port=port, **outcome)
+            success = True
+        except VcfDepotTargetPartialError as exc:
+            job.status = "partial-failure"
+            job.finished_at = utcnow()
+            job.error = str(exc)
+            _update_job(job, db, 100, "partial-failure", target=address, port=port, manual_recovery_required=True)
+            success = False
+        except Exception as exc:  # noqa: BLE001 - persist a sanitized terminal task state.
+            job.status = JobStatus.FAILED.value
+            job.finished_at = utcnow()
+            job.error = str(exc) if isinstance(exc, VcfDepotTargetError) else "VCF Offline Depot target configuration failed unexpectedly."
+            _update_job(job, db, 100, "failed", target=address, port=port)
+            success = False
+        record_audit(
+            db,
+            actor=job.created_by,
+            action="configure_vcf_offline_depot_target",
+            resource_type="job",
+            resource_id=job.id,
+            success=success,
+            detail=f"target={address}:{port}; result={job.status}",
+        )
+
+
+def queue_vcf_target_depot_job(job_id: str, **kwargs: Any) -> None:
+    threading.Thread(
+        target=run_vcf_target_depot_job,
+        kwargs={"job_id": job_id, **kwargs},
+        name=f"vcf-target-depot-{job_id}",
+        daemon=True,
+    ).start()
+
+
+def _add_deployed_vcf_dns(db: Session, fqdn: str, addresses: list[str], *, job_id: str) -> dict[str, Any]:
+    settings = get_dns_settings_row(db)
+    normalized = fqdn.strip().strip(".").lower()
+    domains = [item.lower() for item in dns_domains_for_settings(settings)]
+    managed = next((domain for domain in domains if normalized == domain or normalized.endswith(f".{domain}")), "")
+    if not settings.enabled or not managed:
+        return {"status": "skipped", "reason": "DNS is disabled or the FQDN is outside managed domains."}
+    created: list[str] = []
+    conflicts: list[str] = []
+    for raw_address in addresses:
+        try:
+            parsed = ip_address(raw_address)
+        except ValueError:
+            continue
+        record_type = "AAAA" if isinstance(parsed, IPv6Address) else "A"
+        address = str(parsed)
+        exact = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == normalized, DnsRecord.record_type == record_type, DnsRecord.address == address)
+        ).scalar_one_or_none()
+        if exact:
+            continue
+        other = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == normalized, DnsRecord.record_type == record_type)
+        ).scalars().first()
+        if other:
+            conflicts.append(f"{record_type} {other.address}")
+            continue
+        db.add(
+            DnsRecord(
+                hostname=normalized,
+                record_type=record_type,
+                address=address,
+                record_data_json=dump_dns_record_data(record_type, address),
+                description=f"Created by VCF Helper SDDC Manager deployment {job_id}.",
+                enabled=True,
+            )
+        )
+        created.append(f"{record_type} {address}")
+    db.commit()
+    return {"status": "warning" if conflicts else "saved", "created": created, "conflicts": conflicts}
+
+
+def _wait_for_vcf_api(address: str, username: str, password: str, *, timeout: float = 5400.0, cancelled: Callable[[], bool] | None = None) -> dict[str, str]:
+    started = time.monotonic()
+    last_error: Exception | None = None
+    while time.monotonic() - started < timeout:
+        if cancelled and cancelled():
+            raise JobCancelled("Task was cancelled by an operator.")
+        try:
+            with VcfApiClient(address, username, password, timeout=30.0) as api:
+                return api.appliance_info()
+        except Exception as exc:  # appliance startup returns connection/auth failures until services settle.
+            last_error = exc
+            for _ in range(15):
+                if cancelled and cancelled():
+                    raise JobCancelled("Task was cancelled by an operator.")
+                time.sleep(1)
+    raise VcfSddcDeploymentError("VCF API did not become ready before the 90-minute timeout.") from last_error
+
+
+def _configure_deployed_target_depot(
+    db: Session,
+    job: Job,
+    *,
+    address: str,
+    local_password: str,
+    depot_password: str,
+) -> dict[str, Any]:
+    local = _local_depot_endpoint(db)
+
+    def update(percent: int, state: str) -> None:
+        _update_job(job, db, min(99, 90 + int(percent / 10)), f"depot-{state}")
+
+    return configure_target_depot(
+        address,
+        "admin@local",
+        local_password,
+        local,
+        depot_password,
+        replace_existing=True,
+        progress=update,
+    )
+
+
+def _execute_deployed_target_trust(
+    address: str,
+    *,
+    local_password: str,
+    expected_tls_fingerprint: str,
+    ca: RootCaInfo,
+    progress: Callable[[int, str], None] | None = None,
+) -> dict[str, Any]:
+    return execute_vcf_trust(
+        address=address,
+        port=443,
+        expected_tls_fingerprint=expected_tls_fingerprint,
+        credentials=VcfTrustCredentials(
+            api_username="admin@local",
+            api_password=local_password,
+        ),
+        ca=ca,
+        progress=progress,
+    )
+
+
+def run_vcf_sddc_deployment_job(
+    job_id: str,
+    *,
+    ova_path: str,
+    endpoint: str,
+    endpoint_username: str,
+    endpoint_password: str,
+    endpoint_fingerprint: str,
+    destination: dict[str, Any],
+    vm_name: str,
+    disk_provisioning: str,
+    power_on: bool,
+    property_values: dict[str, str],
+    add_dns: bool,
+    apply_trust: bool,
+    configure_offline_depot: bool,
+    depot_password: str,
+) -> None:
+    with SessionLocal() as db:
+        configure_operational_logging(db)
+        job = db.get(Job, job_id)
+        if not job:
+            return
+        job.status = JobStatus.RUNNING.value
+        job.started_at = utcnow()
+        db.commit()
+
+        def update(percent: int, state: str) -> None:
+            _update_cancelable_job(job, db, percent, state)
+
+        def cancelled() -> bool:
+            db.refresh(job)
+            return job.status == JobStatus.CANCELLED.value
+
+        vm_created = False
+        target_address = ""
+        try:
+            descriptor = inspect_ova(ova_path)
+            result = deploy_ova(
+                descriptor,
+                endpoint=endpoint,
+                username=endpoint_username,
+                password=endpoint_password,
+                resource_pool_id=str(destination.get("resource_pool_id") or ""),
+                datastore_id=str(destination.get("datastore_id") or ""),
+                network_ids={str(key): str(value) for key, value in dict(destination.get("network_ids") or {}).items()},
+                vm_name=vm_name,
+                property_values=property_values,
+                folder_id=str(destination.get("folder_id") or ""),
+                host_id=str(destination.get("host_id") or ""),
+                port=int(destination.get("port") or 443),
+                progress=update,
+                expected_fingerprint=endpoint_fingerprint,
+                disk_provisioning=disk_provisioning,
+                power_on=power_on,
+                cancelled=cancelled,
+            )
+            vm_created = True
+            fqdn = str(property_values.get("vami.hostname") or "").strip().strip(".")
+            if not power_on:
+                dns_result = None
+                if add_dns:
+                    addresses = [property_values.get("ip0", ""), property_values.get("ipv6", "")]
+                    dns_result = _add_deployed_vcf_dns(db, fqdn, [item for item in addresses if item], job_id=job.id) if fqdn else {"status": "skipped", "reason": "No FQDN was supplied."}
+                job.status = JobStatus.SUCCEEDED.value
+                job.finished_at = utcnow()
+                job.error = None
+                _update_job(job, db, 100, "deployed-powered-off", vm=result, vm_preserved=True, fqdn=fqdn, dns=dns_result)
+                success = True
+                record_audit(
+                    db,
+                    actor=job.created_by,
+                    action="deploy_vcf_sddc_manager",
+                    resource_type="job",
+                    resource_id=job.id,
+                    success=success,
+                    detail=f"vm_name={vm_name}; target=powered-off; snapshot_skipped=true; result={job.status}",
+                )
+                return
+            target_address = fqdn or str(result.get("guest_ip") or property_values.get("ip0") or "")
+            if not target_address:
+                raise VcfSddcDeploymentError("The VM powered on, but no VCF API address was available.")
+            _update_job(job, db, 82, "waiting-for-vcf-api", vm=result, target=target_address, fqdn=fqdn)
+            appliance = _wait_for_vcf_api(target_address, "admin@local", property_values.get("LOCAL_USER_PASSWORD", ""), cancelled=cancelled)
+            _update_job(job, db, 88, "vcf-api-ready", appliance=appliance)
+            if add_dns:
+                addresses = [str(result.get("guest_ip") or ""), property_values.get("ip0", ""), property_values.get("ipv6", "")]
+                dns_result = _add_deployed_vcf_dns(db, fqdn, [item for item in addresses if item], job_id=job.id) if fqdn else {"status": "skipped", "reason": "No FQDN was supplied."}
+                _update_job(job, db, 89, "dns-saved", dns=dns_result)
+            if apply_trust:
+                ca = root_ca_info(get_ca_settings_row(db))
+                tls_fingerprint = tls_sha256_fingerprint(target_address, 443)
+
+                def trust_update(percent: int, state: str) -> None:
+                    _update_job(job, db, 90 + int(percent / 12), f"trust-{state}")
+
+                trust_result = _execute_deployed_target_trust(
+                    target_address,
+                    local_password=property_values.get("LOCAL_USER_PASSWORD", ""),
+                    expected_tls_fingerprint=tls_fingerprint,
+                    ca=ca,
+                    progress=trust_update,
+                )
+                _update_job(job, db, 98 if not configure_offline_depot else 94, "trust-succeeded", trust=trust_result, snapshot_skipped="new-deployment")
+            if configure_offline_depot:
+                depot_result = _configure_deployed_target_depot(
+                    db,
+                    job,
+                    address=target_address,
+                    local_password=property_values.get("LOCAL_USER_PASSWORD", ""),
+                    depot_password=depot_password,
+                )
+                _update_job(job, db, 99, "depot-succeeded", target_depot=depot_result)
+            job.status = JobStatus.SUCCEEDED.value
+            job.finished_at = utcnow()
+            job.error = None
+            _update_job(job, db, 100, "succeeded")
+            success = True
+        except VcfDepotTargetPartialError as exc:
+            job.status = "partial-failure"
+            job.finished_at = utcnow()
+            job.error = str(exc)
+            _update_job(job, db, 100, "partial-failure", target=target_address, vm_preserved=vm_created, manual_recovery_required=True)
+            success = False
+        except VcfSddcPostImportError as exc:
+            vm_created = True
+            imported = dict(exc.vm_result)
+            target_address = str(imported.get("guest_ip") or property_values.get("ip0") or property_values.get("vami.hostname") or target_address or "")
+            job.status = "partial-failure"
+            job.finished_at = utcnow()
+            job.error = str(exc)
+            _update_job(job, db, 100, "partial-failure", target=target_address, vm=imported, vm_preserved=True, manual_recovery_required=True)
+            success = False
+        except (JobCancelled, VcfSddcDeploymentCancelled):
+            job.status = JobStatus.CANCELLED.value
+            job.finished_at = utcnow()
+            job.error = "Task cancelled by operator."
+            _update_job(job, db, 100, "cancelled", target=target_address, vm_preserved=vm_created)
+            success = False
+        except Exception as exc:  # noqa: BLE001 - background worker persists a safe terminal state.
+            job.status = "partial-failure" if vm_created else JobStatus.FAILED.value
+            job.finished_at = utcnow()
+            safe_types = (VcfSddcDeploymentError, VcfTrustError, VcfDepotTargetError)
+            job.error = str(exc) if isinstance(exc, safe_types) else "SDDC Manager deployment failed unexpectedly."
+            _update_job(job, db, 100, job.status, target=target_address, vm_preserved=vm_created)
+            success = False
+        record_audit(
+            db,
+            actor=job.created_by,
+            action="deploy_vcf_sddc_manager",
+            resource_type="job",
+            resource_id=job.id,
+            success=success,
+            detail=f"vm_name={vm_name}; target={target_address or 'not-created'}; snapshot_skipped=true; result={job.status}",
+        )
+
+
+def queue_vcf_sddc_deployment_job(job_id: str, **kwargs: Any) -> None:
+    threading.Thread(
+        target=run_vcf_sddc_deployment_job,
+        kwargs={"job_id": job_id, **kwargs},
+        name=f"vcf-sddc-deploy-{job_id}",
+        daemon=True,
+    ).start()
 
 
 def vcf_trust_context(db: Session) -> dict[str, Any]:
@@ -4713,7 +5381,7 @@ def vcf_trust_context(db: Session) -> dict[str, Any]:
     trust_targets = db.execute(select(VcfTrustTarget).order_by(desc(VcfTrustTarget.updated_at))).scalars().all()
     latest_trust_job = db.execute(
         select(Job)
-        .where(Job.type == "vcf-ca-trust", Job.status != "awaiting-host-key-confirmation")
+        .where(Job.type == "vcf-ca-trust")
         .order_by(desc(Job.created_at))
     ).scalars().first()
     return {
@@ -4726,12 +5394,12 @@ def vcf_trust_context(db: Session) -> dict[str, Any]:
     }
 
 
-def _vcf_trust_target(db: Session, address: str, ssh_port: int) -> VcfTrustTarget:
+def _vcf_trust_target(db: Session, address: str, port: int) -> VcfTrustTarget:
     target = db.execute(
-        select(VcfTrustTarget).where(VcfTrustTarget.address == address, VcfTrustTarget.ssh_port == ssh_port)
+        select(VcfTrustTarget).where(VcfTrustTarget.address == address, VcfTrustTarget.api_port == port)
     ).scalar_one_or_none()
     if target is None:
-        target = VcfTrustTarget(address=address, ssh_port=ssh_port)
+        target = VcfTrustTarget(address=address, api_port=port)
         db.add(target)
         db.flush()
     return target
@@ -4743,6 +5411,8 @@ def run_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCredenti
         target = db.get(VcfTrustTarget, target_id)
         if not job or not target:
             return
+        if job.status == JobStatus.CANCELLED.value:
+            return
         job.status = JobStatus.RUNNING.value
         job.started_at = utcnow()
         target.last_attempted_at = job.started_at
@@ -4750,13 +5420,14 @@ def run_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCredenti
         db.commit()
 
         def update(percent: int, state: str) -> None:
+            _raise_if_job_cancelled(job, db)
             job.progress_percent = percent
             job.result = sanitized_result(
                 address=target.address,
-                ssh_port=target.ssh_port,
+                port=target.api_port,
                 ca=ca,
                 state=state,
-                host_key_fingerprint=target.ssh_host_key_fingerprint,
+                tls_fingerprint=target.tls_fingerprint,
             )
             db.commit()
 
@@ -4764,8 +5435,8 @@ def run_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCredenti
         try:
             outcome = execute_vcf_trust(
                 address=target.address,
-                ssh_port=target.ssh_port,
-                expected_host_key=target.ssh_host_key_fingerprint,
+                port=target.api_port,
+                expected_tls_fingerprint=target.tls_fingerprint,
                 credentials=credentials,
                 ca=ca,
                 progress=update,
@@ -4777,10 +5448,10 @@ def run_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCredenti
             job.error = None
             job.result = sanitized_result(
                 address=target.address,
-                ssh_port=target.ssh_port,
+                port=target.api_port,
                 ca=ca,
                 state=job.status,
-                host_key_fingerprint=target.ssh_host_key_fingerprint,
+                tls_fingerprint=target.tls_fingerprint,
                 **outcome,
             )
             target.appliance_role = str(outcome.get("role") or "")
@@ -4791,23 +5462,20 @@ def run_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCredenti
             target.updated_at = finished
             success = True
             db.commit()
-        except VcfTrustPartialError as exc:
+        except JobCancelled as exc:
             finished = utcnow()
-            job.status = "partial-failure"
+            job.status = JobStatus.CANCELLED.value
             job.progress_percent = 100
             job.finished_at = finished
             job.error = str(exc)
             job.result = sanitized_result(
                 address=target.address,
-                ssh_port=target.ssh_port,
+                port=target.api_port,
                 ca=ca,
-                state="partial-failure",
-                host_key_fingerprint=target.ssh_host_key_fingerprint,
-                certificate_installed=True,
-                manual_recovery_required=True,
+                state="cancelled",
+                tls_fingerprint=target.tls_fingerprint,
             )
-            target.last_ca_fingerprint = ca.fingerprint
-            target.last_result = "partial-failure"
+            target.last_result = "cancelled"
             target.updated_at = finished
             db.commit()
         except Exception as exc:  # noqa: BLE001 - background task must persist a sanitized terminal state.
@@ -4819,10 +5487,10 @@ def run_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCredenti
             job.error = safe_error
             job.result = sanitized_result(
                 address=target.address,
-                ssh_port=target.ssh_port,
+                port=target.api_port,
                 ca=ca,
                 state="failed",
-                host_key_fingerprint=target.ssh_host_key_fingerprint,
+                tls_fingerprint=target.tls_fingerprint,
             )
             target.last_result = "failed"
             target.updated_at = finished
@@ -4835,7 +5503,7 @@ def run_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCredenti
             resource_id=job.id,
             success=success,
             detail=(
-                f"target={target.address}:{target.ssh_port}; role={target.appliance_role or 'unknown'}; "
+                f"target={target.address}:{target.api_port}; role={target.appliance_role or 'unknown'}; "
                 f"version={target.appliance_version or 'unknown'}; ca_fingerprint={ca.fingerprint}; "
                 f"snapshot_acknowledged=true; result={target.last_result}"
             ),
@@ -4849,6 +5517,14 @@ def queue_vcf_trust_job(job_id: str, target_id: int, credentials: VcfTrustCreden
         name=f"vcf-ca-trust-{job_id}",
         daemon=True,
     ).start()
+
+
+def _normalize_vcf_trust_address(address: str) -> tuple[str, list[str]]:
+    normalized_address = address.strip()
+    errors: list[str] = []
+    if not normalized_address or any(character.isspace() for character in normalized_address):
+        errors.append("Enter one VCF appliance IP address or hostname.")
+    return normalized_address, errors
 
 
 APPLIANCE_APPLY_BASELINES_KEY = "appliance_apply.baselines.v1"
@@ -10409,6 +11085,340 @@ def vcf_helper_page(
     )
 
 
+async def _vcf_helper_json(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Submit a valid JSON request.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Submit a JSON object.")
+    verify_csrf(request, str(payload.get("csrf") or ""))
+    return payload
+
+
+def _confirmed_tls_fingerprint(address: str, port: int, confirmed: str) -> tuple[str, JSONResponse | None]:
+    try:
+        fingerprint = tls_sha256_fingerprint(address, port)
+    except (OSError, ssl.SSLError) as exc:
+        raise HTTPException(status_code=422, detail=f"Could not read the target TLS certificate: {exc}") from exc
+    if confirmed.strip().upper() != fingerprint.upper():
+        return fingerprint, JSONResponse(
+            {
+                "status": "tls-confirmation-required",
+                "address": address,
+                "port": port,
+                "fingerprint": fingerprint,
+            },
+            status_code=409,
+        )
+    return fingerprint, None
+
+
+def _split_vcf_endpoint_address_port(raw_address: Any, raw_port: Any = None) -> tuple[str, int]:
+    endpoint = str(raw_address or "").strip()
+    port = 443
+    if raw_port not in (None, ""):
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="Target endpoint port must be a number from 1 to 65535.") from exc
+    if not endpoint:
+        return "", port
+    if "://" in endpoint:
+        parsed = urlsplit(endpoint)
+        address = parsed.hostname or ""
+        try:
+            port = parsed.port or port
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Target endpoint port must be a number from 1 to 65535.") from exc
+    elif endpoint.startswith("[") and "]" in endpoint:
+        closing = endpoint.find("]")
+        address = endpoint[1:closing]
+        suffix = endpoint[closing + 1 :]
+        if suffix.startswith(":") and suffix[1:]:
+            try:
+                port = int(suffix[1:])
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="Target endpoint port must be a number from 1 to 65535.") from exc
+    elif endpoint.count(":") == 1 and endpoint.rsplit(":", 1)[1].isdigit():
+        address, port_text = endpoint.rsplit(":", 1)
+        port = int(port_text)
+    else:
+        address = endpoint.strip("[]")
+    address = address.strip()
+    if not 0 < port <= 65535:
+        raise HTTPException(status_code=422, detail="Target endpoint port must be a number from 1 to 65535.")
+    return address, port
+
+
+def _validate_vcf_sddc_property_values(descriptor: Any, values: dict[str, str]) -> list[str]:
+    properties = {item.key: item for item in descriptor.properties}
+    required = {"ROOT_PASSWORD", "LOCAL_USER_PASSWORD", "vami.hostname"}
+    address_version = values.get("ip_address_version", properties.get("ip_address_version").default if properties.get("ip_address_version") else "IPv4")
+    if "IPv4" in str(address_version):
+        required.update({"ip0", "netmask0", "gateway", "DNS"})
+    if "IPv6" in str(address_version):
+        required.update({"ipv6", "ipv6_prefix", "ipv6_gateway"})
+    missing = [key for key in sorted(required) if key in properties and not values.get(key, "").strip()]
+    invalid = []
+    for key, property_info in properties.items():
+        value = values.get(key, "")
+        min_match = re.search(r"MinLen\((\d+)\)", property_info.qualifiers or "")
+        max_match = re.search(r"MaxLen\((\d+)\)", property_info.qualifiers or "")
+        if min_match and value and len(value) < int(min_match.group(1)):
+            invalid.append(f"{property_info.label or key} must be at least {min_match.group(1)} characters.")
+        if max_match and value and len(value) > int(max_match.group(1)):
+            invalid.append(f"{property_info.label or key} must be at most {max_match.group(1)} characters.")
+    if missing:
+        labels = [properties[key].label or key for key in missing]
+        invalid.insert(0, f"Complete required OVA properties: {', '.join(labels)}.")
+    return invalid
+
+
+@router.post("/vcf-helper/sddc-manager/inventory", response_model=None)
+async def vcf_sddc_manager_inventory(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+) -> JSONResponse:
+    require_vcf_helper_write(identity)
+    payload = await _vcf_helper_json(request)
+    address, port = _split_vcf_endpoint_address_port(payload.get("address"), payload.get("port"))
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    if not address or not username or not password:
+        raise HTTPException(status_code=422, detail="Target address, username, and password are required.")
+    fingerprint, confirmation = _confirmed_tls_fingerprint(address, port, str(payload.get("confirmed_tls_fingerprint") or ""))
+    if confirmation:
+        return confirmation
+    try:
+        inventory = vsphere_inventory(address, username, password, port=port, expected_fingerprint=fingerprint)
+        descriptor = inspect_ova(str(payload.get("ova_path") or ""))
+    except VcfSddcDeploymentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"status": "ready", "tls_fingerprint": fingerprint, "inventory": inventory, "ova": descriptor.public_dict()})
+
+
+@router.post("/vcf-helper/sddc-manager/deploy", response_model=None)
+async def deploy_vcf_sddc_manager_from_ui(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    require_vcf_helper_write(identity)
+    payload = await _vcf_helper_json(request)
+    address, port = _split_vcf_endpoint_address_port(payload.get("address"), payload.get("port"))
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    if not address or not username or not password:
+        raise HTTPException(status_code=422, detail="Target address, username, and password are required.")
+    _fingerprint, confirmation = _confirmed_tls_fingerprint(address, port, str(payload.get("confirmed_tls_fingerprint") or ""))
+    if confirmation:
+        return confirmation
+    try:
+        descriptor = inspect_ova(str(payload.get("ova_path") or ""))
+    except VcfSddcDeploymentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    raw_properties = payload.get("properties") or {}
+    if not isinstance(raw_properties, dict):
+        raise HTTPException(status_code=422, detail="OVA properties must be an object.")
+    allowed_keys = {item.key for item in descriptor.properties}
+    property_values = {str(key): str(value) for key, value in raw_properties.items() if str(key) in allowed_keys}
+    invalid_properties = _validate_vcf_sddc_property_values(descriptor, property_values)
+    if invalid_properties:
+        raise HTTPException(status_code=422, detail=" ".join(invalid_properties))
+    destination = payload.get("destination") or {}
+    if not isinstance(destination, dict) or not destination.get("resource_pool_id") or not destination.get("datastore_id"):
+        raise HTTPException(status_code=422, detail="Select a resource pool and datastore.")
+    network_ids = destination.get("network_ids") or {}
+    if any(not str(dict(network_ids).get(name) or "") for name in descriptor.networks):
+        raise HTTPException(status_code=422, detail="Map every OVA network before deployment.")
+    options = payload.get("options") or {}
+    if not isinstance(options, dict):
+        options = {}
+    power_on = bool(options.get("power_on", True))
+    add_dns = bool(options.get("add_dns"))
+    apply_trust = bool(options.get("apply_trust")) if power_on else False
+    configure_offline_depot = bool(options.get("configure_offline_depot")) if power_on else False
+    if not power_on and any(bool(options.get(key)) for key in ("apply_trust", "configure_offline_depot")):
+        raise HTTPException(status_code=422, detail="VCF certificate trust and offline depot configuration require Power on after deployment.")
+    try:
+        disk_provisioning = normalize_disk_provisioning(str(options.get("disk_provisioning") or "thin"))
+    except VcfSddcDeploymentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    depot_password = str(payload.get("depot_password") or "")
+    if configure_offline_depot:
+        local = local_vcf_depot_target_context(db)
+        if not local["available"]:
+            raise HTTPException(status_code=422, detail=" ".join(local["reasons"]))
+        if not depot_password:
+            raise HTTPException(status_code=422, detail="Enter the one-time local depot HTTP password.")
+    vm_name = str(payload.get("vm_name") or descriptor.vm_name).strip()
+    if not vm_name:
+        raise HTTPException(status_code=422, detail="Virtual machine name is required.")
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="vcf-sddc-manager-deploy",
+        status=JobStatus.PENDING.value,
+        created_by=identity.username,
+        progress_percent=0,
+        result=json.dumps(
+            {
+                "state": "queued",
+                "ova": descriptor.relative_path,
+                "vm_name": vm_name,
+                "endpoint": address,
+                "disk_provisioning": disk_provisioning,
+                "power_on": power_on,
+                "property_keys": sorted(property_values),
+                "password_property_keys": sorted(item.key for item in descriptor.properties if item.password and item.key in property_values),
+                "options": {
+                    "add_dns": add_dns,
+                    "apply_trust": apply_trust,
+                    "configure_offline_depot": configure_offline_depot,
+                },
+            },
+            sort_keys=True,
+        ),
+    )
+    db.add(job)
+    db.commit()
+    queue_vcf_sddc_deployment_job(
+        job.id,
+        ova_path=descriptor.path,
+        endpoint=address,
+        endpoint_username=username,
+        endpoint_password=password,
+        endpoint_fingerprint=str(payload.get("confirmed_tls_fingerprint") or ""),
+        destination={**destination, "port": port},
+        vm_name=vm_name,
+        disk_provisioning=disk_provisioning,
+        power_on=power_on,
+        property_values=property_values,
+        add_dns=add_dns,
+        apply_trust=apply_trust,
+        configure_offline_depot=configure_offline_depot,
+        depot_password=depot_password,
+    )
+    record_audit(db, actor=identity.username, action="queue_vcf_sddc_manager_deployment", resource_type="job", resource_id=job.id, detail=f"ova={descriptor.relative_path}; vm_name={vm_name}; endpoint={address}")
+    return JSONResponse({"status": "queued", "job_id": job.id}, status_code=202)
+
+
+@router.get("/vcf-helper/sddc-manager/tasks/{job_id}", response_model=None)
+def vcf_sddc_manager_task_status(
+    job_id: str,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    require_vcf_helper_write(identity)
+    job = db.get(Job, job_id)
+    if not job or job.type != "vcf-sddc-manager-deploy":
+        raise HTTPException(status_code=404, detail="SDDC Manager deployment task not found.")
+    return JSONResponse({"job_id": job.id, "status": job.status, "progress_percent": job.progress_percent, "error": job.error or "", "result": _job_payload(job)})
+
+
+@router.post("/vcf-helper/offline-depot/inspect-target", response_model=None)
+async def inspect_vcf_offline_depot_target_from_ui(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    require_vcf_helper_write(identity)
+    payload = await _vcf_helper_json(request)
+    local = local_vcf_depot_target_context(db)
+    if not local["available"]:
+        raise HTTPException(status_code=422, detail=" ".join(local["reasons"]))
+    try:
+        address, port = _split_vcf_endpoint_address_port(payload.get("address"), payload.get("port"))
+    except HTTPException as exc:
+        raise exc
+    api_username = str(payload.get("api_username") or "").strip()
+    api_password = str(payload.get("api_password") or "")
+    fingerprint, confirmation = _confirmed_tls_fingerprint(address, port, str(payload.get("confirmed_tls_fingerprint") or ""))
+    if confirmation:
+        return confirmation
+    try:
+        target = inspect_target_depot(address, api_username, api_password, port=port, expected_fingerprint=fingerprint)
+    except VcfDepotTargetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    current = target["depot"]
+    replacement_required = bool(current.get("hostname") or current.get("url") or current.get("username")) and not (
+        str(current.get("hostname") or "").lower() == str(local["hostname"]).lower()
+        and int(current.get("port") or 0) == int(local["port"])
+    )
+    return JSONResponse({"status": "ready", "address": address, "port": port, "tls_fingerprint": fingerprint, "target": target, "local_depot": {key: local[key] for key in ("hostname", "port", "url", "username")}, "replacement_required": replacement_required})
+
+
+@router.post("/vcf-helper/offline-depot/configure", response_model=None)
+async def configure_vcf_offline_depot_target_from_ui(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    require_vcf_helper_write(identity)
+    payload = await _vcf_helper_json(request)
+    local = local_vcf_depot_target_context(db)
+    if not local["available"]:
+        raise HTTPException(status_code=422, detail=" ".join(local["reasons"]))
+    try:
+        address, port = _split_vcf_endpoint_address_port(payload.get("address"), payload.get("port"))
+    except HTTPException as exc:
+        raise exc
+    api_username = str(payload.get("api_username") or "").strip()
+    api_password = str(payload.get("api_password") or "")
+    depot_password = str(payload.get("depot_password") or "")
+    if not address or not api_username or not api_password or not depot_password:
+        raise HTTPException(status_code=422, detail="Target API credentials and the one-time depot password are required.")
+    fingerprint, confirmation = _confirmed_tls_fingerprint(address, port, str(payload.get("confirmed_tls_fingerprint") or ""))
+    if confirmation:
+        return confirmation
+    replace_existing = bool(payload.get("replace_existing"))
+    try:
+        current = inspect_target_depot(address, api_username, api_password, port=port, expected_fingerprint=fingerprint)["depot"]
+    except VcfDepotTargetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    has_different = bool(current.get("hostname") or current.get("url") or current.get("username")) and not (
+        str(current.get("hostname") or "").lower() == str(local["hostname"]).lower()
+        and int(current.get("port") or 0) == int(local["port"])
+    )
+    if has_different and not replace_existing:
+        return JSONResponse({"status": "replacement-confirmation-required", "current": current}, status_code=409)
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="vcf-offline-depot-target-config",
+        status=JobStatus.PENDING.value,
+        created_by=identity.username,
+        progress_percent=0,
+        result=json.dumps({"state": "queued", "target": address, "port": port, "local_depot": {key: local[key] for key in ("hostname", "port", "url", "username")}}, sort_keys=True),
+    )
+    db.add(job)
+    db.commit()
+    queue_vcf_target_depot_job(
+        job.id,
+        address=address,
+        port=port,
+        api_username=api_username,
+        api_password=api_password,
+        depot_password=depot_password,
+        replace_existing=replace_existing,
+        expected_fingerprint=fingerprint,
+    )
+    record_audit(db, actor=identity.username, action="queue_vcf_offline_depot_target_configuration", resource_type="job", resource_id=job.id, detail=f"target={address}:{port}; depot={local['hostname']}:{local['port']}")
+    return JSONResponse({"status": "queued", "job_id": job.id, "redirect": f"/tasks?job_id={job.id}"}, status_code=202)
+
+
+@router.get("/vcf-helper/offline-depot/tasks/{job_id}", response_model=None)
+def vcf_offline_depot_target_task_status(
+    job_id: str,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    require_vcf_helper_write(identity)
+    job = db.get(Job, job_id)
+    if not job or job.type != "vcf-offline-depot-target-config":
+        raise HTTPException(status_code=404, detail="VCF Offline Depot target task not found.")
+    return JSONResponse({"job_id": job.id, "status": job.status, "progress_percent": job.progress_percent, "error": job.error or "", "result": _job_payload(job)})
+
+
 @router.get("/vcf-trust", response_class=HTMLResponse, response_model=None)
 def vcf_trust_page(
     request: Request,
@@ -10418,103 +11428,84 @@ def vcf_trust_page(
     return RedirectResponse("/vcf-helper?vcf_trust=1", status_code=307)
 
 
+@router.post("/vcf-helper/trust-root-ca/inspect-target", response_model=None)
+async def inspect_vcf_trust_target_from_ui(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    require_vcf_helper_write(identity)
+    payload = await _vcf_helper_json(request)
+    try:
+        address, port = _split_vcf_endpoint_address_port(payload.get("address"), payload.get("port"))
+    except HTTPException as exc:
+        return JSONResponse({"status": "error", "errors": [str(exc.detail)]}, status_code=exc.status_code)
+    normalized_address, errors = _normalize_vcf_trust_address(address)
+    if errors:
+        return JSONResponse({"status": "error", "errors": errors}, status_code=422)
+    api_username = str(payload.get("api_username") or "").strip()
+    api_password = str(payload.get("api_password") or "")
+    if not api_username or not api_password:
+        return JSONResponse({"status": "error", "errors": ["VCF API administrator credentials are required."]}, status_code=422)
+    fingerprint, confirmation = _confirmed_tls_fingerprint(normalized_address, port, str(payload.get("confirmed_tls_fingerprint") or ""))
+    if confirmation:
+        return confirmation
+    try:
+        appliance = inspect_vcf_trust_target(
+            normalized_address,
+            port,
+            VcfTrustCredentials(api_username=api_username, api_password=api_password),
+            expected_fingerprint=fingerprint,
+        )
+    except VcfTrustError as exc:
+        return JSONResponse({"status": "error", "errors": [str(exc)]}, status_code=422)
+    return JSONResponse({"status": "ready", "address": normalized_address, "port": port, "tls_fingerprint": fingerprint, "appliance": appliance})
+
+
 @router.post("/vcf-trust/root-ca", response_model=None)
 @router.post("/vcf-helper/trust-root-ca", response_model=None)
 def trust_vcf_root_ca_from_ui(
     request: Request,
     address: str = Form(...),
-    ssh_port: int = Form(22),
     api_username: str = Form(...),
     api_password: str = Form(...),
-    ssh_auth_method: str = Form("password"),
-    ssh_password: str = Form(""),
-    ssh_private_key: UploadFile | None = File(None),
-    ssh_private_key_passphrase: str = Form(""),
-    root_password: str = Form(...),
+    confirmed_tls_fingerprint: str = Form(""),
     snapshot_acknowledged: str | None = Form(None),
-    confirmed_host_key: str = Form(""),
-    replace_host_key: str | None = Form(None),
     awaiting_job_id: str = Form(""),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse | RedirectResponse | JSONResponse:
+    require_vcf_helper_write(identity)
     verify_csrf(request, csrf)
-    normalized_address = address.strip().strip("[]")
-    errors: list[str] = []
-    if not normalized_address or any(character.isspace() for character in normalized_address) or "/" in normalized_address:
-        errors.append("Enter one VCF appliance IP address or hostname.")
-    if ssh_port < 1 or ssh_port > 65535:
-        errors.append("SSH port must be between 1 and 65535.")
+    try:
+        endpoint_address, port = _split_vcf_endpoint_address_port(address, None)
+    except HTTPException as exc:
+        endpoint_address = ""
+        port = 443
+        errors = [str(exc.detail)]
+    else:
+        normalized_address, errors = _normalize_vcf_trust_address(endpoint_address)
     if snapshot_acknowledged != "on":
         errors.append("Confirm that a current snapshot exists before starting this remote change.")
     if not api_username.strip() or not api_password:
         errors.append("VCF API administrator credentials are required.")
-    if not root_password:
-        errors.append("The appliance root password is required for su elevation.")
-    private_key_text = ""
-    if ssh_auth_method == "private-key":
-        if ssh_private_key and ssh_private_key.filename:
-            private_key_bytes = ssh_private_key.file.read(65537)
-            if len(private_key_bytes) > 65536:
-                errors.append("SSH private keys must be 64 KiB or smaller.")
-            else:
-                try:
-                    private_key_text = private_key_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    errors.append("The SSH private key must be UTF-8 PEM or OpenSSH text.")
-        if not private_key_text:
-            errors.append("Upload the vcf user's SSH private key.")
-    elif ssh_auth_method != "password":
-        errors.append("Select password or private-key SSH authentication.")
-    elif not ssh_password:
-        errors.append("The vcf SSH password is required.")
     try:
         ca = root_ca_info(get_ca_settings_row(db))
     except VcfTrustError as exc:
         errors.append(str(exc))
         ca = None
-
-    discovered_host_key = ""
     if not errors:
         try:
-            discovered_host_key = discover_ssh_host_key(normalized_address, ssh_port)
-        except (OSError, VcfTrustError, paramiko.SSHException) as exc:
-            errors.append(f"Could not read the VCF appliance SSH host key: {exc}")
-
-    target = _vcf_trust_target(db, normalized_address, ssh_port) if normalized_address and 0 < ssh_port <= 65535 else None
-    pinned = target.ssh_host_key_fingerprint if target else ""
-    confirmation_required = bool(discovered_host_key and (not pinned or discovered_host_key != pinned))
-    confirmation_valid = bool(
-        confirmation_required
-        and confirmed_host_key == discovered_host_key
-        and (not pinned or replace_host_key == "on")
-    )
-    if not errors and confirmation_required and not confirmation_valid:
-        confirmation = {
-            "address": normalized_address,
-            "ssh_port": ssh_port,
-            "fingerprint": discovered_host_key,
-            "previous_fingerprint": pinned,
-            "replacement": bool(pinned),
-        }
-        if request.headers.get("X-LabFoundry-VCF-Trust") == "1":
-            return JSONResponse(
-                {
-                    "status": "host-key-confirmation-required",
-                    **confirmation,
-                },
-                status_code=409,
-            )
-        page_context = {
-            "identity": identity,
-            **vcf_helper_context(db),
-            **vcf_trust_context(db),
-            "vcf_trust_auto_open": True,
-            "appliance_apply_status": dnsmasq_apply_status(db, dnsmasq_context(db)),
-            "vcf_trust_host_key_confirmation": confirmation,
-        }
-        return render(request, "vcf_helper.html", page_context, status_code=409)
+            fingerprint, confirmation = _confirmed_tls_fingerprint(normalized_address, port, confirmed_tls_fingerprint)
+        except Exception as exc:  # noqa: BLE001 - surfaced as sanitized form validation.
+            errors.append(str(exc))
+            fingerprint = ""
+            confirmation = None
+        if confirmation:
+            if request.headers.get("X-LabFoundry-VCF-Trust") == "1":
+                return confirmation
+            errors.append("Confirm the VCF appliance HTTPS TLS fingerprint before queueing the task.")
 
     if errors:
         if request.headers.get("X-LabFoundry-VCF-Trust") == "1":
@@ -10529,11 +11520,10 @@ def trust_vcf_root_ca_from_ui(
         }
         return render(request, "vcf_helper.html", page_context, status_code=422)
 
-    assert target is not None and ca is not None
-    if confirmation_required:
-        target.ssh_host_key_fingerprint = discovered_host_key
-    elif not target.ssh_host_key_fingerprint:
-        target.ssh_host_key_fingerprint = discovered_host_key
+    assert ca is not None
+    target = _vcf_trust_target(db, normalized_address, port)
+    target.api_port = port
+    target.tls_fingerprint = fingerprint
     target.updated_at = utcnow()
     job = db.get(Job, awaiting_job_id) if awaiting_job_id else None
     if not job or job.type != "vcf-ca-trust" or job.created_by != identity.username:
@@ -10543,20 +11533,16 @@ def trust_vcf_root_ca_from_ui(
         job.status = JobStatus.PENDING.value
     job.result = sanitized_result(
         address=normalized_address,
-        ssh_port=ssh_port,
+        port=port,
         ca=ca,
         state="queued",
-        host_key_fingerprint=target.ssh_host_key_fingerprint,
+        tls_fingerprint=target.tls_fingerprint,
     )
     target.last_job_id = job.id
     db.commit()
     credentials = VcfTrustCredentials(
         api_username=api_username.strip(),
         api_password=api_password,
-        ssh_password=ssh_password if ssh_auth_method == "password" else "",
-        ssh_private_key=private_key_text,
-        ssh_private_key_passphrase=ssh_private_key_passphrase if ssh_auth_method == "private-key" else "",
-        root_password=root_password,
     )
     record_audit(
         db,
@@ -10564,12 +11550,12 @@ def trust_vcf_root_ca_from_ui(
         action="queue_vcf_root_ca_import",
         resource_type="job",
         resource_id=job.id,
-        detail=f"target={normalized_address}:{ssh_port}; ca_fingerprint={ca.fingerprint}; snapshot_acknowledged=true",
+        detail=f"target={normalized_address}:{port}; ca_fingerprint={ca.fingerprint}; snapshot_acknowledged=true",
     )
     queue_vcf_trust_job(job.id, target.id, credentials, ca)
     if request.headers.get("X-LabFoundry-VCF-Trust") == "1":
-        return JSONResponse({"status": "queued", "job_id": job.id, "redirect": "/vcf-helper?vcf_trust=1"}, status_code=202)
-    return RedirectResponse("/vcf-helper?vcf_trust=1", status_code=303)
+        return JSONResponse({"status": "queued", "job_id": job.id, "redirect": f"/tasks?job_id={job.id}"}, status_code=202)
+    return RedirectResponse(f"/tasks?job_id={job.id}", status_code=303)
 
 
 @router.post("/vcf-helper/generated-fqdns", response_model=None)
@@ -12329,6 +13315,99 @@ def logs_page(
             **logs_context(db),
         },
     )
+
+
+@router.get("/tasks", response_class=HTMLResponse, response_model=None)
+def tasks_page(
+    request: Request,
+    job_id: str = Query(""),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    jobs = db.execute(select(Job).order_by(desc(Job.created_at)).limit(500)).scalars().all()
+    task_rows = [_task_row(job) for job in jobs]
+    selected_job_id = job_id if any(row["id"] == job_id for row in task_rows) else (task_rows[0]["id"] if task_rows else "")
+    return render(
+        request,
+        "tasks.html",
+        {
+            "identity": identity,
+            "task_rows": task_rows,
+            "selected_task_id": selected_job_id,
+        },
+    )
+
+
+@router.get("/tasks/status", response_class=JSONResponse, response_model=None)
+def tasks_status(
+    job_id: str = Query(""),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    jobs = db.execute(select(Job).order_by(desc(Job.created_at)).limit(500)).scalars().all()
+    rows = [_task_row(job) for job in jobs]
+    selected = next((row for row in rows if row["id"] == job_id), None)
+    if selected is None and rows:
+        selected = rows[0]
+    return JSONResponse(
+        {
+            "tasks": rows,
+            "selected_task": selected,
+            "active_count": sum(1 for row in rows if row["status"] in ACTIVE_JOB_STATUSES),
+            "server_time": utcnow().isoformat(),
+        }
+    )
+
+
+@router.get("/tasks/{job_id}/log", response_class=JSONResponse, response_model=None)
+def task_log(
+    job_id: str,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Task not found")
+    row = _task_row(job)
+    return JSONResponse(
+        {
+            "job_id": job.id,
+            "status": job.status,
+            "title": f"{row['type_label']} log",
+            "text": "\n".join(_task_log_lines(job, db)),
+        }
+    )
+
+
+@router.post("/tasks/{job_id}/cancel", response_class=JSONResponse, response_model=None)
+def cancel_task_from_ui(
+    job_id: str,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    verify_csrf(request, csrf)
+    if not (identity.has_role(Role.ADMIN.value) or identity.has_role(Role.SERVICE_ADMIN.value)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator or service administrator role required")
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if job.status not in ACTIVE_JOB_STATUSES:
+        return JSONResponse({"task": _task_row(job), "message": "Task is already finished."})
+    job.status = JobStatus.CANCELLED.value
+    job.finished_at = utcnow()
+    job.error = "Task cancelled by operator."
+    payload = _job_payload(job)
+    payload["state"] = "cancelled"
+    payload["cancelled_by"] = identity.username
+    payload["cancelled_at"] = job.finished_at.isoformat()
+    job.result = json.dumps(_redact_task_value(payload), sort_keys=True)
+    job.progress_percent = 100
+    db.commit()
+    record_audit(db, actor=identity.username, action="cancel_task", resource_type="job", resource_id=job.id, detail=f"type={job.type}")
+    db.refresh(job)
+    return JSONResponse({"task": _task_row(job), "message": "Task cancellation requested."})
 
 
 @router.get("/audit-log", response_class=HTMLResponse, response_model=None)

@@ -1,5 +1,9 @@
 # VMware Workstation Lifecycle Testing
 
+The shared lifecycle host-state checks verify that first-boot appliances retain
+`vcf-sdk==9.1.0.0`, `VCF.PowerCLI==9.1.0.25380678`, and `Connect-VIServer`
+after the wheel-only test deployment.
+
 LabFoundry can run a VMware Workstation lifecycle lab alongside the Hyper-V
 lab. The Workstation path uses VMX/VMDK artifacts and `vmrun.exe`, then
 delegates appliance behavior checks to the shared Python lifecycle runner.

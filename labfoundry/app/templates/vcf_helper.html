@@ -60,27 +60,35 @@
         </span>
         <span class="vcf-helper-action-arrow" aria-hidden="true">&rarr;</span>
       </button>
+      <button class="info-band vcf-helper-action-band" type="button" data-vcf-sddc-deploy-open aria-haspopup="dialog" aria-controls="vcf-sddc-deploy-modal" {% if not vcf_sddc_ovas or not (identity.has_role('admin') or identity.has_role('service-admin')) %}disabled{% endif %}>
+        <span class="vcf-helper-action-copy">
+          <span class="vcf-helper-action-title">Deploy SDDC Manager</span>
+          <span class="muted">Deploy an OVA from {{ vcf_sddc_ova_root }} to vCenter or standalone ESXi and monitor VCF API readiness.</span>
+        </span>
+        <span class="vcf-helper-action-arrow" aria-hidden="true">&rarr;</span>
+      </button>
+      <button class="info-band vcf-helper-action-band" type="button" data-vcf-target-depot-open aria-haspopup="dialog" aria-controls="vcf-target-depot-modal" {% if not vcf_target_depot.available or not (identity.has_role('admin') or identity.has_role('service-admin')) %}disabled{% endif %}>
+        <span class="vcf-helper-action-copy">
+          <span class="vcf-helper-action-title">Configure VCF Offline Depot</span>
+          <span class="muted">Point a VCF Installer or SDDC Manager at {{ vcf_target_depot.url }} and monitor metadata synchronization.</span>
+        </span>
+        <span class="vcf-helper-action-arrow" aria-hidden="true">&rarr;</span>
+      </button>
     </div>
+
+    {% if not vcf_sddc_ovas %}<div class="alert warn">SDDC Manager deployment becomes available when a valid OVA is present under <span class="mono-text">{{ vcf_sddc_ova_root }}</span>.</div>{% endif %}
+    {% if not vcf_target_depot.available %}<div class="alert warn">Offline-depot target configuration is unavailable: {{ vcf_target_depot.reasons|join(' ') }}</div>{% endif %}
 
   </div>
 
   <aside class="side-stack">
     {% include "partials/appliance_apply_status.html" %}
-    <div class="panel detail-panel">
-      <div class="panel-head">
-        <h2>DNS Boundary</h2>
-        <span class="status-pill muted">desired state</span>
-      </div>
-      <div class="settings-list compact-settings-list">
-        <div><span>Record type</span><strong>A or AAAA</strong><small>IPv4 or IPv6</small></div>
-        <div><span>Runtime apply</span><strong>dnsmasq</strong><small>global Appliance Apply</small></div>
-        <div><span>Conflicts</span><strong>skip existing</strong><small>no overwrite</small></div>
-      </div>
-    </div>
   </aside>
 </section>
 
 {% include "partials/vcf_trust_modal.html" %}
+{% include "partials/vcf_sddc_deploy_modal.html" %}
+{% include "partials/vcf_target_depot_modal.html" %}
 
 <dialog id="vcf-fqdn-modal" class="confirm-modal wide-modal vcf-fqdn-modal" aria-labelledby="vcf-fqdn-modal-title">
   <form class="confirm-modal-panel form-stack" action="/vcf-helper/generated-fqdns" method="post" data-vcf-fqdn-form>

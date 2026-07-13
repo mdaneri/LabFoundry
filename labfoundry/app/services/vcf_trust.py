@@ -1,26 +1,19 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import io
 import json
-import socket
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from ipaddress import IPv6Address, ip_address
 from typing import Any, Callable
 
 import httpx
-import paramiko
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 
 from labfoundry.app.models import CaSettings
+from labfoundry.app.services.vcf_sddc_deployment import tls_sha256_fingerprint
 
 
-VCF_RESTART_COMMAND = "/opt/vmware/vcf/operationsmanager/scripts/cli/sddcmanager_restart_services.sh"
 VCF_SUPPORTED_ROLES = {"VcfInstaller", "SddcManager"}
 
 
@@ -28,18 +21,10 @@ class VcfTrustError(RuntimeError):
     pass
 
 
-class VcfTrustPartialError(VcfTrustError):
-    pass
-
-
 @dataclass(frozen=True)
 class VcfTrustCredentials:
     api_username: str
     api_password: str
-    ssh_password: str = ""
-    ssh_private_key: str = ""
-    ssh_private_key_passphrase: str = ""
-    root_password: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,35 +74,35 @@ def pem_fingerprint(pem: str) -> str:
     return colon_fingerprint(certificate.fingerprint(hashes.SHA256()))
 
 
-def discover_ssh_host_key(address: str, port: int, timeout: float = 10.0) -> str:
-    sock = socket.create_connection((address, port), timeout=timeout)
-    transport = paramiko.Transport(sock)
-    try:
-        transport.start_client(timeout=timeout)
-        key = transport.get_remote_server_key()
-        digest = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode("ascii").rstrip("=")
-        return f"SHA256:{digest}"
-    finally:
-        transport.close()
-        sock.close()
-
-
 class VcfApiClient:
-    def __init__(self, address: str, username: str, password: str, *, timeout: float = 30.0):
+    def __init__(
+        self,
+        address: str,
+        username: str,
+        password: str,
+        *,
+        port: int = 443,
+        timeout: float = 30.0,
+        expected_fingerprint: str = "",
+    ):
+        normalized = address.strip().strip("[]")
+        if expected_fingerprint and tls_sha256_fingerprint(normalized, port).upper() != expected_fingerprint.upper():
+            raise VcfTrustError("The VCF appliance TLS certificate changed after confirmation.")
         try:
-            parsed_address = ip_address(address)
+            parsed_address = ip_address(normalized)
         except ValueError:
             parsed_address = None
-        api_host = f"[{address}]" if isinstance(parsed_address, IPv6Address) else address
-        self.base_url = f"https://{api_host}"
+        api_host = f"[{normalized}]" if isinstance(parsed_address, IPv6Address) else normalized
+        port_suffix = "" if port == 443 else f":{port}"
+        self.base_url = f"https://{api_host}{port_suffix}"
         self.username = username
         self.password = password
         # VCF appliances commonly begin with a private/self-signed HTTPS certificate.
-        # The mutating workflow is protected by the separately pinned SSH host key.
+        # Operators confirm the endpoint TLS fingerprint before LabFoundry calls the API.
         self.client = httpx.Client(base_url=self.base_url, verify=False, timeout=timeout)
         self.token = ""
 
-    def __enter__(self) -> VcfApiClient:
+    def __enter__(self) -> "VcfApiClient":
         response = self.client.post("/v1/tokens", json={"username": self.username, "password": self.password})
         self._raise(response, "VCF API authentication failed")
         self.token = str(response.json().get("accessToken") or "")
@@ -181,157 +166,58 @@ def find_trusted_certificate(certificates: list[dict[str, Any]], fingerprint: st
     return None
 
 
-def load_private_key(pem: str, passphrase: str = "") -> paramiko.PKey:
-    last_error: Exception | None = None
-    for key_type in (paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.RSAKey):
-        try:
-            return key_type.from_private_key(io.StringIO(pem), password=passphrase or None)
-        except (paramiko.SSHException, ValueError) as exc:
-            last_error = exc
-    try:
-        password = passphrase.encode("utf-8") if passphrase else None
-        private_key = serialization.load_pem_private_key(pem.encode("utf-8"), password=password)
-        if isinstance(private_key, rsa.RSAPrivateKey):
-            normalized = private_key.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.TraditionalOpenSSL,
-                serialization.NoEncryption(),
-            ).decode("utf-8")
-            return paramiko.RSAKey.from_private_key(io.StringIO(normalized))
-        if isinstance(private_key, ec.EllipticCurvePrivateKey):
-            normalized = private_key.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.TraditionalOpenSSL,
-                serialization.NoEncryption(),
-            ).decode("utf-8")
-            return paramiko.ECDSAKey.from_private_key(io.StringIO(normalized))
-        if isinstance(private_key, ed25519.Ed25519PrivateKey):
-            normalized = private_key.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.OpenSSH,
-                serialization.NoEncryption(),
-            ).decode("utf-8")
-            return paramiko.Ed25519Key.from_private_key(io.StringIO(normalized))
-    except (ValueError, TypeError, paramiko.SSHException) as exc:
-        last_error = exc
-    raise VcfTrustError("The uploaded SSH private key is invalid or its passphrase is incorrect.") from last_error
-
-
-def _read_channel(channel: paramiko.Channel, marker: str, timeout: float, *, occurrences: int = 1) -> str:
-    deadline = time.monotonic() + timeout
-    chunks: list[str] = []
-    while time.monotonic() < deadline:
-        if channel.recv_ready():
-            text = channel.recv(4096).decode("utf-8", errors="replace")
-            chunks.append(text)
-            if "".join(chunks).count(marker) >= occurrences:
-                return "".join(chunks)
-        elif channel.closed:
-            break
-        time.sleep(0.1)
-    raise VcfTrustError("Timed out waiting for the privileged VCF command.")
-
-
-def restart_vcf_services(
+def inspect_vcf_trust_target(
     address: str,
     port: int,
-    expected_host_key: str,
     credentials: VcfTrustCredentials,
     *,
-    timeout: float = 30.0,
-) -> None:
-    client = paramiko.SSHClient()
-    discovered: dict[str, str] = {}
-
-    class _PinnedPolicy(paramiko.MissingHostKeyPolicy):
-        def missing_host_key(self, ssh_client: paramiko.SSHClient, hostname: str, key: paramiko.PKey) -> None:
-            digest = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode("ascii").rstrip("=")
-            discovered["fingerprint"] = f"SHA256:{digest}"
-            if discovered["fingerprint"] != expected_host_key:
-                raise paramiko.SSHException("SSH host key does not match the pinned fingerprint.")
-            ssh_client.get_host_keys().add(hostname, key.get_name(), key)
-
-    client.set_missing_host_key_policy(_PinnedPolicy())
-    connect: dict[str, Any] = {
-        "hostname": address,
-        "port": port,
-        "username": "vcf",
-        "timeout": timeout,
-        "allow_agent": False,
-        "look_for_keys": False,
-    }
-    if credentials.ssh_private_key:
-        connect["pkey"] = load_private_key(credentials.ssh_private_key, credentials.ssh_private_key_passphrase)
-    else:
-        connect["password"] = credentials.ssh_password
-    try:
-        client.connect(**connect)
-        channel = client.invoke_shell(width=160, height=40)
-        channel.send("su -\n")
-        _read_channel(channel, "Password:", timeout)
-        channel.send(credentials.root_password + "\n")
-        command = f"{VCF_RESTART_COMMAND}; rc=$?; printf '\\n__LABFOUNDRY_RC__%s\\n' \"$rc\""
-        channel.send(command + "\n")
-        output = _read_channel(channel, "__LABFOUNDRY_RC__", max(timeout, 120.0), occurrences=2)
-        tail = output.rsplit("__LABFOUNDRY_RC__", 1)[1].strip().splitlines()[0]
-        if not tail.startswith("0"):
-            raise VcfTrustPartialError("The root CA was installed, but the VCF service restart command failed.")
-    except VcfTrustPartialError:
-        raise
-    except (paramiko.SSHException, OSError) as exc:
-        raise VcfTrustPartialError("The root CA was installed, but SSH service restart failed.") from exc
-    finally:
-        client.close()
+    expected_fingerprint: str = "",
+) -> dict[str, Any]:
+    with VcfApiClient(
+        address,
+        credentials.api_username,
+        credentials.api_password,
+        port=port,
+        expected_fingerprint=expected_fingerprint,
+    ) as api:
+        return api.appliance_info()
 
 
 def execute_vcf_trust(
     *,
     address: str,
-    ssh_port: int,
-    expected_host_key: str,
+    port: int = 443,
+    expected_tls_fingerprint: str = "",
     credentials: VcfTrustCredentials,
     ca: RootCaInfo,
     progress: Callable[[int, str], None] | None = None,
-    recovery_attempts: int = 12,
-    recovery_delay: float = 10.0,
 ) -> dict[str, Any]:
     update = progress or (lambda _percent, _state: None)
     update(10, "authenticating")
-    with VcfApiClient(address, credentials.api_username, credentials.api_password) as api:
+    with VcfApiClient(
+        address,
+        credentials.api_username,
+        credentials.api_password,
+        port=port,
+        expected_fingerprint=expected_tls_fingerprint,
+    ) as api:
         appliance = api.appliance_info()
-        update(25, "checking-trust")
+        update(35, "checking-trust")
         if find_trusted_certificate(api.trusted_certificates(), ca.fingerprint):
             return {**appliance, "outcome": "no-op", "restart": "not-required", "verified": True}
-        update(40, "importing")
+        update(65, "importing")
         api.add_trusted_certificate(ca.pem)
+        update(90, "verifying")
         if not find_trusted_certificate(api.trusted_certificates(), ca.fingerprint):
             raise VcfTrustError("VCF did not return the imported LabFoundry root CA during verification.")
-
-    if appliance["role"] == "VcfInstaller":
-        return {**appliance, "outcome": "installed", "restart": "not-applicable", "verified": True}
-
-    update(60, "restarting")
-    restart_vcf_services(address, ssh_port, expected_host_key, credentials)
-    update(75, "verifying")
-    last_error: Exception | None = None
-    for _attempt in range(recovery_attempts):
-        try:
-            with VcfApiClient(address, credentials.api_username, credentials.api_password) as api:
-                recovered = api.appliance_info()
-                if find_trusted_certificate(api.trusted_certificates(), ca.fingerprint):
-                    return {**recovered, "outcome": "installed", "restart": "completed", "verified": True}
-                last_error = VcfTrustError("The imported root CA was not present after restart.")
-        except (VcfTrustError, httpx.HTTPError) as exc:
-            last_error = exc
-        time.sleep(recovery_delay)
-    raise VcfTrustPartialError("The root CA was installed, but VCF did not recover and verify before the timeout.") from last_error
+    return {**appliance, "outcome": "installed", "restart": "not-required", "verified": True}
 
 
-def sanitized_result(*, address: str, ssh_port: int, ca: RootCaInfo, state: str, **values: Any) -> str:
+def sanitized_result(*, address: str, port: int, ca: RootCaInfo, state: str, **values: Any) -> str:
     return json.dumps(
         {
             "target": address,
-            "ssh_port": ssh_port,
+            "port": port,
             "ca_subject": ca.subject,
             "ca_expires_at": ca.expires_at,
             "ca_fingerprint": ca.fingerprint,

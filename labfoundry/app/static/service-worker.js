@@ -4,7 +4,7 @@ const LABFOUNDRY_ASSETS = [
   "/favicon.ico",
   "/static/offline.html",
   "/static/app.css?v=vcfdt-rail-values-20260711-5",
-  "/static/app.js?v=depot-auth-20260711-1",
+  "/static/app.js?v=api-trust-depot-wizard-20260712-1",
   "/static/pwa.js?v=pwa-20260627-1",
   "/static/brand/labfoundry-mark.svg",
   "/static/brand/labfoundry-appliance-graphic.svg",

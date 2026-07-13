@@ -40,6 +40,7 @@ def init_db() -> None:
     _ensure_sqlite_dns_security_columns()
     _ensure_sqlite_ca_columns()
     _ensure_sqlite_vcf_depot_columns()
+    _ensure_sqlite_vcf_trust_columns()
     _ensure_sqlite_esxi_pxe_columns()
 
 
@@ -295,6 +296,23 @@ def _ensure_sqlite_vcf_depot_columns() -> None:
             for name, definition in depot_columns.items():
                 if name not in depot_existing:
                     connection.execute(text(f"ALTER TABLE vcf_offline_depot_settings ADD COLUMN {name} {definition}"))
+
+
+def _ensure_sqlite_vcf_trust_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "vcf_trust_targets" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("vcf_trust_targets")}
+    columns = {
+        "api_port": "INTEGER DEFAULT 443",
+        "tls_fingerprint": "VARCHAR(160) DEFAULT ''",
+    }
+    with engine.begin() as connection:
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE vcf_trust_targets ADD COLUMN {name} {definition}"))
 
 
 def _ensure_sqlite_esxi_pxe_columns() -> None:

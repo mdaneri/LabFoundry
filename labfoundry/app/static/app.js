@@ -8757,6 +8757,284 @@ function initializeVcfDepotTaskLogModal() {
   }
 }
 
+let labFoundryTasksTable = null;
+let labFoundryTasks = [];
+let labFoundrySelectedTaskId = "";
+let labFoundryTasksRefreshTimer = 0;
+
+function taskStatusActive(status) {
+  return ["pending", "running"].includes(String(status || ""));
+}
+
+function taskById(taskId) {
+  return labFoundryTasks.find((task) => task.id === taskId) || null;
+}
+
+function taskStatusPillHtml(task) {
+  return `<span class="status-pill ${escapeHtml(task.status_pill || "muted")}">${escapeHtml(task.status || "unknown")}</span>`;
+}
+
+function renderTaskDetail(task) {
+  const modal = document.getElementById("task-detail-modal");
+  if (!(modal instanceof HTMLDialogElement) || !task) {
+    return;
+  }
+  labFoundrySelectedTaskId = task.id;
+  const title = modal.querySelector("[data-task-detail-title]");
+  const statusPill = modal.querySelector("[data-task-detail-status]");
+  const summary = modal.querySelector("[data-task-detail-summary]");
+  const facts = modal.querySelector("[data-task-detail-facts]");
+  const error = modal.querySelector("[data-task-detail-error]");
+  const result = modal.querySelector("[data-task-detail-result]");
+  const cancelButton = modal.querySelector("[data-task-detail-cancel]");
+  const logButton = modal.querySelector("[data-task-detail-log]");
+  if (title instanceof HTMLElement) {
+    title.textContent = `${task.type_label || task.type || "Task"} ${task.id}`;
+  }
+  if (statusPill instanceof HTMLElement) {
+    statusPill.className = `status-pill ${task.status_pill || "muted"}`;
+    statusPill.textContent = task.status || "unknown";
+  }
+  if (summary instanceof HTMLElement) {
+    summary.textContent = task.summary || task.state || "";
+  }
+  if (facts instanceof HTMLElement) {
+    facts.replaceChildren();
+    [
+      ["Type", task.type_label || task.type || "—"],
+      ["State", task.state || task.status || "—"],
+      ["Progress", `${task.progress_percent || 0}%`],
+      ["Created", task.created_at || "—"],
+      ["Started", task.started_at || "—"],
+      ["Finished", task.finished_at || "—"],
+      ["Created by", task.created_by || "—"],
+    ].forEach(([label, value]) => {
+      const row = document.createElement("div");
+      const key = document.createElement("span");
+      const val = document.createElement("strong");
+      key.textContent = label;
+      val.textContent = value;
+      row.append(key, val);
+      facts.append(row);
+    });
+  }
+  if (error instanceof HTMLElement) {
+    error.textContent = task.error || "";
+    error.classList.toggle("hidden", !task.error);
+  }
+  if (result instanceof HTMLElement) {
+    result.textContent = task.result_json || "{}";
+  }
+  if (cancelButton instanceof HTMLButtonElement) {
+    cancelButton.classList.toggle("hidden", !task.can_cancel);
+    cancelButton.disabled = !task.can_cancel;
+    cancelButton.dataset.taskId = task.id;
+  }
+  if (logButton instanceof HTMLButtonElement) {
+    logButton.dataset.taskId = task.id;
+  }
+}
+
+function openTaskDetail(taskOrId) {
+  const task = typeof taskOrId === "string" ? taskById(taskOrId) : taskOrId;
+  const modal = document.getElementById("task-detail-modal");
+  if (!(modal instanceof HTMLDialogElement) || !task) {
+    return;
+  }
+  renderTaskDetail(task);
+  const url = new URL(window.location.href);
+  url.searchParams.set("job_id", task.id);
+  window.history.replaceState({}, "", url);
+  if (!modal.open) {
+    modal.showModal();
+  }
+}
+
+async function refreshTasksPage({ reopen = false } = {}) {
+  const page = document.querySelector("[data-tasks-page]");
+  if (!(page instanceof HTMLElement)) {
+    return;
+  }
+  const queryId = labFoundrySelectedTaskId || page.dataset.selectedTaskId || "";
+  const response = await fetch(`/tasks/status?job_id=${encodeURIComponent(queryId)}`, { credentials: "same-origin" });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.detail || "Unable to refresh tasks.");
+  }
+  labFoundryTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+  const count = document.querySelector("[data-tasks-count]");
+  if (count instanceof HTMLElement) {
+    const active = Number(payload.active_count || 0);
+    count.textContent = active ? `${active} active · ${labFoundryTasks.length} total` : `${labFoundryTasks.length} tasks`;
+    count.className = `status-pill ${active ? "warn" : "muted"}`;
+  }
+  if (labFoundryTasksTable) {
+    labFoundryTasksTable.replaceData(labFoundryTasks);
+  }
+  const selected = payload.selected_task || taskById(queryId);
+  if (selected && (reopen || document.getElementById("task-detail-modal")?.open)) {
+    renderTaskDetail(selected);
+    if (reopen) {
+      openTaskDetail(selected);
+    }
+  }
+  window.clearTimeout(labFoundryTasksRefreshTimer);
+  if (labFoundryTasks.some((task) => taskStatusActive(task.status))) {
+    labFoundryTasksRefreshTimer = window.setTimeout(() => refreshTasksPage().catch(() => {}), 2000);
+  }
+}
+
+async function openTaskLog(taskId) {
+  const modal = document.getElementById("task-log-modal");
+  const title = document.querySelector("[data-task-log-title]");
+  const meta = document.querySelector("[data-task-log-meta]");
+  const content = document.querySelector("[data-task-log-content]");
+  if (!(modal instanceof HTMLDialogElement) || !(content instanceof HTMLElement)) {
+    return;
+  }
+  content.textContent = "Loading task log…";
+  if (title instanceof HTMLElement) {
+    title.textContent = "Task log";
+  }
+  if (meta instanceof HTMLElement) {
+    meta.textContent = taskId;
+  }
+  if (!modal.open) {
+    modal.showModal();
+  }
+  try {
+    const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/log`, { credentials: "same-origin" });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || "Unable to load task log.");
+    }
+    if (title instanceof HTMLElement) {
+      title.textContent = payload.title || "Task log";
+    }
+    if (meta instanceof HTMLElement) {
+      meta.textContent = `${payload.job_id || taskId} · ${payload.status || "unknown"}`;
+    }
+    content.textContent = payload.text || "No task log is available.";
+  } catch (error) {
+    content.textContent = error instanceof Error ? error.message : "Unable to load task log.";
+  }
+}
+
+async function cancelTask(taskId) {
+  const page = document.querySelector("[data-tasks-page]");
+  if (!(page instanceof HTMLElement)) {
+    return;
+  }
+  const confirmed = await requestConfirmation({
+    title: "Cancel task",
+    message: `Cancel task ${taskId}? If the worker is already inside a target system operation, LabFoundry will request cancellation and record the task as cancelled.`,
+    label: "Cancel task",
+  });
+  if (!confirmed) {
+    return;
+  }
+  const body = new URLSearchParams();
+  body.set("csrf", page.dataset.csrf || "");
+  const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.detail || "Unable to cancel task.");
+  }
+  await refreshTasksPage();
+  const task = payload.task || taskById(taskId);
+  if (task) {
+    renderTaskDetail(task);
+  }
+}
+
+function initializeTasksPage() {
+  const page = document.querySelector("[data-tasks-page]");
+  if (!(page instanceof HTMLElement)) {
+    return;
+  }
+  try {
+    labFoundryTasks = JSON.parse(page.dataset.tasks || "[]");
+  } catch (_error) {
+    labFoundryTasks = [];
+  }
+  labFoundrySelectedTaskId = page.dataset.selectedTaskId || new URLSearchParams(window.location.search).get("job_id") || "";
+  const tableElement = document.getElementById("tasks-table");
+  const fallback = document.getElementById(tableElement?.dataset.fallbackId || "");
+  if (tableElement instanceof HTMLElement && typeof window.Tabulator === "function") {
+    labFoundryTasksTable = new window.Tabulator(tableElement, {
+      data: labFoundryTasks,
+      layout: "fitColumns",
+      height: "min(640px, calc(100vh - 260px))",
+      placeholder: "No tasks have been recorded yet.",
+      rowClick: (_event, row) => openTaskDetail(row.getData()),
+      columns: [
+        { title: "Status", field: "status", width: 130, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
+        { title: "Task", field: "id", minWidth: 190, formatter: (cell) => `<code>${escapeHtml(cell.getValue())}</code>` },
+        { title: "Type", field: "type_label", minWidth: 190, formatter: (cell) => escapeHtml(cell.getValue() || "") },
+        { title: "State", field: "state", minWidth: 170, formatter: (cell) => escapeHtml(cell.getValue() || "") },
+        { title: "Summary", field: "summary", minWidth: 180, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Progress", field: "progress_percent", width: 105, formatter: (cell) => `${Number(cell.getValue() || 0)}%` },
+        { title: "Created", field: "created_at", minWidth: 210, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Finished", field: "finished_at", minWidth: 210, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        {
+          title: "Actions",
+          field: "id",
+          width: 210,
+          hozAlign: "right",
+          headerSort: false,
+          formatter: (cell) => {
+            const task = cell.getRow().getData();
+            const cancel = task.can_cancel ? `<button class="button danger compact-button" type="button" data-task-row-cancel="${escapeHtml(task.id)}">Cancel</button>` : "";
+            return `<button class="button secondary compact-button" type="button" data-task-row-open="${escapeHtml(task.id)}">Detail</button> <button class="button secondary compact-button" type="button" data-task-row-log="${escapeHtml(task.id)}">Log</button> ${cancel}`;
+          },
+          cellClick: (event, cell) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) {
+              return;
+            }
+            const taskId = target.dataset.taskRowOpen || target.dataset.taskRowLog || target.dataset.taskRowCancel;
+            if (!taskId) {
+              return;
+            }
+            event.stopPropagation();
+            if (target.dataset.taskRowOpen) {
+              openTaskDetail(taskId);
+            } else if (target.dataset.taskRowLog) {
+              openTaskLog(taskId);
+            } else if (target.dataset.taskRowCancel) {
+              cancelTask(taskId).catch((error) => window.alert(error instanceof Error ? error.message : "Unable to cancel task."));
+            }
+          },
+        },
+      ],
+    });
+    fallback?.classList.add("hidden");
+  }
+  document.querySelector("[data-task-detail-close]")?.addEventListener("click", () => document.getElementById("task-detail-modal")?.close());
+  document.querySelector("[data-task-log-close]")?.addEventListener("click", () => document.getElementById("task-log-modal")?.close());
+  document.querySelector("[data-task-detail-log]")?.addEventListener("click", () => {
+    if (labFoundrySelectedTaskId) {
+      openTaskLog(labFoundrySelectedTaskId);
+    }
+  });
+  document.querySelector("[data-task-detail-cancel]")?.addEventListener("click", () => {
+    if (labFoundrySelectedTaskId) {
+      cancelTask(labFoundrySelectedTaskId).catch((error) => window.alert(error instanceof Error ? error.message : "Unable to cancel task."));
+    }
+  });
+  const shouldOpenSelected = Boolean(labFoundrySelectedTaskId);
+  refreshTasksPage({ reopen: shouldOpenSelected }).catch(() => {
+    if (shouldOpenSelected) {
+      openTaskDetail(labFoundrySelectedTaskId);
+    }
+  });
+}
+
 function updateVcfDepotSummary(form, payload = {}) {
   const portInput = form.querySelector('input[name="port"]');
   const hostnameInput = form.querySelector('input[name="hostname"]');
@@ -10628,64 +10906,203 @@ function initializeHistoryBackButtons() {
 
 function initializeVcfTrustForm() {
   const form = document.querySelector("[data-vcf-trust-form]");
-  const selector = document.querySelector("[data-vcf-trust-auth-method]");
-  if (!(form instanceof HTMLFormElement) || !(selector instanceof HTMLSelectElement)) {
+  if (!(form instanceof HTMLFormElement)) {
     return;
   }
   const dialog = document.getElementById("vcf-trust-modal");
-  const passwordFields = document.querySelectorAll("[data-vcf-trust-password-field]");
-  const keyFields = document.querySelectorAll("[data-vcf-trust-key-field]");
-  const passwordInput = form.querySelector('[name="ssh_password"]');
-  const keyInput = form.querySelector('[name="ssh_private_key"]');
-  const confirmedHostKey = form.querySelector("[data-vcf-trust-confirmed-host-key]");
-  const confirmation = form.querySelector("[data-vcf-trust-host-key-confirmation]");
+  const confirmedTls = form.querySelector("[data-vcf-trust-confirmed-tls-fingerprint]");
+  const tlsConfirmation = form.querySelector("[data-vcf-trust-tls-confirmation]");
+  const tlsCheckbox = form.querySelector("[data-vcf-trust-tls-confirm]");
+  const tlsFingerprint = form.querySelector("[data-vcf-trust-tls-fingerprint]");
+  const reviewTarget = form.querySelector("[data-vcf-trust-review-target]");
+  const reviewPort = form.querySelector("[data-vcf-trust-review-port]");
+  const reviewRole = form.querySelector("[data-vcf-trust-review-role]");
+  const reviewVersion = form.querySelector("[data-vcf-trust-review-version]");
   const errors = form.querySelector("[data-vcf-trust-form-errors]");
-  const replaceRow = form.querySelector("[data-vcf-trust-replace-row]");
-  const replaceHostKey = form.querySelector("[data-vcf-trust-replace-host-key]");
   const submit = form.querySelector("[data-vcf-trust-submit]");
+  const next = form.querySelector("[data-vcf-trust-next]");
+  const back = form.querySelector("[data-vcf-trust-back]");
   const cancel = form.querySelector("[data-vcf-trust-cancel]");
-  const update = () => {
-    const useKey = selector.value === "private-key";
-    passwordFields.forEach((field) => field.classList.toggle("hidden", useKey));
-    keyFields.forEach((field) => field.classList.toggle("hidden", !useKey));
-    if (passwordInput instanceof HTMLInputElement) {
-      passwordInput.required = !useKey;
+  const stepPages = [...form.querySelectorAll("[data-vcf-trust-step]")];
+  const stepButtons = [...form.querySelectorAll("[data-vcf-trust-step-nav]")];
+  const stepKicker = form.querySelector("[data-vcf-trust-step-kicker]");
+  const stepTitle = form.querySelector("[data-vcf-trust-step-title]");
+  const stepDescription = form.querySelector("[data-vcf-trust-step-description]");
+  let currentStep = "target";
+  let maxUnlockedStepIndex = 0;
+  let inspectedTls = "";
+  const steps = [
+    { id: "target", title: "Target and root CA", description: "Choose the VCF appliance, confirm snapshot readiness, and review the active LabFoundry root CA." },
+    { id: "api", title: "API credentials", description: "Enter the one-time VCF API administrator credentials used to inspect and import the root CA." },
+    { id: "review", title: "Review and queue", description: "Confirm the target HTTPS TLS fingerprint, then queue the certificate trust task." },
+  ];
+  const stepIndex = (step) => Math.max(0, steps.findIndex((item) => item.id === step));
+  const stepDefinition = (step) => steps[stepIndex(step)] || steps[0];
+  const showError = (message) => {
+    if (errors instanceof HTMLElement) {
+      errors.textContent = message;
+      errors.classList.toggle("hidden", !message);
     }
-    if (keyInput instanceof HTMLInputElement) {
-      keyInput.required = useKey;
+  };
+  const controlsForStep = (step) => {
+    const page = form.querySelector(`[data-vcf-trust-step="${CSS.escape(step)}"]`);
+    return page ? [...page.querySelectorAll("input, select, textarea")].filter((control) => !control.disabled) : [];
+  };
+  const validateStep = (step) => {
+    const invalid = controlsForStep(step).find((control) => typeof control.checkValidity === "function" && !control.checkValidity());
+    if (invalid && typeof invalid.reportValidity === "function") {
+      invalid.reportValidity();
+      return false;
     }
+    return true;
+  };
+  const showStep = (step, { unlock = false } = {}) => {
+    const index = stepIndex(step);
+    if (unlock) maxUnlockedStepIndex = Math.max(maxUnlockedStepIndex, index);
+    if (index > maxUnlockedStepIndex) return;
+    currentStep = step;
+    const definition = stepDefinition(step);
+    stepPages.forEach((page) => page.classList.toggle("hidden", page.dataset.vcfTrustStep !== step));
+    stepButtons.forEach((button) => {
+      const buttonIndex = stepIndex(button.dataset.step || "target");
+      button.disabled = buttonIndex > maxUnlockedStepIndex;
+      button.classList.toggle("active", button.dataset.step === step);
+      button.classList.toggle("complete", buttonIndex < index);
+    });
+    if (stepKicker instanceof HTMLElement) stepKicker.textContent = `Step ${index + 1} of ${steps.length}`;
+    if (stepTitle instanceof HTMLElement) stepTitle.textContent = definition.title;
+    if (stepDescription instanceof HTMLElement) stepDescription.textContent = definition.description;
+    back?.classList.toggle("hidden", index === 0);
+    next?.classList.toggle("hidden", index === steps.length - 1);
+    submit?.classList.toggle("hidden", index !== steps.length - 1);
+    if (submit instanceof HTMLButtonElement) submit.disabled = index !== steps.length - 1;
   };
   const resetConfirmation = () => {
-    if (confirmedHostKey instanceof HTMLInputElement) {
-      confirmedHostKey.value = "";
+    if (confirmedTls instanceof HTMLInputElement) {
+      confirmedTls.value = "";
     }
-    confirmation?.classList.add("hidden");
-    replaceRow?.classList.add("hidden");
-    if (replaceHostKey instanceof HTMLInputElement) {
-      replaceHostKey.checked = false;
-      replaceHostKey.required = false;
+    inspectedTls = "";
+    tlsConfirmation?.classList.add("hidden");
+    if (tlsCheckbox instanceof HTMLInputElement) {
+      tlsCheckbox.checked = false;
+      tlsCheckbox.required = false;
     }
-    if (submit instanceof HTMLButtonElement) {
-      submit.textContent = "Run trust task";
+    if (reviewTarget instanceof HTMLElement) reviewTarget.textContent = "Not inspected yet";
+    if (reviewPort instanceof HTMLElement) reviewPort.textContent = "443";
+    if (reviewRole instanceof HTMLElement) reviewRole.textContent = "Inspect target to verify";
+    if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = "Inspect target to verify";
+  };
+  const applyTargetInspection = (payload) => {
+    inspectedTls = payload.tls_fingerprint || payload.fingerprint || "";
+    if (reviewTarget instanceof HTMLElement) reviewTarget.textContent = payload.address || form.elements.address.value || "";
+    if (reviewPort instanceof HTMLElement) reviewPort.textContent = String(payload.port || "443");
+    if (reviewRole instanceof HTMLElement) reviewRole.textContent = payload.appliance?.role || "unknown";
+    if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = payload.appliance?.version || "unknown";
+    if (tlsFingerprint instanceof HTMLElement) tlsFingerprint.textContent = inspectedTls;
+    tlsConfirmation?.classList.toggle("hidden", !inspectedTls);
+    if (tlsCheckbox instanceof HTMLInputElement) {
+      tlsCheckbox.checked = false;
+      tlsCheckbox.required = Boolean(inspectedTls);
+    }
+    if (confirmedTls instanceof HTMLInputElement) {
+      confirmedTls.value = "";
     }
   };
-  selector.addEventListener("change", update);
+  const inspectTarget = async () => {
+    if (!validateStep("target") || !validateStep("api")) return false;
+    showError("");
+    if (next instanceof HTMLButtonElement) {
+      next.disabled = true;
+      next.textContent = "Inspecting…";
+    }
+    try {
+      const response = await fetch("/vcf-helper/trust-root-ca/inspect-target", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          csrf: form.elements.csrf.value,
+          address: form.elements.address.value,
+          api_username: form.elements.api_username.value,
+          api_password: form.elements.api_password.value,
+          confirmed_tls_fingerprint: confirmedTls instanceof HTMLInputElement ? confirmedTls.value : "",
+        }),
+      });
+      const payload = await response.json();
+      if (response.status === 409 || payload.status === "tls-confirmation-required") {
+        applyTargetInspection(payload);
+        showStep("review", { unlock: true });
+        return false;
+      }
+      if (!response.ok) {
+        const messages = Array.isArray(payload.errors) ? payload.errors : [payload.detail || payload.error || "Could not inspect the target VCF API."];
+        showError(messages.join(" "));
+        return false;
+      }
+      applyTargetInspection(payload);
+      maxUnlockedStepIndex = steps.length - 1;
+      return true;
+    } catch (_error) {
+      showError("Could not inspect the target VCF API. Check connectivity and try again.");
+      return false;
+    } finally {
+      if (next instanceof HTMLButtonElement) {
+        next.disabled = false;
+        next.textContent = "Next";
+      }
+    }
+  };
   cancel?.addEventListener("click", () => {
     form.reset();
-    update();
     resetConfirmation();
+    maxUnlockedStepIndex = 0;
+    showStep("target");
     if (dialog instanceof HTMLDialogElement) {
       dialog.close();
     }
   });
+  tlsCheckbox?.addEventListener("change", () => {
+    if (!(confirmedTls instanceof HTMLInputElement) || !(tlsCheckbox instanceof HTMLInputElement)) return;
+    confirmedTls.value = tlsCheckbox.checked ? inspectedTls : "";
+  });
+  next?.addEventListener("click", async () => {
+    if (currentStep === "target") {
+      if (!validateStep("target")) return;
+      showStep("api", { unlock: true });
+      return;
+    }
+    if (currentStep === "api") {
+      const ready = await inspectTarget();
+      if (!ready) return;
+      showStep("review", { unlock: true });
+      return;
+    }
+    if (!validateStep(currentStep)) return;
+    const index = stepIndex(currentStep);
+    showStep(steps[Math.min(index + 1, steps.length - 1)].id, { unlock: true });
+  });
+  back?.addEventListener("click", () => {
+    const index = stepIndex(currentStep);
+    showStep(steps[Math.max(index - 1, 0)].id);
+  });
+  stepButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const targetStep = button.dataset.step || "target";
+      if (stepIndex(targetStep) > stepIndex(currentStep) && !validateStep(currentStep)) return;
+      showStep(targetStep);
+    });
+  });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (currentStep !== "review") {
+      next?.click();
+      return;
+    }
+    if (!validateStep(currentStep)) return;
     errors?.classList.add("hidden");
     if (submit instanceof HTMLButtonElement) {
       submit.disabled = true;
-      submit.textContent = confirmedHostKey instanceof HTMLInputElement && confirmedHostKey.value
-        ? "Queueing task..."
-        : "Checking SSH host key...";
+      submit.textContent = "Queueing task…";
     }
     try {
       const response = await fetch(form.action, {
@@ -10695,27 +11112,12 @@ function initializeVcfTrustForm() {
         headers: { "X-LabFoundry-VCF-Trust": "1" },
       });
       const payload = await response.json();
-      if (response.status === 409 && payload.status === "host-key-confirmation-required") {
-        if (confirmedHostKey instanceof HTMLInputElement) {
-          confirmedHostKey.value = payload.fingerprint || "";
-        }
-        if (confirmation instanceof HTMLElement) {
-          const title = document.createElement("strong");
-          title.textContent = payload.replacement ? "Changed SSH host key" : "First-seen SSH host key";
-          const fingerprint = document.createElement("div");
-          fingerprint.textContent = `Verify this fingerprint against the VCF console: ${payload.fingerprint || "unknown"}`;
-          const action = document.createElement("div");
-          action.textContent = "Your entries remain in this form. Confirm the fingerprint to queue and run the task.";
-          confirmation.replaceChildren(title, fingerprint, action);
-          confirmation.classList.remove("hidden");
-        }
-        replaceRow?.classList.toggle("hidden", !payload.replacement);
-        if (replaceHostKey instanceof HTMLInputElement) {
-          replaceHostKey.required = Boolean(payload.replacement);
-        }
+      if (response.status === 409 && payload.status === "tls-confirmation-required") {
+        applyTargetInspection(payload);
+        showStep("review", { unlock: true });
         if (submit instanceof HTMLButtonElement) {
           submit.disabled = false;
-          submit.textContent = "Confirm host key and start task";
+          submit.textContent = "Run trust task";
         }
         return;
       }
@@ -10734,7 +11136,7 @@ function initializeVcfTrustForm() {
       if (submit instanceof HTMLButtonElement) {
         submit.textContent = "Task queued";
       }
-      window.location.assign(payload.redirect || "/vcf-helper?vcf_trust=1");
+      window.location.assign(payload.redirect || `/tasks?job_id=${encodeURIComponent(payload.job_id || "")}`);
     } catch (_error) {
       if (errors instanceof HTMLElement) {
         errors.textContent = "The request could not be completed. Check connectivity and try again.";
@@ -10746,16 +11148,624 @@ function initializeVcfTrustForm() {
       }
     }
   });
-  update();
   if (dialog instanceof HTMLDialogElement && dialog.hasAttribute("data-vcf-trust-auto-open") && !dialog.open) {
     dialog.showModal();
   }
+  showStep("target");
+}
 
-  const statusCard = document.querySelector("[data-vcf-trust-job-status]");
-  const activeStatus = statusCard?.getAttribute("data-vcf-trust-job-status") || "";
-  if (["pending", "running"].includes(activeStatus)) {
-    window.setTimeout(() => window.location.reload(), 2000);
+async function vcfHelperJson(url, method, payload) {
+  const response = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: method === "GET" ? undefined : JSON.stringify(payload),
+  });
+  let data = {};
+  try { data = await response.json(); } catch (_error) { data = {}; }
+  if (!response.ok && ![409].includes(response.status)) {
+    const detail = typeof data.detail === "string" ? data.detail : "The VCF Helper request failed.";
+    throw new Error(detail);
   }
+  return { response, data };
+}
+
+function fillVcfInventorySelect(select, rows, emptyLabel = "") {
+  if (!(select instanceof HTMLSelectElement)) return;
+  select.replaceChildren();
+  if (emptyLabel) select.append(new Option(emptyLabel, ""));
+  (Array.isArray(rows) ? rows : []).forEach((row) => select.append(new Option(row.name || row.id, row.id)));
+}
+
+function initializeVcfSddcDeployment() {
+  const form = document.querySelector("[data-vcf-sddc-deploy-form]");
+  const dialog = document.getElementById("vcf-sddc-deploy-modal");
+  if (!(form instanceof HTMLFormElement) || !(dialog instanceof HTMLDialogElement)) return;
+  const open = document.querySelector("[data-vcf-sddc-deploy-open]");
+  const close = form.querySelector("[data-vcf-sddc-close]");
+  const next = form.querySelector("[data-vcf-sddc-next]");
+  const submit = form.querySelector("[data-vcf-sddc-submit]");
+  const back = form.querySelector("[data-vcf-sddc-back]");
+  const errors = form.querySelector("[data-vcf-sddc-errors]");
+  const confirmation = form.querySelector("[data-vcf-sddc-confirmation]");
+  const stepPages = [...form.querySelectorAll("[data-vcf-sddc-step]")];
+  const stepNavButtons = [...form.querySelectorAll("[data-vcf-sddc-step-nav]")];
+  const stepKicker = form.querySelector("[data-vcf-sddc-step-kicker]");
+  const stepTitle = form.querySelector("[data-vcf-sddc-step-title]");
+  const stepDescription = form.querySelector("[data-vcf-sddc-step-description]");
+  const destination = form.querySelector("[data-vcf-sddc-destination]");
+  const propertyContainer = form.querySelector("[data-vcf-sddc-properties]");
+  const networkContainer = form.querySelector("[data-vcf-sddc-networks]");
+  const ovaSelect = form.querySelector("[data-vcf-sddc-ova]");
+  const vmName = form.querySelector("[data-vcf-sddc-vm-name]");
+  const tlsFingerprint = form.querySelector("[data-vcf-sddc-tls-fingerprint]");
+  const tlsConfirmation = form.querySelector("[data-vcf-sddc-tls-confirmation]");
+  const tlsConfirmationFingerprint = form.querySelector("[data-vcf-sddc-tls-confirmation-fingerprint]");
+  const tlsConfirmInput = form.querySelector("[data-vcf-sddc-tls-confirm]");
+  const configureDepot = form.querySelector("[data-vcf-sddc-configure-depot]");
+  const applyTrust = form.querySelector("[data-vcf-sddc-apply-trust]");
+  const powerOn = form.querySelector("[data-vcf-sddc-power-on]");
+  const postPowerOptions = [...form.querySelectorAll("[data-vcf-sddc-post-power-option]")];
+  const depotPasswordRow = form.querySelector("[data-vcf-sddc-depot-password]");
+  const assignmentMode = form.querySelector("[data-vcf-sddc-assignment-mode]");
+  const dhcpZoneRow = form.querySelector("[data-vcf-sddc-dhcp-zone-row]");
+  const dhcpZoneSelect = form.querySelector("[data-vcf-sddc-dhcp-zone]");
+  const autoHostnameRow = form.querySelector("[data-vcf-sddc-auto-hostname-row]");
+  const autoHostname = form.querySelector("[data-vcf-sddc-auto-hostname]");
+  const autoIpRow = form.querySelector("[data-vcf-sddc-auto-ip-row]");
+  const autoIp = form.querySelector("[data-vcf-sddc-auto-ip]");
+  const taskPanel = form.querySelector("[data-vcf-sddc-task]");
+  let activeJob = "";
+  let currentOva = null;
+  let pollTimer = 0;
+  let ovas = [];
+  let dhcpAssignment = { available: false, scopes: [] };
+  let autoHostnameTouched = false;
+  let pendingTlsAction = null;
+  let pendingTlsFingerprint = "";
+  let currentStep = "source";
+  let maxUnlockedStepIndex = 0;
+  const steps = [
+    { id: "source", title: "vCenter / ESXi information", description: "Choose the SDDC Manager OVA and the vSphere endpoint used for discovery and import." },
+    { id: "resources", title: "Resources and VM name", description: "Select the destination placement, datastore, network mapping, disk mode, and VM name." },
+    { id: "address", title: "Address assignment and hostname", description: "Use manual OVF networking values or pre-fill address details from a LabFoundry DHCP zone." },
+    { id: "properties", title: "OVF properties", description: "Review and complete the appliance OVF properties before deployment." },
+    { id: "followup", title: "Post-deployment options", description: "Choose power-on behavior and optional DNS, trust, and offline-depot follow-up actions." },
+  ];
+  try { ovas = JSON.parse(form.dataset.ovas || "[]"); } catch (_error) { ovas = []; }
+  try { dhcpAssignment = JSON.parse(form.dataset.dhcpAssignment || "{}"); } catch (_error) { dhcpAssignment = { available: false, scopes: [] }; }
+
+  const showError = (message) => {
+    if (errors instanceof HTMLElement) { errors.textContent = message; errors.classList.toggle("hidden", !message); }
+  };
+  const showConfirmation = (message) => {
+    if (confirmation instanceof HTMLElement) { confirmation.textContent = message; confirmation.classList.toggle("hidden", !message); }
+  };
+  const showTaskError = (message) => {
+    const taskError = form.querySelector("[data-vcf-sddc-task-error]");
+    if (taskError instanceof HTMLElement) { taskError.textContent = message; taskError.classList.toggle("hidden", !message); }
+  };
+  const showTlsConfirmation = (fingerprint, action) => {
+    pendingTlsFingerprint = fingerprint || "";
+    pendingTlsAction = action;
+    if (tlsConfirmationFingerprint instanceof HTMLElement) tlsConfirmationFingerprint.textContent = pendingTlsFingerprint;
+    if (tlsConfirmInput instanceof HTMLInputElement) tlsConfirmInput.checked = false;
+    tlsConfirmation?.classList.remove("hidden");
+  };
+  const hideTlsConfirmation = () => {
+    tlsConfirmation?.classList.add("hidden");
+    pendingTlsAction = null;
+    pendingTlsFingerprint = "";
+  };
+  const stepIndex = (step) => Math.max(0, steps.findIndex((item) => item.id === step));
+  const stepDefinition = (step) => steps[stepIndex(step)] || steps[0];
+  const controlsForStep = (step) => {
+    const page = form.querySelector(`[data-vcf-sddc-step="${CSS.escape(step)}"]`);
+    return page ? [...page.querySelectorAll("input, select, textarea")].filter((control) => !control.disabled) : [];
+  };
+  const validateStep = (step) => {
+    const invalid = controlsForStep(step).find((control) => typeof control.checkValidity === "function" && !control.checkValidity());
+    if (invalid && typeof invalid.reportValidity === "function") {
+      invalid.reportValidity();
+      return false;
+    }
+    return true;
+  };
+  const showStep = (step, { unlock = false } = {}) => {
+    const nextIndex = stepIndex(step);
+    if (unlock) maxUnlockedStepIndex = Math.max(maxUnlockedStepIndex, nextIndex);
+    if (nextIndex > maxUnlockedStepIndex) return;
+    currentStep = step;
+    const definition = stepDefinition(step);
+    stepPages.forEach((page) => page.classList.toggle("hidden", page.dataset.vcfSddcStep !== step));
+    stepNavButtons.forEach((button) => {
+      const index = stepIndex(button.dataset.step || "source");
+      button.disabled = index > maxUnlockedStepIndex;
+      button.classList.toggle("active", button.dataset.step === step);
+      button.classList.toggle("complete", index < nextIndex);
+    });
+    if (stepKicker instanceof HTMLElement) stepKicker.textContent = `Step ${nextIndex + 1} of ${steps.length}`;
+    if (stepTitle instanceof HTMLElement) stepTitle.textContent = definition.title;
+    if (stepDescription instanceof HTMLElement) stepDescription.textContent = definition.description;
+    back?.classList.toggle("hidden", nextIndex === 0);
+    if (next instanceof HTMLButtonElement) {
+      next.classList.toggle("hidden", nextIndex === steps.length - 1);
+      next.textContent = "Next";
+      next.disabled = false;
+    }
+    if (submit instanceof HTMLButtonElement) {
+      submit.classList.toggle("hidden", nextIndex !== steps.length - 1);
+      submit.disabled = nextIndex !== steps.length - 1;
+    }
+  };
+  const selectedOva = () => ovas.find((row) => row.path === ovaSelect?.value) || null;
+  const propertyControl = (key) => propertyContainer instanceof HTMLElement ? propertyContainer.querySelector(`[data-ovf-key="${CSS.escape(key)}"]`) : null;
+  const selectedDhcpScope = () => (dhcpAssignment.scopes || []).find((row) => String(row.id) === String(dhcpZoneSelect?.value)) || null;
+  const hostLabelFromVmName = (scope) => {
+    const rawName = String(vmName?.value || "").trim();
+    const domain = String(scope?.domain_name || "").trim().toLowerCase();
+    if (domain && rawName.toLowerCase().endsWith(`.${domain}`)) return rawName.slice(0, -(domain.length + 1));
+    return rawName.split(".")[0] || rawName || "sddcm";
+  };
+  const fqdnForAutoHost = (scope) => {
+    const host = String(autoHostname?.value || "").trim().replace(/\.$/, "");
+    if (!host) return "";
+    if (host.includes(".")) return host;
+    return scope?.domain_name ? `${host}.${scope.domain_name}` : host;
+  };
+  const syncOva = () => {
+    currentOva = selectedOva();
+    if (vmName instanceof HTMLInputElement && currentOva) vmName.value = currentOva.vm_name || "";
+  };
+  const setPropertyValue = (key, value) => {
+    const control = propertyControl(key);
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement) {
+      control.value = value || "";
+      control.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  };
+  const syncPostPowerOptions = () => {
+    const enabled = !(powerOn instanceof HTMLInputElement) || powerOn.checked;
+    postPowerOptions.forEach((row) => {
+      const control = row.querySelector("input, select, textarea");
+      if (!(control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement)) return;
+      if (!control.dataset.baseDisabled) control.dataset.baseDisabled = control.disabled ? "true" : "false";
+      if (!enabled && control instanceof HTMLInputElement && control.type === "checkbox") control.checked = false;
+      control.disabled = !enabled || control.dataset.baseDisabled === "true";
+    });
+    depotPasswordRow?.classList.toggle("hidden", !enabled || !(configureDepot instanceof HTMLInputElement && configureDepot.checked));
+  };
+  const applyDhcpAssignment = (options = {}) => {
+    const automatic = assignmentMode?.value === "automatic";
+    [dhcpZoneRow, autoHostnameRow, autoIpRow].forEach((row) => row?.classList.toggle("hidden", !automatic));
+    if (!automatic) return;
+    const scope = selectedDhcpScope();
+    if (!scope) return;
+    if (!autoHostnameTouched || options.refreshHostname) {
+      if (autoHostname instanceof HTMLInputElement) autoHostname.value = hostLabelFromVmName(scope);
+    }
+    if (autoIp instanceof HTMLInputElement && options.refreshIp !== false) autoIp.value = scope.suggested_ipv4 || "";
+    setPropertyValue("ip_address_version", "IPv4");
+    setPropertyValue("vami.hostname", fqdnForAutoHost(scope));
+    setPropertyValue("ip0", autoIp instanceof HTMLInputElement ? autoIp.value : scope.suggested_ipv4 || "");
+    setPropertyValue("netmask0", scope.netmask || "");
+    setPropertyValue("gateway", scope.gateway || "");
+    setPropertyValue("DNS", scope.dns_server || "");
+    setPropertyValue("domain", scope.domain_name || "");
+    setPropertyValue("searchpath", scope.domain_name || "");
+    if (scope.ntp_server) setPropertyValue("guestinfo.ntp", scope.ntp_server);
+  };
+  const renderProperties = (properties) => {
+    if (!(propertyContainer instanceof HTMLElement)) return;
+    propertyContainer.replaceChildren();
+    (properties || []).forEach((property) => {
+      const label = document.createElement("label");
+      const heading = document.createElement("span"); heading.className = "field-label";
+      const title = document.createElement("span"); title.textContent = property.label || property.key;
+      const help = document.createElement("button"); help.type = "button"; help.className = "help-icon"; help.textContent = "i";
+      help.dataset.help = [property.description, property.qualifiers].filter(Boolean).join(" ");
+      heading.append(title, help); label.append(heading);
+      const values = [...String(property.qualifiers || "").matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+      let control;
+      if (values.length) {
+        control = document.createElement("select"); values.forEach((value) => control.append(new Option(value, value)));
+      } else {
+        control = document.createElement("input"); control.type = property.password ? "password" : "text";
+        if (property.password) control.autocomplete = "new-password";
+        const minLen = String(property.qualifiers || "").match(/MinLen\((\d+)\)/);
+        const maxLen = String(property.qualifiers || "").match(/MaxLen\((\d+)\)/);
+        if (minLen) control.minLength = Number(minLen[1]);
+        if (maxLen) control.maxLength = Number(maxLen[1]);
+      }
+      control.dataset.ovfKey = property.key; control.value = property.default || "";
+      if (["ROOT_PASSWORD", "LOCAL_USER_PASSWORD", "vami.hostname"].includes(property.key)) control.required = true;
+      label.append(control); propertyContainer.append(label);
+    });
+    const updatePropertyRequirements = () => {
+      const version = propertyControl("ip_address_version")?.value || "IPv4";
+      const ipv4Required = version.includes("IPv4");
+      const ipv6Required = version.includes("IPv6");
+      ["ip0", "netmask0", "gateway", "DNS"].forEach((key) => { const control = propertyControl(key); if (control) control.required = ipv4Required; });
+      ["ipv6", "ipv6_prefix", "ipv6_gateway"].forEach((key) => { const control = propertyControl(key); if (control) control.required = ipv6Required; });
+    };
+    propertyContainer.querySelector('[data-ovf-key="ip_address_version"]')?.addEventListener("change", updatePropertyRequirements);
+    updatePropertyRequirements();
+    applyDhcpAssignment({ refreshIp: true });
+  };
+  const renderNetworks = (networks, inventoryNetworks) => {
+    if (!(networkContainer instanceof HTMLElement)) return;
+    networkContainer.replaceChildren();
+    (networks || []).forEach((networkName) => {
+      const label = document.createElement("label");
+      const heading = document.createElement("span"); heading.className = "field-label";
+      const title = document.createElement("span"); title.textContent = `${networkName} mapping`;
+      const help = document.createElement("button"); help.type = "button"; help.className = "help-icon"; help.textContent = "i"; help.dataset.help = "Maps the source OVA network to a vSphere network.";
+      heading.append(title, help); label.append(heading);
+      const select = document.createElement("select"); select.dataset.ovaNetwork = networkName; select.required = true;
+      fillVcfInventorySelect(select, inventoryNetworks); label.append(select); networkContainer.append(label);
+    });
+  };
+  const parseEndpoint = () => {
+    const raw = String(form.elements.address.value || "").trim();
+    const endpoint = raw.replace(/^https?:\/\//i, "");
+    if (endpoint.startsWith("[") && endpoint.includes("]")) {
+      const closing = endpoint.indexOf("]");
+      const host = endpoint.slice(1, closing);
+      const rest = endpoint.slice(closing + 1);
+      const parsedPort = rest.startsWith(":") ? Number(rest.slice(1)) : 443;
+      return { address: host, port: Number.isInteger(parsedPort) && parsedPort > 0 ? parsedPort : 443 };
+    }
+    const slashless = endpoint.split("/")[0];
+    const colonParts = slashless.split(":");
+    if (colonParts.length === 2 && /^\d+$/.test(colonParts[1])) {
+      return { address: colonParts[0], port: Number(colonParts[1]) };
+    }
+    return { address: slashless, port: 443 };
+  };
+  const basePayload = () => {
+    const endpoint = parseEndpoint();
+    return {
+      csrf: form.elements.csrf.value,
+      ova_path: form.elements.ova_path.value,
+      address: endpoint.address,
+      port: endpoint.port,
+      username: form.elements.username.value.trim(),
+      password: form.elements.password.value,
+      confirmed_tls_fingerprint: form.elements.confirmed_tls_fingerprint.value,
+    };
+  };
+  const poll = async () => {
+    if (!activeJob) return;
+    try {
+      const { data } = await vcfHelperJson(`/vcf-helper/sddc-manager/tasks/${encodeURIComponent(activeJob)}`, "GET", {});
+      form.querySelector("[data-vcf-sddc-task-status]").textContent = data.status;
+      form.querySelector("[data-vcf-sddc-state]").textContent = data.result?.state || data.status;
+      form.querySelector("[data-vcf-sddc-progress]").textContent = `${data.progress_percent}%`;
+      showTaskError(data.error || "");
+      if (["pending", "running"].includes(data.status)) pollTimer = window.setTimeout(poll, 2000);
+    } catch (error) { showTaskError(error.message); }
+  };
+
+  open?.addEventListener("click", () => { syncOva(); dialog.showModal(); });
+  close?.addEventListener("click", () => dialog.close());
+  ovaSelect?.addEventListener("change", syncOva);
+  vmName?.addEventListener("input", () => {
+    if (assignmentMode?.value === "automatic" && !autoHostnameTouched) applyDhcpAssignment({ refreshHostname: true, refreshIp: false });
+  });
+  assignmentMode?.addEventListener("change", () => applyDhcpAssignment({ refreshHostname: true, refreshIp: true }));
+  dhcpZoneSelect?.addEventListener("change", () => applyDhcpAssignment({ refreshHostname: true, refreshIp: true }));
+  autoHostname?.addEventListener("input", () => { autoHostnameTouched = true; applyDhcpAssignment({ refreshIp: false }); });
+  autoIp?.addEventListener("input", () => applyDhcpAssignment({ refreshIp: false }));
+  powerOn?.addEventListener("change", syncPostPowerOptions);
+  applyTrust?.addEventListener("change", syncPostPowerOptions);
+  configureDepot?.addEventListener("change", syncPostPowerOptions);
+  syncPostPowerOptions();
+  const handleDiscover = async () => {
+    if (!validateStep("source")) return;
+    showError(""); showConfirmation("");
+    if (next instanceof HTMLButtonElement) {
+      next.disabled = true;
+      next.textContent = "Discovering…";
+    }
+    try {
+      const { response, data } = await vcfHelperJson("/vcf-helper/sddc-manager/inventory", "POST", basePayload());
+      if (response.status === 409 && data.status === "tls-confirmation-required") {
+        showTlsConfirmation(data.fingerprint || "", handleDiscover);
+        return;
+      }
+      currentOva = data.ova;
+      fillVcfInventorySelect(form.elements.resource_pool_id, data.inventory?.resource_pools);
+      fillVcfInventorySelect(form.elements.datastore_id, data.inventory?.datastores);
+      fillVcfInventorySelect(form.elements.folder_id, data.inventory?.folders, "Default VM folder");
+      fillVcfInventorySelect(form.elements.host_id, data.inventory?.hosts, "Automatic placement");
+      renderNetworks(data.ova?.networks, data.inventory?.networks);
+      renderProperties(data.ova?.properties);
+      maxUnlockedStepIndex = steps.length - 1;
+      showStep("resources");
+    } catch (error) {
+      showError(error.message);
+    } finally {
+      if (next instanceof HTMLButtonElement) {
+        next.disabled = false;
+        next.textContent = "Next";
+      }
+    }
+  };
+  const handleNext = async () => {
+    if (currentStep === "source") {
+      await handleDiscover();
+      return;
+    }
+    if (!validateStep(currentStep)) return;
+    const index = stepIndex(currentStep);
+    showStep(steps[Math.min(index + 1, steps.length - 1)].id);
+  };
+  const handleSubmit = async () => {
+    showError(""); showTaskError("");
+    const properties = {}; form.querySelectorAll("[data-ovf-key]").forEach((control) => { properties[control.dataset.ovfKey] = control.value; });
+    const networkIds = {}; form.querySelectorAll("[data-ova-network]").forEach((control) => { networkIds[control.dataset.ovaNetwork] = control.value; });
+    const shouldPowerOn = !(form.elements.power_on instanceof HTMLInputElement) || form.elements.power_on.checked;
+    const payload = {
+      ...basePayload(), vm_name: form.elements.vm_name.value, properties,
+      destination: { resource_pool_id: form.elements.resource_pool_id.value, datastore_id: form.elements.datastore_id.value, folder_id: form.elements.folder_id.value, host_id: form.elements.host_id.value, network_ids: networkIds },
+      options: { power_on: shouldPowerOn, add_dns: form.elements.add_dns.checked, apply_trust: shouldPowerOn && form.elements.apply_trust.checked, configure_offline_depot: shouldPowerOn && form.elements.configure_offline_depot.checked, disk_provisioning: form.elements.disk_provisioning.value },
+      depot_password: form.elements.depot_password.value,
+    };
+    submit.disabled = true;
+    try {
+      const { response, data } = await vcfHelperJson("/vcf-helper/sddc-manager/deploy", "POST", payload);
+      if (response.status === 409 && data.status === "tls-confirmation-required") { showTlsConfirmation(data.fingerprint || "", handleSubmit); submit.disabled = false; return; }
+      activeJob = data.job_id;
+      window.location.assign(`/tasks?job_id=${encodeURIComponent(activeJob)}`);
+    } catch (error) { showError(error.message); submit.disabled = false; }
+  };
+  next?.addEventListener("click", handleNext);
+  back?.addEventListener("click", () => {
+    const index = stepIndex(currentStep);
+    showStep(steps[Math.max(index - 1, 0)].id);
+  });
+  stepNavButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const targetStep = button.dataset.step || "source";
+      if (stepIndex(targetStep) > stepIndex(currentStep) && !validateStep(currentStep)) return;
+      showStep(targetStep);
+    });
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (currentStep !== "followup") {
+      await handleNext();
+      return;
+    }
+    if (!validateStep(currentStep)) return;
+    await handleSubmit();
+  });
+  tlsConfirmInput?.addEventListener("change", async () => {
+    if (!(tlsConfirmInput instanceof HTMLInputElement) || !tlsConfirmInput.checked) return;
+    if (tlsFingerprint instanceof HTMLInputElement) tlsFingerprint.value = pendingTlsFingerprint;
+    const action = pendingTlsAction;
+    hideTlsConfirmation();
+    if (typeof action === "function") await action();
+  });
+  syncOva();
+  showStep("source");
+}
+
+function initializeVcfTargetDepotHelper() {
+  const form = document.querySelector("[data-vcf-target-depot-form]");
+  const dialog = document.getElementById("vcf-target-depot-modal");
+  if (!(form instanceof HTMLFormElement) || !(dialog instanceof HTMLDialogElement)) return;
+  const errors = form.querySelector("[data-vcf-target-depot-errors]");
+  const tls = form.querySelector("[data-vcf-target-depot-tls-fingerprint]");
+  const submit = form.querySelector("[data-vcf-target-depot-submit]");
+  const next = form.querySelector("[data-vcf-target-depot-next]");
+  const back = form.querySelector("[data-vcf-target-depot-back]");
+  const stepPages = [...form.querySelectorAll("[data-vcf-target-depot-step]")];
+  const stepButtons = [...form.querySelectorAll("[data-vcf-target-depot-step-nav]")];
+  const stepKicker = form.querySelector("[data-vcf-target-depot-step-kicker]");
+  const stepTitle = form.querySelector("[data-vcf-target-depot-step-title]");
+  const stepDescription = form.querySelector("[data-vcf-target-depot-step-description]");
+  const tlsConfirmation = form.querySelector("[data-vcf-target-depot-tls-confirmation]");
+  const tlsConfirm = form.querySelector("[data-vcf-target-depot-tls-confirm]");
+  const tlsConfirmationFingerprint = form.querySelector("[data-vcf-target-depot-tls-confirmation-fingerprint]");
+  const reviewTarget = form.querySelector("[data-vcf-target-depot-review-target]");
+  const reviewPort = form.querySelector("[data-vcf-target-depot-review-port]");
+  const reviewRole = form.querySelector("[data-vcf-target-depot-review-role]");
+  const reviewVersion = form.querySelector("[data-vcf-target-depot-review-version]");
+  const reviewTls = form.querySelector("[data-vcf-target-depot-review-tls]");
+  const queueTarget = form.querySelector("[data-vcf-target-depot-queue-target]");
+  const queueAction = form.querySelector("[data-vcf-target-depot-queue-action]");
+  let currentStep = "target";
+  let maxUnlockedStepIndex = 0;
+  let inspected = null;
+  let inspectedTls = "";
+  const steps = [
+    { id: "target", title: "Target and local depot", description: "Choose the remote VCF appliance and review the local LabFoundry depot endpoint." },
+    { id: "api", title: "API credentials", description: "Enter the one-time VCF API administrator credentials." },
+    { id: "depot", title: "Depot credentials", description: "Enter the one-time password for the configured LabFoundry depot HTTP user." },
+    { id: "review", title: "Review current settings", description: "Confirm TLS and review the sanitized current target depot configuration." },
+    { id: "queue", title: "Queue configuration", description: "Start the background task and continue monitoring from Operations → Tasks." },
+  ];
+  const showError = (message) => { errors.textContent = message; errors.classList.toggle("hidden", !message); };
+  const payload = () => ({ csrf: form.elements.csrf.value, address: form.elements.address.value.trim(), api_username: form.elements.api_username.value.trim(), api_password: form.elements.api_password.value, depot_password: form.elements.depot_password.value, confirmed_tls_fingerprint: form.elements.confirmed_tls_fingerprint.value, replace_existing: form.elements.replace_existing.checked });
+  const stepIndex = (step) => Math.max(0, steps.findIndex((item) => item.id === step));
+  const controlsForStep = (step) => {
+    const page = form.querySelector(`[data-vcf-target-depot-step="${CSS.escape(step)}"]`);
+    return page ? [...page.querySelectorAll("input, select, textarea")].filter((control) => !control.disabled) : [];
+  };
+  const validateStep = (step) => {
+    const invalid = controlsForStep(step).find((control) => typeof control.checkValidity === "function" && !control.checkValidity());
+    if (invalid && typeof invalid.reportValidity === "function") {
+      invalid.reportValidity();
+      return false;
+    }
+    return true;
+  };
+  const showStep = (step, { unlock = false } = {}) => {
+    const index = stepIndex(step);
+    if (unlock) maxUnlockedStepIndex = Math.max(maxUnlockedStepIndex, index);
+    if (index > maxUnlockedStepIndex) return;
+    currentStep = step;
+    const definition = steps[index] || steps[0];
+    stepPages.forEach((page) => page.classList.toggle("hidden", page.dataset.vcfTargetDepotStep !== step));
+    stepButtons.forEach((button) => {
+      const buttonIndex = stepIndex(button.dataset.step || "target");
+      button.disabled = buttonIndex > maxUnlockedStepIndex;
+      button.classList.toggle("active", button.dataset.step === step);
+      button.classList.toggle("complete", buttonIndex < index);
+    });
+    if (stepKicker instanceof HTMLElement) stepKicker.textContent = `Step ${index + 1} of ${steps.length}`;
+    if (stepTitle instanceof HTMLElement) stepTitle.textContent = definition.title;
+    if (stepDescription instanceof HTMLElement) stepDescription.textContent = definition.description;
+    back?.classList.toggle("hidden", index === 0);
+    next?.classList.toggle("hidden", index === steps.length - 1);
+    submit?.classList.toggle("hidden", index !== steps.length - 1);
+    if (submit instanceof HTMLButtonElement) submit.disabled = index !== steps.length - 1;
+  };
+  const reset = () => {
+    form.reset();
+    if (tls instanceof HTMLInputElement) tls.value = "";
+    inspected = null;
+    inspectedTls = "";
+    maxUnlockedStepIndex = 0;
+    tlsConfirmation?.classList.add("hidden");
+    if (tlsConfirm instanceof HTMLInputElement) {
+      tlsConfirm.checked = false;
+      tlsConfirm.required = false;
+    }
+    showError("");
+    showStep("target");
+  };
+  const renderCurrentDepot = (data) => {
+    inspected = data;
+    inspectedTls = data.tls_fingerprint || data.fingerprint || "";
+    if (tls instanceof HTMLInputElement) tls.value = "";
+    if (reviewTarget instanceof HTMLElement) reviewTarget.textContent = data.target?.address || data.address || form.elements.address.value || "";
+    if (reviewPort instanceof HTMLElement) reviewPort.textContent = String(data.port || "443");
+    if (reviewRole instanceof HTMLElement) reviewRole.textContent = data.target?.appliance?.role || "unknown";
+    if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = data.target?.appliance?.version || "unknown";
+    if (reviewTls instanceof HTMLElement) reviewTls.textContent = inspectedTls || "not available";
+    if (queueTarget instanceof HTMLElement) queueTarget.textContent = reviewTarget?.textContent || "";
+    if (queueAction instanceof HTMLElement) queueAction.textContent = data.replacement_required ? "Replace existing depot and sync metadata" : "Configure or verify LabFoundry depot and sync metadata";
+    if (tlsConfirmationFingerprint instanceof HTMLElement) tlsConfirmationFingerprint.textContent = inspectedTls;
+    tlsConfirmation?.classList.toggle("hidden", !inspectedTls);
+    if (tlsConfirm instanceof HTMLInputElement) {
+      tlsConfirm.checked = false;
+      tlsConfirm.required = Boolean(inspectedTls);
+    }
+    const current = data.target?.depot || {};
+    const values = form.querySelector("[data-vcf-target-depot-current-values]");
+    if (values instanceof HTMLElement) {
+      values.replaceChildren();
+      [["Hostname", current.hostname || "not configured"], ["Port", current.port || ""], ["URL", current.url || ""], ["User", current.username || ""], ["Status", current.status || ""]].forEach(([label, value]) => {
+        const row = document.createElement("div");
+        const key = document.createElement("span"); key.textContent = label;
+        const strong = document.createElement("strong"); strong.textContent = value;
+        row.append(key, strong); values.append(row);
+      });
+    }
+    form.querySelector("[data-vcf-target-depot-current]")?.classList.remove("hidden");
+    const replaceRow = form.querySelector("[data-vcf-target-depot-replace-row]");
+    replaceRow?.classList.toggle("hidden", !data.replacement_required);
+    if (form.elements.replace_existing instanceof HTMLInputElement) {
+      form.elements.replace_existing.required = Boolean(data.replacement_required);
+      form.elements.replace_existing.checked = false;
+    }
+  };
+  const inspect = async () => {
+    showError("");
+    if (next instanceof HTMLButtonElement) {
+      next.disabled = true;
+      next.textContent = "Inspecting…";
+    }
+    try {
+      const { response, data } = await vcfHelperJson("/vcf-helper/offline-depot/inspect-target", "POST", payload());
+      if (response.status === 409 && data.status === "tls-confirmation-required") {
+        renderCurrentDepot(data);
+        showStep("review", { unlock: true });
+        return false;
+      }
+      renderCurrentDepot(data);
+      return true;
+    } catch (error) {
+      showError(error.message);
+      return false;
+    } finally {
+      if (next instanceof HTMLButtonElement) {
+        next.disabled = false;
+        next.textContent = "Next";
+      }
+    }
+  };
+  document.querySelector("[data-vcf-target-depot-open]")?.addEventListener("click", () => dialog.showModal());
+  form.querySelector("[data-vcf-target-depot-close]")?.addEventListener("click", () => { reset(); dialog.close(); });
+  tlsConfirm?.addEventListener("change", () => {
+    if (!(tlsConfirm instanceof HTMLInputElement) || !(tls instanceof HTMLInputElement)) return;
+    tls.value = tlsConfirm.checked ? inspectedTls : "";
+  });
+  next?.addEventListener("click", async () => {
+    if (!validateStep(currentStep)) return;
+    if (currentStep === "depot") {
+      const ready = await inspect();
+      if (!ready) return;
+      showStep("review", { unlock: true });
+      return;
+    }
+    if (currentStep === "review") {
+      if (!inspected && !(tls instanceof HTMLInputElement && tls.value)) {
+        const ready = await inspect();
+        if (!ready) return;
+      }
+      showStep("queue", { unlock: true });
+      return;
+    }
+    const index = stepIndex(currentStep);
+    showStep(steps[Math.min(index + 1, steps.length - 1)].id, { unlock: true });
+  });
+  back?.addEventListener("click", () => {
+    const index = stepIndex(currentStep);
+    showStep(steps[Math.max(index - 1, 0)].id);
+  });
+  stepButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const targetStep = button.dataset.step || "target";
+      if (stepIndex(targetStep) > stepIndex(currentStep) && !validateStep(currentStep)) return;
+      showStep(targetStep);
+    });
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    showError("");
+    if (currentStep !== "queue") {
+      next?.click();
+      return;
+    }
+    if (!validateStep("queue")) return;
+    if (submit instanceof HTMLButtonElement) {
+      submit.disabled = true;
+      submit.textContent = "Queueing task…";
+    }
+    try {
+      const { response, data } = await vcfHelperJson("/vcf-helper/offline-depot/configure", "POST", payload());
+      if (response.status === 409 && data.status === "replacement-confirmation-required") {
+        form.querySelector("[data-vcf-target-depot-replace-row]")?.classList.remove("hidden");
+        showStep("review", { unlock: true });
+        showError("Confirm replacement of the existing target depot, then queue again.");
+        if (submit instanceof HTMLButtonElement) { submit.disabled = false; submit.textContent = "Configure and sync"; }
+        return;
+      }
+      if (response.status === 409 && data.status === "tls-confirmation-required") {
+        renderCurrentDepot(data);
+        showStep("review", { unlock: true });
+        if (submit instanceof HTMLButtonElement) { submit.disabled = false; submit.textContent = "Configure and sync"; }
+        return;
+      }
+      window.location.assign(`/tasks?job_id=${encodeURIComponent(data.job_id || "")}`);
+    } catch (error) {
+      showError(error.message);
+      if (submit instanceof HTMLButtonElement) { submit.disabled = false; submit.textContent = "Configure and sync"; }
+    }
+  });
+  showStep("target");
 }
 
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
@@ -10778,6 +11788,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable)
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTasksTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTaskLogModal);
+document.addEventListener("DOMContentLoaded", initializeTasksPage);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeManagedFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallSourceGroupManager);
@@ -10806,6 +11817,8 @@ document.addEventListener("DOMContentLoaded", initializeFirewallSettings);
 document.addEventListener("DOMContentLoaded", initializeDnsSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfFqdnGenerator);
 document.addEventListener("DOMContentLoaded", initializeVcfTrustForm);
+document.addEventListener("DOMContentLoaded", initializeVcfSddcDeployment);
+document.addEventListener("DOMContentLoaded", initializeVcfTargetDepotHelper);
 document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);

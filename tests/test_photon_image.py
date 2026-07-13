@@ -47,6 +47,10 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "tdnf -y install" in script and "nginx" in script
     assert "tdnf -y install" in script and "chrony" in script
     assert "tdnf -y install" in script and "powershell" in script
+    assert "VCF.PowerCLI" in script
+    assert "9.1.0.25380678" in script
+    assert "Connect-VIServer" in script
+    assert "LABFOUNDRY_POWERCLI_MODULE_SOURCE" in script
     assert "tdnf -y install" in script and "ipxe" in script
     assert "tdnf -y install" in script and "syslinux" in script
     assert "IPXE_BOOTLOADER_SOURCE_DIR=\"$LABFOUNDRY_HOME/third_party/ipxe/bootloaders\"" in script

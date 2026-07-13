@@ -17,6 +17,11 @@ The v1 workflow has three selectable streams:
   virtualenv read/execute permissions, and schedules a short delayed
   `labfoundry.service` restart.
 
+Base images include `vcf-sdk==9.1.0.0` and `VCF.PowerCLI==9.1.0.25380678`.
+Wheel-only updates use `--no-deps`, so they preserve those image-provisioned
+toolsets. Use the Python Libraries stream or rebuild the appliance image when a
+future LabFoundry release intentionally changes the pinned SDK toolchain.
+
 The LabFoundry update source defaults to:
 
 ```text

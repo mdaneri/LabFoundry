@@ -45,8 +45,8 @@ def test_login_and_dashboard_render(client):
         "/routes-wan",
         "/firewall",
         "/dns",
-        "/dhcp",
         "/chrony",
+        "/dhcp",
         "/authentication",
         "/users",
         "/certificate-authority",
@@ -57,6 +57,7 @@ def test_login_and_dashboard_render(client):
         "/vcf-private-registry",
         "/vcf-backups",
         "/services",
+        "/tasks",
         "/logs",
         "/appliance-update",
         "/backup-restore",
@@ -92,6 +93,70 @@ def test_login_and_dashboard_render(client):
     favicon = client.get("/favicon.ico")
     assert favicon.status_code == 200
     assert favicon.headers["content-type"].startswith("image/svg+xml")
+
+
+def test_tasks_page_lists_redacts_logs_and_cancels(client):
+    import json
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, utcnow
+
+    login(client)
+    with SessionLocal() as db:
+        job = Job(
+            id="job_taskgrid001",
+            type="vcf-sddc-manager-deploy",
+            status=JobStatus.RUNNING.value,
+            created_by="admin",
+            started_at=utcnow(),
+            progress_percent=42,
+            result=json.dumps(
+                {
+                    "state": "uploading-disk1.vmdk",
+                    "target": "sddcm.labfoundry.internal",
+                    "api_password": "VMware01!",
+                    "tls_fingerprint": "AA:BB",
+                }
+            ),
+            error="",
+        )
+        db.add(job)
+        db.commit()
+
+    page = client.get("/tasks?job_id=job_taskgrid001")
+    assert page.status_code == 200
+    assert "Tasks" in page.text
+    assert 'href="/tasks"' in page.text
+    assert "job_taskgrid001" in page.text
+    assert "uploading-disk1.vmdk" in page.text
+    assert "VMware01!" not in page.text
+    assert "[redacted]" in page.text
+    assert "data-task-detail-cancel" in page.text
+    assert "data-task-detail-log" in page.text
+
+    status_response = client.get("/tasks/status?job_id=job_taskgrid001")
+    assert status_response.status_code == 200
+    payload = status_response.json()
+    selected = payload["selected_task"]
+    assert selected["id"] == "job_taskgrid001"
+    assert selected["can_cancel"] is True
+    assert selected["result"]["api_password"] == "[redacted]"
+    assert payload["active_count"] == 1
+
+    log_response = client.get("/tasks/job_taskgrid001/log")
+    assert log_response.status_code == 200
+    log_payload = log_response.json()
+    assert "uploading-disk1.vmdk" in log_payload["text"]
+    assert "VMware01!" not in log_payload["text"]
+    assert "[redacted]" in log_payload["text"]
+
+    csrf = page.text.split('data-csrf="', 1)[1].split('"', 1)[0]
+    cancel_response = client.post("/tasks/job_taskgrid001/cancel", data={"csrf": csrf})
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["task"]["status"] == "cancelled"
+
+    status_response = client.get("/tasks/status?job_id=job_taskgrid001")
+    assert status_response.json()["selected_task"]["can_cancel"] is False
 
 
 def test_pwa_manifest_service_worker_and_offline_shell(client):
@@ -135,7 +200,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcfdt-task-pages-20260710-4" in offline.text
+    assert "/static/app.css?v=api-trust-depot-wizard-20260712-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -151,8 +216,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=vcfdt-task-pages-20260710-4" in page.text
-    assert "/static/app.js?v=vcfdt-task-pages-20260710-4" in page.text
+    assert "/static/app.css?v=api-trust-depot-wizard-20260712-1" in page.text
+    assert "/static/app.js?v=api-trust-depot-wizard-20260712-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -9401,11 +9466,14 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
 
     assert response.status_code == 200
     assert "Generated VCF FQDNs" in response.text
+    assert "DNS Boundary" not in response.text
     assert 'href="/vcf-helper"' in response.text
     visible_workspace = response.text.split('<dialog id="vcf-trust-modal"', 1)[0]
     assert "VCF Certificate Trust" in visible_workspace
     assert "Review DNS" not in visible_workspace
-    assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 2
+    assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 4
+    assert "Deploy SDDC Manager" in visible_workspace
+    assert "Configure VCF Offline Depot" in visible_workspace
     assert 'data-vcf-fqdn-modal-open aria-haspopup="dialog" aria-controls="vcf-fqdn-modal"' in visible_workspace
     assert 'aria-controls="vcf-trust-modal"' in visible_workspace
     assert "Root CA subject" not in visible_workspace
@@ -9416,6 +9484,40 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert '<option value="vvf-9.1" >VVF 9.1</option>' in response.text
     assert "data-target-components=" in response.text
     assert 'name="start_ipv4"' in response.text
+    assert "data-dhcp-assignment=" in response.text
+    assert "Automatic from DHCP zone" in response.text
+    assert 'name="disk_provisioning"' in response.text
+    assert "Thin provisioned" in response.text
+    assert "Thick provisioned" in response.text
+    assert "data-vcf-sddc-trust-mode-row" not in response.text
+    assert 'name="power_on"' in response.text
+    assert "Power on after deployment" in response.text
+    assert "data-vcf-sddc-tls-confirmation" in response.text
+    assert 'type="checkbox" data-vcf-sddc-tls-confirm' in response.text
+    assert "Confirm vSphere TLS fingerprint" in response.text
+    sddc_modal = response.text.split('<dialog id="vcf-sddc-deploy-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert "HTTPS port" not in sddc_modal
+    assert "vcf-sddc-wizard-rail" in response.text
+    assert "data-vcf-target-depot-step-nav" in response.text
+    assert 'data-vcf-target-depot-step="target"' in response.text
+    assert 'data-vcf-target-depot-step="api"' in response.text
+    assert 'data-vcf-target-depot-step="depot"' in response.text
+    assert 'data-vcf-target-depot-step="review"' in response.text
+    assert 'data-vcf-target-depot-step="queue"' in response.text
+    assert "data-vcf-target-depot-task" not in response.text
+    assert "vCenter / ESXi" in response.text
+    assert "Resources" in response.text
+    assert "Address" in response.text
+    assert "OVF properties" in response.text
+    assert "Post deployment" in response.text
+    assert "data-vcf-sddc-step-source" in response.text
+    assert "data-vcf-sddc-step-destination" in response.text
+    assert 'data-vcf-sddc-step="resources"' in response.text
+    assert 'data-vcf-sddc-step="address"' in response.text
+    assert 'data-vcf-sddc-step="properties"' in response.text
+    assert 'data-vcf-sddc-step="followup"' in response.text
+    assert "data-vcf-sddc-back" in response.text
+    assert "data-vcf-sddc-next" in response.text
     assert "Starting IP / prefix" in response.text
     assert 'placeholder="192.168.50.100/24 or 2001:db8::100/64"' in response.text
     assert "Assigned IP" in response.text
@@ -9426,6 +9528,66 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert "[data-vcf-fqdn-target]" in app_js
     assert 'submit.textContent = complete ? "Done" : "Create DNS records"' in app_js
     assert 'modal.close("done")' in app_js
+    assert "[data-vcf-sddc-assignment-mode]" in app_js
+    assert "applyDhcpAssignment" in app_js
+    assert "disk_provisioning: form.elements.disk_provisioning.value" in app_js
+    assert "[data-vcf-sddc-trust-mode-row]" not in app_js
+    assert "showTlsConfirmation(data.fingerprint || \"\", handleDiscover)" in app_js
+    assert "await action()" in app_js
+    assert "parseEndpoint" in app_js
+    assert 'next.textContent = "Next"' in app_js
+    assert "power_on: shouldPowerOn" in app_js
+    assert "add_dns: form.elements.add_dns.checked" in app_js
+    assert "showStep(\"resources\")" in app_js
+    assert "showStep(\"source\")" in app_js
+    assert "initializeVcfSddcDeployment" in app_js
+    assert "initializeVcfTargetDepotHelper" in app_js
+    assert "/vcf-helper/offline-depot/inspect-target" in app_js
+    assert "window.location.assign(`/tasks?job_id=${encodeURIComponent(data.job_id || \"\")}`)" in app_js
+
+
+def test_vcf_sddc_dhcp_assignment_uses_static_address_outside_scope(client):
+    import html
+    import json
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpReservation, DhcpScope, DhcpSettings, DnsRecord
+
+    login(client)
+    with SessionLocal() as db:
+        settings = db.get(DhcpSettings, 1) or DhcpSettings(id=1)
+        settings.enabled = True
+        db.merge(settings)
+        db.add(
+            DhcpScope(
+                name="VCF",
+                address_family="ipv4",
+                interface_name="eth2",
+                site_address="10.88.0.1",
+                prefix_length=24,
+                range_expression="10.88.0.100-10.88.0.200",
+                domain_name="labfoundry.internal",
+                dns_server="10.88.0.1",
+                ntp_server="10.88.0.1",
+                enabled=True,
+            )
+        )
+        db.add(DnsRecord(hostname="used.labfoundry.internal", record_type="A", address="10.88.0.2", enabled=True))
+        db.add(DhcpReservation(hostname="reserved.labfoundry.internal", mac_address="02:15:5d:88:00:03", ip_address="10.88.0.3", enabled=True))
+        db.commit()
+
+    response = client.get("/vcf-helper")
+
+    assert response.status_code == 200
+    payload = response.text.split("data-dhcp-assignment='", 1)[1].split("'", 1)[0]
+    assignment = json.loads(html.unescape(payload))
+    scope = next(row for row in assignment["scopes"] if row["name"] == "VCF")
+    assert assignment["available"] is True
+    assert scope["suggested_ipv4"] == "10.88.0.4"
+    assert scope["netmask"] == "255.255.255.0"
+    assert scope["gateway"] == "10.88.0.1"
+    assert scope["dns_server"] == "10.88.0.1"
+    assert scope["domain_name"] == "labfoundry.internal"
 
 
 def test_vcf_helper_renders_certificate_trust_modal(client):
@@ -9448,23 +9610,66 @@ def test_vcf_helper_renders_certificate_trust_modal(client):
     assert "VCF Certificate Trust" in response.text
     assert 'action="/vcf-trust/root-ca"' in response.text
     assert 'name="snapshot_acknowledged"' in response.text
-    assert 'name="ssh_private_key"' in response.text
+    assert 'name="confirmed_tls_fingerprint"' in response.text
     assert "SHA-256 fingerprint" in response.text
     assert "data-vcf-trust-form" in response.text
-    assert "data-vcf-trust-host-key-confirmation" in response.text
+    assert "data-vcf-trust-step-nav" in response.text
+    assert 'data-vcf-trust-step="target"' in response.text
+    assert 'data-vcf-trust-step="api"' in response.text
+    assert 'data-vcf-trust-step="review"' in response.text
+    assert "SSH" not in response.text.split('<dialog id="vcf-trust-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert "Latest trust task" not in response.text
+    assert "VCF trust targets" not in response.text
+    assert "data-vcf-trust-tls-confirmation" in response.text
     assert '<dialog id="vcf-trust-modal"' in response.text
     assert '<dialog id="vcf-trust-modal" class="confirm-modal wide-modal" aria-labelledby="vcf-trust-modal-title" open' not in response.text
     app_js = Path("labfoundry/app/static/app.js").read_text()
     assert 'headers: { "X-LabFoundry-VCF-Trust": "1" }' in app_js
-    assert "Your entries remain in this form" in app_js
-    assert 'window.location.assign(payload.redirect || "/vcf-helper?vcf_trust=1")' in app_js
+    assert "/vcf-helper/trust-root-ca/inspect-target" in app_js
+    assert "window.location.assign(payload.redirect || `/tasks?job_id=" in app_js
+    assert "data-vcf-trust-auth-method" not in app_js
 
     legacy = client.get("/vcf-trust", follow_redirects=False)
     assert legacy.status_code == 307
     assert legacy.headers["location"] == "/vcf-helper?vcf_trust=1"
 
 
-def test_vcf_trust_requires_tofu_confirmation_then_queues_without_persisting_credentials(client, monkeypatch):
+def test_vcf_trust_inspects_target_tls_without_persisting_target(client, monkeypatch):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import VcfTrustTarget
+    import labfoundry.app.ui as ui
+
+    login(client)
+    csrf = client.get("/vcf-helper").text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    monkeypatch.setattr(ui, "tls_sha256_fingerprint", lambda _address, _port: "AA:BB")
+    monkeypatch.setattr(ui, "inspect_vcf_trust_target", lambda *_args, **_kwargs: {"role": "VcfInstaller", "version": "9.1.0.0"})
+
+    response = client.post(
+        "/vcf-helper/trust-root-ca/inspect-target",
+        json={
+            "csrf": csrf,
+            "address": "https://vcf-installer.example.test:8443",
+            "api_username": "administrator@vsphere.local",
+            "api_password": "api-secret",
+            "confirmed_tls_fingerprint": "AA:BB",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "address": "vcf-installer.example.test",
+        "port": 8443,
+        "tls_fingerprint": "AA:BB",
+        "appliance": {"role": "VcfInstaller", "version": "9.1.0.0"},
+    }
+    with SessionLocal() as db:
+        assert db.execute(select(VcfTrustTarget)).scalars().all() == []
+
+
+def test_vcf_trust_requires_tls_confirmation_then_queues_without_persisting_credentials(client, monkeypatch):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -9479,18 +9684,14 @@ def test_vcf_trust_requires_tofu_confirmation_then_queues_without_persisting_cre
         settings.enabled = True
         ensure_root_ca_material(settings)
         db.commit()
-    monkeypatch.setattr(ui, "discover_ssh_host_key", lambda _address, _port: "SHA256:verified-host-key")
+    monkeypatch.setattr(ui, "tls_sha256_fingerprint", lambda _address, _port: "AA:BB")
     queued = []
     monkeypatch.setattr(ui, "queue_vcf_trust_job", lambda job_id, target_id, credentials, ca: queued.append((job_id, target_id, credentials, ca)))
     csrf = client.get("/vcf-helper").text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     credentials = {
         "address": "vcf-installer.example.test",
-        "ssh_port": "22",
         "api_username": "administrator@vsphere.local",
         "api_password": "api-super-secret",
-        "ssh_auth_method": "password",
-        "ssh_password": "ssh-super-secret",
-        "root_password": "root-super-secret",
         "snapshot_acknowledged": "on",
         "csrf": csrf,
     }
@@ -9502,14 +9703,8 @@ def test_vcf_trust_requires_tofu_confirmation_then_queues_without_persisting_cre
     )
 
     assert awaiting.status_code == 409
-    assert awaiting.json() == {
-        "status": "host-key-confirmation-required",
-        "address": "vcf-installer.example.test",
-        "ssh_port": 22,
-        "fingerprint": "SHA256:verified-host-key",
-        "previous_fingerprint": "",
-        "replacement": False,
-    }
+    assert awaiting.json()["status"] == "tls-confirmation-required"
+    assert awaiting.json()["fingerprint"] == "AA:BB"
     with SessionLocal() as db:
         assert db.execute(select(Job).where(Job.type == "vcf-ca-trust")).scalars().all() == []
         assert db.execute(select(VcfTrustTarget)).scalars().all() == []
@@ -9518,23 +9713,103 @@ def test_vcf_trust_requires_tofu_confirmation_then_queues_without_persisting_cre
         "/vcf-trust/root-ca",
         data={
             **credentials,
-            "confirmed_host_key": "SHA256:verified-host-key",
+            "confirmed_tls_fingerprint": "AA:BB",
         },
         headers={"X-LabFoundry-VCF-Trust": "1"},
     )
 
     assert confirmed.status_code == 202
     assert confirmed.json()["status"] == "queued"
-    assert confirmed.json()["redirect"] == "/vcf-helper?vcf_trust=1"
+    assert confirmed.json()["redirect"] == f"/tasks?job_id={confirmed.json()['job_id']}"
     assert len(queued) == 1
     assert queued[0][2].api_password == "api-super-secret"
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "vcf-ca-trust")).scalar_one()
         target = db.execute(select(VcfTrustTarget)).scalar_one()
         assert job.status == "pending"
-        assert target.ssh_host_key_fingerprint == "SHA256:verified-host-key"
+        assert target.api_port == 443
+        assert target.tls_fingerprint == "AA:BB"
         persisted = "\n".join([job.result or "", target.last_result, target.address])
         assert "super-secret" not in persisted
+
+
+def test_vcf_trust_rejects_mismatched_confirmed_tls_fingerprint(client, monkeypatch):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.services.ca import ensure_root_ca_material
+    from labfoundry.app.ui import get_ca_settings_row
+    import labfoundry.app.ui as ui
+
+    login(client)
+    with SessionLocal() as db:
+        settings = get_ca_settings_row(db)
+        settings.enabled = True
+        ensure_root_ca_material(settings)
+        db.commit()
+    monkeypatch.setattr(ui, "tls_sha256_fingerprint", lambda _address, _port: "AA:BB")
+    csrf = client.get("/vcf-helper").text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/vcf-trust/root-ca",
+        data={
+            "address": "vcf-installer.example.test",
+            "api_username": "administrator@vsphere.local",
+            "api_password": "api-secret",
+            "snapshot_acknowledged": "on",
+            "confirmed_tls_fingerprint": "CC:DD",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-VCF-Trust": "1"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["fingerprint"] == "AA:BB"
+
+
+def test_vcf_trust_job_preserves_cancelled_state_at_progress_checkpoint(client, monkeypatch):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, VcfTrustTarget
+    from labfoundry.app.services.ca import ensure_root_ca_material
+    from labfoundry.app.services.vcf_trust import VcfTrustCredentials, root_ca_info
+    from labfoundry.app.ui import get_ca_settings_row
+    import labfoundry.app.ui as ui
+
+    login(client)
+    with SessionLocal() as db:
+        settings = get_ca_settings_row(db)
+        settings.enabled = True
+        ensure_root_ca_material(settings)
+        ca = root_ca_info(settings)
+        target = VcfTrustTarget(address="vcf-installer.example.test", api_port=443, tls_fingerprint="AA:BB")
+        job = Job(id="job_vcf_trust_cancel", type="vcf-ca-trust", status=JobStatus.PENDING.value, created_by="admin")
+        db.add(target)
+        db.add(job)
+        db.commit()
+        target_id = target.id
+
+    def fake_execute(*_args, progress, **_kwargs):
+        with SessionLocal() as db:
+            job = db.get(Job, "job_vcf_trust_cancel")
+            job.status = JobStatus.CANCELLED.value
+            db.commit()
+        progress(20, "checking-api")
+        raise AssertionError("progress should raise before trust execution continues")
+
+    monkeypatch.setattr(ui, "execute_vcf_trust", fake_execute)
+
+    ui.run_vcf_trust_job(
+        "job_vcf_trust_cancel",
+        target_id,
+        VcfTrustCredentials(api_username="admin", api_password="api"),
+        ca,
+    )
+
+    with SessionLocal() as db:
+        job = db.get(Job, "job_vcf_trust_cancel")
+        target = db.get(VcfTrustTarget, target_id)
+        assert job.status == JobStatus.CANCELLED.value
+        assert job.progress_percent == 100
+        assert "cancelled" in (job.result or "")
+        assert target.last_result == "cancelled"
 
 
 def test_vcf_helper_generates_dns_records_with_component_descriptions(client):
@@ -10217,3 +10492,220 @@ def test_zone_file_import_error_preserves_pasted_zone_text(client):
     assert "Import Zone File" in imported.text
     assert "Line 2:" in imported.text
     assert "badrecord IN TXT unsupported" in imported.text
+def test_vcf_sddc_inventory_requires_tls_confirmation_and_redacts_credentials(client, monkeypatch):
+    from labfoundry.app import ui
+    from labfoundry.app.services.vcf_sddc_deployment import OvaDescriptor, OvfProperty
+
+    login(client)
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    descriptor = OvaDescriptor(
+        path="/mnt/labfoundry-vcf-offline-depot/PROD/COMP/SDDC_MANAGER_VCF/test.ova",
+        relative_path="test.ova",
+        filename="test.ova",
+        size_bytes=10,
+        vm_name="sddc-test",
+        ovf_member="test.ovf",
+        manifest_member="test.mf",
+        networks=["Network 1"],
+        properties=[OvfProperty("ROOT_PASSWORD", "string", "Root", "secret", "", "", True, True)],
+        files=[],
+    )
+    monkeypatch.setattr(ui, "tls_sha256_fingerprint", lambda *_args, **_kwargs: "AA:BB")
+    monkeypatch.setattr(ui, "inspect_ova", lambda *_args, **_kwargs: descriptor)
+    monkeypatch.setattr(ui, "vsphere_inventory", lambda *_args, **_kwargs: {"resource_pools": [], "datastores": [], "folders": [], "hosts": [], "networks": []})
+    payload = {"csrf": csrf, "address": "vc.example", "port": 443, "username": "admin", "password": "top-secret", "ova_path": descriptor.path}
+
+    confirmation = client.post("/vcf-helper/sddc-manager/inventory", json=payload)
+    assert confirmation.status_code == 409
+    assert confirmation.json()["fingerprint"] == "AA:BB"
+
+    ready = client.post("/vcf-helper/sddc-manager/inventory", json={**payload, "confirmed_tls_fingerprint": "AA:BB"})
+    assert ready.status_code == 200
+    assert "top-secret" not in ready.text
+    assert ready.json()["ova"]["properties"][0]["password"] is True
+
+
+def test_vcf_sddc_deploy_job_persists_no_passwords(client, monkeypatch):
+    import json
+    from labfoundry.app import ui
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job
+    from labfoundry.app.services.vcf_sddc_deployment import OvaDescriptor, OvfProperty
+
+    login(client)
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    descriptor = OvaDescriptor(
+        path="/mnt/labfoundry-vcf-offline-depot/PROD/COMP/SDDC_MANAGER_VCF/test.ova",
+        relative_path="test.ova",
+        filename="test.ova",
+        size_bytes=10,
+        vm_name="sddc-test",
+        ovf_member="test.ovf",
+        manifest_member="test.mf",
+        networks=["Network 1"],
+        properties=[
+            OvfProperty("ROOT_PASSWORD", "string", "Root", "", "", "", True, True),
+            OvfProperty("LOCAL_USER_PASSWORD", "string", "Local", "", "", "", True, True),
+            OvfProperty("vami.hostname", "string", "FQDN", "", "", "", False, True),
+        ],
+        files=[],
+    )
+    queued = {}
+    monkeypatch.setattr(ui, "tls_sha256_fingerprint", lambda *_args, **_kwargs: "AA:BB")
+    monkeypatch.setattr(ui, "inspect_ova", lambda *_args, **_kwargs: descriptor)
+    monkeypatch.setattr(ui, "queue_vcf_sddc_deployment_job", lambda job_id, **kwargs: queued.update({"job_id": job_id, **kwargs}))
+    response = client.post(
+        "/vcf-helper/sddc-manager/deploy",
+        json={
+            "csrf": csrf,
+            "address": "vc.example",
+            "port": 443,
+            "username": "administrator",
+            "password": "vsphere-secret",
+            "confirmed_tls_fingerprint": "AA:BB",
+            "ova_path": descriptor.path,
+            "vm_name": "sddc-test",
+            "properties": {"ROOT_PASSWORD": "root-secret", "LOCAL_USER_PASSWORD": "local-secret", "vami.hostname": "sddc.example"},
+            "destination": {"resource_pool_id": "resgroup-1", "datastore_id": "datastore-1", "network_ids": {"Network 1": "network-1"}},
+            "options": {"disk_provisioning": "thick"},
+        },
+    )
+    assert response.status_code == 202
+    assert queued["endpoint_password"] == "vsphere-secret"
+    assert queued["disk_provisioning"] == "thick"
+    assert queued["power_on"] is True
+    with SessionLocal() as db:
+        job = db.get(Job, response.json()["job_id"])
+        persisted = json.dumps(json.loads(job.result))
+    assert "vsphere-secret" not in persisted
+    assert "root-secret" not in persisted
+    assert "local-secret" not in persisted
+    assert "thick" in persisted
+    assert "power_on" in persisted
+
+    powered_off_dns = client.post(
+        "/vcf-helper/sddc-manager/deploy",
+        json={
+            "csrf": csrf,
+            "address": "vc.example",
+            "port": 443,
+            "username": "administrator",
+            "password": "vsphere-secret",
+            "confirmed_tls_fingerprint": "AA:BB",
+            "ova_path": descriptor.path,
+            "vm_name": "sddc-test-powered-off",
+            "properties": {"ROOT_PASSWORD": "root-secret", "LOCAL_USER_PASSWORD": "local-secret", "vami.hostname": "sddc.example"},
+            "destination": {"resource_pool_id": "resgroup-1", "datastore_id": "datastore-1", "network_ids": {"Network 1": "network-1"}},
+            "options": {"power_on": False, "add_dns": True},
+        },
+    )
+    assert powered_off_dns.status_code == 202
+    assert queued["power_on"] is False
+    assert queued["add_dns"] is True
+    assert queued["apply_trust"] is False
+    assert queued["configure_offline_depot"] is False
+
+    rejected = client.post(
+        "/vcf-helper/sddc-manager/deploy",
+        json={
+            "csrf": csrf,
+            "address": "vc.example",
+            "port": 443,
+            "username": "administrator",
+            "password": "vsphere-secret",
+            "confirmed_tls_fingerprint": "AA:BB",
+            "ova_path": descriptor.path,
+            "vm_name": "sddc-test-powered-off-trust",
+            "properties": {"ROOT_PASSWORD": "root-secret", "LOCAL_USER_PASSWORD": "local-secret", "vami.hostname": "sddc.example"},
+            "destination": {"resource_pool_id": "resgroup-1", "datastore_id": "datastore-1", "network_ids": {"Network 1": "network-1"}},
+            "options": {"power_on": False, "apply_trust": True},
+        },
+    )
+    assert rejected.status_code == 422
+    assert "require Power on" in rejected.json()["detail"]
+
+
+def test_vcf_sddc_endpoint_address_parses_inline_port():
+    from labfoundry.app import ui
+
+    assert ui._split_vcf_endpoint_address_port("vc.example:8443") == ("vc.example", 8443)
+    assert ui._split_vcf_endpoint_address_port("https://vc.example/sdk", None) == ("vc.example", 443)
+    assert ui._split_vcf_endpoint_address_port("[2001:db8::10]:9443") == ("2001:db8::10", 9443)
+
+
+def test_vcf_sddc_deploy_requires_ipv4_ova_properties(client, monkeypatch):
+    from labfoundry.app import ui
+    from labfoundry.app.services.vcf_sddc_deployment import OvaDescriptor, OvfProperty
+
+    login(client)
+    page = client.get("/vcf-helper")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    descriptor = OvaDescriptor(
+        path="/mnt/labfoundry-vcf-offline-depot/PROD/COMP/SDDC_MANAGER_VCF/test.ova",
+        relative_path="test.ova",
+        filename="test.ova",
+        size_bytes=10,
+        vm_name="sddc-test",
+        ovf_member="test.ovf",
+        manifest_member="test.mf",
+        networks=["Network 1"],
+        properties=[
+            OvfProperty("ROOT_PASSWORD", "string", "Root", "", "", "MinLen(15)", True, True),
+            OvfProperty("LOCAL_USER_PASSWORD", "string", "Local", "", "", "MinLen(15)", True, True),
+            OvfProperty("vami.hostname", "string", "FQDN", "", "", "", False, True),
+            OvfProperty("ip_address_version", "string", "IP version", "", "IPv4", 'ValueMap{"IPv4","IPv4 and IPv6"}', False, True),
+            OvfProperty("ip0", "string", "Network 1 IPv4 Address", "", "", "", False, True),
+            OvfProperty("netmask0", "string", "Network 1 Subnet Mask", "", "", "", False, True),
+            OvfProperty("gateway", "string", "Network Default IPv4 Gateway", "", "", "", False, True),
+            OvfProperty("DNS", "string", "Domain Name Servers", "", "", "", False, True),
+        ],
+        files=[],
+    )
+    queued = {}
+    monkeypatch.setattr(ui, "tls_sha256_fingerprint", lambda *_args, **_kwargs: "AA:BB")
+    monkeypatch.setattr(ui, "inspect_ova", lambda *_args, **_kwargs: descriptor)
+    monkeypatch.setattr(ui, "queue_vcf_sddc_deployment_job", lambda job_id, **kwargs: queued.update({"job_id": job_id, **kwargs}))
+
+    response = client.post(
+        "/vcf-helper/sddc-manager/deploy",
+        json={
+            "csrf": csrf,
+            "address": "vc.example",
+            "port": 443,
+            "username": "administrator",
+            "password": "vsphere-secret",
+            "confirmed_tls_fingerprint": "AA:BB",
+            "ova_path": descriptor.path,
+            "vm_name": "sddc-test",
+            "properties": {
+                "ROOT_PASSWORD": "RootPassword123!",
+                "LOCAL_USER_PASSWORD": "LocalPassword123!",
+                "vami.hostname": "sddc.example",
+                "ip_address_version": "IPv4",
+            },
+            "destination": {"resource_pool_id": "resgroup-1", "datastore_id": "datastore-1", "network_ids": {"Network 1": "network-1"}},
+            "options": {},
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Network 1 IPv4 Address" in response.json()["detail"]
+    assert "Domain Name Servers" in response.json()["detail"]
+    assert queued == {}
+
+
+def test_recover_interrupted_vcf_helper_jobs_discards_transient_work(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job
+    from labfoundry.app.ui import recover_interrupted_vcf_helper_jobs
+
+    with SessionLocal() as db:
+        job = Job(id="job_interrupted_vcf", type="vcf-sddc-manager-deploy", status="running", created_by="admin", result='{"state":"uploading-ova"}')
+        db.add(job)
+        db.commit()
+        assert recover_interrupted_vcf_helper_jobs(db) == 1
+        db.refresh(job)
+        assert job.status == "failed"
+        assert "Transient credentials were discarded" in job.error

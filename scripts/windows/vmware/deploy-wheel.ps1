@@ -166,6 +166,10 @@ function Invoke-HostOpenApiCheck {
 function Get-SshConnectionArguments {
     param([string]$ControlPath)
 
+    if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+        return @()
+    }
+
     return @(
         '-o', 'ControlMaster=auto',
         '-o', 'ControlPersist=60',
@@ -268,7 +272,9 @@ try {
 
     Write-Host "Deployed $wheelName to $IpAddress and verified labfoundry.service."
 } finally {
-    & ssh @sshConnectionArguments -O exit "${SshUser}@${IpAddress}" 2>$null | Out-Null
+    if ($sshConnectionArguments.Count -gt 0) {
+        & ssh @sshConnectionArguments -O exit "${SshUser}@${IpAddress}" 2>$null | Out-Null
+    }
     Remove-Item -LiteralPath $tempDeployDirectory -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $sshControlPath -Force -ErrorAction SilentlyContinue
 }

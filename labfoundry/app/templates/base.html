@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=vcfdt-rail-values-20260711-5">
+    <link rel="stylesheet" href="/static/app.css?v=api-trust-depot-wizard-20260712-1">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -59,6 +59,7 @@
             ]),
             ("Operations", [
               ("Services", "/services", "read:services"),
+              ("Tasks", "/tasks", "read:dashboard"),
               ("Logs", "/logs", "read:logs"),
               ("Appliance Update", "/appliance-update", "admin:all"),
               ("Backup / Restore", "/backup-restore", "admin:all")
@@ -198,7 +199,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=depot-auth-20260711-1"></script>
+    <script src="/static/app.js?v=api-trust-depot-wizard-20260712-1"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>
