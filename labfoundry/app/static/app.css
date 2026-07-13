@@ -3010,8 +3010,7 @@ input[type="checkbox"] {
 
 .user-row-menu,
 .service-row-menu,
-.lease-row-menu,
-.task-row-menu {
+.lease-row-menu {
   position: absolute;
   z-index: 45;
   display: grid;
@@ -3025,8 +3024,7 @@ input[type="checkbox"] {
 
 .user-row-menu button,
 .service-row-menu button,
-.lease-row-menu button,
-.task-row-menu button {
+.lease-row-menu button {
   border: 0;
   border-bottom: 1px solid #edf2f7;
   padding: 9px 10px;
@@ -3044,8 +3042,7 @@ input[type="checkbox"] {
 
 .user-row-menu button:last-child,
 .service-row-menu button:last-child,
-.lease-row-menu button:last-child,
-.task-row-menu button:last-child {
+.lease-row-menu button:last-child {
   border-bottom: 0;
 }
 
@@ -3054,23 +3051,19 @@ input[type="checkbox"] {
 .service-row-menu button:hover,
 .service-row-menu button:focus-visible,
 .lease-row-menu button:hover,
-.lease-row-menu button:focus-visible,
-.task-row-menu button:hover,
-.task-row-menu button:focus-visible {
+.lease-row-menu button:focus-visible {
   background: #eff6ff;
 }
 
 .user-row-menu button.danger,
 .service-row-menu button.danger,
-.lease-row-menu button.danger,
-.task-row-menu button.danger {
+.lease-row-menu button.danger {
   color: var(--bad);
 }
 
 .user-row-menu button:disabled,
 .service-row-menu button:disabled,
-.lease-row-menu button:disabled,
-.task-row-menu button:disabled {
+.lease-row-menu button:disabled {
   color: var(--muted);
   cursor: not-allowed;
   opacity: 0.65;
@@ -4028,22 +4021,6 @@ textarea {
 
 #tasks-table {
   height: 100%;
-}
-
-.task-actions-cell {
-  overflow: visible;
-}
-
-.task-action-menu {
-  position: relative;
-  display: inline-grid;
-  justify-items: end;
-}
-
-.task-row-menu {
-  right: 0;
-  top: calc(100% + 4px);
-  text-align: left;
 }
 
 .task-modal.confirm-modal.wide-modal {

@@ -4878,6 +4878,11 @@ class JobCancelled(RuntimeError):
 
 
 ACTIVE_JOB_STATUSES = {JobStatus.PENDING.value, JobStatus.RUNNING.value}
+SERVICE_ADMIN_CANCELLABLE_JOB_TYPES = {
+    "vcf-sddc-manager-deploy",
+    "vcf-offline-depot-target-config",
+    "vcf-ca-trust",
+}
 TASK_SECRET_KEY_RE = re.compile(r"(password|passwd|secret|token|credential|authorization|activation|private[_-]?key|api[_-]?key)", re.IGNORECASE)
 TASK_SECRET_VALUE_RE = re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----|sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{12,})", re.IGNORECASE)
 
@@ -4946,7 +4951,17 @@ def _task_time_label(value: datetime | None) -> str:
     return value.isoformat()
 
 
-def _task_row(job: Job) -> dict[str, Any]:
+def _can_cancel_task(job: Job, identity: Identity | None = None) -> bool:
+    if job.status not in ACTIVE_JOB_STATUSES:
+        return False
+    if identity is None:
+        return True
+    if identity.has_role(Role.ADMIN.value):
+        return True
+    return identity.has_role(Role.SERVICE_ADMIN.value) and job.type in SERVICE_ADMIN_CANCELLABLE_JOB_TYPES
+
+
+def _task_row(job: Job, identity: Identity | None = None) -> dict[str, Any]:
     raw_result = _job_payload(job)
     result = _redact_task_value(raw_result)
     status_value = str(job.status or "")
@@ -4971,7 +4986,7 @@ def _task_row(job: Job) -> dict[str, Any]:
         "result": result,
         "result_json": json.dumps(result, indent=2, sort_keys=True),
         "error": error,
-        "can_cancel": status_value in ACTIVE_JOB_STATUSES,
+        "can_cancel": _can_cancel_task(job, identity),
     }
 
 
@@ -13343,8 +13358,8 @@ def tasks_page(
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     jobs = db.execute(select(Job).order_by(desc(Job.created_at)).limit(500)).scalars().all()
-    task_rows = [_task_row(job) for job in jobs]
-    selected_job_id = job_id if any(row["id"] == job_id for row in task_rows) else (task_rows[0]["id"] if task_rows else "")
+    task_rows = [_task_row(job, identity) for job in jobs]
+    selected_job_id = job_id if any(row["id"] == job_id for row in task_rows) else ""
     return render(
         request,
         "tasks.html",
@@ -13363,10 +13378,8 @@ def tasks_status(
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     jobs = db.execute(select(Job).order_by(desc(Job.created_at)).limit(500)).scalars().all()
-    rows = [_task_row(job) for job in jobs]
-    selected = next((row for row in rows if row["id"] == job_id), None)
-    if selected is None and rows:
-        selected = rows[0]
+    rows = [_task_row(job, identity) for job in jobs]
+    selected = next((row for row in rows if job_id and row["id"] == job_id), None)
     return JSONResponse(
         {
             "tasks": rows,
@@ -13406,13 +13419,16 @@ def cancel_task_from_ui(
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     verify_csrf(request, csrf)
-    if not (identity.has_role(Role.ADMIN.value) or identity.has_role(Role.SERVICE_ADMIN.value)):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator or service administrator role required")
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
+    if not (
+        identity.has_role(Role.ADMIN.value)
+        or (identity.has_role(Role.SERVICE_ADMIN.value) and job.type in SERVICE_ADMIN_CANCELLABLE_JOB_TYPES)
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator role required for this task type")
     if job.status not in ACTIVE_JOB_STATUSES:
-        return JSONResponse({"task": _task_row(job), "message": "Task is already finished."})
+        return JSONResponse({"task": _task_row(job, identity), "message": "Task is already finished."})
     job.status = JobStatus.CANCELLED.value
     job.finished_at = utcnow()
     job.error = "Task cancelled by operator."
@@ -13425,7 +13441,7 @@ def cancel_task_from_ui(
     db.commit()
     record_audit(db, actor=identity.username, action="cancel_task", resource_type="job", resource_id=job.id, detail=f"type={job.type}")
     db.refresh(job)
-    return JSONResponse({"task": _task_row(job), "message": "Task cancellation requested."})
+    return JSONResponse({"task": _task_row(job, identity), "message": "Task cancellation requested."})
 
 
 @router.get("/audit-log", response_class=HTMLResponse, response_model=None)

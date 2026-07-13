@@ -146,19 +146,24 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert "data-task-detail-cancel" in page.text
     assert "data-task-detail-log" in page.text
     assert "task-grid-shell" in page.text
+    assert 'data-selected-task-id="job_taskgrid001"' in page.text
+    plain_page = client.get("/tasks")
+    assert plain_page.status_code == 200
+    assert 'data-selected-task-id=""' in plain_page.text
     app_js = Path("labfoundry/app/static/app.js").read_text()
     assert 'paginationMode: "local"' in app_js
-    assert "paginationSizeSelector: [15, 25, 50, 100]" in app_js
+    tasks_table_js = app_js.split("function initializeTasksPage", 1)[1].split("function updateVcfDepotSummary", 1)[0]
+    assert "paginationSizeSelector" not in tasks_table_js
     assert "rowDblClick: (_event, row) => openTaskDetail(row.getData())" in app_js
-    assert "data-task-row-menu-toggle" in app_js
-    assert "data-task-row-open" in app_js
-    task_actions_js = app_js.split('title: "Actions"', 1)[1].split("cellClick:", 1)[0]
-    assert "button secondary compact-button" not in task_actions_js
-    assert 'role="menuitem" data-task-row-open' in task_actions_js
-    assert 'role="menuitem" data-task-row-log' in task_actions_js
+    assert "rowContextMenu" in tasks_table_js
+    assert 'label: "Details"' in tasks_table_js
+    assert 'label: "Log"' in tasks_table_js
+    assert 'label: "Cancel task"' in tasks_table_js
+    assert 'title: "Actions"' not in tasks_table_js
+    assert "data-task-row-menu-toggle" not in app_js
     app_css = Path("labfoundry/app/static/app.css").read_text()
     assert ".tasks-panel {\n  display: grid;\n  gap: 14px;\n  grid-template-rows: auto minmax(0, 1fr);" in app_css
-    assert ".task-row-menu" in app_css
+    assert ".task-row-menu" not in app_css
 
     status_response = client.get("/tasks/status?job_id=job_taskgrid001")
     assert status_response.status_code == 200
@@ -185,6 +190,51 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert status_response.json()["selected_task"]["can_cancel"] is False
 
 
+def test_service_admin_task_cancellation_is_limited_to_vcf_helpers(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, Role, User
+    from labfoundry.app.security import roles_to_json
+
+    with SessionLocal() as db:
+        admin = db.execute(select(User).where(User.username == "admin")).scalar_one()
+        admin.role = Role.SERVICE_ADMIN.value
+        admin.roles_json = roles_to_json([Role.SERVICE_ADMIN.value])
+        db.add_all(
+            [
+                Job(
+                    id="job_admin_only_cancel",
+                    type="appliance-update",
+                    status=JobStatus.RUNNING.value,
+                    created_by="admin",
+                    progress_percent=10,
+                ),
+                Job(
+                    id="job_vcf_helper_cancel",
+                    type="vcf-ca-trust",
+                    status=JobStatus.RUNNING.value,
+                    created_by="admin",
+                    progress_percent=10,
+                ),
+            ]
+        )
+        db.commit()
+
+    login(client)
+    page = client.get("/tasks")
+    assert page.status_code == 200
+    csrf = page.text.split('data-csrf="', 1)[1].split('"', 1)[0]
+
+    denied = client.post("/tasks/job_admin_only_cancel/cancel", data={"csrf": csrf})
+    assert denied.status_code == 403
+    assert "Administrator role required for this task type" in denied.text
+
+    allowed = client.post("/tasks/job_vcf_helper_cancel/cancel", data={"csrf": csrf})
+    assert allowed.status_code == 200
+    assert allowed.json()["task"]["status"] == "cancelled"
+
+
 def test_pwa_manifest_service_worker_and_offline_shell(client):
     manifest = client.get("/manifest.webmanifest")
     assert manifest.status_code == 200
@@ -206,7 +256,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v74" in service_worker.text
+    assert "labfoundry-pwa-v75" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -218,7 +268,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-3" in service_worker.text
+    assert "/static/app.css?v=tasks-row-menu-20260713-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -227,7 +277,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-3" in offline.text
+    assert "/static/app.css?v=tasks-row-menu-20260713-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -243,8 +293,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-3" in page.text
-    assert "/static/app.js?v=vcf-helper-tasks-layout-20260713-3" in page.text
+    assert "/static/app.css?v=tasks-row-menu-20260713-1" in page.text
+    assert "/static/app.js?v=tasks-row-menu-20260713-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -8042,7 +8092,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "vcf-helper-tasks-layout-20260713-3" in page.text
+    assert "tasks-row-menu-20260713-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

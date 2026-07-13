@@ -8791,14 +8791,6 @@ function taskStatusPillHtml(task) {
   return `<span class="status-pill ${escapeHtml(task.status_pill || "muted")}">${escapeHtml(task.status || "unknown")}</span>`;
 }
 
-function closeTaskRowMenus(exceptMenu = null) {
-  document.querySelectorAll("[data-task-row-menu]").forEach((menu) => {
-    if (menu !== exceptMenu) {
-      menu.setAttribute("hidden", "");
-    }
-  });
-}
-
 function renderTaskDetail(task) {
   const modal = document.getElementById("task-detail-modal");
   if (!(modal instanceof HTMLDialogElement) || !task) {
@@ -8998,16 +8990,35 @@ function initializeTasksPage() {
       pagination: true,
       paginationMode: "local",
       paginationSize: 25,
-      paginationSizeSelector: [15, 25, 50, 100],
       paginationCounter: "rows",
       placeholder: "No tasks have been recorded yet.",
       selectableRows: 1,
       rowClick: (_event, row) => {
-        closeTaskRowMenus();
         labFoundrySelectedTaskId = row.getData().id || "";
         row.select();
       },
       rowDblClick: (_event, row) => openTaskDetail(row.getData()),
+      rowContextMenu: [
+        {
+          label: "Details",
+          action: (_event, row) => openTaskDetail(row.getData()),
+        },
+        {
+          label: "Log",
+          action: (_event, row) => openTaskLog(row.getData().id),
+        },
+        {
+          label: "Cancel task",
+          disabled: (component) => !component.getData().can_cancel,
+          action: (_event, row) => {
+            const task = row.getData();
+            if (!task.can_cancel) {
+              return;
+            }
+            cancelTask(task.id).catch((error) => window.alert(error instanceof Error ? error.message : "Unable to cancel task."));
+          },
+        },
+      ],
       columns: [
         { title: "Status", field: "status", width: 130, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
         { title: "Task", field: "id", minWidth: 190, formatter: (cell) => `<code>${escapeHtml(cell.getValue())}</code>` },
@@ -9017,61 +9028,6 @@ function initializeTasksPage() {
         { title: "Progress", field: "progress_percent", width: 105, formatter: (cell) => `${Number(cell.getValue() || 0)}%` },
         { title: "Created", field: "created_at", minWidth: 210, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
         { title: "Finished", field: "finished_at", minWidth: 210, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
-        {
-          title: "Actions",
-          field: "id",
-          width: 82,
-          hozAlign: "right",
-          headerSort: false,
-          cssClass: "task-actions-cell",
-          formatter: (cell) => {
-            const task = cell.getRow().getData();
-            const cancel = task.can_cancel ? `<button class="danger" type="button" role="menuitem" data-task-row-cancel="${escapeHtml(task.id)}">Cancel task</button>` : "";
-            return `
-              <div class="task-action-menu" data-task-action-menu>
-                <button class="row-menu-button" type="button" title="Task actions" aria-label="Task actions" aria-haspopup="menu" aria-expanded="false" data-task-row-menu-toggle="${escapeHtml(task.id)}">...</button>
-                <div class="task-row-menu" role="menu" hidden data-task-row-menu>
-                  <button type="button" role="menuitem" data-task-row-open="${escapeHtml(task.id)}">Details</button>
-                  <button type="button" role="menuitem" data-task-row-log="${escapeHtml(task.id)}">Log</button>
-                  ${cancel}
-                </div>
-              </div>
-            `;
-          },
-          cellClick: (event, cell) => {
-            const target = event.target;
-            if (!(target instanceof HTMLElement)) {
-              return;
-            }
-            const menuToggle = target.closest("[data-task-row-menu-toggle]");
-            const openAction = target.closest("[data-task-row-open]");
-            const logAction = target.closest("[data-task-row-log]");
-            const cancelAction = target.closest("[data-task-row-cancel]");
-            const taskId = menuToggle?.dataset.taskRowMenuToggle || openAction?.dataset.taskRowOpen || logAction?.dataset.taskRowLog || cancelAction?.dataset.taskRowCancel;
-            if (!taskId) {
-              return;
-            }
-            event.stopPropagation();
-            if (menuToggle instanceof HTMLElement) {
-              const menu = menuToggle.closest("[data-task-action-menu]")?.querySelector("[data-task-row-menu]");
-              if (menu instanceof HTMLElement) {
-                const willOpen = menu.hasAttribute("hidden");
-                closeTaskRowMenus(willOpen ? menu : null);
-                menu.toggleAttribute("hidden", !willOpen);
-                menuToggle.setAttribute("aria-expanded", willOpen ? "true" : "false");
-              }
-            } else if (openAction) {
-              closeTaskRowMenus();
-              openTaskDetail(taskId);
-            } else if (logAction) {
-              closeTaskRowMenus();
-              openTaskLog(taskId);
-            } else if (cancelAction) {
-              closeTaskRowMenus();
-              cancelTask(taskId).catch((error) => window.alert(error instanceof Error ? error.message : "Unable to cancel task."));
-            }
-          },
-        },
       ],
     });
     fallback?.classList.add("hidden");
@@ -9086,11 +9042,6 @@ function initializeTasksPage() {
   document.querySelector("[data-task-detail-cancel]")?.addEventListener("click", () => {
     if (labFoundrySelectedTaskId) {
       cancelTask(labFoundrySelectedTaskId).catch((error) => window.alert(error instanceof Error ? error.message : "Unable to cancel task."));
-    }
-  });
-  document.addEventListener("click", (event) => {
-    if (!(event.target instanceof HTMLElement) || !event.target.closest("[data-task-action-menu]")) {
-      closeTaskRowMenus();
     }
   });
   const shouldOpenSelected = Boolean(labFoundrySelectedTaskId);
