@@ -20,6 +20,8 @@ def create_api_token(client, scopes):
 
 
 def test_login_and_dashboard_render(client):
+    from pathlib import Path
+
     login(client)
     root = client.get("/", follow_redirects=False)
     assert root.status_code == 303
@@ -68,7 +70,16 @@ def test_login_and_dashboard_render(client):
         assert next_position > position
         position = next_position
     assert "/ca/requests" not in nav
-    assert 'data-server-time' in response.text
+    topbar = response.text.split('<header class="topbar"', 1)[1].split("</header>", 1)[0]
+    footer = response.text.split('<footer class="management-info-footnote"', 1)[1].split("</footer>", 1)[0]
+    assert 'data-server-time' not in topbar
+    assert 'data-server-time' in footer
+    server_time_response = client.get("/server-time")
+    assert server_time_response.status_code == 200
+    assert server_time_response.json()["label"].startswith("Server ")
+    app_js = Path("labfoundry/app/static/app.js").read_text()
+    assert "function initializeServerTime()" in app_js
+    assert 'window.setInterval(sync, 60000)' in app_js
     assert 'title="Roles: admin">User admin</span>' in response.text
     assert '<span class="role-chip">admin</span>' not in response.text
     assert 'href="/logs"' in response.text
@@ -97,6 +108,7 @@ def test_login_and_dashboard_render(client):
 
 def test_tasks_page_lists_redacts_logs_and_cancels(client):
     import json
+    from pathlib import Path
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import Job, JobStatus, utcnow
@@ -133,6 +145,20 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert "[redacted]" in page.text
     assert "data-task-detail-cancel" in page.text
     assert "data-task-detail-log" in page.text
+    assert "task-grid-shell" in page.text
+    app_js = Path("labfoundry/app/static/app.js").read_text()
+    assert 'paginationMode: "local"' in app_js
+    assert "paginationSizeSelector: [15, 25, 50, 100]" in app_js
+    assert "rowDblClick: (_event, row) => openTaskDetail(row.getData())" in app_js
+    assert "data-task-row-menu-toggle" in app_js
+    assert "data-task-row-open" in app_js
+    task_actions_js = app_js.split('title: "Actions"', 1)[1].split("cellClick:", 1)[0]
+    assert "button secondary compact-button" not in task_actions_js
+    assert 'role="menuitem" data-task-row-open' in task_actions_js
+    assert 'role="menuitem" data-task-row-log' in task_actions_js
+    app_css = Path("labfoundry/app/static/app.css").read_text()
+    assert ".tasks-panel {\n  display: grid;\n  gap: 14px;\n  grid-template-rows: auto minmax(0, 1fr);" in app_css
+    assert ".task-row-menu" in app_css
 
     status_response = client.get("/tasks/status?job_id=job_taskgrid001")
     assert status_response.status_code == 200
@@ -180,7 +206,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v72" in service_worker.text
+    assert "labfoundry-pwa-v73" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -200,7 +226,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=api-trust-depot-wizard-20260712-1" in offline.text
+    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-2" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -216,8 +242,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=api-trust-depot-wizard-20260712-1" in page.text
-    assert "/static/app.js?v=api-trust-depot-wizard-20260712-1" in page.text
+    assert "/static/app.css?v=vcf-helper-tasks-layout-20260713-2" in page.text
+    assert "/static/app.js?v=vcf-helper-tasks-layout-20260713-2" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -9468,10 +9494,15 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert "Generated VCF FQDNs" in response.text
     assert "DNS Boundary" not in response.text
     assert 'href="/vcf-helper"' in response.text
-    visible_workspace = response.text.split('<dialog id="vcf-trust-modal"', 1)[0]
+    visible_workspace = response.text.split('<section class="split-workspace vcf-helper-workspace"', 1)[1].split("</section>", 1)[0]
     assert "VCF Certificate Trust" in visible_workspace
     assert "Review DNS" not in visible_workspace
     assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 4
+    assert "vcf-helper-action-arrow" not in visible_workspace
+    assert "service-summary-grid" not in visible_workspace
+    assert "Generated names" not in visible_workspace
+    assert "Next IP hint" not in visible_workspace
+    assert "<aside" not in visible_workspace
     assert "Deploy SDDC Manager" in visible_workspace
     assert "Configure VCF Offline Depot" in visible_workspace
     assert 'data-vcf-fqdn-modal-open aria-haspopup="dialog" aria-controls="vcf-fqdn-modal"' in visible_workspace
@@ -9493,6 +9524,9 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert 'name="power_on"' in response.text
     assert "Power on after deployment" in response.text
     assert "data-vcf-sddc-tls-confirmation" in response.text
+    app_css = Path("labfoundry/app/static/app.css").read_text()
+    assert ".vcf-helper-workspace {\n  grid-template-columns: minmax(0, 1fr);" in app_css
+    assert ".vcf-helper-action-bands {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));" in app_css
     assert 'type="checkbox" data-vcf-sddc-tls-confirm' in response.text
     assert "Confirm vSphere TLS fingerprint" in response.text
     sddc_modal = response.text.split('<dialog id="vcf-sddc-deploy-modal"', 1)[1].split("</dialog>", 1)[0]

@@ -7346,6 +7346,17 @@ def monitor_data(
     return JSONResponse(monitor_payload(db, hours=hours))
 
 
+@router.get("/server-time", response_class=JSONResponse, response_model=None)
+def server_time(_identity: Identity = Depends(require_session_identity)) -> JSONResponse:
+    now = utcnow()
+    return JSONResponse(
+        {
+            "server_time": now.isoformat(),
+            "label": now.strftime("Server %H:%M:%S UTC"),
+        }
+    )
+
+
 @router.get("/appliance-update", response_class=HTMLResponse, response_model=None)
 def appliance_update_page(
     request: Request,

@@ -8774,6 +8774,14 @@ function taskStatusPillHtml(task) {
   return `<span class="status-pill ${escapeHtml(task.status_pill || "muted")}">${escapeHtml(task.status || "unknown")}</span>`;
 }
 
+function closeTaskRowMenus(exceptMenu = null) {
+  document.querySelectorAll("[data-task-row-menu]").forEach((menu) => {
+    if (menu !== exceptMenu) {
+      menu.setAttribute("hidden", "");
+    }
+  });
+}
+
 function renderTaskDetail(task) {
   const modal = document.getElementById("task-detail-modal");
   if (!(modal instanceof HTMLDialogElement) || !task) {
@@ -8969,9 +8977,20 @@ function initializeTasksPage() {
     labFoundryTasksTable = new window.Tabulator(tableElement, {
       data: labFoundryTasks,
       layout: "fitColumns",
-      height: "min(640px, calc(100vh - 260px))",
+      height: "100%",
+      pagination: true,
+      paginationMode: "local",
+      paginationSize: 25,
+      paginationSizeSelector: [15, 25, 50, 100],
+      paginationCounter: "rows",
       placeholder: "No tasks have been recorded yet.",
-      rowClick: (_event, row) => openTaskDetail(row.getData()),
+      selectableRows: 1,
+      rowClick: (_event, row) => {
+        closeTaskRowMenus();
+        labFoundrySelectedTaskId = row.getData().id || "";
+        row.select();
+      },
+      rowDblClick: (_event, row) => openTaskDetail(row.getData()),
       columns: [
         { title: "Status", field: "status", width: 130, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
         { title: "Task", field: "id", minWidth: 190, formatter: (cell) => `<code>${escapeHtml(cell.getValue())}</code>` },
@@ -8984,29 +9003,54 @@ function initializeTasksPage() {
         {
           title: "Actions",
           field: "id",
-          width: 210,
+          width: 82,
           hozAlign: "right",
           headerSort: false,
+          cssClass: "task-actions-cell",
           formatter: (cell) => {
             const task = cell.getRow().getData();
-            const cancel = task.can_cancel ? `<button class="button danger compact-button" type="button" data-task-row-cancel="${escapeHtml(task.id)}">Cancel</button>` : "";
-            return `<button class="button secondary compact-button" type="button" data-task-row-open="${escapeHtml(task.id)}">Detail</button> <button class="button secondary compact-button" type="button" data-task-row-log="${escapeHtml(task.id)}">Log</button> ${cancel}`;
+            const cancel = task.can_cancel ? `<button class="danger" type="button" role="menuitem" data-task-row-cancel="${escapeHtml(task.id)}">Cancel task</button>` : "";
+            return `
+              <div class="task-action-menu" data-task-action-menu>
+                <button class="row-menu-button" type="button" title="Task actions" aria-label="Task actions" aria-haspopup="menu" aria-expanded="false" data-task-row-menu-toggle="${escapeHtml(task.id)}">...</button>
+                <div class="task-row-menu" role="menu" hidden data-task-row-menu>
+                  <button type="button" role="menuitem" data-task-row-open="${escapeHtml(task.id)}">Details</button>
+                  <button type="button" role="menuitem" data-task-row-log="${escapeHtml(task.id)}">Log</button>
+                  ${cancel}
+                </div>
+              </div>
+            `;
           },
           cellClick: (event, cell) => {
             const target = event.target;
             if (!(target instanceof HTMLElement)) {
               return;
             }
-            const taskId = target.dataset.taskRowOpen || target.dataset.taskRowLog || target.dataset.taskRowCancel;
+            const menuToggle = target.closest("[data-task-row-menu-toggle]");
+            const openAction = target.closest("[data-task-row-open]");
+            const logAction = target.closest("[data-task-row-log]");
+            const cancelAction = target.closest("[data-task-row-cancel]");
+            const taskId = menuToggle?.dataset.taskRowMenuToggle || openAction?.dataset.taskRowOpen || logAction?.dataset.taskRowLog || cancelAction?.dataset.taskRowCancel;
             if (!taskId) {
               return;
             }
             event.stopPropagation();
-            if (target.dataset.taskRowOpen) {
+            if (menuToggle instanceof HTMLElement) {
+              const menu = menuToggle.closest("[data-task-action-menu]")?.querySelector("[data-task-row-menu]");
+              if (menu instanceof HTMLElement) {
+                const willOpen = menu.hasAttribute("hidden");
+                closeTaskRowMenus(willOpen ? menu : null);
+                menu.toggleAttribute("hidden", !willOpen);
+                menuToggle.setAttribute("aria-expanded", willOpen ? "true" : "false");
+              }
+            } else if (openAction) {
+              closeTaskRowMenus();
               openTaskDetail(taskId);
-            } else if (target.dataset.taskRowLog) {
+            } else if (logAction) {
+              closeTaskRowMenus();
               openTaskLog(taskId);
-            } else if (target.dataset.taskRowCancel) {
+            } else if (cancelAction) {
+              closeTaskRowMenus();
               cancelTask(taskId).catch((error) => window.alert(error instanceof Error ? error.message : "Unable to cancel task."));
             }
           },
@@ -9025,6 +9069,11 @@ function initializeTasksPage() {
   document.querySelector("[data-task-detail-cancel]")?.addEventListener("click", () => {
     if (labFoundrySelectedTaskId) {
       cancelTask(labFoundrySelectedTaskId).catch((error) => window.alert(error instanceof Error ? error.message : "Unable to cancel task."));
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof HTMLElement) || !event.target.closest("[data-task-action-menu]")) {
+      closeTaskRowMenus();
     }
   });
   const shouldOpenSelected = Boolean(labFoundrySelectedTaskId);
@@ -10617,6 +10666,51 @@ function updateServerTime(value) {
   node.textContent = formatServerTime(value);
 }
 
+function initializeServerTime() {
+  const node = document.querySelector("[data-server-time]");
+  if (!(node instanceof HTMLElement) || node.dataset.serverTimeInitialized === "true") {
+    return;
+  }
+  node.dataset.serverTimeInitialized = "true";
+
+  let serverBaseMs = Date.parse(node.dataset.serverTimeIso || "");
+  let clientBaseMs = Date.now();
+  if (!Number.isFinite(serverBaseMs)) {
+    serverBaseMs = clientBaseMs;
+  }
+
+  const render = () => {
+    const estimated = new Date(serverBaseMs + (Date.now() - clientBaseMs));
+    node.textContent = formatServerTime(estimated.toISOString());
+  };
+
+  const sync = async () => {
+    try {
+      const response = await fetch("/server-time", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        return;
+      }
+      const payload = await response.json();
+      const nextBaseMs = Date.parse(payload.server_time || payload.iso || "");
+      if (Number.isFinite(nextBaseMs)) {
+        serverBaseMs = nextBaseMs;
+        clientBaseMs = Date.now();
+        node.dataset.serverTimeIso = new Date(serverBaseMs).toISOString();
+        render();
+      }
+    } catch (_error) {
+      // Keep the local ticking estimate; the next minute sync will retry.
+    }
+  };
+
+  render();
+  window.setInterval(render, 1000);
+  window.setInterval(sync, 60000);
+}
+
 function monitorSeriesPoints(rows, fields) {
   return (Array.isArray(rows) ? rows : []).map((row) => {
     const point = { time: new Date(row.sampled_at || 0).getTime() };
@@ -11789,6 +11883,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTasksTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTaskLogModal);
 document.addEventListener("DOMContentLoaded", initializeTasksPage);
+document.addEventListener("DOMContentLoaded", initializeServerTime);
 document.addEventListener("DOMContentLoaded", initializeFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeManagedFirewallRulesTable);
 document.addEventListener("DOMContentLoaded", initializeFirewallSourceGroupManager);
