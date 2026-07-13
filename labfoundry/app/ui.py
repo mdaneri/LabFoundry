@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from labfoundry.app.audit import record_audit
-from labfoundry.app.adapters.system import SystemAdapter
+from labfoundry.app.adapters.system import AdapterResult, SystemAdapter
 from labfoundry.app.config import get_settings
 from labfoundry.app.database import SessionLocal, get_db
 from labfoundry.app.models import (
@@ -1491,6 +1491,33 @@ def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
     if normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
+    capability_result = SystemAdapter().read_chronyd_capabilities()
+    try:
+        chrony_capabilities = json.loads(capability_result.stdout or "{}")
+    except json.JSONDecodeError:
+        chrony_capabilities = {}
+    chrony_nts_supported = capability_result.returncode == 0 and bool(chrony_capabilities.get("nts"))
+    if not chrony_nts_supported:
+        upstream_sources = chrony_upstream_sources(settings)
+        nts_state_changed = settings.nts_server_enabled or any(bool(source.get("use_nts")) for source in upstream_sources)
+        if nts_state_changed:
+            for source in upstream_sources:
+                source["use_nts"] = False
+            settings.nts_server_enabled = False
+            settings.upstream_sources_json = dump_chrony_upstream_sources(upstream_sources)
+            settings.upstream_servers = join_servers([str(source["source"]) for source in upstream_sources if source.get("enabled")])
+            settings.updated_at = utcnow()
+            db.add(settings)
+            db.commit()
+            db.refresh(settings)
+            record_audit(
+                db,
+                actor="system",
+                action="disable_unsupported_chrony_nts",
+                resource_type="chronyd",
+                resource_id=str(settings.id),
+                detail="Installed chronyd does not include NTS support; NTS server and upstream flags were disabled.",
+            )
     available_interfaces = service_bind_options(db)
     chrony_nts_cert_path, chrony_nts_key_path, chrony_nts_chain_path = chrony_nts_certificate_paths(settings)
     if settings.nts_server_enabled:
@@ -1498,7 +1525,18 @@ def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
         settings.nts_server_key_path = chrony_nts_key_path
         settings.nts_ke_port = 4460
     config_preview = render_chrony_config(settings)
-    validation_errors = validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})
+    ca_state_errors = ensure_ca_state(db) if settings.nts_server_enabled else []
+    validation_errors = [*ca_state_errors, *validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})]
+    if settings.nts_server_enabled:
+        ca_settings = get_ca_settings_row(db)
+        if not ca_settings.enabled:
+            validation_errors.append("Chrony NTS server mode requires Certificate Authority to be enabled.")
+        elif ca_state_errors:
+            validation_errors.append("Chrony NTS server mode requires healthy Certificate Authority state.")
+        elif not ca_certificate_available(db, "chrony:nts"):
+            validation_errors.append("Chrony NTS server mode requires an issued CA-managed server certificate before apply.")
+        if not chrony_nts_supported:
+            validation_errors.append("Chrony NTS server mode is unavailable because the installed chronyd binary does not include NTS support.")
     status_result = SystemAdapter().read_chronyd_status() if include_runtime_health else None
     return {
         "chrony_settings": settings,
@@ -1518,6 +1556,8 @@ def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
         "chrony_nts_cert_path": chrony_nts_cert_path,
         "chrony_nts_key_path": chrony_nts_key_path,
         "chrony_nts_chain_path": chrony_nts_chain_path,
+        "chrony_nts_supported": chrony_nts_supported,
+        "chrony_nts_capabilities": chrony_capabilities,
     }
 
 
@@ -4936,6 +4976,8 @@ def _task_status_pill(status_value: str) -> str:
 def _task_type_label(job_type: str) -> str:
     labels = {
         "appliance-apply": "Appliance Apply",
+        "appliance-reboot": "Appliance Reboot",
+        "appliance-shutdown": "Appliance Shutdown",
         "appliance-update": "Appliance Update",
         "vcf-sddc-manager-deploy": "Deploy SDDC Manager",
         "vcf-offline-depot-target-config": "Configure VCF Offline Depot",
@@ -6624,7 +6666,14 @@ def filesystem_path(path: Path | PurePosixPath) -> Path:
     return path if isinstance(path, Path) else Path(path)
 
 
-def tail_fixed_log_file(path: Path | PurePosixPath, *, max_bytes: int = 64 * 1024, max_lines: int = 240) -> dict[str, Any]:
+LOG_LINE_OPTIONS = {100, 200, 500}
+
+
+def normalized_log_line_count(value: int) -> int:
+    return value if value in LOG_LINE_OPTIONS else 100
+
+
+def tail_fixed_log_file(path: Path | PurePosixPath, *, max_bytes: int = 256 * 1024, max_lines: int = 100) -> dict[str, Any]:
     read_path = filesystem_path(path)
     try:
         if not read_path.exists():
@@ -6637,7 +6686,8 @@ def tail_fixed_log_file(path: Path | PurePosixPath, *, max_bytes: int = 64 * 102
     except OSError as exc:
         return {"path": str(path), "available": False, "lines": [], "size_bytes": 0, "updated_at": "", "error": str(exc)}
     text = raw.decode("utf-8", errors="replace")
-    lines = redact_config_preview(text).splitlines()[-max_lines:]
+    all_lines = redact_config_preview(text).splitlines()
+    lines = all_lines[-max_lines:]
     updated_at = utcnow()
     try:
         updated_at = datetime.fromtimestamp(read_path.stat().st_mtime, tz=timezone.utc)
@@ -6649,26 +6699,59 @@ def tail_fixed_log_file(path: Path | PurePosixPath, *, max_bytes: int = 64 * 102
         "lines": lines,
         "size_bytes": size,
         "updated_at": updated_at.isoformat(),
-        "truncated": size > max_bytes,
+        "truncated": size > max_bytes or len(all_lines) > max_lines,
     }
 
 
-def logs_context(db: Session) -> dict[str, Any]:
-    sources = [
-        ("vcfdt", "VCFDT", VCF_DEPOT_VDT_LOG_PATH),
-        ("app", "LabFoundry App", LABFOUNDRY_APP_LOG_PATH),
-        ("kms", "KMS", KMS_SERVER_LOG_PATH),
+def journal_log_source(
+    source_id: str,
+    label: str,
+    unit: str,
+    result: AdapterResult,
+    *,
+    max_lines: int,
+) -> dict[str, Any]:
+    available = result.returncode == 0 and not result.dry_run
+    text = redact_config_preview(result.stdout or "") if available else ""
+    all_lines = text.splitlines()
+    return {
+        "id": source_id,
+        "label": label,
+        "path": f"systemd journal: {unit}",
+        "available": available,
+        "lines": all_lines[-max_lines:],
+        "size_bytes": len(text.encode("utf-8")),
+        "updated_at": "",
+        "truncated": len(all_lines) > max_lines,
+        "error": "" if available else redact_config_preview(result.stderr or result.stdout or ""),
+    }
+
+
+def log_sources_context(*, max_lines: int = 100) -> list[dict[str, Any]]:
+    line_count = normalized_log_line_count(max_lines)
+    adapter = SystemAdapter()
+    return [
+        {
+            "id": "app",
+            "label": "LabFoundry App",
+            **tail_fixed_log_file(LABFOUNDRY_APP_LOG_PATH, max_lines=line_count),
+        },
+        journal_log_source("dnsmasq", "dnsmasq", "dnsmasq.service", adapter.read_dnsmasq_logs(), max_lines=line_count),
+        journal_log_source("chrony", "Chrony", "chronyd.service", adapter.read_chronyd_logs(), max_lines=line_count),
+        {
+            "id": "kms",
+            "label": "KMS",
+            **tail_fixed_log_file(KMS_SERVER_LOG_PATH, max_lines=line_count),
+        },
     ]
+
+
+def logs_context(db: Session, *, max_lines: int = 100) -> dict[str, Any]:
+    line_count = normalized_log_line_count(max_lines)
     events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(100)).scalars().all()
     return {
-        "log_sources": [
-            {
-                "id": source_id,
-                "label": label,
-                **tail_fixed_log_file(path),
-            }
-            for source_id, label, path in sources
-        ],
+        "log_sources": log_sources_context(max_lines=line_count),
+        "log_line_count": line_count,
         "audit_events": events,
     }
 
@@ -7317,6 +7400,86 @@ def logout(request: Request, csrf: str = Form(...)) -> RedirectResponse:
     verify_csrf(request, csrf)
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
+
+
+@router.post("/appliance/power/{action}", response_model=None)
+def appliance_power_action(
+    request: Request,
+    action: str,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    if action not in {"reboot", "shutdown"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown appliance power action")
+
+    now = utcnow()
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type=f"appliance-{action}",
+        status=JobStatus.PENDING.value,
+        created_by=identity.username,
+        progress_percent=0,
+    )
+    db.add(job)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action=f"submit_appliance_{action}",
+        resource_type="job",
+        resource_id=job.id,
+        detail=f"Confirmed appliance {action} task submitted.",
+    )
+
+    job.status = JobStatus.RUNNING.value
+    job.started_at = now
+    db.add(job)
+    db.commit()
+    try:
+        result = SystemAdapter().schedule_appliance_power(action)
+    except Exception as exc:
+        result = AdapterResult(
+            command=["labfoundry-helper", "appliance-power", action],
+            returncode=1,
+            stdout="",
+            stderr=str(exc),
+            dry_run=get_settings().dry_run_system_adapters,
+        )
+
+    succeeded = result.returncode == 0
+    state = "failed"
+    if succeeded:
+        state = "dry-run recorded" if result.dry_run else "scheduled"
+    payload = {
+        "action": action,
+        "state": state,
+        "status": JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
+        "success": succeeded,
+        "scheduled": succeeded and not result.dry_run,
+        "delay_seconds": 5,
+        "dry_run": result.dry_run,
+        "commands": [adapter_result_to_payload(result)],
+    }
+    job.status = payload["status"]
+    job.finished_at = utcnow()
+    job.progress_percent = 100
+    job.result = json.dumps(payload, indent=2, sort_keys=True)
+    job.error = None if succeeded else f"Appliance {action} scheduling failed."
+    db.add(job)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action=f"schedule_appliance_{action}",
+        resource_type="job",
+        resource_id=job.id,
+        detail=" ".join(result.command),
+        success=succeeded,
+    )
+    return RedirectResponse(f"/tasks?job_id={job.id}", status_code=303)
 
 
 @router.get("/dashboard", response_class=HTMLResponse, response_model=None)
@@ -10798,6 +10961,12 @@ def update_chrony_settings_from_ui(
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
     settings = get_chrony_settings_row(db)
+    capability_result = SystemAdapter().read_chronyd_capabilities()
+    try:
+        chrony_capabilities = json.loads(capability_result.stdout or "{}")
+    except json.JSONDecodeError:
+        chrony_capabilities = {}
+    chrony_nts_supported = capability_result.returncode == 0 and bool(chrony_capabilities.get("nts"))
     selected_interfaces, selected_addresses = resolve_service_bind_targets(
         db,
         [*listen_interfaces, listen_interface],
@@ -10830,7 +10999,7 @@ def update_chrony_settings_from_ui(
                         "id": str(item.get("id") or f"source-{index}"),
                         "source": source,
                         "enabled": bool(item.get("enabled", True)),
-                        "use_nts": bool(item.get("use_nts", False)),
+                        "use_nts": chrony_nts_supported and bool(item.get("use_nts", False)),
                         "description": str(item.get("description") or "").strip(),
                         "maxdelay": str(item.get("maxdelay") or "").strip(),
                     }
@@ -10848,7 +11017,7 @@ def update_chrony_settings_from_ui(
                     "id": f"source-{index + 1}",
                     "source": source,
                     "enabled": index in enabled_indexes,
-                    "use_nts": index in nts_indexes,
+                    "use_nts": chrony_nts_supported and index in nts_indexes,
                     "description": upstream_description[index].strip() if index < len(upstream_description) else "",
                     "maxdelay": upstream_maxdelay[index].strip() if index < len(upstream_maxdelay) else "",
                 }
@@ -10861,7 +11030,7 @@ def update_chrony_settings_from_ui(
     settings.upstream_sources_json = dump_chrony_upstream_sources(source_rows)
     settings.upstream_servers = join_servers([str(row["source"]) for row in source_rows if row.get("enabled")])
     settings.allow_clients = join_allow_clients(split_allow_clients(allow_clients))
-    settings.nts_server_enabled = nts_server_enabled == "on"
+    settings.nts_server_enabled = chrony_nts_supported and nts_server_enabled == "on"
     chrony_nts_cert_path, chrony_nts_key_path, _chrony_nts_chain_path = chrony_nts_certificate_paths(settings)
     settings.nts_server_cert_path = chrony_nts_cert_path
     settings.nts_server_key_path = chrony_nts_key_path
@@ -10874,6 +11043,8 @@ def update_chrony_settings_from_ui(
     settings.updated_at = utcnow()
     db.add(settings)
     db.commit()
+    if settings.nts_server_enabled:
+        ensure_ca_state(db)
     record_audit(db, actor=identity.username, action="update_chrony_settings", resource_type="chronyd", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         context = ntp_context(db)
@@ -10896,6 +11067,7 @@ def update_chrony_settings_from_ui(
                 "nts_server_cert_path": saved_settings.nts_server_cert_path,
                 "nts_server_key_path": saved_settings.nts_server_key_path,
                 "nts_ke_port": saved_settings.nts_ke_port,
+                "nts_supported": context["chrony_nts_supported"],
                 "valid": not context["ntp_validation_errors"],
                 "validation_errors": context["ntp_validation_errors"],
                 "config_path": saved_settings.config_path,
@@ -13337,6 +13509,7 @@ def services(
 @router.get("/logs", response_class=HTMLResponse, response_model=None)
 def logs_page(
     request: Request,
+    lines: int = Query(100),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
@@ -13345,8 +13518,23 @@ def logs_page(
         "logs.html",
         {
             "identity": identity,
-            **logs_context(db),
+            **logs_context(db, max_lines=lines),
         },
+    )
+
+
+@router.get("/logs/data", response_class=JSONResponse, response_model=None)
+def logs_data(
+    lines: int = Query(100),
+    _identity: Identity = Depends(require_session_identity),
+) -> JSONResponse:
+    line_count = normalized_log_line_count(lines)
+    return JSONResponse(
+        {
+            "line_count": line_count,
+            "refreshed_at": utcnow().isoformat(),
+            "sources": log_sources_context(max_lines=line_count),
+        }
     )
 
 

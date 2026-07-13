@@ -37,13 +37,14 @@
     <div class="section-block chrony-upstreams-section">
       <div class="panel-head table-head">
         <div>
-          <h2>Upstream sources <button class="help-icon" type="button" data-help="Chrony time sources used after global appliance apply. Enable NTS per source when the upstream supports Network Time Security; disabled rows stay in desired state but are not rendered.">i</button></h2>
+          <h2>Upstream sources <button class="help-icon" type="button" data-help="{% if chrony_nts_supported %}Chrony time sources used after global appliance apply. Enable NTS per source when the upstream supports Network Time Security; disabled rows stay in desired state but are not rendered.{% else %}Chrony time sources used after global appliance apply. NTS controls are disabled because the installed chronyd binary does not include NTS support.{% endif %}">i</button></h2>
         </div>
       </div>
       <div
         id="chrony-upstreams-table"
         class="tabulator-shell chrony-upstreams-table"
         data-chrony-upstreams='{{ chrony_settings_json.upstream_sources | tojson }}'
+        data-chrony-nts-supported="{{ 'true' if chrony_nts_supported else 'false' }}"
         data-fallback-id="chrony-upstreams-fallback"
       ></div>
       <table id="chrony-upstreams-fallback" class="data-table compact dns-fallback-table">
@@ -56,7 +57,7 @@
               <td><input class="table-input" name="upstream_source" value="{{ source.source }}" placeholder="time.example.com" form="chrony-settings-form"></td>
               <td>
                 <label class="inline-check">
-                  <input type="checkbox" name="upstream_use_nts" value="{{ loop.index0 }}" {{ "checked" if source.use_nts else "" }} form="chrony-settings-form">
+                  <input type="checkbox" name="upstream_use_nts" value="{{ loop.index0 }}"{% if source.use_nts %} checked{% endif %}{% if not chrony_nts_supported %} disabled{% endif %} form="chrony-settings-form">
                   <span>NTS</span>
                 </label>
               </td>
@@ -83,8 +84,14 @@
       </div>
       <form id="chrony-settings-form" class="form-stack" action="/chrony/settings" method="post" data-autosave-form data-ntp-settings data-autosave-status-id="ntp-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Controls whether LabFoundry treats Chrony as enabled desired state. The host service changes only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if chrony_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-        <label class="switch-field"><span class="field-label"><span>NTS server</span><button class="help-icon" type="button" data-help="Enables Chrony NTS-KE for lab clients using CA-managed certificate material. Host listeners and TCP 4460 firewall rules change only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="nts_server_enabled" {{ "checked" if chrony_settings.nts_server_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>NTP service enabled</span><button class="help-icon" type="button" data-help="Controls the standard Chrony NTP service on UDP 123. This does not enable NTS. The host service changes only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if chrony_settings.enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        {% if not chrony_nts_supported %}
+          <div class="runtime-source-list" data-chrony-nts-unavailable>
+            <span class="status-pill muted">NTS unavailable</span>
+            <span>Installed chronyd has no NTS support.</span>
+          </div>
+        {% endif %}
+        <label class="switch-field{% if not chrony_nts_supported %} disabled-field{% endif %}"{% if not chrony_nts_supported %} aria-disabled="true"{% endif %}><span class="field-label"><span>NTS server{% if not chrony_nts_supported %} (disabled){% endif %}</span><button class="help-icon" type="button" data-help="{% if chrony_nts_supported %}Enables Chrony NTS-KE for lab clients using CA-managed certificate material. Host listeners and TCP 4460 firewall rules change only after global appliance apply.{% else %}Unavailable because the installed chronyd binary does not include NTS support. Rebuild the appliance with an NTS-capable Chrony package to enable this setting.{% endif %}">i</button></span><input class="switch-input" type="checkbox" name="nts_server_enabled"{% if chrony_settings.nts_server_enabled %} checked{% endif %}{% if not chrony_nts_supported %} disabled{% endif %}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="compact-service-field">
           <span class="field-label"><span>Hostname</span><button class="help-icon" type="button" data-help="DNS name lab clients can use for the NTP endpoint. It is recorded in desired state and previews; DNS records remain owned by the DNS page.">i</button></span>
           <input name="hostname" value="{{ chrony_settings.hostname }}" autocomplete="off">
@@ -96,7 +103,7 @@
           </label>
           <label>
             <span class="field-label"><span>NTS-KE port</span><button class="help-icon" type="button" data-help="Chrony NTS Key Establishment uses TCP 4460. Firewall apply owns exposure for this port when NTS server mode is enabled.">i</button></span>
-            <input type="number" value="{{ chrony_settings.nts_ke_port }}" min="4460" max="4460" readonly aria-label="NTS-KE port">
+            <input type="number" value="{{ chrony_settings.nts_ke_port }}" min="4460" max="4460" readonly{% if not chrony_nts_supported %} disabled{% endif %} aria-label="NTS-KE port">
           </label>
         </div>
         <input type="hidden" name="listen_interfaces_present" value="1">

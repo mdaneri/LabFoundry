@@ -160,6 +160,33 @@ class SystemAdapter:
             )
         return self._helper_result("chronyd", "status", dry_run_message="dry-run: Chrony status command recorded", use_sudo=False, timeout_seconds=5)
 
+    def read_chronyd_logs(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(
+                ["labfoundry-helper", "chronyd", "logs"],
+                "No host Chrony journal is read in development mode.",
+            )
+        return self._helper_result("chronyd", "logs", dry_run_message="dry-run: Chrony log read command recorded", timeout_seconds=5)
+
+    def read_dnsmasq_logs(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(
+                ["labfoundry-helper", "dnsmasq", "logs"],
+                "No host dnsmasq journal is read in development mode.",
+            )
+        return self._helper_result("dnsmasq", "logs", dry_run_message="dry-run: dnsmasq log read command recorded", timeout_seconds=5)
+
+    def read_chronyd_capabilities(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(["labfoundry-helper", "chronyd", "capabilities"], json.dumps({"nts": True, "version": "dry-run +NTS"}))
+        return self._helper_result(
+            "chronyd",
+            "capabilities",
+            dry_run_message="dry-run: Chrony capability check recorded",
+            use_sudo=False,
+            timeout_seconds=5,
+        )
+
     def apply_network_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("network", "apply", config_path, dry_run_message="dry-run: network apply command recorded")
 
@@ -238,6 +265,21 @@ class SystemAdapter:
 
     def restart_appliance_after_update(self, config_path: str) -> AdapterResult:
         return self._helper_result("appliance-update", "restart-service", config_path, dry_run_message="dry-run: LabFoundry service restart command recorded")
+
+    def schedule_appliance_power(self, action: str) -> AdapterResult:
+        if action not in {"reboot", "shutdown"}:
+            return AdapterResult(
+                command=["labfoundry-helper", "appliance-power", action],
+                dry_run=self.dry_run,
+                stderr=f"Unsupported appliance power action: {action}",
+                returncode=2,
+            )
+        return self._helper_result(
+            "appliance-power",
+            action,
+            dry_run_message=f"dry-run: appliance {action} scheduling command recorded",
+            timeout_seconds=5,
+        )
 
     def _record_only_result(self, command: list[str], stdout: str) -> AdapterResult:
         return AdapterResult(command=command, dry_run=True, stdout=stdout)

@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=vcf-wizard-tls-20260713-1">
+    <link rel="stylesheet" href="/static/app.css?v=account-power-menu-20260713-1">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -98,11 +98,32 @@
           </div>
           {% if identity %}
             <div class="topbar-actions">
-              <span class="user-chip" title="Roles: {{ identity.roles|join(', ') }}">User {{ identity.username }}</span>
-              <form action="/logout" method="post">
-                <input type="hidden" name="csrf" value="{{ csrf_token }}">
-                <button class="button ghost" type="submit">Sign out</button>
-              </form>
+              <details class="account-menu" data-account-menu>
+                <summary class="account-menu-trigger" title="Roles: {{ identity.roles|join(', ') }}" aria-label="Open account menu for {{ identity.username }}">
+                  <span class="account-menu-avatar" aria-hidden="true">{{ identity.username[:1]|upper }}</span>
+                  <span>{{ identity.username }}</span>
+                  <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m5 7.5 5 5 5-5"/></svg>
+                </summary>
+                <div class="account-menu-panel" role="menu">
+                  <button class="account-menu-item" type="button" role="menuitem" data-about-open>About</button>
+                  <div class="account-menu-separator" role="separator"></div>
+                  <form action="/logout" method="post">
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button class="account-menu-item" type="submit" role="menuitem">Sign out ({{ identity.username }})</button>
+                  </form>
+                  {% if identity.has_role('admin') %}
+                    <div class="account-menu-separator" role="separator"></div>
+                    <form action="/appliance/power/reboot" method="post" data-confirm-modal data-confirm-title="Reboot LabFoundry appliance?" data-confirm-message="This creates an appliance reboot task and schedules the reboot after the task is recorded. The management UI and appliance services will be temporarily unavailable." data-confirm-label="Create reboot task">
+                      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                      <button class="account-menu-item" type="submit" role="menuitem">Reboot</button>
+                    </form>
+                    <form action="/appliance/power/shutdown" method="post" data-confirm-modal data-confirm-title="Shut down LabFoundry appliance?" data-confirm-message="This creates an appliance shutdown task and powers off the appliance after the task is recorded. Physical or hypervisor access is required to start it again." data-confirm-label="Create shutdown task">
+                      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                      <button class="account-menu-item danger" type="submit" role="menuitem">Shutdown</button>
+                    </form>
+                  {% endif %}
+                </div>
+              </details>
             </div>
           {% endif %}
         </header>
@@ -142,6 +163,24 @@
         </footer>
       </main>
     </div>
+    <dialog id="about-modal" class="confirm-modal" aria-labelledby="about-modal-title">
+      <div class="confirm-modal-panel about-modal-panel">
+        <div class="confirm-modal-body">
+          <p class="kicker">About</p>
+          <h2 id="about-modal-title">LabFoundry</h2>
+          <p class="muted">Photon appliance control plane for lab infrastructure services.</p>
+          <dl class="about-facts">
+            <div><dt>Version</dt><dd>{{ current_version_info.base_version|default(current_version_info.version) }}</dd></div>
+            <div><dt>Build</dt><dd>{{ current_version_info.public_label or "source checkout" }}</dd></div>
+            <div><dt>Python</dt><dd>{{ current_version_info.python }}</dd></div>
+          </dl>
+        </div>
+        <div class="confirm-modal-actions">
+          <a class="button secondary" href="{{ public_github_url }}" target="_blank" rel="noopener">GitHub</a>
+          <button class="button primary" type="button" data-about-close>Close</button>
+        </div>
+      </div>
+    </dialog>
     <dialog id="confirm-modal" class="confirm-modal" aria-labelledby="confirm-modal-title">
       <form method="dialog" class="confirm-modal-panel">
         <div class="confirm-modal-body">
@@ -201,7 +240,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=vcf-wizard-tls-20260713-1"></script>
+    <script src="/static/app.js?v=account-power-menu-20260713-1"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

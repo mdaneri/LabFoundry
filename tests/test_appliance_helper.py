@@ -23,6 +23,54 @@ def load_helper_module():
     return module
 
 
+def test_appliance_power_helper_schedules_reboot(monkeypatch):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "scheduled\n", "")
+
+    monkeypatch.setattr(helper, "_command_path", lambda command: "/usr/bin/systemctl" if command == "systemctl" else None)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/systemd-run" if command == "systemd-run" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_appliance_power("reboot", []) == 0
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[:3] == ["/usr/bin/systemd-run", "--quiet", "--on-active=5"]
+    assert command[3].startswith("--unit=labfoundry-reboot-")
+    assert command[-2:] == ["/usr/bin/systemctl", "reboot"]
+
+
+def test_appliance_power_helper_maps_shutdown_to_poweroff(monkeypatch):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "_command_path", lambda command: "/usr/bin/systemctl" if command == "systemctl" else None)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/systemd-run" if command == "systemd-run" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_appliance_power("shutdown", []) == 0
+    assert commands[0][-2:] == ["/usr/bin/systemctl", "poweroff"]
+
+
+def test_appliance_power_helper_fails_closed_without_systemd_run(monkeypatch, capsys):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(helper, "_command_path", lambda command: "/usr/bin/systemctl" if command == "systemctl" else None)
+    monkeypatch.setattr(helper.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(helper, "_run", lambda command: commands.append(command))
+
+    assert helper._handle_appliance_power("shutdown", []) == 127
+    assert commands == []
+    assert "refusing an immediate appliance power action" in capsys.readouterr().err
+
+
 def kms_config_text(managed_root: Path, *, enabled: bool = True, database_path: Path | None = None) -> str:
     database_path = database_path or Path("/var/lib/labfoundry/kms/pykmip.db")
     return "\n".join(
@@ -3541,6 +3589,7 @@ def test_chronyd_helper_apply_grants_chrony_group_read_to_nts_key(monkeypatch, t
     monkeypatch.setattr(helper, "CHRONY_STATE_DIR", state_dir)
     monkeypatch.setattr(helper.grp, "getgrnam", lambda name: ChronyGroup())
     monkeypatch.setattr(helper.os, "chown", lambda path, uid, gid: chown_calls.append((Path(path), uid, gid)), raising=False)
+    monkeypatch.setattr(helper, "_chronyd_supports_nts", lambda: True)
     monkeypatch.setattr(helper, "_run", fake_run)
 
     assert helper._handle_chronyd("apply", [str(config_path)]) == 0
@@ -3549,6 +3598,84 @@ def test_chronyd_helper_apply_grants_chrony_group_read_to_nts_key(monkeypatch, t
     if os.name != "nt":
         assert oct(key_path.stat().st_mode & 0o777) == "0o640"
     assert ["systemctl", "restart", "chronyd.service"] in commands
+
+
+def test_chronyd_helper_rejects_missing_nts_certificate_files(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "chronyd"
+    config_path = apply_dir / "labfoundry-chrony.conf"
+    apply_dir.mkdir(parents=True)
+    config_path.write_text(
+        chronyd_config_text(
+            nts_server_cert_path=str(tmp_path / "missing.crt"),
+            nts_server_key_path=str(tmp_path / "missing.key"),
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "_chronyd_supports_nts", lambda: True)
+
+    errors = helper._chronyd_config_errors(config_path)
+
+    assert f"chronyd NTS server certificate does not exist: {tmp_path / 'missing.crt'}" in errors
+    assert f"chronyd NTS server key does not exist: {tmp_path / 'missing.key'}" in errors
+
+
+def test_chronyd_helper_rejects_nts_when_installed_binary_lacks_support(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "chronyd"
+    config_path = apply_dir / "labfoundry-chrony.conf"
+    apply_dir.mkdir(parents=True)
+    config_path.write_text(chronyd_config_text(server="time.cloudflare.com").replace(" iburst", " iburst nts"), encoding="utf-8")
+    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "_chronyd_supports_nts", lambda: False)
+
+    errors = helper._chronyd_config_errors(config_path)
+
+    assert "installed chronyd does not support NTS" in "\n".join(errors)
+
+
+def test_chronyd_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/journalctl" if command == "journalctl" else None)
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda command: commands.append(command) or subprocess.CompletedProcess(command, 0, "chronyd ready\n", ""),
+    )
+
+    assert helper._handle_chronyd("logs", []) == 0
+    assert "chronyd ready" in capsys.readouterr().out
+    assert commands == [["/usr/bin/journalctl", "-u", "chronyd.service", "-n", "500", "--no-pager", "--output=short-iso"]]
+
+
+def test_dnsmasq_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/journalctl" if command == "journalctl" else None)
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda command: commands.append(command) or subprocess.CompletedProcess(command, 0, "dnsmasq ready\n", ""),
+    )
+
+    assert helper._handle_dnsmasq("logs", []) == 0
+    assert "dnsmasq ready" in capsys.readouterr().out
+    assert commands == [["/usr/bin/journalctl", "-u", "dnsmasq.service", "-n", "500", "--no-pager", "--output=short-iso"]]
+
+
+def test_chronyd_helper_capabilities_reports_missing_nts(monkeypatch, capsys):
+    helper = load_helper_module()
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/chronyd" if command == "chronyd" else None)
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda command, timeout=None: subprocess.CompletedProcess(command, 0, "chronyd version 4.3 (+CMDMON -NTS)\n", ""),
+    )
+
+    assert helper._handle_chronyd("capabilities", []) == 0
+    assert json.loads(capsys.readouterr().out)["nts"] is False
 
 
 def test_chronyd_helper_disabled_apply_stops_chronyd_without_installing_config(monkeypatch, tmp_path):

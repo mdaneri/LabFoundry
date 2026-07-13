@@ -3885,6 +3885,13 @@ function chronyGuardedTickFormatter(cell) {
   return labFoundryBooleanFormatter(cell);
 }
 
+function chronyUnsupportedNtsFormatter(cell) {
+  if (!chronyUpstreamRowHasSource(cell)) {
+    return "";
+  }
+  return '<span class="muted" title="NTS is not supported by the installed chronyd binary">unavailable</span>';
+}
+
 function chronyGuardedTextFormatter(cell) {
   if (!chronyUpstreamRowHasSource(cell)) {
     return "";
@@ -3936,6 +3943,7 @@ function initializeChronyUpstreamsTable() {
   }
   try {
     const parsedRows = JSON.parse(tableElement.dataset.chronyUpstreams || "[]");
+    const ntsSupported = tableElement.dataset.chronyNtsSupported !== "false";
     const rows = normalizeChronyUpstreamRows(parsedRows);
     rows.push(chronyBlankUpstreamRow());
     const table = new Tabulator(tableElement, {
@@ -3957,7 +3965,15 @@ function initializeChronyUpstreamsTable() {
             return dnsAddRowHintFormatter(cell, value || "+ Add source here");
           },
         },
-        { title: "NTS", field: "use_nts", formatter: chronyGuardedTickFormatter, editor: "tickCross", editable: chronyUpstreamRowHasSource, width: 70, hozAlign: "center" },
+        {
+          title: "NTS",
+          field: "use_nts",
+          formatter: ntsSupported ? chronyGuardedTickFormatter : chronyUnsupportedNtsFormatter,
+          editor: ntsSupported ? "tickCross" : false,
+          editable: ntsSupported ? chronyUpstreamRowHasSource : false,
+          width: ntsSupported ? 70 : 105,
+          hozAlign: "center",
+        },
         { title: "Max delay", field: "maxdelay", editor: "input", editable: chronyUpstreamRowHasSource, width: 105, formatter: chronyGuardedTextFormatter },
         { title: "Enabled", field: "enabled", formatter: chronyGuardedTickFormatter, editor: "tickCross", editable: chronyUpstreamRowHasSource, width: 92, hozAlign: "center" },
         { title: "Description", field: "description", editor: "input", editable: chronyUpstreamRowHasSource, minWidth: 170, formatter: chronyGuardedTextFormatter },
@@ -6509,6 +6525,50 @@ function requestConfirmation(options = {}) {
     modal.addEventListener("close", handleClose);
     modal.showModal();
   });
+}
+
+function initializeAccountMenu() {
+  const menu = document.querySelector("[data-account-menu]");
+  const aboutModal = document.getElementById("about-modal");
+  const aboutOpen = document.querySelector("[data-about-open]");
+  const aboutClose = document.querySelector("[data-about-close]");
+  if (!(menu instanceof HTMLDetailsElement)) {
+    return;
+  }
+
+  const closeMenu = () => {
+    menu.open = false;
+  };
+  document.addEventListener("click", (event) => {
+    if (!menu.contains(event.target)) {
+      closeMenu();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && menu.open) {
+      closeMenu();
+    }
+  });
+  menu.querySelectorAll("form").forEach((form) => {
+    form.addEventListener("submit", closeMenu);
+  });
+
+  if (aboutOpen instanceof HTMLButtonElement && aboutModal instanceof HTMLDialogElement) {
+    aboutOpen.addEventListener("click", () => {
+      closeMenu();
+      aboutModal.showModal();
+    });
+  }
+  if (aboutClose instanceof HTMLButtonElement && aboutModal instanceof HTMLDialogElement) {
+    aboutClose.addEventListener("click", () => aboutModal.close());
+  }
+  if (aboutModal instanceof HTMLDialogElement) {
+    aboutModal.addEventListener("click", (event) => {
+      if (event.target === aboutModal) {
+        aboutModal.close();
+      }
+    });
+  }
 }
 
 function initializeConfirmationModals() {
@@ -10472,6 +10532,106 @@ function initializeTabs() {
   });
 }
 
+function initializeLogsPage() {
+  const root = document.querySelector("[data-logs-page]");
+  if (!(root instanceof HTMLElement)) {
+    return;
+  }
+  const lineSelect = root.querySelector("[data-log-lines]");
+  const refreshStatus = root.querySelector("[data-log-refresh-status]");
+  const refreshUrl = root.dataset.logRefreshUrl || "/logs/data";
+  const allowedLineCounts = new Set(["100", "200", "500"]);
+  if (!(lineSelect instanceof HTMLSelectElement)) {
+    return;
+  }
+  try {
+    const storedLineCount = window.localStorage.getItem("labfoundry:logs:line-count") || "";
+    if (allowedLineCounts.has(storedLineCount)) {
+      lineSelect.value = storedLineCount;
+    }
+  } catch {
+    // Storage is optional; the server-rendered default remains usable.
+  }
+
+  let refreshing = false;
+  let refreshQueued = false;
+  const refresh = async () => {
+    if (refreshing) {
+      refreshQueued = true;
+      return;
+    }
+    refreshing = true;
+    if (refreshStatus instanceof HTMLElement) {
+      refreshStatus.textContent = "Refreshing...";
+    }
+    try {
+      const response = await fetch(`${refreshUrl}?lines=${encodeURIComponent(lineSelect.value)}`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        throw new Error(`Log refresh failed (${response.status})`);
+      }
+      const payload = await response.json();
+      (Array.isArray(payload.sources) ? payload.sources : []).forEach((source) => {
+        const panel = document.getElementById(`logs-${source.id}-panel`);
+        if (!(panel instanceof HTMLElement)) {
+          return;
+        }
+        const availability = panel.querySelector("[data-log-availability]");
+        if (availability instanceof HTMLElement) {
+          availability.textContent = source.available ? "available" : "not found";
+          availability.classList.toggle("good", Boolean(source.available));
+          availability.classList.toggle("muted", !source.available);
+        }
+        const meta = panel.querySelector("[data-log-meta]");
+        if (meta instanceof HTMLElement) {
+          const parts = [`${Number(source.size_bytes || 0)} bytes`];
+          if (source.updated_at) {
+            parts.push(String(source.updated_at));
+          }
+          if (source.truncated) {
+            parts.push("tail view");
+          }
+          meta.textContent = parts.join(" · ");
+        }
+        const output = panel.querySelector("[data-log-lines-output]");
+        if (output instanceof HTMLElement) {
+          output.textContent = source.available
+            ? (Array.isArray(source.lines) ? source.lines.join("\n") : "")
+            : String(source.error || "Log file has not been written yet.");
+        }
+      });
+      if (refreshStatus instanceof HTMLElement) {
+        refreshStatus.textContent = `Auto-refresh 5s · updated ${new Date().toLocaleTimeString()}`;
+      }
+    } catch {
+      if (refreshStatus instanceof HTMLElement) {
+        refreshStatus.textContent = "Auto-refresh unavailable";
+      }
+    } finally {
+      refreshing = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        refresh();
+      }
+    }
+  };
+
+  lineSelect.addEventListener("change", () => {
+    if (!allowedLineCounts.has(lineSelect.value)) {
+      lineSelect.value = "100";
+    }
+    try {
+      window.localStorage.setItem("labfoundry:logs:line-count", lineSelect.value);
+    } catch {
+      // Storage is optional.
+    }
+    refresh();
+  });
+  refresh();
+  window.setInterval(refresh, 5000);
+}
+
 function initializeApplianceApplyProgress() {
   const form = document.querySelector("[data-appliance-apply-form]");
   if (!(form instanceof HTMLFormElement)) {
@@ -11912,6 +12072,7 @@ document.addEventListener("DOMContentLoaded", initializeCodeMirrorEditors);
 document.addEventListener("DOMContentLoaded", initializeKickstartEditorDirtyState);
 document.addEventListener("DOMContentLoaded", initializeHostsFileEditor);
 document.addEventListener("DOMContentLoaded", initializeZoneEditors);
+document.addEventListener("DOMContentLoaded", initializeAccountMenu);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
 document.addEventListener("DOMContentLoaded", initializePreviewModalControls);
 document.addEventListener("DOMContentLoaded", initializeCopyValueButtons);
@@ -11940,6 +12101,7 @@ document.addEventListener("DOMContentLoaded", initializeEsxiIsoUploadForms);
 document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);
+document.addEventListener("DOMContentLoaded", initializeLogsPage);
 document.addEventListener("DOMContentLoaded", initializeApplianceApplyProgress);
 document.addEventListener("DOMContentLoaded", initializeMonitorPage);
 document.addEventListener("DOMContentLoaded", initializeHistoryBackButtons);

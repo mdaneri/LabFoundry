@@ -2,13 +2,24 @@
 {% block page_title %}Logs{% endblock %}
 {% block content %}
 <section class="page-stack">
-  <div class="panel wide-panel">
+  <div class="panel wide-panel" data-logs-page data-log-refresh-url="/logs/data">
     <div class="panel-head">
       <div>
         <h2>Logs</h2>
         <p class="muted">Read-only appliance log sources with sensitive lines redacted before rendering.</p>
       </div>
-      <span class="status-pill muted">{{ log_sources|length }} sources</span>
+      <div class="logs-toolbar">
+        <label class="logs-line-selector">
+          <span class="field-label"><span>Lines</span><button class="help-icon" type="button" data-help="Select the number of most recent lines shown for every log source. The page refreshes the selected tail automatically every 5 seconds.">i</button></span>
+          <select data-log-lines aria-label="Log lines">
+            {% for option in [100, 200, 500] %}
+              <option value="{{ option }}" {{ "selected" if log_line_count == option else "" }}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <span class="status-pill muted" data-log-refresh-status>Auto-refresh 5s</span>
+        <span class="status-pill muted">{{ log_sources|length }} sources</span>
+      </div>
     </div>
 
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="Log sources" data-tab-storage-key="labfoundry:logs:active-tab">
@@ -24,17 +35,17 @@
 
     <div class="tab-panels">
       {% for source in log_sources %}
-        <div id="logs-{{ source.id }}-panel" class="tab-panel {{ 'active' if loop.first else '' }}" role="tabpanel" {{ "hidden" if not loop.first else "" }}>
+        <div id="logs-{{ source.id }}-panel" class="tab-panel {{ 'active' if loop.first else '' }}" role="tabpanel" data-log-source-id="{{ source.id }}" {{ "hidden" if not loop.first else "" }}>
           <div class="panel-head compact">
             <div>
               <h2>{{ source.label }}</h2>
               <p class="muted">{{ source.path }}</p>
             </div>
-            <span class="status-pill {{ 'good' if source.available else 'muted' }}">{{ "available" if source.available else "not found" }}</span>
+            <span class="status-pill {{ 'good' if source.available else 'muted' }}" data-log-availability>{{ "available" if source.available else "not found" }}</span>
           </div>
           <div class="terminal-note">
-            <strong>{{ source.size_bytes }} bytes{% if source.updated_at %} · {{ source.updated_at }}{% endif %}{% if source.truncated %} · tail view{% endif %}</strong>
-            <code>{{ source.lines | join('\n') if source.available else source.error or "Log file has not been written yet." }}</code>
+            <strong data-log-meta>{{ source.size_bytes }} bytes{% if source.updated_at %} · {{ source.updated_at }}{% endif %}{% if source.truncated %} · tail view{% endif %}</strong>
+            <code data-log-lines-output>{{ source.lines | join('\n') if source.available else source.error or "Log file has not been written yet." }}</code>
           </div>
         </div>
       {% endfor %}
