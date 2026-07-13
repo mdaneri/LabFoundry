@@ -9654,6 +9654,8 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert "initializeVcfTargetDepotHelper" in app_js
     assert "/vcf-helper/offline-depot/inspect-target" in app_js
     assert "window.location.assign(`/tasks?job_id=${encodeURIComponent(data.job_id || \"\")}`)" in app_js
+    assert "const hasTargetDetails = Boolean(data.target?.appliance)" in app_js
+    assert "tlsConfirm.checked = isConfirmedTls" in app_js
 
 
 def test_vcf_sddc_dhcp_assignment_uses_static_address_outside_scope(client):
@@ -9739,6 +9741,8 @@ def test_vcf_helper_renders_certificate_trust_modal(client):
     assert "/vcf-helper/trust-root-ca/inspect-target" in app_js
     assert "window.location.assign(payload.redirect || `/tasks?job_id=" in app_js
     assert "After TLS confirmation" in app_js
+    assert "previouslyConfirmedTls" in app_js
+    assert "tlsCheckbox.checked = isConfirmedTls" in app_js
     assert "data-vcf-trust-auth-method" not in app_js
 
     legacy = client.get("/vcf-trust", follow_redirects=False)

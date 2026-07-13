@@ -11056,7 +11056,13 @@ function initializeVcfTrustForm() {
     if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = "Inspect target to verify";
   };
   const applyTargetInspection = (payload) => {
+    const previouslyConfirmedTls = confirmedTls instanceof HTMLInputElement ? confirmedTls.value : "";
     inspectedTls = payload.tls_fingerprint || payload.fingerprint || "";
+    const isConfirmedTls = Boolean(
+      inspectedTls
+      && previouslyConfirmedTls
+      && previouslyConfirmedTls.toUpperCase() === inspectedTls.toUpperCase()
+    );
     if (reviewTarget instanceof HTMLElement) reviewTarget.textContent = payload.address || form.elements.address.value || "";
     if (reviewPort instanceof HTMLElement) reviewPort.textContent = String(payload.port || "443");
     const pendingTlsConfirmation = inspectedTls && !payload.appliance;
@@ -11065,11 +11071,11 @@ function initializeVcfTrustForm() {
     if (tlsFingerprint instanceof HTMLElement) tlsFingerprint.textContent = inspectedTls;
     tlsConfirmation?.classList.toggle("hidden", !inspectedTls);
     if (tlsCheckbox instanceof HTMLInputElement) {
-      tlsCheckbox.checked = false;
+      tlsCheckbox.checked = isConfirmedTls;
       tlsCheckbox.required = Boolean(inspectedTls);
     }
     if (confirmedTls instanceof HTMLInputElement) {
-      confirmedTls.value = "";
+      confirmedTls.value = isConfirmedTls ? inspectedTls : "";
     }
   };
   const inspectTarget = async () => {
@@ -11714,20 +11720,28 @@ function initializeVcfTargetDepotHelper() {
     showStep("target");
   };
   const renderCurrentDepot = (data) => {
-    inspected = data;
+    const hasTargetDetails = Boolean(data.target?.appliance);
+    inspected = hasTargetDetails ? data : null;
+    const previouslyConfirmedTls = tls instanceof HTMLInputElement ? tls.value : "";
     inspectedTls = data.tls_fingerprint || data.fingerprint || "";
-    if (tls instanceof HTMLInputElement) tls.value = "";
+    const isConfirmedTls = Boolean(
+      inspectedTls
+      && previouslyConfirmedTls
+      && previouslyConfirmedTls.toUpperCase() === inspectedTls.toUpperCase()
+    );
+    if (tls instanceof HTMLInputElement) tls.value = isConfirmedTls ? inspectedTls : "";
     if (reviewTarget instanceof HTMLElement) reviewTarget.textContent = data.target?.address || data.address || form.elements.address.value || "";
     if (reviewPort instanceof HTMLElement) reviewPort.textContent = String(data.port || "443");
-    if (reviewRole instanceof HTMLElement) reviewRole.textContent = data.target?.appliance?.role || "unknown";
-    if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = data.target?.appliance?.version || "unknown";
+    const pendingTlsConfirmation = inspectedTls && !hasTargetDetails;
+    if (reviewRole instanceof HTMLElement) reviewRole.textContent = data.target?.appliance?.role || (pendingTlsConfirmation ? "After TLS confirmation" : "Not inspected yet");
+    if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = data.target?.appliance?.version || (pendingTlsConfirmation ? "After TLS confirmation" : "Not inspected yet");
     if (reviewTls instanceof HTMLElement) reviewTls.textContent = inspectedTls || "not available";
     if (queueTarget instanceof HTMLElement) queueTarget.textContent = reviewTarget?.textContent || "";
     if (queueAction instanceof HTMLElement) queueAction.textContent = data.replacement_required ? "Replace existing depot and sync metadata" : "Configure or verify LabFoundry depot and sync metadata";
     if (tlsConfirmationFingerprint instanceof HTMLElement) tlsConfirmationFingerprint.textContent = inspectedTls;
     tlsConfirmation?.classList.toggle("hidden", !inspectedTls);
     if (tlsConfirm instanceof HTMLInputElement) {
-      tlsConfirm.checked = false;
+      tlsConfirm.checked = isConfirmedTls;
       tlsConfirm.required = Boolean(inspectedTls);
     }
     const current = data.target?.depot || {};
@@ -11741,12 +11755,14 @@ function initializeVcfTargetDepotHelper() {
         row.append(key, strong); values.append(row);
       });
     }
-    form.querySelector("[data-vcf-target-depot-current]")?.classList.remove("hidden");
+    form.querySelector("[data-vcf-target-depot-current]")?.classList.toggle("hidden", !hasTargetDetails);
     const replaceRow = form.querySelector("[data-vcf-target-depot-replace-row]");
-    replaceRow?.classList.toggle("hidden", !data.replacement_required);
+    replaceRow?.classList.toggle("hidden", !hasTargetDetails || !data.replacement_required);
     if (form.elements.replace_existing instanceof HTMLInputElement) {
-      form.elements.replace_existing.required = Boolean(data.replacement_required);
-      form.elements.replace_existing.checked = false;
+      form.elements.replace_existing.required = Boolean(hasTargetDetails && data.replacement_required);
+      if (!hasTargetDetails) {
+        form.elements.replace_existing.checked = false;
+      }
     }
   };
   const inspect = async () => {
@@ -11776,9 +11792,21 @@ function initializeVcfTargetDepotHelper() {
   };
   document.querySelector("[data-vcf-target-depot-open]")?.addEventListener("click", () => dialog.showModal());
   form.querySelector("[data-vcf-target-depot-close]")?.addEventListener("click", () => { reset(); dialog.close(); });
-  tlsConfirm?.addEventListener("change", () => {
+  tlsConfirm?.addEventListener("change", async () => {
     if (!(tlsConfirm instanceof HTMLInputElement) || !(tls instanceof HTMLInputElement)) return;
     tls.value = tlsConfirm.checked ? inspectedTls : "";
+    if (!tlsConfirm.checked || !inspectedTls) {
+      return;
+    }
+    if (reviewRole instanceof HTMLElement) reviewRole.textContent = "Inspecting…";
+    if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = "Inspecting…";
+    const ready = await inspect();
+    if (!ready) {
+      tls.value = "";
+      tlsConfirm.checked = false;
+      if (reviewRole instanceof HTMLElement) reviewRole.textContent = "After TLS confirmation";
+      if (reviewVersion instanceof HTMLElement) reviewVersion.textContent = "After TLS confirmation";
+    }
   });
   next?.addEventListener("click", async () => {
     if (!validateStep(currentStep)) return;
