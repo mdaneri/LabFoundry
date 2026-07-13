@@ -124,7 +124,6 @@ class VcfDepotApiClient:
                     "isOfflineDepot": True,
                     "hostname": local.hostname,
                     "port": local.port,
-                    "url": local.url,
                 },
             },
         )

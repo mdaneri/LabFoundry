@@ -57,3 +57,35 @@ def test_configure_target_requires_replacement_confirmation(monkeypatch):
     monkeypatch.setattr(service, "VcfDepotApiClient", FakeClient)
     with pytest.raises(service.VcfDepotTargetError, match="confirm replacement"):
         service.configure_target_depot("installer", "admin", "api", LOCAL, "one-time", replace_existing=False)
+
+
+def test_update_depot_uses_authenticated_fqdn_port_payload_without_url():
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        def json(self):
+            return remote(LOCAL.hostname)
+
+    class FakeHttpClient:
+        def put(self, path, *, json):
+            captured["path"] = path
+            captured["json"] = json
+            return FakeResponse()
+
+    api = service.VcfDepotApiClient.__new__(service.VcfDepotApiClient)
+    api.client = FakeHttpClient()
+
+    api.update_depot(LOCAL, "one-time")
+
+    assert captured["path"] == "/v1/system/settings/depot"
+    assert captured["json"] == {
+        "offlineAccount": {"username": "vcf-depot", "password": "one-time"},
+        "depotConfiguration": {
+            "isOfflineDepot": True,
+            "hostname": "depot.labfoundry.internal",
+            "port": 443,
+        },
+    }
