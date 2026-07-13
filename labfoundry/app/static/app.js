@@ -8997,7 +8997,6 @@ function initializeTasksPage() {
         labFoundrySelectedTaskId = row.getData().id || "";
         row.select();
       },
-      rowDblClick: (_event, row) => openTaskDetail(row.getData()),
       rowContextMenu: [
         {
           label: "Details",
@@ -9030,6 +9029,7 @@ function initializeTasksPage() {
         { title: "Finished", field: "finished_at", minWidth: 210, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
       ],
     });
+    labFoundryTasksTable.on("rowDblClick", (_event, row) => openTaskDetail(row.getData()));
     fallback?.classList.add("hidden");
   }
   document.querySelector("[data-task-detail-close]")?.addEventListener("click", () => document.getElementById("task-detail-modal")?.close());

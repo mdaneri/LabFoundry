@@ -154,7 +154,7 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert 'paginationMode: "local"' in app_js
     tasks_table_js = app_js.split("function initializeTasksPage", 1)[1].split("function updateVcfDepotSummary", 1)[0]
     assert "paginationSizeSelector" not in tasks_table_js
-    assert "rowDblClick: (_event, row) => openTaskDetail(row.getData())" in app_js
+    assert 'labFoundryTasksTable.on("rowDblClick", (_event, row) => openTaskDetail(row.getData()))' in app_js
     assert "rowContextMenu" in tasks_table_js
     assert 'label: "Details"' in tasks_table_js
     assert 'label: "Log"' in tasks_table_js
