@@ -3665,6 +3665,23 @@ def test_dnsmasq_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
     assert commands == [["/usr/bin/journalctl", "-u", "dnsmasq.service", "-n", "500", "--no-pager", "--output=short-iso"]]
 
 
+def test_nginx_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/journalctl" if command == "journalctl" else None)
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "nginx ready\n", "")
+
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_nginx("logs", []) == 0
+    assert capsys.readouterr().out == "nginx ready\n"
+    assert commands == [["/usr/bin/journalctl", "-u", "nginx.service", "-n", "500", "--no-pager", "--output=short-iso"]]
+
+
 def test_chronyd_helper_capabilities_reports_missing_nts(monkeypatch, capsys):
     helper = load_helper_module()
     monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/chronyd" if command == "chronyd" else None)

@@ -98,6 +98,25 @@ def test_real_dnsmasq_logs_use_privileged_fixed_helper_action(monkeypatch):
     assert result.stdout == "dnsmasq ready\n"
 
 
+def test_real_nginx_logs_use_privileged_fixed_helper_action(monkeypatch):
+    import labfoundry.app.adapters.system as system_adapter
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "nginx ready\n", "")
+
+    monkeypatch.setattr(system_adapter.subprocess, "run", fake_run)
+
+    result = SystemAdapter(dry_run=False).read_nginx_logs()
+
+    assert result.returncode == 0
+    assert result.command == ["sudo", "-n", SystemAdapter.HELPER_PATH, "nginx", "logs", "--real"]
+    assert commands == [result.command]
+    assert result.stdout == "nginx ready\n"
+
+
 def test_real_chronyd_capabilities_use_unprivileged_fixed_helper_action(monkeypatch):
     import labfoundry.app.adapters.system as system_adapter
 

@@ -6777,6 +6777,7 @@ def log_sources_context(*, max_lines: int = 100) -> list[dict[str, Any]]:
             path_label="dnsmasq.service journal: TFTP messages",
         ),
         journal_log_source("chrony", "Chrony", "chronyd.service", adapter.read_chronyd_logs(), max_lines=line_count),
+        journal_log_source("nginx", "Nginx", "nginx.service", adapter.read_nginx_logs(), max_lines=line_count),
         {
             "id": "kms",
             "label": "KMS",

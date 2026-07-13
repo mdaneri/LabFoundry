@@ -3750,6 +3750,14 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
             stdout="chronyd ready\nprivate_key=do-not-render\n",
         ),
     )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_nginx_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "nginx", "logs"],
+            dry_run=False,
+            stdout="nginx[20]: management request completed\nrequest_token=do-not-render\n",
+        ),
+    )
 
     login(client)
     response = client.get("/logs")
@@ -3764,6 +3772,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "TFTP" in response.text
     assert "KMS" in response.text
     assert "Chrony" in response.text
+    assert "Nginx" in response.text
     assert "Audit Events" in response.text
     assert "logs-audit-panel" in response.text
     assert 'data-log-source-tab="dnsmasq-dns"' in response.text
@@ -3772,6 +3781,8 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert 'title="dnsmasq.service journal: DHCP messages"' in response.text
     assert 'data-log-source-tab="dnsmasq-tftp"' in response.text
     assert 'title="dnsmasq.service journal: TFTP messages"' in response.text
+    assert 'data-log-source-tab="nginx"' in response.text
+    assert 'title="systemd journal: nginx.service"' in response.text
     assert 'data-log-source-tab="kms"' in response.text
     kms_tab = response.text.split('data-log-source-tab="kms"', 1)[1].split("</button>", 1)[0]
     assert 'aria-disabled="true"' in kms_tab
@@ -3794,6 +3805,8 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "DHCPACK(eth1)" in response.text
     assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in response.text
     assert "private_key= [redacted]" in response.text
+    assert "management request completed" in response.text
+    assert "request_token= [redacted]" in response.text
     assert "password= [redacted]" in response.text
     assert "do-not-render" not in response.text
     assert "Log file has not been written yet." in response.text
@@ -3802,7 +3815,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert data_response.status_code == 200
     payload = data_response.json()
     assert payload["line_count"] == 500
-    assert [source["id"] for source in payload["sources"]] == ["app", "dnsmasq-dns", "dnsmasq-dhcp", "dnsmasq-tftp", "chrony", "kms"]
+    assert [source["id"] for source in payload["sources"]] == ["app", "dnsmasq-dns", "dnsmasq-dhcp", "dnsmasq-tftp", "chrony", "nginx", "kms"]
     assert "query[A] example.test" in "\n".join(payload["sources"][1]["lines"])
     assert "DHCPACK(eth1)" not in "\n".join(payload["sources"][1]["lines"])
     assert "DHCPACK(eth1)" in "\n".join(payload["sources"][2]["lines"])
@@ -3908,6 +3921,12 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
             command=["labfoundry-helper", "chronyd", "logs"], dry_run=True, stdout="No host Chrony journal is read in development mode."
         ),
     )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_nginx_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "nginx", "logs"], dry_run=True, stdout="No host Nginx journal is read in development mode."
+        ),
+    )
 
     login(client)
     response = client.get("/logs")
@@ -3920,6 +3939,7 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
     assert "TFTP" in response.text
     assert "Audit Events" in response.text
     assert "Chrony" in response.text
+    assert "Nginx" in response.text
     assert "Log file has not been written yet." in response.text
 
 
