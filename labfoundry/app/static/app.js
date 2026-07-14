@@ -9680,6 +9680,19 @@ function initializeVcfDepotSoftwareDepotIdGenerator() {
       }
     });
   });
+  const form = modal?.querySelector("form");
+  if (form instanceof HTMLFormElement) {
+    form.addEventListener("submit", () => {
+      if (modal instanceof HTMLDialogElement) {
+        modal.close("submit");
+      }
+      const submitButton = form.querySelector('button[type="submit"]');
+      if (submitButton instanceof HTMLButtonElement) {
+        submitButton.disabled = true;
+        submitButton.textContent = "Creating task…";
+      }
+    });
+  }
 }
 
 function initializeVcfDepotToolResetModal() {
@@ -10768,16 +10781,16 @@ function initializeApplianceApplyProgress() {
     }
     event.preventDefault();
     if (title instanceof HTMLElement) {
-      title.textContent = "Submitting appliance changes";
+      title.textContent = "Creating appliance apply task";
     }
     if (detail instanceof HTMLElement) {
-      detail.textContent = "The server is validating and applying the selected units. This list stays on the page and refreshes with real per-unit results when the task completes.";
+      detail.textContent = "The server is committing one task for the selected units. Adapter work continues in the background after the task is created.";
     }
-    steps.replaceChildren(...units.map((unit) => renderStep(unit, "Waiting for result", "waiting")));
+    steps.replaceChildren(...units.map((unit) => renderStep(unit, "Creating task", "waiting")));
     tracker.classList.remove("hidden");
     submitButtons.forEach((button) => {
       button.disabled = true;
-      button.textContent = "Submitting...";
+      button.textContent = "Creating task...";
     });
     try {
       const response = await fetch(form.action || window.location.href, {

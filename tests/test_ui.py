@@ -385,7 +385,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=dashboard-20260714-1" in service_worker.text
-    assert "/static/app.js?v=dashboard-20260714-1" in service_worker.text
+    assert "/static/app.js?v=dashboard-async-20260714-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -411,7 +411,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=dashboard-20260714-1" in page.text
-    assert "/static/app.js?v=dashboard-20260714-1" in page.text
+    assert "/static/app.js?v=dashboard-async-20260714-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -1228,7 +1228,8 @@ def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(c
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
     assert apply_response.status_code == 200
-    assert "Appliance apply task succeeded" in apply_response.text
+    assert "Appliance apply task pending" in apply_response.text
+    assert "was created and will continue in the background" in apply_response.text
 
     with SessionLocal() as db:
         status = appliance_apply_status(db, "appliance_settings")
@@ -1866,13 +1867,13 @@ def test_appliance_settings_apply_task_records_dry_run_helper_commands(client, c
     with caplog.at_level(logging.INFO, logger="labfoundry.appliance_apply"):
         apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
     assert apply_response.status_code == 200
-    assert "Appliance apply task succeeded" in apply_response.text
+    assert "Appliance apply task pending" in apply_response.text
+    assert "was created and will continue in the background" in apply_response.text
     assert "completed status=succeeded selected_units=appliance_settings" in caplog.text
     assert "unit=appliance_settings status=succeeded" in caplog.text
     assert "labfoundry-helper appliance-settings validate" in caplog.text
-    assert "Task Steps" in apply_response.text
+    assert "Open task" in apply_response.text
     assert "Appliance Settings" in apply_response.text
-    assert "Done" in apply_response.text
     assert "data-apply-progress-modal" not in apply_response.text
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
@@ -1883,11 +1884,20 @@ def test_appliance_settings_apply_task_records_dry_run_helper_commands(client, c
 
 
 def test_appliance_apply_failure_renders_command_details(client, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
     from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job
     import labfoundry.app.ui as ui_module
 
-    class FailingApplianceSettingsAdapter:
-        dry_run = False
+    base_system_adapter = ui_module.SystemAdapter
+
+    class FailingApplianceSettingsAdapter(base_system_adapter):
+        def __init__(self) -> None:
+            super().__init__(dry_run=False)
 
         def read_dhcp_leases(self) -> AdapterResult:
             return AdapterResult(command=["labfoundry-helper", "dnsmasq", "leases"], dry_run=True, stdout="")
@@ -1916,15 +1926,19 @@ def test_appliance_apply_failure_renders_command_details(client, monkeypatch):
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
 
     assert response.status_code == 200
-    assert "Appliance apply task failed" in response.text
-    assert "Appliance Settings failed" in response.text
-    assert "Task Steps" in response.text
-    assert "Failed" in response.text
-    assert "labfoundry-helper appliance-settings apply" in response.text
-    assert "exited 30" in response.text
-    assert "Read-only file system" in response.text
-    assert "password= [redacted]" in response.text
+    assert "Appliance apply task pending" in response.text
+    assert "Open task" in response.text
     assert "super-secret" not in response.text
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
+        payload = json.loads(job.result or "{}")
+        assert job.status == "failed"
+        command = payload["units"][0]["commands"][-1]
+        assert "labfoundry-helper appliance-settings apply" in command["command_line"]
+        assert command["returncode"] == 30
+        assert "Read-only file system" in command["stderr"]
+        assert "password= [redacted]" in command["stdout"]
+        assert "super-secret" not in (job.result or "")
 
 
 def test_appliance_apply_stops_unit_after_validation_failure(client, monkeypatch):
@@ -1937,8 +1951,11 @@ def test_appliance_apply_stops_unit_after_validation_failure(client, monkeypatch
     from labfoundry.app.models import Job
     import labfoundry.app.ui as ui_module
 
-    class ValidationFailingApplianceSettingsAdapter:
-        dry_run = False
+    base_system_adapter = ui_module.SystemAdapter
+
+    class ValidationFailingApplianceSettingsAdapter(base_system_adapter):
+        def __init__(self) -> None:
+            super().__init__(dry_run=False)
 
         def read_dhcp_leases(self) -> AdapterResult:
             return AdapterResult(command=["labfoundry-helper", "dnsmasq", "leases"], dry_run=True, stdout="")
@@ -1973,8 +1990,8 @@ def test_appliance_apply_stops_unit_after_validation_failure(client, monkeypatch
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
 
     assert response.status_code == 200
-    assert "Appliance apply task failed" in response.text
-    assert "labfoundry-helper appliance-settings validate" in response.text
+    assert "Appliance apply task pending" in response.text
+    assert "Open task" in response.text
     assert "labfoundry-helper appliance-settings apply" not in response.text
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
@@ -3387,7 +3404,7 @@ def test_routes_wan_autosave_endpoints_and_apply_task(client):
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "wan"})
     assert apply_response.status_code == 200
-    assert "Appliance apply task succeeded" in apply_response.text
+    assert "Appliance apply task pending" in apply_response.text
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
@@ -3671,8 +3688,11 @@ def test_real_local_users_apply_clears_pending_passwords_and_baselines_post_appl
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import Setting, User
 
-    class SuccessfulLocalUsersAdapter:
-        dry_run = False
+    base_system_adapter = ui_module.SystemAdapter
+
+    class SuccessfulLocalUsersAdapter(base_system_adapter):
+        def __init__(self) -> None:
+            super().__init__(dry_run=False)
 
         def read_dhcp_leases(self) -> AdapterResult:
             return AdapterResult(command=["labfoundry-helper", "dnsmasq", "leases"], dry_run=True, stdout="")
@@ -4207,7 +4227,8 @@ def test_dns_and_dhcp_pages_render(client):
     assert "window.setInterval(load, 5000)" in app_js.text
     assert "initializeApplianceApplyProgress" in app_js.text
     assert "Submitting appliance changes" in app_js.text
-    assert "Waiting for result" in app_js.text
+    assert "Creating appliance apply task" in app_js.text
+    assert "Adapter work continues in the background" in app_js.text
     assert "data-apply-submit-tracker" in app_js.text
     assert "data-apply-progress-modal" not in app_js.text
     assert "index === 0 ? \"Applying\"" not in app_js.text
@@ -6166,6 +6187,9 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "initializeVcfDepotSettings" in app_js.text
+    software_depot_modal_js = app_js.text.split("function initializeVcfDepotSoftwareDepotIdGenerator", 1)[1].split("function ", 1)[0]
+    assert 'modal.close("submit")' in software_depot_modal_js
+    assert 'submitButton.textContent = "Creating task…"' in software_depot_modal_js
     assert "initializeVcfDepotProfilesTable" in app_js.text
     assert "initializeVcfDepotTasksTable" in app_js.text
     assert "refreshVcfDepotTasksTable" in app_js.text
@@ -8646,7 +8670,7 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
 
     baseline_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"})
     assert baseline_response.status_code == 200
-    assert "Appliance apply task succeeded" in baseline_response.text
+    assert "Appliance apply task pending" in baseline_response.text
     with SessionLocal() as db:
         baseline = db.execute(select(Setting).where(Setting.key == "appliance_apply.baselines.v1")).scalar_one()
         assert '"firewall"' in baseline.value
@@ -8702,6 +8726,92 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
         assert job is not None
         assert "skipped_changed_units" in (job.result or "")
         assert '"unit_id": "firewall"' in (job.result or "")
+
+
+def test_appliance_apply_rejects_submission_while_another_task_is_active(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus
+
+    login(client)
+    page = client.get("/appliance-apply")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    with SessionLocal() as db:
+        db.add(
+            Job(
+                id="job_active_apply",
+                type="appliance-apply",
+                status=JobStatus.RUNNING.value,
+                created_by="admin",
+                progress_percent=25,
+                result="{}",
+            )
+        )
+        db.commit()
+
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"})
+
+    assert response.status_code == 409
+    assert "Appliance apply task job_active_apply is already running." in response.text
+    assert "Wait for it to finish before submitting another appliance apply task." in response.text
+    with SessionLocal() as db:
+        jobs = db.scalars(select(Job).where(Job.type == "appliance-apply")).all()
+        assert [job.id for job in jobs] == ["job_active_apply"]
+
+
+def test_recover_interrupted_appliance_apply_jobs_marks_active_tasks_failed(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus
+    from labfoundry.app.ui import recover_interrupted_appliance_apply_jobs
+
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                Job(
+                    id="job_pending_apply",
+                    type="appliance-apply",
+                    status=JobStatus.PENDING.value,
+                    created_by="admin",
+                    progress_percent=0,
+                    result=json.dumps({"selected_units": ["firewall"]}),
+                ),
+                Job(
+                    id="job_running_apply",
+                    type="appliance-apply",
+                    status=JobStatus.RUNNING.value,
+                    created_by="admin",
+                    progress_percent=40,
+                    result=json.dumps({"selected_units": ["vcf_offline_depot"]}),
+                ),
+                Job(
+                    id="job_unrelated_download",
+                    type="vcf-depot-download",
+                    status=JobStatus.RUNNING.value,
+                    created_by="admin",
+                    progress_percent=40,
+                    result="{}",
+                ),
+            ]
+        )
+        db.commit()
+
+        assert recover_interrupted_appliance_apply_jobs(db) == 2
+
+        apply_jobs = db.scalars(select(Job).where(Job.type == "appliance-apply").order_by(Job.id)).all()
+        assert all(job.status == JobStatus.FAILED.value for job in apply_jobs)
+        assert all(job.finished_at is not None for job in apply_jobs)
+        assert all(job.progress_percent == 100 for job in apply_jobs)
+        assert all("Review current appliance state" in (job.error or "") for job in apply_jobs)
+        assert all(json.loads(job.result or "{}")["interrupted"] is True for job in apply_jobs)
+        assert all(json.loads(job.result or "{}")["state"] == "failed" for job in apply_jobs)
+        unrelated = db.get(Job, "job_unrelated_download")
+        assert unrelated is not None
+        assert unrelated.status == JobStatus.RUNNING.value
 
 
 def test_appliance_startup_initializes_factory_apply_baseline(monkeypatch, tmp_path):

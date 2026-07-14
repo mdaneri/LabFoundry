@@ -303,7 +303,7 @@ Use `Appliance Apply` to review and submit appliance changes. The page:
 - checks changed valid units by default;
 - shows compact summaries and rendered config previews or diffs when a last-applied baseline exists;
 - lets operators unselect changed units that should stay pending;
-- creates one `appliance-apply` job that records selected units, skipped changed units, validation results, rendered previews/diffs, adapter command intent, dry-run state, and the audit event.
+- commits one pending `appliance-apply` job before returning the browser response, then runs adapter work in the background; the job records selected units, skipped changed units, validation results, rendered previews/diffs, adapter command intent, dry-run state, and audit events. If selected desired state changes while queued, execution fails closed and asks the operator to submit again.
 
 Within each selected unit, helper commands run sequentially and stop on the first failure. A failed `validate` step is recorded in the job and prevents the matching `apply` or follow-on reload/sync step from running.
 

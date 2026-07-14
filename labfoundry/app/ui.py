@@ -18,7 +18,7 @@ from typing import Any, Callable
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, func, select
@@ -2208,6 +2208,33 @@ def recover_interrupted_vcf_depot_download_jobs(db: Session) -> int:
         if profile is not None:
             profile.status = "blocked"
             profile.updated_at = finished
+    db.commit()
+    return len(jobs)
+
+
+def recover_interrupted_appliance_apply_jobs(db: Session) -> int:
+    jobs = db.scalars(
+        select(Job).where(
+            Job.type == "appliance-apply",
+            Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+        )
+    ).all()
+    if not jobs:
+        return 0
+    finished = utcnow()
+    for job in jobs:
+        job.status = JobStatus.FAILED.value
+        job.finished_at = finished
+        job.progress_percent = 100
+        job.error = (
+            "Interrupted by a LabFoundry restart before completion. "
+            "Review current appliance state and submit the selected changes again."
+        )
+        payload = _job_payload(job)
+        payload["state"] = "failed"
+        payload["interrupted"] = True
+        payload["interrupted_at"] = finished.isoformat()
+        job.result = json.dumps(payload, indent=2, sort_keys=True)
     db.commit()
     return len(jobs)
 
@@ -6938,8 +6965,8 @@ def adapter_result_to_payload(result: Any) -> dict[str, Any]:
         "command": result.command,
         "command_line": " ".join(result.command),
         "dry_run": result.dry_run,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
+        "stdout": apply_output_excerpt(result.stdout),
+        "stderr": apply_output_excerpt(result.stderr),
         "returncode": result.returncode,
     }
 
@@ -8103,9 +8130,132 @@ def appliance_apply_status_api(
     )
 
 
+class ApplianceApplyJobError(RuntimeError):
+    """An operator-safe failure raised before appliance apply execution begins."""
+
+
+APPLIANCE_APPLY_SUBMIT_LOCK = threading.Lock()
+
+
+def active_appliance_apply_job(db: Session) -> Job | None:
+    return db.scalars(
+        select(Job)
+        .where(
+            Job.type == "appliance-apply",
+            Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+        )
+        .order_by(Job.created_at)
+        .limit(1)
+    ).first()
+
+
+def run_appliance_apply_job(job_id: str) -> None:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        if job is None or job.status != JobStatus.PENDING.value:
+            return
+        job.status = JobStatus.RUNNING.value
+        job.started_at = utcnow()
+        job.progress_percent = 1
+        db.commit()
+
+        unit_results: list[dict[str, Any]] = []
+        try:
+            job_result = json.loads(job.result or "{}")
+            selected_order = [str(unit_id) for unit_id in job_result.get("selected_units", [])]
+            selected_ids = set(selected_order)
+            captured_by_id = {
+                str(unit.get("unit_id")): unit
+                for unit in job_result.get("captured_units", [])
+                if isinstance(unit, dict) and unit.get("unit_id")
+            }
+            current_units = appliance_apply_units(db)
+            current_by_id = {unit["id"]: unit for unit in current_units}
+            missing_ids = [unit_id for unit_id in selected_order if unit_id not in current_by_id]
+            if missing_ids:
+                raise ApplianceApplyJobError(f"Selected appliance apply units are unavailable: {', '.join(missing_ids)}.")
+            selected_units = [current_by_id[unit_id] for unit_id in selected_order]
+            invalid_units = [unit["label"] for unit in selected_units if unit["validation_errors"]]
+            if invalid_units:
+                raise ApplianceApplyJobError(f"Desired state became invalid before execution: {', '.join(invalid_units)}.")
+            changed_after_submit = [
+                unit["label"]
+                for unit in selected_units
+                if str(captured_by_id.get(unit["id"], {}).get("snapshot_hash") or "") != str(unit["snapshot_hash"])
+            ]
+            if changed_after_submit:
+                raise ApplianceApplyJobError(
+                    f"Desired state changed after task submission: {', '.join(changed_after_submit)}. Submit the appliance changes again."
+                )
+
+            for index, unit in enumerate(selected_units, start=1):
+                unit_results.append(execute_appliance_apply_unit(unit))
+                job.progress_percent = min(95, int(index / max(len(selected_units), 1) * 90) + 5)
+                job.result = json.dumps({**job_result, "units": unit_results}, indent=2)
+                db.commit()
+
+            succeeded = all(result["success"] for result in unit_results)
+            persist_vcf_depot_metadata_from_apply(db, unit_results)
+            if succeeded:
+                update_appliance_apply_baselines(db, appliance_apply_units(db), selected_ids)
+            else:
+                log_appliance_apply_failures(job_id, unit_results)
+            log_appliance_apply_submission(
+                job_id,
+                selected_units=selected_order,
+                skipped_changed_units=job_result.get("skipped_changed_units", []),
+                unit_results=unit_results,
+                succeeded=succeeded,
+            )
+            job_result = {
+                **job_result,
+                "units": unit_results,
+                "dry_run": any(result["dry_run"] for result in unit_results),
+            }
+            job.status = JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value
+            job.finished_at = utcnow()
+            job.progress_percent = 100
+            job.result = json.dumps(job_result, indent=2)
+            job.error = None if succeeded else "One or more appliance apply units reported a failure."
+            db.commit()
+            record_audit(
+                db,
+                actor=job.created_by,
+                action="complete_appliance_apply_task",
+                resource_type="job",
+                resource_id=job.id,
+                detail=f"selected_units={','.join(selected_order)}; result={job.status}",
+                success=succeeded,
+            )
+        except Exception as exc:  # noqa: BLE001 - background task must persist a safe terminal state.
+            APPLY_LOGGER.exception("Appliance apply task %s failed before completion", job_id)
+            db.rollback()
+            job = db.get(Job, job_id)
+            if job is None:
+                return
+            safe_error = str(exc) if isinstance(exc, ApplianceApplyJobError) else "Appliance apply task failed unexpectedly."
+            job_result = json.loads(job.result or "{}")
+            job.status = JobStatus.FAILED.value
+            job.finished_at = utcnow()
+            job.progress_percent = 100
+            job.result = json.dumps({**job_result, "units": unit_results}, indent=2)
+            job.error = safe_error
+            db.commit()
+            record_audit(
+                db,
+                actor=job.created_by,
+                action="complete_appliance_apply_task",
+                resource_type="job",
+                resource_id=job.id,
+                detail=f"result={job.status}",
+                success=False,
+            )
+
+
 @router.post("/appliance-apply", response_class=HTMLResponse, response_model=None)
 def submit_appliance_apply(
     request: Request,
+    background_tasks: BackgroundTasks,
     selected_units: list[str] = Form(default=[]),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -8142,10 +8292,6 @@ def submit_appliance_apply(
         )
 
     selected_ordered_units = [unit for unit in units if unit["id"] in selected_ids]
-    unit_results = [execute_appliance_apply_unit(unit) for unit in selected_ordered_units]
-    succeeded = all(result["success"] for result in unit_results)
-    persist_vcf_depot_metadata_from_apply(db, unit_results)
-    now = utcnow()
     skipped_changed_units = [
         {"unit_id": unit["id"], "label": unit["label"], "summary": unit["summary"]}
         for unit in units
@@ -8154,48 +8300,63 @@ def submit_appliance_apply(
     job_result = {
         "selected_units": [unit["id"] for unit in selected_ordered_units],
         "skipped_changed_units": skipped_changed_units,
-        "units": unit_results,
-        "dry_run": any(result["dry_run"] for result in unit_results),
+        "captured_units": [
+            {
+                "unit_id": unit["id"],
+                "label": unit["label"],
+                "snapshot_hash": unit["snapshot_hash"],
+                "summary": unit["summary"],
+                "validation_errors": unit["validation_errors"],
+                "validation_warnings": unit["validation_warnings"],
+                "config_path": unit["config_path"],
+                "config_preview": unit["config_preview"],
+                "config_diff": unit["config_diff"],
+            }
+            for unit in selected_ordered_units
+        ],
+        "units": [],
+        "dry_run": bool(get_settings().dry_run_system_adapters),
     }
-    job_id = f"job_{uuid4().hex[:12]}"
-    job = Job(
-        id=job_id,
-        type="appliance-apply",
-        status=JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(job_result, indent=2),
-        error=None if succeeded else "One or more appliance apply units reported a failure.",
-    )
-    db.add(job)
-    if succeeded:
-        update_appliance_apply_baselines(db, appliance_apply_units(db), selected_ids)
-    else:
-        log_appliance_apply_failures(job_id, unit_results)
-    log_appliance_apply_submission(
-        job_id,
-        selected_units=[unit["id"] for unit in selected_ordered_units],
-        skipped_changed_units=skipped_changed_units,
-        unit_results=unit_results,
-        succeeded=succeeded,
-    )
-    db.commit()
-    detail = " ; ".join(
-        " ".join(command["command"])
-        for result in unit_results
-        for command in result["commands"]
-    )
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_appliance_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=detail,
-        success=succeeded,
-    )
+    with APPLIANCE_APPLY_SUBMIT_LOCK:
+        db.expire_all()
+        active_job = active_appliance_apply_job(db)
+        if active_job is not None:
+            return render(
+                request,
+                "appliance_apply.html",
+                {
+                    "identity": identity,
+                    **appliance_apply_context(db),
+                    "selected_apply_unit_ids": selected_ids,
+                    "apply_error": (
+                        f"Appliance apply task {active_job.id} is already {active_job.status}. "
+                        "Wait for it to finish before submitting another appliance apply task."
+                    ),
+                },
+                status_code=409,
+            )
+
+        job_id = f"job_{uuid4().hex[:12]}"
+        job = Job(
+            id=job_id,
+            type="appliance-apply",
+            status=JobStatus.PENDING.value,
+            created_by=identity.username,
+            progress_percent=0,
+            result=json.dumps(job_result, indent=2),
+            error=None,
+        )
+        db.add(job)
+        db.commit()
+        record_audit(
+            db,
+            actor=identity.username,
+            action="create_appliance_apply_task",
+            resource_type="job",
+            resource_id=job.id,
+            detail=f"selected_units={','.join(job_result['selected_units'])}",
+        )
+    background_tasks.add_task(run_appliance_apply_job, job.id)
     return render(
         request,
         "appliance_apply.html",
@@ -8204,8 +8365,8 @@ def submit_appliance_apply(
             **appliance_apply_context(db),
             "apply_task": job,
             "apply_task_dry_run": job_result["dry_run"],
-            "applied_unit_results": unit_results,
-            "apply_failure_summaries": appliance_apply_failure_summaries(unit_results),
+            "applied_unit_results": [],
+            "apply_failure_summaries": [],
         },
     )
 

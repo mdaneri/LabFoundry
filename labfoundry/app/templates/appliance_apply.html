@@ -21,9 +21,9 @@
         <div class="alert error">{{ apply_error }}</div>
       {% endif %}
       {% if apply_task %}
-        <div class="alert {{ 'success' if apply_task.status == 'succeeded' else 'error' }}">
+        <div class="alert {{ 'success' if apply_task.status == 'succeeded' else ('error' if apply_task.status == 'failed' else 'warning') }}">
           <strong>Appliance apply task {{ apply_task.status }}</strong>
-          <p>{{ apply_task.id }}{% if apply_task_dry_run %} recorded as dry-run.{% endif %}</p>
+          <p>{{ apply_task.id }}{% if apply_task.status in ['pending', 'running'] %} was created and will continue in the background.{% elif apply_task_dry_run %} recorded as dry-run.{% endif %} <a class="text-link" href="/tasks?job_id={{ apply_task.id }}">Open task</a></p>
           {% if apply_task_dry_run %}
             <p>Dry-run mode recorded the commands without changing the host.</p>
           {% endif %}
