@@ -162,6 +162,7 @@ def test_vmware_ovf_customizer_rotates_clone_specific_env_secrets(tmp_path):
 
 def test_vmware_ovf_export_and_image_plumbing_are_present():
     export_script = Path("scripts/windows/vmware/export-ovf.ps1").read_text(encoding="utf-8")
+    packer_template = Path("image/vmware-workstation/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
     provision_script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
     bootstrap_script = Path("scripts/appliance/labfoundry-bootstrap-https").read_text(encoding="utf-8")
     vmware_unit = Path("image/vmware-workstation/systemd/labfoundry-vmware-ovf-customize.service").read_text(encoding="utf-8")
@@ -186,6 +187,12 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "VMware Workstation\\OVFTool\\ovftool.exe" in export_script
     assert "Join-Path $Path 'ovftool.exe'" in export_script
     assert "Add-LabFoundryOvfProperties" in export_script
+    assert "Set-LabFoundryOvfHardware" in export_script
+    assert "'osType' -Value 'vmwarePhoton64Guest'" in export_script
+    assert "'id' -Value '36'" in export_script
+    assert "'ResourceSubType' -Value 'VirtualSCSI'" in export_script
+    assert "'ResourceType') -eq '15'" in export_script
+    assert "ResourceType') -in @('5', '20')" in export_script
     assert "Ensure-LabFoundryOvfNetworks" in export_script
     assert "SelectSingleNode('/ovf:Envelope/ovf:NetworkSection'" in export_script
     assert "envelope.InsertBefore($networkSection, $VirtualSystem)" in export_script
@@ -225,3 +232,6 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "VMware Workstation\\OVFTool" in docs
     assert "LabFoundry Management Network" in docs
     assert "LabFoundry Services Network" in docs
+    assert 'guest_os_type        = "vmware-photon-64"' in packer_template
+    assert 'disk_adapter_type    = "pvscsi"' in packer_template
+    assert '"sata0:0.present" = "FALSE"' in packer_template

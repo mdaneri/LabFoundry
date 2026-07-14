@@ -152,12 +152,13 @@ locals {
 source "vmware-iso" "photon" {
   vm_name              = var.vm_name
   output_directory     = var.output_directory
-  guest_os_type        = "other5xlinux-64"
+  guest_os_type        = "vmware-photon-64"
   version              = 21
   headless             = var.headless
   cpus                 = 4
   memory               = 4096
   disk_size            = 40960
+  disk_adapter_type    = "pvscsi"
   disk_type_id         = 0
   cdrom_adapter_type   = "sata"
   network              = var.vmnet_name
@@ -173,14 +174,18 @@ source "vmware-iso" "photon" {
   shutdown_command     = "echo '${var.ssh_password}' | sudo -S systemctl poweroff"
 
   vmx_data = {
-    "firmware"                = "efi"
-    "uefi.secureBoot.enabled" = "FALSE"
-    "ethernet1.present"       = "TRUE"
+    "firmware"                 = "efi"
+    "uefi.secureBoot.enabled"  = "FALSE"
+    "ethernet1.present"        = "TRUE"
     "ethernet1.connectionType" = "custom"
-    "ethernet1.vnet"          = var.service_vmnet_name
-    "ethernet1.virtualDev"    = "vmxnet3"
-    "ethernet1.addressType"   = "generated"
+    "ethernet1.vnet"           = var.service_vmnet_name
+    "ethernet1.virtualDev"     = "vmxnet3"
+    "ethernet1.addressType"    = "generated"
     "ethernet1.startConnected" = "TRUE"
+  }
+
+  vmx_data_post = {
+    "sata0:0.present" = "FALSE"
   }
 }
 

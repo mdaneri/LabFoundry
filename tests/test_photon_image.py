@@ -540,9 +540,12 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "'unregister', $resolvedVmx" in build_script
     assert "Refusing to unregister VMware template outside the configured image output directory" in build_script
     assert 'variable "service_vmnet_name"' in packer_template
-    assert '"ethernet1.present"       = "TRUE"' in packer_template
-    assert '"ethernet1.vnet"          = var.service_vmnet_name' in packer_template
-    assert '"ethernet1.virtualDev"    = "vmxnet3"' in packer_template
+    assert '"ethernet1.present"        = "TRUE"' in packer_template
+    assert '"ethernet1.vnet"           = var.service_vmnet_name' in packer_template
+    assert '"ethernet1.virtualDev"     = "vmxnet3"' in packer_template
+    assert 'guest_os_type        = "vmware-photon-64"' in packer_template
+    assert 'disk_adapter_type    = "pvscsi"' in packer_template
+    assert '"sata0:0.present" = "FALSE"' in packer_template
     assert "-TrustRootCa" in docs
     assert "removes stale" in docs
     assert "connection summary" in docs

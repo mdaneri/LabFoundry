@@ -150,7 +150,9 @@ powershell.exe -ExecutionPolicy Bypass `
 
 The export script runs OVF Tool, adds LabFoundry vApp properties and appliance
 network mappings to the OVF descriptor, regenerates the manifest, and packages
-the folder as an OVA unless `-NoOva` is passed. The descriptor exposes two
+the folder as an OVA unless `-NoOva` is passed. It identifies the guest as
+VMware Photon OS, uses VMware Paravirtual SCSI for the appliance disk, and
+removes the build-time CD-ROM device. The descriptor exposes two
 network mappings for vSphere/ESXi import: `LabFoundry Management Network` for
 the first adapter, which remains management-only as `eth0`, and
 `LabFoundry Services Network` for the second adapter used by DNS, DHCP, CA,

@@ -306,6 +306,45 @@ function Ensure-LabFoundryOvfNetworks {
     Set-RasdValue -Document $Document -Item $serviceAdapter -LocalName 'Connection' -Value $serviceNetworkName
 }
 
+function Set-LabFoundryOvfHardware {
+    param(
+        [xml]$Document,
+        [System.Xml.XmlElement]$HardwareSection,
+        [System.Xml.XmlNamespaceManager]$NamespaceManager
+    )
+
+    $operatingSystem = $Document.SelectSingleNode('//ovf:VirtualSystem/ovf:OperatingSystemSection', $NamespaceManager)
+    if (-not $operatingSystem) {
+        throw 'OVF descriptor does not contain an ovf:OperatingSystemSection.'
+    }
+    Set-OvfAttribute -Document $Document -Element $operatingSystem -Name 'id' -Value '36'
+    Set-VmwAttribute -Document $Document -Element $operatingSystem -Name 'osType' -Value 'vmwarePhoton64Guest'
+
+    $items = @($HardwareSection.SelectNodes('ovf:Item', $NamespaceManager))
+    $scsiControllers = @($items | Where-Object { (Get-RasdValue -Item $_ -LocalName 'ResourceType') -eq '6' })
+    if ($scsiControllers.Count -eq 0) {
+        throw 'OVF descriptor does not contain a SCSI controller for the appliance disk.'
+    }
+    foreach ($controller in $scsiControllers) {
+        Set-RasdValue -Document $Document -Item $controller -LocalName 'ResourceSubType' -Value 'VirtualSCSI'
+        Set-RasdValue -Document $Document -Item $controller -LocalName 'ElementName' -Value 'SCSI Controller 0 - VMware Paravirtual'
+        Set-RasdValue -Document $Document -Item $controller -LocalName 'Description' -Value 'VMware Paravirtual SCSI controller.'
+    }
+
+    foreach ($cdrom in @($items | Where-Object { (Get-RasdValue -Item $_ -LocalName 'ResourceType') -eq '15' })) {
+        [void]$HardwareSection.RemoveChild($cdrom)
+    }
+
+    $remainingItems = @($HardwareSection.SelectNodes('ovf:Item', $NamespaceManager))
+    foreach ($controller in @($remainingItems | Where-Object { (Get-RasdValue -Item $_ -LocalName 'ResourceType') -in @('5', '20') })) {
+        $instanceId = Get-RasdValue -Item $controller -LocalName 'InstanceID'
+        $hasChildren = $remainingItems | Where-Object { (Get-RasdValue -Item $_ -LocalName 'Parent') -eq $instanceId } | Select-Object -First 1
+        if (-not $hasChildren) {
+            [void]$HardwareSection.RemoveChild($controller)
+        }
+    }
+}
+
 function Get-OvfProperty {
     param(
         [System.Xml.XmlElement]$ProductSection,
@@ -407,6 +446,7 @@ function Add-LabFoundryOvfProperties {
     $hardware = $document.SelectSingleNode('//ovf:VirtualSystem/ovf:VirtualHardwareSection', $manager)
     if ($hardware) {
         Set-OvfAttribute -Document $document -Element $hardware -Name 'transport' -Value 'com.vmware.guestInfo'
+        Set-LabFoundryOvfHardware -Document $document -HardwareSection $hardware -NamespaceManager $manager
         Ensure-LabFoundryOvfNetworks -Document $document -VirtualSystem $virtualSystem -HardwareSection $hardware -NamespaceManager $manager
     }
 
