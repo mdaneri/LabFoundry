@@ -4666,9 +4666,10 @@ textarea {
 
 .logs-refresh-status {
   justify-content: center;
-  width: 210px;
-  flex: 0 0 210px;
+  min-width: 170px;
+  flex: 0 0 auto;
   text-align: center;
+  white-space: nowrap;
 }
 
 .logs-line-selector {
@@ -4828,6 +4829,16 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.audit-events-fallback-shell {
+  flex: 1 1 0;
+  min-height: min(480px, calc(100vh - 200px));
+  overflow: auto;
+}
+
+.audit-events-fallback-shell .data-table {
+  margin: 0;
 }
 
 .validation-list {

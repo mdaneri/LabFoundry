@@ -59,7 +59,7 @@ COMMANDS: dict[str, set[str]] = {
     "ca": {"validate", "apply"},
     "kms": {"validate", "apply"},
     "chronyd": {"validate", "apply", "status", "logs", "capabilities"},
-    "nginx": {"logs"},
+    "nginx": {"logs", "access-logs", "error-logs"},
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
     "vcf-offline-depot": {"validate", "stage-tool", "reset-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties"},
@@ -90,6 +90,8 @@ NO_PATH_ACTIONS = {
     ("chronyd", "logs"),
     ("chronyd", "capabilities"),
     ("nginx", "logs"),
+    ("nginx", "access-logs"),
+    ("nginx", "error-logs"),
     ("appliance-power", "reboot"),
     ("appliance-power", "shutdown"),
     ("vcf-offline-depot", "generate-software-depot-id"),
@@ -140,6 +142,8 @@ PXE_BOOT_BINARY_DIRS = [
 KMS_APPLY_DIR = Path("/var/lib/labfoundry/apply/kms")
 KMS_STATE_DIR = Path("/var/lib/labfoundry/kms")
 KMS_LOG_DIR = Path("/var/log/labfoundry/kms")
+NGINX_ACCESS_LOG_PATH = Path("/var/log/nginx/access.log")
+NGINX_ERROR_LOG_PATH = Path("/var/log/nginx/error.log")
 KMS_CONFIG_DIR = Path("/etc/labfoundry/kms")
 KMS_CONFIG_PATH = KMS_CONFIG_DIR / "pykmip.conf"
 KMS_POLICY_DIR = KMS_CONFIG_DIR / "policies"
@@ -1957,13 +1961,31 @@ def _chronyd_logs() -> int:
 
 
 def _handle_nginx(action: str, args: list[str]) -> int:
-    if action != "logs":
+    if action not in {"logs", "access-logs", "error-logs"}:
         print(f"unsupported nginx action: {action}", file=sys.stderr)
         return 2
     if args:
-        print("nginx logs does not accept a path", file=sys.stderr)
+        print(f"nginx {action} does not accept a path", file=sys.stderr)
         return 2
-    return _systemd_unit_logs("nginx.service")
+    if action == "logs":
+        return _systemd_unit_logs("nginx.service")
+    log_path = NGINX_ACCESS_LOG_PATH if action == "access-logs" else NGINX_ERROR_LOG_PATH
+    if not log_path.is_file():
+        print(f"nginx log file is unavailable: {log_path}", file=sys.stderr)
+        return 1
+    try:
+        size = log_path.stat().st_size
+        with log_path.open("rb") as handle:
+            if size > 512 * 1024:
+                handle.seek(size - 512 * 1024)
+            text = handle.read(512 * 1024).decode("utf-8", errors="replace")
+    except OSError as exc:
+        print(f"unable to read nginx log file {log_path}: {exc}", file=sys.stderr)
+        return 1
+    lines = text.splitlines()[-500:]
+    if lines:
+        print("\n".join(lines))
+    return 0
 
 
 def _chronyd_capabilities() -> int:

@@ -10634,7 +10634,7 @@ function initializeLogsPage() {
         }
       }
       if (refreshStatus instanceof HTMLElement) {
-        refreshStatus.textContent = `Auto-refresh 5s · updated ${new Date().toLocaleTimeString()}`;
+        refreshStatus.textContent = `Updated ${new Date().toLocaleTimeString()} · 5s`;
       }
     } catch {
       if (refreshStatus instanceof HTMLElement) {
@@ -10671,6 +10671,7 @@ function initializeAuditEventsTable() {
   }
   const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
   try {
+    tableElement.classList.remove("hidden");
     const rows = JSON.parse(tableElement.dataset.auditEvents || "[]");
     const rowHeight = 30;
     const rowPitch = rowHeight + 1;
@@ -10705,6 +10706,7 @@ function initializeAuditEventsTable() {
     resizeObserver.observe(tableElement);
     fallback?.classList.add("hidden");
   } catch (_error) {
+    tableElement.classList.add("hidden");
     fallback?.classList.remove("hidden");
   }
 }

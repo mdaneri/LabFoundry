@@ -6796,6 +6796,22 @@ def log_sources_context(*, max_lines: int = 100) -> list[dict[str, Any]]:
         ),
         journal_log_source("chrony", "Chrony", "chronyd.service", adapter.read_chronyd_logs(), max_lines=line_count),
         journal_log_source("nginx", "Nginx", "nginx.service", adapter.read_nginx_logs(), max_lines=line_count),
+        journal_log_source(
+            "nginx-access",
+            "HTTP Access",
+            "nginx.service",
+            adapter.read_nginx_access_logs(),
+            max_lines=line_count,
+            path_label="/var/log/nginx/access.log · management and service HTTP requests",
+        ),
+        journal_log_source(
+            "nginx-error",
+            "HTTP Errors",
+            "nginx.service",
+            adapter.read_nginx_error_logs(),
+            max_lines=line_count,
+            path_label="/var/log/nginx/error.log · management and service HTTP errors",
+        ),
         {
             "id": "kms",
             "label": "KMS",

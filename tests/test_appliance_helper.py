@@ -3726,6 +3726,23 @@ def test_nginx_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
     assert commands == [["/usr/bin/journalctl", "-u", "nginx.service", "-n", "500", "--no-pager", "--output=short-iso"]]
 
 
+def test_nginx_helper_reads_only_fixed_http_log_files(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    access_log = tmp_path / "access.log"
+    error_log = tmp_path / "error.log"
+    access_log.write_text("management request\nservice request\n", encoding="utf-8")
+    error_log.write_text("upstream error\n", encoding="utf-8")
+    monkeypatch.setattr(helper, "NGINX_ACCESS_LOG_PATH", access_log)
+    monkeypatch.setattr(helper, "NGINX_ERROR_LOG_PATH", error_log)
+
+    assert helper._handle_nginx("access-logs", []) == 0
+    assert capsys.readouterr().out == "management request\nservice request\n"
+    assert helper._handle_nginx("error-logs", []) == 0
+    assert capsys.readouterr().out == "upstream error\n"
+    assert helper._handle_nginx("access-logs", ["/tmp/other.log"]) == 2
+    assert "does not accept a path" in capsys.readouterr().err
+
+
 def test_chronyd_helper_capabilities_reports_missing_nts(monkeypatch, capsys):
     helper = load_helper_module()
     monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/chronyd" if command == "chronyd" else None)
