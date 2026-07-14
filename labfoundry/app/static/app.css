@@ -4763,12 +4763,23 @@ textarea {
 }
 
 .audit-events-panel {
-  min-height: calc(100vh - 144px);
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 120px);
+  min-height: 0;
+  margin-bottom: 0;
+  overflow: hidden;
+}
+
+.audit-events-panel > .panel-head {
+  flex: 0 0 auto;
 }
 
 .audit-events-grid {
+  flex: 1 1 0;
   min-height: 0;
-  height: calc(100vh - 230px);
+  height: auto;
+  overflow: hidden;
 }
 
 .audit-events-grid .tabulator-cell {

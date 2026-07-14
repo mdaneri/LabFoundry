@@ -10677,11 +10677,8 @@ function initializeAuditEventsTable() {
       index: "id",
       layout: "fitColumns",
       height: "100%",
+      renderVertical: "virtual",
       placeholder: "No audit events yet.",
-      pagination: true,
-      paginationMode: "local",
-      paginationSize: 100,
-      paginationSizeSelector: [100, 200, 500],
       columns: [
         { title: "Time", field: "created_at", width: 170, headerFilter: "input" },
         { title: "Actor", field: "actor", width: 130, headerFilter: "input" },
