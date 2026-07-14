@@ -10679,6 +10679,8 @@ function initializeAuditEventsTable() {
       height: "100%",
       renderVertical: "virtual",
       placeholder: "No audit events yet.",
+      pagination: true,
+      paginationMode: "local",
       columns: [
         { title: "Time", field: "created_at", width: 170, headerFilter: "input" },
         { title: "Actor", field: "actor", width: 130, headerFilter: "input" },

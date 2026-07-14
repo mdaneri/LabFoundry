@@ -383,8 +383,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=logs-scrollbar-20260713-6" in service_worker.text
-    assert "/static/app.js?v=logs-scrollbar-20260713-6" in service_worker.text
+    assert "/static/app.css?v=audit-pagination-20260713-7" in service_worker.text
+    assert "/static/app.js?v=audit-pagination-20260713-7" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -393,7 +393,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=logs-scrollbar-20260713-6" in offline.text
+    assert "/static/app.css?v=audit-pagination-20260713-7" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -409,8 +409,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=logs-scrollbar-20260713-6" in page.text
-    assert "/static/app.js?v=logs-scrollbar-20260713-6" in page.text
+    assert "/static/app.css?v=audit-pagination-20260713-7" in page.text
+    assert "/static/app.js?v=audit-pagination-20260713-7" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3735,6 +3735,8 @@ def test_audit_log_renders(client):
     assert 'id="audit-events-fallback"' in response.text
     audit_js = client.get("/static/app.js").text.split("function initializeAuditEventsTable", 1)[1].split("function ", 1)[0]
     assert 'renderVertical: "virtual"' in audit_js
+    assert "pagination: true" in audit_js
+    assert 'paginationMode: "local"' in audit_js
     assert "paginationSize" not in audit_js
     audit_css = client.get("/static/app.css").text
     assert ".audit-events-panel" in audit_css
@@ -8469,7 +8471,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "logs-scrollbar-20260713-6" in page.text
+    assert "audit-pagination-20260713-7" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
