@@ -37,7 +37,7 @@
     <div class="tab-panels">
       {% for source in log_sources %}
         <div id="logs-{{ source.id }}-panel" class="tab-panel {{ 'active' if active_log_tab.id == source.id else '' }}" role="tabpanel" data-log-source-id="{{ source.id }}" {{ "hidden" if active_log_tab.id != source.id else "" }}>
-          <div class="terminal-note">
+          <div class="terminal-note" data-terminal-note-open="false">
             <strong data-log-meta>{{ source.size_bytes }} bytes{% if source.updated_at %} · {{ source.updated_at }}{% endif %}{% if source.truncated %} · tail view{% endif %}</strong>
             <code class="language-labfoundry-log" data-log-lines-output>{{ source.lines | join('\n') if source.available else source.error or "Log file has not been written yet." }}</code>
           </div>

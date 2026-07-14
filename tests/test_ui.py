@@ -383,8 +383,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=logs-layout-20260713-2" in service_worker.text
-    assert "/static/app.js?v=logs-layout-20260713-2" in service_worker.text
+    assert "/static/app.css?v=logs-scroll-20260713-4" in service_worker.text
+    assert "/static/app.js?v=logs-scroll-20260713-4" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -393,7 +393,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=logs-layout-20260713-2" in offline.text
+    assert "/static/app.css?v=logs-scroll-20260713-4" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -409,8 +409,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=logs-layout-20260713-2" in page.text
-    assert "/static/app.js?v=logs-layout-20260713-2" in page.text
+    assert "/static/app.css?v=logs-scroll-20260713-4" in page.text
+    assert "/static/app.js?v=logs-scroll-20260713-4" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3816,6 +3816,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert '<option value="500" >500</option>' in response.text
     assert "Auto-refresh 5s" in response.text
     assert 'class="language-labfoundry-log" data-log-lines-output' in response.text
+    assert response.text.count('data-terminal-note-open="false"') == 7
     toolbar = response.text.split('<div class="logs-toolbar">', 1)[1].split("</div>", 1)[0]
     assert toolbar.index("data-log-refresh-status") < toolbar.index("data-log-lines")
     assert "logs-refresh-status" in toolbar
@@ -3860,6 +3861,13 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert 'window.Prism.languages["labfoundry-log"]' in js.text
     assert '"level-error"' in js.text
     assert "highlightConfigPreviewElement(output);" in js.text
+    css = client.get("/static/app.css")
+    assert "height: calc(100vh - 120px);" in css.text
+    assert "flex: 1 1 0;" in css.text
+    assert "grid-template-rows: minmax(0, 1fr);" in css.text
+    assert "grid-template-rows: auto minmax(0, 1fr);" in css.text
+    assert "overflow-y: auto;" in css.text
+    assert "scrollbar-gutter: stable;" in css.text
 
 
 def test_configure_logging_writes_main_app_log(tmp_path, monkeypatch):
@@ -8453,7 +8461,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "logs-layout-20260713-2" in page.text
+    assert "logs-scroll-20260713-4" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

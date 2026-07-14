@@ -4711,10 +4711,26 @@ textarea {
 }
 
 [data-logs-page] {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 120px);
+  margin-bottom: 0;
+  overflow: hidden;
   overflow-x: hidden;
 }
 
-[data-logs-page] .tab-panels,
+[data-logs-page] > .panel-head,
+[data-logs-page] > .tool-tabs {
+  flex: 0 0 auto;
+}
+
+[data-logs-page] .tab-panels {
+  flex: 1 1 0;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
 [data-logs-page] .tab-panel,
 [data-logs-page] .terminal-note,
 [data-logs-page] [data-log-lines-output] {
@@ -4722,9 +4738,28 @@ textarea {
   max-width: 100%;
 }
 
+[data-logs-page] .tab-panel {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+[data-logs-page] .terminal-note {
+  box-sizing: border-box;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  margin-top: 0;
+  overflow: hidden;
+}
+
 [data-logs-page] [data-log-lines-output] {
   width: 100%;
-  overflow: hidden;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .audit-events-panel {
