@@ -737,6 +737,26 @@ textarea {
   width: min(430px, calc(100vw - 32px));
 }
 
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.about-brand-mark {
+  width: 58px;
+  height: 58px;
+  flex: 0 0 58px;
+  border-radius: 12px;
+  filter: drop-shadow(0 8px 18px rgba(37, 99, 235, 0.16));
+}
+
+.about-brand > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
 .about-facts {
   display: grid;
   gap: 8px;

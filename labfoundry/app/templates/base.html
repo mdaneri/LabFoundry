@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=audit-fit-20260713-9">
+    <link rel="stylesheet" href="/static/app.css?v=about-logo-20260713-10">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -168,8 +168,13 @@
       <div class="confirm-modal-panel about-modal-panel">
         <div class="confirm-modal-body">
           <p class="kicker">About</p>
-          <h2 id="about-modal-title">LabFoundry</h2>
-          <p class="muted">Photon appliance control plane for lab infrastructure services.</p>
+          <div class="about-brand">
+            <img class="about-brand-mark" src="/static/brand/labfoundry-mark.svg" alt="" aria-hidden="true">
+            <div>
+              <h2 id="about-modal-title">LabFoundry</h2>
+              <p class="muted">Photon appliance control plane for lab infrastructure services.</p>
+            </div>
+          </div>
           <dl class="about-facts">
             <div><dt>Version</dt><dd>{{ current_version_info.base_version|default(current_version_info.version) }}</dd></div>
             <div><dt>Build</dt><dd>{{ current_version_info.public_label or "source checkout" }}</dd></div>
@@ -241,7 +246,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=audit-fit-20260713-9"></script>
+    <script src="/static/app.js?v=about-logo-20260713-10"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>
