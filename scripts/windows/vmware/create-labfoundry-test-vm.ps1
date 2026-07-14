@@ -21,7 +21,7 @@ param(
     [switch]$SkipNetworkPrepare,
     [switch]$WaitForIp,
     [switch]$TrustRootCa,
-    [int]$IpTimeoutSeconds = 180
+    [int]$TimeoutSeconds = 180
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,7 +53,7 @@ function Install-ApplianceRootCa {
     $rootCerPath = Join-Path $env:TEMP "labfoundry-$Name-root-ca.cer"
     $rootUrl = "http://$IpAddress/ca/downloads/root-ca.pem"
     Write-Host "Downloading LabFoundry root CA from $rootUrl"
-    Invoke-WebRequest -Uri $rootUrl -UseBasicParsing -TimeoutSec 30 -OutFile $rootPemPath
+    Invoke-WebRequest -Uri $rootUrl -UseBasicParsing -TimeoutSec $TimeoutSeconds -OutFile $rootPemPath
 
     $pem = Get-Content -LiteralPath $rootPemPath -Raw
     $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::CreateFromPem($pem)
@@ -236,7 +236,7 @@ if (($WaitForIp -or $TrustRootCa) -and -not $NoStart -and -not $WhatIfPreference
     $ip = & (Join-Path $PSScriptRoot 'get-labfoundry-vm-ip.ps1') `
         -VmxPath $targetVmx `
         -VmrunPath $VmrunPath `
-        -TimeoutSeconds $IpTimeoutSeconds
+        -TimeoutSeconds $TimeoutSeconds
     if ($WaitForIp) {
         Write-Host "Management IP: $ip"
     }
