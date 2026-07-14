@@ -4760,6 +4760,28 @@ textarea {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  scrollbar-color: rgba(148, 163, 184, 0.62) transparent;
+  scrollbar-width: thin;
+}
+
+[data-logs-page] [data-log-lines-output]::-webkit-scrollbar {
+  width: 8px;
+}
+
+[data-logs-page] [data-log-lines-output]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-logs-page] [data-log-lines-output]::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.62);
+  background-clip: padding-box;
+}
+
+[data-logs-page] [data-log-lines-output]::-webkit-scrollbar-thumb:hover {
+  background: rgba(191, 219, 254, 0.82);
+  background-clip: padding-box;
 }
 
 .audit-events-panel {

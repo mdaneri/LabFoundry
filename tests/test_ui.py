@@ -383,8 +383,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=audit-grid-20260713-5" in service_worker.text
-    assert "/static/app.js?v=audit-grid-20260713-5" in service_worker.text
+    assert "/static/app.css?v=logs-scrollbar-20260713-6" in service_worker.text
+    assert "/static/app.js?v=logs-scrollbar-20260713-6" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -393,7 +393,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=audit-grid-20260713-5" in offline.text
+    assert "/static/app.css?v=logs-scrollbar-20260713-6" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -409,8 +409,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=audit-grid-20260713-5" in page.text
-    assert "/static/app.js?v=audit-grid-20260713-5" in page.text
+    assert "/static/app.css?v=logs-scrollbar-20260713-6" in page.text
+    assert "/static/app.js?v=logs-scrollbar-20260713-6" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3874,6 +3874,8 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "grid-template-rows: auto minmax(0, 1fr);" in css.text
     assert "overflow-y: auto;" in css.text
     assert "scrollbar-gutter: stable;" in css.text
+    assert "scrollbar-width: thin;" in css.text
+    assert "::-webkit-scrollbar-thumb" in css.text
 
 
 def test_configure_logging_writes_main_app_log(tmp_path, monkeypatch):
@@ -8467,7 +8469,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "audit-grid-20260713-5" in page.text
+    assert "logs-scrollbar-20260713-6" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
