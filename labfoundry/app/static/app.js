@@ -1412,10 +1412,13 @@ async function deleteDhcpOptionFromMenu(row, csrf) {
 function hasRequiredDhcpScopeFields(data) {
   return Boolean(
     (data.name || "").trim() &&
+      (data.address_family || "").trim() &&
       (data.interface_name || "").trim() &&
       (data.site_address || "").trim() &&
+      String(data.prefix_length ?? "").trim() &&
       (data.range_expression || "").trim() &&
-      (data.dns_server || "").trim(),
+      (data.lease_time || "").trim() &&
+      (data.domain_name || "").trim(),
   );
 }
 

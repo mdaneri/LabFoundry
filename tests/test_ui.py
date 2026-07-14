@@ -372,7 +372,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v77" in service_worker.text
+    assert "labfoundry-pwa-v78" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -385,7 +385,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=dashboard-20260714-1" in service_worker.text
-    assert "/static/app.js?v=dashboard-async-20260714-1" in service_worker.text
+    assert "/static/app.js?v=dhcp-vlan-zone-20260714-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -411,7 +411,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=dashboard-20260714-1" in page.text
-    assert "/static/app.js?v=dashboard-async-20260714-1" in page.text
+    assert "/static/app.js?v=dhcp-vlan-zone-20260714-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -9886,6 +9886,50 @@ def test_dhcp_scope_edit_form_updates_ip_zone(client):
     assert "192.168.50.110" in refreshed.text
     assert "edited IP zone" in refreshed.text
     assert '"ntp_server": "192.168.50.1"' in refreshed.text
+
+
+def test_dhcp_vlan_scope_can_be_created_without_dns_server(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DhcpScope
+
+    login(client)
+    page = client.get("/dhcp")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    created = client.post(
+        "/dhcp/scopes",
+        data={
+            "name": "VLAN20",
+            "address_family": "ipv4",
+            "interface_name": "eth1.20",
+            "site_address": "192.168.20.1",
+            "prefix_length": "24",
+            "range_expression": "192.168.20.100-192.168.20.200",
+            "lease_time": "12h",
+            "domain_name": "labfoundry.internal",
+            "dns_server": "",
+            "ntp_server": "",
+            "description": "VLAN DHCP zone without a bound DNS listener",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+
+    assert created.status_code == 303
+    with SessionLocal() as db:
+        scope = db.execute(select(DhcpScope).where(DhcpScope.name == "VLAN20")).scalar_one()
+        assert scope.interface_name == "eth1.20"
+        assert scope.dns_server == ""
+
+    app_js = client.get("/static/app.js").text
+    required_block = app_js.split("function hasRequiredDhcpScopeFields", 1)[1].split("async function autoSaveDhcpScope", 1)[0]
+    assert "data.address_family" in required_block
+    assert "data.prefix_length" in required_block
+    assert "data.lease_time" in required_block
+    assert "data.domain_name" in required_block
+    assert "data.dns_server" not in required_block
 
 
 def test_dhcp_scope_family_cannot_change_after_create(client):
