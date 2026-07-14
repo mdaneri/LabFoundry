@@ -169,17 +169,18 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     gitignore = Path(".gitignore").read_text(encoding="utf-8")
 
     for key in (
-        "labfoundry.management_mode",
-        "labfoundry.cidr",
-        "labfoundry.gateway",
-        "labfoundry.fqdn",
-        "labfoundry.dns_servers",
-        "labfoundry.ntp_servers",
-        "labfoundry.admin_password",
-        "labfoundry.root_password",
+        "management_mode",
+        "cidr",
+        "gateway",
+        "fqdn",
+        "dns_servers",
+        "ntp_servers",
+        "admin_password",
+        "root_password",
     ):
-        assert key in export_script
-        assert key in docs
+        assert f"-Key '{key}'" in export_script
+        assert f"-Key 'labfoundry.{key}'" not in export_script
+        assert f"`labfoundry.{key}`" in docs
 
     assert "ovftool was not found" in export_script
     assert "VMware Workstation\\OVFTool\\ovftool.exe" in export_script
@@ -194,6 +195,9 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "Appliance identity and time" in export_script
     assert "Initial credentials" in export_script
     assert "-DefaultValue 'dhcp'" in export_script
+    assert "-Name 'class' -Value 'labfoundry'" in export_script
+    assert "$propertyType = if ($Password) { 'password' } else { 'string' }" in export_script
+    assert "$property.RemoveAttribute('password', $vmwNamespace)" in export_script
     assert "LabFoundry Management Network" in export_script
     assert "LabFoundry Services Network" in export_script
     assert "$serviceAdapter = $networkAdapters[1]" in export_script

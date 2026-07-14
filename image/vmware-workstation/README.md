@@ -177,6 +177,10 @@ under `/var/lib/labfoundry`.
 Passwords are consumed as deployment inputs and are not printed in the marker or
 customization log.
 
+The OVF descriptor stores these as unqualified property IDs inside the
+`labfoundry` product class. ESXi qualifies them once in the guest OVF environment
+as `labfoundry.<property>`; do not repeat the class prefix in each property ID.
+
 ## Lifecycle
 
 Run the Workstation lifecycle wrapper after building an appliance VM:

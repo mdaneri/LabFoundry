@@ -349,7 +349,8 @@ function Set-LabFoundryOvfProperty {
     }
     [void]$ProductSection.AppendChild($property)
     Set-OvfAttribute -Document $Document -Element $property -Name 'key' -Value $Key
-    Set-OvfAttribute -Document $Document -Element $property -Name 'type' -Value 'string'
+    $propertyType = if ($Password) { 'password' } else { 'string' }
+    Set-OvfAttribute -Document $Document -Element $property -Name 'type' -Value $propertyType
     Set-OvfAttribute -Document $Document -Element $property -Name 'userConfigurable' -Value 'true'
     Set-OvfAttribute -Document $Document -Element $property -Name 'required' -Value ($Required.ToString().ToLowerInvariant())
     if ($DefaultValue) {
@@ -358,9 +359,7 @@ function Set-LabFoundryOvfProperty {
     else {
         $property.RemoveAttribute('value', $ovfNamespace)
     }
-    if ($Password) {
-        Set-VmwAttribute -Document $Document -Element $property -Name 'password' -Value 'true'
-    }
+    $property.RemoveAttribute('password', $vmwNamespace)
 
     foreach ($childName in @('Label', 'Description')) {
         foreach ($child in @($property.GetElementsByTagName($childName, $ovfNamespace))) {
@@ -416,18 +415,18 @@ function Add-LabFoundryOvfProperties {
     }
 
     Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Management network'
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.management_mode' -Label 'Management IPv4 mode' -Description 'Use dhcp for VMware-assigned management addressing, or static to require labfoundry.cidr and labfoundry.gateway.' -Required $false -DefaultValue 'dhcp'
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.cidr' -Label 'Management IP CIDR' -Description 'Static management address for eth0, for example 192.168.10.10/24. Required only when management mode is static.' -Required $false
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.gateway' -Label 'Management gateway' -Description 'IPv4 gateway used by the management interface when management mode is static.' -Required $false
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.dns_servers' -Label 'DNS servers' -Description 'Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS.' -Required $false
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'management_mode' -Label 'Management IPv4 mode' -Description 'Use dhcp for VMware-assigned management addressing, or static to require labfoundry.cidr and labfoundry.gateway.' -Required $false -DefaultValue 'dhcp'
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'cidr' -Label 'Management IP CIDR' -Description 'Static management address for eth0, for example 192.168.10.10/24. Required only when management mode is static.' -Required $false
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'gateway' -Label 'Management gateway' -Description 'IPv4 gateway used by the management interface when management mode is static.' -Required $false
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'dns_servers' -Label 'DNS servers' -Description 'Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS.' -Required $false
 
     Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Appliance identity and time'
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.fqdn' -Label 'Appliance FQDN' -Description 'Fully qualified appliance name applied to Photon OS and LabFoundry desired state.' -Required $true
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.ntp_servers' -Label 'NTP servers' -Description 'Optional NTP server names or IPs. If blank, the image defaults are kept.' -Required $false
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'fqdn' -Label 'Appliance FQDN' -Description 'Fully qualified appliance name applied to Photon OS and LabFoundry desired state.' -Required $true
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ntp_servers' -Label 'NTP servers' -Description 'Optional NTP server names or IPs. If blank, the image defaults are kept.' -Required $false
 
     Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Initial credentials'
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.admin_password' -Label 'LabFoundry admin password' -Description 'Initial LabFoundry web admin password. The value is consumed on first boot and not logged.' -Required $true -Password $true
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.root_password' -Label 'Photon root password' -Description 'Photon root console password for recovery. Root SSH remains disabled by default.' -Required $true -Password $true
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'admin_password' -Label 'LabFoundry admin password' -Description 'Initial LabFoundry web admin password. The value is consumed on first boot and not logged.' -Required $true -Password $true
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'root_password' -Label 'Photon root password' -Description 'Photon root console password for recovery. Root SSH remains disabled by default.' -Required $true -Password $true
 
     $settings = New-Object System.Xml.XmlWriterSettings
     $settings.Indent = $true
