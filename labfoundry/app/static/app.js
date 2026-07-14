@@ -154,17 +154,34 @@ function registerLabFoundryPrismLanguages() {
   }
   if (!window.Prism.languages["labfoundry-log"]) {
     window.Prism.languages["labfoundry-log"] = {
-      error: {
-        pattern: /(^|\n)(?:ERROR|FATAL|Caused by:).*/,
-        lookbehind: true,
+      redacted: {
+        pattern: /\[redacted(?: sensitive line|-token)?\]|=\s*\[redacted\]/i,
         alias: "important",
+      },
+      timestamp: /\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/,
+      "level-error": {
+        pattern: /\b(?:ERROR|CRITICAL|FATAL)\b/,
+        alias: "important",
+      },
+      "level-warning": /\b(?:WARN|WARNING)\b/,
+      "level-info": /\b(?:INFO|NOTICE)\b/,
+      "level-debug": /\b(?:TRACE|DEBUG)\b/,
+      component: {
+        pattern: /\[[A-Za-z_][A-Za-z0-9_.-]+\]|\b[A-Za-z_][A-Za-z0-9_.-]+(?=\[\d+\]:)/,
+        alias: "class-name",
+      },
+      identifier: /\b(?:job|req)_[A-Za-z0-9_-]+\b/,
+      address: /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/,
+      label: {
+        pattern: /(^|\n)(?:Job|Type|Status|State|Progress|Created|Started|Finished|Selected units|Skipped changed units|Units)(?=:)/,
+        lookbehind: true,
+        alias: "property",
       },
       command: {
         pattern: /(^|\n)\$ .*/,
         lookbehind: true,
         alias: "function",
       },
-      timestamp: /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/,
       stack: {
         pattern: /^\s+at\s+.+$/m,
         alias: "comment",
@@ -178,6 +195,9 @@ function registerLabFoundryPrismLanguages() {
 function previewLanguageForText(text, element) {
   if (element.classList.contains("language-diff")) {
     return "diff";
+  }
+  if (element.classList.contains("language-labfoundry-log")) {
+    return "labfoundry-log";
   }
   if (element.classList.contains("language-json")) {
     return "json";
@@ -200,13 +220,13 @@ function highlightConfigPreviewElement(element) {
   }
   registerLabFoundryPrismLanguages();
   const language = previewLanguageForText(element.textContent || "", element);
-  element.classList.remove("language-json", "language-labfoundry-config");
+  element.classList.remove("language-json", "language-labfoundry-config", "language-labfoundry-log");
   if (language !== "diff") {
     element.classList.remove("language-diff");
   }
   element.classList.add(`language-${language}`);
   if (element.parentElement instanceof HTMLElement && element.parentElement.tagName === "PRE") {
-    element.parentElement.classList.remove("language-json", "language-labfoundry-config");
+    element.parentElement.classList.remove("language-json", "language-labfoundry-config", "language-labfoundry-log");
     if (language !== "diff") {
       element.parentElement.classList.remove("language-diff");
     }
@@ -8901,6 +8921,7 @@ function renderTaskDetail(task) {
   }
   if (result instanceof HTMLElement) {
     result.textContent = task.result_json || "{}";
+    highlightConfigPreviewElement(result);
   }
   if (cancelButton instanceof HTMLButtonElement) {
     cancelButton.classList.toggle("hidden", !task.can_cancel);
@@ -8970,6 +8991,7 @@ async function openTaskLog(taskId) {
     return;
   }
   content.textContent = "Loading task log…";
+  highlightConfigPreviewElement(content);
   if (title instanceof HTMLElement) {
     title.textContent = "Task log";
   }
@@ -8992,8 +9014,10 @@ async function openTaskLog(taskId) {
       meta.textContent = `${payload.job_id || taskId} · ${payload.status || "unknown"}`;
     }
     content.textContent = payload.text || "No task log is available.";
+    highlightConfigPreviewElement(content);
   } catch (error) {
     content.textContent = error instanceof Error ? error.message : "Unable to load task log.";
+    highlightConfigPreviewElement(content);
   }
 }
 
@@ -10599,6 +10623,7 @@ function initializeLogsPage() {
           output.textContent = source.available
             ? (Array.isArray(source.lines) ? source.lines.join("\n") : "")
             : String(source.error || "Log file has not been written yet.");
+          highlightConfigPreviewElement(output);
         }
       });
       const activeButton = root.querySelector("[role='tablist'] .tab-button.active");
@@ -10609,7 +10634,7 @@ function initializeLogsPage() {
         }
       }
       if (refreshStatus instanceof HTMLElement) {
-        refreshStatus.textContent = `Auto-refresh 5s · updated ${new Date().toLocaleTimeString()}`;
+        refreshStatus.textContent = `Updated ${new Date().toLocaleTimeString()} · 5s`;
       }
     } catch {
       if (refreshStatus instanceof HTMLElement) {
@@ -10637,6 +10662,53 @@ function initializeLogsPage() {
   });
   refresh();
   window.setInterval(refresh, 5000);
+}
+
+function initializeAuditEventsTable() {
+  const tableElement = document.getElementById("audit-events-table");
+  if (!(tableElement instanceof HTMLElement) || typeof Tabulator === "undefined") {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  try {
+    tableElement.classList.remove("hidden");
+    const rows = JSON.parse(tableElement.dataset.auditEvents || "[]");
+    const rowHeight = 30;
+    const rowPitch = rowHeight + 1;
+    const gridChromeHeight = 88;
+    const pageSizeForHeight = () => Math.max(5, Math.floor(Math.max(0, tableElement.clientHeight - gridChromeHeight) / rowPitch));
+    const table = new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "100%",
+      renderVertical: "virtual",
+      rowHeight,
+      placeholder: "No audit events yet.",
+      pagination: true,
+      paginationMode: "local",
+      paginationSize: pageSizeForHeight(),
+      columns: [
+        { title: "Time", field: "created_at", width: 170, headerFilter: "input" },
+        { title: "Actor", field: "actor", width: 130, headerFilter: "input" },
+        { title: "Action", field: "action", minWidth: 190, headerFilter: "input" },
+        { title: "Resource", field: "resource", minWidth: 180, headerFilter: "input" },
+        { title: "Success", field: "success", width: 100, hozAlign: "center", formatter: labFoundryBooleanFormatter, headerFilter: "list", headerFilterParams: { values: { "": "All", true: "Yes", false: "No" } } },
+        { title: "Detail", field: "detail", minWidth: 280, widthGrow: 2, formatter: "plaintext", tooltip: true, headerFilter: "input" },
+      ],
+    });
+    const resizeObserver = new ResizeObserver(() => {
+      const nextPageSize = pageSizeForHeight();
+      if (table.getPageSize() !== nextPageSize) {
+        table.setPageSize(nextPageSize);
+      }
+    });
+    resizeObserver.observe(tableElement);
+    fallback?.classList.add("hidden");
+  } catch (_error) {
+    tableElement.classList.add("hidden");
+    fallback?.classList.remove("hidden");
+  }
 }
 
 function initializeApplianceApplyProgress() {
@@ -12109,6 +12181,7 @@ document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);
 document.addEventListener("DOMContentLoaded", initializeLogsPage);
+document.addEventListener("DOMContentLoaded", initializeAuditEventsTable);
 document.addEventListener("DOMContentLoaded", initializeApplianceApplyProgress);
 document.addEventListener("DOMContentLoaded", initializeMonitorPage);
 document.addEventListener("DOMContentLoaded", initializeHistoryBackButtons);

@@ -61,6 +61,7 @@ def test_login_and_dashboard_render(client):
         "/services",
         "/tasks",
         "/logs",
+        "/audit-log",
         "/appliance-update",
         "/backup-restore",
     ]
@@ -89,9 +90,10 @@ def test_login_and_dashboard_render(client):
     assert 'data-confirm-title="Reboot LabFoundry appliance?"' in response.text
     assert 'data-confirm-title="Shut down LabFoundry appliance?"' in response.text
     assert 'id="about-modal"' in response.text
+    assert 'class="about-brand-mark" src="/static/brand/labfoundry-mark.svg"' in response.text
     assert '<span class="role-chip">admin</span>' not in response.text
     assert 'href="/logs"' in response.text
-    assert 'href="/audit-log"' not in response.text
+    assert 'href="/audit-log"' in response.text
     assert "cdn.tailwindcss.com" not in response.text
     assert "unpkg.com/htmx" not in response.text
     assert 'body class="bg-slate-100 text-slate-900"' not in response.text
@@ -250,6 +252,10 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert "[redacted]" in page.text
     assert "data-task-detail-cancel" in page.text
     assert "data-task-detail-log" in page.text
+    assert 'class="terminal-note task-result-preview"' in page.text
+    assert 'class="language-json" data-task-detail-result' in page.text
+    assert 'class="terminal-note task-log-preview"' in page.text
+    assert 'class="language-labfoundry-log" data-task-log-content' in page.text
     assert "task-grid-shell" in page.text
     assert 'data-selected-task-id="job_taskgrid001"' in page.text
     plain_page = client.get("/tasks")
@@ -271,6 +277,9 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert ".task-detail-facts {\n  grid-template-columns: repeat(2, minmax(0, 1fr));" in app_css
     assert ".task-detail-facts div {\n  grid-template-columns: 92px minmax(0, 1fr);" in app_css
     assert ".task-row-menu" not in app_css
+    assert ".task-result-preview code," in app_css
+    assert "highlightConfigPreviewElement(result);" in app_js
+    assert "highlightConfigPreviewElement(content);" in app_js
 
     status_response = client.get("/tasks/status?job_id=job_taskgrid001")
     assert status_response.status_code == 200
@@ -375,8 +384,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=account-power-menu-20260713-3" in service_worker.text
-    assert "/static/app.js?v=account-power-menu-20260713-3" in service_worker.text
+    assert "/static/app.css?v=logs-http-20260713-12" in service_worker.text
+    assert "/static/app.js?v=logs-http-20260713-12" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -385,7 +394,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=account-power-menu-20260713-3" in offline.text
+    assert "/static/app.css?v=logs-http-20260713-12" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -401,8 +410,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=account-power-menu-20260713-3" in page.text
-    assert "/static/app.js?v=account-power-menu-20260713-3" in page.text
+    assert "/static/app.css?v=logs-http-20260713-12" in page.text
+    assert "/static/app.js?v=logs-http-20260713-12" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3717,15 +3726,82 @@ def test_real_local_users_apply_clears_pending_passwords_and_baselines_post_appl
 
 def test_audit_log_renders(client):
     login(client)
-    response = client.get("/audit-log", follow_redirects=False)
+    response = client.get("/audit-log")
 
-    assert response.status_code == 303
-    assert response.headers["location"] == "/logs#logs-audit-panel"
+    assert response.status_code == 200
+    assert "Audit Events" in response.text
+    assert "ui_login" in response.text
+    assert 'id="audit-events-table"' in response.text
+    assert "data-audit-events=" in response.text
+    assert 'id="audit-events-fallback"' in response.text
+    assert 'id="audit-events-table" class="tabulator-shell audit-events-grid hidden"' in response.text
+    assert 'id="audit-events-fallback" class="audit-events-fallback-shell"' in response.text
+    assert 'id="audit-events-fallback" class="audit-events-fallback-shell hidden"' not in response.text
+    audit_js = client.get("/static/app.js").text.split("function initializeAuditEventsTable", 1)[1].split("function ", 1)[0]
+    assert 'tableElement.classList.remove("hidden")' in audit_js
+    assert 'tableElement.classList.add("hidden")' in audit_js
+    assert 'renderVertical: "virtual"' in audit_js
+    assert "pagination: true" in audit_js
+    assert 'paginationMode: "local"' in audit_js
+    assert "const rowHeight = 30" in audit_js
+    assert "paginationSize: pageSizeForHeight()" in audit_js
+    assert "new ResizeObserver" in audit_js
+    assert "table.setPageSize(nextPageSize)" in audit_js
+    assert 'formatter: "plaintext", tooltip: true' in audit_js
+    assert "paginationSize: 100" not in audit_js
+    audit_css = client.get("/static/app.css").text
+    assert ".audit-events-panel" in audit_css
+    assert "height: calc(100vh - 120px);" in audit_css
+    assert "flex: 1 1 0;" in audit_css
+    assert "min-height: min(480px, calc(100vh - 200px));" in audit_css
+    assert ".audit-events-fallback-shell" in audit_css
+    assert "overflow: auto;" in audit_css
 
-    logs = client.get("/logs")
-    assert logs.status_code == 200
-    assert "Audit Events" in logs.text
-    assert "ui_login" in logs.text
+
+def test_logs_page_shows_unavailable_state_when_every_source_is_unavailable(client, monkeypatch):
+    unavailable_sources = [
+        {
+            "id": "app",
+            "label": "LabFoundry App",
+            "path": "/var/log/labfoundry/labfoundry.log",
+            "available": False,
+            "lines": [],
+            "size_bytes": 0,
+            "updated_at": "",
+            "truncated": False,
+            "error": "Log file has not been written yet.",
+        },
+        {
+            "id": "kms",
+            "label": "KMS",
+            "path": "/var/log/labfoundry/kms.log",
+            "available": False,
+            "lines": [],
+            "size_bytes": 0,
+            "updated_at": "",
+            "truncated": False,
+            "error": "Log file has not been written yet.",
+        },
+    ]
+    monkeypatch.setattr(
+        "labfoundry.app.ui.log_sources_context",
+        lambda *, max_lines=100: unavailable_sources,
+    )
+
+    login(client)
+    response = client.get("/logs")
+
+    assert response.status_code == 200
+    app_tab = response.text.split('data-log-source-tab="app"', 1)[1].split("</button>", 1)[0]
+    assert 'class="tab-button active"' in response.text.split('data-log-source-tab="app"', 1)[0].rsplit("<button", 1)[1]
+    assert 'aria-selected="true"' in app_tab
+    assert 'aria-disabled="true"' in app_tab
+    app_panel = response.text.split('id="logs-app-panel"', 1)[1].split('id="logs-kms-panel"', 1)[0]
+    assert 'id="logs-app-panel" class="tab-panel active"' in response.text
+    assert "Log file has not been written yet." in app_panel
+    kms_panel_tag = response.text.split('id="logs-kms-panel"', 1)[1].split(">", 1)[0]
+    assert 'class="tab-panel "' in kms_panel_tag
+    assert " hidden" in kms_panel_tag
 
 
 def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client, tmp_path, monkeypatch):
@@ -3773,6 +3849,22 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
             stdout="nginx[20]: management request completed\nrequest_token=do-not-render\n",
         ),
     )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_nginx_access_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "nginx", "access-logs"],
+            dry_run=False,
+            stdout='192.0.2.10 - - [13/Jul/2026:20:15:31 -0700] "GET /dashboard HTTP/1.1" 200 1234\naccess_token=do-not-render\n',
+        ),
+    )
+    monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_nginx_error_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "nginx", "error-logs"],
+            dry_run=False,
+            stdout="2026/07/13 20:15:31 [error] 12#12: upstream timed out\npassword=do-not-render\n",
+        ),
+    )
 
     login(client)
     response = client.get("/logs")
@@ -3788,8 +3880,9 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "KMS" in response.text
     assert "Chrony" in response.text
     assert "Nginx" in response.text
-    assert "Audit Events" in response.text
-    assert "logs-audit-panel" in response.text
+    assert "HTTP Access" in response.text
+    assert "HTTP Errors" in response.text
+    assert "logs-audit-panel" not in response.text
     assert 'data-log-source-tab="dnsmasq-dns"' in response.text
     assert 'title="dnsmasq.service journal: DNS and service messages"' in response.text
     assert 'data-log-source-tab="dnsmasq-dhcp"' in response.text
@@ -3798,6 +3891,10 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert 'title="dnsmasq.service journal: TFTP messages"' in response.text
     assert 'data-log-source-tab="nginx"' in response.text
     assert 'title="systemd journal: nginx.service"' in response.text
+    assert 'data-log-source-tab="nginx-access"' in response.text
+    assert 'title="/var/log/nginx/access.log · management and service HTTP requests"' in response.text
+    assert 'data-log-source-tab="nginx-error"' in response.text
+    assert 'title="/var/log/nginx/error.log · management and service HTTP errors"' in response.text
     assert 'data-log-source-tab="kms"' in response.text
     kms_tab = response.text.split('data-log-source-tab="kms"', 1)[1].split("</button>", 1)[0]
     assert 'aria-disabled="true"' in kms_tab
@@ -3807,7 +3904,9 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert '<option value="100" selected>100</option>' in response.text
     assert '<option value="200" >200</option>' in response.text
     assert '<option value="500" >500</option>' in response.text
-    assert "Auto-refresh 5s" in response.text
+    assert "Refresh 5s" in response.text
+    assert 'class="language-labfoundry-log" data-log-lines-output' in response.text
+    assert response.text.count('data-terminal-note-open="false"') == 9
     toolbar = response.text.split('<div class="logs-toolbar">', 1)[1].split("</div>", 1)[0]
     assert toolbar.index("data-log-refresh-status") < toolbar.index("data-log-lines")
     assert "logs-refresh-status" in toolbar
@@ -3821,6 +3920,9 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in response.text
     assert "private_key= [redacted]" in response.text
     assert "management request completed" in response.text
+    assert "GET /dashboard HTTP/1.1" in response.text
+    assert "upstream timed out" in response.text
+    assert "access_token= [redacted]" in response.text
     assert "request_token= [redacted]" in response.text
     assert "password= [redacted]" in response.text
     assert "do-not-render" not in response.text
@@ -3830,7 +3932,17 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert data_response.status_code == 200
     payload = data_response.json()
     assert payload["line_count"] == 500
-    assert [source["id"] for source in payload["sources"]] == ["app", "dnsmasq-dns", "dnsmasq-dhcp", "dnsmasq-tftp", "chrony", "nginx", "kms"]
+    assert [source["id"] for source in payload["sources"]] == [
+        "app",
+        "dnsmasq-dns",
+        "dnsmasq-dhcp",
+        "dnsmasq-tftp",
+        "chrony",
+        "nginx",
+        "nginx-access",
+        "nginx-error",
+        "kms",
+    ]
     assert "query[A] example.test" in "\n".join(payload["sources"][1]["lines"])
     assert "DHCPACK(eth1)" not in "\n".join(payload["sources"][1]["lines"])
     assert "DHCPACK(eth1)" in "\n".join(payload["sources"][2]["lines"])
@@ -3849,6 +3961,19 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "refreshQueued = true" in js.text
     assert "tabButton.disabled = !source.available" in js.text
     assert "activeButton.disabled" in js.text
+    assert 'window.Prism.languages["labfoundry-log"]' in js.text
+    assert '"level-error"' in js.text
+    assert "highlightConfigPreviewElement(output);" in js.text
+    css = client.get("/static/app.css")
+    assert "height: calc(100vh - 120px);" in css.text
+    assert "flex: 1 1 0;" in css.text
+    assert "grid-template-rows: minmax(0, 1fr);" in css.text
+    assert "grid-template-rows: auto minmax(0, 1fr);" in css.text
+    assert "overflow-y: auto;" in css.text
+    assert "scrollbar-gutter: stable;" in css.text
+    assert "scrollbar-width: thin;" in css.text
+    assert "::-webkit-scrollbar-thumb" in css.text
+    assert "white-space: nowrap;" in css.text
 
 
 def test_configure_logging_writes_main_app_log(tmp_path, monkeypatch):
@@ -3952,7 +4077,7 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
     assert "DNS" in response.text
     assert "DHCP" in response.text
     assert "TFTP" in response.text
-    assert "Audit Events" in response.text
+    assert "logs-audit-panel" not in response.text
     assert "Chrony" in response.text
     assert "Nginx" in response.text
     assert "Log file has not been written yet." in response.text
@@ -8442,7 +8567,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "account-power-menu-20260713-3" in page.text
+    assert "logs-http-20260713-12" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

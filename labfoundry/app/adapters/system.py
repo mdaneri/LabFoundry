@@ -184,6 +184,22 @@ class SystemAdapter:
             )
         return self._helper_result("nginx", "logs", dry_run_message="dry-run: Nginx log read command recorded", timeout_seconds=5)
 
+    def read_nginx_access_logs(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(
+                ["labfoundry-helper", "nginx", "access-logs"],
+                "No host Nginx access log is read in development mode.",
+            )
+        return self._helper_result("nginx", "access-logs", dry_run_message="dry-run: Nginx access log read command recorded", timeout_seconds=5)
+
+    def read_nginx_error_logs(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(
+                ["labfoundry-helper", "nginx", "error-logs"],
+                "No host Nginx error log is read in development mode.",
+            )
+        return self._helper_result("nginx", "error-logs", dry_run_message="dry-run: Nginx error log read command recorded", timeout_seconds=5)
+
     def read_chronyd_capabilities(self) -> AdapterResult:
         if self.dry_run:
             return self._record_only_result(["labfoundry-helper", "chronyd", "capabilities"], json.dumps({"nts": True, "version": "dry-run +NTS"}))

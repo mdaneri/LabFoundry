@@ -186,8 +186,17 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "Join-Path $Path 'ovftool.exe'" in export_script
     assert "Add-LabFoundryOvfProperties" in export_script
     assert "Ensure-LabFoundryOvfNetworks" in export_script
+    assert "SelectSingleNode('/ovf:Envelope/ovf:NetworkSection'" in export_script
+    assert "envelope.InsertBefore($networkSection, $VirtualSystem)" in export_script
+    assert "VirtualSystem.InsertBefore($networkSection, $HardwareSection)" not in export_script
+    assert "Add-LabFoundryOvfCategory" in export_script
+    assert "Management network" in export_script
+    assert "Appliance identity and time" in export_script
+    assert "Initial credentials" in export_script
+    assert "-DefaultValue 'dhcp'" in export_script
     assert "LabFoundry Management Network" in export_script
     assert "LabFoundry Services Network" in export_script
+    assert "$serviceAdapter = $networkAdapters[1]" in export_script
     assert "Network adapter 2" in export_script
     assert "Remove-NamespacedChildElement -Parent $serviceAdapter -LocalName 'Address'" in export_script
     assert "Update-OvfManifest" in export_script

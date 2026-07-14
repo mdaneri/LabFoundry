@@ -9,7 +9,7 @@
         <p class="muted">Read-only appliance log sources with sensitive lines redacted before rendering.</p>
       </div>
       <div class="logs-toolbar">
-        <span class="status-pill muted logs-refresh-status" data-log-refresh-status>Auto-refresh 5s</span>
+        <span class="status-pill muted logs-refresh-status" data-log-refresh-status title="Logs refresh automatically every 5 seconds.">Refresh 5s</span>
         <span class="status-pill muted">{{ log_sources|length }} sources</span>
         <label class="logs-line-selector">
           <span class="field-label"><span>Lines</span><button class="help-icon" type="button" data-help="Select the number of most recent lines shown for every log source. The page refreshes the selected tail automatically every 5 seconds.">i</button></span>
@@ -28,53 +28,24 @@
         {% set active_log_tab.id = source.id %}
       {% endif %}
     {% endfor %}
-    {% if not active_log_tab.id %}
-      {% set active_log_tab.id = "audit" %}
+    {% if not active_log_tab.id and log_sources %}
+      {% set active_log_tab.id = log_sources[0].id %}
     {% endif %}
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="Log sources" data-tab-storage-key="labfoundry:logs:active-tab">
       {% for source in log_sources %}
         <button class="tab-button {{ 'active' if active_log_tab.id == source.id else '' }}" type="button" role="tab" data-tab-target="logs-{{ source.id }}-panel" data-log-source-tab="{{ source.id }}" aria-selected="{{ 'true' if active_log_tab.id == source.id else 'false' }}" aria-disabled="{{ 'false' if source.available else 'true' }}" title="{{ source.path }}{{ '' if source.available else ' (unavailable)' }}" {{ "disabled" if not source.available else "" }}>{{ source.label }}</button>
       {% endfor %}
-      <button class="tab-button {{ 'active' if active_log_tab.id == 'audit' else '' }}" type="button" role="tab" data-tab-target="logs-audit-panel" aria-controls="logs-audit-panel" aria-selected="{{ 'true' if active_log_tab.id == 'audit' else 'false' }}">Audit Events</button>
     </div>
 
     <div class="tab-panels">
       {% for source in log_sources %}
         <div id="logs-{{ source.id }}-panel" class="tab-panel {{ 'active' if active_log_tab.id == source.id else '' }}" role="tabpanel" data-log-source-id="{{ source.id }}" {{ "hidden" if active_log_tab.id != source.id else "" }}>
-          <div class="terminal-note">
+          <div class="terminal-note" data-terminal-note-open="false">
             <strong data-log-meta>{{ source.size_bytes }} bytes{% if source.updated_at %} · {{ source.updated_at }}{% endif %}{% if source.truncated %} · tail view{% endif %}</strong>
-            <code data-log-lines-output>{{ source.lines | join('\n') if source.available else source.error or "Log file has not been written yet." }}</code>
+            <code class="language-labfoundry-log" data-log-lines-output>{{ source.lines | join('\n') if source.available else source.error or "Log file has not been written yet." }}</code>
           </div>
         </div>
       {% endfor %}
-      <div id="logs-audit-panel" class="tab-panel {{ 'active' if active_log_tab.id == 'audit' else '' }}" role="tabpanel" {{ "hidden" if active_log_tab.id != 'audit' else "" }}>
-        <div class="panel-head compact">
-          <div>
-            <h2>Audit Events</h2>
-            <p class="muted">Read-only API and UI history</p>
-          </div>
-          <span class="status-pill muted">{{ audit_events|length }} events</span>
-        </div>
-        <table class="data-table">
-          <thead>
-            <tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th><th>Success</th><th>Detail</th></tr>
-          </thead>
-          <tbody>
-            {% for event in audit_events %}
-              <tr>
-                <td>{{ event.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
-                <td>{{ event.actor }}</td>
-                <td>{{ event.action }}</td>
-                <td>{{ event.resource_type }}{% if event.resource_id %}:{{ event.resource_id }}{% endif %}</td>
-                <td>{{ "yes" if event.success else "no" }}</td>
-                <td>{{ event.detail or "" }}</td>
-              </tr>
-            {% else %}
-              <tr><td colspan="6">No audit events yet.</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
     </div>
   </div>
 </section>

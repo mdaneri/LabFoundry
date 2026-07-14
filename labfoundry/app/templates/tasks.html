@@ -49,7 +49,9 @@
       <div class="alert error hidden" data-task-detail-error></div>
       <details class="task-result-details">
         <summary>Redacted result payload</summary>
-        <pre><code data-task-detail-result>{}</code></pre>
+        <div class="terminal-note task-result-preview" data-terminal-note-open="false">
+          <code class="language-json" data-task-detail-result>{}</code>
+        </div>
       </details>
     </div>
     <div class="confirm-modal-actions">
@@ -66,7 +68,9 @@
       <p class="kicker">Task log</p>
       <h2 id="task-log-title" data-task-log-title>Task log</h2>
       <p class="muted" data-task-log-meta></p>
-      <pre class="task-log-pre"><code data-task-log-content>Loading task log…</code></pre>
+      <div class="terminal-note task-log-preview" data-terminal-note-open="false">
+        <code class="language-labfoundry-log" data-task-log-content>Loading task log…</code>
+      </div>
     </div>
     <div class="confirm-modal-actions">
       <button class="button ghost" type="button" data-task-log-close>Close</button>

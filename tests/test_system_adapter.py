@@ -117,6 +117,26 @@ def test_real_nginx_logs_use_privileged_fixed_helper_action(monkeypatch):
     assert result.stdout == "nginx ready\n"
 
 
+def test_real_nginx_http_logs_use_privileged_fixed_helper_actions(monkeypatch):
+    import labfoundry.app.adapters.system as system_adapter
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "http request\n", "")
+
+    monkeypatch.setattr(system_adapter.subprocess, "run", fake_run)
+    adapter = SystemAdapter(dry_run=False)
+
+    access = adapter.read_nginx_access_logs()
+    errors = adapter.read_nginx_error_logs()
+
+    assert access.command == ["sudo", "-n", SystemAdapter.HELPER_PATH, "nginx", "access-logs", "--real"]
+    assert errors.command == ["sudo", "-n", SystemAdapter.HELPER_PATH, "nginx", "error-logs", "--real"]
+    assert commands == [access.command, errors.command]
+
+
 def test_real_chronyd_capabilities_use_unprivileged_fixed_helper_action(monkeypatch):
     import labfoundry.app.adapters.system as system_adapter
 
