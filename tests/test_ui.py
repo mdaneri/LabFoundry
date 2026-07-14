@@ -250,6 +250,10 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert "[redacted]" in page.text
     assert "data-task-detail-cancel" in page.text
     assert "data-task-detail-log" in page.text
+    assert 'class="terminal-note task-result-preview"' in page.text
+    assert 'class="language-json" data-task-detail-result' in page.text
+    assert 'class="terminal-note task-log-preview"' in page.text
+    assert 'class="language-labfoundry-log" data-task-log-content' in page.text
     assert "task-grid-shell" in page.text
     assert 'data-selected-task-id="job_taskgrid001"' in page.text
     plain_page = client.get("/tasks")
@@ -271,6 +275,9 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert ".task-detail-facts {\n  grid-template-columns: repeat(2, minmax(0, 1fr));" in app_css
     assert ".task-detail-facts div {\n  grid-template-columns: 92px minmax(0, 1fr);" in app_css
     assert ".task-row-menu" not in app_css
+    assert ".task-result-preview code," in app_css
+    assert "highlightConfigPreviewElement(result);" in app_js
+    assert "highlightConfigPreviewElement(content);" in app_js
 
     status_response = client.get("/tasks/status?job_id=job_taskgrid001")
     assert status_response.status_code == 200
@@ -375,8 +382,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=account-power-menu-20260713-3" in service_worker.text
-    assert "/static/app.js?v=account-power-menu-20260713-3" in service_worker.text
+    assert "/static/app.css?v=logs-syntax-20260713-1" in service_worker.text
+    assert "/static/app.js?v=logs-syntax-20260713-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -385,7 +392,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=account-power-menu-20260713-3" in offline.text
+    assert "/static/app.css?v=logs-syntax-20260713-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -401,8 +408,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=account-power-menu-20260713-3" in page.text
-    assert "/static/app.js?v=account-power-menu-20260713-3" in page.text
+    assert "/static/app.css?v=logs-syntax-20260713-1" in page.text
+    assert "/static/app.js?v=logs-syntax-20260713-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3808,6 +3815,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert '<option value="200" >200</option>' in response.text
     assert '<option value="500" >500</option>' in response.text
     assert "Auto-refresh 5s" in response.text
+    assert 'class="language-labfoundry-log" data-log-lines-output' in response.text
     toolbar = response.text.split('<div class="logs-toolbar">', 1)[1].split("</div>", 1)[0]
     assert toolbar.index("data-log-refresh-status") < toolbar.index("data-log-lines")
     assert "logs-refresh-status" in toolbar
@@ -3849,6 +3857,9 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "refreshQueued = true" in js.text
     assert "tabButton.disabled = !source.available" in js.text
     assert "activeButton.disabled" in js.text
+    assert 'window.Prism.languages["labfoundry-log"]' in js.text
+    assert '"level-error"' in js.text
+    assert "highlightConfigPreviewElement(output);" in js.text
 
 
 def test_configure_logging_writes_main_app_log(tmp_path, monkeypatch):
@@ -8442,7 +8453,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "account-power-menu-20260713-3" in page.text
+    assert "logs-syntax-20260713-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
