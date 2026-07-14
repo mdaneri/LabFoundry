@@ -947,25 +947,32 @@ def get_vcf_backup_settings_row(db: Session, *, reconcile_default_user: bool = T
     return settings
 
 
-def get_vcf_private_registry_settings_row(db: Session) -> VcfPrivateRegistrySettings:
+def get_vcf_private_registry_settings_row(db: Session, *, reconcile: bool = True) -> VcfPrivateRegistrySettings:
     settings = db.execute(select(VcfPrivateRegistrySettings)).scalar_one_or_none()
     if settings is None:
         settings = VcfPrivateRegistrySettings()
-        db.add(settings)
-        db.commit()
-        db.refresh(settings)
+        if reconcile:
+            db.add(settings)
+            db.commit()
+            db.refresh(settings)
     return settings
 
 
-def get_vcf_offline_depot_settings_row(db: Session, *, reconcile_default_user: bool = True) -> VcfOfflineDepotSettings:
+def get_vcf_offline_depot_settings_row(
+    db: Session,
+    *,
+    reconcile_default_user: bool = True,
+    reconcile: bool = True,
+) -> VcfOfflineDepotSettings:
     settings = db.execute(select(VcfOfflineDepotSettings).options(selectinload(VcfOfflineDepotSettings.http_user))).scalar_one_or_none()
     default_user = db.execute(select(User).where(User.username == VCF_DEPOT_DEFAULT_USERNAME).order_by(User.username)).scalar_one_or_none()
     if settings is None:
         settings = VcfOfflineDepotSettings(http_user_id=default_user.id if default_user else None)
-        db.add(settings)
-        db.commit()
-        db.refresh(settings)
-    elif not settings.http_user_id and default_user is not None:
+        if reconcile:
+            db.add(settings)
+            db.commit()
+            db.refresh(settings)
+    elif reconcile and not settings.http_user_id and default_user is not None:
         settings.http_user_id = default_user.id
         settings.updated_at = utcnow()
         db.commit()
@@ -973,19 +980,19 @@ def get_vcf_offline_depot_settings_row(db: Session, *, reconcile_default_user: b
     if reconcile_default_user and disable_default_vcf_depot_user_when_service_off(db, settings):
         db.commit()
         db.refresh(settings)
-    if settings.depot_store_path == VCF_DEPOT_LEGACY_STORE_PATH:
+    if reconcile and settings.depot_store_path == VCF_DEPOT_LEGACY_STORE_PATH:
         settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
         settings.updated_at = utcnow()
         db.commit()
         db.refresh(settings)
-    if settings.tool_archive_path and settings.tool_version:
+    if reconcile and settings.tool_archive_path and settings.tool_version:
         version_source = db.execute(select(Setting).where(Setting.key == VCF_DEPOT_TOOL_VERSION_SOURCE_KEY)).scalar_one_or_none()
         if not version_source or version_source.value != VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND:
             settings.tool_version = ""
             settings.updated_at = utcnow()
             db.commit()
             db.refresh(settings)
-    if not settings.tool_archive_path:
+    if reconcile and not settings.tool_archive_path:
         archive = find_local_vcf_download_tool_archive()
         if archive is not None:
             settings.tool_archive_path = str(archive)
@@ -993,7 +1000,7 @@ def get_vcf_offline_depot_settings_row(db: Session, *, reconcile_default_user: b
             settings.updated_at = utcnow()
             db.commit()
             db.refresh(settings)
-    if not settings.tool_archive_path:
+    if reconcile and not settings.tool_archive_path:
         stale_credentials = db.execute(
             select(Setting).where(
                 Setting.key.in_(
@@ -1460,9 +1467,9 @@ def backing_systemd_unit_active(unit: str) -> bool | None:
     return active_state == "active"
 
 
-def vcf_backup_context(db: Session) -> dict:
-    settings = get_vcf_backup_settings_row(db)
-    if normalize_service_bind_settings(db, settings):
+def vcf_backup_context(db: Session, *, reconcile: bool = True) -> dict:
+    settings = get_vcf_backup_settings_row(db, reconcile_default_user=reconcile)
+    if reconcile and normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
     users = db.execute(select(User).order_by(User.username)).scalars().all()
@@ -1507,9 +1514,9 @@ def chronyd_capabilities_payload(result: AdapterResult) -> dict[str, Any]:
     return capabilities
 
 
-def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
+def ntp_context(db: Session, *, include_runtime_health: bool = False, reconcile: bool = True) -> dict:
     settings = get_chrony_settings_row(db)
-    if normalize_service_bind_settings(db, settings):
+    if reconcile and normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
     capability_result = SystemAdapter().read_chronyd_capabilities()
@@ -1518,7 +1525,7 @@ def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
     if not chrony_nts_supported:
         upstream_sources = chrony_upstream_sources(settings)
         nts_state_changed = settings.nts_server_enabled or any(bool(source.get("use_nts")) for source in upstream_sources)
-        if nts_state_changed:
+        if reconcile and nts_state_changed:
             for source in upstream_sources:
                 source["use_nts"] = False
             settings.nts_server_enabled = False
@@ -1538,12 +1545,12 @@ def ntp_context(db: Session, *, include_runtime_health: bool = False) -> dict:
             )
     available_interfaces = service_bind_options(db)
     chrony_nts_cert_path, chrony_nts_key_path, chrony_nts_chain_path = chrony_nts_certificate_paths(settings)
-    if settings.nts_server_enabled:
+    if reconcile and settings.nts_server_enabled:
         settings.nts_server_cert_path = chrony_nts_cert_path
         settings.nts_server_key_path = chrony_nts_key_path
         settings.nts_ke_port = 4460
     config_preview = render_chrony_config(settings)
-    ca_state_errors = ensure_ca_state(db) if settings.nts_server_enabled else []
+    ca_state_errors = ensure_ca_state(db) if reconcile and settings.nts_server_enabled else []
     validation_errors = [*ca_state_errors, *validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})]
     if settings.nts_server_enabled:
         ca_settings = get_ca_settings_row(db)
@@ -2250,15 +2257,16 @@ def vcf_registry_ca_bundle_context(db: Session) -> dict[str, object]:
     }
 
 
-def vcf_private_registry_context(db: Session) -> dict:
-    settings = get_vcf_private_registry_settings_row(db)
-    if normalize_service_bind_settings(db, settings):
+def vcf_private_registry_context(db: Session, *, reconcile: bool = True) -> dict:
+    settings = get_vcf_private_registry_settings_row(db, reconcile=reconcile)
+    if reconcile and normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
     bundles = db.execute(select(VcfRegistryBundle).order_by(VcfRegistryBundle.name)).scalars().all()
     available_interfaces = service_bind_options(db)
     ca_bundle_context = vcf_registry_ca_bundle_context(db)
-    settings.ca_bundle_path = str(ca_bundle_context["path"])
+    if reconcile:
+        settings.ca_bundle_path = str(ca_bundle_context["path"])
     validation_errors, validation_warnings = validate_vcf_registry_state(
         settings,
         bundles,
@@ -2305,13 +2313,13 @@ def vcf_depot_tool_installed(settings: VcfOfflineDepotSettings) -> bool:
     return bool(settings.tool_archive_path and Path(settings.tool_archive_path).is_file())
 
 
-def vcf_offline_depot_context(db: Session) -> dict:
-    settings = get_vcf_offline_depot_settings_row(db)
-    if normalize_service_bind_settings(db, settings):
+def vcf_offline_depot_context(db: Session, *, reconcile: bool = True) -> dict:
+    settings = get_vcf_offline_depot_settings_row(db, reconcile_default_user=reconcile, reconcile=reconcile)
+    if reconcile and normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
     profiles = db.execute(select(VcfDepotDownloadProfile).order_by(VcfDepotDownloadProfile.name)).scalars().all()
-    if not vcf_depot_tool_installed(settings):
+    if reconcile and not vcf_depot_tool_installed(settings):
         changed_profiles = [profile for profile in profiles if profile.enabled]
         for profile in changed_profiles:
             profile.enabled = False
@@ -2717,7 +2725,7 @@ def queue_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
     thread.start()
 
 
-def firewall_context(db: Session) -> dict:
+def firewall_context(db: Session, *, reconcile: bool = True) -> dict:
     settings = get_firewall_settings_row(db)
     rules = db.execute(select(FirewallRule).order_by(FirewallRule.priority, FirewallRule.name)).scalars().all()
     dns_settings = get_dns_settings_row(db)
@@ -2735,9 +2743,13 @@ def firewall_context(db: Session) -> dict:
         ca_portal_interfaces=ca_portal_firewall_interfaces(physical_interfaces, vlan_interfaces, interface_networks),
         kms_settings=get_kms_settings_row(db),
         chrony_settings=get_chrony_settings_row(db),
-        vcf_backup_settings=get_vcf_backup_settings_row(db),
-        vcf_depot_settings=get_vcf_offline_depot_settings_row(db),
-        vcf_registry_settings=get_vcf_private_registry_settings_row(db),
+        vcf_backup_settings=get_vcf_backup_settings_row(db, reconcile_default_user=reconcile),
+        vcf_depot_settings=get_vcf_offline_depot_settings_row(
+            db,
+            reconcile_default_user=reconcile,
+            reconcile=reconcile,
+        ),
+        vcf_registry_settings=get_vcf_private_registry_settings_row(db, reconcile=reconcile),
         esxi_pxe_boot=esxi_pxe_boot_settings(db),
         interface_networks=interface_networks,
         source_groups=source_group_state["groups"],
@@ -2843,10 +2855,10 @@ def managed_replaced_firewall_rule_row(rule: FirewallRule) -> dict:
     }
 
 
-def ca_context(db: Session) -> dict:
-    state_errors = ensure_ca_state(db)
+def ca_context(db: Session, *, reconcile: bool = True) -> dict:
+    state_errors = ensure_ca_state(db) if reconcile else []
     settings = get_ca_settings_row(db)
-    if normalize_service_bind_settings(db, settings):
+    if reconcile and normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
     available_interfaces = service_bind_options(db)
@@ -2907,12 +2919,16 @@ def ca_context(db: Session) -> dict:
     }
 
 
-def public_services_context(db: Session) -> dict[str, Any]:
+def public_services_context(db: Session, *, reconcile: bool = True) -> dict[str, Any]:
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlans = db.execute(select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     ca_settings = get_ca_settings_row(db)
-    depot_settings = get_vcf_offline_depot_settings_row(db)
-    registry_settings = get_vcf_private_registry_settings_row(db)
+    depot_settings = get_vcf_offline_depot_settings_row(
+        db,
+        reconcile_default_user=reconcile,
+        reconcile=reconcile,
+    )
+    registry_settings = get_vcf_private_registry_settings_row(db, reconcile=reconcile)
     esxi_boot = esxi_pxe_boot_settings(db)
     entries = public_service_entries(
         interfaces=interfaces,
@@ -3206,23 +3222,23 @@ def ca_request_context(db: Session) -> dict:
     }
 
 
-def kms_context(db: Session) -> dict:
+def kms_context(db: Session, *, reconcile: bool = True) -> dict:
     settings = get_kms_settings_row(db)
     available_interfaces = service_bind_options(db)
     changed = False
-    changed = normalize_service_bind_settings(db, settings) or changed
+    changed = reconcile and normalize_service_bind_settings(db, settings) or changed
     normalized_hostname = normalize_dns_hostname(settings.hostname)
-    if normalized_hostname and settings.hostname != normalized_hostname:
+    if reconcile and normalized_hostname and settings.hostname != normalized_hostname:
         settings.hostname = normalized_hostname
         changed = True
-    if settings.enabled:
+    if reconcile and settings.enabled:
         dns_action = ensure_dns_for_kms(db, settings, actor=None, previous_hostname=settings.hostname)
         changed = bool(dns_action) or changed
     if changed:
         settings.updated_at = utcnow()
         db.commit()
         db.refresh(settings)
-    ca_state_errors = ensure_ca_state(db)
+    ca_state_errors = ensure_ca_state(db) if reconcile else []
     clients = db.execute(select(KmsClient).order_by(KmsClient.name)).scalars().all()
     keys = db.execute(select(KmsKey).options(selectinload(KmsKey.owner_client)).order_by(KmsKey.name)).scalars().all()
     config_preview = render_kms_config(settings=settings, clients=clients, keys=keys)
@@ -3425,13 +3441,13 @@ def routes_wan_context(db: Session) -> dict:
     }
 
 
-def dnsmasq_context(db: Session) -> dict:
+def dnsmasq_context(db: Session, *, reconcile: bool = True) -> dict:
     dns_settings = get_dns_settings_row(db)
-    if normalize_service_bind_settings(db, dns_settings):
+    if reconcile and normalize_service_bind_settings(db, dns_settings):
         db.commit()
         db.refresh(dns_settings)
     appliance_settings = get_appliance_settings_row(db)
-    if ensure_dns_for_appliance_settings(db, appliance_settings, previous_fqdn=appliance_settings.fqdn, actor=None):
+    if reconcile and ensure_dns_for_appliance_settings(db, appliance_settings, previous_fqdn=appliance_settings.fqdn, actor=None):
         db.commit()
         db.refresh(dns_settings)
     conditional_forwarders = setting_value(db, DNS_CONDITIONAL_FORWARDERS_SETTING_KEY)
@@ -4936,6 +4952,7 @@ class JobCancelled(RuntimeError):
 
 
 ACTIVE_JOB_STATUSES = {JobStatus.PENDING.value, JobStatus.RUNNING.value}
+FAILED_JOB_STATUSES = {JobStatus.FAILED.value, "partial-failure"}
 SERVICE_ADMIN_CANCELLABLE_JOB_TYPES = {
     "vcf-sddc-manager-deploy",
     "vcf-offline-depot-target-config",
@@ -4982,7 +4999,7 @@ def _redact_task_value(value: Any, *, key: str = "") -> Any:
 def _task_status_pill(status_value: str) -> str:
     if status_value in {JobStatus.SUCCEEDED.value, "no-op"}:
         return "good"
-    if status_value in {JobStatus.FAILED.value, "partial-failure"}:
+    if status_value in FAILED_JOB_STATUSES:
         return "warn"
     if status_value == JobStatus.CANCELLED.value:
         return "muted"
@@ -6111,22 +6128,22 @@ def parse_optional_esxi_kickstart_id(db: Session, kickstart_id: str, *, label: s
     return normalized_id
 
 
-def appliance_apply_units(db: Session) -> list[dict[str, Any]]:
+def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[str, Any]]:
     baselines = load_appliance_apply_baselines(db)
     local_users = local_users_apply_context(db, baselines.get("local_users"))
-    appliance_settings = appliance_settings_context(db)
+    appliance_settings = appliance_settings_context(db, reconcile_dns=reconcile)
     network = network_context(db)
     wan = routes_wan_context(db)
-    firewall = firewall_context(db)
-    dnsmasq = dnsmasq_context(db)
+    firewall = firewall_context(db, reconcile=reconcile)
+    dnsmasq = dnsmasq_context(db, reconcile=reconcile)
     esxi_pxe = esxi_pxe_context(db)
-    ca = ca_context(db)
-    kms = kms_context(db)
-    ntp = ntp_context(db)
-    vcf_backup = vcf_backup_context(db)
-    vcf_depot = vcf_offline_depot_context(db)
-    vcf_registry = vcf_private_registry_context(db)
-    public_services = public_services_context(db)
+    ca = ca_context(db, reconcile=reconcile)
+    kms = kms_context(db, reconcile=reconcile)
+    ntp = ntp_context(db, reconcile=reconcile)
+    vcf_backup = vcf_backup_context(db, reconcile=reconcile)
+    vcf_depot = vcf_offline_depot_context(db, reconcile=reconcile)
+    vcf_registry = vcf_private_registry_context(db, reconcile=reconcile)
+    public_services = public_services_context(db, reconcile=reconcile)
 
     network_baseline = baselines.get("network")
     network_removed_vlans = removed_network_vlan_entries(
@@ -6471,6 +6488,11 @@ def appliance_apply_context(db: Session) -> dict[str, Any]:
     }
 
 
+def dashboard_appliance_apply_units(db: Session) -> list[dict[str, Any]]:
+    """Project desired-state status without running apply-time reconciliation."""
+    return appliance_apply_units(db, reconcile=False)
+
+
 def _dashboard_iso(value: datetime | None) -> str:
     if value is None:
         return ""
@@ -6483,7 +6505,7 @@ def _dashboard_activity_outcome(status_value: str) -> tuple[str, str]:
     normalized = str(status_value or "").strip().lower()
     if normalized in {JobStatus.SUCCEEDED.value, "success"}:
         return "Succeeded", "good"
-    if normalized in {JobStatus.FAILED.value, "failed"}:
+    if normalized in FAILED_JOB_STATUSES:
         return "Failed", "error"
     if normalized == JobStatus.CANCELLED.value:
         return "Cancelled", "muted"
@@ -6495,7 +6517,7 @@ def _dashboard_activity_outcome(status_value: str) -> tuple[str, str]:
 def dashboard_snapshot(db: Session) -> dict[str, Any]:
     """Build the private operator dashboard without exposing task or audit details."""
     generated_at = utcnow()
-    units = appliance_apply_units(db)
+    units = dashboard_appliance_apply_units(db)
     changed_units = [unit for unit in units if unit["changed"]]
     invalid_changed_units = [unit for unit in changed_units if not unit["valid"]]
     valid_changed_units = [unit for unit in changed_units if unit["valid"]]
@@ -6505,7 +6527,7 @@ def dashboard_snapshot(db: Session) -> dict[str, Any]:
     failed_jobs = (
         db.execute(
             select(Job)
-            .where(Job.status == JobStatus.FAILED.value, Job.created_at >= recent_failure_cutoff)
+            .where(Job.status.in_(FAILED_JOB_STATUSES), Job.created_at >= recent_failure_cutoff)
             .order_by(desc(Job.created_at))
         )
         .scalars()

@@ -80,7 +80,7 @@ def test_dashboard_setup_exit_healthy_and_needs_attention_states(client, monkeyp
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import Job, JobStatus, utcnow
 
-    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db: controlled_units())
+    monkeypatch.setattr(ui, "dashboard_appliance_apply_units", lambda _db: controlled_units())
     with SessionLocal() as db:
         setup = ui.dashboard_snapshot(db)
         assert setup["overall"]["state"] == "setup-incomplete"
@@ -130,7 +130,7 @@ def test_dashboard_attention_priority_pending_separation_and_false_positive_filt
 
     monkeypatch.setattr(
         ui,
-        "appliance_apply_units",
+        "dashboard_appliance_apply_units",
         lambda _db: controlled_units(invalid_changed=True, valid_changed=True),
     )
     with SessionLocal() as db:
@@ -201,7 +201,7 @@ def test_dashboard_failed_task_window_and_activity_merge_are_safe(client, monkey
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import AuditEvent, Job, JobStatus, utcnow
 
-    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db: controlled_units())
+    monkeypatch.setattr(ui, "dashboard_appliance_apply_units", lambda _db: controlled_units())
     now = utcnow()
     with SessionLocal() as db:
         db.add_all(
@@ -221,6 +221,13 @@ def test_dashboard_failed_task_window_and_activity_merge_are_safe(client, monkey
                     status=JobStatus.FAILED.value,
                     created_by="admin",
                     created_at=now - timedelta(hours=25),
+                ),
+                Job(
+                    id="job_partial_failure",
+                    type="vcf-sddc-manager-deploy",
+                    status="partial-failure",
+                    created_by="admin",
+                    created_at=now - timedelta(hours=1),
                 ),
                 Job(
                     id="job_running",
@@ -243,17 +250,56 @@ def test_dashboard_failed_task_window_and_activity_merge_are_safe(client, monkey
         snapshot = ui.dashboard_snapshot(db)
 
     failed_ids = [item["url"] for item in snapshot["attention_items"] if item["kind"] == "failed-task"]
-    assert failed_ids == ["/tasks?job_id=job_recent_failure"]
+    assert failed_ids == ["/tasks?job_id=job_partial_failure", "/tasks?job_id=job_recent_failure"]
     timestamps = [item["timestamp"] for item in snapshot["recent_activity"]]
     assert timestamps == sorted(timestamps, reverse=True)
     assert snapshot["recent_activity"][0]["source"] == "Audit"
     assert snapshot["recent_activity"][0]["actor"] == "auditor"
     assert snapshot["recent_activity"][0]["url"] == "/audit-log"
     assert snapshot["tasks"]["running"] == 1
+    assert snapshot["tasks"]["failed_24h"] == 2
     serialized = json.dumps(snapshot)
     assert "private_key" not in serialized
     assert "hidden raw error" not in serialized
     assert "token=hidden" not in serialized
+
+
+def test_dashboard_apply_summary_disables_reconciliation(monkeypatch):
+    from labfoundry.app import ui
+
+    calls = []
+
+    def fake_units(_db, *, reconcile=True):
+        calls.append(reconcile)
+        return controlled_units()
+
+    monkeypatch.setattr(ui, "appliance_apply_units", fake_units)
+    assert ui.dashboard_appliance_apply_units(object()) == controlled_units()
+    assert calls == [False]
+
+
+def test_dashboard_snapshot_does_not_call_desired_state_reconcilers(client, monkeypatch):
+    from labfoundry.app import ui
+    from labfoundry.app.database import SessionLocal
+
+    def unexpected_reconciliation(*_args, **_kwargs):
+        raise AssertionError("dashboard refresh entered a desired-state reconciliation path")
+
+    for helper_name in (
+        "normalize_service_bind_settings",
+        "ensure_dns_for_appliance_settings",
+        "ensure_dns_for_kms",
+        "ensure_ca_state",
+        "disable_default_vcf_backup_user_when_service_off",
+        "disable_default_vcf_depot_user_when_service_off",
+    ):
+        monkeypatch.setattr(ui, helper_name, unexpected_reconciliation)
+
+    with SessionLocal() as db:
+        snapshot = ui.dashboard_snapshot(db)
+
+    assert snapshot["generated_at"]
+    assert set(snapshot["pending_changes"]) == {"count", "invalid_count", "units", "url"}
 
 
 def test_dashboard_html_removes_old_inventory_and_javascript_refresh_is_resilient(client):
