@@ -66,6 +66,9 @@ powershell.exe -ExecutionPolicy Bypass `
 The built VMX keeps the first adapter on `-VmnetName` as management-only and
 adds a second `vmxnet3` adapter on `-ServiceVmnetName` for service traffic. The
 service network defaults to Workstation's built-in host-only `VMnet1`.
+The Packer builder VM contains only the 40 GB Photon OS disk. The OVF export
+step declares the appliance data disks without adding large blank VMDK payloads
+to the reusable builder image.
 
 ## Networking
 
@@ -150,10 +153,18 @@ powershell.exe -ExecutionPolicy Bypass `
 
 The export script runs OVF Tool, adds LabFoundry vApp properties and appliance
 network mappings to the OVF descriptor, regenerates the manifest, and packages
-the folder as an OVA unless `-NoOva` is passed. It identifies the guest as
-VMware Photon OS, uses VMware Paravirtual SCSI for the appliance disk, and
-removes the build-time CD-ROM device. The descriptor exposes two
-network mappings for vSphere/ESXi import: `LabFoundry Management Network` for
+the folder as an OVA unless `-NoOva` is passed. The descriptor declares a
+500 GiB empty VCF Offline Depot disk and a 500 GiB empty VCF Backups disk;
+ESXi creates both disks during deployment, while the OVA carries only the OS
+VMDK payload. The exporter refuses to package an image unless the descriptor
+contains the OS and both empty data disks. It identifies the guest as VMware
+Photon OS, uses VMware Paravirtual SCSI for all three disks, and removes the
+build-time CD-ROM device. On first boot, `labfoundry-data-disks.service`
+formats the two blank disks as ext4, labels them `LABFOUNDRY_DEPOT` and
+`LABFOUNDRY_BKUP`, writes their UUIDs to `/etc/fstab`, and mounts them at
+`/mnt/labfoundry-vcf-offline-depot` and `/mnt/labfoundry-vcf-backups`. The
+descriptor exposes two network mappings for vSphere/ESXi import:
+`LabFoundry Management Network` for
 the first adapter, which remains management-only as `eth0`, and
 `LabFoundry Services Network` for the second adapter used by DNS, DHCP, CA,
 depot, PXE, KMS, and other LabFoundry-managed services. The OVF properties are

@@ -31,10 +31,11 @@ builder lives in [`image/hyperv/`](image/hyperv/) and provisions:
 - `labfoundry-firewall.service` loading the appliance nftables firewall;
 - `/opt/labfoundry/bin/labfoundry-helper` and a constrained sudoers template.
 
-The finished Hyper-V appliance VM also attaches two durable dynamic data disks:
-one for the VCF Offline Depot at `/mnt/labfoundry-vcf-offline-depot` and one
-for VCF Backups at `/mnt/labfoundry-vcf-backups`. Keep those workloads off the
-OS VHDX. On first boot, `labfoundry-data-disks.service` labels blank attached
+Finished Hyper-V appliance VMs and VMware OVF/OVA appliances also attach two
+durable expandable data disks: one for the VCF Offline Depot at
+`/mnt/labfoundry-vcf-offline-depot` and one for VCF Backups at
+`/mnt/labfoundry-vcf-backups`. Keep those workloads off the OS disk. On first
+boot, `labfoundry-data-disks.service` labels blank attached
 data disks as `LABFOUNDRY_DEPOT` and `LABFOUNDRY_BKUP`, formats them as ext4,
 persists them in `/etc/fstab`, and mounts them at those fixed paths before
 `labfoundry.service` starts.

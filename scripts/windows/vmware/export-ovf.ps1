@@ -202,6 +202,21 @@ function Set-RasdValue {
     [void](Set-NamespacedTextElement -Document $Document -Parent $Item -Prefix 'rasd' -LocalName $LocalName -Namespace $rasdNamespace -Value $Value)
 }
 
+function Set-RasdDescription {
+    param(
+        [xml]$Document,
+        [System.Xml.XmlElement]$Item,
+        [string]$Value
+    )
+
+    $description = Set-NamespacedTextElement -Document $Document -Parent $Item -Prefix 'rasd' -LocalName 'Description' -Namespace $rasdNamespace -Value $Value
+    $elementName = Get-NamespacedChildElement -Parent $Item -LocalName 'ElementName' -Namespace $rasdNamespace
+    if ($elementName -and $description.NextSibling -ne $elementName) {
+        [void]$Item.RemoveChild($description)
+        [void]$Item.InsertBefore($description, $elementName)
+    }
+}
+
 function Get-NextRasdInstanceId {
     param(
         [System.Xml.XmlElement]$HardwareSection,
@@ -306,6 +321,79 @@ function Ensure-LabFoundryOvfNetworks {
     Set-RasdValue -Document $Document -Item $serviceAdapter -LocalName 'Connection' -Value $serviceNetworkName
 }
 
+function Ensure-LabFoundryOvfEmptyDataDisks {
+    param(
+        [xml]$Document,
+        [System.Xml.XmlElement]$HardwareSection,
+        [System.Xml.XmlNamespaceManager]$NamespaceManager
+    )
+
+    $diskSection = $Document.SelectSingleNode('/ovf:Envelope/ovf:DiskSection', $NamespaceManager)
+    if (-not $diskSection) {
+        throw 'OVF descriptor does not contain a root-level ovf:DiskSection for the Photon OS disk.'
+    }
+
+    $hardwareDisks = @($HardwareSection.SelectNodes('ovf:Item', $NamespaceManager) | Where-Object { (Get-RasdValue -Item $_ -LocalName 'ResourceType') -eq '17' })
+    $osDisk = $hardwareDisks | Where-Object { (Get-RasdValue -Item $_ -LocalName 'AddressOnParent') -eq '0' } | Select-Object -First 1
+    if (-not $osDisk) {
+        $osDisk = $hardwareDisks | Select-Object -First 1
+    }
+    if (-not $osDisk) {
+        throw 'OVF descriptor does not contain a Photon OS disk hardware item to clone for the empty data disks.'
+    }
+
+    $controllerId = Get-RasdValue -Item $osDisk -LocalName 'Parent'
+    if (-not $controllerId) {
+        throw 'OVF Photon OS disk hardware item is not attached to a SCSI controller.'
+    }
+
+    $dataDisks = @(
+        @{ Id = 'labfoundry-depot'; Unit = '1'; Name = 'Hard disk 2 - VCF Offline Depot'; Description = 'Empty 500 GiB LabFoundry VCF Offline Depot data disk.' },
+        @{ Id = 'labfoundry-backups'; Unit = '2'; Name = 'Hard disk 3 - VCF Backups'; Description = 'Empty 500 GiB LabFoundry VCF Backups data disk.' }
+    )
+
+    foreach ($definition in $dataDisks) {
+        $disk = $Document.SelectSingleNode("/ovf:Envelope/ovf:DiskSection/ovf:Disk[@ovf:diskId='$($definition.Id)']", $NamespaceManager)
+        if (-not $disk) {
+            $disk = $Document.CreateElement('ovf', 'Disk', $ovfNamespace)
+            [void]$diskSection.AppendChild($disk)
+        }
+        Set-OvfAttribute -Document $Document -Element $disk -Name 'diskId' -Value $definition.Id
+        Set-OvfAttribute -Document $Document -Element $disk -Name 'capacity' -Value '500'
+        Set-OvfAttribute -Document $Document -Element $disk -Name 'capacityAllocationUnits' -Value 'byte * 2^30'
+        $disk.RemoveAttribute('fileRef', $ovfNamespace)
+        $disk.RemoveAttribute('format', $ovfNamespace)
+        $disk.RemoveAttribute('parentRef', $ovfNamespace)
+        $disk.RemoveAttribute('populatedSize', $ovfNamespace)
+
+        $hostResource = "ovf:/disk/$($definition.Id)"
+        $diskItem = @($HardwareSection.SelectNodes('ovf:Item', $NamespaceManager) | Where-Object {
+                (Get-RasdValue -Item $_ -LocalName 'ResourceType') -eq '17' -and
+                (Get-RasdValue -Item $_ -LocalName 'HostResource') -eq $hostResource
+            }) | Select-Object -First 1
+        if (-not $diskItem) {
+            $diskItem = $osDisk.CloneNode($true)
+            Remove-NamespacedChildElement -Parent $diskItem -LocalName 'Address' -Namespace $rasdNamespace
+            $firstVmwareConfig = @($HardwareSection.ChildNodes | Where-Object {
+                    $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.NamespaceURI -eq $vmwNamespace
+                }) | Select-Object -First 1
+            if ($firstVmwareConfig) {
+                [void]$HardwareSection.InsertBefore($diskItem, $firstVmwareConfig)
+            }
+            else {
+                [void]$HardwareSection.AppendChild($diskItem)
+            }
+        }
+        Set-RasdValue -Document $Document -Item $diskItem -LocalName 'InstanceID' -Value "$(Get-NextRasdInstanceId -HardwareSection $HardwareSection -NamespaceManager $NamespaceManager)"
+        Set-RasdValue -Document $Document -Item $diskItem -LocalName 'ResourceType' -Value '17'
+        Set-RasdValue -Document $Document -Item $diskItem -LocalName 'Parent' -Value $controllerId
+        Set-RasdValue -Document $Document -Item $diskItem -LocalName 'AddressOnParent' -Value $definition.Unit
+        Set-RasdValue -Document $Document -Item $diskItem -LocalName 'HostResource' -Value $hostResource
+        Set-RasdValue -Document $Document -Item $diskItem -LocalName 'ElementName' -Value $definition.Name
+        Set-RasdDescription -Document $Document -Item $diskItem -Value $definition.Description
+    }
+}
+
 function Set-LabFoundryOvfHardware {
     param(
         [xml]$Document,
@@ -328,7 +416,24 @@ function Set-LabFoundryOvfHardware {
     foreach ($controller in $scsiControllers) {
         Set-RasdValue -Document $Document -Item $controller -LocalName 'ResourceSubType' -Value 'VirtualSCSI'
         Set-RasdValue -Document $Document -Item $controller -LocalName 'ElementName' -Value 'SCSI Controller 0 - VMware Paravirtual'
-        Set-RasdValue -Document $Document -Item $controller -LocalName 'Description' -Value 'VMware Paravirtual SCSI controller.'
+        Set-RasdDescription -Document $Document -Item $controller -Value 'VMware Paravirtual SCSI controller.'
+    }
+
+    $disks = @($items | Where-Object { (Get-RasdValue -Item $_ -LocalName 'ResourceType') -eq '17' })
+    foreach ($disk in $disks) {
+        $unit = Get-RasdValue -Item $disk -LocalName 'AddressOnParent'
+        if ($unit -eq '0') {
+            Set-RasdValue -Document $Document -Item $disk -LocalName 'ElementName' -Value 'Hard disk 1 - Photon OS'
+            Set-RasdDescription -Document $Document -Item $disk -Value 'LabFoundry Photon OS disk.'
+        }
+        elseif ($unit -eq '1') {
+            Set-RasdValue -Document $Document -Item $disk -LocalName 'ElementName' -Value 'Hard disk 2 - VCF Offline Depot'
+            Set-RasdDescription -Document $Document -Item $disk -Value 'Expandable LabFoundry VCF Offline Depot data disk.'
+        }
+        elseif ($unit -eq '2') {
+            Set-RasdValue -Document $Document -Item $disk -LocalName 'ElementName' -Value 'Hard disk 3 - VCF Backups'
+            Set-RasdDescription -Document $Document -Item $disk -Value 'Expandable LabFoundry VCF Backups data disk.'
+        }
     }
 
     foreach ($cdrom in @($items | Where-Object { (Get-RasdValue -Item $_ -LocalName 'ResourceType') -eq '15' })) {
@@ -341,6 +446,36 @@ function Set-LabFoundryOvfHardware {
         $hasChildren = $remainingItems | Where-Object { (Get-RasdValue -Item $_ -LocalName 'Parent') -eq $instanceId } | Select-Object -First 1
         if (-not $hasChildren) {
             [void]$HardwareSection.RemoveChild($controller)
+        }
+    }
+}
+
+function Assert-LabFoundryOvfDiskTopology {
+    param([string]$OvfPath)
+
+    [xml]$document = Get-Content -LiteralPath $OvfPath -Raw
+    $manager = New-Object System.Xml.XmlNamespaceManager($document.NameTable)
+    $manager.AddNamespace('ovf', $ovfNamespace)
+    $manager.AddNamespace('rasd', $rasdNamespace)
+
+    $diskFiles = @($document.SelectNodes('/ovf:Envelope/ovf:DiskSection/ovf:Disk', $manager))
+    $hardwareDisks = @($document.SelectNodes('//ovf:VirtualSystem/ovf:VirtualHardwareSection/ovf:Item[rasd:ResourceType="17"]', $manager))
+    if ($diskFiles.Count -ne 3 -or $hardwareDisks.Count -ne 3) {
+        throw "LabFoundry OVF must contain exactly three disks (Photon OS, VCF Offline Depot, and VCF Backups); descriptor has $($diskFiles.Count) disk definitions and $($hardwareDisks.Count) virtual disks."
+    }
+
+    foreach ($diskId in @('labfoundry-depot', 'labfoundry-backups')) {
+        $disk = $document.SelectSingleNode("/ovf:Envelope/ovf:DiskSection/ovf:Disk[@ovf:diskId='$diskId']", $manager)
+        if (-not $disk) {
+            throw "LabFoundry OVF is missing the empty data disk definition $diskId."
+        }
+        foreach ($forbiddenAttribute in @('fileRef', 'format', 'parentRef', 'populatedSize')) {
+            if ($disk.HasAttribute($forbiddenAttribute, $ovfNamespace)) {
+                throw "LabFoundry OVF data disk $diskId must be empty and cannot define ovf:$forbiddenAttribute."
+            }
+        }
+        if ($disk.GetAttribute('capacity', $ovfNamespace) -ne '500' -or $disk.GetAttribute('capacityAllocationUnits', $ovfNamespace) -ne 'byte * 2^30') {
+            throw "LabFoundry OVF data disk $diskId must declare an empty 500 GiB capacity."
         }
     }
 }
@@ -446,6 +581,7 @@ function Add-LabFoundryOvfProperties {
     $hardware = $document.SelectSingleNode('//ovf:VirtualSystem/ovf:VirtualHardwareSection', $manager)
     if ($hardware) {
         Set-OvfAttribute -Document $document -Element $hardware -Name 'transport' -Value 'com.vmware.guestInfo'
+        Ensure-LabFoundryOvfEmptyDataDisks -Document $document -HardwareSection $hardware -NamespaceManager $manager
         Set-LabFoundryOvfHardware -Document $document -HardwareSection $hardware -NamespaceManager $manager
         Ensure-LabFoundryOvfNetworks -Document $document -VirtualSystem $virtualSystem -HardwareSection $hardware -NamespaceManager $manager
     }
@@ -567,6 +703,7 @@ if ($LASTEXITCODE -ne 0) {
 $ovfPath = Get-OvfDescriptorPath -OutputDirectory $resolvedOutputDirectory
 $ovfPackageDirectory = Split-Path -Parent $ovfPath
 Add-LabFoundryOvfProperties -OvfPath $ovfPath
+Assert-LabFoundryOvfDiskTopology -OvfPath $ovfPath
 $manifestPath = Update-OvfManifest -OvfDirectory $ovfPackageDirectory
 
 $ovaPath = ''

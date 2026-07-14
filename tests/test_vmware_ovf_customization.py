@@ -188,6 +188,14 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "Join-Path $Path 'ovftool.exe'" in export_script
     assert "Add-LabFoundryOvfProperties" in export_script
     assert "Set-LabFoundryOvfHardware" in export_script
+    assert "Ensure-LabFoundryOvfEmptyDataDisks" in export_script
+    assert "Assert-LabFoundryOvfDiskTopology" in export_script
+    assert "exactly three disks (Photon OS, VCF Offline Depot, and VCF Backups)" in export_script
+    assert "Hard disk 2 - VCF Offline Depot" in export_script
+    assert "Hard disk 3 - VCF Backups" in export_script
+    assert "labfoundry-depot" in export_script
+    assert "labfoundry-backups" in export_script
+    assert "RemoveAttribute('fileRef', $ovfNamespace)" in export_script
     assert "'osType' -Value 'vmwarePhoton64Guest'" in export_script
     assert "'id' -Value '36'" in export_script
     assert "'ResourceSubType' -Value 'VirtualSCSI'" in export_script
