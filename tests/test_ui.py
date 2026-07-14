@@ -383,8 +383,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=audit-pagination-20260713-7" in service_worker.text
-    assert "/static/app.js?v=audit-pagination-20260713-7" in service_worker.text
+    assert "/static/app.css?v=audit-fit-20260713-9" in service_worker.text
+    assert "/static/app.js?v=audit-fit-20260713-9" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -393,7 +393,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=audit-pagination-20260713-7" in offline.text
+    assert "/static/app.css?v=audit-fit-20260713-9" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -409,8 +409,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=audit-pagination-20260713-7" in page.text
-    assert "/static/app.js?v=audit-pagination-20260713-7" in page.text
+    assert "/static/app.css?v=audit-fit-20260713-9" in page.text
+    assert "/static/app.js?v=audit-fit-20260713-9" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3737,11 +3737,17 @@ def test_audit_log_renders(client):
     assert 'renderVertical: "virtual"' in audit_js
     assert "pagination: true" in audit_js
     assert 'paginationMode: "local"' in audit_js
-    assert "paginationSize" not in audit_js
+    assert "const rowHeight = 30" in audit_js
+    assert "paginationSize: pageSizeForHeight()" in audit_js
+    assert "new ResizeObserver" in audit_js
+    assert "table.setPageSize(nextPageSize)" in audit_js
+    assert 'formatter: "plaintext", tooltip: true' in audit_js
+    assert "paginationSize: 100" not in audit_js
     audit_css = client.get("/static/app.css").text
     assert ".audit-events-panel" in audit_css
     assert "height: calc(100vh - 120px);" in audit_css
     assert "flex: 1 1 0;" in audit_css
+    assert "min-height: min(480px, calc(100vh - 200px));" in audit_css
 
 
 def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client, tmp_path, monkeypatch):
@@ -8471,7 +8477,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "audit-pagination-20260713-7" in page.text
+    assert "audit-fit-20260713-9" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

@@ -10672,24 +10672,37 @@ function initializeAuditEventsTable() {
   const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
   try {
     const rows = JSON.parse(tableElement.dataset.auditEvents || "[]");
-    new Tabulator(tableElement, {
+    const rowHeight = 30;
+    const rowPitch = rowHeight + 1;
+    const gridChromeHeight = 88;
+    const pageSizeForHeight = () => Math.max(5, Math.floor(Math.max(0, tableElement.clientHeight - gridChromeHeight) / rowPitch));
+    const table = new Tabulator(tableElement, {
       data: rows,
       index: "id",
       layout: "fitColumns",
       height: "100%",
       renderVertical: "virtual",
+      rowHeight,
       placeholder: "No audit events yet.",
       pagination: true,
       paginationMode: "local",
+      paginationSize: pageSizeForHeight(),
       columns: [
         { title: "Time", field: "created_at", width: 170, headerFilter: "input" },
         { title: "Actor", field: "actor", width: 130, headerFilter: "input" },
         { title: "Action", field: "action", minWidth: 190, headerFilter: "input" },
         { title: "Resource", field: "resource", minWidth: 180, headerFilter: "input" },
         { title: "Success", field: "success", width: 100, hozAlign: "center", formatter: labFoundryBooleanFormatter, headerFilter: "list", headerFilterParams: { values: { "": "All", true: "Yes", false: "No" } } },
-        { title: "Detail", field: "detail", minWidth: 280, widthGrow: 2, formatter: "textarea", variableHeight: true, headerFilter: "input" },
+        { title: "Detail", field: "detail", minWidth: 280, widthGrow: 2, formatter: "plaintext", tooltip: true, headerFilter: "input" },
       ],
     });
+    const resizeObserver = new ResizeObserver(() => {
+      const nextPageSize = pageSizeForHeight();
+      if (table.getPageSize() !== nextPageSize) {
+        table.setPageSize(nextPageSize);
+      }
+    });
+    resizeObserver.observe(tableElement);
     fallback?.classList.add("hidden");
   } catch (_error) {
     fallback?.classList.remove("hidden");
