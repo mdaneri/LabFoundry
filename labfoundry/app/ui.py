@@ -2205,6 +2205,33 @@ def recover_interrupted_vcf_depot_download_jobs(db: Session) -> int:
     return len(jobs)
 
 
+def recover_interrupted_appliance_apply_jobs(db: Session) -> int:
+    jobs = db.scalars(
+        select(Job).where(
+            Job.type == "appliance-apply",
+            Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+        )
+    ).all()
+    if not jobs:
+        return 0
+    finished = utcnow()
+    for job in jobs:
+        job.status = JobStatus.FAILED.value
+        job.finished_at = finished
+        job.progress_percent = 100
+        job.error = (
+            "Interrupted by a LabFoundry restart before completion. "
+            "Review current appliance state and submit the selected changes again."
+        )
+        payload = _job_payload(job)
+        payload["state"] = "failed"
+        payload["interrupted"] = True
+        payload["interrupted_at"] = finished.isoformat()
+        job.result = json.dumps(payload, indent=2, sort_keys=True)
+    db.commit()
+    return len(jobs)
+
+
 def recover_interrupted_vcf_helper_jobs(db: Session) -> int:
     jobs = db.scalars(
         select(Job).where(
@@ -7797,6 +7824,21 @@ class ApplianceApplyJobError(RuntimeError):
     """An operator-safe failure raised before appliance apply execution begins."""
 
 
+APPLIANCE_APPLY_SUBMIT_LOCK = threading.Lock()
+
+
+def active_appliance_apply_job(db: Session) -> Job | None:
+    return db.scalars(
+        select(Job)
+        .where(
+            Job.type == "appliance-apply",
+            Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+        )
+        .order_by(Job.created_at)
+        .limit(1)
+    ).first()
+
+
 def run_appliance_apply_job(job_id: str) -> None:
     with SessionLocal() as db:
         job = db.get(Job, job_id)
@@ -7965,26 +8007,45 @@ def submit_appliance_apply(
         "units": [],
         "dry_run": bool(get_settings().dry_run_system_adapters),
     }
-    job_id = f"job_{uuid4().hex[:12]}"
-    job = Job(
-        id=job_id,
-        type="appliance-apply",
-        status=JobStatus.PENDING.value,
-        created_by=identity.username,
-        progress_percent=0,
-        result=json.dumps(job_result, indent=2),
-        error=None,
-    )
-    db.add(job)
-    db.commit()
-    record_audit(
-        db,
-        actor=identity.username,
-        action="create_appliance_apply_task",
-        resource_type="job",
-        resource_id=job.id,
-        detail=f"selected_units={','.join(job_result['selected_units'])}",
-    )
+    with APPLIANCE_APPLY_SUBMIT_LOCK:
+        db.expire_all()
+        active_job = active_appliance_apply_job(db)
+        if active_job is not None:
+            return render(
+                request,
+                "appliance_apply.html",
+                {
+                    "identity": identity,
+                    **appliance_apply_context(db),
+                    "selected_apply_unit_ids": selected_ids,
+                    "apply_error": (
+                        f"Appliance apply task {active_job.id} is already {active_job.status}. "
+                        "Wait for it to finish before submitting another appliance apply task."
+                    ),
+                },
+                status_code=409,
+            )
+
+        job_id = f"job_{uuid4().hex[:12]}"
+        job = Job(
+            id=job_id,
+            type="appliance-apply",
+            status=JobStatus.PENDING.value,
+            created_by=identity.username,
+            progress_percent=0,
+            result=json.dumps(job_result, indent=2),
+            error=None,
+        )
+        db.add(job)
+        db.commit()
+        record_audit(
+            db,
+            actor=identity.username,
+            action="create_appliance_apply_task",
+            resource_type="job",
+            resource_id=job.id,
+            detail=f"selected_units={','.join(job_result['selected_units'])}",
+        )
     background_tasks.add_task(run_appliance_apply_job, job.id)
     return render(
         request,

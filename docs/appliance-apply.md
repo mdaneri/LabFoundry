@@ -147,7 +147,7 @@ Rendered previews and job results must redact sensitive-looking values such as p
 
 ## Job Result
 
-Submitting first commits one pending `appliance-apply` job and returns the operator to the UI; adapter execution continues as response-attached background work so long-running helper actions do not hold the browser request open. The submitted desired-state snapshot hash is checked again before execution, and the task fails closed with a resubmit message if a selected unit changes while it is queued. The job result records:
+Submitting first commits one pending `appliance-apply` job and returns the operator to the UI; adapter execution continues as response-attached background work so long-running helper actions do not hold the browser request open. Only one appliance apply task may be pending or running at a time, preventing overlapping helper commands from sharing staging paths. If LabFoundry restarts during an apply, startup marks the interrupted task failed and tells the operator to review current appliance state before resubmitting. The submitted desired-state snapshot hash is checked again before execution, and the task fails closed with a resubmit message if a selected unit changes while it is queued. The job result records:
 
 - selected apply units;
 - skipped changed units;

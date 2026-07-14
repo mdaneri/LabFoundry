@@ -8728,6 +8728,92 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
         assert '"unit_id": "firewall"' in (job.result or "")
 
 
+def test_appliance_apply_rejects_submission_while_another_task_is_active(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus
+
+    login(client)
+    page = client.get("/appliance-apply")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    with SessionLocal() as db:
+        db.add(
+            Job(
+                id="job_active_apply",
+                type="appliance-apply",
+                status=JobStatus.RUNNING.value,
+                created_by="admin",
+                progress_percent=25,
+                result="{}",
+            )
+        )
+        db.commit()
+
+    response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"})
+
+    assert response.status_code == 409
+    assert "Appliance apply task job_active_apply is already running." in response.text
+    assert "Wait for it to finish before submitting another appliance apply task." in response.text
+    with SessionLocal() as db:
+        jobs = db.scalars(select(Job).where(Job.type == "appliance-apply")).all()
+        assert [job.id for job in jobs] == ["job_active_apply"]
+
+
+def test_recover_interrupted_appliance_apply_jobs_marks_active_tasks_failed(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus
+    from labfoundry.app.ui import recover_interrupted_appliance_apply_jobs
+
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                Job(
+                    id="job_pending_apply",
+                    type="appliance-apply",
+                    status=JobStatus.PENDING.value,
+                    created_by="admin",
+                    progress_percent=0,
+                    result=json.dumps({"selected_units": ["firewall"]}),
+                ),
+                Job(
+                    id="job_running_apply",
+                    type="appliance-apply",
+                    status=JobStatus.RUNNING.value,
+                    created_by="admin",
+                    progress_percent=40,
+                    result=json.dumps({"selected_units": ["vcf_offline_depot"]}),
+                ),
+                Job(
+                    id="job_unrelated_download",
+                    type="vcf-depot-download",
+                    status=JobStatus.RUNNING.value,
+                    created_by="admin",
+                    progress_percent=40,
+                    result="{}",
+                ),
+            ]
+        )
+        db.commit()
+
+        assert recover_interrupted_appliance_apply_jobs(db) == 2
+
+        apply_jobs = db.scalars(select(Job).where(Job.type == "appliance-apply").order_by(Job.id)).all()
+        assert all(job.status == JobStatus.FAILED.value for job in apply_jobs)
+        assert all(job.finished_at is not None for job in apply_jobs)
+        assert all(job.progress_percent == 100 for job in apply_jobs)
+        assert all("Review current appliance state" in (job.error or "") for job in apply_jobs)
+        assert all(json.loads(job.result or "{}")["interrupted"] is True for job in apply_jobs)
+        assert all(json.loads(job.result or "{}")["state"] == "failed" for job in apply_jobs)
+        unrelated = db.get(Job, "job_unrelated_download")
+        assert unrelated is not None
+        assert unrelated.status == JobStatus.RUNNING.value
+
+
 def test_appliance_startup_initializes_factory_apply_baseline(monkeypatch, tmp_path):
     from sqlalchemy import select
     from starlette.testclient import TestClient
