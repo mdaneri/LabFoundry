@@ -10664,6 +10664,39 @@ function initializeLogsPage() {
   window.setInterval(refresh, 5000);
 }
 
+function initializeAuditEventsTable() {
+  const tableElement = document.getElementById("audit-events-table");
+  if (!(tableElement instanceof HTMLElement) || typeof Tabulator === "undefined") {
+    return;
+  }
+  const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
+  try {
+    const rows = JSON.parse(tableElement.dataset.auditEvents || "[]");
+    new Tabulator(tableElement, {
+      data: rows,
+      index: "id",
+      layout: "fitColumns",
+      height: "100%",
+      placeholder: "No audit events yet.",
+      pagination: true,
+      paginationMode: "local",
+      paginationSize: 100,
+      paginationSizeSelector: [100, 200, 500],
+      columns: [
+        { title: "Time", field: "created_at", width: 170, headerFilter: "input" },
+        { title: "Actor", field: "actor", width: 130, headerFilter: "input" },
+        { title: "Action", field: "action", minWidth: 190, headerFilter: "input" },
+        { title: "Resource", field: "resource", minWidth: 180, headerFilter: "input" },
+        { title: "Success", field: "success", width: 100, hozAlign: "center", formatter: labFoundryBooleanFormatter, headerFilter: "list", headerFilterParams: { values: { "": "All", true: "Yes", false: "No" } } },
+        { title: "Detail", field: "detail", minWidth: 280, widthGrow: 2, formatter: "textarea", variableHeight: true, headerFilter: "input" },
+      ],
+    });
+    fallback?.classList.add("hidden");
+  } catch (_error) {
+    fallback?.classList.remove("hidden");
+  }
+}
+
 function initializeApplianceApplyProgress() {
   const form = document.querySelector("[data-appliance-apply-form]");
   if (!(form instanceof HTMLFormElement)) {
@@ -12134,6 +12167,7 @@ document.addEventListener("DOMContentLoaded", initializeTagEditors);
 document.addEventListener("DOMContentLoaded", initializeServiceBindEditors);
 document.addEventListener("DOMContentLoaded", initializeTabs);
 document.addEventListener("DOMContentLoaded", initializeLogsPage);
+document.addEventListener("DOMContentLoaded", initializeAuditEventsTable);
 document.addEventListener("DOMContentLoaded", initializeApplianceApplyProgress);
 document.addEventListener("DOMContentLoaded", initializeMonitorPage);
 document.addEventListener("DOMContentLoaded", initializeHistoryBackButtons);

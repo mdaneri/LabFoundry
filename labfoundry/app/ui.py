@@ -6806,12 +6806,26 @@ def log_sources_context(*, max_lines: int = 100) -> list[dict[str, Any]]:
 
 def logs_context(db: Session, *, max_lines: int = 100) -> dict[str, Any]:
     line_count = normalized_log_line_count(max_lines)
-    events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(100)).scalars().all()
     return {
         "log_sources": log_sources_context(max_lines=line_count),
         "log_line_count": line_count,
-        "audit_events": events,
     }
+
+
+def audit_event_rows_context(db: Session, *, limit: int = 500) -> list[dict[str, Any]]:
+    events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(limit)).scalars().all()
+    return [
+        {
+            "id": event.id,
+            "created_at": event.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "actor": event.actor,
+            "action": event.action,
+            "resource": f"{event.resource_type}:{event.resource_id}" if event.resource_id else event.resource_type,
+            "success": event.success,
+            "detail": event.detail or "",
+        }
+        for event in events
+    ]
 
 
 def appliance_apply_failure_summaries(unit_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -13692,8 +13706,15 @@ def audit_log(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
-) -> RedirectResponse:
-    return RedirectResponse("/logs#logs-audit-panel", status_code=303)
+) -> HTMLResponse:
+    return render(
+        request,
+        "audit.html",
+        {
+            "identity": identity,
+            "audit_event_rows": audit_event_rows_context(db),
+        },
+    )
 
 
 @router.get("/pxe/esxi/ks/{kickstart_file}", response_model=None)

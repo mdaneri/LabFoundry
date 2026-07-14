@@ -4217,7 +4217,7 @@ textarea {
 }
 
 .task-modal.confirm-modal.wide-modal {
-  width: min(1120px, calc(100vw - 48px));
+  width: min(1480px, calc(100vw - 32px));
   max-width: none;
 }
 
@@ -4701,9 +4701,44 @@ textarea {
 }
 
 .terminal-note code {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  word-break: break-word;
   color: #bfdbfe;
+}
+
+[data-logs-page] {
+  overflow-x: hidden;
+}
+
+[data-logs-page] .tab-panels,
+[data-logs-page] .tab-panel,
+[data-logs-page] .terminal-note,
+[data-logs-page] [data-log-lines-output] {
+  min-width: 0;
+  max-width: 100%;
+}
+
+[data-logs-page] [data-log-lines-output] {
+  width: 100%;
+  overflow: hidden;
+}
+
+.audit-events-panel {
+  min-height: calc(100vh - 144px);
+}
+
+.audit-events-grid {
+  min-height: 0;
+  height: calc(100vh - 230px);
+}
+
+.audit-events-grid .tabulator-cell {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .validation-list {
