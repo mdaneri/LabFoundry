@@ -57,6 +57,20 @@ sampler and request-time collection from `/monitor/data` or `/api/v1/monitor`.
 When disabled, LabFoundry may read existing monitor rows but it does not probe
 the host or create new `monitor_samples` rows.
 
+The authenticated `/dashboard` page is the compact operations command center.
+Its server-rendered snapshot shows overall appliance state, setup readiness,
+actionable exceptions, valid pending changes, active tasks, enabled service
+health, the management network path, and a six-entry task/audit activity feed.
+Invalid changed apply units, recent failed tasks, unhealthy enabled services,
+and missing or unexpectedly down configured interfaces are prioritized in that
+order. Disabled optional services and unused interfaces remain quiet. The page
+refreshes from the session-authenticated `/dashboard/data` UI endpoint every
+30 seconds while visible, retains the last successful snapshot on failure, and
+marks retained data stale. This private UI endpoint does not replace or change
+the bearer-authenticated `/api/v1/dashboard` contract. Dashboard actions are
+links into existing workflows; the page does not apply configuration, restart
+services, or mutate the appliance.
+
 Photon OS 5.0 GA shipped with Python 3.11, but the current Photon 5.0 updates
 stream has moved beyond that baseline. On June 21, 2026, live repository
 metadata showed `python3` as `3.14.5-2.ph5`. LabFoundry keeps

@@ -6471,6 +6471,291 @@ def appliance_apply_context(db: Session) -> dict[str, Any]:
     }
 
 
+def _dashboard_iso(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _dashboard_activity_outcome(status_value: str) -> tuple[str, str]:
+    normalized = str(status_value or "").strip().lower()
+    if normalized in {JobStatus.SUCCEEDED.value, "success"}:
+        return "Succeeded", "good"
+    if normalized in {JobStatus.FAILED.value, "failed"}:
+        return "Failed", "error"
+    if normalized == JobStatus.CANCELLED.value:
+        return "Cancelled", "muted"
+    if normalized in ACTIVE_JOB_STATUSES:
+        return normalized.title(), "warn"
+    return normalized.title() or "Recorded", "muted"
+
+
+def dashboard_snapshot(db: Session) -> dict[str, Any]:
+    """Build the private operator dashboard without exposing task or audit details."""
+    generated_at = utcnow()
+    units = appliance_apply_units(db)
+    changed_units = [unit for unit in units if unit["changed"]]
+    invalid_changed_units = [unit for unit in changed_units if not unit["valid"]]
+    valid_changed_units = [unit for unit in changed_units if unit["valid"]]
+
+    jobs = db.execute(select(Job).order_by(desc(Job.created_at)).limit(50)).scalars().all()
+    recent_failure_cutoff = generated_at - timedelta(hours=24)
+    failed_jobs = (
+        db.execute(
+            select(Job)
+            .where(Job.status == JobStatus.FAILED.value, Job.created_at >= recent_failure_cutoff)
+            .order_by(desc(Job.created_at))
+        )
+        .scalars()
+        .all()
+    )
+    active_jobs = (
+        db.execute(select(Job).where(Job.status.in_(ACTIVE_JOB_STATUSES)).order_by(desc(Job.created_at)))
+        .scalars()
+        .all()
+    )
+
+    services = (
+        db.execute(select(ServiceState).where(ServiceState.service.in_(SERVICE_STATE_IDS)).order_by(ServiceState.display_name))
+        .scalars()
+        .all()
+    )
+    enabled_services = [service for service in services if service.enabled]
+    unhealthy_services = [
+        service
+        for service in enabled_services
+        if not service.running or str(service.health or "").lower() not in {"healthy", "running", "good"}
+    ]
+
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlans = db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all()
+    configured_interfaces = [
+        interface
+        for interface in interfaces
+        if str(interface.role or "unused").lower() != "unused" or str(interface.mode or "unused").lower() != "unused"
+    ]
+    interface_exceptions = [
+        interface
+        for interface in configured_interfaces
+        if str(interface.oper_state or "").lower() == "missing"
+        or (str(interface.admin_state or "").lower() == "up" and str(interface.oper_state or "").lower() not in {"up", "unknown"})
+    ]
+    management = next((interface for interface in configured_interfaces if str(interface.role or "").lower() == "management"), None)
+    management_discovered = bool(management and str(management.oper_state or "").lower() != "missing")
+    management_address = ""
+    if management is not None:
+        management_address = str(management.host_ip_cidr if management.ipv4_method == "dhcp" else management.ip_cidr or "")
+        management_address = management_address or str(management.ipv6_cidr or "")
+    management_healthy = bool(
+        management_discovered
+        and management_address
+        and str(management.admin_state or "").lower() == "up"
+        and str(management.oper_state or "").lower() == "up"
+    )
+
+    successful_apply = db.execute(
+        select(Job)
+        .where(Job.type == "appliance-apply", Job.status == JobStatus.SUCCEEDED.value)
+        .order_by(desc(Job.created_at))
+        .limit(1)
+    ).scalar_one_or_none()
+    settings_unit = next((unit for unit in units if unit["id"] == "appliance_settings"), None)
+    all_desired_state_valid = all(unit["valid"] for unit in units)
+    readiness_items = [
+        {
+            "id": "management-discovery",
+            "label": "Management interface discovered",
+            "complete": management_discovered,
+            "summary": management.name if management_discovered and management else "Discover a management interface from the appliance host.",
+            "url": "/physical-interfaces",
+        },
+        {
+            "id": "management-network",
+            "label": "Management addressing and link healthy",
+            "complete": management_healthy,
+            "summary": management_address if management_healthy else "Management needs an address, admin-up desired state, and an active link.",
+            "url": "/physical-interfaces",
+        },
+        {
+            "id": "appliance-settings",
+            "label": "Appliance Settings valid",
+            "complete": bool(settings_unit and settings_unit["valid"]),
+            "summary": "Ready" if settings_unit and settings_unit["valid"] else "Resolve Appliance Settings validation before the first apply.",
+            "url": "/settings",
+        },
+        {
+            "id": "desired-state",
+            "label": "Desired state valid",
+            "complete": all_desired_state_valid,
+            "summary": "All apply units validate" if all_desired_state_valid else f"{sum(1 for unit in units if not unit['valid'])} apply units need attention.",
+            "url": "/appliance-apply",
+        },
+        {
+            "id": "first-apply",
+            "label": "First appliance apply succeeded",
+            "complete": successful_apply is not None,
+            "summary": "Initial desired state applied" if successful_apply else "Submit the reviewed desired state through Appliance Apply.",
+            "url": "/appliance-apply",
+        },
+    ]
+    readiness_mode = not (management_healthy and successful_apply is not None)
+
+    attention_items: list[dict[str, Any]] = []
+    for unit in invalid_changed_units:
+        attention_items.append(
+            {
+                "kind": "invalid-change",
+                "severity": "error",
+                "title": f"{unit['label']} changes are invalid",
+                "summary": str(unit["validation_errors"][0]) if unit["validation_errors"] else "Resolve validation before appliance apply.",
+                "timestamp": generated_at.isoformat(),
+                "url": str(unit["page_url"]),
+            }
+        )
+    for job in failed_jobs:
+        attention_items.append(
+            {
+                "kind": "failed-task",
+                "severity": "error",
+                "title": f"{_task_type_label(job.type)} task failed",
+                "summary": "A task failed within the last 24 hours. Open Tasks for the redacted operator detail.",
+                "timestamp": _dashboard_iso(job.finished_at or job.created_at),
+                "url": f"/tasks?job_id={quote(job.id)}",
+            }
+        )
+    for service in unhealthy_services:
+        state = "stopped" if not service.running else str(service.health or "unhealthy").replace("_", " ")
+        attention_items.append(
+            {
+                "kind": "service",
+                "severity": "warn",
+                "title": f"{service.display_name} is {state}",
+                "summary": "This enabled service is not reporting a healthy running state.",
+                "timestamp": generated_at.isoformat(),
+                "url": "/services",
+            }
+        )
+    for interface in interface_exceptions:
+        state = "missing" if str(interface.oper_state or "").lower() == "missing" else "down"
+        attention_items.append(
+            {
+                "kind": "interface",
+                "severity": "warn",
+                "title": f"{interface.name} is {state}",
+                "summary": f"Configured {interface.role} interface is not available in its expected state.",
+                "timestamp": _dashboard_iso(interface.missing_since) or generated_at.isoformat(),
+                "url": "/physical-interfaces",
+            }
+        )
+
+    if readiness_mode:
+        overall_state = "setup-incomplete"
+        overall_label = "Setup incomplete"
+        primary_item = next((item for item in readiness_items if not item["complete"]), readiness_items[-1])
+        primary_action = {"label": "Continue setup", "url": primary_item["url"]}
+    elif attention_items:
+        overall_state = "needs-attention"
+        overall_label = "Needs attention"
+        primary_action = {"label": "Review next issue", "url": attention_items[0]["url"]}
+    elif valid_changed_units:
+        overall_state = "healthy"
+        overall_label = "Healthy"
+        primary_action = {"label": "Review appliance changes", "url": "/appliance-apply"}
+    elif active_jobs:
+        overall_state = "healthy"
+        overall_label = "Healthy"
+        primary_action = {"label": "View running tasks", "url": "/tasks"}
+    else:
+        overall_state = "healthy"
+        overall_label = "Healthy"
+        primary_action = {"label": "Open monitor", "url": "/monitor"}
+
+    audit_events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(20)).scalars().all()
+    activity: list[dict[str, Any]] = []
+    for job in jobs:
+        outcome, pill = _dashboard_activity_outcome(job.status)
+        activity.append(
+            {
+                "source": "Task",
+                "title": _task_type_label(job.type),
+                "outcome": outcome,
+                "outcome_pill": pill,
+                "actor": job.created_by,
+                "timestamp": _dashboard_iso(job.created_at),
+                "url": f"/tasks?job_id={quote(job.id)}",
+            }
+        )
+    for event in audit_events:
+        activity.append(
+            {
+                "source": "Audit",
+                "title": str(event.action or "Activity").replace("_", " ").title(),
+                "outcome": "Succeeded" if event.success else "Failed",
+                "outcome_pill": "good" if event.success else "error",
+                "actor": event.actor,
+                "timestamp": _dashboard_iso(event.created_at),
+                "url": "/audit-log",
+            }
+        )
+    activity.sort(key=lambda row: row["timestamp"], reverse=True)
+
+    appliance_settings = db.execute(select(ApplianceSettings).limit(1)).scalar_one_or_none()
+    fqdn = str(appliance_settings.fqdn if appliance_settings else "").strip()
+    hostname = fqdn.split(".", 1)[0] if fqdn else "Unknown appliance"
+    return {
+        "generated_at": generated_at.isoformat(),
+        "overall": {
+            "state": overall_state,
+            "label": overall_label,
+            "hostname": hostname,
+            "fqdn": fqdn,
+            "dry_run": bool(get_settings().dry_run_system_adapters),
+            "primary_action": primary_action,
+        },
+        "readiness": {"active": readiness_mode, "items": readiness_items},
+        "attention_items": attention_items,
+        "pending_changes": {
+            "count": len(valid_changed_units),
+            "invalid_count": len(invalid_changed_units),
+            "units": [{"id": unit["id"], "label": unit["label"], "url": unit["page_url"]} for unit in valid_changed_units],
+            "url": "/appliance-apply",
+        },
+        "tasks": {
+            "pending": sum(1 for job in active_jobs if job.status == JobStatus.PENDING.value),
+            "running": sum(1 for job in active_jobs if job.status == JobStatus.RUNNING.value),
+            "failed_24h": len(failed_jobs),
+            "url": "/tasks",
+        },
+        "services": {
+            "enabled": len(enabled_services),
+            "running": sum(1 for service in enabled_services if service.running),
+            "unhealthy": len(unhealthy_services),
+            "exceptions": [
+                {"name": service.display_name, "state": "stopped" if not service.running else str(service.health or "unhealthy"), "url": "/services"}
+                for service in unhealthy_services
+            ],
+            "url": "/services",
+        },
+        "network": {
+            "management": {
+                "name": management.name if management else "Not discovered",
+                "address": management_address,
+                "link": str(management.oper_state if management else "missing"),
+                "healthy": management_healthy,
+            },
+            "configured": len(configured_interfaces),
+            "physical": len(interfaces),
+            "vlans": len([vlan for vlan in vlans if vlan.enabled]),
+            "missing_or_down": len(interface_exceptions),
+            "exceptions": [{"name": interface.name, "state": str(interface.oper_state or "unknown"), "url": "/physical-interfaces"} for interface in interface_exceptions],
+            "url": "/physical-interfaces",
+        },
+        "recent_activity": activity[:6],
+    }
+
+
 def appliance_update_settings(db: Session) -> dict[str, str]:
     return update_settings_from_json(setting_value(db, APPLIANCE_UPDATE_SETTINGS_KEY))
 
@@ -7576,21 +7861,24 @@ def dashboard(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    services = db.execute(select(ServiceState).where(ServiceState.service.in_(SERVICE_STATE_IDS)).order_by(ServiceState.display_name)).scalars().all()
-    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
-    routes = db.execute(select(Route).options(selectinload(Route.wan_policy)).order_by(Route.destination_cidr)).scalars().all()
-    audit_events = db.execute(select(AuditEvent).order_by(desc(AuditEvent.created_at)).limit(8)).scalars().all()
+    snapshot = dashboard_snapshot(db)
     return render(
         request,
         "dashboard.html",
         {
             "identity": identity,
-            "services": services,
-            "interfaces": interfaces,
-            "routes": routes,
-            "audit_events": audit_events,
+            "dashboard": snapshot,
+            "sidebar_pending_apply_count": snapshot["pending_changes"]["count"] + snapshot["pending_changes"]["invalid_count"],
         },
     )
+
+
+@router.get("/dashboard/data", response_class=JSONResponse, response_model=None)
+def dashboard_data(
+    _identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    return JSONResponse(dashboard_snapshot(db))
 
 
 @router.get("/monitor", response_class=HTMLResponse, response_model=None)
