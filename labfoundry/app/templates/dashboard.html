@@ -1,123 +1,133 @@
 {% extends "base.html" %}
 {% block page_title %}Dashboard{% endblock %}
 {% block content %}
-<section class="metric-grid">
-  <article class="metric">
-    <span>Hostname</span>
-    <strong>labfoundry</strong>
-    <small>Management 127.0.0.1</small>
-  </article>
-  <article class="metric">
-    <span>Runtime</span>
-    <strong>Dry-run</strong>
-    <small>No privileged host mutation</small>
-  </article>
-  <article class="metric">
-    <span>Repository</span>
-    <strong>/mnt/labfoundry-vcf-offline-depot</strong>
-    <small>HTTPS publishing target</small>
-  </article>
-  <article class="metric">
-    <span>VCF Backups</span>
-    <strong>/mnt/labfoundry-vcf-backups</strong>
-    <small>SFTP remote directory /backups</small>
-  </article>
-</section>
+<div class="dashboard-command-center" data-dashboard data-refresh-url="/dashboard/data">
+  <div class="dashboard-stale-notice" data-dashboard-stale hidden role="status">Live refresh is unavailable. Showing the last successful dashboard snapshot.</div>
 
-<section class="content-grid two-column">
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Service Health</h2>
-      <a class="text-link" href="/services">Open services</a>
-    </div>
-    <div class="service-grid">
-      {% for service in services %}
-        <div class="service-card">
-          <span class="state-dot {{ service.health }}"></span>
-          <div>
-            <strong>{{ service.display_name }}</strong>
-            <small>{{ "running" if service.running else "stopped" }} / {{ "enabled" if service.enabled else "disabled" }}</small>
-          </div>
-        </div>
-      {% endfor %}
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Interface Status</h2>
-      <a class="text-link" href="/physical-interfaces">Refresh</a>
-    </div>
-    <table class="data-table compact">
-      <thead>
-        <tr><th>Name</th><th>Role</th><th>Mode</th><th>Link</th><th>MTU</th></tr>
-      </thead>
-      <tbody>
-        {% for interface in interfaces %}
-          <tr>
-            <td>{{ interface.name }}</td>
-            <td>{{ interface.role }}</td>
-            <td>{{ interface.mode }}</td>
-            <td><span class="status-pill good">{{ interface.oper_state }}</span></td>
-            <td>{{ interface.mtu }}</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Routes & WAN Simulation</h2>
-    <a class="button secondary" href="/routes-wan">Manage WAN policies</a>
-  </div>
-  <table class="data-table">
-    <thead>
-      <tr>
-        <th>Destination</th>
-        <th>Gateway</th>
-        <th>Interface</th>
-        <th>WAN Policy</th>
-        <th>Latency</th>
-        <th>Loss</th>
-        <th>Bandwidth</th>
-        <th>Status</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for route in routes %}
-        <tr>
-          <td>{{ route.destination_cidr }}</td>
-          <td>{{ route.gateway or "direct" }}</td>
-          <td>{{ route.interface_name }}</td>
-          <td>{{ route.wan_policy.name if route.wan_policy else "none" }}</td>
-          <td>{{ route.wan_policy.latency_ms if route.wan_policy else 0 }} ms</td>
-          <td>{{ route.wan_policy.packet_loss_percent if route.wan_policy else 0 }}%</td>
-          <td>{{ route.wan_policy.bandwidth_mbit if route.wan_policy else "unlimited" }}</td>
-          <td><span class="status-pill {{ 'good' if route.enabled else 'muted' }}">{{ "active" if route.enabled else "disabled" }}</span></td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</section>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Recent Audit Events</h2>
-    <a class="text-link" href="/audit-log">View audit events</a>
-  </div>
-  <div class="audit-list">
-    {% for event in audit_events %}
-      <div class="audit-row">
-        <span>{{ event.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</span>
-        <strong>{{ event.actor }}</strong>
-        <span>{{ event.action }}</span>
-        <span>{{ event.resource_type }}</span>
+  <section class="dashboard-status-band {{ dashboard.overall.state }}" aria-labelledby="dashboard-overall-state">
+    <div class="dashboard-status-main">
+      <span class="dashboard-status-mark" aria-hidden="true"></span>
+      <div>
+        <p class="kicker">Appliance status</p>
+        <h2 id="dashboard-overall-state">{{ dashboard.overall.label }}</h2>
+        <p>{{ dashboard.overall.hostname }}{% if dashboard.overall.fqdn and dashboard.overall.fqdn != dashboard.overall.hostname %} · {{ dashboard.overall.fqdn }}{% endif %}</p>
       </div>
-    {% else %}
-      <p class="muted">No audit events yet.</p>
-    {% endfor %}
-  </div>
-</section>
+    </div>
+    <div class="dashboard-status-meta" aria-label="Dashboard status details">
+      <span><strong>{{ "Dry-run" if dashboard.overall.dry_run else "Live apply" }}</strong><small>{{ "Adapters record command intent" if dashboard.overall.dry_run else "Host changes are enabled" }}</small></span>
+      <span><strong>Last refreshed</strong><small><time datetime="{{ dashboard.generated_at }}">{{ dashboard.generated_at[:16].replace("T", " ") }} UTC</time></small></span>
+    </div>
+    <a class="button primary" href="{{ dashboard.overall.primary_action.url }}">{{ dashboard.overall.primary_action.label }}</a>
+  </section>
+
+  <section class="dashboard-primary-grid">
+    <article class="panel dashboard-attention-panel">
+      <div class="panel-head compact">
+        <div>
+          <h2>{{ "Setup readiness" if dashboard.readiness.active else "Needs attention" }}</h2>
+          <p class="muted">{{ "Complete the appliance foundation before normal operations." if dashboard.readiness.active else "Actionable exceptions in operator priority order." }}</p>
+        </div>
+        {% if not dashboard.readiness.active %}<span class="status-pill {{ 'warn' if dashboard.attention_items else 'good' }}">{{ dashboard.attention_items|length }} {{ "item" if dashboard.attention_items|length == 1 else "items" }}</span>{% endif %}
+      </div>
+
+      {% if dashboard.readiness.active %}
+        <div class="dashboard-readiness-list">
+          {% for item in dashboard.readiness["items"] %}
+            <a href="{{ item.url }}" class="dashboard-readiness-row {{ 'complete' if item.complete else 'incomplete' }}">
+              <span class="dashboard-check" aria-hidden="true">{{ "✓" if item.complete else "·" }}</span>
+              <span><strong>{{ item.label }}</strong><small>{{ item.summary }}</small></span>
+              <span class="status-pill {{ 'good' if item.complete else 'warn' }}">{{ "Ready" if item.complete else "Next" }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      {% if dashboard.attention_items %}
+        {% if dashboard.readiness.active %}<h3 class="dashboard-subheading">Actionable exceptions</h3>{% endif %}
+        <div class="dashboard-attention-list">
+          {% for item in dashboard.attention_items %}
+            <a href="{{ item.url }}" class="dashboard-attention-row">
+              <span class="status-pill {{ item.severity }}">{{ "Critical" if item.severity == "error" else "Warning" }}</span>
+              <span><strong>{{ item.title }}</strong><small>{{ item.summary }}</small></span>
+              <time datetime="{{ item.timestamp }}">{{ item.timestamp[:16].replace("T", " ") }}</time>
+            </a>
+          {% endfor %}
+        </div>
+      {% elif not dashboard.readiness.active %}
+        <div class="dashboard-empty-state"><strong>No actionable exceptions</strong><span>Enabled services, configured interfaces, recent tasks, and changed apply units look healthy.</span></div>
+      {% endif %}
+    </article>
+
+    <article class="panel dashboard-changes-panel">
+      <div class="panel-head compact">
+        <div><h2>Changes &amp; Tasks</h2><p class="muted">Desired-state drift and work in progress.</p></div>
+      </div>
+      <a class="dashboard-summary-row" href="/appliance-apply">
+        <span><strong>Pending appliance changes</strong><small>Valid changed units ready for review</small></span>
+        <span class="dashboard-summary-value">{{ dashboard.pending_changes.count }}</span>
+      </a>
+      {% if dashboard.pending_changes.units %}
+        <div class="dashboard-unit-links" aria-label="Valid pending apply units">
+          {% for unit in dashboard.pending_changes.units[:4] %}<a href="{{ unit.url }}">{{ unit.label }}</a>{% endfor %}
+          {% if dashboard.pending_changes.units|length > 4 %}<a href="/appliance-apply">+{{ dashboard.pending_changes.units|length - 4 }} more</a>{% endif %}
+        </div>
+      {% else %}
+        <p class="dashboard-inline-empty">No valid pending changes.</p>
+      {% endif %}
+      {% if dashboard.pending_changes.invalid_count %}<p class="dashboard-invalid-note"><span class="status-pill error">{{ dashboard.pending_changes.invalid_count }} invalid</span> Kept in Needs attention until resolved.</p>{% endif %}
+      <a class="dashboard-summary-row" href="/tasks">
+        <span><strong>Tasks</strong><small>Pending and running work</small></span>
+        <span class="dashboard-task-counts"><b>{{ dashboard.tasks.pending }}</b> pending <b>{{ dashboard.tasks.running }}</b> running</span>
+      </a>
+      <div class="dashboard-panel-actions"><a class="text-link" href="/appliance-apply">Review changes</a><a class="text-link" href="/tasks">Open tasks</a></div>
+    </article>
+  </section>
+
+  <section class="dashboard-snapshot-grid">
+    <article class="panel dashboard-snapshot-panel">
+      <div class="panel-head compact"><div><h2>Services</h2><p class="muted">Enabled runtime state; exceptions only.</p></div><a class="text-link" href="/services">Open services</a></div>
+      <div class="dashboard-count-strip">
+        <span><strong>{{ dashboard.services.enabled }}</strong><small>Enabled</small></span>
+        <span><strong>{{ dashboard.services.running }}</strong><small>Running</small></span>
+        <span><strong>{{ dashboard.services.unhealthy }}</strong><small>Unhealthy</small></span>
+      </div>
+      <div class="dashboard-exception-list">
+        {% for item in dashboard.services.exceptions %}<a href="{{ item.url }}"><span>{{ item.name }}</span><span class="status-pill warn">{{ item.state }}</span></a>{% else %}<p class="dashboard-inline-empty">No enabled service exceptions.</p>{% endfor %}
+      </div>
+    </article>
+
+    <article class="panel dashboard-snapshot-panel">
+      <div class="panel-head compact"><div><h2>Network</h2><p class="muted">Management path and configured interfaces.</p></div><a class="text-link" href="/physical-interfaces">Open interfaces</a></div>
+      <div class="dashboard-management-row">
+        <span><strong>{{ dashboard.network.management.name }}</strong><small>{{ dashboard.network.management.address or "No management address" }}</small></span>
+        <span class="status-pill {{ 'good' if dashboard.network.management.healthy else 'warn' }}">{{ dashboard.network.management.link }}</span>
+      </div>
+      <div class="dashboard-count-strip network">
+        <span><strong>{{ dashboard.network.configured }}</strong><small>Configured</small></span>
+        <span><strong>{{ dashboard.network.vlans }}</strong><small>VLANs</small></span>
+        <span><strong>{{ dashboard.network.missing_or_down }}</strong><small>Missing / down</small></span>
+      </div>
+      <div class="dashboard-exception-list">
+        {% for item in dashboard.network.exceptions %}<a href="{{ item.url }}"><span>{{ item.name }}</span><span class="status-pill warn">{{ item.state }}</span></a>{% else %}<p class="dashboard-inline-empty">No configured interface exceptions.</p>{% endfor %}
+      </div>
+    </article>
+  </section>
+
+  <section class="panel dashboard-activity-panel">
+    <div class="panel-head compact"><div><h2>Recent activity</h2><p class="muted">Tasks and audit events in one chronological view.</p></div><div class="dashboard-activity-links"><a class="text-link" href="/tasks">Tasks</a><a class="text-link" href="/audit-log">Audit events</a></div></div>
+    <div class="dashboard-activity-list">
+      {% for item in dashboard.recent_activity %}
+        <a class="dashboard-activity-row" href="{{ item.url }}">
+          <span class="dashboard-activity-source">{{ item.source }}</span>
+          <strong>{{ item.title }}</strong>
+          <span class="status-pill {{ item.outcome_pill }}">{{ item.outcome }}</span>
+          <span>{{ item.actor }}</span>
+          <time datetime="{{ item.timestamp }}">{{ item.timestamp[:16].replace("T", " ") }}</time>
+        </a>
+      {% else %}
+        <div class="dashboard-empty-state"><strong>No recent activity</strong><span>Tasks and operator audit events will appear here.</span></div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
 {% endblock %}

@@ -32,6 +32,15 @@
 - Prefer explicit status language over generic button text. Avoid labels such as `Save DNS` or `Apply` when the action really means "save desired state", "review appliance changes", "submit appliance changes", "import into this domain", or "apply zone file".
 - Destructive UI actions such as deleting a domain, scope, record set, backup, token, or appliance-owned config should require the shared modal confirmation pattern (`data-confirm-modal`) instead of a browser confirm or immediate submit. The modal copy should name the object, explain what will be removed, and mention whether the appliance is affected immediately or only after global appliance apply.
 
+## Dashboard Operations UX
+
+- Keep `/dashboard` as an adaptive, read-only operations command center. Preserve the application shell and send mutating work to existing workflows instead of adding dashboard-side apply, restart, or service actions.
+- Build the initial HTML and `/dashboard/data` response from the same private snapshot builder. Keep `/api/v1/dashboard` and its public schema independent and backward compatible.
+- Prioritize dashboard attention items as invalid changed apply units, failed tasks from the last 24 hours, unhealthy enabled services, then missing or unexpectedly down configured physical interfaces. Disabled optional services and unused interfaces are not exceptions.
+- Keep valid pending changes separate from invalid changed units. Link changes to `/appliance-apply`, tasks to `/tasks`, service exceptions to `/services`, and interface exceptions to `/physical-interfaces`.
+- Fresh appliances remain in setup readiness until management networking is healthy and one global appliance-apply task has succeeded. Show management discovery, addressing/link state, Appliance Settings validity, desired-state validity, and first-apply readiness while that mode is active.
+- Merge recent tasks and audit events chronologically without rendering task results, command output, raw errors, or audit detail. Dashboard refresh runs every 30 seconds only while visible, refreshes immediately on visibility return, and preserves the last successful snapshot with a stale marker after failure.
+
 ## Photon OS Appliance Deployment
 
 - Default live appliance testing should use VMware Workstation. VMware Workstation is installed by default at `C:\Program Files\VMware\VMware Workstation`; use `vmrun.exe` there with the helpers under `scripts/windows/vmware/`.

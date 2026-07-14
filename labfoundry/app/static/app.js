@@ -12113,6 +12113,156 @@ function initializeVcfTargetDepotHelper() {
   showStep("target");
 }
 
+function escapeDashboardHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function dashboardTimeMarkup(value) {
+  const raw = String(value || "");
+  const parsed = new Date(raw);
+  const label = Number.isNaN(parsed.getTime())
+    ? "Not recorded"
+    : parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return `<time datetime="${escapeDashboardHtml(raw)}">${escapeDashboardHtml(label)}</time>`;
+}
+
+function dashboardSnapshotMarkup(snapshot) {
+  const overall = snapshot.overall || {};
+  const readiness = snapshot.readiness || { active: false, items: [] };
+  const attention = Array.isArray(snapshot.attention_items) ? snapshot.attention_items : [];
+  const pending = snapshot.pending_changes || { count: 0, invalid_count: 0, units: [] };
+  const tasks = snapshot.tasks || { pending: 0, running: 0 };
+  const services = snapshot.services || { enabled: 0, running: 0, unhealthy: 0, exceptions: [] };
+  const network = snapshot.network || { management: {}, configured: 0, vlans: 0, missing_or_down: 0, exceptions: [] };
+  const activity = Array.isArray(snapshot.recent_activity) ? snapshot.recent_activity : [];
+  const action = overall.primary_action || { label: "Open monitor", url: "/monitor" };
+  const fqdn = overall.fqdn && overall.fqdn !== overall.hostname ? ` · ${escapeDashboardHtml(overall.fqdn)}` : "";
+  const readinessRows = (readiness.items || []).map((item) => `
+    <a href="${escapeDashboardHtml(item.url)}" class="dashboard-readiness-row ${item.complete ? "complete" : "incomplete"}">
+      <span class="dashboard-check" aria-hidden="true">${item.complete ? "✓" : "·"}</span>
+      <span><strong>${escapeDashboardHtml(item.label)}</strong><small>${escapeDashboardHtml(item.summary)}</small></span>
+      <span class="status-pill ${item.complete ? "good" : "warn"}">${item.complete ? "Ready" : "Next"}</span>
+    </a>`).join("");
+  const attentionRows = attention.map((item) => `
+    <a href="${escapeDashboardHtml(item.url)}" class="dashboard-attention-row">
+      <span class="status-pill ${escapeDashboardHtml(item.severity)}">${item.severity === "error" ? "Critical" : "Warning"}</span>
+      <span><strong>${escapeDashboardHtml(item.title)}</strong><small>${escapeDashboardHtml(item.summary)}</small></span>
+      ${dashboardTimeMarkup(item.timestamp)}
+    </a>`).join("");
+  const pendingUnits = (pending.units || []).slice(0, 4).map((unit) => `<a href="${escapeDashboardHtml(unit.url)}">${escapeDashboardHtml(unit.label)}</a>`).join("");
+  const pendingMore = (pending.units || []).length > 4 ? `<a href="/appliance-apply">+${(pending.units || []).length - 4} more</a>` : "";
+  const serviceExceptions = (services.exceptions || []).map((item) => `<a href="${escapeDashboardHtml(item.url)}"><span>${escapeDashboardHtml(item.name)}</span><span class="status-pill warn">${escapeDashboardHtml(item.state)}</span></a>`).join("");
+  const networkExceptions = (network.exceptions || []).map((item) => `<a href="${escapeDashboardHtml(item.url)}"><span>${escapeDashboardHtml(item.name)}</span><span class="status-pill warn">${escapeDashboardHtml(item.state)}</span></a>`).join("");
+  const activityRows = activity.map((item) => `
+    <a class="dashboard-activity-row" href="${escapeDashboardHtml(item.url)}">
+      <span class="dashboard-activity-source">${escapeDashboardHtml(item.source)}</span>
+      <strong>${escapeDashboardHtml(item.title)}</strong>
+      <span class="status-pill ${escapeDashboardHtml(item.outcome_pill)}">${escapeDashboardHtml(item.outcome)}</span>
+      <span>${escapeDashboardHtml(item.actor)}</span>
+      ${dashboardTimeMarkup(item.timestamp)}
+    </a>`).join("");
+  return `
+    <div class="dashboard-stale-notice" data-dashboard-stale hidden role="status">Live refresh is unavailable. Showing the last successful dashboard snapshot.</div>
+    <section class="dashboard-status-band ${escapeDashboardHtml(overall.state)}" aria-labelledby="dashboard-overall-state">
+      <div class="dashboard-status-main"><span class="dashboard-status-mark" aria-hidden="true"></span><div><p class="kicker">Appliance status</p><h2 id="dashboard-overall-state">${escapeDashboardHtml(overall.label)}</h2><p>${escapeDashboardHtml(overall.hostname)}${fqdn}</p></div></div>
+      <div class="dashboard-status-meta" aria-label="Dashboard status details">
+        <span><strong>${overall.dry_run ? "Dry-run" : "Live apply"}</strong><small>${overall.dry_run ? "Adapters record command intent" : "Host changes are enabled"}</small></span>
+        <span><strong>Last refreshed</strong><small>${dashboardTimeMarkup(snapshot.generated_at)}</small></span>
+      </div>
+      <a class="button primary" href="${escapeDashboardHtml(action.url)}">${escapeDashboardHtml(action.label)}</a>
+    </section>
+    <section class="dashboard-primary-grid">
+      <article class="panel dashboard-attention-panel">
+        <div class="panel-head compact"><div><h2>${readiness.active ? "Setup readiness" : "Needs attention"}</h2><p class="muted">${readiness.active ? "Complete the appliance foundation before normal operations." : "Actionable exceptions in operator priority order."}</p></div>${readiness.active ? "" : `<span class="status-pill ${attention.length ? "warn" : "good"}">${attention.length} ${attention.length === 1 ? "item" : "items"}</span>`}</div>
+        ${readiness.active ? `<div class="dashboard-readiness-list">${readinessRows}</div>` : ""}
+        ${attention.length ? `${readiness.active ? '<h3 class="dashboard-subheading">Actionable exceptions</h3>' : ""}<div class="dashboard-attention-list">${attentionRows}</div>` : readiness.active ? "" : '<div class="dashboard-empty-state"><strong>No actionable exceptions</strong><span>Enabled services, configured interfaces, recent tasks, and changed apply units look healthy.</span></div>'}
+      </article>
+      <article class="panel dashboard-changes-panel">
+        <div class="panel-head compact"><div><h2>Changes &amp; Tasks</h2><p class="muted">Desired-state drift and work in progress.</p></div></div>
+        <a class="dashboard-summary-row" href="/appliance-apply"><span><strong>Pending appliance changes</strong><small>Valid changed units ready for review</small></span><span class="dashboard-summary-value">${Number(pending.count) || 0}</span></a>
+        ${(pending.units || []).length ? `<div class="dashboard-unit-links" aria-label="Valid pending apply units">${pendingUnits}${pendingMore}</div>` : '<p class="dashboard-inline-empty">No valid pending changes.</p>'}
+        ${pending.invalid_count ? `<p class="dashboard-invalid-note"><span class="status-pill error">${Number(pending.invalid_count) || 0} invalid</span> Kept in Needs attention until resolved.</p>` : ""}
+        <a class="dashboard-summary-row" href="/tasks"><span><strong>Tasks</strong><small>Pending and running work</small></span><span class="dashboard-task-counts"><b>${Number(tasks.pending) || 0}</b> pending <b>${Number(tasks.running) || 0}</b> running</span></a>
+        <div class="dashboard-panel-actions"><a class="text-link" href="/appliance-apply">Review changes</a><a class="text-link" href="/tasks">Open tasks</a></div>
+      </article>
+    </section>
+    <section class="dashboard-snapshot-grid">
+      <article class="panel dashboard-snapshot-panel">
+        <div class="panel-head compact"><div><h2>Services</h2><p class="muted">Enabled runtime state; exceptions only.</p></div><a class="text-link" href="/services">Open services</a></div>
+        <div class="dashboard-count-strip"><span><strong>${Number(services.enabled) || 0}</strong><small>Enabled</small></span><span><strong>${Number(services.running) || 0}</strong><small>Running</small></span><span><strong>${Number(services.unhealthy) || 0}</strong><small>Unhealthy</small></span></div>
+        <div class="dashboard-exception-list">${serviceExceptions || '<p class="dashboard-inline-empty">No enabled service exceptions.</p>'}</div>
+      </article>
+      <article class="panel dashboard-snapshot-panel">
+        <div class="panel-head compact"><div><h2>Network</h2><p class="muted">Management path and configured interfaces.</p></div><a class="text-link" href="/physical-interfaces">Open interfaces</a></div>
+        <div class="dashboard-management-row"><span><strong>${escapeDashboardHtml(network.management?.name || "Not discovered")}</strong><small>${escapeDashboardHtml(network.management?.address || "No management address")}</small></span><span class="status-pill ${network.management?.healthy ? "good" : "warn"}">${escapeDashboardHtml(network.management?.link || "missing")}</span></div>
+        <div class="dashboard-count-strip network"><span><strong>${Number(network.configured) || 0}</strong><small>Configured</small></span><span><strong>${Number(network.vlans) || 0}</strong><small>VLANs</small></span><span><strong>${Number(network.missing_or_down) || 0}</strong><small>Missing / down</small></span></div>
+        <div class="dashboard-exception-list">${networkExceptions || '<p class="dashboard-inline-empty">No configured interface exceptions.</p>'}</div>
+      </article>
+    </section>
+    <section class="panel dashboard-activity-panel">
+      <div class="panel-head compact"><div><h2>Recent activity</h2><p class="muted">Tasks and audit events in one chronological view.</p></div><div class="dashboard-activity-links"><a class="text-link" href="/tasks">Tasks</a><a class="text-link" href="/audit-log">Audit events</a></div></div>
+      <div class="dashboard-activity-list">${activityRows || '<div class="dashboard-empty-state"><strong>No recent activity</strong><span>Tasks and operator audit events will appear here.</span></div>'}</div>
+    </section>`;
+}
+
+function initializeDashboard() {
+  const root = document.querySelector("[data-dashboard]");
+  if (!(root instanceof HTMLElement)) return;
+  const refreshUrl = root.dataset.refreshUrl || "/dashboard/data";
+  let timer = 0;
+  let refreshing = false;
+  const schedule = () => {
+    window.clearTimeout(timer);
+    if (document.visibilityState !== "hidden") timer = window.setTimeout(refresh, 30000);
+  };
+  const markStale = () => {
+    root.classList.add("is-stale");
+    const stale = root.querySelector("[data-dashboard-stale]");
+    if (stale instanceof HTMLElement) stale.hidden = false;
+  };
+  const refresh = async () => {
+    if (refreshing || document.visibilityState === "hidden") return;
+    refreshing = true;
+    root.setAttribute("aria-busy", "true");
+    const activeElement = document.activeElement;
+    const focusedHref = activeElement instanceof HTMLAnchorElement && root.contains(activeElement)
+      ? activeElement.getAttribute("href")
+      : "";
+    const focusedText = focusedHref ? activeElement.textContent?.trim() || "" : "";
+    try {
+      const response = await fetch(refreshUrl, { headers: { Accept: "application/json" }, credentials: "same-origin" });
+      if (!response.ok) throw new Error(`Dashboard refresh failed (${response.status})`);
+      const snapshot = await response.json();
+      root.innerHTML = dashboardSnapshotMarkup(snapshot);
+      root.classList.remove("is-stale");
+      if (focusedHref) {
+        const focusTarget = Array.from(root.querySelectorAll("a[href]")).find((link) =>
+          link.getAttribute("href") === focusedHref && link.textContent?.trim() === focusedText
+        );
+        if (focusTarget instanceof HTMLElement) focusTarget.focus({ preventScroll: true });
+      }
+      refreshApplianceApplySidebar().catch(() => {});
+    } catch {
+      markStale();
+    } finally {
+      refreshing = false;
+      root.removeAttribute("aria-busy");
+      schedule();
+    }
+  };
+  document.addEventListener("visibilitychange", () => {
+    window.clearTimeout(timer);
+    if (document.visibilityState !== "hidden") refresh();
+  });
+  schedule();
+}
+
+document.addEventListener("DOMContentLoaded", initializeDashboard);
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);
