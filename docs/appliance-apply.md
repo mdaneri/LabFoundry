@@ -147,7 +147,7 @@ Rendered previews and job results must redact sensitive-looking values such as p
 
 ## Job Result
 
-Submitting creates one `appliance-apply` job. The job result records:
+Submitting first commits one pending `appliance-apply` job and returns the operator to the UI; adapter execution continues as response-attached background work so long-running helper actions do not hold the browser request open. The submitted desired-state snapshot hash is checked again before execution, and the task fails closed with a resubmit message if a selected unit changes while it is queued. The job result records:
 
 - selected apply units;
 - skipped changed units;
