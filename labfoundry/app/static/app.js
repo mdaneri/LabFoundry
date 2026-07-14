@@ -5905,8 +5905,9 @@ function initializeDhcpScopesTable() {
   const handleDhcpScopeEdited = (cell) => {
     const row = cell.getRow();
     const data = row.getData();
+    const field = cell.getField();
     if (data.is_new) {
-      if (cell.getField() === "name" && isUniqueNewDhcpScopeName(data, existingScopeNames)) {
+      if (field === "name" && isUniqueNewDhcpScopeName(data, existingScopeNames)) {
         if (!data.address_family) {
           data.address_family = dhcpDefaultFamilyForInterface(scopeDefaults, data.interface_name || defaultInterface);
         }
@@ -5917,10 +5918,12 @@ function initializeDhcpScopesTable() {
           data.lease_time = "12h";
         }
       }
-      if (["name", "interface_name", "address_family"].includes(cell.getField())) {
-        const updated = applyDhcpScopeInterfaceDefaults(data, scopeDefaults, { overwrite: cell.getField() !== "name" });
-        row.update(updated);
-      }
+    }
+    if ((data.is_new && field === "name") || ["interface_name", "address_family"].includes(field)) {
+      const updated = applyDhcpScopeInterfaceDefaults(data, scopeDefaults, { overwrite: field !== "name" });
+      row.update(updated);
+    }
+    if (data.is_new) {
       row.reformat();
     }
     return autoSaveDhcpScope(cell, csrf);

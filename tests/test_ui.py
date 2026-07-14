@@ -372,7 +372,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v78" in service_worker.text
+    assert "labfoundry-pwa-v79" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -385,7 +385,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=dashboard-20260714-1" in service_worker.text
-    assert "/static/app.js?v=dhcp-vlan-zone-20260714-1" in service_worker.text
+    assert "/static/app.js?v=dhcp-vlan-dns-default-20260714-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -411,7 +411,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=dashboard-20260714-1" in page.text
-    assert "/static/app.js?v=dhcp-vlan-zone-20260714-1" in page.text
+    assert "/static/app.js?v=dhcp-vlan-dns-default-20260714-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -4400,7 +4400,7 @@ def test_new_record_rows_lock_defaults_until_required_field(client):
     assert 'markNewRecordRow(row, "host_label")' in dns_block
 
 
-def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
+def test_dhcp_zone_defaults_follow_vlan_dns_and_interface_chrony_bindings(client):
     import html
     import json
 
@@ -4414,8 +4414,8 @@ def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
         eth2_interface.ipv6_cidr = "fd00:50::1/64"
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.enabled = True
-        dns_settings.listen_interface = "eth2"
-        dns_settings.listen_address = "192.168.50.1\nfd00:50::1"
+        dns_settings.listen_interface = "eth2\neth1.20"
+        dns_settings.listen_address = "192.168.50.1\nfd00:50::1\n192.168.20.1"
         chrony_settings = db.execute(select(ChronySettings)).scalar_one()
         chrony_settings.enabled = True
         chrony_settings.listen_interface = "eth2"
@@ -4441,7 +4441,8 @@ def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
     assert eth2["ipv6_dns_default"] == "fd00:50::1"
     assert eth2["ipv4_ntp_default"] == "192.168.50.1"
     assert eth2["ipv6_ntp_default"] == "fd00:50::1"
-    assert eth1_vlan["dns_default"] == ""
+    assert eth1_vlan["dns_default"] == "192.168.20.1"
+    assert eth1_vlan["ipv4_dns_default"] == "192.168.20.1"
     assert eth1_vlan["ntp_default"] == ""
     assert "sitea" in defaults["existing_names"]
     assert defaults["default_domain"] == "labfoundry.internal"
@@ -4452,6 +4453,7 @@ def test_dhcp_new_zone_row_defaults_follow_interface_dns_and_chrony(client):
     assert 'rowData.ntp_server = ntpDefault || "";' in app_js.text
     assert 'rowData.site_address = gateway || "";' in app_js.text
     assert 'rowData.prefix_length = Number.isInteger(prefix) ? prefix : "";' in app_js.text
+    assert 'if ((data.is_new && field === "name") || ["interface_name", "address_family"].includes(field)) {' in app_js.text
 
 
 def test_dns_new_record_row_suggests_next_available_ipv4(client):
