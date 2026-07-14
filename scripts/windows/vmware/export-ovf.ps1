@@ -241,11 +241,22 @@ function Ensure-LabFoundryOvfNetworks {
     $managementNetworkName = 'LabFoundry Management Network'
     $serviceNetworkName = 'LabFoundry Services Network'
 
-    $networkSection = $Document.SelectSingleNode('//ovf:VirtualSystem/ovf:NetworkSection', $NamespaceManager)
+    $envelope = $Document.SelectSingleNode('/ovf:Envelope', $NamespaceManager)
+    if (-not $envelope) {
+        throw 'OVF descriptor does not contain an ovf:Envelope.'
+    }
+
+    $networkSection = $Document.SelectSingleNode('/ovf:Envelope/ovf:NetworkSection', $NamespaceManager)
+    $nestedNetworkSection = $Document.SelectSingleNode('//ovf:VirtualSystem/ovf:NetworkSection', $NamespaceManager)
+    if (-not $networkSection -and $nestedNetworkSection) {
+        [void]$nestedNetworkSection.ParentNode.RemoveChild($nestedNetworkSection)
+        [void]$envelope.InsertBefore($nestedNetworkSection, $VirtualSystem)
+        $networkSection = $nestedNetworkSection
+    }
     if (-not $networkSection) {
         $networkSection = $Document.CreateElement('ovf', 'NetworkSection', $ovfNamespace)
         [void](Add-TextElement -Document $Document -Parent $networkSection -LocalName 'Info' -Value 'LabFoundry deployment networks')
-        [void]$VirtualSystem.InsertBefore($networkSection, $HardwareSection)
+        [void]$envelope.InsertBefore($networkSection, $VirtualSystem)
     }
 
     $networks = @($networkSection.GetElementsByTagName('Network', $ovfNamespace))
@@ -277,6 +288,9 @@ function Ensure-LabFoundryOvfNetworks {
     Set-RasdValue -Document $Document -Item $managementAdapter -LocalName 'Connection' -Value $managementNetworkName
 
     $serviceAdapter = $networkAdapters | Where-Object { (Get-RasdValue -Item $_ -LocalName 'Connection') -eq $serviceNetworkName } | Select-Object -First 1
+    if (-not $serviceAdapter -and $networkAdapters.Count -ge 2) {
+        $serviceAdapter = $networkAdapters[1]
+    }
     if (-not $serviceAdapter) {
         $serviceAdapter = $managementAdapter.CloneNode($true)
         Remove-NamespacedChildElement -Parent $serviceAdapter -LocalName 'Address' -Namespace $rasdNamespace
@@ -307,6 +321,16 @@ function Get-OvfProperty {
     return $null
 }
 
+function Add-LabFoundryOvfCategory {
+    param(
+        [xml]$Document,
+        [System.Xml.XmlElement]$ProductSection,
+        [string]$Name
+    )
+
+    [void](Add-TextElement -Document $Document -Parent $ProductSection -LocalName 'Category' -Value $Name)
+}
+
 function Set-LabFoundryOvfProperty {
     param(
         [xml]$Document,
@@ -315,18 +339,25 @@ function Set-LabFoundryOvfProperty {
         [string]$Label,
         [string]$Description,
         [bool]$Required,
-        [bool]$Password = $false
+        [bool]$Password = $false,
+        [string]$DefaultValue = ''
     )
 
     $property = Get-OvfProperty -ProductSection $ProductSection -Key $Key
     if (-not $property) {
         $property = $Document.CreateElement('ovf', 'Property', $ovfNamespace)
-        [void]$ProductSection.AppendChild($property)
     }
+    [void]$ProductSection.AppendChild($property)
     Set-OvfAttribute -Document $Document -Element $property -Name 'key' -Value $Key
     Set-OvfAttribute -Document $Document -Element $property -Name 'type' -Value 'string'
     Set-OvfAttribute -Document $Document -Element $property -Name 'userConfigurable' -Value 'true'
     Set-OvfAttribute -Document $Document -Element $property -Name 'required' -Value ($Required.ToString().ToLowerInvariant())
+    if ($DefaultValue) {
+        Set-OvfAttribute -Document $Document -Element $property -Name 'value' -Value $DefaultValue
+    }
+    else {
+        $property.RemoveAttribute('value', $ovfNamespace)
+    }
     if ($Password) {
         Set-VmwAttribute -Document $Document -Element $property -Name 'password' -Value 'true'
     }
@@ -380,12 +411,21 @@ function Add-LabFoundryOvfProperties {
         Ensure-LabFoundryOvfNetworks -Document $document -VirtualSystem $virtualSystem -HardwareSection $hardware -NamespaceManager $manager
     }
 
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.management_mode' -Label 'Management IPv4 mode' -Description 'Use dhcp for VMware-assigned management addressing, or static to require labfoundry.cidr and labfoundry.gateway.' -Required $false
+    foreach ($category in @($productSection.GetElementsByTagName('Category', $ovfNamespace))) {
+        [void]$productSection.RemoveChild($category)
+    }
+
+    Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Management network'
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.management_mode' -Label 'Management IPv4 mode' -Description 'Use dhcp for VMware-assigned management addressing, or static to require labfoundry.cidr and labfoundry.gateway.' -Required $false -DefaultValue 'dhcp'
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.cidr' -Label 'Management IP CIDR' -Description 'Static management address for eth0, for example 192.168.10.10/24. Required only when management mode is static.' -Required $false
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.gateway' -Label 'Management gateway' -Description 'IPv4 gateway used by the management interface when management mode is static.' -Required $false
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.fqdn' -Label 'Appliance FQDN' -Description 'Fully qualified appliance name applied to Photon OS and LabFoundry desired state.' -Required $true
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.dns_servers' -Label 'DNS servers' -Description 'Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS.' -Required $false
+
+    Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Appliance identity and time'
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.fqdn' -Label 'Appliance FQDN' -Description 'Fully qualified appliance name applied to Photon OS and LabFoundry desired state.' -Required $true
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.ntp_servers' -Label 'NTP servers' -Description 'Optional NTP server names or IPs. If blank, the image defaults are kept.' -Required $false
+
+    Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Initial credentials'
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.admin_password' -Label 'LabFoundry admin password' -Description 'Initial LabFoundry web admin password. The value is consumed on first boot and not logged.' -Required $true -Password $true
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'labfoundry.root_password' -Label 'Photon root password' -Description 'Photon root console password for recovery. Root SSH remains disabled by default.' -Required $true -Password $true
 

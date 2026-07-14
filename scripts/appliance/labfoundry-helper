@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import configparser
 import hashlib
 from datetime import datetime, timezone
@@ -5060,6 +5061,88 @@ def _vcf_download_tool_version(tool_path: Path) -> str:
     return _parse_vcf_download_tool_version("\n".join(part for part in [completed.stdout, completed.stderr] if part))
 
 
+def _remove_retired_vcf_download_tool_tree(path: Path) -> None:
+    for attempt in range(3):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt == 2:
+                print(f"warning: unable to remove retired VCF Download Tool runtime: {path}", file=sys.stderr)
+                return
+            time.sleep(0.1 * (attempt + 1))
+
+
+def _replace_vcf_download_tool_runtime(tool_home: Path) -> tuple[Path, Path]:
+    runtime_tool_home = VCF_DEPOT_RUNTIME_TOOL_DIR
+    runtime_parent = runtime_tool_home.parent
+    runtime_parent.mkdir(parents=True, exist_ok=True)
+    replacement = Path(tempfile.mkdtemp(prefix=f".{runtime_tool_home.name}.staging-", dir=str(runtime_parent)))
+    retired: Path | None = None
+    try:
+        for child in tool_home.iterdir():
+            target = replacement / child.name
+            if child.is_dir():
+                shutil.copytree(child, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(child, target)
+        if runtime_tool_home.is_dir():
+            for preserved_name in ["log", "secrets"]:
+                preserved = runtime_tool_home / preserved_name
+                if preserved.is_dir():
+                    shutil.copytree(preserved, replacement / preserved_name, dirs_exist_ok=True)
+
+        replacement_tool_path = _find_vcf_download_tool_binary(replacement)
+        runtime_tool_path = runtime_tool_home / replacement_tool_path.relative_to(replacement)
+        runtime_wrapper_path = runtime_tool_home / "vcf-download-tool"
+        if runtime_tool_path == runtime_wrapper_path:
+            replacement_preserved_path = replacement / "vcf-download-tool.real"
+            replacement_tool_path.replace(replacement_preserved_path)
+            runtime_tool_path = runtime_tool_home / replacement_preserved_path.relative_to(replacement)
+        (replacement / "vcf-download-tool").write_text(
+            "\n".join(
+                [
+                    "#!/bin/sh",
+                    f"cd {shlex_quote(str(_vcf_download_tool_home(runtime_tool_path)))} || exit 1",
+                    f"exec {shlex_quote(str(runtime_tool_path))} \"$@\"",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(replacement / "vcf-download-tool", 0o755)
+
+        try:
+            account = pwd.getpwnam(LABFOUNDRY_SERVICE_USER)
+        except KeyError:
+            account = None
+        if account is not None:
+            for runtime_path in [replacement, *replacement.rglob("*")]:
+                _chown_path(runtime_path, account.pw_uid, account.pw_gid)
+
+        if runtime_tool_home.exists():
+            retired = Path(tempfile.mkdtemp(prefix=f".{runtime_tool_home.name}.retired-", dir=str(runtime_parent)))
+            retired.rmdir()
+            runtime_tool_home.replace(retired)
+        try:
+            replacement.replace(runtime_tool_home)
+        except OSError:
+            if retired is not None and retired.exists() and not runtime_tool_home.exists():
+                retired.replace(runtime_tool_home)
+                retired = None
+            raise
+    except Exception:
+        if replacement.exists():
+            shutil.rmtree(replacement, ignore_errors=True)
+        raise
+
+    if retired is not None:
+        _remove_retired_vcf_download_tool_tree(retired)
+    return runtime_tool_home, runtime_tool_path
+
+
 def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
     extraction_dir = VCF_DEPOT_TOOL_DIR / "extracted"
     try:
@@ -5084,47 +5167,12 @@ def _stage_vcf_download_tool_archive(archive_path: Path) -> int:
         encoding="utf-8",
     )
     os.chmod(wrapper_path, 0o755)
-    runtime_tool_home = VCF_DEPOT_RUNTIME_TOOL_DIR
-    runtime_tool_home.mkdir(parents=True, exist_ok=True)
-    for existing in runtime_tool_home.iterdir():
-        if existing.name in {"log", "secrets"}:
-            continue
-        if existing.is_dir():
-            shutil.rmtree(existing)
-        else:
-            existing.unlink()
-    for child in tool_home.iterdir():
-        target = runtime_tool_home / child.name
-        if child.is_dir():
-            shutil.copytree(child, target, dirs_exist_ok=True)
-        else:
-            shutil.copy2(child, target)
-    runtime_tool_path = _find_vcf_download_tool_binary(runtime_tool_home)
-    runtime_tool_path.chmod(0o755)
-    runtime_wrapper_path = runtime_tool_home / "vcf-download-tool"
-    if runtime_tool_path == runtime_wrapper_path:
-        preserved_runtime_tool_path = runtime_tool_home / "vcf-download-tool.real"
-        runtime_tool_path.replace(preserved_runtime_tool_path)
-        runtime_tool_path = preserved_runtime_tool_path
-    runtime_wrapper_path.write_text(
-        "\n".join(
-            [
-                "#!/bin/sh",
-                f"cd {shlex_quote(str(_vcf_download_tool_home(runtime_tool_path)))} || exit 1",
-                f"exec {shlex_quote(str(runtime_tool_path))} \"$@\"",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    os.chmod(runtime_wrapper_path, 0o755)
     try:
-        account = pwd.getpwnam(LABFOUNDRY_SERVICE_USER)
-    except KeyError:
-        account = None
-    if account is not None:
-        for runtime_path in [runtime_tool_home, *runtime_tool_home.rglob("*")]:
-            _chown_path(runtime_path, account.pw_uid, account.pw_gid)
+        runtime_tool_home, runtime_tool_path = _replace_vcf_download_tool_runtime(tool_home)
+    except (OSError, FileNotFoundError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    runtime_wrapper_path = runtime_tool_home / "vcf-download-tool"
     tool_version = _vcf_download_tool_version(runtime_wrapper_path)
     print(
         json.dumps(

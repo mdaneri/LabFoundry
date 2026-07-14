@@ -2813,6 +2813,50 @@ def test_vcf_offline_depot_helper_extracts_vcfdt_tool(monkeypatch, tmp_path, cap
     assert str(extracted) in wrapper_text
 
 
+def test_vcf_offline_depot_helper_renews_runtime_when_retired_tree_stays_busy(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    archive_path = tmp_path / "vcf-download-tool-9.1.0.renew.tar.gz"
+    tool_payload = b"#!/bin/sh\necho 'vcf-download-tool 9.1.0'\n"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = tarfile.TarInfo("vcfdt/bin/vcf-download-tool")
+        info.mode = 0o750
+        info.size = len(tool_payload)
+        archive.addfile(info, io.BytesIO(tool_payload))
+
+    tool_dir = tmp_path / "opt" / "labfoundry" / "vcf-download-tool"
+    runtime_tool_dir = tmp_path / "var" / "lib" / "labfoundry" / "vcfDownloadTool" / "active-tool"
+    busy_dir = runtime_tool_dir / "esximage" / "python" / "lib" / "python3.11"
+    busy_dir.mkdir(parents=True)
+    (busy_dir / "stale.pyc").write_bytes(b"stale")
+    (runtime_tool_dir / "secrets").mkdir()
+    (runtime_tool_dir / "secrets" / "download-token.txt").write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(helper, "VCF_DEPOT_TOOL_DIR", tool_dir)
+    monkeypatch.setattr(helper, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_tool_dir)
+    monkeypatch.setattr(
+        helper,
+        "_run_vcfdt_user_command",
+        lambda command: subprocess.CompletedProcess(command, 0, "vcf-download-tool 9.1.0\n", ""),
+    )
+    real_rmtree = helper.shutil.rmtree
+
+    def busy_rmtree(path, *args, **kwargs):
+        if Path(path).name.startswith(".active-tool.retired-"):
+            raise OSError(39, "Directory not empty", str(path))
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(helper.shutil, "rmtree", busy_rmtree)
+
+    assert helper._handle_vcf_offline_depot("stage-tool", [str(archive_path)]) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["vcf_offline_depot"] == "stage-tool complete"
+    assert "warning: unable to remove retired VCF Download Tool runtime" in captured.err
+    assert (runtime_tool_dir / "bin" / "vcf-download-tool").read_bytes() == tool_payload
+    assert (runtime_tool_dir / "secrets" / "download-token.txt").read_text(encoding="utf-8") == "secret"
+    assert not (runtime_tool_dir / "esximage").exists()
+    assert list(runtime_tool_dir.parent.glob(".active-tool.retired-*"))
+
+
 def test_vcf_offline_depot_helper_preserves_root_level_runtime_executable(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
     archive_path = tmp_path / "vcf-download-tool-9.1.0.root.tar.gz"

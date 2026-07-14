@@ -157,16 +157,16 @@ the first adapter, which remains management-only as `eth0`, and
 depot, PXE, KMS, and other LabFoundry-managed services. The OVF properties are
 intended for vSphere/ESXi import:
 
-| Property | Required | Description |
-| --- | --- | --- |
-| `labfoundry.management_mode` | no | `dhcp` by default. Use `static` only when `labfoundry.cidr` and `labfoundry.gateway` should be enforced on first boot. |
-| `labfoundry.cidr` | no | Static management IPv4 CIDR for `eth0`, for example `192.168.10.10/24`; required only when management mode is `static`. |
-| `labfoundry.gateway` | no | IPv4 gateway for the management network when management mode is `static`. |
-| `labfoundry.fqdn` | yes | Appliance FQDN applied to Photon OS and LabFoundry desired state. |
-| `labfoundry.dns_servers` | no | Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS. |
-| `labfoundry.ntp_servers` | no | Optional NTP names or IPs. Blank keeps the image defaults. |
-| `labfoundry.admin_password` | yes | Initial LabFoundry web `admin` password. |
-| `labfoundry.root_password` | yes | Photon root console password. Root SSH remains disabled by default. |
+| Category | Property | Required | Description |
+| --- | --- | --- | --- |
+| Management network | `labfoundry.management_mode` | no | Defaults to `dhcp` in the deployment form. Use `static` only when `labfoundry.cidr` and `labfoundry.gateway` should be enforced on first boot. |
+| Management network | `labfoundry.cidr` | no | Static management IPv4 CIDR for `eth0`, for example `192.168.10.10/24`; required only when management mode is `static`. |
+| Management network | `labfoundry.gateway` | no | IPv4 gateway for the management network when management mode is `static`. |
+| Management network | `labfoundry.dns_servers` | no | Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS. |
+| Appliance identity and time | `labfoundry.fqdn` | yes | Appliance FQDN applied to Photon OS and LabFoundry desired state. |
+| Appliance identity and time | `labfoundry.ntp_servers` | no | Optional NTP names or IPs. Blank keeps the image defaults. |
+| Initial credentials | `labfoundry.admin_password` | yes | Initial LabFoundry web `admin` password. |
+| Initial credentials | `labfoundry.root_password` | yes | Photon root console password. Root SSH remains disabled by default. |
 
 On first boot from an OVF/OVA deployment, `labfoundry-vmware-ovf-customize`
 reads those properties through VMware Tools before LabFoundry starts. DHCP
