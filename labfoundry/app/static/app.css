@@ -4799,14 +4799,15 @@ textarea {
 
 .audit-events-grid {
   flex: 1 1 0;
-  min-height: 0;
+  min-height: min(480px, calc(100vh - 200px));
   height: auto;
   overflow: hidden;
 }
 
 .audit-events-grid .tabulator-cell {
-  white-space: normal;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .validation-list {
