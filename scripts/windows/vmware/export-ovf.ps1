@@ -347,6 +347,20 @@ function Ensure-LabFoundryOvfEmptyDataDisks {
         throw 'OVF Photon OS disk hardware item is not attached to a SCSI controller.'
     }
 
+    $osDiskHostResource = Get-RasdValue -Item $osDisk -LocalName 'HostResource'
+    if ($osDiskHostResource -notmatch '^ovf:/disk/(.+)$') {
+        throw 'OVF Photon OS disk hardware item does not reference an OVF disk definition.'
+    }
+    $osDiskId = $Matches[1]
+    $osDiskDefinition = $Document.SelectSingleNode("/ovf:Envelope/ovf:DiskSection/ovf:Disk[@ovf:diskId='$osDiskId']", $NamespaceManager)
+    if (-not $osDiskDefinition) {
+        throw "OVF descriptor does not contain the Photon OS disk definition $osDiskId."
+    }
+    $diskFormat = $osDiskDefinition.GetAttribute('format', $ovfNamespace)
+    if ([string]::IsNullOrWhiteSpace($diskFormat)) {
+        throw 'OVF Photon OS disk definition does not declare the required ovf:format attribute.'
+    }
+
     $dataDisks = @(
         @{ Id = 'labfoundry-depot'; Unit = '1'; Name = 'Hard disk 2 - VCF Offline Depot'; Description = 'Empty 500 GiB LabFoundry VCF Offline Depot data disk.' },
         @{ Id = 'labfoundry-backups'; Unit = '2'; Name = 'Hard disk 3 - VCF Backups'; Description = 'Empty 500 GiB LabFoundry VCF Backups data disk.' }
@@ -361,8 +375,8 @@ function Ensure-LabFoundryOvfEmptyDataDisks {
         Set-OvfAttribute -Document $Document -Element $disk -Name 'diskId' -Value $definition.Id
         Set-OvfAttribute -Document $Document -Element $disk -Name 'capacity' -Value '500'
         Set-OvfAttribute -Document $Document -Element $disk -Name 'capacityAllocationUnits' -Value 'byte * 2^30'
+        Set-OvfAttribute -Document $Document -Element $disk -Name 'format' -Value $diskFormat
         $disk.RemoveAttribute('fileRef', $ovfNamespace)
-        $disk.RemoveAttribute('format', $ovfNamespace)
         $disk.RemoveAttribute('parentRef', $ovfNamespace)
         $disk.RemoveAttribute('populatedSize', $ovfNamespace)
 
@@ -464,15 +478,29 @@ function Assert-LabFoundryOvfDiskTopology {
         throw "LabFoundry OVF must contain exactly three disks (Photon OS, VCF Offline Depot, and VCF Backups); descriptor has $($diskFiles.Count) disk definitions and $($hardwareDisks.Count) virtual disks."
     }
 
+    $osDiskHardware = $hardwareDisks | Where-Object { (Get-RasdValue -Item $_ -LocalName 'AddressOnParent') -eq '0' } | Select-Object -First 1
+    $osDiskHostResource = Get-RasdValue -Item $osDiskHardware -LocalName 'HostResource'
+    if ($osDiskHostResource -notmatch '^ovf:/disk/(.+)$') {
+        throw 'LabFoundry OVF Photon OS disk does not reference an OVF disk definition.'
+    }
+    $osDiskDefinition = $document.SelectSingleNode("/ovf:Envelope/ovf:DiskSection/ovf:Disk[@ovf:diskId='$($Matches[1])']", $manager)
+    $diskFormat = if ($osDiskDefinition) { $osDiskDefinition.GetAttribute('format', $ovfNamespace) } else { '' }
+    if ([string]::IsNullOrWhiteSpace($diskFormat)) {
+        throw 'LabFoundry OVF Photon OS disk does not declare the required ovf:format attribute.'
+    }
+
     foreach ($diskId in @('labfoundry-depot', 'labfoundry-backups')) {
         $disk = $document.SelectSingleNode("/ovf:Envelope/ovf:DiskSection/ovf:Disk[@ovf:diskId='$diskId']", $manager)
         if (-not $disk) {
             throw "LabFoundry OVF is missing the empty data disk definition $diskId."
         }
-        foreach ($forbiddenAttribute in @('fileRef', 'format', 'parentRef', 'populatedSize')) {
+        foreach ($forbiddenAttribute in @('fileRef', 'parentRef', 'populatedSize')) {
             if ($disk.HasAttribute($forbiddenAttribute, $ovfNamespace)) {
                 throw "LabFoundry OVF data disk $diskId must be empty and cannot define ovf:$forbiddenAttribute."
             }
+        }
+        if ($disk.GetAttribute('format', $ovfNamespace) -ne $diskFormat) {
+            throw "LabFoundry OVF data disk $diskId must declare the Photon OS disk format."
         }
         if ($disk.GetAttribute('capacity', $ovfNamespace) -ne '500' -or $disk.GetAttribute('capacityAllocationUnits', $ovfNamespace) -ne 'byte * 2^30') {
             throw "LabFoundry OVF data disk $diskId must declare an empty 500 GiB capacity."

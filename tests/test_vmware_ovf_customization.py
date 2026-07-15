@@ -324,6 +324,8 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "labfoundry-depot" in export_script
     assert "labfoundry-backups" in export_script
     assert "RemoveAttribute('fileRef', $ovfNamespace)" in export_script
+    assert "Set-OvfAttribute -Document $Document -Element $disk -Name 'format' -Value $diskFormat" in export_script
+    assert "@('fileRef', 'parentRef', 'populatedSize')" in export_script
     assert "'osType' -Value 'vmwarePhoton64Guest'" in export_script
     assert "'id' -Value '36'" in export_script
     assert "'ResourceSubType' -Value 'VirtualSCSI'" in export_script
