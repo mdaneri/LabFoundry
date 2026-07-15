@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=dashboard-20260714-1">
+    <link rel="stylesheet" href="/static/app.css?v=appliance-task-grid-20260715-4">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -81,12 +81,12 @@
         </nav>
         {% if identity %}
           <div class="sidebar-apply">
-            <a class="sidebar-apply-link {% if pending_apply_count %}pending{% else %}current{% endif %} {% if request.url.path == '/appliance-apply' %}active{% endif %}" href="/appliance-apply" data-appliance-apply-sidebar data-pending-count="{{ pending_apply_count }}">
+            <a class="sidebar-apply-link pending {% if not pending_apply_count %}hidden{% endif %} {% if request.url.path == '/appliance-apply' %}active{% endif %}" href="/appliance-apply" data-appliance-apply-sidebar data-pending-count="{{ pending_apply_count }}">
               <span class="sidebar-apply-text">
-                <strong data-appliance-apply-sidebar-title>{% if pending_apply_count %}Review appliance changes{% else %}Appliance Apply{% endif %}</strong>
-                <small data-appliance-apply-sidebar-detail>{% if pending_apply_count %}{{ pending_apply_count }} pending {{ 'unit' if pending_apply_count == 1 else 'units' }}{% else %}Desired state current{% endif %}</small>
+                <strong data-appliance-apply-sidebar-title>Review appliance changes</strong>
+                <small data-appliance-apply-sidebar-detail>{{ pending_apply_count }} pending {{ 'unit' if pending_apply_count == 1 else 'units' }}</small>
               </span>
-              <span class="sidebar-apply-badge" data-appliance-apply-sidebar-badge>{% if pending_apply_count %}pending{% else %}current{% endif %}</span>
+              <span class="sidebar-apply-badge" data-appliance-apply-sidebar-badge>pending</span>
             </a>
           </div>
         {% endif %}
@@ -238,6 +238,55 @@
         <pre><code data-chrony-source-health-output>Use the Chrony service menu to check chronyc tracking, sources, and authdata.</code></pre>
       </div>
     </dialog>
+    {% if identity %}
+      <dialog id="appliance-apply-modal" class="appliance-apply-modal" aria-labelledby="appliance-apply-modal-title" data-csrf="{{ csrf_token }}">
+        <div class="appliance-apply-modal-panel">
+          <div class="appliance-apply-modal-head">
+            <div>
+              <p class="kicker" data-appliance-apply-modal-kicker>Desired state</p>
+              <h2 id="appliance-apply-modal-title" data-appliance-apply-modal-title>Review appliance changes</h2>
+              <p class="muted" data-appliance-apply-modal-subtitle>Select valid components, inspect their rendered differences, then submit one appliance task.</p>
+            </div>
+            <div class="appliance-apply-modal-head-actions">
+              <span class="status-pill warn" data-appliance-apply-modal-status>loading</span>
+              <button class="button ghost icon-button" type="button" data-appliance-apply-modal-close aria-label="Close appliance changes" title="Close">×</button>
+            </div>
+          </div>
+          <div class="alert error hidden" data-appliance-apply-modal-error role="alert"></div>
+          <section class="appliance-apply-review" data-appliance-apply-review>
+            <form class="form-stack" data-appliance-apply-review-form>
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <div class="appliance-apply-review-list" data-appliance-apply-review-list></div>
+              <div class="appliance-apply-modal-actions">
+                <span class="muted" data-appliance-apply-selection-summary></span>
+                <button class="button primary" type="submit" data-appliance-apply-submit>Submit appliance changes</button>
+              </div>
+            </form>
+          </section>
+          <section class="appliance-apply-live hidden" data-appliance-apply-live aria-live="polite">
+            <div id="appliance-apply-live-grid" class="tabulator-shell appliance-apply-live-grid"></div>
+            <div class="appliance-apply-step-detail hidden" data-appliance-apply-step-detail>
+              <div class="appliance-apply-step-detail-head">
+                <div>
+                  <strong data-appliance-apply-step-detail-title>Component detail</strong>
+                  <span class="muted" data-appliance-apply-step-detail-meta></span>
+                </div>
+                <span class="status-pill muted" data-appliance-apply-step-detail-status>pending</span>
+              </div>
+              <div class="alert error hidden" data-appliance-apply-step-detail-error></div>
+              <pre><code class="language-json" data-appliance-apply-step-detail-result>{}</code></pre>
+            </div>
+            <div class="appliance-apply-modal-actions">
+              <span class="muted" data-appliance-apply-live-summary>Waiting for task status…</span>
+              <div>
+                <button class="button danger hidden" type="button" data-appliance-apply-cancel>Cancel master task</button>
+                <button class="button primary hidden" type="button" data-appliance-apply-result-close>Close</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </dialog>
+    {% endif %}
     <script src="/static/vendor/tabulator/tabulator.min.js"></script>
     <script>
       window.Prism = window.Prism || {};
@@ -246,7 +295,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=ovf-ipv6-20260714-1"></script>
+    <script src="/static/app.js?v=appliance-task-grid-20260715-4"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

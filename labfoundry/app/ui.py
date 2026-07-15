@@ -47,6 +47,7 @@ from labfoundry.app.models import (
     FirewallRule,
     FirewallSettings,
     Job,
+    JobStep,
     JobStatus,
     KmsClient,
     KmsKey,
@@ -2214,7 +2215,9 @@ def recover_interrupted_vcf_depot_download_jobs(db: Session) -> int:
 
 def recover_interrupted_appliance_apply_jobs(db: Session) -> int:
     jobs = db.scalars(
-        select(Job).where(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .where(
             Job.type == "appliance-apply",
             Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
         )
@@ -2223,6 +2226,17 @@ def recover_interrupted_appliance_apply_jobs(db: Session) -> int:
         return 0
     finished = utcnow()
     for job in jobs:
+        for step in job.steps:
+            if step.status == JobStatus.RUNNING.value:
+                step.status = JobStatus.FAILED.value
+                step.error = "Interrupted by a LabFoundry restart while this component was running."
+                step.finished_at = finished
+                step.progress_percent = 100
+            elif step.status == JobStatus.PENDING.value:
+                step.status = "skipped"
+                step.error = "Skipped because the appliance apply task was interrupted."
+                step.finished_at = finished
+                step.progress_percent = 100
         job.status = JobStatus.FAILED.value
         job.finished_at = finished
         job.progress_percent = 100
@@ -5058,11 +5072,23 @@ def _task_time_label(value: datetime | None) -> str:
 def _can_cancel_task(job: Job, identity: Identity | None = None) -> bool:
     if job.status not in ACTIVE_JOB_STATUSES:
         return False
+    if job.type == "appliance-apply" and _job_payload(job).get("cancel_requested"):
+        return False
     if identity is None:
         return True
     if identity.has_role(Role.ADMIN.value):
         return True
     return identity.has_role(Role.SERVICE_ADMIN.value) and job.type in SERVICE_ADMIN_CANCELLABLE_JOB_TYPES
+
+
+def _job_step_payload(step: JobStep) -> dict[str, Any]:
+    if not step.result:
+        return {}
+    try:
+        value = json.loads(step.result)
+    except (json.JSONDecodeError, TypeError):
+        return {"raw": str(step.result)}
+    return value if isinstance(value, dict) else {"value": value}
 
 
 def _task_row(job: Job, identity: Identity | None = None) -> dict[str, Any]:
@@ -5074,6 +5100,9 @@ def _task_row(job: Job, identity: Identity | None = None) -> dict[str, Any]:
     if not summary and isinstance(result.get("vm"), dict):
         summary = str(result["vm"].get("vm_name") or result["vm"].get("guest_ip") or "")
     error = _redact_task_value(job.error or "")
+    steps = sorted(job.steps, key=lambda step: (step.position, step.id))
+    if not summary and steps:
+        summary = f"{len(steps)} component{'s' if len(steps) != 1 else ''}"
     return {
         "id": job.id,
         "type": job.type,
@@ -5091,6 +5120,37 @@ def _task_row(job: Job, identity: Identity | None = None) -> dict[str, Any]:
         "result_json": json.dumps(result, indent=2, sort_keys=True),
         "error": error,
         "can_cancel": _can_cancel_task(job, identity),
+        "_children": [_job_step_row(step) for step in steps],
+    }
+
+
+def _job_step_row(step: JobStep) -> dict[str, Any]:
+    result = _redact_task_value(_job_step_payload(step))
+    error = _redact_task_value(step.error or "")
+    status_value = str(step.status or JobStatus.PENDING.value)
+    return {
+        "id": step.id,
+        "job_id": step.job_id,
+        "component_key": step.component_key,
+        "label": step.label,
+        "type": "appliance-apply-step",
+        "type_label": "Apply component",
+        "status": status_value,
+        "status_pill": _task_status_pill(status_value),
+        "state": status_value,
+        "summary": " · ".join(str(item) for item in result.get("summary", []) if item),
+        "created_by": step.job.created_by if step.job is not None else "",
+        "created_at": _task_time_label(step.created_at),
+        "started_at": _task_time_label(step.started_at),
+        "finished_at": _task_time_label(step.finished_at),
+        "progress_percent": max(0, min(100, int(step.progress_percent or 0))),
+        "result": result,
+        "result_json": json.dumps(result, indent=2, sort_keys=True),
+        "error": error,
+        "can_cancel": False,
+        "is_step": True,
+        "position": step.position,
+        "_children": [],
     }
 
 
@@ -6506,12 +6566,14 @@ def service_runtime_status(db: Session, service_id: str) -> dict[str, Any]:
 
 def appliance_apply_context(db: Session) -> dict[str, Any]:
     units = appliance_apply_units(db)
-    changed_units = [unit for unit in units if unit["changed"]]
+    submitted_ids = active_appliance_apply_submitted_unit_ids(db)
+    changed_units = [unit for unit in units if unit["changed"] and unit["id"] not in submitted_ids]
     return {
         "apply_units": units,
         "changed_apply_units": changed_units,
         "unchanged_apply_units": [unit for unit in units if not unit["changed"]],
         "changed_apply_unit_count": len(changed_units),
+        "submitted_apply_unit_ids": submitted_ids,
     }
 
 
@@ -8113,6 +8175,39 @@ def appliance_apply_page(
     return render(request, "appliance_apply.html", {"identity": identity, **appliance_apply_context(db)})
 
 
+@router.get("/appliance-apply/review", response_class=JSONResponse, response_model=None)
+def appliance_apply_review(
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    context = appliance_apply_context(db)
+    units = [
+        {
+            "id": unit["id"],
+            "label": unit["label"],
+            "page_url": unit["page_url"],
+            "summary": unit["summary"],
+            "valid": unit["valid"],
+            "validation_errors": unit["validation_errors"],
+            "validation_warnings": unit["validation_warnings"],
+            "config_path": unit["config_path"],
+            "config_preview": unit["config_preview"],
+            "config_diff": unit["config_diff"],
+            "has_baseline": unit["has_baseline"],
+            "selected": unit["valid"],
+        }
+        for unit in context["changed_apply_units"]
+    ]
+    active_job = active_appliance_apply_job(db)
+    return JSONResponse(
+        {
+            "units": units,
+            "pending_count": len(units),
+            "active_task": _task_row(active_job, identity) if active_job is not None else None,
+        }
+    )
+
+
 @router.get("/appliance-apply/status", response_class=JSONResponse, response_model=None)
 def appliance_apply_status_api(
     identity: Identity = Depends(require_session_identity),
@@ -8120,12 +8215,15 @@ def appliance_apply_status_api(
 ) -> JSONResponse:
     context = appliance_apply_context(db)
     pending_count = context["changed_apply_unit_count"]
+    active_job = active_appliance_apply_job(db)
     return JSONResponse(
         {
             "pending_count": pending_count,
             "label": "Review appliance changes" if pending_count else "Appliance Apply",
             "detail": f"{pending_count} pending {'unit' if pending_count == 1 else 'units'}" if pending_count else "Desired state current",
             "badge": "pending" if pending_count else "current",
+            "locked": active_job is not None,
+            "active_task": _task_row(active_job, identity) if active_job is not None else None,
         }
     )
 
@@ -8140,6 +8238,7 @@ APPLIANCE_APPLY_SUBMIT_LOCK = threading.Lock()
 def active_appliance_apply_job(db: Session) -> Job | None:
     return db.scalars(
         select(Job)
+        .options(selectinload(Job.steps))
         .where(
             Job.type == "appliance-apply",
             Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
@@ -8149,9 +8248,18 @@ def active_appliance_apply_job(db: Session) -> Job | None:
     ).first()
 
 
+def active_appliance_apply_submitted_unit_ids(db: Session) -> set[str]:
+    job = active_appliance_apply_job(db)
+    if job is None:
+        return set()
+    if job.steps:
+        return {step.component_key for step in job.steps}
+    return {str(unit_id) for unit_id in _job_payload(job).get("selected_units", [])}
+
+
 def run_appliance_apply_job(job_id: str) -> None:
     with SessionLocal() as db:
-        job = db.get(Job, job_id)
+        job = db.scalar(select(Job).options(selectinload(Job.steps)).where(Job.id == job_id))
         if job is None or job.status != JobStatus.PENDING.value:
             return
         job.status = JobStatus.RUNNING.value
@@ -8163,7 +8271,6 @@ def run_appliance_apply_job(job_id: str) -> None:
         try:
             job_result = json.loads(job.result or "{}")
             selected_order = [str(unit_id) for unit_id in job_result.get("selected_units", [])]
-            selected_ids = set(selected_order)
             captured_by_id = {
                 str(unit.get("unit_id")): unit
                 for unit in job_result.get("captured_units", [])
@@ -8188,18 +8295,80 @@ def run_appliance_apply_job(job_id: str) -> None:
                     f"Desired state changed after task submission: {', '.join(changed_after_submit)}. Submit the appliance changes again."
                 )
 
+            steps_by_key = {step.component_key: step for step in job.steps}
+            total_steps = max(len(selected_units), 1)
+            failed = False
+            cancelled = False
             for index, unit in enumerate(selected_units, start=1):
-                unit_results.append(execute_appliance_apply_unit(unit))
-                job.progress_percent = min(95, int(index / max(len(selected_units), 1) * 90) + 5)
-                job.result = json.dumps({**job_result, "units": unit_results}, indent=2)
+                db.refresh(job)
+                current_payload = _job_payload(job)
+                if current_payload.get("cancel_requested"):
+                    cancelled = True
+                    for remaining_unit in selected_units[index - 1 :]:
+                        remaining = steps_by_key.get(remaining_unit["id"])
+                        if remaining is None or remaining.status != JobStatus.PENDING.value:
+                            continue
+                        remaining.status = "skipped"
+                        remaining.progress_percent = 100
+                        remaining.finished_at = utcnow()
+                        remaining.error = "Skipped after the master task cancellation request."
+                        remaining.result = json.dumps({"summary": remaining_unit["summary"], "reason": "cancelled"}, indent=2)
+                    db.commit()
+                    break
+
+                step = steps_by_key.get(unit["id"])
+                if step is None:
+                    raise ApplianceApplyJobError(f"Component task record is missing for {unit['label']}.")
+                step.status = JobStatus.RUNNING.value
+                step.started_at = utcnow()
+                step.progress_percent = 5
+                job.progress_percent = min(95, int(((index - 1) / total_steps) * 100))
                 db.commit()
 
-            succeeded = all(result["success"] for result in unit_results)
-            persist_vcf_depot_metadata_from_apply(db, unit_results)
-            if succeeded:
-                update_appliance_apply_baselines(db, appliance_apply_units(db), selected_ids)
-            else:
+                result = execute_appliance_apply_unit(unit)
+                result = _redact_task_value(result)
+                db.refresh(job)
+                current_payload = _job_payload(job)
+                unit_results.append(result)
+                step.result = json.dumps(result, indent=2, sort_keys=True)
+                step.status = JobStatus.SUCCEEDED.value if result["success"] else JobStatus.FAILED.value
+                step.finished_at = utcnow()
+                step.progress_percent = 100
+                step.error = None if result["success"] else "The component reported an apply failure."
+                job.progress_percent = min(99, int((index / total_steps) * 100))
+                job.result = json.dumps({**current_payload, "units": unit_results}, indent=2)
+                persist_vcf_depot_metadata_from_apply(db, [result])
+                if result["success"]:
+                    update_appliance_apply_baselines(db, [unit], {unit["id"]})
+                else:
+                    failed = True
+                    for remaining_unit in selected_units[index:]:
+                        remaining = steps_by_key.get(remaining_unit["id"])
+                        if remaining is None or remaining.status != JobStatus.PENDING.value:
+                            continue
+                        remaining.status = "skipped"
+                        remaining.progress_percent = 100
+                        remaining.finished_at = utcnow()
+                        remaining.error = f"Skipped because {unit['label']} failed."
+                        remaining.result = json.dumps({"summary": remaining_unit["summary"], "reason": "previous_component_failed"}, indent=2)
+                if current_payload.get("cancel_requested") and not failed:
+                    cancelled = True
+                    for remaining_unit in selected_units[index:]:
+                        remaining = steps_by_key.get(remaining_unit["id"])
+                        if remaining is None or remaining.status != JobStatus.PENDING.value:
+                            continue
+                        remaining.status = "skipped"
+                        remaining.progress_percent = 100
+                        remaining.finished_at = utcnow()
+                        remaining.error = "Skipped after the master task cancellation request."
+                        remaining.result = json.dumps({"summary": remaining_unit["summary"], "reason": "cancelled"}, indent=2)
+                db.commit()
+                if failed or cancelled:
+                    break
+
+            if failed:
                 log_appliance_apply_failures(job_id, unit_results)
+            succeeded = not failed and not cancelled and all(result["success"] for result in unit_results) and len(unit_results) == len(selected_units)
             log_appliance_apply_submission(
                 job_id,
                 selected_units=selected_order,
@@ -8207,16 +8376,28 @@ def run_appliance_apply_job(job_id: str) -> None:
                 unit_results=unit_results,
                 succeeded=succeeded,
             )
+            db.refresh(job)
+            final_payload = _job_payload(job)
             job_result = {
-                **job_result,
+                **final_payload,
                 "units": unit_results,
                 "dry_run": any(result["dry_run"] for result in unit_results),
             }
-            job.status = JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value
+            if cancelled:
+                job.status = JobStatus.CANCELLED.value
+                job_result["state"] = JobStatus.CANCELLED.value
+                job.error = "Appliance apply cancelled after the running component completed."
+            elif succeeded:
+                job.status = JobStatus.SUCCEEDED.value
+                job_result["state"] = JobStatus.SUCCEEDED.value
+                job.error = None
+            else:
+                job.status = JobStatus.FAILED.value
+                job_result["state"] = JobStatus.FAILED.value
+                job.error = "One or more appliance apply components reported a failure."
             job.finished_at = utcnow()
             job.progress_percent = 100
             job.result = json.dumps(job_result, indent=2)
-            job.error = None if succeeded else "One or more appliance apply units reported a failure."
             db.commit()
             record_audit(
                 db,
@@ -8234,9 +8415,21 @@ def run_appliance_apply_job(job_id: str) -> None:
             if job is None:
                 return
             safe_error = str(exc) if isinstance(exc, ApplianceApplyJobError) else "Appliance apply task failed unexpectedly."
+            finished = utcnow()
+            for step in job.steps:
+                if step.status == JobStatus.RUNNING.value:
+                    step.status = JobStatus.FAILED.value
+                    step.error = safe_error
+                    step.finished_at = finished
+                    step.progress_percent = 100
+                elif step.status == JobStatus.PENDING.value:
+                    step.status = "skipped"
+                    step.error = "Skipped because the master task failed before this component started."
+                    step.finished_at = finished
+                    step.progress_percent = 100
             job_result = json.loads(job.result or "{}")
             job.status = JobStatus.FAILED.value
-            job.finished_at = utcnow()
+            job.finished_at = finished
             job.progress_percent = 100
             job.result = json.dumps({**job_result, "units": unit_results}, indent=2)
             job.error = safe_error
@@ -8260,12 +8453,15 @@ def submit_appliance_apply(
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
-) -> HTMLResponse:
+) -> Response:
     verify_csrf(request, csrf)
+    wants_json = "application/json" in request.headers.get("accept", "")
     units = appliance_apply_units(db)
     unit_map = {unit["id"]: unit for unit in units}
     selected_ids = {unit_id for unit_id in selected_units if unit_id in APPLIANCE_APPLY_UNIT_IDS}
     if not selected_ids:
+        if wants_json:
+            return JSONResponse({"detail": "Select at least one appliance change to submit."}, status_code=422)
         return render(
             request,
             "appliance_apply.html",
@@ -8279,6 +8475,8 @@ def submit_appliance_apply(
         )
     invalid_units = [unit for unit in units if unit["id"] in selected_ids and unit["validation_errors"]]
     if invalid_units:
+        if wants_json:
+            return JSONResponse({"detail": "Resolve validation errors before submitting appliance changes."}, status_code=422)
         return render(
             request,
             "appliance_apply.html",
@@ -8347,6 +8545,21 @@ def submit_appliance_apply(
             error=None,
         )
         db.add(job)
+        for position, unit in enumerate(selected_ordered_units, start=1):
+            captured = next(item for item in job_result["captured_units"] if item["unit_id"] == unit["id"])
+            db.add(
+                JobStep(
+                    id=f"{job_id}:{unit['id']}",
+                    job=job,
+                    component_key=unit["id"],
+                    label=unit["label"],
+                    position=position,
+                    status=JobStatus.PENDING.value,
+                    progress_percent=0,
+                    result=json.dumps(captured, indent=2, sort_keys=True),
+                    error=None,
+                )
+            )
         db.commit()
         record_audit(
             db,
@@ -8357,18 +8570,18 @@ def submit_appliance_apply(
             detail=f"selected_units={','.join(job_result['selected_units'])}",
         )
     background_tasks.add_task(run_appliance_apply_job, job.id)
-    return render(
-        request,
-        "appliance_apply.html",
-        {
-            "identity": identity,
-            **appliance_apply_context(db),
-            "apply_task": job,
-            "apply_task_dry_run": job_result["dry_run"],
-            "applied_unit_results": [],
-            "apply_failure_summaries": [],
-        },
-    )
+    if wants_json:
+        db.refresh(job)
+        return JSONResponse(
+            {
+                "status": "pending",
+                "job_id": job.id,
+                "task": _task_row(job, identity),
+                "status_url": f"/tasks/{job.id}/status",
+            },
+            status_code=202,
+        )
+    return RedirectResponse(f"/tasks?job_id={quote(job.id)}", status_code=303)
 
 
 @router.get("/routes-wan", response_class=HTMLResponse, response_model=None)
@@ -14106,7 +14319,7 @@ def tasks_page(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    jobs = db.execute(select(Job).order_by(desc(Job.created_at)).limit(500)).scalars().all()
+    jobs = db.execute(select(Job).options(selectinload(Job.steps)).order_by(desc(Job.created_at)).limit(500)).scalars().all()
     task_rows = [_task_row(job, identity) for job in jobs]
     selected_job_id = job_id if any(row["id"] == job_id for row in task_rows) else ""
     return render(
@@ -14126,7 +14339,7 @@ def tasks_status(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    jobs = db.execute(select(Job).order_by(desc(Job.created_at)).limit(500)).scalars().all()
+    jobs = db.execute(select(Job).options(selectinload(Job.steps)).order_by(desc(Job.created_at)).limit(500)).scalars().all()
     rows = [_task_row(job, identity) for job in jobs]
     selected = next((row for row in rows if job_id and row["id"] == job_id), None)
     return JSONResponse(
@@ -14137,6 +14350,18 @@ def tasks_status(
             "server_time": utcnow().isoformat(),
         }
     )
+
+
+@router.get("/tasks/{job_id}/status", response_class=JSONResponse, response_model=None)
+def task_status(
+    job_id: str,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    job = db.scalar(select(Job).options(selectinload(Job.steps)).where(Job.id == job_id))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return JSONResponse({"task": _task_row(job, identity), "server_time": utcnow().isoformat()})
 
 
 @router.get("/tasks/{job_id}/log", response_class=JSONResponse, response_model=None)
@@ -14178,6 +14403,30 @@ def cancel_task_from_ui(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator role required for this task type")
     if job.status not in ACTIVE_JOB_STATUSES:
         return JSONResponse({"task": _task_row(job, identity), "message": "Task is already finished."})
+    if job.type == "appliance-apply":
+        payload = _job_payload(job)
+        if not payload.get("cancel_requested"):
+            payload["state"] = "cancellation-requested"
+            payload["cancel_requested"] = True
+            payload["cancelled_by"] = identity.username
+            payload["cancel_requested_at"] = utcnow().isoformat()
+            job.result = json.dumps(_redact_task_value(payload), sort_keys=True)
+            db.commit()
+            record_audit(
+                db,
+                actor=identity.username,
+                action="request_cancel_task",
+                resource_type="job",
+                resource_id=job.id,
+                detail=f"type={job.type}",
+            )
+            db.refresh(job)
+        return JSONResponse(
+            {
+                "task": _task_row(job, identity),
+                "message": "Cancellation requested. The running component will finish before remaining components are skipped.",
+            }
+        )
     job.status = JobStatus.CANCELLED.value
     job.finished_at = utcnow()
     job.error = "Task cancelled by operator."

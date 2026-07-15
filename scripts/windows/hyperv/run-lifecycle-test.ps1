@@ -442,7 +442,18 @@ function Invoke-PxeBootSmoke {
         $quotedPassword = ConvertTo-ShellSingleQuoted -Value $SshPassword
         $quotedMac = ConvertTo-ShellSingleQuoted -Value $MacAddress
         $leaseCommand = "printf '%s\n' $quotedPassword | sudo -S grep -i $quotedMac /var/lib/labfoundry/dnsmasq/dhcp.leases 2>/dev/null || true"
-        $leaseOutput = (& plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" $leaseCommand 2>&1 | Out-String).Trim()
+        $plinkArgs = @('-batch', '-ssh')
+        if ($script:applianceHostKey) {
+            $plinkArgs += @('-hostkey', $script:applianceHostKey)
+        }
+        $plinkArgs += @('-pw', $SshPassword, "$ApplianceSshUser@$ApplianceIPAddress", $leaseCommand)
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $leaseOutput = (& plink @plinkArgs 2>&1 | Out-String).Trim()
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         $leaseSeen = $leaseOutput -match [regex]::Escape($MacAddress)
     }
 

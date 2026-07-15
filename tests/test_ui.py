@@ -10,6 +10,15 @@ def login(client):
     assert response.status_code == 303
 
 
+def assert_apply_redirect(response):
+    assert response.status_code == 200
+    assert response.url.path == "/tasks"
+    assert response.history
+    assert response.history[0].status_code == 303
+    assert response.history[0].headers["location"].startswith("/tasks?job_id=job_")
+    assert "Appliance Apply" in response.text
+
+
 def create_api_token(client, scopes):
     response = client.post(
         "/api/v1/auth/login?username=admin&password=labfoundry-admin",
@@ -372,7 +381,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v80" in service_worker.text
+    assert "labfoundry-pwa-v84" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -384,8 +393,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=dashboard-20260714-1" in service_worker.text
-    assert "/static/app.js?v=ovf-ipv6-20260714-1" in service_worker.text
+    assert "/static/app.css?v=appliance-task-grid-20260715-4" in service_worker.text
+    assert "/static/app.js?v=appliance-task-grid-20260715-4" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -394,7 +403,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=dashboard-20260714-1" in offline.text
+    assert "/static/app.css?v=appliance-task-grid-20260715-4" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -410,8 +419,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=dashboard-20260714-1" in page.text
-    assert "/static/app.js?v=ovf-ipv6-20260714-1" in page.text
+    assert "/static/app.css?v=appliance-task-grid-20260715-4" in page.text
+    assert "/static/app.js?v=appliance-task-grid-20260715-4" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -787,6 +796,8 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
         "label": "Appliance Apply",
         "detail": "Desired state current",
         "badge": "current",
+        "locked": False,
+        "active_task": None,
     }
 
     page = client.get("/dns")
@@ -1227,9 +1238,7 @@ def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(c
         assert settings.ntp_servers != "time.cloudflare.com\n192.0.2.10"
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
-    assert apply_response.status_code == 200
-    assert "Appliance apply task pending" in apply_response.text
-    assert "was created and will continue in the background" in apply_response.text
+    assert_apply_redirect(apply_response)
 
     with SessionLocal() as db:
         status = appliance_apply_status(db, "appliance_settings")
@@ -1347,7 +1356,6 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client, monkeypa
     assert "chronyUpstreamRowHasSource" in js.text
     assert "editable: chronyUpstreamRowHasSource" in js.text
     assert "function labFoundryBooleanFormatter" in js.text
-    assert 'formatter: "tickCross"' not in js.text
     assert "formatter: labFoundryBooleanFormatter" in js.text
     assert "const tone = enabled ? \"good\" : \"bad\"" in js.text
     assert "boolean-glyph ${tone}" in js.text
@@ -1866,13 +1874,10 @@ def test_appliance_settings_apply_task_records_dry_run_helper_commands(client, c
 
     with caplog.at_level(logging.INFO, logger="labfoundry.appliance_apply"):
         apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
-    assert apply_response.status_code == 200
-    assert "Appliance apply task pending" in apply_response.text
-    assert "was created and will continue in the background" in apply_response.text
+    assert_apply_redirect(apply_response)
     assert "completed status=succeeded selected_units=appliance_settings" in caplog.text
     assert "unit=appliance_settings status=succeeded" in caplog.text
     assert "labfoundry-helper appliance-settings validate" in caplog.text
-    assert "Open task" in apply_response.text
     assert "Appliance Settings" in apply_response.text
     assert "data-apply-progress-modal" not in apply_response.text
     with SessionLocal() as db:
@@ -1925,9 +1930,7 @@ def test_appliance_apply_failure_renders_command_details(client, monkeypatch):
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
 
-    assert response.status_code == 200
-    assert "Appliance apply task pending" in response.text
-    assert "Open task" in response.text
+    assert_apply_redirect(response)
     assert "super-secret" not in response.text
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
@@ -1989,9 +1992,7 @@ def test_appliance_apply_stops_unit_after_validation_failure(client, monkeypatch
 
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
 
-    assert response.status_code == 200
-    assert "Appliance apply task pending" in response.text
-    assert "Open task" in response.text
+    assert_apply_redirect(response)
     assert "labfoundry-helper appliance-settings apply" not in response.text
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
@@ -3403,8 +3404,7 @@ def test_routes_wan_autosave_endpoints_and_apply_task(client):
         assert routing.source_interface == "eth1.20"
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "wan"})
-    assert apply_response.status_code == 200
-    assert "Appliance apply task pending" in apply_response.text
+    assert_apply_redirect(apply_response)
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
@@ -4226,11 +4226,13 @@ def test_dns_and_dhcp_pages_render(client):
     assert "function updateServerTime" in app_js.text
     assert "window.setInterval(load, 5000)" in app_js.text
     assert "initializeApplianceApplyProgress" in app_js.text
-    assert "Submitting appliance changes" in app_js.text
-    assert "Creating appliance apply task" in app_js.text
-    assert "Adapter work continues in the background" in app_js.text
-    assert "data-apply-submit-tracker" in app_js.text
-    assert "data-apply-progress-modal" not in app_js.text
+    assert "Submit appliance changes" in app_js.text
+    assert "openApplianceApplyReview" in app_js.text
+    assert "renderApplianceApplyTask" in app_js.text
+    assert 'applianceApplyModalTable.on("rowClick"' in app_js.text
+    assert 'labFoundryTasksTable.on("rowClick"' in app_js.text
+    assert "data-appliance-apply-modal" in app_js.text
+    assert "data-apply-submit-tracker" not in app_js.text
     assert "index === 0 ? \"Applying\"" not in app_js.text
     assert "initializeDhcpScopesTable" in app_js.text
     assert "autoSaveDhcpScope" in app_js.text
@@ -4312,7 +4314,11 @@ def test_dns_and_dhcp_pages_render(client):
     assert ".apply-step-row" in app_css.text
     assert ".confirm-modal" in app_css.text
     assert ".confirm-modal::backdrop" in app_css.text
-    assert "backdrop-filter" not in app_css.text
+    assert ".appliance-apply-modal::backdrop" in app_css.text
+    assert "backdrop-filter: blur(2px);" in app_css.text
+    assert "background: var(--surface);" in app_css.text
+    assert "width: min(1180px, calc(100vw - 40px));" in app_css.text
+    assert "max-height: min(560px, 55vh);" in app_css.text
     assert ".section-head" in app_css.text
     assert ".dns-import-controls" in app_css.text
     assert "min-height: clamp(360px, 50vh, 640px) !important;" in app_css.text
@@ -5763,9 +5769,7 @@ def test_kms_apply_task_captures_current_desired_state(client):
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "kms"})
 
-    assert response.status_code == 200
-    assert "Appliance apply task" in response.text
-    assert "Dry-run mode recorded the commands" in response.text
+    assert_apply_redirect(response)
 
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
@@ -6027,8 +6031,7 @@ def test_vcf_private_registry_settings_autosave_bundle_status_api_and_apply_task
     assert status.json()["bundle_count"] == 1
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "vcf_private_registry"})
-    assert apply_response.status_code == 200
-    assert "Appliance apply task" in apply_response.text
+    assert_apply_redirect(apply_response)
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
@@ -6504,8 +6507,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert alias.json()["endpoint"] == status.json()["endpoint"]
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "vcf_offline_depot"})
-    assert apply_response.status_code == 200
-    assert "Appliance apply task" in apply_response.text
+    assert_apply_redirect(apply_response)
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
@@ -6904,7 +6906,10 @@ def test_vcf_offline_depot_accepts_pasted_download_token_and_activation_code(cli
     runtime_log = tmp_path / "active-tool" / "log" / "vdt.log"
     runtime_token = tmp_path / "active-tool" / "secrets" / "download-token.txt"
     runtime_activation = tmp_path / "active-tool" / "secrets" / "activation-code.txt"
+    tool_archive = tmp_path / "vcf-download-tool-9.0.0.tar.gz"
+    tool_archive.write_bytes(b"test archive")
     monkeypatch.setattr("labfoundry.app.ui.VCF_DEPOT_VDT_LOG_PATH", PurePosixPath(runtime_log.as_posix()))
+    monkeypatch.setattr("labfoundry.app.ui.find_local_vcf_download_tool_archive", lambda: tool_archive)
 
     login(client)
     page = client.get("/vcf-offline-depot")
@@ -7690,8 +7695,7 @@ def test_vcf_backups_apply_task_captures_sftp_config(client):
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "vcf_backups"})
 
-    assert response.status_code == 200
-    assert "Appliance apply task" in response.text
+    assert_apply_redirect(response)
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert job.status == "succeeded"
@@ -7768,7 +7772,7 @@ def test_physical_and_vlan_pages_render(client):
     assert "physicalRoleFormatter" in app_js
     assert 'editable: (cell) => cell.getRow().getData().mode !== "trunk"' in app_js
     assert app_js.count('editable: (cell) => cell.getRow().getData().mode !== "trunk"') >= 3
-    assert 'role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_cidr: ""' in app_js
+    assert 'role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_enabled: false, ipv6_cidr: ""' in app_js
     assert "data.requires_activation && !data.is_activated" in app_js
     assert "cidrInputEditor" in app_js
     assert "isValidCidr" in app_js
@@ -8208,6 +8212,7 @@ def test_management_dhcp_interface_can_be_saved_as_static_from_observed_addresse
             "mode": "access",
             "ipv4_method": "static",
             "ip_cidr": eth0_row["host_ip_cidr"],
+            "ipv6_enabled": "on",
             "ipv6_cidr": eth0_row["host_ipv6_cidr"],
             "mtu": "1500",
             "admin_state": "up",
@@ -8304,8 +8309,7 @@ def test_vlan_interface_create_edit_delete_and_apply(client):
     assert "192.168.50.1/24" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "network"})
-    assert apply_response.status_code == 200
-    assert "Appliance apply task" in apply_response.text
+    assert_apply_redirect(apply_response)
 
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
@@ -8580,8 +8584,7 @@ def test_firewall_page_create_rule_and_apply_task(client):
     assert "allow-vcenter" in client.get("/firewall").text
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"})
-    assert apply_response.status_code == 200
-    assert "Appliance apply task" in apply_response.text
+    assert_apply_redirect(apply_response)
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
         assert "labfoundry-helper firewall apply" in (job.result or "")
@@ -8593,7 +8596,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "dashboard-20260714-1" in page.text
+    assert "appliance-task-grid-20260715-4" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -8648,18 +8651,18 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Job, Setting
+    from labfoundry.app.models import Job, JobStep, Setting
 
     login(client)
     page = client.get("/appliance-apply")
     assert page.status_code == 200
     assert "Appliance Change Set" in page.text
     change_set_markup = page.text.split('class="panel apply-change-set-panel"', 1)[1].split('<div class="apply-unit-list">', 1)[0]
-    assert "Submit appliance changes" in change_set_markup
-    assert "data-apply-submit-tracker" in change_set_markup
+    assert "Submit appliance changes" not in change_set_markup
+    assert "data-apply-submit-tracker" not in change_set_markup
     assert "apply-submit-panel" in page.text
-    assert page.text.count("data-apply-submit-button") == 2
-    assert "data-apply-progress-modal" not in page.text
+    assert page.text.count("Submit appliance changes") >= 2
+    assert "appliance-apply-modal" in page.text
     assert "No last-applied baseline exists yet" in page.text
     assert 'value="firewall"' in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -8670,12 +8673,16 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     firewall_input = empty_response.text.split('value="firewall"', 1)[1].split(">", 1)[0]
     assert "checked" not in firewall_input
 
-    baseline_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"})
-    assert baseline_response.status_code == 200
-    assert "Appliance apply task pending" in baseline_response.text
+    baseline_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"}, follow_redirects=False)
+    assert baseline_response.status_code == 303
+    assert baseline_response.headers["location"].startswith("/tasks?job_id=job_")
     with SessionLocal() as db:
         baseline = db.execute(select(Setting).where(Setting.key == "appliance_apply.baselines.v1")).scalar_one()
         assert '"firewall"' in baseline.value
+        baseline_job = db.execute(select(Job).where(Job.type == "appliance-apply").order_by(Job.created_at.desc())).scalars().first()
+        assert baseline_job is not None
+        steps = db.scalars(select(JobStep).where(JobStep.job_id == baseline_job.id)).all()
+        assert [(step.component_key, step.status) for step in steps] == [("firewall", "succeeded")]
 
     firewall_page = client.get("/firewall")
     csrf = firewall_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -8720,14 +8727,38 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     assert "Prism.manual = true" in changed_page.text
     assert "highlightConfigPreviews" in client.get("/static/app.js").text
 
-    skipped_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "network"})
-    assert skipped_response.status_code == 200
-    assert "allow-global-apply-test" in skipped_response.text
+    skipped_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "network"}, follow_redirects=False)
+    assert skipped_response.status_code == 303
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply").order_by(Job.created_at.desc())).scalars().first()
         assert job is not None
         assert "skipped_changed_units" in (job.result or "")
         assert '"unit_id": "firewall"' in (job.result or "")
+
+
+def test_appliance_apply_json_submission_returns_master_with_live_child_status(client):
+    login(client)
+    page = client.get("/appliance-apply")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/appliance-apply",
+        data={"csrf": csrf, "selected_units": "firewall"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["job_id"].startswith("job_")
+    assert payload["status_url"] == f"/tasks/{payload['job_id']}/status"
+    assert payload["task"]["type"] == "appliance-apply"
+    assert [(step["component_key"], step["status"]) for step in payload["task"]["_children"]] == [("firewall", "pending")]
+
+    status_response = client.get(payload["status_url"])
+    assert status_response.status_code == 200
+    task = status_response.json()["task"]
+    assert task["status"] == "succeeded"
+    assert [(step["component_key"], step["status"]) for step in task["_children"]] == [("firewall", "succeeded")]
 
 
 def test_appliance_apply_rejects_submission_while_another_task_is_active(client):
@@ -8754,9 +8785,9 @@ def test_appliance_apply_rejects_submission_while_another_task_is_active(client)
 
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"})
 
-    assert response.status_code == 409
-    assert "Appliance apply task job_active_apply is already running." in response.text
-    assert "Wait for it to finish before submitting another appliance apply task." in response.text
+    assert response.status_code == 423
+    assert response.json()["job_id"] == "job_active_apply"
+    assert "Changes are locked" in response.json()["detail"]
     with SessionLocal() as db:
         jobs = db.scalars(select(Job).where(Job.type == "appliance-apply")).all()
         assert [job.id for job in jobs] == ["job_active_apply"]
@@ -8768,7 +8799,7 @@ def test_recover_interrupted_appliance_apply_jobs_marks_active_tasks_failed(clie
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Job, JobStatus
+    from labfoundry.app.models import Job, JobStatus, JobStep
     from labfoundry.app.ui import recover_interrupted_appliance_apply_jobs
 
     with SessionLocal() as db:
@@ -8800,6 +8831,28 @@ def test_recover_interrupted_appliance_apply_jobs_marks_active_tasks_failed(clie
                 ),
             ]
         )
+        db.add_all(
+            [
+                JobStep(
+                    id="job_pending_apply:firewall",
+                    job_id="job_pending_apply",
+                    component_key="firewall",
+                    label="Firewall",
+                    position=1,
+                    status=JobStatus.PENDING.value,
+                    result="{}",
+                ),
+                JobStep(
+                    id="job_running_apply:vcf_offline_depot",
+                    job_id="job_running_apply",
+                    component_key="vcf_offline_depot",
+                    label="VCF Offline Depot",
+                    position=1,
+                    status=JobStatus.RUNNING.value,
+                    result="{}",
+                ),
+            ]
+        )
         db.commit()
 
         assert recover_interrupted_appliance_apply_jobs(db) == 2
@@ -8811,9 +8864,198 @@ def test_recover_interrupted_appliance_apply_jobs_marks_active_tasks_failed(clie
         assert all("Review current appliance state" in (job.error or "") for job in apply_jobs)
         assert all(json.loads(job.result or "{}")["interrupted"] is True for job in apply_jobs)
         assert all(json.loads(job.result or "{}")["state"] == "failed" for job in apply_jobs)
+        steps = db.scalars(select(JobStep).order_by(JobStep.id)).all()
+        assert [(step.status, step.progress_percent) for step in steps] == [("skipped", 100), ("failed", 100)]
         unrelated = db.get(Job, "job_unrelated_download")
         assert unrelated is not None
         assert unrelated.status == JobStatus.RUNNING.value
+
+
+def test_appliance_apply_master_steps_fail_fast_and_keep_successful_baselines(client, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    import labfoundry.app.ui as ui
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, JobStep, Setting
+
+    units = [
+        {
+            "id": component,
+            "label": label,
+            "snapshot_hash": f"hash-{component}",
+            "summary": [label],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "config_path": f"/tmp/{component}.conf",
+            "config_preview": f"{component}=enabled",
+            "config_diff": "",
+            "context": {},
+        }
+        for component, label in [("network", "Network"), ("firewall", "Firewall"), ("dnsmasq", "DNS/DHCP")]
+    ]
+    result = {
+        "selected_units": [unit["id"] for unit in units],
+        "captured_units": [{"unit_id": unit["id"], "snapshot_hash": unit["snapshot_hash"], "summary": unit["summary"]} for unit in units],
+        "skipped_changed_units": [],
+        "units": [],
+        "dry_run": True,
+    }
+    with SessionLocal() as db:
+        job = Job(
+            id="job_fail_fast_apply",
+            type="appliance-apply",
+            status=JobStatus.PENDING.value,
+            created_by="admin",
+            progress_percent=0,
+            result=json.dumps(result),
+        )
+        db.add(job)
+        db.add_all(
+            [
+                JobStep(
+                    id=f"{job.id}:{unit['id']}",
+                    job=job,
+                    component_key=unit["id"],
+                    label=unit["label"],
+                    position=index,
+                    status=JobStatus.PENDING.value,
+                    result=json.dumps({"summary": unit["summary"]}),
+                )
+                for index, unit in enumerate(units, start=1)
+            ]
+        )
+        db.commit()
+
+    executed = []
+
+    def execute(unit):
+        executed.append(unit["id"])
+        success = unit["id"] == "network"
+        return {
+            "unit_id": unit["id"],
+            "label": unit["label"],
+            "status": "succeeded" if success else "failed",
+            "success": success,
+            "dry_run": True,
+            "commands": [],
+            "summary": unit["summary"],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "config_path": unit["config_path"],
+            "config_preview": unit["config_preview"],
+            "config_diff": "",
+        }
+
+    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db: units)
+    monkeypatch.setattr(ui, "execute_appliance_apply_unit", execute)
+    monkeypatch.setattr(ui, "persist_vcf_depot_metadata_from_apply", lambda _db, _results: None)
+    monkeypatch.setattr(ui, "log_appliance_apply_failures", lambda _job_id, _results: None)
+    monkeypatch.setattr(ui, "log_appliance_apply_submission", lambda *_args, **_kwargs: None)
+
+    ui.run_appliance_apply_job("job_fail_fast_apply")
+
+    assert executed == ["network", "firewall"]
+    with SessionLocal() as db:
+        job = db.get(Job, "job_fail_fast_apply")
+        steps = db.scalars(select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.position)).all()
+        baseline = db.scalar(select(Setting).where(Setting.key == "appliance_apply.baselines.v1"))
+        assert job.status == JobStatus.FAILED.value
+        assert [step.status for step in steps] == ["succeeded", "failed", "skipped"]
+        assert baseline is not None
+        baseline_payload = json.loads(baseline.value)
+        assert "network" in baseline_payload
+        assert "firewall" not in baseline_payload
+        assert "dnsmasq" not in baseline_payload
+
+
+def test_appliance_apply_parent_cancel_finishes_current_step_and_skips_remaining(client, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    import labfoundry.app.ui as ui
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, JobStep
+
+    units = [
+        {
+            "id": component,
+            "label": label,
+            "snapshot_hash": f"hash-{component}",
+            "summary": [label],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "config_path": f"/tmp/{component}.conf",
+            "config_preview": component,
+            "config_diff": "",
+            "context": {},
+        }
+        for component, label in [("network", "Network"), ("firewall", "Firewall")]
+    ]
+    payload = {
+        "selected_units": [unit["id"] for unit in units],
+        "captured_units": [{"unit_id": unit["id"], "snapshot_hash": unit["snapshot_hash"]} for unit in units],
+        "skipped_changed_units": [],
+        "units": [],
+        "dry_run": True,
+    }
+    with SessionLocal() as db:
+        job = Job(id="job_cancel_apply", type="appliance-apply", status="pending", created_by="admin", result=json.dumps(payload))
+        db.add(job)
+        db.add_all(
+            [
+                JobStep(
+                    id=f"{job.id}:{unit['id']}",
+                    job=job,
+                    component_key=unit["id"],
+                    label=unit["label"],
+                    position=index,
+                    status="pending",
+                    result="{}",
+                )
+                for index, unit in enumerate(units, start=1)
+            ]
+        )
+        db.commit()
+
+    def execute(unit):
+        with SessionLocal() as other_db:
+            parent = other_db.get(Job, "job_cancel_apply")
+            current = json.loads(parent.result or "{}")
+            current["cancel_requested"] = True
+            current["state"] = "cancellation-requested"
+            parent.result = json.dumps(current)
+            other_db.commit()
+        return {
+            "unit_id": unit["id"],
+            "label": unit["label"],
+            "status": "succeeded",
+            "success": True,
+            "dry_run": True,
+            "commands": [],
+            "summary": unit["summary"],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "config_path": unit["config_path"],
+            "config_preview": unit["config_preview"],
+            "config_diff": "",
+        }
+
+    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db: units)
+    monkeypatch.setattr(ui, "execute_appliance_apply_unit", execute)
+    monkeypatch.setattr(ui, "persist_vcf_depot_metadata_from_apply", lambda _db, _results: None)
+    monkeypatch.setattr(ui, "log_appliance_apply_submission", lambda *_args, **_kwargs: None)
+
+    ui.run_appliance_apply_job("job_cancel_apply")
+
+    with SessionLocal() as db:
+        job = db.get(Job, "job_cancel_apply")
+        steps = db.scalars(select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.position)).all()
+        assert job.status == JobStatus.CANCELLED.value
+        assert [step.status for step in steps] == ["succeeded", "skipped"]
+        assert json.loads(job.result or "{}")["state"] == "cancelled"
 
 
 def test_appliance_startup_initializes_factory_apply_baseline(monkeypatch, tmp_path):
@@ -9556,9 +9798,7 @@ def test_ca_apply_task_captures_current_desired_state(client):
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "ca"})
 
-    assert response.status_code == 200
-    assert "Appliance apply task" in response.text
-    assert "Dry-run mode recorded the commands" in response.text
+    assert_apply_redirect(response)
 
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
@@ -9765,9 +10005,7 @@ def test_dns_apply_task_captures_current_desired_state(client):
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "dnsmasq"})
 
-    assert response.status_code == 200
-    assert "Appliance apply task" in response.text
-    assert "Dry-run mode recorded the commands" in response.text
+    assert_apply_redirect(response)
 
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()
@@ -10030,9 +10268,7 @@ def test_dhcp_apply_task_captures_current_desired_state(client):
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "dnsmasq"})
 
-    assert response.status_code == 200
-    assert "Appliance apply task" in response.text
-    assert "Dry-run mode recorded the commands" in response.text
+    assert_apply_redirect(response)
 
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one()

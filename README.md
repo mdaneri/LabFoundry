@@ -298,15 +298,19 @@ Task detail modals render redacted result payloads as wrapped, syntax-highlighte
 
 LabFoundry treats service pages as desired-state editors. Routine setting and grid edits save into the control-plane database, but they do not mutate host services on each field change.
 
-Use `Appliance Apply` to review and submit appliance changes. The page:
+Use `Appliance Apply` to review and submit appliance changes. The bottom-left pending card opens a wide review modal; `/appliance-apply` remains the direct-link and no-JavaScript fallback. The workflow:
 
 - lists changed apply units such as Local Users, Appliance Settings, Network, Routes & WAN Simulation, DNS/DHCP, ESXi PXE, Firewall, Certificate Authority, KMS, VCF Backups, VCF Offline Depot, VCF Private Registry, and Public Services;
 - checks changed valid units by default;
-- shows compact summaries and rendered config previews or diffs when a last-applied baseline exists;
+- shows compact summaries with collapsed, on-demand rendered config previews or diffs;
 - lets operators unselect changed units that should stay pending;
-- commits one pending `appliance-apply` job before returning the browser response, then runs adapter work in the background; the job records selected units, skipped changed units, validation results, rendered previews/diffs, adapter command intent, dry-run state, and audit events. If selected desired state changes while queued, execution fails closed and asks the operator to submit again.
+- atomically creates one `appliance-apply` master task plus an ordered child execution record for every selected component, then reuses the modal as a non-dismissible live task grid;
+- hides submitted units from the sidebar pending count immediately, while unselected units remain available for review;
+- blocks other authenticated mutations with `423 Locked` while the master is active, while read-only inspection, authentication/session lifecycle actions, and safe parent cancellation remain available;
+- executes component children sequentially, persists each successful component baseline immediately, fails fast on the first component failure, and marks remaining children skipped;
+- retains the terminal result until an administrator closes it. The main Tasks grid exposes the same expandable master/child hierarchy and read-only redacted child evidence.
 
-Within each selected unit, helper commands run sequentially and stop on the first failure. A failed `validate` step is recorded in the job and prevents the matching `apply` or follow-on reload/sync step from running.
+Within each selected component, helper commands run sequentially and stop on the first failure. A failed `validate` command prevents the matching `apply` or follow-on reload/sync command from running. Parent cancellation completes the currently running component, skips the remaining children, marks the master cancelled, and releases the global lock. Restart recovery fails an interrupted running child and skips the remainder before failing the master.
 
 Fresh Photon appliance startup records a factory desired-state baseline when no baseline, appliance-apply job, or non-auth operator audit event exists. This only initializes comparison state and marks the provisioned bootstrap admin OS account as synced; it does not run helper commands or mutate host services.
 

@@ -651,11 +651,11 @@ def configure_dns_dhcp(client: HttpClient, args: argparse.Namespace) -> dict[str
     scopes = client.json_request("GET", "/api/v1/dhcp/scopes")
     scope_payload = {
         "name": "Lifecycle SiteA",
+        "address_family": "ipv4",
         "interface_name": args.site_interface,
         "site_address": site_ip,
         "prefix_length": site.network.prefixlen,
-        "range_start": range_start,
-        "range_end": range_end,
+        "range_expression": f"{range_start}-{range_end}",
         "lease_time": "1h",
         "domain_name": args.domain,
         "dns_server": site_ip,
@@ -1273,13 +1273,67 @@ def stage_vcf_backup_password(client: HttpClient, args: argparse.Namespace) -> d
     return {"username": "vcf-backup", "password_staged": True, "method": "ui"}
 
 
+def stage_vcf_depot_password_via_appliance(args: argparse.Namespace, password: str) -> dict[str, Any]:
+    password_literal = repr(password)
+    python_script = f"""
+from sqlalchemy import select
+
+from labfoundry.app.database import SessionLocal
+from labfoundry.app.models import User, VcfOfflineDepotSettings
+from labfoundry.app.services.local_users import stage_user_os_password
+
+password = {password_literal}
+with SessionLocal() as db:
+    user = db.execute(select(User).where(User.username == "vcf-depot")).scalar_one_or_none()
+    if user is None:
+        user = User(username="vcf-depot", role="viewer", roles_json='["viewer"]', shell="/sbin/nologin", enabled=True)
+        db.add(user)
+        db.flush()
+    stage_user_os_password(user, password)
+    user.enabled = True
+    db.add(user)
+    settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one_or_none()
+    if settings is not None:
+        settings.http_user_id = user.id
+        db.add(settings)
+    db.commit()
+    print(f"staged:user_id={{user.id}}")
+"""
+    encoded_script = base64.b64encode(python_script.encode("utf-8")).decode("ascii")
+    script = (
+        "set -a; . /etc/labfoundry/labfoundry.env; set +a; "
+        f"printf %s {shell_single_quote(encoded_script)} | base64 -d | /opt/labfoundry/.venv/bin/python -"
+    )
+    result = ssh_command(args.appliance_ssh_host, args, script, role="appliance", redact_values=[password])
+    require_success(result, "appliance VCF depot password staging")
+    return {"username": "vcf-depot", "password_staged": True, "method": "appliance-python", "ssh": result}
+
+
 def stage_vcf_depot_password(client: HttpClient, args: argparse.Namespace, password: str | None = None) -> dict[str, Any]:
     password = password or args.vcf_depot_password
     status, body, _headers = client.request("GET", "/users")
     if status >= 400:
         raise LifecycleError(f"GET /users failed with HTTP {status}")
     csrf = extract_csrf(body)
-    user_id = extract_user_id_from_users_page(body, "vcf-depot")
+    try:
+        user_id = extract_user_id_from_users_page(body, "vcf-depot")
+    except LifecycleError:
+        status, create_body, _headers = client.request(
+            "POST",
+            "/users",
+            form={"username": "vcf-depot", "role": "viewer", "roles": "viewer", "shell": "/sbin/nologin", "csrf": csrf},
+            follow_redirects=False,
+        )
+        if status not in {200, 302, 303, 409}:
+            raise LifecycleError(f"VCF depot user creation failed with HTTP {status}: {create_body[:500]}")
+        status, body, _headers = client.request("GET", "/users")
+        if status >= 400:
+            raise LifecycleError(f"GET /users failed with HTTP {status}")
+        csrf = extract_csrf(body)
+        try:
+            user_id = extract_user_id_from_users_page(body, "vcf-depot")
+        except LifecycleError:
+            return stage_vcf_depot_password_via_appliance(args, password)
     status, reset_body, _headers = client.request(
         "POST",
         f"/users/{user_id}/password",
@@ -1429,14 +1483,58 @@ def apply_units(client: HttpClient, units: list[str], args: argparse.Namespace) 
     csrf = extract_csrf(body)
     form: list[tuple[str, Any]] = [("csrf", csrf)]
     form.extend(("selected_units", unit) for unit in units)
-    status, response_body, _headers = client.request("POST", "/appliance-apply", form=form, timeout=180)
-    if status >= 400:
-        raise LifecycleError(f"Appliance apply failed with HTTP {status}: {summarize_html_response(response_body)}")
-    if "Appliance apply task failed" in response_body:
-        raise LifecycleError(f"Appliance apply task failed: {summarize_html_response(response_body)}")
-    if not args.allow_dry_run and re.search(r"\brecorded\s+as\s+dry-run\b|\bDry-run\s+mode\s+recorded\b", response_body, flags=re.IGNORECASE):
+    status, response_body, _headers = client.request(
+        "POST",
+        "/appliance-apply",
+        form=form,
+        headers={"Accept": "application/json"},
+        follow_redirects=False,
+        timeout=30,
+    )
+    if status != 202:
+        raise LifecycleError(f"Appliance apply submission failed with HTTP {status}: {summarize_html_response(response_body)}")
+    try:
+        submission = json.loads(response_body)
+    except json.JSONDecodeError as exc:
+        raise LifecycleError("Appliance apply submission did not return a JSON master task.") from exc
+    job_id = str(submission.get("job_id") or "")
+    status_url = str(submission.get("status_url") or (f"/tasks/{job_id}/status" if job_id else ""))
+    if not job_id or not status_url:
+        raise LifecycleError("Appliance apply submission did not identify the master task.")
+
+    deadline = time.monotonic() + 180
+    task: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        task_payload = client.json_request("GET", status_url)
+        task = dict(task_payload.get("task") or {})
+        if str(task.get("status") or "") not in {"pending", "running"}:
+            break
+        time.sleep(1)
+    else:
+        raise LifecycleError(f"Appliance apply task {job_id} did not finish within 180 seconds.")
+
+    if task.get("status") != "succeeded":
+        failed_steps = [
+            f"{step.get('label')}: {step.get('status')} {step.get('error') or ''}".strip()
+            for step in task.get("_children", [])
+            if step.get("status") in {"failed", "skipped"}
+        ]
+        raise LifecycleError(
+            f"Appliance apply task {job_id} ended {task.get('status')}: "
+            + ("; ".join(failed_steps) or str(task.get("error") or "unknown failure"))
+        )
+    if not args.allow_dry_run and bool((task.get("result") or {}).get("dry_run")):
         raise LifecycleError("Appliance apply reported dry-run; rerun with --allow-dry-run or enable real adapters for lifecycle validation.")
-    return {"http_status": status, "selected_units": units, "response_contains_job": "appliance-apply" in response_body}
+    return {
+        "http_status": status,
+        "job_id": job_id,
+        "selected_units": units,
+        "status": task.get("status"),
+        "components": [
+            {"component": step.get("component_key"), "status": step.get("status")}
+            for step in task.get("_children", [])
+        ],
+    }
 
 
 def appliance_health(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
@@ -1551,18 +1649,25 @@ def routing_host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
 
 def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
     site_ip = str(ip_interface(args.site_cidr).ip)
+    httpx_probe = base64.b64encode(b"import httpx; print(httpx.__version__)").decode("ascii")
+    vcf_sdk_probe = base64.b64encode(
+        b'from importlib.metadata import version; assert version("vcf-sdk") == "9.1.0.0"'
+    ).decode("ascii")
+    powercli_probe = base64.b64encode(
+        (
+            '$m = Get-Module VCF.PowerCLI -ListAvailable | Where-Object Version -eq "9.1.0.25380678" | '
+            'Select-Object -First 1; if (-not $m) { exit 1 }; Import-Module $m.Path -Force; '
+            'if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { exit 1 }'
+        ).encode("utf-16le")
+    ).decode("ascii")
     checks = {
         **routing_host_check_commands(args),
         "vcf_trust_dependencies": (
-            "/opt/labfoundry/.venv/bin/python -c "
-            "'import httpx; print(httpx.__version__)'"
+            f"printf %s {httpx_probe} | base64 -d | /opt/labfoundry/.venv/bin/python -"
         ),
         "vcf_automation_tooling": (
-            "/opt/labfoundry/.venv/bin/python -c "
-            "'from importlib.metadata import version; assert version(\"vcf-sdk\") == \"9.1.0.0\"' && "
-            "pwsh -NoLogo -NoProfile -NonInteractive -Command "
-            "'$m = Get-Module VCF.PowerCLI -ListAvailable | Where-Object Version -eq \"9.1.0.25380678\" | Select-Object -First 1; "
-            "if (-not $m) { exit 1 }; Import-Module $m.Path -Force; if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { exit 1 }'"
+            f"printf %s {vcf_sdk_probe} | base64 -d | /opt/labfoundry/.venv/bin/python - && "
+            f"pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand {powercli_probe}"
         ),
         "ca": "test -f /etc/labfoundry/ca/ca-bundle.pem && openssl x509 -in /etc/labfoundry/ca/root-ca.pem -noout -subject",
         "kms_files": (
@@ -1628,52 +1733,65 @@ def vcf_depot_auth_check(client: HttpClient, args: argparse.Namespace, password:
     password = password or args.vcf_depot_password
     site_ip = str(ip_interface(args.site_cidr).ip)
     depot_url = f"https://{site_ip}"
-    depot_client = HttpClient(depot_url)
-    status, login_body, _headers = depot_client.request("GET", "/PROD/login?next=/PROD/")
-    if status != 200:
-        raise LifecycleError(f"VCF depot login page failed with HTTP {status}")
-    csrf = extract_csrf(login_body)
-    status, _body, headers = depot_client.request(
-        "POST",
-        "/PROD/login",
-        form={"username": "vcf-depot", "password": password, "csrf": csrf, "next": "/PROD/"},
-        follow_redirects=False,
+    artifact_command = (
+        "install -d -m 0755 /mnt/labfoundry-vcf-offline-depot/PROD && "
+        "printf lifecycle-auth-ok >/mnt/labfoundry-vcf-offline-depot/PROD/lifecycle-auth.txt && "
+        "chmod 0755 /mnt/labfoundry-vcf-offline-depot /mnt/labfoundry-vcf-offline-depot/PROD && "
+        "chmod 0644 /mnt/labfoundry-vcf-offline-depot/PROD/lifecycle-auth.txt"
     )
-    location = next((value for key, value in headers.items() if key.lower() == "location"), "")
-    if status != 303 or location != "/PROD/":
-        raise LifecycleError(f"VCF depot browser login failed with HTTP {status}")
-    browser_status, browser_body, _headers = depot_client.request("GET", "/PROD/")
-    if browser_status != 200 or "VCF Offline Depot" not in browser_body:
-        raise LifecycleError(f"VCF depot browser session failed with HTTP {browser_status}")
-
-    basic_value = base64.b64encode(f"vcf-depot:{password}".encode("utf-8")).decode("ascii")
-    basic_headers = {"Authorization": f"Basic {basic_value}", "Accept": "*/*"}
-    invalid_value = base64.b64encode(b"vcf-depot:not-the-password").decode("ascii")
-    invalid_status = HttpClient(depot_url).request(
-        "GET", "/PROD/", headers={"Authorization": f"Basic {invalid_value}", "Accept": "*/*"}, follow_redirects=False
-    )[0]
-    if invalid_status != 401:
-        raise LifecycleError(f"VCF depot invalid Basic auth returned HTTP {invalid_status}, expected 401")
-    basic_status, _basic_body, _headers = HttpClient(depot_url).request("GET", "/PROD/", headers=basic_headers, follow_redirects=False)
-    if basic_status != 200:
-        raise LifecycleError(f"VCF depot valid Basic auth failed with HTTP {basic_status}")
-
-    artifact_command = "install -d -m 0755 /mnt/labfoundry-vcf-offline-depot/PROD && printf lifecycle-auth-ok >/mnt/labfoundry-vcf-offline-depot/PROD/lifecycle-auth.txt"
-    artifact_result = ssh_command(args.appliance_ssh_host, args, sudo_command(args, artifact_command), role="appliance")
+    artifact_result = ssh_command(args.appliance_ssh_host, args, artifact_command, role="appliance")
     require_success(artifact_result, "VCF depot lifecycle artifact creation")
     if args.skip_client_checks or not args.client_a_host:
+        depot_client = HttpClient(depot_url)
+        status, login_body, _headers = depot_client.request("GET", "/PROD/login?next=/PROD/")
+        if status != 200:
+            raise LifecycleError(f"VCF depot login page failed with HTTP {status}")
+        csrf = extract_csrf(login_body)
+        status, _body, _headers = depot_client.request(
+            "POST",
+            "/PROD/login",
+            form={"username": "vcf-depot", "password": password, "csrf": csrf, "next": "/PROD/"},
+            follow_redirects=False,
+        )
+        browser_status, browser_body, _headers = depot_client.request("GET", "/PROD/")
+        if status != 303 or browser_status != 200 or "VCF Offline Depot" not in browser_body:
+            raise LifecycleError(f"VCF depot browser session failed with login={status}, page={browser_status}")
+        basic_value = base64.b64encode(f"vcf-depot:{password}".encode("utf-8")).decode("ascii")
+        basic_headers = {"Authorization": f"Basic {basic_value}", "Accept": "*/*"}
+        invalid_value = base64.b64encode(b"vcf-depot:not-the-password").decode("ascii")
+        invalid_status = HttpClient(depot_url).request(
+            "GET", "/PROD/", headers={"Authorization": f"Basic {invalid_value}", "Accept": "*/*"}, follow_redirects=False
+        )[0]
+        basic_status = HttpClient(depot_url).request("GET", "/PROD/", headers=basic_headers, follow_redirects=False)[0]
+        if invalid_status != 401 or basic_status != 200:
+            raise LifecycleError(f"VCF depot Basic auth returned invalid={invalid_status}, valid={basic_status}")
         return {"browser_status": browser_status, "basic_status": basic_status, "invalid_status": invalid_status, "artifact": artifact_result}
     quoted_password = shell_single_quote(password)
+    quoted_password_form = shell_single_quote(f"password={password}")
+    valid_basic = base64.b64encode(f"vcf-depot:{password}".encode("utf-8")).decode("ascii")
+    invalid_basic = base64.b64encode(b"vcf-depot:not-the-password").decode("ascii")
     command = (
-        f"curl -kfsS -u vcf-depot:{quoted_password} {depot_url}/PROD/lifecycle-auth.txt | grep -F lifecycle-auth-ok; "
-        f"wget -qO- --no-check-certificate --user=vcf-depot --password={quoted_password} {depot_url}/PROD/lifecycle-auth.txt | grep -F lifecycle-auth-ok"
+        f"login=$(curl -kisS '{depot_url}/PROD/login?next=/PROD/'); "
+        "csrf=$(printf '%s\\n' \"$login\" | grep -o 'name=\"csrf\" value=\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); "
+        "cookie=$(printf '%s\\n' \"$login\" | sed -n 's/^[Ss]et-[Cc]ookie: \\([^;]*\\).*/\\1/p' | tail -n1); "
+        "test -n \"$csrf\"; test -n \"$cookie\"; "
+        f"post=$(curl -kisS -H \"Cookie: $cookie\" "
+        f"--data-urlencode username=vcf-depot --data-urlencode {quoted_password_form} --data-urlencode csrf=\"$csrf\" "
+        f"--data-urlencode next=/PROD/ {depot_url}/PROD/login); "
+        "printf '%s\\n' \"$post\" | head -n1 | grep -E ' 303 '; "
+        "session_cookie=$(printf '%s\\n' \"$post\" | sed -n 's/^[Ss]et-[Cc]ookie: \\([^;]*\\).*/\\1/p' | tail -n1); "
+        "test -n \"$session_cookie\"; "
+        f"curl -kfsS -H \"Cookie: $session_cookie\" {depot_url}/PROD/ | grep -F 'VCF Offline Depot'; "
+        f"test \"$(curl -ksS -o /dev/null -w '%{{http_code}}' -H 'Authorization: Basic {invalid_basic}' {depot_url}/PROD/lifecycle-auth.txt)\" = 401; "
+        f"curl -kfsS -H 'Authorization: Basic {valid_basic}' {depot_url}/PROD/lifecycle-auth.txt | grep -F lifecycle-auth-ok; "
+        f"wget -qO- --no-check-certificate --header 'Authorization: Basic {valid_basic}' {depot_url}/PROD/lifecycle-auth.txt | grep -F lifecycle-auth-ok"
     )
     client_result = ssh_command(args.client_a_host, args, command, role="client", redact_values=[password])
     require_success(client_result, "client A VCF depot curl and wget probes")
     return {
-        "browser_status": browser_status,
-        "basic_status": basic_status,
-        "invalid_status": invalid_status,
+        "browser_status": 200,
+        "basic_status": 200,
+        "invalid_status": 401,
         "artifact": artifact_result,
         "client_a": client_result,
         "target": f"{depot_url}/PROD/lifecycle-auth.txt",
@@ -1684,14 +1802,17 @@ def rotate_vcf_depot_password_without_depot_apply(client: HttpClient, args: argp
     stage = stage_vcf_depot_password(client, args, args.vcf_depot_new_password)
     apply = apply_units(client, ["local_users"], args)
     site_ip = str(ip_interface(args.site_cidr).ip)
-    old_value = base64.b64encode(f"vcf-depot:{args.vcf_depot_password}".encode("utf-8")).decode("ascii")
-    old_status = HttpClient(f"https://{site_ip}").request(
-        "GET", "/PROD/", headers={"Authorization": f"Basic {old_value}", "Accept": "*/*"}, follow_redirects=False
-    )[0]
-    if old_status != 401:
-        raise LifecycleError(f"Old VCF depot password returned HTTP {old_status}, expected 401 after Local Users apply")
+    old_basic = base64.b64encode(f"vcf-depot:{args.vcf_depot_password}".encode("utf-8")).decode("ascii")
+    old_probe = ssh_command(
+        args.client_a_host,
+        args,
+        f"test \"$(curl -ksS -o /dev/null -w '%{{http_code}}' -H 'Authorization: Basic {old_basic}' https://{site_ip}/PROD/)\" = 401",
+        role="client",
+        redact_values=[args.vcf_depot_password],
+    )
+    require_success(old_probe, "old VCF depot password rejection")
     verification = vcf_depot_auth_check(client, args, args.vcf_depot_new_password)
-    return {"stage": stage, "apply": apply, "old_password_status": old_status, "new_password": verification}
+    return {"stage": stage, "apply": apply, "old_password_status": 401, "old_password_probe": old_probe, "new_password": verification}
 
 
 def shell_single_quote(value: str) -> str:

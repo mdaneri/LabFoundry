@@ -4,7 +4,9 @@ LabFoundry separates desired-state editing from appliance enforcement.
 
 Service pages edit desired state. They autosave routine settings and grids, show local validation, expose rendered config previews through compact preview actions, and link to the global apply review. They should not own service-specific apply buttons or service-specific apply submit routes.
 
-`Appliance Apply` is the global review and submit surface. It lists changed apply units, checks valid changed units by default, and lets an operator unselect any unit that should remain pending.
+`Appliance Apply` is the global review and submit surface. The bottom-left review card opens a wide modal that lists changed apply units, checks valid changed units by default, and lets an operator unselect any unit that should remain pending. `/appliance-apply` retains the same review as a direct-link and no-JavaScript fallback.
+
+Submitting transforms the review modal into a live master/child task grid. One `appliance-apply` master owns one child execution record per selected component. Every signed-in session sees the blocking grid while the master is pending or running. LabFoundry rejects other UI and API mutations with HTTP `423 Locked`; read-only pages, authentication/session actions, task inspection, and safe master cancellation remain available. Submitted units disappear from the sidebar pending count immediately, while unselected changes remain pending.
 
 Each selected unit runs its helper steps in order and stops at the first failed step. For example, if a unit's `validate` helper fails, LabFoundry records that command output in the job and does not run the unit's `apply`, reload, sync, or relocation steps.
 
@@ -137,7 +139,7 @@ The real VCF Offline Depot apply path stages nginx config at `/var/lib/labfoundr
 
 ## Baselines And Diffs
 
-After a successful selected apply, LabFoundry stores the selected units' last-applied baseline in the existing `settings` table. The baseline includes the normalized snapshot hash, compact summary, rendered config preview, config path, and apply timestamp.
+After each successfully applied component, LabFoundry stores that unit's last-applied baseline in the existing `settings` table. The baseline includes the normalized snapshot hash, compact summary, rendered config preview, config path, and apply timestamp. This per-component commit means an earlier success remains current when a later child fails or the remaining children are skipped.
 
 On fresh Photon appliance startup, LabFoundry records the factory desired-state baseline automatically when there is no existing baseline, no appliance-apply job, and no non-auth operator audit event. This startup baseline is comparison metadata only: it does not submit an apply job, run helper commands, or mutate host services. It also records the provisioned bootstrap admin OS account as synced because image provisioning already created that Photon account and set its password.
 
@@ -147,7 +149,9 @@ Rendered previews and job results must redact sensitive-looking values such as p
 
 ## Job Result
 
-Submitting first commits one pending `appliance-apply` job and returns the operator to the UI; adapter execution continues as response-attached background work so long-running helper actions do not hold the browser request open. Only one appliance apply task may be pending or running at a time, preventing overlapping helper commands from sharing staging paths. If LabFoundry restarts during an apply, startup marks the interrupted task failed and tells the operator to review current appliance state before resubmitting. The submitted desired-state snapshot hash is checked again before execution, and the task fails closed with a resubmit message if a selected unit changes while it is queued. The job result records:
+Submitting first commits one pending `appliance-apply` master and its ordered component children, then returns HTTP `202` to the modal while adapter execution continues as background work. The children progress through `pending`, `running`, `succeeded`, `failed`, or `skipped`. Components execute sequentially; the first failed child stops the task and skips the remainder. A safe cancellation request finishes the running child, skips the remainder, and releases the global mutation lock only after the master becomes terminal.
+
+Only one appliance apply master may be pending or running at a time, preventing overlapping helper commands from sharing staging paths. If LabFoundry restarts during an apply, startup fails the running child, skips pending children, fails the master, and releases the lock. The submitted desired-state snapshot hash is checked again before execution, and the task fails closed with a resubmit message if a selected unit changes while it is queued. The master and children record:
 
 - selected apply units;
 - skipped changed units;
@@ -155,7 +159,7 @@ Submitting first commits one pending `appliance-apply` job and returns the opera
 - compact summaries;
 - rendered config previews and diffs;
 - adapter commands and dry-run status;
-- per-unit success state.
+- per-component status, timing, progress, result, and error.
 
 In development, adapter commands are dry-run records. They capture command intent without changing host services.
 
@@ -173,9 +177,9 @@ Service right rails should show:
 - `Pending Appliance Changes`, with status and a link to `/appliance-apply`;
 - `Validation`, with errors, warnings, and compact rendered config preview actions.
 
-The top pending banner is page-scoped: show it only when the current page's apply unit has changed. The sidebar apply card remains global and may show pending units from other pages.
+The top pending banner is page-scoped: show it only when the current page's apply unit has changed. The sidebar review card remains global, shows only unsubmitted pending units, and disappears when no changes require review. Active submitted work is represented by the blocking master/child grid instead of a second pending banner or sidebar count.
 
-Validation side rails should not render full config blocks inline. Keep the path/name visible in a compact preview action row and open the shared preview modal for the full rendered text. The hidden source element in that row should retain the existing `data-...-preview` selector so autosave refreshes continue to replace the latest preview content. The global Appliance Apply page is the exception: it can keep current previews and diffs inline because it is the deliberate review-before-submit surface.
+Validation side rails should not render full config blocks inline. Keep the path/name visible in a compact preview action row and open the shared preview modal for the full rendered text. The hidden source element in that row should retain the existing `data-...-preview` selector so autosave refreshes continue to replace the latest preview content. Appliance Apply keeps component diffs collapsed until the operator opens the relevant row.
 
 Editable Tabulator grids should keep new-record placeholder rows visually incomplete until the required identity field is filled. Only the required first field should be visible and editable at first; generated defaults and secondary cells should stay blank and locked so operators do not mistake a placeholder for a saved complete row.
 
