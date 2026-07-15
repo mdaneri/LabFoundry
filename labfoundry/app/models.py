@@ -755,6 +755,32 @@ class Job(Base):
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    steps: Mapped[list["JobStep"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="JobStep.position",
+    )
+
+
+class JobStep(Base):
+    __tablename__ = "job_steps"
+    __table_args__ = (UniqueConstraint("job_id", "component_key", name="uq_job_step_component"),)
+
+    id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), index=True)
+    component_key: Mapped[str] = mapped_column(String(80))
+    label: Mapped[str] = mapped_column(String(160))
+    position: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(40), default=JobStatus.PENDING.value)
+    progress_percent: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    job: Mapped[Job] = relationship(back_populates="steps")
+
 
 class Setting(Base):
     __tablename__ = "settings"

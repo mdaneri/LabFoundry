@@ -20,6 +20,9 @@ const PUBLIC_ADDRESS_MODE_COOKIE = "labfoundry_public_address_mode";
 const LABFOUNDRY_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const labFoundryDnsRecordTables = new WeakMap();
 let applianceApplySidebarRefreshTimer = 0;
+let applianceApplyGlobalPollTimer = 0;
+let applianceApplyModalTable = null;
+let applianceApplyActiveJobId = "";
 
 function labFoundryRequestMethod(input, init = {}) {
   return String(init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
@@ -6675,16 +6678,17 @@ function updateApplianceApplySidebar(payload = {}) {
   const detail = sidebar.querySelector("[data-appliance-apply-sidebar-detail]");
   const badge = sidebar.querySelector("[data-appliance-apply-sidebar-badge]");
   sidebar.dataset.pendingCount = String(pendingCount);
-  sidebar.classList.toggle("pending", hasPending);
-  sidebar.classList.toggle("current", !hasPending);
+  sidebar.classList.toggle("hidden", !hasPending);
+  sidebar.classList.add("pending");
+  sidebar.classList.remove("current");
   if (title instanceof HTMLElement) {
-    title.textContent = hasPending ? "Review appliance changes" : "Appliance Apply";
+    title.textContent = "Review appliance changes";
   }
   if (detail instanceof HTMLElement) {
-    detail.textContent = hasPending ? `${pendingCount} pending ${pendingCount === 1 ? "unit" : "units"}` : "Desired state current";
+    detail.textContent = `${pendingCount} pending ${pendingCount === 1 ? "unit" : "units"}`;
   }
   if (badge instanceof HTMLElement) {
-    badge.textContent = hasPending ? "pending" : "current";
+    badge.textContent = "pending";
   }
 }
 
@@ -8904,7 +8908,12 @@ function taskStatusActive(status) {
 }
 
 function taskById(taskId) {
-  return labFoundryTasks.find((task) => task.id === taskId) || null;
+  for (const task of labFoundryTasks) {
+    if (task.id === taskId) return task;
+    const child = (task._children || []).find((item) => item.id === taskId);
+    if (child) return child;
+  }
+  return null;
 }
 
 function taskStatusPillHtml(task) {
@@ -8970,6 +8979,7 @@ function renderTaskDetail(task) {
   }
   if (logButton instanceof HTMLButtonElement) {
     logButton.dataset.taskId = task.id;
+    logButton.classList.toggle("hidden", Boolean(task.is_step));
   }
 }
 
@@ -8981,7 +8991,7 @@ function openTaskDetail(taskOrId) {
   }
   renderTaskDetail(task);
   const url = new URL(window.location.href);
-  url.searchParams.set("job_id", task.id);
+  url.searchParams.set("job_id", task.is_step ? task.job_id : task.id);
   window.history.replaceState({}, "", url);
   if (!modal.open) {
     modal.showModal();
@@ -9117,10 +9127,6 @@ function initializeTasksPage() {
       paginationCounter: "rows",
       placeholder: "No tasks have been recorded yet.",
       selectableRows: 1,
-      rowClick: (_event, row) => {
-        labFoundrySelectedTaskId = row.getData().id || "";
-        row.select();
-      },
       rowContextMenu: [
         {
           label: "Details",
@@ -9128,6 +9134,7 @@ function initializeTasksPage() {
         },
         {
           label: "Log",
+          disabled: (component) => Boolean(component.getData().is_step),
           action: (_event, row) => openTaskLog(row.getData().id),
         },
         {
@@ -9144,14 +9151,28 @@ function initializeTasksPage() {
       ],
       columns: [
         { title: "Status", field: "status", width: 130, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
-        { title: "Task", field: "id", minWidth: 190, formatter: (cell) => `<code>${escapeHtml(cell.getValue())}</code>` },
-        { title: "Type", field: "type_label", minWidth: 190, formatter: (cell) => escapeHtml(cell.getValue() || "") },
-        { title: "State", field: "state", minWidth: 170, formatter: (cell) => escapeHtml(cell.getValue() || "") },
-        { title: "Summary", field: "summary", minWidth: 180, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        {
+          title: "Task / component",
+          field: "id",
+          minWidth: 290,
+          widthGrow: 2,
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            const label = data.is_step ? data.label : data.type_label;
+            return `<span class="service-name-cell"><strong>${escapeHtml(label || "Task")}</strong><small>${escapeHtml(data.id || "")}</small></span>`;
+          },
+        },
+        { title: "State", field: "state", minWidth: 160, formatter: (cell) => escapeHtml(cell.getValue() || "") },
         { title: "Progress", field: "progress_percent", width: 105, formatter: (cell) => `${Number(cell.getValue() || 0)}%` },
-        { title: "Created", field: "created_at", minWidth: 210, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
-        { title: "Finished", field: "finished_at", minWidth: 210, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Created", field: "created_at", minWidth: 190, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Duration", field: "duration", width: 105, formatter: (cell) => applianceApplyDuration(cell.getRow().getData()) },
       ],
+      dataTree: true,
+      dataTreeStartExpanded: false,
+    });
+    labFoundryTasksTable.on("rowClick", (_event, row) => {
+      labFoundrySelectedTaskId = row.getData().id || "";
+      row.select();
     });
     labFoundryTasksTable.on("rowDblClick", (_event, row) => openTaskDetail(row.getData()));
     fallback?.classList.add("hidden");
@@ -10764,104 +10785,372 @@ function initializeAuditEventsTable() {
   }
 }
 
-function initializeApplianceApplyProgress() {
-  const form = document.querySelector("[data-appliance-apply-form]");
-  if (!(form instanceof HTMLFormElement)) {
-    return;
-  }
-  const tracker = document.querySelector("[data-apply-submit-tracker]");
-  const steps = document.querySelector("[data-apply-submit-steps]");
-  const title = document.querySelector("[data-apply-submit-title]");
-  const detail = document.querySelector("[data-apply-submit-detail]");
-  const submitButtons = Array.from(form.querySelectorAll("[data-apply-submit-button]")).filter((button) => button instanceof HTMLButtonElement);
-  if (!(tracker instanceof HTMLElement) || !(steps instanceof HTMLElement)) {
-    return;
-  }
-
-  const selectedUnits = () =>
-    Array.from(form.querySelectorAll("[data-apply-unit-checkbox]:checked")).flatMap((checkbox) => {
-      if (!(checkbox instanceof HTMLInputElement) || checkbox.disabled) {
-        return [];
-      }
-      const card = checkbox.closest("[data-apply-unit-card]");
-      if (!(card instanceof HTMLElement)) {
-        return [];
-      }
-      return [
-        {
-          id: card.dataset.applyUnitId || checkbox.value,
-          label: card.dataset.applyUnitLabel || checkbox.value,
-        },
-      ];
-    });
-
-  const renderStep = (unit, state, className = "") => {
-    const row = document.createElement("div");
-    row.className = `apply-step-row ${className}`.trim();
-
-    const name = document.createElement("span");
-    name.className = "apply-step-name";
-    name.textContent = unit.label;
-
-    const line = document.createElement("span");
-    line.className = "apply-step-line";
-
-    const status = document.createElement("span");
-    status.className = "apply-step-state";
-    status.textContent = state;
-
-    row.append(name, line, status);
-    return row;
+function applianceApplyModalElements() {
+  const modal = document.getElementById("appliance-apply-modal");
+  return {
+    modal,
+    title: modal?.querySelector("[data-appliance-apply-modal-title]"),
+    kicker: modal?.querySelector("[data-appliance-apply-modal-kicker]"),
+    subtitle: modal?.querySelector("[data-appliance-apply-modal-subtitle]"),
+    status: modal?.querySelector("[data-appliance-apply-modal-status]"),
+    error: modal?.querySelector("[data-appliance-apply-modal-error]"),
+    review: modal?.querySelector("[data-appliance-apply-review]"),
+    live: modal?.querySelector("[data-appliance-apply-live]"),
+    reviewList: modal?.querySelector("[data-appliance-apply-review-list]"),
+    reviewForm: modal?.querySelector("[data-appliance-apply-review-form]"),
+    selectionSummary: modal?.querySelector("[data-appliance-apply-selection-summary]"),
+    submit: modal?.querySelector("[data-appliance-apply-submit]"),
+    liveSummary: modal?.querySelector("[data-appliance-apply-live-summary]"),
+    cancel: modal?.querySelector("[data-appliance-apply-cancel]"),
+    resultClose: modal?.querySelector("[data-appliance-apply-result-close]"),
   };
+}
 
-  form.addEventListener("submit", async (event) => {
-    const units = selectedUnits();
-    if (!units.length) {
+function showApplianceApplyModal(modal) {
+  if (modal instanceof HTMLDialogElement && !modal.open) {
+    modal.showModal();
+  }
+}
+
+function setApplianceApplyModalError(message = "") {
+  const error = applianceApplyModalElements().error;
+  if (error instanceof HTMLElement) {
+    error.textContent = message;
+    error.classList.toggle("hidden", !message);
+  }
+}
+
+function applianceApplyReviewRow(unit) {
+  const row = document.createElement("article");
+  row.className = "appliance-apply-review-row";
+  row.dataset.applyUnitId = unit.id || "";
+
+  const head = document.createElement("div");
+  head.className = "appliance-apply-review-row-head";
+  const label = document.createElement("label");
+  label.className = "apply-unit-select";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.name = "selected_units";
+  checkbox.value = unit.id || "";
+  checkbox.checked = Boolean(unit.selected && unit.valid);
+  checkbox.disabled = !unit.valid;
+  checkbox.dataset.applianceApplyReviewCheckbox = "";
+  const labelText = document.createElement("span");
+  const strong = document.createElement("strong");
+  strong.textContent = unit.label || unit.id || "Component";
+  const small = document.createElement("small");
+  small.textContent = unit.config_path || "";
+  labelText.append(strong, small);
+  label.append(checkbox, labelText);
+
+  const actions = document.createElement("div");
+  actions.className = "apply-unit-actions";
+  const validity = document.createElement("span");
+  validity.className = `status-pill ${unit.valid ? "good" : "warn"}`;
+  validity.textContent = unit.valid ? "valid" : "needs attention";
+  const edit = document.createElement("a");
+  edit.className = "text-link";
+  edit.href = unit.page_url || "/appliance-apply";
+  edit.textContent = "Edit";
+  actions.append(validity, edit);
+  head.append(label, actions);
+
+  const summary = document.createElement("div");
+  summary.className = "apply-unit-summary";
+  (unit.summary || []).forEach((item) => {
+    const pill = document.createElement("span");
+    pill.textContent = String(item);
+    summary.append(pill);
+  });
+  row.append(head, summary);
+
+  const messages = [...(unit.validation_errors || []), ...(unit.validation_warnings || [])];
+  if (messages.length) {
+    const alert = document.createElement("div");
+    alert.className = `alert ${unit.validation_errors?.length ? "error" : "warning"}`;
+    messages.forEach((message) => {
+      const line = document.createElement("div");
+      line.textContent = String(message);
+      alert.append(line);
+    });
+    row.append(alert);
+  }
+
+  const details = document.createElement("details");
+  details.className = "config-diff";
+  const detailsSummary = document.createElement("summary");
+  detailsSummary.textContent = unit.config_diff ? "Config diff" : "Current config preview";
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  code.className = unit.config_diff ? "language-diff" : "";
+  code.textContent = unit.config_diff || unit.config_preview || "No rendered configuration changes.";
+  pre.append(code);
+  details.append(detailsSummary, pre);
+  row.append(details);
+  highlightConfigPreviewElement(code);
+  return row;
+}
+
+function updateApplianceApplySelection() {
+  const { modal, selectionSummary, submit } = applianceApplyModalElements();
+  if (!(modal instanceof HTMLDialogElement)) return;
+  const selected = modal.querySelectorAll("[data-appliance-apply-review-checkbox]:checked").length;
+  if (selectionSummary instanceof HTMLElement) {
+    selectionSummary.textContent = `${selected} component${selected === 1 ? "" : "s"} selected`;
+  }
+  if (submit instanceof HTMLButtonElement) {
+    submit.disabled = selected === 0;
+  }
+}
+
+async function openApplianceApplyReview() {
+  const elements = applianceApplyModalElements();
+  if (!(elements.modal instanceof HTMLDialogElement)) return;
+  elements.modal.dataset.active = "false";
+  elements.review?.classList.remove("hidden");
+  elements.live?.classList.add("hidden");
+  if (elements.title instanceof HTMLElement) elements.title.textContent = "Review appliance changes";
+  if (elements.kicker instanceof HTMLElement) elements.kicker.textContent = "Desired state";
+  if (elements.subtitle instanceof HTMLElement) elements.subtitle.textContent = "Select valid components, inspect their rendered differences, then submit one appliance task.";
+  if (elements.status instanceof HTMLElement) {
+    elements.status.className = "status-pill muted";
+    elements.status.textContent = "loading";
+  }
+  setApplianceApplyModalError("");
+  showApplianceApplyModal(elements.modal);
+  try {
+    const response = await fetch("/appliance-apply/review", { credentials: "same-origin", headers: { Accept: "application/json" } });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Unable to load appliance changes.");
+    if (payload.active_task) {
+      applianceApplyActiveJobId = payload.active_task.id || "";
+      renderApplianceApplyTask(payload.active_task);
       return;
     }
-    event.preventDefault();
-    if (title instanceof HTMLElement) {
-      title.textContent = "Creating appliance apply task";
+    const units = Array.isArray(payload.units) ? payload.units : [];
+    if (elements.reviewList instanceof HTMLElement) {
+      elements.reviewList.replaceChildren(...units.map(applianceApplyReviewRow));
+      if (!units.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.innerHTML = "<h2>No pending appliance changes</h2><p class=\"muted\">All apply units match the last successful baseline.</p>";
+        elements.reviewList.replaceChildren(empty);
+      }
     }
-    if (detail instanceof HTMLElement) {
-      detail.textContent = "The server is committing one task for the selected units. Adapter work continues in the background after the task is created.";
+    if (elements.status instanceof HTMLElement) {
+      elements.status.className = `status-pill ${units.length ? "warn" : "good"}`;
+      elements.status.textContent = `${units.length} changed`;
     }
-    steps.replaceChildren(...units.map((unit) => renderStep(unit, "Creating task", "waiting")));
-    tracker.classList.remove("hidden");
-    submitButtons.forEach((button) => {
-      button.disabled = true;
-      button.textContent = "Creating task...";
+    updateApplianceApplySelection();
+  } catch (error) {
+    setApplianceApplyModalError(error instanceof Error ? error.message : "Unable to load appliance changes.");
+  }
+}
+
+function applianceApplyDuration(task) {
+  const start = Date.parse(task.started_at || task.created_at || "");
+  const finish = Date.parse(task.finished_at || "") || Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(finish)) return "—";
+  const seconds = Math.max(0, Math.round((finish - start) / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function renderApplianceApplyStepDetail(task) {
+  const detail = document.querySelector("[data-appliance-apply-step-detail]");
+  if (!(detail instanceof HTMLElement) || !task) return;
+  detail.classList.remove("hidden");
+  const title = detail.querySelector("[data-appliance-apply-step-detail-title]");
+  const meta = detail.querySelector("[data-appliance-apply-step-detail-meta]");
+  const status = detail.querySelector("[data-appliance-apply-step-detail-status]");
+  const error = detail.querySelector("[data-appliance-apply-step-detail-error]");
+  const result = detail.querySelector("[data-appliance-apply-step-detail-result]");
+  if (title instanceof HTMLElement) title.textContent = task.is_step ? task.label : task.type_label;
+  if (meta instanceof HTMLElement) meta.textContent = `${task.id} · ${applianceApplyDuration(task)}`;
+  if (status instanceof HTMLElement) {
+    status.className = `status-pill ${task.status_pill || "muted"}`;
+    status.textContent = task.status || "unknown";
+  }
+  if (error instanceof HTMLElement) {
+    error.textContent = task.error || "";
+    error.classList.toggle("hidden", !task.error);
+  }
+  if (result instanceof HTMLElement) {
+    result.textContent = task.result_json || "{}";
+    highlightConfigPreviewElement(result);
+  }
+}
+
+function renderApplianceApplyTask(task) {
+  const elements = applianceApplyModalElements();
+  if (!(elements.modal instanceof HTMLDialogElement) || !task) return;
+  const active = taskStatusActive(task.status);
+  elements.modal.dataset.active = active ? "true" : "false";
+  elements.review?.classList.add("hidden");
+  elements.live?.classList.remove("hidden");
+  if (elements.kicker instanceof HTMLElement) elements.kicker.textContent = "Master appliance task";
+  if (elements.title instanceof HTMLElement) elements.title.textContent = task.type_label || "Appliance Apply";
+  if (elements.subtitle instanceof HTMLElement) elements.subtitle.textContent = task.id || "";
+  if (elements.status instanceof HTMLElement) {
+    elements.status.className = `status-pill ${task.status_pill || "muted"}`;
+    elements.status.textContent = task.state || task.status || "unknown";
+  }
+  if (elements.liveSummary instanceof HTMLElement) {
+    const children = Array.isArray(task._children) ? task._children : [];
+    const complete = children.filter((child) => !taskStatusActive(child.status) && child.status !== "pending").length;
+    elements.liveSummary.textContent = active
+      ? `${complete} of ${children.length} components finished · changes are globally locked`
+      : `${children.length} components · appliance changes are unlocked`;
+  }
+  if (elements.cancel instanceof HTMLButtonElement) {
+    elements.cancel.classList.toggle("hidden", !task.can_cancel);
+    elements.cancel.disabled = !task.can_cancel;
+    elements.cancel.dataset.taskId = task.id || "";
+  }
+  if (elements.resultClose instanceof HTMLButtonElement) {
+    elements.resultClose.classList.toggle("hidden", active);
+  }
+  const grid = document.getElementById("appliance-apply-live-grid");
+  if (grid instanceof HTMLElement && typeof window.Tabulator === "function") {
+    const columns = [
+      { title: "Status", field: "status", width: 120, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
+      { title: "Task / component", field: "label", minWidth: 260, formatter: (cell) => escapeHtml(cell.getRow().getData().is_step ? cell.getValue() || "" : cell.getRow().getData().type_label || "Appliance Apply") },
+      { title: "State", field: "state", minWidth: 170, formatter: (cell) => escapeHtml(cell.getValue() || "") },
+      { title: "Progress", field: "progress_percent", width: 105, formatter: (cell) => `${Number(cell.getValue() || 0)}%` },
+      { title: "Duration", field: "duration", width: 105, formatter: (cell) => applianceApplyDuration(cell.getRow().getData()) },
+    ];
+    if (!applianceApplyModalTable) {
+      applianceApplyModalTable = new window.Tabulator(grid, {
+        data: [task],
+        index: "id",
+        layout: "fitColumns",
+        dataTree: true,
+        dataTreeStartExpanded: true,
+        selectableRows: 1,
+        columns,
+      });
+      applianceApplyModalTable.on("rowClick", (_event, row) => renderApplianceApplyStepDetail(row.getData()));
+    } else {
+      applianceApplyModalTable.replaceData([task]);
+    }
+  }
+  showApplianceApplyModal(elements.modal);
+}
+
+async function submitApplianceApplyForm(form) {
+  const elements = applianceApplyModalElements();
+  if (!(form instanceof HTMLFormElement) || !(elements.modal instanceof HTMLDialogElement)) return;
+  setApplianceApplyModalError("");
+  if (elements.submit instanceof HTMLButtonElement) {
+    elements.submit.disabled = true;
+    elements.submit.textContent = "Creating task…";
+  }
+  try {
+    const response = await fetch("/appliance-apply", {
+      method: "POST",
+      body: new FormData(form),
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
     });
-    try {
-      const response = await fetch(form.action || window.location.href, {
-        method: (form.method || "POST").toUpperCase(),
-        body: new FormData(form),
-        credentials: "same-origin",
-      });
-      const text = await response.text();
-      if (!response.ok) {
-        throw new Error(text.trim().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ") || "Appliance changes could not be submitted.");
-      }
-      document.open();
-      document.write(text);
-      document.close();
-    } catch (error) {
-      if (title instanceof HTMLElement) {
-        title.textContent = "Apply response interrupted";
-      }
-      if (detail instanceof HTMLElement) {
-        detail.textContent =
-          error instanceof Error
-            ? error.message
-            : "The browser did not receive a complete apply response. Reload the page to check the latest appliance apply task.";
-      }
-      steps.replaceChildren(...units.map((unit) => renderStep(unit, "Check latest task", "waiting")));
-      submitButtons.forEach((button) => {
-        button.disabled = false;
-        button.textContent = "Submit appliance changes";
-      });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Appliance changes could not be submitted.");
+    applianceApplyActiveJobId = payload.job_id || payload.task?.id || "";
+    renderApplianceApplyTask(payload.task);
+    refreshApplianceApplySidebar().catch(() => {});
+  } catch (error) {
+    setApplianceApplyModalError(error instanceof Error ? error.message : "Appliance changes could not be submitted.");
+  } finally {
+    if (elements.submit instanceof HTMLButtonElement) {
+      elements.submit.disabled = false;
+      elements.submit.textContent = "Submit appliance changes";
     }
+  }
+}
+
+async function pollGlobalApplianceApply() {
+  window.clearTimeout(applianceApplyGlobalPollTimer);
+  if (document.visibilityState === "hidden") {
+    applianceApplyGlobalPollTimer = window.setTimeout(pollGlobalApplianceApply, 5000);
+    return;
+  }
+  let delay = 2000;
+  try {
+    const response = await fetch("/appliance-apply/status", { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error("Unable to read appliance apply status.");
+    const payload = await response.json();
+    updateApplianceApplySidebar(payload);
+    if (payload.active_task) {
+      applianceApplyActiveJobId = payload.active_task.id || "";
+      renderApplianceApplyTask(payload.active_task);
+      delay = 2000;
+    } else if (applianceApplyActiveJobId) {
+      const jobId = applianceApplyActiveJobId;
+      const taskResponse = await fetch(`/tasks/${encodeURIComponent(jobId)}/status`, { credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (taskResponse.ok) {
+        const taskPayload = await taskResponse.json();
+        renderApplianceApplyTask(taskPayload.task);
+      }
+      applianceApplyActiveJobId = "";
+    }
+  } catch (_error) {
+    delay = 2000;
+  }
+  applianceApplyGlobalPollTimer = window.setTimeout(pollGlobalApplianceApply, delay);
+}
+
+function initializeApplianceApplyProgress() {
+  const elements = applianceApplyModalElements();
+  if (!(elements.modal instanceof HTMLDialogElement)) return;
+  document.querySelector("[data-appliance-apply-sidebar]")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    openApplianceApplyReview().catch(() => {});
   });
+  elements.modal.addEventListener("cancel", (event) => {
+    if (elements.modal.dataset.active === "true") event.preventDefault();
+  });
+  elements.modal.querySelector("[data-appliance-apply-modal-close]")?.addEventListener("click", () => {
+    if (elements.modal.dataset.active !== "true") elements.modal.close();
+  });
+  elements.resultClose?.addEventListener("click", () => elements.modal.close());
+  elements.reviewList?.addEventListener("change", updateApplianceApplySelection);
+  elements.reviewForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitApplianceApplyForm(elements.reviewForm).catch(() => {});
+  });
+  const fallbackForm = document.querySelector("[data-appliance-apply-form]");
+  fallbackForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    showApplianceApplyModal(elements.modal);
+    submitApplianceApplyForm(fallbackForm).catch(() => {});
+  });
+  elements.cancel?.addEventListener("click", async () => {
+    const taskId = elements.cancel?.dataset.taskId || "";
+    if (!taskId) return;
+    const confirmed = await requestConfirmation({
+      title: "Cancel appliance apply",
+      message: "The running component will finish safely. Remaining components will be skipped and the global lock will remain until cancellation completes.",
+      label: "Request cancellation",
+    });
+    if (!confirmed) return;
+    const body = new URLSearchParams();
+    body.set("csrf", elements.modal.dataset.csrf || "");
+    const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      body,
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      setApplianceApplyModalError(payload.detail || "Unable to request cancellation.");
+      return;
+    }
+    renderApplianceApplyTask(payload.task);
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "hidden") pollGlobalApplianceApply().catch(() => {});
+  });
+  pollGlobalApplianceApply().catch(() => {});
 }
 
 function monitorFinite(value) {

@@ -1,6 +1,46 @@
 import sqlite3
 
 
+def test_existing_database_startup_adds_job_steps_table(tmp_path):
+    from labfoundry.app import database
+    db_path = tmp_path / "existing.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE jobs (
+            id VARCHAR(64) PRIMARY KEY,
+            job_type VARCHAR(64) NOT NULL,
+            status VARCHAR(32) NOT NULL,
+            progress_percent INTEGER NOT NULL,
+            created_by VARCHAR(255) NOT NULL,
+            created_at DATETIME NOT NULL,
+            started_at DATETIME,
+            finished_at DATETIME,
+            result JSON,
+            error TEXT
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    previous_engine = database.engine
+    migrated_engine = database.create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    try:
+        database.engine = migrated_engine
+        database.SessionLocal.configure(bind=migrated_engine)
+        database.init_db()
+        table_names = set(database.inspect(migrated_engine).get_table_names())
+        step_columns = {column["name"] for column in database.inspect(migrated_engine).get_columns("job_steps")}
+    finally:
+        migrated_engine.dispose()
+        database.engine = previous_engine
+        database.SessionLocal.configure(bind=previous_engine)
+
+    assert "job_steps" in table_names
+    assert {"job_id", "component_key", "position", "status", "result", "error"} <= step_columns
+
+
 def test_physical_interface_ipv6_enabled_migration_backfills_only_static_ipv6(tmp_path):
     from labfoundry.app import database
 

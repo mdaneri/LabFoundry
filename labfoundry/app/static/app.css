@@ -3992,6 +3992,136 @@ textarea {
   margin: 4px 0 0;
 }
 
+.appliance-apply-modal {
+  width: min(1180px, calc(100vw - 40px));
+  max-width: none;
+  height: auto;
+  max-height: calc(100vh - 40px);
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  overflow: hidden;
+}
+
+.appliance-apply-modal::backdrop {
+  background: rgba(15, 23, 42, 0.62);
+  backdrop-filter: blur(2px);
+}
+
+.appliance-apply-modal-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  max-height: calc(100vh - 40px);
+  padding: 18px;
+  box-sizing: border-box;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.appliance-apply-modal-head,
+.appliance-apply-modal-head-actions,
+.appliance-apply-modal-actions,
+.appliance-apply-step-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.appliance-apply-modal-head h2,
+.appliance-apply-modal-head p,
+.appliance-apply-step-detail p {
+  margin: 0;
+}
+
+.appliance-apply-review,
+.appliance-apply-live,
+.appliance-apply-review form {
+  min-height: 0;
+}
+
+.appliance-apply-review form,
+.appliance-apply-live {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 12px;
+  height: 100%;
+}
+
+.appliance-apply-review-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+  max-height: calc(100vh - 220px);
+  padding-right: 4px;
+}
+
+.appliance-apply-review-row {
+  display: grid;
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.appliance-apply-review-row-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.appliance-apply-review-row .config-diff pre {
+  max-height: 300px;
+}
+
+.appliance-apply-live {
+  grid-template-rows: auto minmax(0, auto) auto;
+  height: auto;
+}
+
+.appliance-apply-live-grid {
+  min-height: 0;
+  height: auto;
+  max-height: min(560px, 55vh);
+  overflow: auto;
+}
+
+.appliance-apply-step-detail {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--soft);
+}
+
+.appliance-apply-step-detail pre {
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
+  border-radius: 6px;
+  overflow: auto;
+  background: #0f172a;
+  color: #dbeafe;
+}
+
+.appliance-apply-step-detail code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.appliance-apply-modal[data-active="true"] [data-appliance-apply-modal-close] {
+  display: none;
+}
+
 .config-diff .token.coord {
   color: #93c5fd;
   font-weight: 750;
