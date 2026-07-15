@@ -54,6 +54,7 @@ def _ensure_sqlite_network_columns() -> None:
             "host_ipv6_cidr": "VARCHAR(64)",
             "ipv6_cidr": "VARCHAR(64)",
             "ipv4_method": "VARCHAR(20) DEFAULT 'static'",
+            "ipv6_enabled": "BOOLEAN DEFAULT 0",
         },
         "vlan_interfaces": {
             "ipv6_cidr": "VARCHAR(64)",
@@ -67,6 +68,8 @@ def _ensure_sqlite_network_columns() -> None:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {definition}"))
+            if table_name == "physical_interfaces" and "ipv6_enabled" not in existing:
+                connection.execute(text("UPDATE physical_interfaces SET ipv6_enabled = 1 WHERE ipv6_cidr IS NOT NULL AND TRIM(ipv6_cidr) <> ''"))
 
 
 def _ensure_sqlite_dhcp_columns() -> None:

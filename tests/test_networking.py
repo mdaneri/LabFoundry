@@ -1,7 +1,7 @@
 import json
 import logging
 
-from labfoundry.app.models import AuditEvent, CaSettings, DhcpScope, DhcpSettings, DnsSettings, Job, KmsSettings, NatRule, PhysicalInterface, Route, RoutingRule, Setting, VlanInterface
+from labfoundry.app.models import ApplianceSettings, AuditEvent, CaSettings, DhcpScope, DhcpSettings, DnsSettings, Job, KmsSettings, NatRule, PhysicalInterface, Route, RoutingRule, Setting, VlanInterface
 from labfoundry.app.services.networking import (
     HostPhysicalInterface,
     NETWORK_INVENTORY_CLEANUP_WARNING_KEY,
@@ -425,6 +425,7 @@ def test_startup_host_inventory_refreshes_appliance_seed_without_apply_job(monke
     monkeypatch.setenv("LABFOUNDRY_SECRET_KEY", "test-secret-key-with-enough-length")
     monkeypatch.setenv("LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD", "labfoundry-admin")
     get_settings.cache_clear()
+
     database.engine.dispose()
     database.engine = database.create_engine(
         f"sqlite:///{db_path}",
@@ -459,6 +460,39 @@ def test_startup_host_inventory_refreshes_appliance_seed_without_apply_job(monke
         assert interface.ip_cidr is None
         assert interface.admin_state == "down"
         assert db.execute(select(Job).where(Job.type == "appliance-apply")).scalar_one_or_none() is None
+
+    get_settings.cache_clear()
+
+
+def test_appliance_seed_preserves_ovf_auto_ipv6_and_root_ssh(monkeypatch, tmp_path):
+    from sqlalchemy import select
+
+    import labfoundry.app.database as database
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.seed import seed_initial_data
+
+    db_path = tmp_path / "labfoundry-ovf-seed.db"
+    monkeypatch.setenv("LABFOUNDRY_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("LABFOUNDRY_SECRET_KEY", "test-secret-key-with-enough-length")
+    monkeypatch.setenv("LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD", "labfoundry-admin")
+    monkeypatch.setenv("LABFOUNDRY_APPLIANCE_MANAGEMENT_CIDR", "dhcp")
+    monkeypatch.setenv("LABFOUNDRY_APPLIANCE_MANAGEMENT_IPV6_ENABLED", "true")
+    monkeypatch.setenv("LABFOUNDRY_APPLIANCE_MANAGEMENT_IPV6_CIDR", "")
+    monkeypatch.setenv("LABFOUNDRY_APPLIANCE_ROOT_SSH_ENABLED", "true")
+    get_settings.cache_clear()
+    database.engine.dispose()
+    database.engine = database.create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    database.SessionLocal.configure(bind=database.engine)
+    database.init_db()
+
+    with database.SessionLocal() as db:
+        seed_initial_data(db, include_examples=False, appliance_mode=True)
+        interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
+        appliance_settings = db.execute(select(ApplianceSettings)).scalar_one()
+        assert interface.ipv4_method == "dhcp"
+        assert interface.ipv6_enabled is True
+        assert interface.ipv6_cidr is None
+        assert appliance_settings.root_ssh_enabled is True
 
     get_settings.cache_clear()
 
@@ -500,6 +534,46 @@ def test_render_network_config_includes_management_dhcp_method():
     assert "  role=management" in config
     assert "  ipv4_method=dhcp" in config
     assert "  ip_cidr=" in config
+
+
+def test_render_network_config_persists_automatic_ipv6_state():
+    config = render_network_config(
+        interfaces=[
+            PhysicalInterface(
+                name="eth0",
+                mac_address="00:15:5d:aa:bb:01",
+                ipv4_method="dhcp",
+                ipv6_enabled=True,
+                ipv6_cidr=None,
+                role="management",
+                mode="access",
+            )
+        ],
+        vlans=[],
+    )
+
+    assert "  ipv6_enabled=true" in config
+    assert "  ipv6_cidr=" in config
+
+
+def test_validate_network_state_rejects_ipv6_cidr_while_disabled():
+    errors = validate_network_state(
+        interfaces=[
+            PhysicalInterface(
+                name="eth0",
+                mac_address="00:15:5d:aa:bb:01",
+                ip_cidr="192.168.49.1/24",
+                ipv6_enabled=False,
+                ipv6_cidr="fd00:49::1/64",
+                role="management",
+                mode="access",
+                mtu=1500,
+            )
+        ],
+        vlans=[],
+    )
+
+    assert "Interface eth0 cannot set an IPv6 CIDR while IPv6 is disabled." in errors
 
 
 def test_validate_network_state_rejects_static_management_without_ipv4():
@@ -545,6 +619,7 @@ def test_render_network_config_includes_dual_stack_physical_and_vlan_cidrs():
                 name="eth1",
                 mac_address="00:15:5d:aa:bb:02",
                 ip_cidr="192.168.50.1/24",
+                ipv6_enabled=True,
                 ipv6_cidr="2001:db8:50::1/64",
                 role="access",
                 mode="trunk",

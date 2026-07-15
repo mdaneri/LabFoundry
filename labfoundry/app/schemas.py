@@ -258,6 +258,7 @@ class PhysicalInterfaceResponse(BaseModel):
     host_admin_state: str | None
     ip_cidr: str | None
     ipv4_method: str = "static"
+    ipv6_enabled: bool = False
     ipv6_cidr: str | None
     mtu: int
     admin_state: str

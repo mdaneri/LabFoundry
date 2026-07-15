@@ -5271,6 +5271,9 @@ async function autoSavePhysicalInterface(cell, csrf) {
   if (data.ipv4_method === "dhcp") {
     data.ip_cidr = "";
   }
+  if (!data.ipv6_enabled) {
+    data.ipv6_cidr = "";
+  }
   try {
     await postNetworkAction(`/physical-interfaces/${data.id}/edit`, data, csrf, { reload: false });
     showTransientGridStatus("Saved");
@@ -5289,6 +5292,9 @@ async function savePhysicalInterfaceRow(row, csrf, successMessage = "Saved") {
   data.admin_state = data.admin_up ? "up" : "down";
   if (data.ipv4_method === "dhcp") {
     data.ip_cidr = "";
+  }
+  if (!data.ipv6_enabled) {
+    data.ipv6_cidr = "";
   }
   try {
     await postNetworkAction(`/physical-interfaces/${data.id}/edit`, data, csrf, { reload: false });
@@ -5349,12 +5355,14 @@ async function convertManagementDhcpInterfaceToStatic(row, csrf) {
     ipv4_method: data.ipv4_method,
     ip_cidr: data.ip_cidr,
     ipv6_cidr: data.ipv6_cidr,
+    ipv6_enabled: data.ipv6_enabled,
   };
   try {
     await row.update({
       ipv4_method: "static",
       ip_cidr: observedIpv4 || data.ip_cidr || "",
       ipv6_cidr: observedIpv6 || data.ipv6_cidr || "",
+      ipv6_enabled: Boolean(observedIpv6 || data.ipv6_enabled),
     });
     await savePhysicalInterfaceRow(row, csrf, "Converted");
   } catch (_error) {
@@ -5557,12 +5565,38 @@ function initializePhysicalInterfacesTable() {
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
         {
+          title: "IPv6",
+          field: "ipv6_enabled",
+          formatter: "tickCross",
+          editor: "tickCross",
+          headerTooltip: "Enables IPv6 desired state. Enabled with a blank CIDR uses router advertisements and SLAAC; disabled blocks RA and IPv6 link-local addressing.",
+          editable: (cell) => cell.getRow().getData().mode !== "trunk",
+          hozAlign: "center",
+          width: 85,
+          cellEdited: async (cell) => {
+            if (!cell.getValue()) {
+              await cell.getRow().update({ ipv6_cidr: "" });
+            }
+            await autoSavePhysicalInterface(cell, csrf);
+            cell.getRow().reformat();
+          },
+        },
+        {
           title: "IPv6 CIDR",
           field: "ipv6_cidr",
           editor: cidrInputEditor,
           editorParams: { family: "ipv6", placeholder: "fd00:50::1/64" },
-          editable: (cell) => cell.getRow().getData().mode !== "trunk",
-          formatter: (cell) => (cell.getRow().getData().mode === "trunk" ? "" : dnsAddRowHintFormatter(cell, "fd00:50::1/64")),
+          editable: (cell) => cell.getRow().getData().mode !== "trunk" && Boolean(cell.getRow().getData().ipv6_enabled),
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.mode === "trunk" || !data.ipv6_enabled) {
+              return "";
+            }
+            if (!cell.getValue()) {
+              return '<span class="status-pill muted">RA/SLAAC</span>';
+            }
+            return dnsAddRowHintFormatter(cell, "fd00:50::1/64");
+          },
           minWidth: 180,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
@@ -5596,7 +5630,7 @@ function initializePhysicalInterfacesTable() {
           minWidth: 220,
           cellEdited: async (cell) => {
             if (cell.getValue() === "trunk") {
-              await cell.getRow().update({ role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_cidr: "" });
+              await cell.getRow().update({ role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_enabled: false, ipv6_cidr: "" });
             }
             await autoSavePhysicalInterface(cell, csrf);
             cell.getRow().reformat();

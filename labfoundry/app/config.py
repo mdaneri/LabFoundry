@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     bootstrap_admin_password: str = "labfoundry-admin"
     appliance_fqdn: str = "labfoundry.labfoundry.internal"
     appliance_management_cidr: str = "192.168.49.1/24"
+    appliance_management_ipv6_enabled: bool = False
+    appliance_management_ipv6_cidr: str = ""
+    appliance_root_ssh_enabled: bool = False
     appliance_external_dns_servers: str = "1.1.1.1\n9.9.9.9"
     appliance_ntp_servers: str = "time.cloudflare.com\nnts.netnod.se"
     dry_run_system_adapters: bool = True

@@ -3462,42 +3462,57 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
             continue
         mode = interface.get("mode", "unused")
         ipv4_method = (interface.get("ipv4_method") or "static").strip().lower()
+        ipv6_enabled = (interface.get("ipv6_enabled") or ("true" if interface.get("ipv6_cidr") else "false")).strip().lower() == "true"
         lines = [
             "# Managed by LabFoundry. Local changes may be overwritten.",
             "[Match]",
             f"Name={name}",
             "",
             "[Network]",
-            "IPv6AcceptRA=no",
         ]
         if ipv4_method == "dhcp":
             lines.append("DHCP=ipv4")
         elif interface.get("ip_cidr"):
             lines.append(f"Address={interface['ip_cidr']}")
-        if interface.get("ipv6_cidr"):
+        if not ipv6_enabled:
+            lines.extend(["IPv6AcceptRA=no", "LinkLocalAddressing=no"])
+        elif interface.get("ipv6_cidr"):
+            lines.extend(["IPv6AcceptRA=no", "LinkLocalAddressing=ipv6"])
             lines.append(f"Address={interface['ipv6_cidr']}")
+        else:
+            lines.extend(["IPv6AcceptRA=yes", "LinkLocalAddressing=ipv6"])
         if name == management_name:
             for dns in preserved_management["DNS"]:
                 lines.append(f"DNS={dns}")
-        elif ipv4_method != "dhcp" and not interface.get("ip_cidr") and not interface.get("ipv6_cidr"):
-            lines.append("LinkLocalAddressing=no")
         if mode == "trunk":
             for vlan in sorted(vlans_by_parent.get(name, []), key=lambda row: int(row.get("vlan_id", "0"))):
                 lines.append(f"VLAN={vlan['name']}")
-        if name == management_name and ipv4_method != "dhcp":
-            for cidr_key in ("ip_cidr", "ipv6_cidr"):
-                if interface.get(cidr_key):
-                    network = ip_network(interface[cidr_key], strict=False)
-                    lines.extend(
-                        [
-                            "",
-                            "[RoutingPolicyRule]",
-                            f"From={network}",
-                            f"Table={MANAGEMENT_ROUTE_TABLE_ID}",
-                            f"Priority={MANAGEMENT_ROUTE_RULE_PRIORITY}",
-                        ]
-                    )
+        if name == management_name:
+            static_management_cidrs = []
+            if ipv4_method != "dhcp" and interface.get("ip_cidr"):
+                static_management_cidrs.append(interface["ip_cidr"])
+            if ipv6_enabled and interface.get("ipv6_cidr"):
+                static_management_cidrs.append(interface["ipv6_cidr"])
+            static_versions = set()
+            for cidr in static_management_cidrs:
+                network = ip_network(cidr, strict=False)
+                static_versions.add(network.version)
+                lines.extend(
+                    [
+                        "",
+                        "[RoutingPolicyRule]",
+                        f"From={network}",
+                        f"Table={MANAGEMENT_ROUTE_TABLE_ID}",
+                        f"Priority={MANAGEMENT_ROUTE_RULE_PRIORITY}",
+                    ]
+                )
             for gateway in preserved_management["Gateway"]:
+                try:
+                    gateway_version = ip_address(gateway).version
+                except ValueError:
+                    continue
+                if gateway_version not in static_versions:
+                    continue
                 lines.extend(
                     [
                         "",
@@ -3562,6 +3577,7 @@ def _network_config_errors(path: Path) -> list[str]:
         name = interface.get("name", "")
         role = interface.get("role", "")
         ipv4_method = (interface.get("ipv4_method") or "static").strip().lower()
+        ipv6_enabled_value = (interface.get("ipv6_enabled") or ("true" if interface.get("ipv6_cidr") else "false")).strip().lower()
         if not _valid_network_interface_name(name):
             errors.append(f"Interface name {name or '<missing>'} is invalid.")
         if ipv4_method not in {"static", "dhcp"}:
@@ -3572,6 +3588,10 @@ def _network_config_errors(path: Path) -> list[str]:
             errors.append(f"Interface {name or '<missing>'} cannot set an IPv4 CIDR while IPv4 method is DHCP.")
         if role == "management" and ipv4_method == "static" and not interface.get("ip_cidr"):
             errors.append(f"Interface {name or '<missing>'} must set an IPv4 CIDR when IPv4 method is static.")
+        if ipv6_enabled_value not in {"true", "false"}:
+            errors.append(f"Interface {name or '<missing>'} IPv6 enabled value {ipv6_enabled_value or '<missing>'} is invalid.")
+        if ipv6_enabled_value == "false" and interface.get("ipv6_cidr"):
+            errors.append(f"Interface {name or '<missing>'} cannot set an IPv6 CIDR while IPv6 is disabled.")
         for key, version, label in [("ip_cidr", 4, "IPv4 CIDR"), ("ipv6_cidr", 6, "IPv6 CIDR")]:
             value = interface.get(key, "")
             if not value:

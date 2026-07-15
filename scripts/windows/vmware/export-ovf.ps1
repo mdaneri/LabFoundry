@@ -514,6 +514,7 @@ function Set-LabFoundryOvfProperty {
         [string]$Description,
         [bool]$Required,
         [bool]$Password = $false,
+        [bool]$Boolean = $false,
         [string]$DefaultValue = ''
     )
 
@@ -523,7 +524,7 @@ function Set-LabFoundryOvfProperty {
     }
     [void]$ProductSection.AppendChild($property)
     Set-OvfAttribute -Document $Document -Element $property -Name 'key' -Value $Key
-    $propertyType = if ($Password) { 'password' } else { 'string' }
+    $propertyType = if ($Password) { 'password' } elseif ($Boolean) { 'boolean' } else { 'string' }
     Set-OvfAttribute -Document $Document -Element $property -Name 'type' -Value $propertyType
     Set-OvfAttribute -Document $Document -Element $property -Name 'userConfigurable' -Value 'true'
     Set-OvfAttribute -Document $Document -Element $property -Name 'required' -Value ($Required.ToString().ToLowerInvariant())
@@ -591,9 +592,11 @@ function Add-LabFoundryOvfProperties {
     }
 
     Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Management network'
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'management_mode' -Label 'Management IPv4 mode' -Description 'Use dhcp for VMware-assigned management addressing, or static to require labfoundry.cidr and labfoundry.gateway.' -Required $false -DefaultValue 'dhcp'
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'cidr' -Label 'Management IP CIDR' -Description 'Static management address for eth0, for example 192.168.10.10/24. Required only when management mode is static.' -Required $false
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'gateway' -Label 'Management gateway' -Description 'IPv4 gateway used by the management interface when management mode is static.' -Required $false
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'cidr' -Label 'Management IPv4 CIDR' -Description 'Static IPv4 address and prefix for eth0, for example 192.168.10.10/24. Leave blank to use DHCPv4.' -Required $false
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'gateway' -Label 'Management IPv4 gateway' -Description 'Required when a static IPv4 CIDR is supplied. Leave blank with DHCPv4.' -Required $false
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ipv6_enabled' -Label 'Enable management IPv6' -Description 'Enables IPv6 on eth0. Blank IPv6 addressing then uses router advertisements and SLAAC.' -Required $false -Boolean $true -DefaultValue 'false'
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ipv6_cidr' -Label 'Management IPv6 CIDR' -Description 'Optional static IPv6 address and prefix. Leave blank while IPv6 is enabled to use RA/SLAAC.' -Required $false
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ipv6_gateway' -Label 'Management IPv6 gateway' -Description 'Required with a static IPv6 CIDR; leave blank for automatic IPv6.' -Required $false
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'dns_servers' -Label 'DNS servers' -Description 'Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS.' -Required $false
 
     Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Appliance identity and time'
@@ -603,6 +606,7 @@ function Add-LabFoundryOvfProperties {
     Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Initial credentials'
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'admin_password' -Label 'LabFoundry admin password' -Description 'Initial LabFoundry web admin password. The value is consumed on first boot and not logged.' -Required $true -Password $true
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'root_password' -Label 'Photon root password' -Description 'Photon root console password for recovery. Root SSH remains disabled by default.' -Required $true -Password $true
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'root_ssh_enabled' -Label 'Enable Photon root SSH' -Description 'Allows root password SSH on first boot using the supplied Photon root password. Leave disabled for console-only root recovery.' -Required $false -Boolean $true -DefaultValue 'false'
 
     $settings = New-Object System.Xml.XmlWriterSettings
     $settings.Indent = $true

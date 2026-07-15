@@ -1,6 +1,31 @@
 import sqlite3
 
 
+def test_physical_interface_ipv6_enabled_migration_backfills_only_static_ipv6(tmp_path):
+    from labfoundry.app import database
+
+    db_path = tmp_path / "legacy-network.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE physical_interfaces (id INTEGER PRIMARY KEY, ipv6_cidr VARCHAR(64))")
+    connection.execute("INSERT INTO physical_interfaces (id, ipv6_cidr) VALUES (1, 'fd00:10::1/64'), (2, NULL), (3, '')")
+    connection.commit()
+    connection.close()
+
+    previous_engine = database.engine
+    migrated_engine = database.create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    try:
+        database.engine = migrated_engine
+        database._ensure_sqlite_network_columns()
+        connection = sqlite3.connect(db_path)
+        rows = connection.execute("SELECT id, ipv6_enabled FROM physical_interfaces ORDER BY id").fetchall()
+        connection.close()
+    finally:
+        migrated_engine.dispose()
+        database.engine = previous_engine
+
+    assert rows == [(1, 1), (2, 0), (3, 0)]
+
+
 def test_vcf_trust_target_migration_uses_api_port_uniqueness(tmp_path):
     from labfoundry.app import database
 

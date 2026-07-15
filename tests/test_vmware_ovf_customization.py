@@ -68,6 +68,122 @@ def test_vmware_ovf_customizer_supports_dhcp_management_by_default():
     assert config["management_source_cidr"] == ""
 
 
+def test_vmware_ovf_customizer_ignores_legacy_mode_and_derives_ipv4_from_cidr():
+    customizer = load_customizer()
+    properties = customizer.parse_ovf_environment(OVF_ENV)
+    properties["labfoundry.management_mode"] = "dhcp"
+
+    config = customizer.validate_properties(properties)
+
+    assert config["management_mode"] == "static"
+    properties.pop("labfoundry.cidr")
+    properties.pop("labfoundry.gateway")
+    assert customizer.validate_properties(properties)["management_mode"] == "dhcp"
+
+
+def test_vmware_ovf_customizer_rejects_incomplete_ipv4_pairs():
+    customizer = load_customizer()
+    properties = customizer.parse_ovf_environment(OVF_ENV)
+    properties.pop("labfoundry.gateway")
+    try:
+        customizer.validate_properties(properties)
+    except customizer.OvfCustomizationError as exc:
+        assert "gateway is required" in str(exc)
+    else:
+        raise AssertionError("static IPv4 without a gateway should fail")
+
+    properties.pop("labfoundry.cidr")
+    properties["labfoundry.gateway"] = "192.168.10.1"
+    try:
+        customizer.validate_properties(properties)
+    except customizer.OvfCustomizationError as exc:
+        assert "cannot be supplied" in str(exc)
+    else:
+        raise AssertionError("IPv4 gateway without a CIDR should fail")
+
+
+def test_vmware_ovf_customizer_supports_disabled_auto_and_static_ipv6(tmp_path):
+    customizer = load_customizer()
+    customizer.NETWORKD_PATH = tmp_path / "management.network"
+    properties = customizer.parse_ovf_environment(OVF_ENV)
+
+    disabled = customizer.validate_properties(properties)
+    customizer.write_networkd_config(disabled)
+    assert "IPv6AcceptRA=no" in customizer.NETWORKD_PATH.read_text(encoding="utf-8")
+    assert "LinkLocalAddressing=no" in customizer.NETWORKD_PATH.read_text(encoding="utf-8")
+
+    properties["labfoundry.ipv6_enabled"] = "true"
+    automatic = customizer.validate_properties(properties)
+    customizer.write_networkd_config(automatic)
+    assert automatic["ipv6_mode"] == "auto"
+    assert "IPv6AcceptRA=yes" in customizer.NETWORKD_PATH.read_text(encoding="utf-8")
+
+    properties["labfoundry.ipv6_cidr"] = "fd00:10::10/64"
+    properties["labfoundry.ipv6_gateway"] = "fe80::1"
+    static = customizer.validate_properties(properties)
+    customizer.write_networkd_config(static)
+    rendered = customizer.NETWORKD_PATH.read_text(encoding="utf-8")
+    assert static["ipv6_mode"] == "static"
+    assert "Address=fd00:10::10/64" in rendered
+    assert "Gateway=fe80::1" in rendered
+    assert "IPv6AcceptRA=no" in rendered
+
+
+def test_vmware_ovf_customizer_rejects_contradictory_or_incomplete_ipv6():
+    customizer = load_customizer()
+    properties = customizer.parse_ovf_environment(OVF_ENV)
+    properties["labfoundry.ipv6_cidr"] = "fd00:10::10/64"
+    try:
+        customizer.validate_properties(properties)
+    except customizer.OvfCustomizationError as exc:
+        assert "ipv6_enabled=true" in str(exc)
+    else:
+        raise AssertionError("disabled IPv6 with a CIDR should fail")
+
+    properties["labfoundry.ipv6_enabled"] = "true"
+    try:
+        customizer.validate_properties(properties)
+    except customizer.OvfCustomizationError as exc:
+        assert "ipv6_gateway is required" in str(exc)
+    else:
+        raise AssertionError("static IPv6 without a gateway should fail")
+
+
+def test_vmware_ovf_customizer_renders_family_specific_management_firewall(tmp_path):
+    customizer = load_customizer()
+    customizer.FIREWALL_CONFIG_PATH = tmp_path / "labfoundry.nft"
+    properties = customizer.parse_ovf_environment(OVF_ENV)
+    properties["labfoundry.ipv6_enabled"] = "true"
+    properties["labfoundry.ipv6_cidr"] = "fd00:10::10/64"
+    properties["labfoundry.ipv6_gateway"] = "fe80::1"
+
+    customizer.write_initial_firewall_config(customizer.validate_properties(properties))
+
+    rendered = customizer.FIREWALL_CONFIG_PATH.read_text(encoding="utf-8")
+    assert "ip saddr 192.168.10.0/24" in rendered
+    assert "ip6 saddr fd00:10::/64" in rendered
+
+
+def test_vmware_ovf_customizer_configures_and_validates_root_ssh(tmp_path, monkeypatch):
+    customizer = load_customizer()
+    customizer.SSHD_ROOT_LOGIN_CONFIG_PATH = tmp_path / "sshd_config.d" / "labfoundry-root-login.conf"
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(customizer.shutil, "which", lambda command: "/usr/sbin/sshd" if command == "sshd" else None)
+    monkeypatch.setattr(customizer.subprocess, "run", fake_run)
+
+    customizer.configure_root_ssh(True)
+
+    rendered = customizer.SSHD_ROOT_LOGIN_CONFIG_PATH.read_text(encoding="utf-8")
+    assert "PermitRootLogin yes" in rendered
+    assert "PasswordAuthentication yes" in rendered
+    assert commands == [["/usr/sbin/sshd", "-t"]]
+
+
 def test_vmware_ovf_customizer_requires_static_network_properties_only_for_static_mode():
     customizer = load_customizer()
     properties = customizer.parse_ovf_environment(OVF_ENV)
@@ -119,7 +235,7 @@ def test_vmware_ovf_customizer_renders_dhcp_network_and_interface_scoped_firewal
     firewall = customizer.FIREWALL_CONFIG_PATH.read_text(encoding="utf-8")
     assert "DHCP=ipv4" in networkd
     assert "Address=" not in networkd
-    assert 'iifname "eth0" tcp dport { 22, 80, 443 } accept' in firewall
+    assert 'iifname "eth0" meta nfproto ipv4 tcp dport { 22, 80, 443 } accept' in firewall
 
 
 def test_vmware_ovf_customizer_rotates_clone_specific_env_secrets(tmp_path):
@@ -135,6 +251,7 @@ def test_vmware_ovf_customizer_rotates_clone_specific_env_secrets(tmp_path):
     customizer.generate_secret_key = lambda: next(generated)
     customizer.set_password = lambda username, password: None
     customizer.set_hostname = lambda fqdn: None
+    customizer.configure_root_ssh = lambda enabled: None
     customizer.ENV_PATH.write_text(
         "\n".join(
             [
@@ -147,6 +264,8 @@ def test_vmware_ovf_customizer_rotates_clone_specific_env_secrets(tmp_path):
         encoding="utf-8",
     )
     properties = customizer.parse_ovf_environment(OVF_ENV)
+    properties["labfoundry.ipv6_enabled"] = "true"
+    properties["labfoundry.root_ssh_enabled"] = "true"
     config = customizer.validate_properties(properties)
 
     summary = customizer.apply_customization(config)
@@ -158,6 +277,8 @@ def test_vmware_ovf_customizer_rotates_clone_specific_env_secrets(tmp_path):
     assert "baked-secrets-key" not in rendered
     assert "rotated-secret-key" not in str(summary)
     assert "rotated-secrets-key" not in str(summary)
+    assert 'LABFOUNDRY_APPLIANCE_MANAGEMENT_IPV6_ENABLED="true"' in rendered
+    assert 'LABFOUNDRY_APPLIANCE_ROOT_SSH_ENABLED="true"' in rendered
 
 
 def test_vmware_ovf_export_and_image_plumbing_are_present():
@@ -170,18 +291,25 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     gitignore = Path(".gitignore").read_text(encoding="utf-8")
 
     for key in (
-        "management_mode",
         "cidr",
         "gateway",
+        "ipv6_enabled",
+        "ipv6_cidr",
+        "ipv6_gateway",
         "fqdn",
         "dns_servers",
         "ntp_servers",
         "admin_password",
         "root_password",
+        "root_ssh_enabled",
     ):
         assert f"-Key '{key}'" in export_script
         assert f"-Key 'labfoundry.{key}'" not in export_script
         assert f"`labfoundry.{key}`" in docs
+
+    assert "-Key 'management_mode'" not in export_script
+    assert "PROPERTY_MANAGEMENT_MODE" in Path("scripts/appliance/labfoundry-vmware-ovf-customize.py").read_text(encoding="utf-8")
+    assert "-Boolean $true -DefaultValue 'false'" in export_script
 
     assert "ovftool was not found" in export_script
     assert "VMware Workstation\\OVFTool\\ovftool.exe" in export_script
@@ -209,9 +337,9 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "Management network" in export_script
     assert "Appliance identity and time" in export_script
     assert "Initial credentials" in export_script
-    assert "-DefaultValue 'dhcp'" in export_script
+    assert "Leave blank to use DHCPv4" in export_script
     assert "-Name 'class' -Value 'labfoundry'" in export_script
-    assert "$propertyType = if ($Password) { 'password' } else { 'string' }" in export_script
+    assert "$propertyType = if ($Password) { 'password' } elseif ($Boolean) { 'boolean' } else { 'string' }" in export_script
     assert "$property.RemoveAttribute('password', $vmwNamespace)" in export_script
     assert "LabFoundry Management Network" in export_script
     assert "LabFoundry Services Network" in export_script

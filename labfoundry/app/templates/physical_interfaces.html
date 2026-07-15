@@ -18,7 +18,8 @@
     </div>
     <div class="inline-help-row">
       <span class="field-label"><span>Host inventory</span><button class="help-icon" type="button" data-help="Reads current Linux network devices through safe host inventory commands, matching NICs by MAC so Linux eth renumbering does not move desired state. Missing NICs are marked for review; refresh does not apply network changes.">i</button></span>
-      <span class="field-label"><span>Desired state</span><button class="help-icon" type="button" data-help="Editable access/trunk, IPv4 CIDR, IPv6 CIDR, MTU, and admin state values are stored in LabFoundry and enforced only through the global appliance apply workflow.">i</button></span>
+      <span class="field-label"><span>Desired state</span><button class="help-icon" type="button" data-help="Editable access/trunk, IPv4 addressing, IPv6 enablement and CIDR, MTU, and admin state values are stored in LabFoundry and enforced only through global appliance apply. Enabled IPv6 with a blank CIDR uses RA/SLAAC.">i</button></span>
+      <span class="field-label"><span>IPv6</span><button class="help-icon" type="button" data-help="The IPv6 switch controls the selected physical interface only. Disabled blocks router advertisements and link-local IPv6; enabled with a blank CIDR uses RA/SLAAC; enabled with a CIDR enforces that static address during global appliance apply.">i</button></span>
     </div>
     {% if form_error %}
       <div class="alert error">{{ form_error }}</div>
@@ -36,7 +37,7 @@
     ></div>
     <table id="physical-interfaces-fallback" class="data-table dns-fallback-table">
       <thead>
-        <tr><th>Name</th><th>MAC</th><th>Driver</th><th>Speed</th><th>Observed IPv4</th><th>Observed IPv6</th><th>IPv4 Method</th><th>IPv4 CIDR</th><th>IPv6 CIDR</th><th>Role</th><th>Link Type</th><th>MTU</th><th>Admin Up</th><th>Oper</th><th>Source</th></tr>
+        <tr><th>Name</th><th>MAC</th><th>Driver</th><th>Speed</th><th>Observed IPv4</th><th>Observed IPv6</th><th>IPv4 Method</th><th>IPv4 CIDR</th><th>IPv6</th><th>IPv6 CIDR</th><th>Role</th><th>Link Type</th><th>MTU</th><th>Admin Up</th><th>Oper</th><th>Source</th></tr>
       </thead>
       <tbody>
         {% for interface in physical_interface_rows %}
@@ -49,6 +50,7 @@
             <td>{{ interface["host_ipv6_cidr"] or "" }}</td>
             <td>{{ interface["ipv4_method"] }}</td>
             <td>{{ interface["ip_cidr"] or "" }}</td>
+            <td>{{ "enabled" if interface["ipv6_enabled"] else "disabled" }}</td>
             <td>{{ interface["ipv6_cidr"] or "" }}</td>
             <td>{{ interface["role"] }}</td>
             <td>{{ interface["mode"] }}</td>

@@ -89,6 +89,7 @@ def physical_interface_to_dict(interface: PhysicalInterface, vlan_count: int = 0
         "host_admin_state": interface.host_admin_state or "",
         "ip_cidr": interface.ip_cidr or "",
         "ipv4_method": normalize_ipv4_method(interface.ipv4_method),
+        "ipv6_enabled": bool(interface.ipv6_enabled),
         "ipv6_cidr": interface.ipv6_cidr or "",
         "mtu": interface.mtu,
         "admin_state": interface.admin_state,
@@ -647,7 +648,9 @@ def reconcile_host_physical_interfaces(
                 if (interface.name == "eth0" or interface.role == "management") and normalize_ipv4_method(interface.ipv4_method) != "dhcp"
                 else None
             )
-            interface.ipv6_cidr = host.host_ipv6_cidr if interface.name == "eth0" or interface.role == "management" else None
+            if interface.name != "eth0" and interface.role != "management":
+                interface.ipv6_enabled = False
+                interface.ipv6_cidr = None
             interface.mtu = host.host_mtu or interface.mtu
             interface.admin_state = host.host_admin_state if interface.name == "eth0" or interface.role == "management" else "down"
     for interface in interfaces:
@@ -734,6 +737,7 @@ def render_network_config(
                 f"  mode={mode}",
                 f"  ipv4_method={normalize_ipv4_method(interface.ipv4_method)}",
                 f"  ip_cidr={interface.ip_cidr or ''}",
+                f"  ipv6_enabled={'true' if interface.ipv6_enabled else 'false'}",
                 f"  ipv6_cidr={interface.ipv6_cidr or ''}",
                 f"  admin_state={interface.admin_state}",
                 f"  mtu={interface.mtu}",
@@ -783,6 +787,8 @@ def validate_network_state(
             errors.append(f"Interface {interface.name} can use DHCP only when its role is management.")
         if ipv4_method == "dhcp" and interface.ip_cidr:
             errors.append(f"Interface {interface.name} cannot set an IPv4 CIDR while IPv4 method is DHCP.")
+        if not interface.ipv6_enabled and interface.ipv6_cidr:
+            errors.append(f"Interface {interface.name} cannot set an IPv6 CIDR while IPv6 is disabled.")
         if role == "management" and ipv4_method == "static" and not interface.ip_cidr:
             errors.append(f"Interface {interface.name} must set an IPv4 CIDR when IPv4 method is static.")
         mode = normalize_interface_mode(interface.mode)

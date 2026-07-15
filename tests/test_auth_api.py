@@ -63,6 +63,45 @@ def test_settings_api_updates_root_ssh_desired_state(client):
     assert '"root_ssh_enabled": true' in payload["config_preview"]
 
 
+def test_physical_interface_api_persists_optional_ipv6_enabled_state(client):
+    token, _metadata = create_token(client, scopes=["read:interfaces", "write:interfaces"])
+    headers = {"Authorization": f"Bearer {token}"}
+    interfaces = client.get("/api/v1/interfaces/physical", headers=headers)
+    assert interfaces.status_code == 200, interfaces.text
+    management = next(row for row in interfaces.json() if row["role"] == "management")
+
+    enabled = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"ipv6_enabled": True, "ipv6_cidr": ""},
+    )
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["ipv6_enabled"] is True
+    assert enabled.json()["ipv6_cidr"] == ""
+
+    preserved = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"mtu": 1500},
+    )
+    assert preserved.status_code == 200, preserved.text
+    assert preserved.json()["ipv6_enabled"] is True
+
+    contradictory = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"ipv6_enabled": False, "ipv6_cidr": "fd00:10::1/64"},
+    )
+    assert contradictory.status_code == 422
+
+    wrong_type = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"ipv6_enabled": "false"},
+    )
+    assert wrong_type.status_code == 422
+
+
 def test_scope_restrictions_are_enforced(client):
     token, _metadata = create_token(client, scopes=["read:dashboard"])
     response = client.post(

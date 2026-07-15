@@ -619,6 +619,8 @@ def test_network_helper_renders_dual_stack_networkd_addresses(tmp_path):
 
     assert "Address=192.168.49.1/24" in files["00-labfoundry-mgmt.network"]
     assert "Address=2001:db8:49::1/64" in files["00-labfoundry-mgmt.network"]
+    assert "IPv6AcceptRA=no" in files["00-labfoundry-mgmt.network"]
+    assert "LinkLocalAddressing=ipv6" in files["00-labfoundry-mgmt.network"]
     vlan_network = files["10-labfoundry-eth2.20.network"]
     assert "Address=192.168.20.1/24" in vlan_network
     assert "Address=2001:db8:20::1/64" in vlan_network
@@ -652,6 +654,40 @@ def test_network_helper_renders_management_dhcp_networkd(tmp_path):
     management_network = files["00-labfoundry-mgmt.network"]
     assert "DHCP=ipv4" in management_network
     assert "Address=" not in management_network
+    assert "IPv6AcceptRA=no" in management_network
+    assert "LinkLocalAddressing=no" in management_network
+
+
+def test_network_helper_preserves_automatic_ipv6_for_management(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[physical_interfaces]",
+                "interface=eth0",
+                "  role=management",
+                "  mode=access",
+                "  ipv4_method=dhcp",
+                "  ip_cidr=",
+                "  ipv6_enabled=true",
+                "  ipv6_cidr=",
+                "  admin_state=up",
+                "  mtu=1500",
+                "",
+                "[vlan_interfaces]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert helper._network_config_errors(config_path) == []
+    files, _reconfigure_links, _admin_down_links = helper._systemd_networkd_files(config_path)
+
+    management_network = files["00-labfoundry-mgmt.network"]
+    assert "DHCP=ipv4" in management_network
+    assert "IPv6AcceptRA=yes" in management_network
+    assert "LinkLocalAddressing=ipv6" in management_network
 
 
 def test_wan_helper_rejects_config_outside_apply_dir(tmp_path):

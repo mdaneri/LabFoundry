@@ -825,14 +825,26 @@ def update_physical_interface(
         raise HTTPException(status_code=404, detail="Interface not found")
     next_role = normalize_interface_role(payload.get("role", interface.role))
     next_ipv4_method = normalize_ipv4_method(payload.get("ipv4_method", interface.ipv4_method))
+    requested_ipv6_enabled = payload.get("ipv6_enabled", interface.ipv6_enabled)
+    if not isinstance(requested_ipv6_enabled, bool):
+        raise HTTPException(status_code=422, detail="ipv6_enabled must be a boolean.")
+    next_ipv6_enabled = requested_ipv6_enabled
     if next_ipv4_method == "dhcp" and next_role != "management":
         raise HTTPException(status_code=422, detail="IPv4 DHCP is available only for the management interface.")
-    for field in ("role", "mtu", "admin_state", "ip_cidr", "ipv6_cidr", "ipv4_method"):
+    requested_ipv6_cidr = str(payload.get("ipv6_cidr", interface.ipv6_cidr) or "").strip()
+    if not next_ipv6_enabled and requested_ipv6_cidr:
+        raise HTTPException(status_code=422, detail="IPv6 CIDR must be blank while IPv6 is disabled.")
+    for field in ("role", "mtu", "admin_state", "ip_cidr", "ipv6_cidr", "ipv4_method", "ipv6_enabled"):
         if field in payload:
             if field == "ipv4_method":
                 interface.ipv4_method = next_ipv4_method
                 if next_ipv4_method == "dhcp":
                     interface.ip_cidr = None
+                continue
+            if field == "ipv6_enabled":
+                interface.ipv6_enabled = next_ipv6_enabled
+                if not next_ipv6_enabled:
+                    interface.ipv6_cidr = None
                 continue
             if field in {"ip_cidr", "ipv6_cidr"} and payload[field]:
                 try:

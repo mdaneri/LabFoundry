@@ -172,20 +172,25 @@ intended for vSphere/ESXi import:
 
 | Category | Property | Required | Description |
 | --- | --- | --- | --- |
-| Management network | `labfoundry.management_mode` | no | Defaults to `dhcp` in the deployment form. Use `static` only when `labfoundry.cidr` and `labfoundry.gateway` should be enforced on first boot. |
-| Management network | `labfoundry.cidr` | no | Static management IPv4 CIDR for `eth0`, for example `192.168.10.10/24`; required only when management mode is `static`. |
-| Management network | `labfoundry.gateway` | no | IPv4 gateway for the management network when management mode is `static`. |
+| Management network | `labfoundry.cidr` | no | Static management IPv4 CIDR for `eth0`, for example `192.168.10.10/24`; blank uses DHCPv4. |
+| Management network | `labfoundry.gateway` | no | Required with a static IPv4 CIDR and invalid without one. |
+| Management network | `labfoundry.ipv6_enabled` | no | Boolean, default `false`. Enables management IPv6. |
+| Management network | `labfoundry.ipv6_cidr` | no | Blank while IPv6 is enabled uses RA/SLAAC; a value selects static IPv6. |
+| Management network | `labfoundry.ipv6_gateway` | no | Required with a static IPv6 CIDR. |
 | Management network | `labfoundry.dns_servers` | no | Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS. |
 | Appliance identity and time | `labfoundry.fqdn` | yes | Appliance FQDN applied to Photon OS and LabFoundry desired state. |
 | Appliance identity and time | `labfoundry.ntp_servers` | no | Optional NTP names or IPs. Blank keeps the image defaults. |
 | Initial credentials | `labfoundry.admin_password` | yes | Initial LabFoundry web `admin` password. |
 | Initial credentials | `labfoundry.root_password` | yes | Photon root console password. Root SSH remains disabled by default. |
+| Initial credentials | `labfoundry.root_ssh_enabled` | no | Boolean, default `false`. Enables root password SSH immediately on first boot. |
 
 On first boot from an OVF/OVA deployment, `labfoundry-vmware-ovf-customize`
-reads those properties through VMware Tools before LabFoundry starts. DHCP
-management writes `DHCP=ipv4` for `eth0`; static management writes the supplied
-CIDR and gateway. It also writes resolver overrides when supplied, hostname,
-root password, and bootstrap admin password once, then records a redacted marker
+reads those properties through VMware Tools before LabFoundry starts. A blank
+IPv4 CIDR writes `DHCP=ipv4`; a supplied CIDR and gateway configure static IPv4.
+IPv6 can be disabled, automatic through RA/SLAAC, or static. The customizer also
+writes family-correct firewall access, resolver overrides when supplied,
+hostname, root password, optional root SSH state, and bootstrap admin password
+once, then records a redacted marker
 under `/var/lib/labfoundry`.
 Passwords are consumed as deployment inputs and are not printed in the marker or
 customization log.

@@ -108,6 +108,8 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
                 host_admin_state="up",
                 ip_cidr=None if management_uses_dhcp else management_cidr,
                 ipv4_method="dhcp" if management_uses_dhcp else "static",
+                ipv6_enabled=settings.appliance_management_ipv6_enabled,
+                ipv6_cidr=settings.appliance_management_ipv6_cidr or None,
                 mtu=1500,
                 role="management",
                 mode="access",
@@ -235,6 +237,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
         appliance_settings = ApplianceSettings(
             fqdn=normalize_fqdn(settings.appliance_fqdn) or "labfoundry.labfoundry.internal",
             management_https_enabled=appliance_mode,
+            root_ssh_enabled=settings.appliance_root_ssh_enabled,
             external_dns_servers=_settings_lines(settings.appliance_external_dns_servers),
             ntp_servers=_settings_lines(settings.appliance_ntp_servers),
         )

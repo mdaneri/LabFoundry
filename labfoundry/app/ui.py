@@ -9409,6 +9409,7 @@ def edit_physical_interface_from_ui(
     mode: str = Form("unused"),
     ipv4_method: str = Form("static"),
     ip_cidr: str = Form(""),
+    ipv6_enabled: bool = Form(False),
     ipv6_cidr: str = Form(""),
     mtu: int = Form(1500),
     admin_state: str = Form("up"),
@@ -9446,7 +9447,10 @@ def edit_physical_interface_from_ui(
         if isinstance(ip_value, Response):
             return ip_value
     ipv6_value = None
-    if new_mode != "trunk":
+    ipv6_enabled_value = bool(ipv6_enabled) and new_mode != "trunk"
+    if new_mode != "trunk" and not ipv6_enabled_value and ipv6_cidr.strip():
+        return Response("Clear IPv6 CIDR before disabling IPv6.", status_code=422, media_type="text/plain")
+    if ipv6_enabled_value:
         ipv6_value = cidr_for_family(ipv6_cidr, 6, "Interface IPv6 CIDR")
         if isinstance(ipv6_value, Response):
             return ipv6_value
@@ -9464,6 +9468,7 @@ def edit_physical_interface_from_ui(
     interface.mode = new_mode
     interface.ipv4_method = ipv4_method_value
     interface.ip_cidr = ip_value or None
+    interface.ipv6_enabled = ipv6_enabled_value
     interface.ipv6_cidr = ipv6_value or None
     interface.mtu = mtu
     interface.admin_state = admin_state_value

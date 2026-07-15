@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
-from ipaddress import IPv4Address, IPv4Interface, ip_address
+from ipaddress import IPv4Address, IPv4Interface, IPv6Address, IPv6Interface, ip_address
 import xml.etree.ElementTree as ET
 
 
@@ -21,11 +21,15 @@ PROPERTY_PREFIX = "labfoundry."
 PROPERTY_MANAGEMENT_MODE = f"{PROPERTY_PREFIX}management_mode"
 PROPERTY_CIDR = f"{PROPERTY_PREFIX}cidr"
 PROPERTY_GATEWAY = f"{PROPERTY_PREFIX}gateway"
+PROPERTY_IPV6_ENABLED = f"{PROPERTY_PREFIX}ipv6_enabled"
+PROPERTY_IPV6_CIDR = f"{PROPERTY_PREFIX}ipv6_cidr"
+PROPERTY_IPV6_GATEWAY = f"{PROPERTY_PREFIX}ipv6_gateway"
 PROPERTY_FQDN = f"{PROPERTY_PREFIX}fqdn"
 PROPERTY_DNS = f"{PROPERTY_PREFIX}dns_servers"
 PROPERTY_NTP = f"{PROPERTY_PREFIX}ntp_servers"
 PROPERTY_ADMIN_PASSWORD = f"{PROPERTY_PREFIX}admin_password"
 PROPERTY_ROOT_PASSWORD = f"{PROPERTY_PREFIX}root_password"
+PROPERTY_ROOT_SSH_ENABLED = f"{PROPERTY_PREFIX}root_ssh_enabled"
 REQUIRED_PROPERTIES = {
     PROPERTY_FQDN,
     PROPERTY_ADMIN_PASSWORD,
@@ -37,6 +41,7 @@ NETWORKD_PATH = Path("/etc/systemd/network/00-labfoundry-mgmt.network")
 RESOLV_CONF_PATH = Path("/etc/resolv.conf")
 NGINX_MANAGEMENT_PATH = Path("/etc/labfoundry/nginx/sites.d/management.conf")
 FIREWALL_CONFIG_PATH = Path("/etc/labfoundry/nftables.d/labfoundry.nft")
+SSHD_ROOT_LOGIN_CONFIG_PATH = Path("/etc/ssh/sshd_config.d/labfoundry-root-login.conf")
 MARKER_PATH = Path("/var/lib/labfoundry/vmware-ovf-customization.applied")
 LOG_PATH = Path("/var/log/labfoundry/vmware-ovf-customize.log")
 DEFAULT_INTERFACE = "eth0"
@@ -121,31 +126,64 @@ def validate_ntp_servers(value: str) -> list[str]:
     return servers
 
 
+def parse_boolean_property(properties: dict[str, str], key: str, *, default: bool = False) -> bool:
+    value = properties.get(key, "").strip().lower()
+    if not value:
+        return default
+    if value in {"true", "1", "yes", "on"}:
+        return True
+    if value in {"false", "0", "no", "off"}:
+        return False
+    raise OvfCustomizationError(f"{key} must be true or false")
+
+
 def validate_properties(properties: dict[str, str]) -> dict[str, object]:
     missing = sorted(key for key in REQUIRED_PROPERTIES if not properties.get(key))
     if missing:
         raise OvfCustomizationError(f"Missing required OVF properties: {', '.join(missing)}")
 
-    management_mode = properties.get(PROPERTY_MANAGEMENT_MODE, "dhcp").strip().lower() or "dhcp"
-    if management_mode not in {"dhcp", "static"}:
-        raise OvfCustomizationError("labfoundry.management_mode must be dhcp or static")
-
+    _legacy_management_mode = properties.get(PROPERTY_MANAGEMENT_MODE, "").strip().lower()
+    # Kept parse-compatible for existing deployment automation; address presence now owns IPv4 behavior.
     cidr: IPv4Interface | None = None
     gateway: IPv4Address | None = None
-    if management_mode == "static":
-        if not properties.get(PROPERTY_CIDR):
-            raise OvfCustomizationError("labfoundry.cidr is required when labfoundry.management_mode is static")
-        if not properties.get(PROPERTY_GATEWAY):
-            raise OvfCustomizationError("labfoundry.gateway is required when labfoundry.management_mode is static")
+    cidr_value = properties.get(PROPERTY_CIDR, "").strip()
+    gateway_value = properties.get(PROPERTY_GATEWAY, "").strip()
+    management_mode = "static" if cidr_value else "dhcp"
+    if cidr_value:
+        if not gateway_value:
+            raise OvfCustomizationError("labfoundry.gateway is required when labfoundry.cidr is supplied")
         try:
-            cidr = IPv4Interface(properties[PROPERTY_CIDR].strip())
+            cidr = IPv4Interface(cidr_value)
         except ValueError as exc:
             raise OvfCustomizationError("labfoundry.cidr must be an IPv4 CIDR such as 192.168.10.10/24") from exc
 
         try:
-            gateway = IPv4Address(properties[PROPERTY_GATEWAY].strip())
+            gateway = IPv4Address(gateway_value)
         except ValueError as exc:
             raise OvfCustomizationError("labfoundry.gateway must be an IPv4 address") from exc
+    elif gateway_value:
+        raise OvfCustomizationError("labfoundry.gateway cannot be supplied without labfoundry.cidr")
+
+    ipv6_enabled = parse_boolean_property(properties, PROPERTY_IPV6_ENABLED)
+    ipv6_cidr_value = properties.get(PROPERTY_IPV6_CIDR, "").strip()
+    ipv6_gateway_value = properties.get(PROPERTY_IPV6_GATEWAY, "").strip()
+    ipv6_cidr: IPv6Interface | None = None
+    ipv6_gateway: IPv6Address | None = None
+    if not ipv6_enabled and (ipv6_cidr_value or ipv6_gateway_value):
+        raise OvfCustomizationError("IPv6 CIDR and gateway require labfoundry.ipv6_enabled=true")
+    if ipv6_enabled and ipv6_cidr_value:
+        if not ipv6_gateway_value:
+            raise OvfCustomizationError("labfoundry.ipv6_gateway is required when labfoundry.ipv6_cidr is supplied")
+        try:
+            ipv6_cidr = IPv6Interface(ipv6_cidr_value)
+        except ValueError as exc:
+            raise OvfCustomizationError("labfoundry.ipv6_cidr must be an IPv6 CIDR such as fd00:10::10/64") from exc
+        try:
+            ipv6_gateway = IPv6Address(ipv6_gateway_value)
+        except ValueError as exc:
+            raise OvfCustomizationError("labfoundry.ipv6_gateway must be an IPv6 address") from exc
+    elif ipv6_gateway_value:
+        raise OvfCustomizationError("labfoundry.ipv6_gateway cannot be supplied without labfoundry.ipv6_cidr")
 
     fqdn = validate_fqdn(properties[PROPERTY_FQDN])
     dns_servers = validate_dns_servers(properties.get(PROPERTY_DNS, ""))
@@ -154,12 +192,18 @@ def validate_properties(properties: dict[str, str]) -> dict[str, object]:
         "management_mode": management_mode,
         "cidr": str(cidr) if cidr else "dhcp",
         "gateway": str(gateway) if gateway else "",
+        "ipv6_enabled": ipv6_enabled,
+        "ipv6_mode": "static" if ipv6_cidr else ("auto" if ipv6_enabled else "disabled"),
+        "ipv6_cidr": str(ipv6_cidr) if ipv6_cidr else "",
+        "ipv6_gateway": str(ipv6_gateway) if ipv6_gateway else "",
         "fqdn": fqdn,
         "dns_servers": dns_servers,
         "ntp_servers": ntp_servers,
         "admin_password": properties[PROPERTY_ADMIN_PASSWORD],
         "root_password": properties[PROPERTY_ROOT_PASSWORD],
+        "root_ssh_enabled": parse_boolean_property(properties, PROPERTY_ROOT_SSH_ENABLED),
         "management_source_cidr": str(cidr.network) if cidr else "",
+        "management_source_ipv6_cidr": str(ipv6_cidr.network) if ipv6_cidr else "",
     }
 
 
@@ -169,11 +213,16 @@ def redacted_summary(config: dict[str, object]) -> dict[str, object]:
         "management_mode": config["management_mode"],
         "cidr": config["cidr"],
         "gateway": config["gateway"],
+        "ipv6_enabled": config["ipv6_enabled"],
+        "ipv6_mode": config["ipv6_mode"],
+        "ipv6_cidr": config["ipv6_cidr"],
+        "ipv6_gateway": config["ipv6_gateway"],
         "fqdn": config["fqdn"],
         "dns_server_count": len(config["dns_servers"]),
         "ntp_server_count": len(config["ntp_servers"]),
         "admin_password_set": bool(config["admin_password"]),
         "root_password_set": bool(config["root_password"]),
+        "root_ssh_enabled": config["root_ssh_enabled"],
     }
 
 
@@ -216,7 +265,7 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 def write_env_file(path: Path, updates: dict[str, object]) -> None:
     values = read_env_file(path)
-    values.update({key: str(value) for key, value in updates.items() if str(value)})
+    values.update({key: str(value) for key, value in updates.items()})
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{key}={quote_env_value(values[key])}" for key in sorted(values)]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -234,6 +283,12 @@ def write_networkd_config(config: dict[str, object]) -> None:
     else:
         lines.append(f"Address={config['cidr']}")
         lines.append(f"Gateway={config['gateway']}")
+    if config["ipv6_mode"] == "disabled":
+        lines.extend(["IPv6AcceptRA=no", "LinkLocalAddressing=no"])
+    elif config["ipv6_mode"] == "auto":
+        lines.extend(["IPv6AcceptRA=yes", "LinkLocalAddressing=ipv6"])
+    else:
+        lines.extend(["IPv6AcceptRA=no", "LinkLocalAddressing=ipv6", f"Address={config['ipv6_cidr']}", f"Gateway={config['ipv6_gateway']}"])
     lines.extend(f"DNS={server}" for server in config["dns_servers"])
     content = "\n".join(lines).strip() + "\n"
     NETWORKD_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -258,12 +313,22 @@ def write_nginx_management_server_name(config: dict[str, object]) -> None:
 
 
 def write_initial_firewall_config(config: dict[str, object]) -> None:
+    management_rules = []
     source_cidr = str(config["management_source_cidr"])
-    management_rule = (
-        f'ip saddr {source_cidr} tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry management access"'
+    management_rules.append(
+        f'ip saddr {source_cidr} tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry IPv4 management access"'
         if source_cidr
-        else f'iifname "{DEFAULT_INTERFACE}" tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry management access"'
+        else f'iifname "{DEFAULT_INTERFACE}" meta nfproto ipv4 tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry IPv4 management access"'
     )
+    if config["ipv6_mode"] == "auto":
+        management_rules.append(
+            f'iifname "{DEFAULT_INTERFACE}" meta nfproto ipv6 tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry IPv6 management access"'
+        )
+    elif config["ipv6_mode"] == "static":
+        management_rules.append(
+            f'ip6 saddr {config["management_source_ipv6_cidr"]} tcp dport {{ 22, 80, 443 }} accept comment "LabFoundry IPv6 management access"'
+        )
+    rendered_management_rules = "\n    ".join(management_rules)
     content = f"""# Managed by LabFoundry. Local changes may be overwritten.
 # nftables firewall state for Photon OS appliance images.
 flush ruleset
@@ -272,7 +337,7 @@ table inet labfoundry {{
     type filter hook input priority filter; policy drop;
     iifname "lo" accept comment "LabFoundry loopback"
     ct state established,related accept comment "LabFoundry established traffic"
-    {management_rule}
+    {rendered_management_rules}
     meta l4proto icmp accept comment "LabFoundry ICMP diagnostics"
     meta l4proto ipv6-icmp accept comment "LabFoundry IPv6 ICMP diagnostics"
   }}
@@ -310,6 +375,29 @@ def set_hostname(fqdn: str) -> None:
         subprocess.run([hostname, fqdn], check=True)
 
 
+def configure_root_ssh(enabled: bool) -> None:
+    SSHD_ROOT_LOGIN_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    previous = SSHD_ROOT_LOGIN_CONFIG_PATH.read_text(encoding="utf-8") if SSHD_ROOT_LOGIN_CONFIG_PATH.exists() else None
+    lines = [
+        "# Managed by LabFoundry. Local changes may be overwritten by Appliance Settings apply.",
+        f"PermitRootLogin {'yes' if enabled else 'no'}",
+    ]
+    if enabled:
+        lines.extend(["PasswordAuthentication yes", "KbdInteractiveAuthentication yes"])
+    SSHD_ROOT_LOGIN_CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.chmod(SSHD_ROOT_LOGIN_CONFIG_PATH, 0o644)
+    sshd = shutil.which("sshd") or "/usr/sbin/sshd"
+    try:
+        subprocess.run([sshd, "-t"], check=True, text=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        if previous is None:
+            SSHD_ROOT_LOGIN_CONFIG_PATH.unlink(missing_ok=True)
+        else:
+            SSHD_ROOT_LOGIN_CONFIG_PATH.write_text(previous, encoding="utf-8")
+            os.chmod(SSHD_ROOT_LOGIN_CONFIG_PATH, 0o644)
+        raise OvfCustomizationError("Photon sshd configuration validation failed") from exc
+
+
 def apply_customization(config: dict[str, object], *, dry_run: bool = False) -> dict[str, object]:
     summary = redacted_summary(config)
     if dry_run:
@@ -321,6 +409,7 @@ def apply_customization(config: dict[str, object], *, dry_run: bool = False) -> 
     write_initial_firewall_config(config)
     set_hostname(str(config["fqdn"]))
     set_password("root", str(config["root_password"]))
+    configure_root_ssh(bool(config["root_ssh_enabled"]))
     bootstrap_user = read_env_file(ENV_PATH).get("LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME", "admin").strip('"') or "admin"
     set_password(bootstrap_user, str(config["admin_password"]))
     write_env_file(
@@ -331,6 +420,9 @@ def apply_customization(config: dict[str, object], *, dry_run: bool = False) -> 
             "LABFOUNDRY_SECRETS_KEY": generate_secret_key(),
             "LABFOUNDRY_APPLIANCE_FQDN": config["fqdn"],
             "LABFOUNDRY_APPLIANCE_MANAGEMENT_CIDR": config["cidr"],
+            "LABFOUNDRY_APPLIANCE_MANAGEMENT_IPV6_ENABLED": str(config["ipv6_enabled"]).lower(),
+            "LABFOUNDRY_APPLIANCE_MANAGEMENT_IPV6_CIDR": config["ipv6_cidr"],
+            "LABFOUNDRY_APPLIANCE_ROOT_SSH_ENABLED": str(config["root_ssh_enabled"]).lower(),
             "LABFOUNDRY_APPLIANCE_EXTERNAL_DNS_SERVERS": ",".join(config["dns_servers"]),
             "LABFOUNDRY_APPLIANCE_NTP_SERVERS": ",".join(config["ntp_servers"]),
             "LABFOUNDRY_MANAGEMENT_SOURCE_CIDR": config["management_source_cidr"],
