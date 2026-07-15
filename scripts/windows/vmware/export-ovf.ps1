@@ -543,7 +543,8 @@ function Set-LabFoundryOvfProperty {
         [bool]$Required,
         [bool]$Password = $false,
         [bool]$Boolean = $false,
-        [string]$DefaultValue = ''
+        [string]$DefaultValue = '',
+        [int]$MinLength = 0
     )
 
     $property = Get-OvfProperty -ProductSection $ProductSection -Key $Key
@@ -556,6 +557,12 @@ function Set-LabFoundryOvfProperty {
     Set-OvfAttribute -Document $Document -Element $property -Name 'type' -Value $propertyType
     Set-OvfAttribute -Document $Document -Element $property -Name 'userConfigurable' -Value 'true'
     Set-OvfAttribute -Document $Document -Element $property -Name 'required' -Value ($Required.ToString().ToLowerInvariant())
+    if ($MinLength -gt 0) {
+        Set-OvfAttribute -Document $Document -Element $property -Name 'qualifiers' -Value "MinLen($MinLength)"
+    }
+    else {
+        $property.RemoveAttribute('qualifiers', $ovfNamespace)
+    }
     if ($DefaultValue) {
         Set-OvfAttribute -Document $Document -Element $property -Name 'value' -Value $DefaultValue
     }
@@ -632,8 +639,8 @@ function Add-LabFoundryOvfProperties {
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ntp_servers' -Label 'NTP servers' -Description 'Optional NTP server names or IPs. If blank, the image defaults are kept.' -Required $false
 
     Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Initial credentials'
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'admin_password' -Label 'LabFoundry admin password' -Description 'Initial LabFoundry web admin password. The value is consumed on first boot and not logged.' -Required $true -Password $true
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'root_password' -Label 'Photon root password' -Description 'Photon root console password for recovery. Root SSH remains disabled by default.' -Required $true -Password $true
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'admin_password' -Label 'LabFoundry admin password' -Description 'Required initial LabFoundry web admin password; minimum 12 characters. The value is consumed on first boot and not logged.' -Required $true -Password $true -MinLength 12
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'root_password' -Label 'Photon root password' -Description 'Required Photon root console password; minimum 12 characters. Root SSH remains disabled by default.' -Required $true -Password $true -MinLength 12
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'root_ssh_enabled' -Label 'Enable Photon root SSH' -Description 'Allows root password SSH on first boot using the supplied Photon root password. Leave disabled for console-only root recovery.' -Required $false -Boolean $true -DefaultValue 'false'
 
     $settings = New-Object System.Xml.XmlWriterSettings

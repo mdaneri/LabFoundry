@@ -30,6 +30,7 @@ PROPERTY_NTP = f"{PROPERTY_PREFIX}ntp_servers"
 PROPERTY_ADMIN_PASSWORD = f"{PROPERTY_PREFIX}admin_password"
 PROPERTY_ROOT_PASSWORD = f"{PROPERTY_PREFIX}root_password"
 PROPERTY_ROOT_SSH_ENABLED = f"{PROPERTY_PREFIX}root_ssh_enabled"
+MINIMUM_PASSWORD_LENGTH = 12
 REQUIRED_PROPERTIES = {
     PROPERTY_FQDN,
     PROPERTY_ADMIN_PASSWORD,
@@ -138,9 +139,14 @@ def parse_boolean_property(properties: dict[str, str], key: str, *, default: boo
 
 
 def validate_properties(properties: dict[str, str]) -> dict[str, object]:
-    missing = sorted(key for key in REQUIRED_PROPERTIES if not properties.get(key))
+    missing = sorted(key for key in REQUIRED_PROPERTIES if not properties.get(key, "").strip())
     if missing:
         raise OvfCustomizationError(f"Missing required OVF properties: {', '.join(missing)}")
+    for password_key in (PROPERTY_ADMIN_PASSWORD, PROPERTY_ROOT_PASSWORD):
+        if len(properties[password_key]) < MINIMUM_PASSWORD_LENGTH:
+            raise OvfCustomizationError(
+                f"{password_key} must be at least {MINIMUM_PASSWORD_LENGTH} characters"
+            )
 
     _legacy_management_mode = properties.get(PROPERTY_MANAGEMENT_MODE, "").strip().lower()
     # Kept parse-compatible for existing deployment automation; address presence now owns IPv4 behavior.

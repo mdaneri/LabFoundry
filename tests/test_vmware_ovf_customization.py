@@ -25,7 +25,7 @@ OVF_ENV = """<?xml version="1.0" encoding="UTF-8"?>
     <Property oe:key="labfoundry.dns_servers" oe:value="192.168.10.2,192.168.10.3" />
     <Property oe:key="labfoundry.ntp_servers" oe:value="ntp.labfoundry.internal time1.google.com" />
     <Property oe:key="labfoundry.admin_password" oe:value="admin-secret" />
-    <Property oe:key="labfoundry.root_password" oe:value="root-secret" />
+    <Property oe:key="labfoundry.root_password" oe:value="root-secret1" />
   </PropertySection>
 </Environment>
 """
@@ -48,7 +48,7 @@ def test_vmware_ovf_customizer_parses_and_validates_properties_without_logging_s
     assert summary["admin_password_set"] is True
     assert summary["root_password_set"] is True
     assert "admin-secret" not in str(summary)
-    assert "root-secret" not in str(summary)
+    assert "root-secret1" not in str(summary)
 
 
 def test_vmware_ovf_customizer_supports_dhcp_management_by_default():
@@ -66,6 +66,28 @@ def test_vmware_ovf_customizer_supports_dhcp_management_by_default():
     assert config["gateway"] == ""
     assert config["dns_servers"] == []
     assert config["management_source_cidr"] == ""
+
+
+def test_vmware_ovf_customizer_rejects_empty_or_whitespace_passwords():
+    customizer = load_customizer()
+
+    for key, value in (
+        ("labfoundry.admin_password", ""),
+        ("labfoundry.admin_password", "   "),
+        ("labfoundry.root_password", ""),
+        ("labfoundry.root_password", "   "),
+        ("labfoundry.admin_password", "Short1!"),
+        ("labfoundry.root_password", "Short1!"),
+    ):
+        properties = customizer.parse_ovf_environment(OVF_ENV)
+        properties[key] = value
+
+        try:
+            customizer.validate_properties(properties)
+        except customizer.OvfCustomizationError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"Expected an empty {key} value to be rejected")
 
 
 def test_vmware_ovf_customizer_ignores_legacy_mode_and_derives_ipv4_from_cidr():
@@ -343,6 +365,9 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "-Name 'class' -Value 'labfoundry'" in export_script
     assert "$propertyType = if ($Password) { 'password' } elseif ($Boolean) { 'boolean' } else { 'string' }" in export_script
     assert "$property.RemoveAttribute('password', $vmwNamespace)" in export_script
+    assert "-Key 'admin_password'" in export_script and "-Password $true -MinLength 12" in export_script
+    assert "-Key 'root_password'" in export_script and "-Password $true -MinLength 12" in export_script
+    assert "-Name 'qualifiers' -Value \"MinLen($MinLength)\"" in export_script
     assert "LabFoundry Management Network" in export_script
     assert "LabFoundry Services Network" in export_script
     assert "$serviceAdapter = $networkAdapters[1]" in export_script
