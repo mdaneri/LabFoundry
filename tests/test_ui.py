@@ -133,7 +133,7 @@ def test_web_terminal_requires_login_and_renders_admin_only_unavailable_state(cl
     assert "Passwordless local SSH as admin" in response.text
     assert "Web terminal access is disabled in Appliance Settings." in response.text
     assert "/static/vendor/xterm/xterm.js?v=5.5.0" in response.text
-    assert "/static/terminal.js?v=web-terminal-access-20260716-2" in response.text
+    assert "/static/terminal.js?v=web-terminal-review-20260716-3" in response.text
     assert "data-terminal-connect" not in response.text
     assert "data-terminal-disconnect" not in response.text
 
@@ -246,6 +246,8 @@ def test_public_web_terminal_uses_public_shell_and_explicit_user_access(client, 
     assert 'class="public-portal-shell"' in terminal.text
     assert 'class="app-shell"' not in terminal.text
     assert "Back to Public Services" not in terminal.text
+    assert 'action="/logout"' in terminal.text
+    assert 'name="next" value="/terminal"' in terminal.text
 
     with SessionLocal() as db:
         user = db.get(User, user_id)
@@ -254,6 +256,14 @@ def test_public_web_terminal_uses_public_shell_and_explicit_user_access(client, 
     denied = client.get("/terminal", headers={"host": "192.168.87.32"})
     assert denied.status_code == 403
     assert "Web SSH access is not enabled" in denied.text
+    logout = client.post(
+        "/logout",
+        headers={"host": "192.168.87.32"},
+        data={"csrf": csrf, "next": "/terminal"},
+        follow_redirects=False,
+    )
+    assert logout.status_code == 303
+    assert logout.headers["location"] == "/login?next=/terminal"
 
 
 def test_web_terminal_uses_one_use_ticket_and_bridges_websocket_input(client, monkeypatch):
@@ -383,6 +393,9 @@ def test_web_terminal_uses_one_use_ticket_and_bridges_websocket_input(client, mo
     favicon = client.get("/favicon.ico")
     assert favicon.status_code == 200
     assert favicon.headers["content-type"].startswith("image/svg+xml")
+    terminal_js = client.get("/static/terminal.js")
+    assert 'JSON.stringify({ type: "input", data })' in terminal_js.text
+    assert 'data === "\\u0004" ? "exit\\r" : data' not in terminal_js.text
 
 
 def test_appliance_power_action_creates_task_before_scheduling(client, monkeypatch):
@@ -641,7 +654,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v100" in service_worker.text
+    assert "labfoundry-pwa-v101" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -5405,11 +5418,56 @@ def test_public_ca_root_page_is_unauthenticated(client):
     assert "PRIVATE KEY" not in root.text
 
 
+def test_public_services_reject_terminal_listener_without_valid_management_https_certificate(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, CaCertificate, PhysicalInterface
+    from labfoundry.app.ui import public_services_context
+
+    with SessionLocal() as db:
+        appliance_settings = db.execute(select(ApplianceSettings)).scalar_one()
+        appliance_settings.management_https_enabled = False
+        appliance_settings.web_terminal_enabled = True
+        appliance_settings.web_terminal_interfaces_json = '["eth0", "eth2"]'
+        eth0 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
+        eth0.role = "management"
+        eth0.ip_cidr = "192.168.167.10/24"
+        eth2 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
+        eth2.role = "access"
+        eth2.mode = "access"
+        eth2.admin_state = "up"
+        eth2.oper_state = "up"
+        eth2.ip_cidr = "192.168.87.32/24"
+        for certificate in db.execute(
+            select(CaCertificate).where(CaCertificate.managed_owner == "appliance:https")
+        ).scalars():
+            db.delete(certificate)
+        db.commit()
+
+        context = public_services_context(db, reconcile=False)
+
+    assert context["public_service_validation_errors"] == [
+        "Web terminal public listeners require valid Management HTTPS and an issued appliance HTTPS certificate. Apply Certificate Authority and Appliance Settings first."
+    ]
+    assert "Terminal-only HTTPS front door" not in context["public_service_config_preview"]
+    assert not any(entry.get("web_terminal") for entry in context["public_service_entries"])
+
+
 def test_public_service_home_is_scoped_to_called_ip(client, tmp_path, monkeypatch):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ApplianceSettings, CaSettings, PhysicalInterface, Setting, User, VcfOfflineDepotSettings, VcfPrivateRegistrySettings
+    from labfoundry.app.models import (
+        ApplianceSettings,
+        CaCertificate,
+        CaSettings,
+        PhysicalInterface,
+        Setting,
+        User,
+        VcfOfflineDepotSettings,
+        VcfPrivateRegistrySettings,
+    )
 
     depot_store = tmp_path / "depot"
     prod_root = depot_store / "PROD"
@@ -5443,6 +5501,18 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path, monkeypatc
         ca_settings.root_certificate_pem = "-----BEGIN CERTIFICATE-----\npublic-root\n-----END CERTIFICATE-----\n"
         ca_settings.listen_interface = "eth2"
         ca_settings.listen_address = "192.168.87.32"
+        db.add(
+            CaCertificate(
+                common_name="labfoundry.labfoundry.internal",
+                status="issued",
+                certificate_pem="-----BEGIN CERTIFICATE-----\nterminal-leaf\n-----END CERTIFICATE-----\n",
+                private_key_encrypted="fernet:v1:test",
+                managed_owner="appliance:https",
+                cert_path="/etc/labfoundry/https/certs/labfoundry.labfoundry.internal.crt",
+                key_path="/etc/labfoundry/https/certs/labfoundry.labfoundry.internal.key",
+                chain_path="/etc/labfoundry/https/certs/labfoundry.labfoundry.internal-chain.pem",
+            )
+        )
 
         depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
         depot_settings.enabled = True

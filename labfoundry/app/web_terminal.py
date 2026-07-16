@@ -275,8 +275,8 @@ def terminal_page(
         context.update(
             {
                 "public_address_mode_switch": False,
-                "public_logout_action": "/requests/logout",
-                "public_logout_next": "/",
+                "public_logout_action": "/logout",
+                "public_logout_next": "/terminal",
                 **public_portal_links_context(db),
             }
         )

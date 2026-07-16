@@ -1,5 +1,5 @@
-{% set public_logout_action = '/requests/logout' %}
-{% set public_logout_next = '/' %}
+{% set public_logout_action = '/logout' %}
+{% set public_logout_next = '/terminal' %}
 {% extends "public_portal_base.html" %}
 
 {% block title %}LabFoundry - Web Terminal{% endblock %}
@@ -17,5 +17,5 @@
 
 {% block public_after_main %}
   <script src="/static/vendor/xterm/xterm.js?v=5.5.0"></script>
-  <script src="/static/terminal.js?v=web-terminal-access-20260716-2"></script>
+  <script src="/static/terminal.js?v=web-terminal-review-20260716-3"></script>
 {% endblock %}

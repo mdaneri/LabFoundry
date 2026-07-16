@@ -3016,17 +3016,35 @@ def public_services_context(db: Session, *, reconcile: bool = True) -> dict[str,
         normalized_web_terminal_interfaces(appliance_settings, management),
         terminal_options,
     )
+    terminal_cert_path, terminal_key_path, _terminal_chain_path = ca_managed_certificate_paths(db, "appliance:https")
+    terminal_https_ready = bool(
+        appliance_settings.management_https_enabled
+        and terminal_cert_path
+        and terminal_key_path
+        and ca_certificate_available(db, "appliance:https")
+    )
     terminal_addresses = set(
         web_terminal_addresses(terminal_interfaces, terminal_options)
-        if appliance_settings.web_terminal_enabled
+        if appliance_settings.web_terminal_enabled and terminal_https_ready
         else []
     )
     management_address = management.get("ip", "")
     for entry in entries:
         entry["web_terminal"] = bool(entry.get("address") in terminal_addresses and entry.get("address") != management_address)
+    terminal_extra_requested = bool(
+        appliance_settings.web_terminal_enabled
+        and any(
+            address != management_address
+            for address in web_terminal_addresses(terminal_interfaces, terminal_options)
+        )
+    )
+    validation_errors = []
+    if terminal_extra_requested and not terminal_https_ready:
+        validation_errors.append(
+            "Web terminal public listeners require valid Management HTTPS and an issued appliance HTTPS certificate. Apply Certificate Authority and Appliance Settings first."
+        )
     ca_portal_hostname = normalize_dns_hostname(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
     ca_portal_cert_path, ca_portal_key_path, _ca_portal_chain_path = ca_service_cert_paths("ca-portal", ca_portal_hostname)
-    terminal_cert_path, terminal_key_path, _terminal_chain_path = ca_managed_certificate_paths(db, "appliance:https")
     config_preview = render_public_services_nginx_config(
         entries,
         depot_store_path=depot_settings.depot_store_path,
@@ -3040,7 +3058,7 @@ def public_services_context(db: Session, *, reconcile: bool = True) -> dict[str,
         "public_service_entries": entries,
         "public_service_config_preview": config_preview,
         "public_service_config_path": PUBLIC_SERVICES_STAGED_CONFIG_PATH,
-        "public_service_validation_errors": [],
+        "public_service_validation_errors": validation_errors,
         "public_service_validation_warnings": [],
     }
 
@@ -7998,9 +8016,11 @@ def login(
 
 
 @router.post("/logout", response_model=None)
-def logout(request: Request, csrf: str = Form(...)) -> RedirectResponse:
+def logout(request: Request, csrf: str = Form(...), next: str = Form("")) -> RedirectResponse:
     verify_csrf(request, csrf)
     request.session.clear()
+    if next == "/terminal":
+        return RedirectResponse("/login?next=/terminal", status_code=303)
     return RedirectResponse("/login", status_code=303)
 
 

@@ -178,7 +178,7 @@
           inputDisposable?.dispose();
           inputDisposable = terminal.onData((data) => {
             if (currentSocket.readyState !== WebSocket.OPEN) return;
-            currentSocket.send(JSON.stringify({ type: "input", data: data === "\u0004" ? "exit\r" : data }));
+            currentSocket.send(JSON.stringify({ type: "input", data }));
           });
         } else if (message.type === "error") {
           showError(message.message || "Terminal session failed.");
