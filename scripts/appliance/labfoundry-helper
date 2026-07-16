@@ -4350,6 +4350,20 @@ def _target_networks(target: dict[str, str]) -> list[str]:
     return networks
 
 
+def _target_network_owners(targets: list[dict[str, str]]) -> dict[str, int]:
+    owners: dict[str, int] = {}
+    for index, target in enumerate(targets):
+        for network in _target_networks(target):
+            owner_index = owners.get(network)
+            if owner_index is None:
+                owners[network] = index
+                continue
+            owner = targets[owner_index]
+            if owner.get("routing_domain", "lab") != "management" and target.get("routing_domain", "lab") == "management":
+                owners[network] = index
+    return owners
+
+
 def _target_route_table_id(target: dict[str, str]) -> int:
     return MANAGEMENT_ROUTE_TABLE_ID if target.get("routing_domain", "lab") == "management" else LAB_ROUTE_TABLE_ID
 
@@ -4357,6 +4371,16 @@ def _target_route_table_id(target: dict[str, str]) -> int:
 def _run_target_route_replace(network: str, interface_name: str, table_id: int) -> int:
     command = [*_route_command_prefix(network), "replace", network, "dev", interface_name, "table", str(table_id)]
     result = _run(command)
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _run_target_route_delete(network: str, interface_name: str, table_id: int) -> int:
+    command = [*_route_command_prefix(network), "del", network, "dev", interface_name, "table", str(table_id)]
+    result = _run(command)
+    if result.returncode == 2:
+        return 0
     print(result.stdout, end="")
     print(result.stderr, end="", file=sys.stderr)
     return result.returncode
@@ -4414,10 +4438,17 @@ def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
     if shutil.which("ip") is None:
         print("ip command not found", file=sys.stderr)
         return 127
-    for target in parsed["targets"]:
+    targets = parsed["targets"]
+    network_owners = _target_network_owners(targets)
+    for index, target in enumerate(targets):
         table_id = _target_route_table_id(target)
         interface_name = target.get("name", "")
         for network in _target_networks(target):
+            if network_owners[network] != index:
+                result = _run_target_route_delete(network, interface_name, table_id)
+                if result != 0:
+                    return result
+                continue
             result = _run_target_route_replace(network, interface_name, table_id)
             if result != 0:
                 return result
@@ -4469,11 +4500,15 @@ def _apply_wan_policy_rules(parsed: dict[str, list[dict[str, str]]]) -> int:
     cleanup_result = _cleanup_wan_policy_rules()
     if cleanup_result != 0:
         return cleanup_result
-    for index, target in enumerate(parsed["targets"]):
+    targets = parsed["targets"]
+    network_owners = _target_network_owners(targets)
+    for index, target in enumerate(targets):
         domain = target.get("routing_domain", "lab")
         table_id = _target_route_table_id(target)
         base_priority = MANAGEMENT_ROUTE_RULE_PRIORITY if domain == "management" else LAB_ROUTE_RULE_PRIORITY
         for source_network in _target_networks(target):
+            if network_owners[source_network] != index:
+                continue
             result = _run_rule_replace(source_network, table_id, base_priority + index)
             if result != 0:
                 return result

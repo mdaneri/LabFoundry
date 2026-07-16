@@ -885,6 +885,51 @@ def test_wan_helper_preserves_management_default_gateway(monkeypatch, tmp_path):
     assert ["ip", "route", "replace", "default", "via", "192.168.49.254", "dev", "eth0", "table", "100"] in commands
 
 
+def test_wan_helper_gives_management_ownership_of_duplicate_vlan_network(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "duplicate-management-vlan.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[targets]",
+                "target=eth0",
+                "  kind=physical",
+                "  role=management",
+                "  ip_cidr=192.168.1.10/24",
+                "  ipv6_cidr=",
+                "  routing_domain=management",
+                "  route_allowed=false",
+                "target=eth1.1",
+                "  kind=vlan",
+                "  role=access",
+                "  ip_cidr=192.168.1.20/24",
+                "  ipv6_cidr=",
+                "  routing_domain=lab",
+                "  route_allowed=true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parsed = helper._parse_wan_config(config_path)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/sbin/{command}" if command == "ip" else None)
+
+    assert helper._apply_wan_target_routes(parsed) == 0
+    assert helper._apply_wan_policy_rules(parsed) == 0
+    assert ["ip", "route", "replace", "192.168.1.0/24", "dev", "eth0", "table", "100"] in commands
+    assert ["ip", "route", "replace", "192.168.1.0/24", "dev", "eth1.1", "table", "200"] not in commands
+    assert ["ip", "route", "del", "192.168.1.0/24", "dev", "eth1.1", "table", "200"] in commands
+    assert ["ip", "rule", "add", "from", "192.168.1.0/24", "table", "100", "priority", "1000"] in commands
+    assert ["ip", "rule", "add", "from", "192.168.1.0/24", "table", "200", "priority", "2001"] not in commands
+
+
 def test_staging_prepare_repairs_apply_directory_ownership(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_root = tmp_path / "apply"

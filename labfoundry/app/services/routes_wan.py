@@ -256,6 +256,29 @@ def _policy_by_id(policies: list[WanPolicy]) -> dict[int, WanPolicy]:
     return {policy.id: policy for policy in policies}
 
 
+def _target_networks(target: dict[str, str]) -> list:
+    return [
+        ip_network(target[cidr_key], strict=False)
+        for cidr_key in ("ip_cidr", "ipv6_cidr")
+        if target.get(cidr_key)
+    ]
+
+
+def _target_network_owners(targets: list[dict[str, str]]) -> dict[str, int]:
+    owners: dict[str, int] = {}
+    for index, target in enumerate(targets):
+        for network in _target_networks(target):
+            key = str(network)
+            owner_index = owners.get(key)
+            if owner_index is None:
+                owners[key] = index
+                continue
+            owner = targets[owner_index]
+            if owner.get("routing_domain") != "management" and target.get("routing_domain") == "management":
+                owners[key] = index
+    return owners
+
+
 def _nat_source_resolved(rule: NatRule, source_groups: list[dict] | None = None) -> str:
     source = rule.source.strip()
     if source.lower().startswith(FIREWALL_SOURCE_GROUP_REFERENCE_PREFIX):
@@ -427,15 +450,19 @@ def render_wan_config(
         lines.append("sysctl -w net.ipv4.ip_forward=1  # required for lab routing rules")
     if not any(rule.enabled for rule in nat_rules) and not any(route.enabled for route in routes) and not generated_lab_routing_enabled and not any(rule.enabled for rule in routing_rules):
         lines.append("sysctl -w net.ipv4.ip_forward=0  # no LabFoundry lab routing or NAT requires forwarding")
+    target_network_owners = _target_network_owners(targets)
     for index, target in enumerate(targets):
         table = MANAGEMENT_ROUTE_TABLE_ID if target.get("routing_domain") == "management" else LAB_ROUTE_TABLE_ID
         priority = (1000 if target.get("routing_domain") == "management" else 2000) + index
-        for cidr_key in ("ip_cidr", "ipv6_cidr"):
-            if target.get(cidr_key):
-                network = ip_network(target[cidr_key], strict=False)
-                route_family = "-6 " if network.version == 6 else ""
-                lines.append(f"ip {route_family}rule add from {network} table {table} priority {priority}")
-                lines.append(f"ip {route_family}route replace {network} dev {target['name']} table {table}")
+        for network in _target_networks(target):
+            owner_index = target_network_owners[str(network)]
+            if owner_index != index:
+                owner_name = targets[owner_index]["name"]
+                lines.append(f"# {network} on {target['name']} reuses the subnet owned by {owner_name}; no duplicate policy route generated")
+                continue
+            route_family = "-6 " if network.version == 6 else ""
+            lines.append(f"ip {route_family}rule add from {network} table {table} priority {priority}")
+            lines.append(f"ip {route_family}route replace {network} dev {target['name']} table {table}")
         gateway = str(target.get("gateway", "") or "").strip()
         if target.get("routing_domain") == "management" and gateway:
             try:
