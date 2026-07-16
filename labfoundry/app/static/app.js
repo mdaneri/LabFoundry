@@ -10816,6 +10816,7 @@ function applianceApplyModalElements() {
     subtitle: modal?.querySelector("[data-appliance-apply-modal-subtitle]"),
     status: modal?.querySelector("[data-appliance-apply-modal-status]"),
     error: modal?.querySelector("[data-appliance-apply-modal-error]"),
+    connectionWarning: modal?.querySelector("[data-appliance-apply-connection-warning]"),
     review: modal?.querySelector("[data-appliance-apply-review]"),
     live: modal?.querySelector("[data-appliance-apply-live]"),
     reviewList: modal?.querySelector("[data-appliance-apply-review-list]"),
@@ -10846,6 +10847,7 @@ function applianceApplyReviewRow(unit) {
   const row = document.createElement("article");
   row.className = "appliance-apply-review-row";
   row.dataset.applyUnitId = unit.id || "";
+  row.dataset.applyConnectionWarnings = JSON.stringify(Array.isArray(unit.connection_warnings) ? unit.connection_warnings : []);
 
   const head = document.createElement("div");
   head.className = "appliance-apply-review-row-head";
@@ -10915,14 +10917,40 @@ function applianceApplyReviewRow(unit) {
 }
 
 function updateApplianceApplySelection() {
-  const { modal, selectionSummary, submit } = applianceApplyModalElements();
+  const { modal, selectionSummary, submit, connectionWarning } = applianceApplyModalElements();
   if (!(modal instanceof HTMLDialogElement)) return;
-  const selected = modal.querySelectorAll("[data-appliance-apply-review-checkbox]:checked").length;
+  const selectedCheckboxes = Array.from(modal.querySelectorAll("[data-appliance-apply-review-checkbox]:checked"));
+  const selected = selectedCheckboxes.length;
   if (selectionSummary instanceof HTMLElement) {
     selectionSummary.textContent = `${selected} component${selected === 1 ? "" : "s"} selected`;
   }
   if (submit instanceof HTMLButtonElement) {
     submit.disabled = selected === 0;
+  }
+  if (connectionWarning instanceof HTMLElement) {
+    const messages = new Set();
+    selectedCheckboxes.forEach((checkbox) => {
+      const row = checkbox.closest("[data-apply-unit-id]");
+      if (!(row instanceof HTMLElement)) return;
+      try {
+        const warnings = JSON.parse(row.dataset.applyConnectionWarnings || "[]");
+        if (Array.isArray(warnings)) warnings.forEach((warning) => messages.add(String(warning)));
+      } catch (_error) {
+        // Ignore malformed optional warning metadata and keep the apply review usable.
+      }
+    });
+    connectionWarning.replaceChildren();
+    if (messages.size) {
+      const title = document.createElement("strong");
+      title.textContent = "Management connection warning";
+      connectionWarning.append(title);
+      messages.forEach((message) => {
+        const line = document.createElement("div");
+        line.textContent = message;
+        connectionWarning.append(line);
+      });
+    }
+    connectionWarning.classList.toggle("hidden", messages.size === 0);
   }
 }
 
@@ -10947,6 +10975,10 @@ async function openApplianceApplyReview() {
     elements.selectionSummary.textContent = "Loading appliance changes…";
   }
   setApplianceApplyModalError("");
+  if (elements.connectionWarning instanceof HTMLElement) {
+    elements.connectionWarning.replaceChildren();
+    elements.connectionWarning.classList.add("hidden");
+  }
   showApplianceApplyModal(elements.modal);
   try {
     const response = await fetch("/appliance-apply/review", { credentials: "same-origin", headers: { Accept: "application/json" } });

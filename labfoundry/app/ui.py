@@ -5803,6 +5803,10 @@ def _normalize_vcf_trust_address(address: str) -> tuple[str, list[str]]:
 
 
 APPLIANCE_APPLY_BASELINES_KEY = "appliance_apply.baselines.v1"
+MANAGEMENT_CERTIFICATE_CONNECTION_WARNING = (
+    "Applying the selected management HTTPS change will replace or rebind the management certificate. "
+    "This browser connection will be interrupted; reconnect and verify or trust the certificate presented by the appliance."
+)
 APPLIANCE_APPLY_UNIT_IDS = {
     "local_users",
     "appliance_settings",
@@ -5929,6 +5933,113 @@ def config_diff_for_unit(unit_id: str, current_preview: str, baseline: dict[str,
             lineterm="",
         )
     )
+
+
+def network_management_signature(config_preview: str) -> dict[str, str]:
+    interfaces: list[dict[str, str]] = []
+    current_section = ""
+    current: dict[str, str] | None = None
+    for raw_line in (config_preview or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line.strip("[]")
+            current = None
+            continue
+        if "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if current_section == "physical_interfaces" and key == "interface":
+            current = {"name": value}
+            interfaces.append(current)
+            continue
+        if current_section == "physical_interfaces" and current is not None:
+            current[key] = value
+    management = next((interface for interface in interfaces if interface.get("role") == "management"), None)
+    if management is None:
+        return {}
+    return {
+        "name": management.get("name", ""),
+        "ipv4_method": management.get("ipv4_method", ""),
+        "ip_cidr": management.get("ip_cidr", ""),
+        "ipv6_cidr": management.get("ipv6_cidr", ""),
+    }
+
+
+def management_address_label(signature: dict[str, str]) -> str:
+    if signature.get("ip_cidr"):
+        return signature["ip_cidr"]
+    if signature.get("ipv4_method") == "dhcp":
+        return "a DHCP-assigned address"
+    if signature.get("ipv6_cidr"):
+        return signature["ipv6_cidr"]
+    return "no configured management address"
+
+
+def json_config_object(config_preview: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(config_preview or "")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def management_tls_binding_signature(config_preview: str) -> dict[str, Any]:
+    payload = json_config_object(config_preview)
+    if not payload:
+        return {}
+    return {
+        "management_https_enabled": bool(payload.get("management_https_enabled")),
+        "management_https_cert_path": str(payload.get("management_https_cert_path") or ""),
+        "management_https_key_path": str(payload.get("management_https_key_path") or ""),
+    }
+
+
+def management_certificate_signature(config_preview: str) -> dict[str, str]:
+    payload = json_config_object(config_preview)
+    for certificate in payload.get("certificates", []):
+        if not isinstance(certificate, dict) or certificate.get("managed_owner") != "appliance:https":
+            continue
+        return {
+            "common_name": str(certificate.get("common_name") or ""),
+            "fingerprint": str(certificate.get("fingerprint") or ""),
+            "certificate_pem": str(certificate.get("certificate_pem") or ""),
+            "cert_path": str(certificate.get("cert_path") or ""),
+            "key_path": str(certificate.get("key_path") or ""),
+            "chain_path": str(certificate.get("chain_path") or ""),
+        }
+    return {}
+
+
+def appliance_apply_connection_warnings(
+    unit_id: str,
+    current_preview: str,
+    baseline: dict[str, Any] | None,
+) -> list[str]:
+    previous_preview = str((baseline or {}).get("config_preview") or "")
+    if not previous_preview:
+        return []
+    if unit_id == "network":
+        previous = network_management_signature(previous_preview)
+        current = network_management_signature(current_preview)
+        if previous and current and previous != current:
+            return [
+                "Applying Network will change the management address "
+                f"from {management_address_label(previous)} to {management_address_label(current)}. "
+                "This browser connection will be lost; reconnect to the new management address after the task completes."
+            ]
+    if unit_id == "appliance_settings":
+        previous = management_tls_binding_signature(previous_preview)
+        current = management_tls_binding_signature(current_preview)
+        if previous and current and previous != current:
+            return [MANAGEMENT_CERTIFICATE_CONNECTION_WARNING]
+    if unit_id == "ca":
+        previous = management_certificate_signature(previous_preview)
+        current = management_certificate_signature(current_preview)
+        if previous != current and (previous or current):
+            return [MANAGEMENT_CERTIFICATE_CONNECTION_WARNING]
+    return []
 
 
 def network_vlan_entries_from_config(config_preview: str) -> list[dict[str, str]]:
@@ -6363,7 +6474,7 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
     if wan_removed_routes:
         wan_summary.append(f"{len(wan_removed_routes)} route removals")
 
-    return [
+    units = [
         make_appliance_apply_unit(
             unit_id="local_users",
             label="Local Users",
@@ -6556,6 +6667,13 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
             baseline=baselines.get("public_services"),
         ),
     ]
+    for unit in units:
+        unit["connection_warnings"] = appliance_apply_connection_warnings(
+            unit["id"],
+            unit["config_preview"],
+            baselines.get(unit["id"]),
+        )
+    return units
 
 
 def appliance_apply_status(db: Session, unit_id: str) -> dict[str, Any]:
@@ -8326,6 +8444,7 @@ def appliance_apply_review(
             "valid": unit["valid"],
             "validation_errors": unit["validation_errors"],
             "validation_warnings": unit["validation_warnings"],
+            "connection_warnings": unit["connection_warnings"],
             "config_path": unit["config_path"],
             "config_preview": unit["config_preview"],
             "config_diff": unit["config_diff"],

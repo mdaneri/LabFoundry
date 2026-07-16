@@ -654,7 +654,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v101" in service_worker.text
+    assert "labfoundry-pwa-v102" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -667,7 +667,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in service_worker.text
-    assert "/static/app.js?v=web-terminal-access-20260716-2" in service_worker.text
+    assert "/static/app.js?v=management-apply-warning-20260716-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -693,7 +693,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in page.text
-    assert "/static/app.js?v=web-terminal-access-20260716-2" in page.text
+    assert "/static/app.js?v=management-apply-warning-20260716-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -4566,12 +4566,15 @@ def test_dns_and_dhcp_pages_render(client):
     assert "Submit appliance changes" in app_js.text
     assert "openApplianceApplyReview" in app_js.text
     assert "renderApplianceApplyTask" in app_js.text
+    assert "Management connection warning" in app_js.text
+    assert "applyConnectionWarnings" in app_js.text
     assert 'elements.submit.classList.add("hidden")' in app_js.text
     assert 'elements.submit.classList.toggle("hidden", units.length === 0)' in app_js.text
     assert '{ title: "Status", field: "status", width: 150' in app_js.text
     assert 'applianceApplyModalTable.on("rowClick"' in app_js.text
     assert 'labFoundryTasksTable.on("rowClick"' in app_js.text
     assert "data-appliance-apply-modal" in app_js.text
+    assert "data-appliance-apply-connection-warning" in dns.text
     assert 'class="button primary hidden" type="submit" data-appliance-apply-submit' in dns.text
     assert "data-apply-submit-tracker" not in app_js.text
     assert "index === 0 ? \"Applying\"" not in app_js.text
@@ -9008,7 +9011,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "web-terminal-access-20260716-2" in page.text
+    assert "management-apply-warning-20260716-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -9079,6 +9082,7 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     firewall_review = next(unit for unit in review.json()["units"] if unit["id"] == "firewall")
     assert firewall_review["has_baseline"] is False
     assert firewall_review["selected"] is True
+    assert firewall_review["connection_warnings"] == []
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     empty_response = client.post("/appliance-apply", data={"csrf": csrf})
@@ -9147,6 +9151,95 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
         assert job is not None
         assert "skipped_changed_units" in (job.result or "")
         assert '"unit_id": "firewall"' in (job.result or "")
+
+
+def test_appliance_apply_connection_warnings_detect_management_address_and_certificate_changes():
+    import json
+
+    from labfoundry.app.ui import (
+        MANAGEMENT_CERTIFICATE_CONNECTION_WARNING,
+        appliance_apply_connection_warnings,
+    )
+
+    previous_network = "\n".join(
+        [
+            "[physical_interfaces]",
+            "interface=eth0",
+            "  role=management",
+            "  ipv4_method=static",
+            "  ip_cidr=192.168.1.10/24",
+            "  ipv6_cidr=",
+        ]
+    )
+    current_network = previous_network.replace("192.168.1.10/24", "192.168.1.20/24")
+    network_warnings = appliance_apply_connection_warnings(
+        "network",
+        current_network,
+        {"config_preview": previous_network},
+    )
+    assert len(network_warnings) == 1
+    assert "from 192.168.1.10/24 to 192.168.1.20/24" in network_warnings[0]
+    assert "browser connection will be lost" in network_warnings[0]
+
+    previous_settings = json.dumps(
+        {
+            "management_https_enabled": True,
+            "management_https_cert_path": "/etc/labfoundry/https/certs/appliance-old.crt",
+            "management_https_key_path": "/etc/labfoundry/https/certs/appliance-old.key",
+        }
+    )
+    current_settings = previous_settings.replace("appliance-old", "appliance-new")
+    assert appliance_apply_connection_warnings(
+        "appliance_settings",
+        current_settings,
+        {"config_preview": previous_settings},
+    ) == [MANAGEMENT_CERTIFICATE_CONNECTION_WARNING]
+
+    previous_ca = json.dumps(
+        {
+            "certificates": [
+                {
+                    "managed_owner": "appliance:https",
+                    "common_name": "labfoundry.example",
+                    "fingerprint": "old-fingerprint",
+                    "certificate_pem": "old-certificate",
+                    "cert_path": "/etc/labfoundry/https/certs/appliance.crt",
+                    "key_path": "/etc/labfoundry/https/certs/appliance.key",
+                    "chain_path": "/etc/labfoundry/https/certs/appliance-chain.pem",
+                }
+            ]
+        }
+    )
+    current_ca = previous_ca.replace("old-fingerprint", "new-fingerprint").replace("old-certificate", "new-certificate")
+    assert appliance_apply_connection_warnings(
+        "ca",
+        current_ca,
+        {"config_preview": previous_ca},
+    ) == [MANAGEMENT_CERTIFICATE_CONNECTION_WARNING]
+
+
+def test_appliance_apply_review_returns_management_address_connection_warning(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+    from labfoundry.app.ui import appliance_apply_units, update_appliance_apply_baselines
+
+    login(client)
+    with SessionLocal() as db:
+        units = appliance_apply_units(db)
+        update_appliance_apply_baselines(db, units, {unit["id"] for unit in units})
+        management = db.scalar(select(PhysicalInterface).where(PhysicalInterface.name == "eth0"))
+        assert management is not None
+        management.ip_cidr = "192.168.49.20/24"
+        db.commit()
+
+    review = client.get("/appliance-apply/review")
+
+    assert review.status_code == 200
+    network = next(unit for unit in review.json()["units"] if unit["id"] == "network")
+    assert len(network["connection_warnings"]) == 1
+    assert "from 192.168.49.1/24 to 192.168.49.20/24" in network["connection_warnings"][0]
 
 
 def test_appliance_apply_json_submission_returns_master_with_live_child_status(client):
