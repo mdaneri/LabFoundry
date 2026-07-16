@@ -60,6 +60,7 @@ def test_login_and_dashboard_render(client):
         "/dhcp",
         "/authentication",
         "/users",
+        "/ldap",
         "/certificate-authority",
         "/kms",
         "/esxi-pxe",
@@ -667,7 +668,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in service_worker.text
-    assert "/static/app.js?v=web-terminal-access-20260716-2" in service_worker.text
+    assert "/static/app.js?v=managed-ldap-20260716-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -693,7 +694,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in page.text
-    assert "/static/app.js?v=web-terminal-access-20260716-2" in page.text
+    assert "/static/app.js?v=managed-ldap-20260716-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3763,17 +3764,18 @@ def test_local_users_page_separates_ldap_authentication(client):
     login(client)
     authentication = client.get("/authentication")
     assert authentication.status_code == 200
-    assert "LDAP provider" in authentication.text
+    assert "LabFoundry LDAP sign-in" in authentication.text
+    assert "Managed VCF LDAP service" in authentication.text
     assert "managed separately" in authentication.text
 
     legacy = client.get("/ldap-users", follow_redirects=False)
     assert legacy.status_code == 303
-    assert legacy.headers["location"] == "/authentication"
+    assert legacy.headers["location"] == "/ldap"
 
     users = client.get("/users")
     assert users.status_code == 200
     assert "Local Users" in users.text
-    assert "LDAP is an authentication provider" in users.text
+    assert "Managed VCF directory users remain isolated" in users.text
     assert "users-table" in users.text
     assert "user-password-modal" in users.text
     assert "data-password-toggle" in users.text
@@ -3868,6 +3870,51 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert 'field: "web_terminal_access"' in app_js.text
     assert 'title: "Web SSH"' in app_js.text
     assert "Temp Password" not in app_js.text
+
+
+def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
+    login(client)
+    page = client.get("/ldap")
+    assert page.status_code == 200
+    assert "Managed LDAP for VCF Automation" in page.text
+    assert "LDAPS / TCP 636 only" in page.text
+    assert "VCF Connections" in page.text
+    assert "Encrypted LDAP Recovery" in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    created = client.post(
+        "/ldap/organizations",
+        data={"name": "Org A", "slug": "org-a", "suffix_dn": "", "enabled": "on", "csrf": csrf},
+    )
+    assert created.status_code == 201, created.text
+    assert "Copy this VCF bind credential now" in created.text
+    assert "ldap-users-table" in created.text
+    assert "ldap-groups-table" in created.text
+    assert "uid=vcf-bind,ou=service-accounts,dc=org-a,dc=ldap,dc=labfoundry,dc=internal" in created.text
+    assert "serviceAccount → employeeType" in created.text
+
+    page = client.get("/ldap")
+    assert "Copy this VCF bind credential now" not in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    organization_id = page.text.split('/ldap/organizations/', 1)[1].split("/", 1)[0]
+    user = client.post(
+        f"/ldap/organizations/{organization_id}/users",
+        data={
+            "uid": "operator",
+            "given_name": "VCF",
+            "surname": "Operator",
+            "display_name": "VCF Operator",
+            "email": "operator@example.invalid",
+            "password": "VeryStrong1!Directory",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert user.status_code == 303
+    page = client.get(user.headers["location"])
+    assert "operator" in page.text
+    assert "pending apply" in page.text
 
 
 def test_local_user_reset_modal_endpoint_and_remove(client):
@@ -9008,7 +9055,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "web-terminal-access-20260716-2" in page.text
+    assert "managed-ldap-20260716-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -9361,7 +9408,7 @@ def test_appliance_apply_master_steps_fail_fast_and_keep_successful_baselines(cl
             "config_diff": "",
         }
 
-    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db: units)
+    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db, **_kwargs: units)
     monkeypatch.setattr(ui, "execute_appliance_apply_unit", execute)
     monkeypatch.setattr(ui, "persist_vcf_depot_metadata_from_apply", lambda _db, _results: None)
     monkeypatch.setattr(ui, "log_appliance_apply_failures", lambda _job_id, _results: None)
@@ -9456,7 +9503,7 @@ def test_appliance_apply_parent_cancel_finishes_current_step_and_skips_remaining
             "config_diff": "",
         }
 
-    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db: units)
+    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db, **_kwargs: units)
     monkeypatch.setattr(ui, "execute_appliance_apply_unit", execute)
     monkeypatch.setattr(ui, "persist_vcf_depot_metadata_from_apply", lambda _db, _results: None)
     monkeypatch.setattr(ui, "log_appliance_apply_submission", lambda *_args, **_kwargs: None)

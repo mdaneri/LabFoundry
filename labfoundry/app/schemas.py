@@ -172,6 +172,189 @@ class VcfOfflineDepotStatusResponse(BaseModel):
     dry_run: bool
 
 
+class LdapPasswordPolicy(BaseModel):
+    min_length: int = Field(default=14, ge=8, le=128)
+    require_uppercase: bool = True
+    require_lowercase: bool = True
+    require_number: bool = True
+    require_special: bool = True
+    disallow_username: bool = True
+    max_failures: int = Field(default=5, ge=1, le=100)
+    lockout_minutes: int = Field(default=15, ge=1, le=1440)
+    failure_window_minutes: int = Field(default=15, ge=1, le=1440)
+    history: int = Field(default=5, ge=0, le=24)
+    max_age_days: int = Field(default=0, ge=0, le=3650)
+
+
+class LdapSettingsUpdate(BaseModel):
+    enabled: bool = False
+    hostname: str = Field(default="ldap.labfoundry.internal", min_length=1, max_length=180)
+    listen_interfaces: list[str] = Field(default_factory=list)
+    listen_addresses: list[str] = Field(default_factory=list)
+    port: int = Field(default=636, ge=1, le=65535)
+    password_policy: LdapPasswordPolicy = Field(default_factory=LdapPasswordPolicy)
+
+
+class LdapSettingsResponse(LdapSettingsUpdate):
+    id: int
+    config_path: str
+    certificate_path: str
+    key_path: str
+    chain_path: str
+    root_ca_path: str
+    valid: bool
+    validation_errors: list[str] = Field(default_factory=list)
+    validation_warnings: list[str] = Field(default_factory=list)
+    updated_at: datetime
+
+
+class LdapOrganizationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    slug: str = Field(default="", max_length=80)
+    suffix_dn: str = Field(default="", max_length=500)
+    enabled: bool = True
+
+
+class LdapOrganizationResponse(BaseModel):
+    id: int
+    name: str
+    slug: str
+    suffix_dn: str
+    users_base_dn: str
+    groups_base_dn: str
+    service_accounts_base_dn: str
+    bind_dn: str
+    bind_secret_present: bool
+    enabled: bool
+    user_count: int
+    group_count: int
+    vcf_target_url: str
+    vcf_org_id: str
+    vcf_org_name: str
+    vcf_tls_fingerprint: str
+    vcf_last_status: str
+    vcf_last_message: str
+    vcf_last_verified_at: str
+    created_at: str
+    updated_at: str
+    raw_bind_password: str | None = None
+
+
+class LdapUserCreate(BaseModel):
+    uid: str = Field(min_length=1, max_length=100)
+    given_name: str = Field(default="", max_length=120)
+    surname: str = Field(default="", max_length=120)
+    display_name: str = Field(default="", max_length=180)
+    email: str = Field(default="", max_length=240)
+    telephone: str = Field(default="", max_length=80)
+    enabled: bool = True
+    password: str = Field(default="", max_length=512)
+
+
+class LdapUserResponse(BaseModel):
+    id: int
+    organization_id: int
+    uid: str
+    dn: str
+    given_name: str
+    surname: str
+    display_name: str
+    email: str
+    telephone: str
+    enabled: bool
+    password_status: str
+    password_applied_at: str
+    unlock_requested: bool
+    created_at: str
+    updated_at: str
+
+
+class LdapPasswordResetRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=512)
+
+
+class LdapGroupMember(BaseModel):
+    type: Literal["user", "group"]
+    id: int
+
+
+class LdapGroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    enabled: bool = True
+    members: list[LdapGroupMember] = Field(default_factory=list)
+
+
+class LdapGroupResponse(BaseModel):
+    id: int
+    organization_id: int
+    name: str
+    dn: str
+    description: str
+    enabled: bool
+    members: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class LdapBindCredentialResponse(BaseModel):
+    organization: LdapOrganizationResponse
+    raw_bind_password: str
+
+
+class LdapVcfInspectRequest(BaseModel):
+    target_url: str = Field(min_length=1, max_length=500)
+    organization_id: str = Field(min_length=1, max_length=240)
+    organization_name: str = Field(default="", max_length=128)
+    username: str = Field(min_length=1, max_length=240)
+    password: str = Field(min_length=1, max_length=512)
+    confirmed_tls_fingerprint: str = Field(default="", max_length=160)
+
+
+class LdapVcfConfigureRequest(LdapVcfInspectRequest):
+    replace_existing: bool = False
+
+
+class LdapVcfInspectionResponse(BaseModel):
+    target_url: str
+    organization_id: str
+    organization_name: str
+    tls_fingerprint: str
+    current_settings: dict[str, Any]
+    proposed_settings: dict[str, Any]
+    changed: bool
+    test_result: dict[str, Any] | None = None
+    user_count: int | None = None
+    group_count: int | None = None
+
+
+class LdapHealthResponse(BaseModel):
+    enabled: bool
+    running: bool
+    health: str
+    ldaps_only: bool
+    hostname: str
+    port: int
+    organization_count: int
+    user_count: int
+    group_count: int
+    validation_errors: list[str] = Field(default_factory=list)
+    validation_warnings: list[str] = Field(default_factory=list)
+
+
+class LdapRecoveryExportRequest(BaseModel):
+    passphrase: str = Field(min_length=12, max_length=512)
+
+
+class LdapRecoveryImportResponse(BaseModel):
+    id: int
+    filename: str
+    sha256: str
+    state: str
+    organization_count: int
+    created_at: datetime
+
+
 class EsxiKickstartCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = None

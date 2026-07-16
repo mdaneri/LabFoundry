@@ -46,6 +46,7 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
 
     assert "tdnf -y install" in script and "nginx" in script
     assert "tdnf -y install" in script and "chrony" in script
+    assert "tdnf -y install" in script and "openldap-servers" in script
     assert "tdnf -y install" in script and "powershell" in script
     assert "VCF.PowerCLI" in script
     assert "9.1.0.25380678" in script
@@ -815,6 +816,7 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
         "esxi_pxe",
         "ca",
         "kms",
+        "ldap",
         "appliance_settings",
         "vcf_backups",
         "vcf_offline_depot",
@@ -826,6 +828,7 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
     assert "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification" in plan["checks"]
     assert "VCF Backup desired state, local user sync, SFTP listener, and client probe" in plan["checks"]
     assert "VCF Offline Depot browser login, curl/wget Basic auth, and Local Users password rotation" in plan["checks"]
+    assert any("Managed LDAP desired state" in check for check in plan["checks"])
     assert plan["pxe_boot"]["enabled"] is False
     assert plan["pxe_boot"]["mode"] == "linux"
 

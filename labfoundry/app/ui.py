@@ -1,5 +1,6 @@
 import difflib
 import hashlib
+import io
 import json
 import logging
 import re
@@ -10,6 +11,7 @@ import ssl
 import subprocess
 import threading
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address, ip_interface, ip_network
 from pathlib import Path, PurePosixPath
@@ -52,6 +54,12 @@ from labfoundry.app.models import (
     KmsClient,
     KmsKey,
     KmsSettings,
+    LdapGroup,
+    LdapGroupMembership,
+    LdapOrganization,
+    LdapRecoveryArchive,
+    LdapSettings,
+    LdapUser,
     NatRule,
     ChronySettings,
     PhysicalInterface,
@@ -322,6 +330,47 @@ from labfoundry.app.services.kms import (
     render_kms_config,
     split_csv,
     validate_kms_state,
+)
+from labfoundry.app.services.ldap import (
+    LDAP_CERT_PATH,
+    LDAP_CHAIN_PATH,
+    LDAP_DEFAULT_HOSTNAME,
+    LDAP_DEFAULT_PORT,
+    LDAP_DNS_RECORD_DESCRIPTION,
+    LDAP_GROUP_PATTERN,
+    LDAP_KEY_PATH,
+    LDAP_RECOVERY_DIR,
+    LDAP_ROOT_CA_PATH,
+    LDAP_STAGED_CONFIG_PATH,
+    LDAP_PENDING_RECOVERY_PAYLOADS,
+    LDAP_UID_PATTERN,
+    VcfAutomationLdapClient,
+    VcfLdapError,
+    default_organization_suffix,
+    decrypt_recovery_payload,
+    encrypt_recovery_payload,
+    ensure_organization_bind_secret,
+    ldap_group_to_dict,
+    ldap_organization_to_dict,
+    ldap_settings_to_dict,
+    ldap_user_to_dict,
+    manual_vcf_bundle,
+    mark_ldap_apply_complete,
+    normalize_dn,
+    normalize_ldap_slug,
+    normalize_vcf_target_url,
+    recovery_sha256,
+    render_ldap_apply_config,
+    render_ldap_preview,
+    rotate_organization_bind_secret,
+    stage_ldap_user_password,
+    stage_ldap_recovery_payload,
+    clear_ldap_recovery_payload,
+    clear_pending_ldap_password,
+    tls_sha256_fingerprint as ldap_vcf_tls_fingerprint,
+    validate_group_cycles,
+    validate_ldap_state,
+    vcf_ldap_settings,
 )
 from labfoundry.app.services.chrony import (
     CHRONY_DEFAULT_HOSTNAME,
@@ -817,6 +866,22 @@ def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
                 )
             )
 
+    ldap_settings = get_ldap_settings_row(db)
+    if ldap_settings.enabled:
+        specs.append(
+            ManagedCertificateSpec(
+                owner="ldap:ldaps",
+                common_name=ldap_settings.hostname,
+                dns_names=[ldap_settings.hostname],
+                ip_addresses=split_addresses(ldap_settings.listen_address),
+                profile_name=CA_SERVER_PROFILE_NAME,
+                description="Managed OpenLDAP LDAPS server certificate.",
+                cert_path=LDAP_CERT_PATH,
+                key_path=LDAP_KEY_PATH,
+                chain_path=LDAP_CHAIN_PATH,
+            )
+        )
+
     chrony_settings = get_chrony_settings_row(db)
     if chrony_settings.nts_server_enabled:
         cert_path, key_path, chain_path = chrony_nts_certificate_paths(chrony_settings)
@@ -912,6 +977,20 @@ def get_kms_settings_row(db: Session) -> KmsSettings:
     settings = db.execute(select(KmsSettings)).scalar_one_or_none()
     if settings is None:
         settings = KmsSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
+def get_ldap_settings_row(db: Session) -> LdapSettings:
+    settings = db.execute(select(LdapSettings)).scalar_one_or_none()
+    if settings is None:
+        settings = LdapSettings(
+            hostname=LDAP_DEFAULT_HOSTNAME,
+            port=LDAP_DEFAULT_PORT,
+            config_path=LDAP_STAGED_CONFIG_PATH,
+        )
         db.add(settings)
         db.commit()
         db.refresh(settings)
@@ -1132,6 +1211,69 @@ def service_bind_options(db: Session) -> list[dict]:
     return options
 
 
+def ldap_service_bind_options(db: Session) -> list[dict[str, Any]]:
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlan_interfaces = db.execute(
+        select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)
+    ).scalars().all()
+    interfaces_by_name = {interface.name: interface for interface in physical_interfaces}
+    options: list[dict[str, Any]] = []
+    for interface in physical_interfaces:
+        mode = normalize_interface_mode(interface.mode)
+        role = normalize_interface_role(interface.role)
+        ipv4_cidr = interface.host_ip_cidr if interface.ipv4_method == "dhcp" else interface.ip_cidr
+        ipv6_cidr = interface.ipv6_cidr or interface.host_ipv6_cidr
+        addresses = interface_addresses_from_cidrs(ipv4_cidr, ipv6_cidr)
+        if interface.oper_state == "missing" or interface.admin_state == "down" or role == "unused" or mode == "trunk" or not addresses:
+            continue
+        options.append(
+            {
+                "name": interface.name,
+                "label": f"{interface.name} - {role} / {mode} / {' / '.join(addresses)}",
+                "role": role,
+                "address": addresses[0],
+                "addresses": addresses,
+            }
+        )
+    for vlan in vlan_interfaces:
+        parent = interfaces_by_name.get(vlan.parent_interface)
+        role = normalize_interface_role(vlan.role)
+        addresses = interface_addresses_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
+        if (parent and (parent.oper_state == "missing" or parent.admin_state == "down")) or role == "unused" or not addresses:
+            continue
+        options.append(
+            {
+                "name": vlan.name,
+                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {role} / {' / '.join(addresses)}",
+                "role": role,
+                "address": addresses[0],
+                "addresses": addresses,
+            }
+        )
+    return options
+
+
+def resolve_ldap_bind_targets(
+    db: Session,
+    listen_interfaces: list[str],
+    *,
+    current_interface: str = "",
+    listen_interfaces_present: str | None = None,
+) -> tuple[str, str]:
+    options = ldap_service_bind_options(db)
+    options_by_name = {option["name"]: option for option in options}
+    selected = split_interfaces(join_interfaces(listen_interfaces))
+    if listen_interfaces_present is None and not selected:
+        selected = split_interfaces(current_interface)
+    selected = [interface for interface in selected if interface in options_by_name]
+    addresses: list[str] = []
+    for interface in selected:
+        for address in options_by_name[interface]["addresses"]:
+            if address not in addresses:
+                addresses.append(address)
+    return join_interfaces(selected), join_addresses(addresses)
+
+
 def vcf_depot_service_bind_options(db: Session) -> list[dict[str, Any]]:
     return service_bind_options(db)
 
@@ -1247,6 +1389,7 @@ def refresh_interface_dependent_addresses(
         (ChronySettings, "Chrony"),
         (CaSettings, "Certificate Authority"),
         (KmsSettings, "KMS"),
+        (LdapSettings, "LDAP"),
         (VcfBackupSettings, "VCF Backups"),
         (VcfOfflineDepotSettings, "VCF Offline Depot"),
         (VcfPrivateRegistrySettings, "VCF Private Registry"),
@@ -1323,6 +1466,9 @@ def refresh_interface_dependent_addresses(
     kms_settings = db.execute(select(KmsSettings)).scalar_one_or_none()
     if kms_settings:
         ensure_dns_for_kms(db, kms_settings, actor=actor, previous_hostname=kms_settings.hostname)
+    ldap_settings = db.execute(select(LdapSettings)).scalar_one_or_none()
+    if ldap_settings:
+        ensure_dns_for_ldap(db, ldap_settings, actor=actor, previous_hostname=ldap_settings.hostname)
     depot_settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one_or_none()
     if depot_settings:
         ensure_dns_for_vcf_offline_depot(db, depot_settings, actor=actor or "system")
@@ -2825,6 +2971,7 @@ def firewall_context(db: Session, *, reconcile: bool = True) -> dict:
         source_groups=source_group_state["groups"],
         source_group_assignments=source_group_state["assignments"],
         web_terminal_interfaces=terminal_interfaces,
+        ldap_settings=get_ldap_settings_row(db),
     )
     generated_rules.extend(
         managed_routing_firewall_rules(
@@ -3417,6 +3564,122 @@ def kms_context(db: Session, *, reconcile: bool = True) -> dict:
         "kms_lab_notice": (
             "PyKMIP is useful for KMIP lab and compatibility testing. Treat this backend as a lab KMS, "
             "not a production HSM or hardened enterprise key manager."
+        ),
+    }
+
+
+def ldap_organizations_query(db: Session) -> list[LdapOrganization]:
+    return (
+        db.execute(
+            select(LdapOrganization)
+            .options(
+                selectinload(LdapOrganization.users).selectinload(LdapUser.organization),
+                selectinload(LdapOrganization.groups).selectinload(LdapGroup.organization),
+                selectinload(LdapOrganization.groups).selectinload(LdapGroup.members).selectinload(LdapGroupMembership.member_user).selectinload(LdapUser.organization),
+                selectinload(LdapOrganization.groups).selectinload(LdapGroup.members).selectinload(LdapGroupMembership.member_group).selectinload(LdapGroup.organization),
+            )
+            .order_by(LdapOrganization.name)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def ldap_context(db: Session, *, reconcile: bool = True, selected_organization_id: int | None = None) -> dict[str, Any]:
+    settings = get_ldap_settings_row(db)
+    available_interfaces = ldap_service_bind_options(db)
+    available_by_name = {option["name"]: option for option in available_interfaces}
+    changed = False
+    selected_interfaces = [name for name in split_interfaces(settings.listen_interface) if name in available_by_name]
+    selected_addresses = [
+        address
+        for name in selected_interfaces
+        for address in available_by_name[name]["addresses"]
+        if address
+    ]
+    normalized_interfaces = join_interfaces(selected_interfaces)
+    normalized_addresses = join_addresses(list(dict.fromkeys(selected_addresses)))
+    if reconcile and settings.listen_interface != normalized_interfaces:
+        settings.listen_interface = normalized_interfaces
+        changed = True
+    if reconcile and settings.listen_address != normalized_addresses:
+        settings.listen_address = normalized_addresses
+        changed = True
+    normalized_hostname = normalize_dns_hostname(settings.hostname or LDAP_DEFAULT_HOSTNAME)
+    if reconcile and normalized_hostname and normalized_hostname != settings.hostname:
+        settings.hostname = normalized_hostname
+        changed = True
+    if reconcile:
+        ensure_dns_for_ldap(db, settings, actor=None, previous_hostname=settings.hostname)
+    if changed:
+        settings.updated_at = utcnow()
+        db.commit()
+        db.refresh(settings)
+
+    ca_errors = ensure_ca_state(db) if reconcile else []
+    organizations = ldap_organizations_query(db)
+    selected_organization = next((row for row in organizations if row.id == selected_organization_id), None)
+    if selected_organization is None and organizations:
+        selected_organization = organizations[0]
+    recovery_archive = (
+        db.execute(
+            select(LdapRecoveryArchive)
+            .where(LdapRecoveryArchive.state == "staged")
+            .order_by(LdapRecoveryArchive.created_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+    recovery_ready = recovery_archive is not None and recovery_archive.id in LDAP_PENDING_RECOVERY_PAYLOADS
+    ca_settings = get_ca_settings_row(db)
+    validation_errors, validation_warnings = validate_ldap_state(
+        settings,
+        organizations,
+        available_interfaces=set(available_by_name),
+        ca_ready=bool(ca_settings.enabled and ca_settings.root_certificate_pem),
+        recovery_staged=recovery_ready,
+    )
+    validation_errors = [*ca_errors, *validation_errors]
+    if settings.enabled:
+        if ldap_dns_record_conflict(db, settings.hostname):
+            validation_errors.append("LDAP hostname conflicts with an existing non-LDAP DNS record.")
+        if not ca_certificate_available(db, "ldap:ldaps"):
+            validation_errors.append("LDAP requires an issued CA-managed LDAPS certificate before apply.")
+
+    if recovery_archive is not None and not recovery_ready:
+        validation_errors.append("The staged LDAP recovery import was lost after restart; upload it and enter its passphrase again.")
+    apply_config = render_ldap_apply_config(settings, organizations, recovery_archive=recovery_archive)
+    runtime_status = service_runtime_status(db, "ldap")
+    runtime_status["enabled"] = settings.enabled
+    if not settings.enabled:
+        runtime_status.update({"label": "disabled", "pill": "muted", "health": "disabled"})
+    elif runtime_status.get("running"):
+        runtime_status.update({"label": "live", "pill": "good", "health": "healthy"})
+    else:
+        runtime_status.update({"label": "pending", "pill": "warn", "health": "degraded"})
+    return {
+        "ldap_settings": settings,
+        "ldap_settings_json": ldap_settings_to_dict(settings),
+        "ldap_organizations": organizations,
+        "ldap_organization_rows": [ldap_organization_to_dict(row) for row in organizations],
+        "ldap_selected_organization": selected_organization,
+        "ldap_users": list(selected_organization.users) if selected_organization else [],
+        "ldap_user_rows": [ldap_user_to_dict(row) for row in selected_organization.users] if selected_organization else [],
+        "ldap_groups": list(selected_organization.groups) if selected_organization else [],
+        "ldap_group_rows": [ldap_group_to_dict(row) for row in selected_organization.groups] if selected_organization else [],
+        "ldap_available_interfaces": available_interfaces,
+        "ldap_selected_interfaces": split_interfaces(settings.listen_interface),
+        "ldap_selected_addresses": split_addresses(settings.listen_address),
+        "ldap_validation_errors": list(dict.fromkeys(validation_errors)),
+        "ldap_validation_warnings": list(dict.fromkeys(validation_warnings)),
+        "ldap_config_preview": render_ldap_preview(settings, organizations, recovery_archive=recovery_archive),
+        "ldap_apply_config": apply_config,
+        "ldap_service_status": runtime_status,
+        "ldap_recovery_archive": recovery_archive,
+        "ldap_vcf_mapping": (
+            vcf_ldap_settings(settings, selected_organization, include_password=False)
+            if selected_organization
+            else {}
         ),
     }
 
@@ -4262,6 +4525,38 @@ def ensure_dns_for_kms(db: Session, settings: KmsSettings, actor: str | None, *,
         audit_prefix="kms",
         previous_hostname=previous_hostname,
         enabled=settings.enabled,
+    )
+
+
+def ldap_dns_record_conflict(db: Session, hostname: str) -> bool:
+    normalized = normalize_dns_hostname(hostname)
+    if not normalized:
+        return False
+    records = db.execute(
+        select(DnsRecord).where(
+            DnsRecord.hostname == normalized,
+            DnsRecord.record_type.in_(["A", "AAAA", "CNAME"]),
+        )
+    ).scalars().all()
+    return any(record.description != LDAP_DNS_RECORD_DESCRIPTION for record in records)
+
+
+def ensure_dns_for_ldap(db: Session, settings: LdapSettings, actor: str | None, *, previous_hostname: str | None = None) -> str | None:
+    hostname = normalize_dns_hostname(settings.hostname)
+    if not hostname:
+        return None
+    settings.hostname = hostname
+    return ensure_interface_dns_alias(
+        db,
+        hostname=hostname,
+        listen_interface=settings.listen_interface,
+        listen_address=settings.listen_address,
+        description=LDAP_DNS_RECORD_DESCRIPTION,
+        actor=actor,
+        audit_prefix="ldap",
+        previous_hostname=previous_hostname,
+        enabled=settings.enabled,
+        bind_options=ldap_service_bind_options(db),
     )
 
 
@@ -5813,6 +6108,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "esxi_pxe",
     "ca",
     "kms",
+    "ldap",
     "chronyd",
     "vcf_backups",
     "vcf_offline_depot",
@@ -6315,6 +6611,7 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
     esxi_pxe = esxi_pxe_context(db)
     ca = ca_context(db, reconcile=reconcile)
     kms = kms_context(db, reconcile=reconcile)
+    ldap = ldap_context(db, reconcile=reconcile)
     ntp = ntp_context(db, reconcile=reconcile)
     vcf_backup = vcf_backup_context(db, reconcile=reconcile)
     vcf_depot = vcf_offline_depot_context(db, reconcile=reconcile)
@@ -6483,6 +6780,23 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
             config_path=KMS_STAGED_CONFIG_PATH,
             config_preview=kms["kms_config_preview"],
             baseline=baselines.get("kms"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="ldap",
+            label="Managed LDAP",
+            page_url="/ldap",
+            context=ldap,
+            summary=[
+                "service enabled" if ldap["ldap_settings"].enabled else "service disabled",
+                f"{len(ldap['ldap_organizations'])} organizations",
+                f"{sum(len(row.users) for row in ldap['ldap_organizations'])} users",
+                f"{sum(len(row.groups) for row in ldap['ldap_organizations'])} groups",
+            ],
+            validation_errors=ldap["ldap_validation_errors"],
+            validation_warnings=ldap["ldap_validation_warnings"],
+            config_path=LDAP_STAGED_CONFIG_PATH,
+            config_preview=ldap["ldap_apply_config"],
+            baseline=baselines.get("ldap"),
         ),
         make_appliance_apply_unit(
             unit_id="chronyd",
@@ -7544,6 +7858,21 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
                 lambda: adapter.apply_kms_config(config_path),
             ]
         )
+    elif unit_id == "ldap":
+        config_path = LDAP_STAGED_CONFIG_PATH
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(LDAP_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_ldap_config(config_path),
+                lambda: adapter.apply_ldap_config(config_path),
+            ]
+        )
+        if not adapter.dry_run:
+            try:
+                Path(config_path).unlink(missing_ok=True)
+            except OSError:
+                pass
     elif unit_id == "chronyd":
         config_path = CHRONY_STAGED_CONFIG_PATH
         if not adapter.dry_run:
@@ -7625,6 +7954,15 @@ def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
             mark_local_users_failed(users, error)
     if unit_id == "esxi_pxe" and succeeded and not any(result.dry_run for result in results):
         mark_kickstarts_applied(list(context["esxi_kickstarts"]))
+    if unit_id == "ldap" and succeeded and not any(result.dry_run for result in results):
+        mark_ldap_apply_complete(
+            [user for organization in context["ldap_organizations"] for user in organization.users]
+        )
+        recovery_archive = context.get("ldap_recovery_archive")
+        if recovery_archive is not None:
+            recovery_archive.state = "applied"
+            recovery_archive.applied_at = utcnow()
+            clear_ldap_recovery_payload(recovery_archive)
     return {
         "unit_id": unit_id,
         "label": unit["label"],
@@ -8475,7 +8813,11 @@ def run_appliance_apply_job(job_id: str) -> None:
                 job.result = json.dumps({**current_payload, "units": unit_results}, indent=2)
                 persist_vcf_depot_metadata_from_apply(db, [result])
                 if result["success"]:
-                    update_appliance_apply_baselines(db, [unit], {unit["id"]})
+                    db.flush()
+                    db.expire_all()
+                    refreshed_units = appliance_apply_units(db, reconcile=False)
+                    applied_unit = next((candidate for candidate in refreshed_units if candidate["id"] == unit["id"]), unit)
+                    update_appliance_apply_baselines(db, [applied_unit], {unit["id"]})
                 else:
                     failed = True
                     for remaining_unit in selected_units[index:]:
@@ -8595,6 +8937,19 @@ def submit_appliance_apply(
     units = appliance_apply_units(db)
     unit_map = {unit["id"]: unit for unit in units}
     selected_ids = {unit_id for unit_id in selected_units if unit_id in APPLIANCE_APPLY_UNIT_IDS}
+    ldap_related_units = {"ca", "dnsmasq", "firewall", "ldap"}
+    ldap_context_for_apply = unit_map.get("ldap", {}).get("context", {})
+    ldap_dependency_active = bool(
+        getattr(ldap_context_for_apply.get("ldap_settings"), "enabled", False)
+        or ldap_context_for_apply.get("ldap_organizations")
+        or ldap_context_for_apply.get("ldap_recovery_archive")
+    )
+    if ldap_dependency_active and selected_ids & ldap_related_units and any(unit_map[unit_id]["changed"] for unit_id in ldap_related_units if unit_id in unit_map):
+        selected_ids.update(
+            unit_id
+            for unit_id in ldap_related_units
+            if unit_id in unit_map and unit_map[unit_id]["changed"]
+        )
     if not selected_ids:
         detail = "Select at least one appliance change to submit."
         return JSONResponse({"detail": detail}, status_code=422) if wants_json else Response(detail, status_code=422, media_type="text/plain")
@@ -11692,6 +12047,640 @@ def delete_ca_certificate_from_ui(
     return RedirectResponse("/certificate-authority", status_code=303)
 
 
+@router.get("/ldap", response_class=HTMLResponse, response_model=None)
+def ldap_page(
+    request: Request,
+    organization_id: int | None = Query(None),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    return render(
+        request,
+        "ldap.html",
+        {
+            "identity": identity,
+            **ldap_context(db, selected_organization_id=organization_id),
+            "appliance_apply_status": appliance_apply_status(db, "ldap"),
+        },
+    )
+
+
+@router.post("/ldap/settings", response_model=None)
+def update_ldap_settings_from_ui(
+    request: Request,
+    enabled: str | None = Form(None),
+    hostname: str = Form(LDAP_DEFAULT_HOSTNAME),
+    listen_interfaces: list[str] = Form(default_factory=list),
+    listen_interfaces_present: str | None = Form(None),
+    min_password_length: int = Form(14),
+    require_uppercase: str | None = Form(None),
+    require_lowercase: str | None = Form(None),
+    require_number: str | None = Form(None),
+    require_special: str | None = Form(None),
+    disallow_username: str | None = Form(None),
+    max_failures: int = Form(5),
+    lockout_minutes: int = Form(15),
+    failure_window_minutes: int = Form(15),
+    password_history: int = Form(5),
+    password_max_age_days: int = Form(0),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    settings = get_ldap_settings_row(db)
+    previous_hostname = settings.hostname
+    selected_interfaces, selected_addresses = resolve_ldap_bind_targets(
+        db,
+        listen_interfaces,
+        current_interface=settings.listen_interface,
+        listen_interfaces_present=listen_interfaces_present,
+    )
+    settings.enabled = enabled is not None
+    settings.hostname = normalize_dns_hostname(hostname or LDAP_DEFAULT_HOSTNAME)
+    settings.listen_interface = selected_interfaces
+    settings.listen_address = selected_addresses
+    settings.port = LDAP_DEFAULT_PORT
+    settings.min_password_length = min_password_length
+    settings.require_uppercase = require_uppercase is not None
+    settings.require_lowercase = require_lowercase is not None
+    settings.require_number = require_number is not None
+    settings.require_special = require_special is not None
+    settings.disallow_username = disallow_username is not None
+    settings.max_failures = max_failures
+    settings.lockout_minutes = lockout_minutes
+    settings.failure_window_minutes = failure_window_minutes
+    settings.password_history = password_history
+    settings.password_max_age_days = password_max_age_days
+    settings.config_path = LDAP_STAGED_CONFIG_PATH
+    settings.updated_at = utcnow()
+    ensure_dns_for_ldap(db, settings, actor=identity.username, previous_hostname=previous_hostname)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_ldap_settings", resource_type="ldap", resource_id=str(settings.id))
+    context = ldap_context(db)
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse(
+            {
+                "saved": True,
+                "settings": context["ldap_settings_json"],
+                "validation_errors": context["ldap_validation_errors"],
+                "validation_warnings": context["ldap_validation_warnings"],
+                "config_preview": context["ldap_config_preview"],
+                "appliance_apply_status": appliance_apply_status(db, "ldap"),
+            }
+        )
+    return RedirectResponse("/ldap", status_code=303)
+
+
+@router.post("/ldap/organizations", response_model=None)
+def create_ldap_organization_from_ui(
+    request: Request,
+    name: str = Form(...),
+    slug: str = Form(""),
+    suffix_dn: str = Form(""),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    try:
+        normalized_slug = normalize_ldap_slug(slug or name)
+        normalized_suffix = normalize_dn(suffix_dn or default_organization_suffix(normalized_slug))
+        if not normalized_suffix.lower().startswith("dc="):
+            raise ValueError("LDAP organization suffix must start with a dc component.")
+    except ValueError as exc:
+        return render(
+            request,
+            "ldap.html",
+            {"identity": identity, **ldap_context(db), "form_error": str(exc), "appliance_apply_status": appliance_apply_status(db, "ldap")},
+            status_code=400,
+        )
+    organization = LdapOrganization(name=name.strip(), slug=normalized_slug, suffix_dn=normalized_suffix, enabled=enabled is not None)
+    raw_secret = ensure_organization_bind_secret(organization)
+    db.add(organization)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return render(
+            request,
+            "ldap.html",
+            {
+                "identity": identity,
+                **ldap_context(db),
+                "form_error": "An LDAP organization already uses that slug or suffix.",
+                "appliance_apply_status": appliance_apply_status(db, "ldap"),
+            },
+            status_code=409,
+        )
+    db.refresh(organization)
+    record_audit(db, actor=identity.username, action="create_ldap_organization", resource_type="ldap_organization", resource_id=str(organization.id))
+    return render(
+        request,
+        "ldap.html",
+        {
+            "identity": identity,
+            **ldap_context(db, selected_organization_id=organization.id),
+            "ldap_one_time_bind_secret": raw_secret,
+            "ldap_one_time_bind_dn": organization.bind_dn,
+            "appliance_apply_status": appliance_apply_status(db, "ldap"),
+        },
+        status_code=201,
+    )
+
+
+@router.post("/ldap/organizations/{organization_id}/delete", response_model=None)
+def delete_ldap_organization_from_ui(
+    request: Request,
+    organization_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    organization = db.get(LdapOrganization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="LDAP organization not found")
+    db.delete(organization)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_ldap_organization", resource_type="ldap_organization", resource_id=str(organization_id))
+    return RedirectResponse("/ldap", status_code=303)
+
+
+@router.post("/ldap/organizations/{organization_id}/bind-credential/rotate", response_model=None)
+def rotate_ldap_bind_credential_from_ui(
+    request: Request,
+    organization_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    organization = db.get(LdapOrganization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="LDAP organization not found")
+    raw_secret = rotate_organization_bind_secret(organization)
+    db.commit()
+    record_audit(db, actor=identity.username, action="rotate_ldap_bind_credential", resource_type="ldap_organization", resource_id=str(organization.id))
+    return render(
+        request,
+        "ldap.html",
+        {
+            "identity": identity,
+            **ldap_context(db, selected_organization_id=organization.id),
+            "ldap_one_time_bind_secret": raw_secret,
+            "ldap_one_time_bind_dn": organization.bind_dn,
+            "appliance_apply_status": appliance_apply_status(db, "ldap"),
+        },
+    )
+
+
+@router.post("/ldap/organizations/{organization_id}/users", response_model=None)
+def create_ldap_user_from_ui(
+    request: Request,
+    organization_id: int,
+    uid: str = Form(...),
+    given_name: str = Form(""),
+    surname: str = Form(""),
+    display_name: str = Form(""),
+    email: str = Form(""),
+    telephone: str = Form(""),
+    password: str = Form(""),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    organization = db.get(LdapOrganization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="LDAP organization not found")
+    normalized_uid = uid.strip().lower()
+    if not LDAP_UID_PATTERN.fullmatch(normalized_uid):
+        raise HTTPException(status_code=400, detail="LDAP uid contains unsupported characters.")
+    user = LdapUser(
+        organization_id=organization_id,
+        uid=normalized_uid,
+        given_name=given_name.strip(),
+        surname=surname.strip() or normalized_uid,
+        display_name=display_name.strip() or " ".join(part for part in [given_name.strip(), surname.strip()] if part).strip() or normalized_uid,
+        email=email.strip().lower(),
+        telephone=telephone.strip(),
+        enabled=enabled is not None,
+    )
+    db.add(user)
+    try:
+        db.flush()
+        if password:
+            stage_ldap_user_password(user, password, get_ldap_settings_row(db))
+        db.commit()
+    except (IntegrityError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409 if isinstance(exc, IntegrityError) else 400, detail="LDAP uid already exists in this organization." if isinstance(exc, IntegrityError) else str(exc)) from exc
+    record_audit(db, actor=identity.username, action="create_ldap_user", resource_type="ldap_user", resource_id=str(user.id), detail=f"organization_id={organization_id}")
+    return RedirectResponse(f"/ldap?organization_id={organization_id}", status_code=303)
+
+
+@router.post("/ldap/users/{user_id}/password", response_model=None)
+def reset_ldap_user_password_from_ui(
+    request: Request,
+    user_id: int,
+    password: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    user = db.get(LdapUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="LDAP user not found")
+    try:
+        stage_ldap_user_password(user, password, get_ldap_settings_row(db))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    record_audit(db, actor=identity.username, action="reset_ldap_user_password", resource_type="ldap_user", resource_id=str(user.id))
+    return RedirectResponse(f"/ldap?organization_id={user.organization_id}", status_code=303)
+
+
+@router.post("/ldap/users/{user_id}/unlock", response_model=None)
+def unlock_ldap_user_from_ui(
+    request: Request,
+    user_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    user = db.get(LdapUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="LDAP user not found")
+    user.unlock_requested_at = utcnow()
+    db.commit()
+    record_audit(db, actor=identity.username, action="unlock_ldap_user", resource_type="ldap_user", resource_id=str(user.id))
+    return RedirectResponse(f"/ldap?organization_id={user.organization_id}", status_code=303)
+
+
+@router.post("/ldap/users/{user_id}/enabled", response_model=None)
+def set_ldap_user_enabled_from_ui(
+    request: Request,
+    user_id: int,
+    enabled: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    user = db.get(LdapUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="LDAP user not found")
+    user.enabled = enabled.lower() == "true"
+    user.updated_at = utcnow()
+    db.commit()
+    record_audit(db, actor=identity.username, action="enable_ldap_user" if user.enabled else "disable_ldap_user", resource_type="ldap_user", resource_id=str(user.id))
+    return RedirectResponse(f"/ldap?organization_id={user.organization_id}", status_code=303)
+
+
+@router.post("/ldap/users/{user_id}/delete", response_model=None)
+def delete_ldap_user_from_ui(
+    request: Request,
+    user_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    user = db.get(LdapUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="LDAP user not found")
+    organization_id = user.organization_id
+    clear_pending_ldap_password(user)
+    db.delete(user)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_ldap_user", resource_type="ldap_user", resource_id=str(user_id))
+    return RedirectResponse(f"/ldap?organization_id={organization_id}", status_code=303)
+
+
+def ldap_group_members_from_form(db: Session, organization_id: int, member_values: list[str]) -> list[LdapGroupMembership]:
+    memberships: list[LdapGroupMembership] = []
+    for raw_value in dict.fromkeys(member_values):
+        member_type, separator, raw_id = raw_value.partition(":")
+        if separator != ":" or not raw_id.isdigit():
+            raise HTTPException(status_code=400, detail="LDAP group member selection is invalid.")
+        member_id = int(raw_id)
+        if member_type == "user":
+            user = db.get(LdapUser, member_id)
+            if user is None or user.organization_id != organization_id:
+                raise HTTPException(status_code=400, detail="LDAP group user must belong to the selected organization.")
+            memberships.append(LdapGroupMembership(member_user=user))
+        elif member_type == "group":
+            group = db.get(LdapGroup, member_id)
+            if group is None or group.organization_id != organization_id:
+                raise HTTPException(status_code=400, detail="Nested LDAP group must belong to the selected organization.")
+            memberships.append(LdapGroupMembership(member_group=group))
+        else:
+            raise HTTPException(status_code=400, detail="LDAP group member selection is invalid.")
+    return memberships
+
+
+@router.post("/ldap/organizations/{organization_id}/groups", response_model=None)
+def create_ldap_group_from_ui(
+    request: Request,
+    organization_id: int,
+    name: str = Form(...),
+    description: str = Form(""),
+    members: list[str] = Form(default_factory=list),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    organization = db.get(LdapOrganization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="LDAP organization not found")
+    normalized_name = name.strip()
+    if not LDAP_GROUP_PATTERN.fullmatch(normalized_name):
+        raise HTTPException(status_code=400, detail="LDAP group name contains unsupported characters.")
+    group = LdapGroup(organization_id=organization_id, name=normalized_name, description=description.strip(), enabled=enabled is not None)
+    db.add(group)
+    try:
+        db.flush()
+        group.members = ldap_group_members_from_form(db, organization_id, members)
+        db.flush()
+        cycle_errors = validate_group_cycles(db.execute(select(LdapGroup).where(LdapGroup.organization_id == organization_id)).scalars().all())
+        if cycle_errors:
+            raise ValueError(cycle_errors[0])
+        db.commit()
+    except (IntegrityError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409 if isinstance(exc, IntegrityError) else 400, detail="LDAP group already exists in this organization." if isinstance(exc, IntegrityError) else str(exc)) from exc
+    record_audit(db, actor=identity.username, action="create_ldap_group", resource_type="ldap_group", resource_id=str(group.id))
+    return RedirectResponse(f"/ldap?organization_id={organization_id}", status_code=303)
+
+
+@router.post("/ldap/groups/{group_id}/delete", response_model=None)
+def delete_ldap_group_from_ui(
+    request: Request,
+    group_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    group = db.get(LdapGroup, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="LDAP group not found")
+    organization_id = group.organization_id
+    db.delete(group)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_ldap_group", resource_type="ldap_group", resource_id=str(group_id))
+    return RedirectResponse(f"/ldap?organization_id={organization_id}", status_code=303)
+
+
+@router.post("/ldap/groups/{group_id}/enabled", response_model=None)
+def set_ldap_group_enabled_from_ui(
+    request: Request,
+    group_id: int,
+    enabled: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    group = db.get(LdapGroup, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="LDAP group not found")
+    group.enabled = enabled.lower() == "true"
+    group.updated_at = utcnow()
+    db.commit()
+    record_audit(db, actor=identity.username, action="enable_ldap_group" if group.enabled else "disable_ldap_group", resource_type="ldap_group", resource_id=str(group.id))
+    return RedirectResponse(f"/ldap?organization_id={group.organization_id}", status_code=303)
+
+
+@router.get("/ldap/organizations/{organization_id}/vcf-bundle.zip", response_model=None)
+def download_ldap_vcf_bundle(
+    organization_id: int,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    organization = db.get(LdapOrganization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="LDAP organization not found")
+    ca_settings = get_ca_settings_row(db)
+    bundle = manual_vcf_bundle(get_ldap_settings_row(db), organization, root_ca_pem=ca_settings.root_certificate_pem or "")
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("vcf-automation-9.1-ldap.json", json.dumps(bundle["vcfAutomation91"], indent=2, sort_keys=True))
+        archive.writestr("labfoundry-root-ca.pem", bundle["rootCaPem"])
+        archive.writestr("manifest.json", json.dumps({key: value for key, value in bundle.items() if key not in {"rootCaPem", "vcfAutomation91"}}, indent=2, sort_keys=True))
+        archive.writestr("README.txt", "\n".join(bundle["instructions"]) + "\n")
+    record_audit(db, actor=identity.username, action="download_ldap_vcf_bundle", resource_type="ldap_organization", resource_id=str(organization.id))
+    return Response(
+        archive_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="labfoundry-ldap-{organization.slug}-vcf91.zip"'},
+    )
+
+
+@router.post("/ldap/organizations/{organization_id}/vcf/inspect", response_model=None)
+def inspect_ldap_vcf_from_ui(
+    request: Request,
+    organization_id: int,
+    target_url: str = Form(...),
+    vcf_organization_id: str = Form(...),
+    vcf_organization_name: str = Form(""),
+    username: str = Form(...),
+    password: str = Form(...),
+    confirmed_tls_fingerprint: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    organization = db.get(LdapOrganization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="LDAP organization not found")
+    normalized_target = normalize_vcf_target_url(target_url)
+    fingerprint = ldap_vcf_tls_fingerprint(normalized_target)
+    result: dict[str, Any] = {
+        "target_url": normalized_target,
+        "organization_id": vcf_organization_id,
+        "organization_name": vcf_organization_name,
+        "tls_fingerprint": fingerprint,
+        "proposed_settings": vcf_ldap_settings(get_ldap_settings_row(db), organization, include_password=False),
+        "current_settings": {},
+    }
+    if confirmed_tls_fingerprint:
+        try:
+            client = VcfAutomationLdapClient(
+                normalized_target,
+                username=username,
+                password=password,
+                organization_id=vcf_organization_id,
+                confirmed_tls_fingerprint=confirmed_tls_fingerprint,
+            )
+            current = client.get_settings()
+            defined = current.get("definedSettings")
+            if isinstance(defined, dict) and "password" in defined:
+                defined["password"] = "[redacted]"
+            result["current_settings"] = current
+        except (ValueError, VcfLdapError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_audit(db, actor=identity.username, action="inspect_vcf_organization_ldap", resource_type="ldap_organization", resource_id=str(organization.id), detail=f"target={normalized_target}; org_id={vcf_organization_id}")
+    return render(
+        request,
+        "ldap.html",
+        {
+            "identity": identity,
+            **ldap_context(db, selected_organization_id=organization_id),
+            "ldap_vcf_inspection": result,
+            "appliance_apply_status": appliance_apply_status(db, "ldap"),
+        },
+    )
+
+
+@router.post("/ldap/organizations/{organization_id}/vcf/configure", response_model=None)
+def configure_ldap_vcf_from_ui(
+    request: Request,
+    organization_id: int,
+    target_url: str = Form(...),
+    vcf_organization_id: str = Form(...),
+    vcf_organization_name: str = Form(""),
+    username: str = Form(...),
+    password: str = Form(...),
+    confirmed_tls_fingerprint: str = Form(...),
+    replace_existing: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    organization = db.get(LdapOrganization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="LDAP organization not found")
+    proposed = vcf_ldap_settings(get_ldap_settings_row(db), organization, include_password=True)
+    try:
+        client = VcfAutomationLdapClient(
+            target_url,
+            username=username,
+            password=password,
+            organization_id=vcf_organization_id,
+            confirmed_tls_fingerprint=confirmed_tls_fingerprint,
+        )
+        current = client.get_settings()
+        if current.get("enabled") and replace_existing is None:
+            raise VcfLdapError("VCF organization already has LDAP enabled; explicitly confirm replacement.")
+        client.configure(proposed)
+        test_result = client.test(proposed)
+        users = client.search_users()
+        groups = client.search_groups()
+        if not users or not groups:
+            raise VcfLdapError("VCF LDAP verification must find at least one user and one group.")
+        verified = client.get_settings()
+    except (ValueError, VcfLdapError) as exc:
+        organization.vcf_last_status = "failed"
+        organization.vcf_last_message = str(exc)
+        organization.updated_at = utcnow()
+        db.commit()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    organization.vcf_target_url = normalize_vcf_target_url(target_url)
+    organization.vcf_org_id = vcf_organization_id
+    organization.vcf_org_name = vcf_organization_name
+    organization.vcf_tls_fingerprint = confirmed_tls_fingerprint.upper()
+    organization.vcf_last_status = "verified"
+    organization.vcf_last_message = f"VCF found {len(users)} users and {len(groups)} groups."
+    organization.vcf_last_verified_at = utcnow()
+    organization.updated_at = utcnow()
+    db.commit()
+    record_audit(db, actor=identity.username, action="configure_vcf_organization_ldap", resource_type="ldap_organization", resource_id=str(organization.id), detail=f"target={organization.vcf_target_url}; org_id={vcf_organization_id}; users={len(users)}; groups={len(groups)}")
+    if isinstance(verified.get("definedSettings"), dict):
+        verified["definedSettings"]["password"] = "[redacted]"
+    return render(
+        request,
+        "ldap.html",
+        {
+            "identity": identity,
+            **ldap_context(db, selected_organization_id=organization_id),
+            "ldap_vcf_configuration_result": {
+                "verified_settings": verified,
+                "test_result": test_result,
+                "user_count": len(users),
+                "group_count": len(groups),
+            },
+            "appliance_apply_status": appliance_apply_status(db, "ldap"),
+        },
+    )
+
+
+@router.post("/ldap/recovery/export", response_model=None)
+def export_ldap_recovery_from_ui(
+    request: Request,
+    passphrase: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    timestamp = utcnow().strftime("%Y%m%dT%H%M%SZ")
+    plain_path = Path(LDAP_RECOVERY_DIR) / f"ldap-recovery-{timestamp}.tar.gz"
+    result = SystemAdapter().export_ldap_recovery(str(plain_path))
+    if result.dry_run:
+        raise HTTPException(status_code=409, detail="LDAP recovery export requires a live appliance with OpenLDAP applied.")
+    if result.returncode != 0 or not plain_path.is_file():
+        raise HTTPException(status_code=500, detail=(result.stderr or "LDAP recovery export failed.").strip())
+    try:
+        encrypted = encrypt_recovery_payload(plain_path.read_bytes(), passphrase)
+    finally:
+        plain_path.unlink(missing_ok=True)
+    record_audit(db, actor=identity.username, action="export_ldap_recovery", resource_type="ldap_recovery", detail=f"created_at={timestamp}")
+    return Response(
+        encrypted,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="labfoundry-ldap-recovery-{timestamp}.lfldap"'},
+    )
+
+
+@router.post("/ldap/recovery/import", response_model=None)
+async def import_ldap_recovery_from_ui(
+    request: Request,
+    archive: UploadFile = File(...),
+    passphrase: str = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    encrypted = await archive.read()
+    try:
+        decrypted = decrypt_recovery_payload(encrypted, passphrase)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    for stale in db.execute(select(LdapRecoveryArchive).where(LdapRecoveryArchive.state == "staged")).scalars().all():
+        clear_ldap_recovery_payload(stale)
+        stale.state = "replaced"
+    row = LdapRecoveryArchive(
+        filename=archive.filename or "ldap-recovery.lfldap",
+        path="memory://pending-ldap-recovery",
+        sha256=recovery_sha256(decrypted),
+        state="staged",
+        organization_count=0,
+        created_by=identity.username,
+    )
+    db.add(row)
+    db.flush()
+    try:
+        manifest = stage_ldap_recovery_payload(row, decrypted)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    row.organization_count = len(manifest.get("databases") or [])
+    db.commit()
+    record_audit(db, actor=identity.username, action="stage_ldap_recovery_import", resource_type="ldap_recovery", resource_id=str(row.id), detail=f"sha256={row.sha256}; databases={row.organization_count}")
+    return RedirectResponse("/ldap#ldap-recovery-panel", status_code=303)
+
+
 @router.get("/kms", response_class=HTMLResponse, response_model=None)
 def kms_page(
     request: Request,
@@ -14144,7 +15133,7 @@ def reset_user_password_from_ui(
 
 @router.get("/ldap-users", response_model=None)
 def legacy_ldap_users_redirect() -> RedirectResponse:
-    return RedirectResponse("/authentication", status_code=303)
+    return RedirectResponse("/ldap", status_code=303)
 
 
 def service_state_status_row(service: ServiceState) -> dict[str, object]:

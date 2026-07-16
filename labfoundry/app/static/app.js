@@ -3899,6 +3899,86 @@ function initializeKmsSettings() {
   });
 }
 
+function initializeLdapDirectoryTables() {
+  const usersElement = document.getElementById("ldap-users-table");
+  if (usersElement instanceof HTMLElement && typeof Tabulator !== "undefined") {
+    try {
+      const users = JSON.parse(usersElement.dataset.users || "[]");
+      new Tabulator(usersElement, {
+        data: users,
+        index: "id",
+        layout: "fitColumns",
+        responsiveLayout: "collapse",
+        placeholder: "No directory users",
+        columns: [
+          { title: "UID", field: "uid", minWidth: 130 },
+          { title: "Display name", field: "display_name", minWidth: 170 },
+          { title: "Email", field: "email", minWidth: 190 },
+          { title: "Password", field: "password_status", minWidth: 130 },
+          { title: "Enabled", field: "enabled", formatter: "tickCross", hozAlign: "center", width: 95 },
+          { title: "DN", field: "dn", minWidth: 260, visible: false },
+        ],
+      });
+      const fallback = document.getElementById(usersElement.dataset.fallbackId || "");
+      if (fallback instanceof HTMLElement) fallback.hidden = true;
+    } catch (error) {
+      showCaMessage("ldap-user-error", error instanceof Error ? error.message : "LDAP users could not render.");
+    }
+  }
+
+  const groupsElement = document.getElementById("ldap-groups-table");
+  if (groupsElement instanceof HTMLElement && typeof Tabulator !== "undefined") {
+    try {
+      const groups = JSON.parse(groupsElement.dataset.groups || "[]").map((group) => ({
+        ...group,
+        member_count: Array.isArray(group.members) ? group.members.length : 0,
+        member_names: Array.isArray(group.members) ? group.members.map((member) => `${member.type}: ${member.name}`).join(", ") : "",
+      }));
+      new Tabulator(groupsElement, {
+        data: groups,
+        index: "id",
+        layout: "fitColumns",
+        responsiveLayout: "collapse",
+        placeholder: "No directory groups",
+        columns: [
+          { title: "Name", field: "name", minWidth: 150 },
+          { title: "Members", field: "member_count", width: 105, hozAlign: "right" },
+          { title: "Membership", field: "member_names", minWidth: 240 },
+          { title: "Enabled", field: "enabled", formatter: "tickCross", hozAlign: "center", width: 95 },
+        ],
+      });
+      const fallback = document.getElementById(groupsElement.dataset.fallbackId || "");
+      if (fallback instanceof HTMLElement) fallback.hidden = true;
+    } catch (error) {
+      showCaMessage("ldap-group-error", error instanceof Error ? error.message : "LDAP groups could not render.");
+    }
+  }
+}
+
+function initializeLdapPasswordModal() {
+  const dialog = document.getElementById("ldap-password-modal");
+  const form = document.getElementById("ldap-password-form");
+  const title = document.getElementById("ldap-password-modal-title");
+  const cancel = dialog?.querySelector("[data-ldap-password-cancel]");
+  if (!(dialog instanceof HTMLDialogElement) || !(form instanceof HTMLFormElement)) return;
+  document.querySelectorAll("[data-ldap-password-button]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const userId = button.dataset.userId || "0";
+      const uid = button.dataset.userUid || "directory user";
+      form.action = `/ldap/users/${encodeURIComponent(userId)}/password`;
+      if (title) title.textContent = `Reset ${uid} password`;
+      const passwordInput = form.querySelector('input[name="password"]');
+      if (passwordInput instanceof HTMLInputElement) passwordInput.value = "";
+      dialog.showModal();
+      if (passwordInput instanceof HTMLInputElement) passwordInput.focus();
+    });
+  });
+  cancel?.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+}
+
 function chronyBlankUpstreamRow() {
   return {
     id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -12649,6 +12729,8 @@ document.addEventListener("DOMContentLoaded", initializeCaSettings);
 document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
 document.addEventListener("DOMContentLoaded", initializeKmsSettings);
+document.addEventListener("DOMContentLoaded", initializeLdapDirectoryTables);
+document.addEventListener("DOMContentLoaded", initializeLdapPasswordModal);
 document.addEventListener("DOMContentLoaded", initializeChronySettings);
 document.addEventListener("DOMContentLoaded", initializeChronyUpstreamsTable);
 document.addEventListener("DOMContentLoaded", initializeChronySourceHealthModal);

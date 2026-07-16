@@ -25,6 +25,7 @@ Current apply units are:
 - ESXi PXE
 - Certificate Authority
 - KMS / KMIP
+- Managed LDAP
 - Chrony
 - VCF Backups
 - VCF Offline Depot
@@ -92,6 +93,8 @@ The real apply path stages schema-v2 `/var/lib/labfoundry/apply/esxi-pxe/labfoun
 ESXi PXE boot settings also affect DNS/DHCP and Firewall desired state. Apply the changed DNS/DHCP, ESXi PXE, and Firewall units together when the DHCP IP zone, HTTP port, or boot files change so dnsmasq returns zone-scoped guide-aligned first-stage and second-stage boot files and the appliance exposes UDP/69 plus the PXE HTTP port on the selected bind targets.
 
 ## Firewall Apply
+
+Managed LDAP contributes Firewall-owned TCP/636 rules on every selected LDAP listener interface. Plaintext TCP/389 is never generated.
 
 The Firewall apply unit derives LabFoundry-managed service allow rules from enabled service listener desired state. Management, DNS, DHCP, KMS, Chrony, VCF Backup, VCF Offline Depot, and VCF Private Registry listeners appear in the managed service rules grid on the Firewall page, while custom firewall rules remain editable in the main grid. Managed DNS and service listener rules default to the built-in `Any` group. Operators can create, rename, remove, and assign firewall groups containing `any`, CIDRs, addresses, or other groups when rule sources or destinations need narrower access than the default. DHCP bootstrap rules are the exception: they remain interface-bound input rules without group filtering because clients and relay paths may arrive before a client address is assigned. IPv4 DHCP zones open UDP/67; IPv6 DHCP zones open UDP/547; Chrony opens UDP/123 on selected bind targets and TCP/4460 when Chrony NTS server mode is enabled. If a DHCP zone or service listener moves from a physical interface to a VLAN such as `eth2.50`, the firewall preview and apply diff should move the generated rule to that same interface. Apply the changed Firewall unit with the service unit that changed when the global apply page shows both as pending.
 

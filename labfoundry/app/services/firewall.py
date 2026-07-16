@@ -11,6 +11,7 @@ from labfoundry.app.models import (
     FirewallRule,
     FirewallSettings,
     KmsSettings,
+    LdapSettings,
     ChronySettings,
     PhysicalInterface,
     RoutingRule,
@@ -160,6 +161,7 @@ def managed_service_firewall_rules(
     source_groups: list[dict] | None = None,
     source_group_assignments: dict[str, str] | None = None,
     web_terminal_interfaces: list[str] | None = None,
+    ldap_settings: LdapSettings | None = None,
 ) -> list[FirewallRule]:
     source_groups_by_id = {str(group.get("id", "")): group for group in source_groups or []}
     source_group_assignments = source_group_assignments or {}
@@ -216,6 +218,20 @@ def managed_service_firewall_rules(
                     protocol="tcp",
                     ports=str(kms_settings.port),
                     priority=60 + index,
+                )
+            )
+    if ldap_settings and ldap_settings.enabled:
+        for index, interface_name in enumerate(split_interfaces(ldap_settings.listen_interface), start=1):
+            rule_name = f"ldap-ldaps-{interface_name}"
+            rules.append(
+                _service_firewall_rule(
+                    name=rule_name,
+                    service="Managed LDAP / LDAPS",
+                    interface_name=interface_name,
+                    source=_managed_rule_source(rule_name, interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                    protocol="tcp",
+                    ports="636",
+                    priority=63 + index,
                 )
             )
     if chrony_settings.enabled:

@@ -72,6 +72,181 @@ def test_appliance_power_helper_fails_closed_without_systemd_run(monkeypatch, ca
     assert "refusing an immediate appliance power action" in capsys.readouterr().err
 
 
+def ldap_payload(*, enabled: bool = False) -> dict:
+    suffix = "dc=org-a,dc=ldap,dc=labfoundry,dc=internal"
+    user_dn = f"uid=operator,ou=users,{suffix}"
+    return {
+        "schema_version": 1,
+        "service": {
+            "enabled": enabled,
+            "hostname": "ldap.labfoundry.internal",
+            "listen_interface": "eth0",
+            "listen_address": "192.168.49.1",
+            "port": 636,
+            "certificate_path": "/etc/labfoundry/ldap/tls/server.crt",
+            "key_path": "/etc/labfoundry/ldap/tls/server.key",
+            "chain_path": "/etc/labfoundry/ldap/tls/server-chain.crt",
+            "root_ca_path": "/etc/labfoundry/ca/root.crt",
+            "password_policy": {
+                "min_length": 14,
+                "history": 5,
+                "max_failures": 5,
+                "failure_window_minutes": 15,
+                "lockout_minutes": 15,
+                "max_age_days": 0,
+            },
+        },
+        "organizations": [
+            {
+                "id": 1,
+                "name": "Org A",
+                "slug": "org-a",
+                "suffix_dn": suffix,
+                "bind_dn": f"uid=vcf-bind,ou=service-accounts,{suffix}",
+                "bind_password": "SecretBind1!",
+                "enabled": True,
+                "vcf_settings": {
+                    "definedSettings": {"userAttributes": {"serviceAccount": "employeeType"}},
+                    "vcf91IdentityBrokerCompatibility": {
+                        "requiredInternalAttribute": "serviceAccount",
+                        "ldapAttribute": "employeeType",
+                    },
+                },
+                "users": [
+                    {
+                        "id": 1,
+                        "uid": "operator",
+                        "dn": user_dn,
+                        "surname": "Operator",
+                        "display_name": "Operator",
+                        "email": "",
+                        "telephone": "",
+                        "enabled": True,
+                        "password": "VeryStrong1!Directory",
+                        "password_status": "pending_apply",
+                    }
+                ],
+                "groups": [
+                    {
+                        "id": 1,
+                        "name": "VCF Administrators",
+                        "dn": f"cn=VCF Administrators,ou=groups,{suffix}",
+                        "description": "",
+                        "enabled": True,
+                        "members": [{"type": "user", "id": 1, "dn": user_dn}],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_ldap_helper_renders_separate_mdb_acl_overlays_and_ldaps_only_listener():
+    helper = load_helper_module()
+    payload = ldap_payload()
+
+    assert helper._ldap_config_errors(payload) == []
+    config = helper._render_ldap_slapd_config(payload)
+    assert "database mdb" in config
+    assert 'suffix "dc=org-a,dc=ldap,dc=labfoundry,dc=internal"' in config
+    assert "overlay ppolicy" in config
+    assert "overlay memberof" in config
+    assert "overlay refint" in config
+    assert "modulepath /usr/lib/openldap" in config
+    assert "moduleload ppolicy.so" in config
+    assert "ppolicy.schema" not in config
+    assert 'by dn.exact="uid=vcf-bind,ou=service-accounts,dc=org-a,dc=ldap,dc=labfoundry,dc=internal" read' in config
+    assert helper._ldap_listener_urls(payload["service"]) == "ldapi:/// ldaps://192.168.49.1:636/"
+    assert "ldap:///" not in helper._ldap_listener_urls(payload["service"])
+
+
+def test_ldap_render_can_use_isolated_validation_data_root(tmp_path):
+    helper = load_helper_module()
+    payload = ldap_payload()
+    config = helper._render_ldap_slapd_config(payload, state_root=tmp_path / "validation-data")
+
+    assert f"directory {tmp_path / 'validation-data' / 'org-a'}" in config
+    assert str(helper.LDAP_STATE_DIR / "org-a") not in config
+
+
+def test_ldap_listener_dropin_overrides_photon_hard_coded_plaintext_listener(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    dropin_dir = tmp_path / "slapd.service.d"
+    dropin_path = dropin_dir / "labfoundry.conf"
+    sysconfig_path = tmp_path / "slapd"
+    monkeypatch.setattr(helper, "LDAP_SYSTEMD_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "LDAP_SYSTEMD_DROPIN_PATH", dropin_path)
+    monkeypatch.setattr(helper, "LDAP_SYSCONFIG_PATH", sysconfig_path)
+    monkeypatch.setattr(helper, "LDAP_CONFIG_DIR", "/etc/openldap/slapd.d")
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
+
+    helper._install_ldap_listener_config(ldap_payload(enabled=True)["service"])
+
+    rendered = dropin_path.read_text(encoding="utf-8")
+    assert "ExecStart=" in rendered
+    assert 'ExecStart=/usr/sbin/slapd -u ldap -F /etc/openldap/slapd.d -h "ldapi:/// ldaps://192.168.49.1:636/"' in rendered
+    assert "ldap:///" not in rendered
+
+
+def test_ldap_private_key_is_group_readable_only_for_slapd(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    key_path = tmp_path / "server.key"
+    key_path.write_text("private", encoding="utf-8")
+    ownership: list[tuple[Path, str, str]] = []
+    modes: list[tuple[Path, int]] = []
+    monkeypatch.setattr(helper.shutil, "chown", lambda path, *, user, group: ownership.append((Path(path), user, group)))
+    monkeypatch.setattr(helper.os, "chmod", lambda path, mode: modes.append((Path(path), mode)))
+
+    helper.shutil.chown(key_path, user="root", group="ldap")
+    helper.os.chmod(key_path, 0o640)
+
+    assert ownership == [(key_path, "root", "ldap")]
+    assert modes == [(key_path, 0o640)]
+
+
+def test_ldap_directory_queries_disable_ldif_wrapping(monkeypatch):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    helper._ldap_entry_exists("uid=operator,ou=users,dc=org-a,dc=ldap,dc=labfoundry,dc=internal")
+    helper._ldap_list_dns("ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal")
+
+    assert all(["-o", "ldif-wrap=no"] == command[2:4] for command in commands)
+
+
+def test_ldap_helper_rejects_missing_service_account_mapping_and_group_cycle():
+    helper = load_helper_module()
+    payload = ldap_payload()
+    payload["organizations"][0]["vcf_settings"]["definedSettings"]["userAttributes"].pop("serviceAccount")
+    payload["organizations"][0]["groups"] = [
+        {
+            "id": 1,
+            "name": "First",
+            "dn": "cn=First,ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal",
+            "enabled": True,
+            "members": [{"type": "group", "id": 2, "dn": "cn=Second,ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal"}],
+        },
+        {
+            "id": 2,
+            "name": "Second",
+            "dn": "cn=Second,ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal",
+            "enabled": True,
+            "members": [{"type": "group", "id": 1, "dn": "cn=First,ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal"}],
+        },
+    ]
+
+    errors = helper._ldap_config_errors(payload)
+    assert any("serviceAccount" in error for error in errors)
+    assert any("cycle" in error for error in errors)
+
+
 def kms_config_text(managed_root: Path, *, enabled: bool = True, database_path: Path | None = None) -> str:
     database_path = database_path or Path("/var/lib/labfoundry/kms/pykmip.db")
     return "\n".join(

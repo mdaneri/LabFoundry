@@ -47,6 +47,7 @@
             ("Identity & Trust", [
               ("Authentication", "/authentication", "read:dashboard"),
               ("Users", "/users", "admin:all"),
+              ("Managed LDAP", "/ldap", "read:ldap"),
               ("Certificate Authority", "/certificate-authority", "admin:all"),
               ("KMS / KMIP", "/kms", "read:kms")
             ]),
@@ -296,7 +297,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=web-terminal-access-20260716-2"></script>
+    <script src="/static/app.js?v=managed-ldap-20260716-1"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

@@ -228,6 +228,25 @@ def test_real_vcf_backup_apply_uses_sudo_helper(monkeypatch):
     assert commands == [result.command]
 
 
+def test_real_ldap_apply_uses_constrained_helper(monkeypatch):
+    import labfoundry.app.adapters.system as system_adapter
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, '{"ldap":"apply complete"}\n', "")
+
+    monkeypatch.setattr(system_adapter.subprocess, "run", fake_run)
+    path = "/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json"
+
+    result = SystemAdapter(dry_run=False).apply_ldap_config(path)
+
+    assert result.returncode == 0
+    assert result.command == ["sudo", "-n", SystemAdapter.HELPER_PATH, "ldap", "apply", "--real", path]
+    assert commands == [result.command]
+
+
 def test_real_local_user_authentication_passes_password_only_on_stdin(monkeypatch):
     import labfoundry.app.adapters.system as system_adapter
 

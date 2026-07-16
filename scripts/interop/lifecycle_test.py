@@ -474,7 +474,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "url": args.client_ca_request_url or args.appliance_url,
             },
         },
-        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "ca", "kms", "appliance_settings", "vcf_backups", "vcf_offline_depot", "public_services"],
+        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "ca", "kms", "ldap", "appliance_settings", "vcf_backups", "vcf_offline_depot", "public_services"],
         "pxe_boot": {
             "enabled": bool(args.pxe_client_mac),
             "mode": args.pxe_test_mode,
@@ -489,6 +489,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "firewall, routing, NAT, and WAN desired state",
             "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification",
             "KMS desired state, DNS/firewall apply, PyKMIP service, and TLS client-certificate probe",
+            "Managed LDAP desired state, two isolated organization suffixes, duplicate uid support, nested groups, LDAPS-only listener, and CA hostname verification",
             "VCF Backup desired state, local user sync, SFTP listener, and client probe",
             "VCF Offline Depot browser login, curl/wget Basic auth, and Local Users password rotation",
             "ESXi PXE desired state, DHCP boot options, TFTP artifacts, and Hyper-V PXE VM smoke",
@@ -1535,6 +1536,127 @@ def configure_kms(client: HttpClient, args: argparse.Namespace) -> dict[str, Any
     }
 
 
+def configure_ldap(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    organizations = client.json_request("GET", "/api/v1/ldap/organizations")
+    organizations_by_slug = {organization["slug"]: organization for organization in organizations}
+    desired_organizations = [
+        ("lifecycle-org-a", "Lifecycle Org A"),
+        ("lifecycle-org-b", "Lifecycle Org B"),
+    ]
+    created: list[dict[str, Any]] = []
+    for slug, name in desired_organizations:
+        organization = organizations_by_slug.get(slug)
+        if organization is None:
+            organization = client.json_request(
+                "POST",
+                "/api/v1/ldap/organizations",
+                json_body={"name": name, "slug": slug, "enabled": True},
+            )
+        created.append(organization)
+
+    password = "LifecycleLdap1!Strong"
+    users: list[dict[str, Any]] = []
+    for organization in created:
+        organization_users = client.json_request("GET", f"/api/v1/ldap/organizations/{organization['id']}/users")
+        user = next((row for row in organization_users if row["uid"] == "operator"), None)
+        if user is None:
+            user = client.json_request(
+                "POST",
+                f"/api/v1/ldap/organizations/{organization['id']}/users",
+                json_body={
+                    "uid": "operator",
+                    "given_name": "Lifecycle",
+                    "surname": "Operator",
+                    "display_name": f"{organization['name']} Operator",
+                    "email": f"operator@{organization['slug']}.invalid",
+                    "enabled": True,
+                    "password": password,
+                },
+            )
+        else:
+            client.json_request(
+                "POST",
+                f"/api/v1/ldap/users/{user['id']}/password",
+                json_body={"password": password},
+            )
+        users.append(user)
+
+    org_a = created[0]
+    org_a_groups = client.json_request("GET", f"/api/v1/ldap/organizations/{org_a['id']}/groups")
+    leaf = next((row for row in org_a_groups if row["name"] == "Lifecycle Operators"), None)
+    if leaf is None:
+        leaf = client.json_request(
+            "POST",
+            f"/api/v1/ldap/organizations/{org_a['id']}/groups",
+            json_body={
+                "name": "Lifecycle Operators",
+                "description": "Direct lifecycle LDAP membership",
+                "enabled": True,
+                "members": [{"type": "user", "id": users[0]["id"]}],
+            },
+        )
+    parent = next((row for row in org_a_groups if row["name"] == "Lifecycle Nested Administrators"), None)
+    if parent is None:
+        client.json_request(
+            "POST",
+            f"/api/v1/ldap/organizations/{org_a['id']}/groups",
+            json_body={
+                "name": "Lifecycle Nested Administrators",
+                "description": "Nested lifecycle LDAP membership",
+                "enabled": True,
+                "members": [{"type": "group", "id": leaf["id"]}],
+            },
+        )
+    org_b = created[1]
+    org_b_groups = client.json_request("GET", f"/api/v1/ldap/organizations/{org_b['id']}/groups")
+    if not any(row["name"] == "Lifecycle Operators" for row in org_b_groups):
+        client.json_request(
+            "POST",
+            f"/api/v1/ldap/organizations/{org_b['id']}/groups",
+            json_body={
+                "name": "Lifecycle Operators",
+                "description": "Independent organization-local group",
+                "enabled": True,
+                "members": [{"type": "user", "id": users[1]["id"]}],
+            },
+        )
+
+    site_ip = str(ip_interface(args.site_cidr).ip)
+    settings = client.json_request(
+        "PATCH",
+        "/api/v1/ldap/settings",
+        json_body={
+            "enabled": True,
+            "hostname": f"ldap.{args.domain}",
+            "listen_interfaces": [args.site_interface],
+            "listen_addresses": [site_ip],
+            "port": 636,
+            "password_policy": {
+                "min_length": 14,
+                "require_uppercase": True,
+                "require_lowercase": True,
+                "require_number": True,
+                "require_special": True,
+                "disallow_username": True,
+                "max_failures": 5,
+                "lockout_minutes": 15,
+                "failure_window_minutes": 15,
+                "history": 5,
+                "max_age_days": 0,
+            },
+        },
+    )
+    return {
+        "hostname": settings["hostname"],
+        "listen_interfaces": settings["listen_interfaces"],
+        "listen_addresses": settings["listen_addresses"],
+        "organization_suffixes": [organization["suffix_dn"] for organization in created],
+        "duplicate_uid": "operator",
+        "nested_group": "Lifecycle Nested Administrators",
+        "service_account_mapping": "employeeType",
+    }
+
+
 def apply_units(client: HttpClient, units: list[str], args: argparse.Namespace) -> dict[str, Any]:
     status, body, _headers = client.request("GET", "/appliance-apply")
     if status >= 400:
@@ -1745,6 +1867,32 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
             "-cert /etc/labfoundry/kms/clients/certs/vcf-management.crt "
             "-key /etc/labfoundry/kms/clients/certs/vcf-management.key "
             "-CAfile /etc/labfoundry/ca/root.crt -verify_return_error </dev/null"
+        ),
+        "ldap_files": (
+            "for path in "
+            "/etc/labfoundry/ldap/tls/server.crt "
+            "/etc/labfoundry/ldap/tls/server.key "
+            "/etc/systemd/system/slapd.service.d/labfoundry.conf; "
+            "do test -f \"$path\" || { echo \"missing $path\"; exit 1; }; done"
+        ),
+        "ldap_service": "systemctl is-active slapd.service || (systemctl status slapd.service --no-pager; journalctl -u slapd.service -n 100 --no-pager; exit 1)",
+        "ldap_listeners": (
+            "ss -lnt | grep -E '[:.]636[[:space:]]' && "
+            "! ss -lnt | grep -E '[:.]389[[:space:]]'"
+        ),
+        "ldap_tls": (
+            f"timeout 10 openssl s_client -connect {site_ip}:636 "
+            f"-servername ldap.{args.domain} -verify_hostname ldap.{args.domain} "
+            "-CAfile /etc/labfoundry/ca/root.crt -verify_return_error </dev/null"
+        ),
+        "ldap_suffixes_and_nested_groups": (
+            "ldapsearch -LLL -Y EXTERNAL -H ldapi:/// "
+            "-b dc=lifecycle-org-a,dc=ldap,dc=labfoundry,dc=internal '(uid=operator)' dn && "
+            "ldapsearch -LLL -Y EXTERNAL -H ldapi:/// "
+            "-b dc=lifecycle-org-b,dc=ldap,dc=labfoundry,dc=internal '(uid=operator)' dn && "
+            "ldapsearch -LLL -Y EXTERNAL -H ldapi:/// "
+            "-b ou=groups,dc=lifecycle-org-a,dc=ldap,dc=labfoundry,dc=internal "
+            "'(cn=Lifecycle Nested Administrators)' member"
         ),
         "vcf_backups": (
             "test -f /etc/ssh/sshd_config.d/labfoundry-vcf-backups.conf && "
@@ -2369,12 +2517,13 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "configure-vcf-backups", configure_vcf_backups, client, args)
     run_step(results, "configure-vcf-offline-depot", configure_vcf_offline_depot, client, args)
     run_step(results, "configure-kms", configure_kms, client, args)
+    run_step(results, "configure-ldap", configure_ldap, client, args)
     run_step(
         results,
         "apply-connectivity-units",
         apply_units,
         client,
-        ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "vcf_backups"],
+        ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "vcf_backups", "ldap"],
         args,
     )
     run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
@@ -2418,6 +2567,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
         raise LifecycleError("--restored-state-run requires --restore-settings-backup.")
     run_step(results, "appliance-health", appliance_health, client, args)
     run_step(results, "restore-settings-backup", restore_settings_backup, client, args)
+    run_step(results, "configure-ldap", configure_ldap, client, args)
     run_step(results, "stage-vcf-backup-password", stage_vcf_backup_password, client, args)
     run_step(results, "stage-vcf-depot-password", stage_vcf_depot_password, client, args)
     run_step(
@@ -2425,7 +2575,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
         "apply-connectivity-units",
         apply_units,
         client,
-        ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "vcf_backups"],
+        ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "vcf_backups", "ldap"],
         args,
     )
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)

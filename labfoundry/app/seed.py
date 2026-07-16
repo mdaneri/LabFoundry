@@ -19,6 +19,7 @@ from labfoundry.app.models import (
     KmsClient,
     KmsKey,
     KmsSettings,
+    LdapSettings,
     NatRule,
     ChronySettings,
     PhysicalInterface,
@@ -35,6 +36,7 @@ from labfoundry.app.models import (
 )
 from labfoundry.app.services.appliance_settings import APPLIANCE_DNS_RECORD_DESCRIPTION, normalize_fqdn
 from labfoundry.app.services.local_users import DEFAULT_LOCAL_USER_SHELL, POWERSHELL_LOCAL_USER_SHELL, stage_user_os_password
+from labfoundry.app.services.ldap import LDAP_DEFAULT_HOSTNAME, LDAP_STAGED_CONFIG_PATH
 from labfoundry.app.services.dnsmasq import join_domains, split_domains, validate_dns_record
 from labfoundry.app.services.networking import normalize_interface_mode, normalize_ipv4_method
 from labfoundry.app.services.chrony import CHRONY_DEFAULT_HOSTNAME, CHRONY_STAGED_CONFIG_PATH, default_chrony_upstream_fields
@@ -256,6 +258,15 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
         )
         db.add(chrony_settings)
         db.flush()
+
+    if db.execute(select(LdapSettings)).scalar_one_or_none() is None:
+        db.add(
+            LdapSettings(
+                enabled=False,
+                hostname=LDAP_DEFAULT_HOSTNAME,
+                config_path=LDAP_STAGED_CONFIG_PATH,
+            )
+        )
 
     appliance_dns_domain = _domain_from_fqdn(appliance_settings.fqdn) or "labfoundry.internal"
     dns_settings = db.execute(select(DnsSettings)).scalar_one_or_none()

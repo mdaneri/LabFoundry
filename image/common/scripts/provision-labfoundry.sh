@@ -81,7 +81,7 @@ case "$LABFOUNDRY_GUEST_PLATFORM" in
     exit 2
     ;;
 esac
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony ipxe syslinux nginx powershell
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony openldap openldap-servers ipxe syslinux nginx powershell
 
 log_step "installing VCF PowerCLI $LABFOUNDRY_POWERCLI_VERSION"
 export LABFOUNDRY_POWERCLI_VERSION
@@ -121,6 +121,7 @@ install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/firewall"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/dnsmasq"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/kms"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/ldap"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/local-users"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/chronyd"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-backups"
@@ -129,6 +130,7 @@ install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/vcfDownloadToo
 install -d -o labfoundry -g labfoundry -m 0700 "$LABFOUNDRY_STATE/vcfDownloadTool/active-tool/secrets"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/dnsmasq"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/kms"
+install -d -o labfoundry -g labfoundry -m 0700 "$LABFOUNDRY_STATE/ldap/recovery"
 install -d -o root -g root -m 0755 "$LABFOUNDRY_STATE/users"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG/kms"
@@ -136,6 +138,7 @@ install -d -o root -g root -m 0755 /etc/labfoundry
 install -d -o root -g root -m 0755 /etc/labfoundry/dnsmasq.d
 install -d -o root -g root -m 0755 /etc/labfoundry/kms
 install -d -o root -g root -m 0755 /etc/labfoundry/kms/policies
+install -d -o root -g root -m 0755 /etc/labfoundry/ldap/tls
 install -d -o root -g root -m 0755 /etc/pykmip
 install -d -o root -g root -m 0755 /etc/labfoundry/nginx/sites.d
 install -d -o root -g root -m 0755 /etc/labfoundry/ssh/authorized_keys
