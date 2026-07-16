@@ -95,6 +95,7 @@ from labfoundry.app.services.appliance_settings import (
     web_terminal_addresses,
     web_terminal_interface_options,
     web_terminal_interfaces_to_json,
+    web_terminal_listener_interfaces,
 )
 from labfoundry.app.services.appliance_update import (
     APPLIANCE_UPDATE_INFO_PATH,
@@ -2795,7 +2796,15 @@ def firewall_context(db: Session, *, reconcile: bool = True) -> dict:
     source_group_state = firewall_source_group_state(setting_value(db, FIREWALL_SOURCE_GROUPS_SETTING_KEY), interface_networks)
     appliance_settings = get_appliance_settings_row(db)
     management = management_interface_context(physical_interfaces)
-    terminal_interfaces = normalized_web_terminal_interfaces(appliance_settings, management) if appliance_settings.web_terminal_enabled else []
+    terminal_options = web_terminal_interface_options(physical_interfaces, vlan_interfaces)
+    terminal_interfaces = (
+        web_terminal_listener_interfaces(
+            normalized_web_terminal_interfaces(appliance_settings, management),
+            terminal_options,
+        )
+        if appliance_settings.web_terminal_enabled
+        else []
+    )
     generated_rules = managed_service_firewall_rules(
         dns_settings=dns_settings,
         dhcp_settings=dhcp_settings,
@@ -3003,8 +3012,12 @@ def public_services_context(db: Session, *, reconcile: bool = True) -> dict[str,
     appliance_settings = get_appliance_settings_row(db)
     management = management_interface_context(interfaces)
     terminal_options = web_terminal_interface_options(interfaces, vlans)
+    terminal_interfaces = web_terminal_listener_interfaces(
+        normalized_web_terminal_interfaces(appliance_settings, management),
+        terminal_options,
+    )
     terminal_addresses = set(
-        web_terminal_addresses(normalized_web_terminal_interfaces(appliance_settings, management), terminal_options)
+        web_terminal_addresses(terminal_interfaces, terminal_options)
         if appliance_settings.web_terminal_enabled
         else []
     )
@@ -3237,8 +3250,13 @@ def public_service_directory_context(db: Session, binding: dict[str, str]) -> di
     )
     appliance_settings = get_appliance_settings_row(db)
     physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlan_interfaces = db.execute(select(VlanInterface).where(VlanInterface.enabled.is_(True)).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     management = management_interface_context(physical_interfaces)
-    terminal_interfaces = normalized_web_terminal_interfaces(appliance_settings, management)
+    terminal_options = web_terminal_interface_options(physical_interfaces, vlan_interfaces)
+    terminal_interfaces = web_terminal_listener_interfaces(
+        normalized_web_terminal_interfaces(appliance_settings, management),
+        terminal_options,
+    )
     if appliance_settings.web_terminal_enabled and binding.get("interface") in terminal_interfaces:
         services.append(
             {

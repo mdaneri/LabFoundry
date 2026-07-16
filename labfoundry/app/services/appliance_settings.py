@@ -71,6 +71,7 @@ def web_terminal_interface_options(
 ) -> list[dict[str, Any]]:
     options: list[dict[str, Any]] = []
     parents = {interface.name: interface for interface in interfaces}
+    management_name = management_interface_context(interfaces).get("name", "")
     for interface in interfaces:
         role = normalize_interface_role(interface.role)
         mode = normalize_interface_mode(interface.mode)
@@ -84,6 +85,7 @@ def web_terminal_interface_options(
                 "kind": "physical",
                 "role": role,
                 "addresses": addresses,
+                "web_terminal_allowed": role != "management" or interface.name == management_name,
                 "label": f"{interface.name} - {role} / {' / '.join(addresses)}",
             }
         )
@@ -106,6 +108,7 @@ def web_terminal_interface_options(
                 "kind": "vlan",
                 "role": role,
                 "addresses": addresses,
+                "web_terminal_allowed": role != "management",
                 "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {role} / {' / '.join(addresses)}",
             }
         )
@@ -128,6 +131,18 @@ def web_terminal_addresses(selected: list[str], options: list[dict[str, Any]]) -
             if address and address not in addresses:
                 addresses.append(address)
     return addresses
+
+
+def web_terminal_listener_interfaces(
+    selected: list[str],
+    options: list[dict[str, Any]],
+) -> list[str]:
+    by_name = {str(option.get("name") or ""): option for option in options}
+    return [
+        name
+        for name in selected
+        if name in by_name and bool(by_name[name].get("web_terminal_allowed", True))
+    ]
 
 
 def _interface_addresses(ipv4_cidr: str | None, ipv6_cidr: str | None) -> list[str]:
@@ -306,7 +321,9 @@ def validate_appliance_settings(
         elif not management_https_cert_available:
             errors.append("Management UI HTTPS requires an issued CA-managed appliance HTTPS certificate. Apply the CA unit first.")
     selected_terminal_interfaces = normalized_web_terminal_interfaces(settings, management_interface)
-    option_names = {str(option.get("name") or "") for option in web_terminal_options or []}
+    terminal_options = web_terminal_options or []
+    options_by_name = {str(option.get("name") or ""): option for option in terminal_options}
+    option_names = set(options_by_name)
     if settings.web_terminal_enabled:
         if not settings.management_https_enabled:
             errors.append("Web terminal access requires Management UI HTTPS.")
@@ -316,6 +333,14 @@ def validate_appliance_settings(
         missing = [name for name in selected_terminal_interfaces if name not in option_names]
         if missing:
             errors.append(f"Web terminal interfaces are unavailable or have no address: {', '.join(missing)}.")
+        disallowed = [
+            name
+            for name in selected_terminal_interfaces
+            if name in option_names
+            and not bool(options_by_name[name].get("web_terminal_allowed", True))
+        ]
+        if disallowed:
+            errors.append(f"Additional Web terminal interfaces cannot use the management role: {', '.join(disallowed)}.")
     if not settings.config_path.startswith("/"):
         errors.append("Appliance settings config path must be absolute.")
     raw_target_naming = (settings.service_dns_target_naming or "").strip().lower().replace("_", "-")

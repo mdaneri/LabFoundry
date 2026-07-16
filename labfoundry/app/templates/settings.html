@@ -44,7 +44,7 @@
           <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add terminal interface">+</button>
           <div class="tag-suggestions" data-tag-menu data-tag-empty-message="No interfaces available." hidden>
             {% for option in web_terminal_interface_options %}
-              {% if option.name != management_interface.name %}
+              {% if option.name != management_interface.name and option.web_terminal_allowed %}
                 <button type="button" data-tag-option="{{ option.name }}" data-tag-label="{{ option.name }}">
                   <strong>{{ option.name }}</strong>
                   <small>{{ option.role }} / {{ option.addresses|join(' / ') }}</small>
@@ -55,7 +55,7 @@
         </div>
         <datalist id="web-terminal-interface-options">
           {% for option in web_terminal_interface_options %}
-            {% if option.name != management_interface.name %}<option value="{{ option.name }}">{{ option.label }}</option>{% endif %}
+            {% if option.name != management_interface.name and option.web_terminal_allowed %}<option value="{{ option.name }}">{{ option.label }}</option>{% endif %}
           {% endfor %}
         </datalist>
       </div>

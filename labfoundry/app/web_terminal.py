@@ -40,6 +40,7 @@ from labfoundry.app.services.appliance_settings import (
     normalized_web_terminal_interfaces,
     web_terminal_addresses,
     web_terminal_interface_options,
+    web_terminal_listener_interfaces,
 )
 
 
@@ -117,7 +118,10 @@ def _terminal_network_state(db: Session) -> tuple[ApplianceSettings, list[str], 
     vlans = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     management = management_interface_context(interfaces)
     options = web_terminal_interface_options(interfaces, vlans)
-    selected = normalized_web_terminal_interfaces(desired, management)
+    selected = web_terminal_listener_interfaces(
+        normalized_web_terminal_interfaces(desired, management),
+        options,
+    )
     management_address = _normalized_listener(str(management.get("ip") or ""))
     management_addresses = [management_address] if management_address else []
     return desired, selected, web_terminal_addresses(selected, options), management_addresses

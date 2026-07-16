@@ -7,6 +7,7 @@ from labfoundry.app.services.appliance_settings import (
     validate_appliance_settings,
     web_terminal_addresses,
     web_terminal_interface_options,
+    web_terminal_listener_interfaces,
 )
 from labfoundry.app import web_terminal
 
@@ -37,6 +38,14 @@ def test_web_terminal_interface_options_require_addressed_non_trunk_interfaces()
             oper_state="up",
             ip_cidr="192.168.87.32/24",
         ),
+        PhysicalInterface(
+            name="eth3",
+            role="management",
+            mode="access",
+            admin_state="up",
+            oper_state="up",
+            ip_cidr="192.168.88.32/24",
+        ),
     ]
     vlans = [
         VlanInterface(
@@ -46,17 +55,45 @@ def test_web_terminal_interface_options_require_addressed_non_trunk_interfaces()
             role="access",
             enabled=True,
             ip_cidr="192.168.50.1/24",
-        )
+        ),
+        VlanInterface(
+            name="eth1.60",
+            parent_interface="eth1",
+            vlan_id=60,
+            role="management",
+            enabled=True,
+            ip_cidr="192.168.60.1/24",
+        ),
     ]
 
     options = web_terminal_interface_options(interfaces, vlans)
 
-    assert [option["name"] for option in options] == ["eth0", "eth2", "eth1.50"]
+    assert [option["name"] for option in options] == ["eth0", "eth2", "eth3", "eth1.50", "eth1.60"]
+    assert web_terminal_listener_interfaces(
+        ["eth0", "eth2", "eth3", "eth1.50", "eth1.60"],
+        options,
+    ) == ["eth0", "eth2", "eth1.50"]
     assert web_terminal_addresses(["eth0", "eth2", "eth1.50"], options) == [
         "192.168.49.1",
         "192.168.87.32",
         "192.168.50.1",
     ]
+    settings = ApplianceSettings(
+        fqdn="labfoundry.labfoundry.internal",
+        management_https_enabled=True,
+        web_terminal_enabled=True,
+        web_terminal_interfaces_json='["eth0", "eth1.60"]',
+        config_path="/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json",
+    )
+    errors, _warnings = validate_appliance_settings(
+        settings,
+        local_dns_enabled=False,
+        management_interface={"name": "eth0", "ip": "192.168.49.1", "ip_cidr": "192.168.49.1/24"},
+        ca_enabled=True,
+        management_https_cert_available=True,
+        web_terminal_options=options,
+    )
+    assert "Additional Web terminal interfaces cannot use the management role: eth1.60." in errors
 
 
 def test_web_terminal_validation_forces_management_and_rejects_unavailable_selection():
