@@ -28,6 +28,7 @@ from labfoundry.app.ui import (
     recover_interrupted_vcf_helper_jobs,
 )
 from labfoundry.app.ui import router as ui_router
+from labfoundry.app.web_terminal import router as web_terminal_router
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -140,6 +141,7 @@ def create_app() -> FastAPI:
     install_problem_handlers(app)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(api_v1_router)
+    app.include_router(web_terminal_router)
     app.include_router(ui_router)
 
     return app

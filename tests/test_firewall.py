@@ -247,6 +247,30 @@ def test_managed_service_firewall_rules_skip_ca_portal_when_ca_disabled():
     assert {rule.name for rule in rules} == {"mgmt-console"}
 
 
+def test_managed_service_firewall_rules_add_https_for_extra_terminal_interfaces():
+    rules = managed_service_firewall_rules(
+        dns_settings=DnsSettings(enabled=False),
+        dhcp_settings=DhcpSettings(enabled=False),
+        dhcp_scopes=[],
+        ca_settings=CaSettings(enabled=False),
+        kms_settings=KmsSettings(enabled=False),
+        chrony_settings=ChronySettings(enabled=False),
+        vcf_backup_settings=VcfBackupSettings(enabled=False),
+        vcf_depot_settings=VcfOfflineDepotSettings(enabled=False),
+        vcf_registry_settings=VcfPrivateRegistrySettings(enabled=False),
+        interface_networks={"eth0": "192.168.49.0/24", "eth2": "192.168.87.0/24", "eth3.50": "192.168.50.0/24"},
+        web_terminal_interfaces=["eth0", "eth2", "eth3.50"],
+    )
+
+    by_name = {rule.name: rule for rule in rules}
+    assert "web-terminal-eth0" not in by_name
+    assert by_name["web-terminal-eth2"].interface_name == "eth2"
+    assert by_name["web-terminal-eth2"].protocol == "tcp"
+    assert by_name["web-terminal-eth2"].destination_port == "443"
+    assert by_name["web-terminal-eth2"].source == "any"
+    assert by_name["web-terminal-eth3.50"].interface_name == "eth3.50"
+
+
 def test_managed_service_firewall_rules_use_assigned_source_group():
     rules = managed_service_firewall_rules(
         dns_settings=DnsSettings(enabled=False),

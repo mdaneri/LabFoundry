@@ -22,7 +22,7 @@
     ></div>
     <table id="users-fallback" class="data-table compact dns-fallback-table">
       <thead>
-        <tr><th>Username</th><th>Roles</th><th>Shell</th><th>Enabled</th><th>OS account</th><th>Created</th><th>Actions</th></tr>
+        <tr><th>Username</th><th>Roles</th><th>Shell</th><th>Web SSH</th><th>Enabled</th><th>OS account</th><th>Created</th><th>Actions</th></tr>
       </thead>
       <tbody>
         {% for user in users %}
@@ -30,6 +30,7 @@
             <td>{{ user.username }}</td>
             <td>{{ user.roles_json|replace("[", "")|replace("]", "")|replace('"', "") if user.roles_json else user.role }}</td>
             <td>{{ user.shell }}</td>
+            <td><span class="status-pill {{ 'good' if user.web_terminal_access else 'muted' }}">{{ "allowed" if user.web_terminal_access else "denied" }}</span></td>
             <td><span class="status-pill {{ 'good' if user.enabled else 'muted' }}">{{ "enabled" if user.enabled else "disabled" }}</span></td>
             <td>
               {% set os_row = local_user_os_statuses.get(user.username) %}

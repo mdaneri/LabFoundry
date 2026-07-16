@@ -159,6 +159,7 @@ def managed_service_firewall_rules(
     interface_networks: dict[str, str],
     source_groups: list[dict] | None = None,
     source_group_assignments: dict[str, str] | None = None,
+    web_terminal_interfaces: list[str] | None = None,
 ) -> list[FirewallRule]:
     source_groups_by_id = {str(group.get("id", "")): group for group in source_groups or []}
     source_group_assignments = source_group_assignments or {}
@@ -173,6 +174,21 @@ def managed_service_firewall_rules(
             priority=10,
         )
     ]
+    for index, interface_name in enumerate(web_terminal_interfaces or [], start=1):
+        if interface_name == "eth0":
+            continue
+        rule_name = f"web-terminal-{interface_name}"
+        rules.append(
+            _service_firewall_rule(
+                name=rule_name,
+                service="Web terminal",
+                interface_name=interface_name,
+                source=_managed_rule_source(rule_name, interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                protocol="tcp",
+                ports="443",
+                priority=15 + index,
+            )
+        )
     rules.extend(dns_firewall_rules(dns_settings, interface_networks, source_groups_by_id, source_group_assignments))
     rules.extend(dhcp_firewall_rules(dhcp_settings, dhcp_scopes))
     if ca_settings.enabled:

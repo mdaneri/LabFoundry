@@ -4,9 +4,9 @@ import subprocess
 from ipaddress import ip_address, ip_interface
 from typing import Any
 
-from labfoundry.app.models import ApplianceSettings, PhysicalInterface
+from labfoundry.app.models import ApplianceSettings, PhysicalInterface, VlanInterface
 from labfoundry.app.services.dnsmasq import split_servers
-from labfoundry.app.services.networking import normalize_ipv4_method
+from labfoundry.app.services.networking import normalize_interface_mode, normalize_interface_role, normalize_ipv4_method
 
 
 APPLIANCE_SETTINGS_DEFAULT_FQDN = "labfoundry.labfoundry.internal"
@@ -31,12 +31,132 @@ def appliance_settings_to_dict(settings: ApplianceSettings) -> dict[str, Any]:
         "id": settings.id,
         "fqdn": settings.fqdn,
         "management_https_enabled": settings.management_https_enabled,
+        "web_terminal_enabled": settings.web_terminal_enabled,
+        "web_terminal_interfaces": web_terminal_interfaces_from_json(settings.web_terminal_interfaces_json),
         "root_ssh_enabled": settings.root_ssh_enabled,
         "service_dns_target_naming": normalize_service_dns_target_naming(settings.service_dns_target_naming),
         "external_dns_servers": split_servers(settings.external_dns_servers),
         "config_path": settings.config_path,
         "updated_at": settings.updated_at.isoformat() if settings.updated_at else "",
     }
+
+
+def web_terminal_interfaces_from_json(value: str | None) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    result: list[str] = []
+    for item in parsed:
+        name = str(item or "").strip()
+        if name and name not in result:
+            result.append(name)
+    return result
+
+
+def web_terminal_interfaces_to_json(values: list[str]) -> str:
+    normalized: list[str] = []
+    for value in values:
+        name = str(value or "").strip()
+        if name and name not in normalized:
+            normalized.append(name)
+    return json.dumps(normalized)
+
+
+def web_terminal_interface_options(
+    interfaces: list[PhysicalInterface],
+    vlans: list[VlanInterface],
+) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    parents = {interface.name: interface for interface in interfaces}
+    management_name = management_interface_context(interfaces).get("name", "")
+    for interface in interfaces:
+        role = normalize_interface_role(interface.role)
+        mode = normalize_interface_mode(interface.mode)
+        ipv4_cidr = interface.host_ip_cidr if normalize_ipv4_method(interface.ipv4_method) == "dhcp" else interface.ip_cidr
+        addresses = _interface_addresses(ipv4_cidr, interface.ipv6_cidr)
+        if interface.oper_state == "missing" or interface.admin_state != "up" or role == "unused" or mode == "trunk" or not addresses:
+            continue
+        options.append(
+            {
+                "name": interface.name,
+                "kind": "physical",
+                "role": role,
+                "addresses": addresses,
+                "web_terminal_allowed": role != "management" or interface.name == management_name,
+                "label": f"{interface.name} - {role} / {' / '.join(addresses)}",
+            }
+        )
+    for vlan in vlans:
+        parent = parents.get(vlan.parent_interface)
+        role = normalize_interface_role(vlan.role)
+        addresses = _interface_addresses(vlan.ip_cidr, vlan.ipv6_cidr)
+        if (
+            not vlan.enabled
+            or role == "unused"
+            or not addresses
+            or parent is None
+            or parent.oper_state == "missing"
+            or parent.admin_state != "up"
+        ):
+            continue
+        options.append(
+            {
+                "name": vlan.name,
+                "kind": "vlan",
+                "role": role,
+                "addresses": addresses,
+                "web_terminal_allowed": role != "management",
+                "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {role} / {' / '.join(addresses)}",
+            }
+        )
+    return options
+
+
+def normalized_web_terminal_interfaces(settings: ApplianceSettings, management_interface: dict[str, str]) -> list[str]:
+    selected = web_terminal_interfaces_from_json(settings.web_terminal_interfaces_json)
+    management_name = str(management_interface.get("name") or "")
+    if settings.web_terminal_enabled and management_name:
+        selected = [management_name, *[name for name in selected if name != management_name]]
+    return selected
+
+
+def web_terminal_addresses(selected: list[str], options: list[dict[str, Any]]) -> list[str]:
+    by_name = {str(option["name"]): option for option in options}
+    addresses: list[str] = []
+    for name in selected:
+        for address in by_name.get(name, {}).get("addresses", []):
+            if address and address not in addresses:
+                addresses.append(address)
+    return addresses
+
+
+def web_terminal_listener_interfaces(
+    selected: list[str],
+    options: list[dict[str, Any]],
+) -> list[str]:
+    by_name = {str(option.get("name") or ""): option for option in options}
+    return [
+        name
+        for name in selected
+        if name in by_name and bool(by_name[name].get("web_terminal_allowed", True))
+    ]
+
+
+def _interface_addresses(ipv4_cidr: str | None, ipv6_cidr: str | None) -> list[str]:
+    result: list[str] = []
+    for value in (ipv4_cidr, ipv6_cidr):
+        if not value:
+            continue
+        try:
+            address = str(ip_interface(value).ip)
+        except ValueError:
+            continue
+        if address not in result:
+            result.append(address)
+    return result
 
 
 def normalize_fqdn(value: str) -> str:
@@ -167,6 +287,7 @@ def validate_appliance_settings(
     ca_enabled: bool = False,
     management_https_cert_available: bool = False,
     chrony_enabled: bool = True,
+    web_terminal_options: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -199,6 +320,27 @@ def validate_appliance_settings(
             errors.append("Management UI HTTPS requires the local LabFoundry CA to be enabled.")
         elif not management_https_cert_available:
             errors.append("Management UI HTTPS requires an issued CA-managed appliance HTTPS certificate. Apply the CA unit first.")
+    selected_terminal_interfaces = normalized_web_terminal_interfaces(settings, management_interface)
+    terminal_options = web_terminal_options or []
+    options_by_name = {str(option.get("name") or ""): option for option in terminal_options}
+    option_names = set(options_by_name)
+    if settings.web_terminal_enabled:
+        if not settings.management_https_enabled:
+            errors.append("Web terminal access requires Management UI HTTPS.")
+        management_name = str(management_interface.get("name") or "")
+        if not management_name or management_name not in selected_terminal_interfaces:
+            errors.append("Web terminal access requires the management interface.")
+        missing = [name for name in selected_terminal_interfaces if name not in option_names]
+        if missing:
+            errors.append(f"Web terminal interfaces are unavailable or have no address: {', '.join(missing)}.")
+        disallowed = [
+            name
+            for name in selected_terminal_interfaces
+            if name in option_names
+            and not bool(options_by_name[name].get("web_terminal_allowed", True))
+        ]
+        if disallowed:
+            errors.append(f"Additional Web terminal interfaces cannot use the management role: {', '.join(disallowed)}.")
     if not settings.config_path.startswith("/"):
         errors.append("Appliance settings config path must be absolute.")
     raw_target_naming = (settings.service_dns_target_naming or "").strip().lower().replace("_", "-")
@@ -218,6 +360,7 @@ def appliance_settings_preview_payload(
     management_interface: dict[str, str],
     management_https_cert_path: str = "",
     management_https_key_path: str = "",
+    web_terminal_options: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     external_servers = split_servers(settings.external_dns_servers)
     resolver_mode = resolver_mode_for_settings(
@@ -226,6 +369,7 @@ def appliance_settings_preview_payload(
         external_servers=external_servers,
     )
     resolver_servers = ["127.0.0.1"] if local_dns_enabled else external_servers
+    selected_terminal_interfaces = normalized_web_terminal_interfaces(settings, management_interface)
     payload = {
         "fqdn": normalize_fqdn(settings.fqdn),
         "resolver_mode": resolver_mode,
@@ -235,6 +379,9 @@ def appliance_settings_preview_payload(
         "management_ip": management_interface.get("ip", ""),
         "management_ip_cidr": management_interface.get("ip_cidr", ""),
         "management_https_enabled": bool(settings.management_https_enabled),
+        "web_terminal_enabled": bool(settings.web_terminal_enabled),
+        "web_terminal_interfaces": selected_terminal_interfaces,
+        "web_terminal_addresses": web_terminal_addresses(selected_terminal_interfaces, web_terminal_options or []),
         "root_ssh_enabled": bool(settings.root_ssh_enabled),
         "service_dns_target_naming": normalize_service_dns_target_naming(settings.service_dns_target_naming),
         "management_http_port": MANAGEMENT_UI_PORT,
@@ -255,6 +402,7 @@ def render_appliance_settings_config(
     management_interface: dict[str, str],
     management_https_cert_path: str = "",
     management_https_key_path: str = "",
+    web_terminal_options: list[dict[str, Any]] | None = None,
 ) -> str:
     payload = appliance_settings_preview_payload(
         settings,
@@ -262,5 +410,6 @@ def render_appliance_settings_config(
         management_interface=management_interface,
         management_https_cert_path=management_https_cert_path,
         management_https_key_path=management_https_key_path,
+        web_terminal_options=web_terminal_options,
     )
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"

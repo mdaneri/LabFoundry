@@ -9,6 +9,7 @@ import hashlib
 import re
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 
 HELPER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "appliance" / "labfoundry-helper"
@@ -408,8 +409,7 @@ def wan_config_text(
     bad_nat_source: bool = False,
     bad_target: bool = False,
     wan_mode: str = "interface",
-    target_role: str = "wan",
-    target_wan: bool = True,
+    target_role: str = "route",
     ipv6_route: bool = False,
     ipv6_only_target: bool = False,
 ) -> str:
@@ -427,7 +427,6 @@ def wan_config_text(
             f"  role={target_role}",
             f"  ip_cidr={ipv4_cidr}",
             f"  ipv6_cidr={ipv6_cidr}",
-            f"  wan={str(target_wan).lower()}",
             "",
             "[routes]",
             f"route={destination}",
@@ -779,10 +778,10 @@ def test_wan_helper_rejects_enabled_routing_rule_missing_targets(tmp_path):
     assert any("references missing destination target missing-destination" in error for error in errors)
 
 
-def test_wan_helper_allows_nat_on_non_wan_role_target(tmp_path):
+def test_wan_helper_allows_nat_on_access_role_target(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "nat-access-target.conf"
-    config_path.write_text(wan_config_text(target_role="access", target_wan=False), encoding="utf-8")
+    config_path.write_text(wan_config_text(target_role="access"), encoding="utf-8")
 
     assert helper._wan_config_errors(config_path) == []
 
@@ -863,7 +862,6 @@ def test_wan_helper_preserves_management_default_gateway(monkeypatch, tmp_path):
                 "  role=management",
                 "  ip_cidr=192.168.49.10/24",
                 "  ipv6_cidr=",
-                "  wan=false",
                 "  routing_domain=management",
                 "  route_allowed=false",
             ]
@@ -3140,6 +3138,9 @@ def appliance_settings_json(
     management_https_cert_path: str = "",
     management_https_key_path: str = "",
     root_ssh_enabled: bool = False,
+    web_terminal_enabled: bool = False,
+    web_terminal_interfaces: list[str] | None = None,
+    web_terminal_addresses: list[str] | None = None,
     ntp_servers: list[str] | None = None,
 ) -> str:
     import json
@@ -3153,6 +3154,9 @@ def appliance_settings_json(
         "management_ip": "192.168.49.1",
         "management_ip_cidr": "192.168.49.1/24",
         "management_https_enabled": management_https_enabled,
+        "web_terminal_enabled": web_terminal_enabled,
+        "web_terminal_interfaces": web_terminal_interfaces or [],
+        "web_terminal_addresses": web_terminal_addresses or [],
         "root_ssh_enabled": root_ssh_enabled,
         "management_http_port": 8000,
         "management_public_http_port": 80,
@@ -3224,6 +3228,163 @@ def test_appliance_settings_helper_requires_https_cert_files(tmp_path):
 
     assert "management_https_cert_path is required when management HTTPS is enabled." in errors
     assert "management_https_key_path is required when management HTTPS is enabled." in errors
+
+
+def test_appliance_settings_helper_requires_https_and_management_for_web_terminal(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-settings.json"
+    config_path.write_text(
+        appliance_settings_json(
+            web_terminal_enabled=True,
+            web_terminal_interfaces=["eth2"],
+            web_terminal_addresses=["192.168.87.32"],
+        ),
+        encoding="utf-8",
+    )
+
+    errors = helper._appliance_settings_config_errors(config_path)
+
+    assert "web terminal requires management HTTPS." in errors
+    assert "web terminal interfaces must include the management interface." in errors
+    assert "web terminal addresses must include the management IP." in errors
+
+
+def test_web_terminal_helper_installs_ca_trust_and_disables_without_deleting_ca(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    ssh_dir = tmp_path / "ssh" / "sshd_config.d"
+    ssh_main = tmp_path / "ssh" / "sshd_config"
+    config_dir = tmp_path / "etc" / "labfoundry" / "ssh"
+    runtime_dir = tmp_path / "var" / "lib" / "labfoundry" / "web-terminal"
+    request_dir = runtime_dir / "requests"
+    dropin = ssh_dir / "labfoundry-web-terminal.conf"
+    ca_key = config_dir / "web-terminal-ca"
+    ca_public = config_dir / "web-terminal-ca.pub"
+    ssh_main.parent.mkdir(parents=True)
+    ssh_main.write_text("PasswordAuthentication no\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if "-t" in command and "-f" in command:
+            key_path = Path(command[command.index("-f") + 1])
+            key_path.write_text("private", encoding="utf-8")
+            Path(f"{key_path}.pub").write_text("ssh-ed25519 AAAA terminal-ca\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "SSHD_CONFIG_DIR", ssh_dir)
+    monkeypatch.setattr(helper, "SSHD_MAIN_CONFIG_PATH", ssh_main)
+    monkeypatch.setattr(helper, "SSHD_WEB_TERMINAL_CONFIG_PATH", dropin)
+    monkeypatch.setattr(helper, "WEB_TERMINAL_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(helper, "WEB_TERMINAL_CA_KEY_PATH", ca_key)
+    monkeypatch.setattr(helper, "WEB_TERMINAL_CA_PUBLIC_KEY_PATH", ca_public)
+    monkeypatch.setattr(helper, "WEB_TERMINAL_RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(helper, "WEB_TERMINAL_REQUEST_DIR", request_dir)
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=1000, pw_gid=1000))
+    monkeypatch.setattr(helper, "_chown_path", lambda *_args: None)
+    monkeypatch.setattr(
+        helper.shutil,
+        "which",
+        lambda command: {"ssh-keygen": "/usr/bin/ssh-keygen", "sshd": "/usr/sbin/sshd"}.get(command),
+    )
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._configure_web_terminal(True) == 0
+    assert dropin.read_text(encoding="utf-8").endswith(f"TrustedUserCAKeys {ca_public}\n")
+    assert ca_key.exists()
+    assert ca_public.exists()
+    assert request_dir.is_dir()
+    assert ["systemctl", "restart", "sshd"] in commands
+
+    assert helper._configure_web_terminal(False) == 0
+    assert not dropin.exists()
+    assert ca_key.exists()
+
+
+def test_web_terminal_helper_signs_short_lived_restricted_certificate_for_non_wheel_user(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    dropin = tmp_path / "labfoundry-web-terminal.conf"
+    ca_key = tmp_path / "web-terminal-ca"
+    dropin.write_text("TrustedUserCAKeys test\n", encoding="utf-8")
+    ca_key.write_text("private", encoding="utf-8")
+    request_path = request_dir / "session_1234.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "username": "admin",
+                "session_id": "session_1234",
+                "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest session-key",
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        public_path = Path(command[-1])
+        public_path.with_name("session-cert.pub").write_text(
+            "ssh-ed25519-cert-v01@openssh.com AAAA signed\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "WEB_TERMINAL_REQUEST_DIR", request_dir)
+    monkeypatch.setattr(helper, "SSHD_WEB_TERMINAL_CONFIG_PATH", dropin)
+    monkeypatch.setattr(helper, "WEB_TERMINAL_CA_KEY_PATH", ca_key)
+    monkeypatch.setattr(
+        helper.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_shell="/usr/bin/pwsh", pw_gid=1000),
+    )
+    monkeypatch.setattr(
+        helper.grp,
+        "getgrnam",
+        lambda _name: (_ for _ in ()).throw(AssertionError("Web terminal signing must not require wheel membership.")),
+    )
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/ssh-keygen" if command == "ssh-keygen" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_web_terminal("sign", [str(request_path)]) == 0
+    command = commands[0]
+    assert command[command.index("-V") + 1] == "-5s:+60s"
+    assert "source-address=127.0.0.1/32" in command
+    assert "no-port-forwarding" in command
+    assert "no-agent-forwarding" in command
+    assert "no-x11-forwarding" in command
+    assert "no-user-rc" in command
+    assert "ssh-ed25519-cert-v01@openssh.com AAAA signed" in capsys.readouterr().out
+    assert not request_path.exists()
+
+
+def test_public_services_helper_rejects_management_routes_in_terminal_listener(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "public-services.conf"
+    config_path.write_text(
+        """# IP-scoped public service front door for non-management interfaces.
+server {
+  # Terminal-only HTTPS front door.
+  location = /login { proxy_pass http://127.0.0.1:8000; }
+  location = /logout { proxy_pass http://127.0.0.1:8000; }
+  location = /terminal { proxy_pass http://127.0.0.1:8000; }
+  location = /terminal/tickets { proxy_pass http://127.0.0.1:8000; }
+  location = /terminal/ws {
+    proxy_set_header X-LabFoundry-Listener-Address $server_addr;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+  location ^~ /static/ { proxy_pass http://127.0.0.1:8000; }
+  location = /dashboard { proxy_pass http://127.0.0.1:8000; }
+  location / { return 404; }
+}
+""",
+        encoding="utf-8",
+    )
+
+    errors = helper._public_services_config_errors(config_path)
+
+    assert "Public services web terminal config must not expose location = /dashboard." in errors
 
 
 def test_appliance_settings_helper_rejects_invalid_json(tmp_path):

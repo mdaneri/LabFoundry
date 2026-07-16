@@ -71,6 +71,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
             username=settings.bootstrap_admin_username,
             role="admin",
             shell=POWERSHELL_LOCAL_USER_SHELL if settings.environment == "appliance" else DEFAULT_LOCAL_USER_SHELL,
+            web_terminal_access=True,
         )
         stage_user_os_password(bootstrap_user, settings.bootstrap_admin_password)
         db.add(bootstrap_user)

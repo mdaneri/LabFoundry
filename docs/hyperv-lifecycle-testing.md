@@ -166,6 +166,10 @@ The lifecycle runner records structured evidence in
   apply unit, HTTP-to-HTTPS redirect behavior on the management front door, and
   HTTPS `/openapi.json` reachability with the locally issued appliance
   certificate
+- passwordless admin web-terminal desired state on management plus the selected
+  SiteA interface, applied OpenSSH user-CA trust, a ready terminal page and
+  one-use ticket on both listeners, and proof that the extra listener returns
+  404 for `/dashboard`
 - VCF Backups SFTP desired state, `vcf-backup` Local Users password staging and
   OS sync, global `vcf_backups` appliance apply, OpenSSH drop-in host state, and
   a client-side SFTP probe from Client A to the SiteA appliance address

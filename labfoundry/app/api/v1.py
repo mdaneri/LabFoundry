@@ -151,10 +151,13 @@ from labfoundry.app.services.appliance_settings import (
     appliance_settings_to_dict,
     management_dhcp_dns_context,
     management_interface_context,
+    normalized_web_terminal_interfaces,
     normalize_fqdn,
     normalize_multiline_values,
     render_appliance_settings_config,
     validate_appliance_settings,
+    web_terminal_interface_options,
+    web_terminal_interfaces_to_json,
 )
 from labfoundry.app.services.chrony import default_chrony_upstream_fields
 from labfoundry.app.services.ca import ca_service_state
@@ -422,13 +425,16 @@ def appliance_settings_response(db: Session, app_settings: Settings) -> Settings
     management_https_cert_available, management_https_cert_path, management_https_key_path = ca_managed_certificate_available(db, "appliance:https")
     local_dns_enabled = bool(dns_settings and dns_settings.enabled)
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlans = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     management = management_interface_context(interfaces)
+    terminal_options = web_terminal_interface_options(interfaces, vlans)
     validation_errors, validation_warnings = validate_appliance_settings(
         desired,
         local_dns_enabled=local_dns_enabled,
         management_interface=management,
         ca_enabled=bool(ca_settings and ca_settings.enabled),
         management_https_cert_available=management_https_cert_available,
+        web_terminal_options=terminal_options,
     )
     return SettingsResponse(
         app_name=app_settings.app_name,
@@ -439,6 +445,8 @@ def appliance_settings_response(db: Session, app_settings: Settings) -> Settings
         appliance_fqdn=desired.fqdn,
         management_https_enabled=desired.management_https_enabled,
         management_https_cert_available=management_https_cert_available,
+        web_terminal_enabled=desired.web_terminal_enabled,
+        web_terminal_interfaces=normalized_web_terminal_interfaces(desired, management),
         root_ssh_enabled=desired.root_ssh_enabled,
         external_dns_servers=appliance_settings_to_dict(desired)["external_dns_servers"],
         appliance_settings_config_path=desired.config_path,
@@ -454,6 +462,7 @@ def appliance_settings_response(db: Session, app_settings: Settings) -> Settings
             management_interface=management,
             management_https_cert_path=management_https_cert_path,
             management_https_key_path=management_https_key_path,
+            web_terminal_options=terminal_options,
         ),
     )
 
@@ -2226,6 +2235,16 @@ def update_app_settings(
     desired = get_appliance_settings(db)
     desired.fqdn = normalize_fqdn(payload.appliance_fqdn)
     desired.management_https_enabled = payload.management_https_enabled
+    desired.web_terminal_enabled = payload.web_terminal_enabled
+    interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    management = management_interface_context(interfaces)
+    requested_terminal_interfaces = list(payload.web_terminal_interfaces)
+    if desired.web_terminal_enabled and management.get("name"):
+        requested_terminal_interfaces = [
+            management["name"],
+            *[name for name in requested_terminal_interfaces if name != management["name"]],
+        ]
+    desired.web_terminal_interfaces_json = web_terminal_interfaces_to_json(requested_terminal_interfaces)
     desired.root_ssh_enabled = payload.root_ssh_enabled
     desired.external_dns_servers = normalize_multiline_values("\n".join(payload.external_dns_servers))
     desired.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH

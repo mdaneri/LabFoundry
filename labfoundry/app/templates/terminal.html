@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block page_title %}Web terminal{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="/static/vendor/xterm/xterm.css?v=5.5.0">{% endblock %}
+{% block content %}
+  {% include "partials/terminal_panel.html" %}
+{% endblock %}
+{% block extra_scripts %}
+  <script src="/static/vendor/xterm/xterm.js?v=5.5.0"></script>
+  <script src="/static/terminal.js?v=web-terminal-review-20260716-3"></script>
+{% endblock %}

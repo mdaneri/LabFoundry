@@ -305,7 +305,6 @@ def render_wan_config(
                 f"  ip_cidr={target.get('ip_cidr', '')}",
                 f"  ipv6_cidr={target.get('ipv6_cidr', '')}",
                 f"  gateway={target.get('gateway', '')}",
-                f"  wan={_bool_value(bool(target.get('wan')))}",
                 f"  routing_domain={target.get('routing_domain', 'lab')}",
                 f"  route_allowed={_bool_value(bool(target.get('route_allowed', True)))}",
             ]

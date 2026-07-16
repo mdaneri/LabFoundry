@@ -22,13 +22,51 @@
         <span class="switch-track" aria-hidden="true"></span>
       </label>
       <label class="switch-field">
+        <span class="field-label"><span>Web terminal access</span><button class="help-icon" type="button" data-help="Allows administrators to open a passwordless browser terminal as their matching Photon OS account. Management is always exposed; additional selected interfaces receive only terminal routes after global appliance apply. HTTPS is required and sudo keeps its normal password policy.">i</button></span>
+        <input class="switch-input" type="checkbox" name="web_terminal_enabled" {{ "checked" if appliance_settings.web_terminal_enabled else "" }}>
+        <span class="switch-track" aria-hidden="true"></span>
+      </label>
+      <div class="settings-inline-field">
+        <span class="field-label"><span>Web terminal interfaces</span><button class="help-icon" type="button" data-help="Selects addressed interfaces that may serve the terminal over HTTPS. The management interface is mandatory; missing, disabled, trunk-only, unused, or addressless selections are rejected before apply.">i</button></span>
+        <input type="hidden" name="web_terminal_interfaces_present" value="1">
+        <div class="tag-editor" data-tag-editor data-tag-name="web_terminal_interfaces">
+          <div class="tag-editor-tags" data-tag-list>
+            {% for interface_name in selected_web_terminal_interfaces %}
+              {% set option = web_terminal_interface_options | selectattr('name', 'equalto', interface_name) | first %}
+              <span class="tag-token" data-value="{{ interface_name }}"{% if interface_name == management_interface.name %} data-tag-locked{% endif %}>
+                <span>{{ interface_name }}</span>
+                {% if interface_name != management_interface.name %}<button type="button" data-tag-remove aria-label="Remove {{ interface_name }}">×</button>{% endif %}
+                <input type="hidden" name="web_terminal_interfaces" value="{{ interface_name }}">
+              </span>
+            {% endfor %}
+          </div>
+          <input class="tag-editor-input" type="text" placeholder="Add interface..." list="web-terminal-interface-options" data-tag-entry autocomplete="off">
+          <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add terminal interface">+</button>
+          <div class="tag-suggestions" data-tag-menu data-tag-empty-message="No interfaces available." hidden>
+            {% for option in web_terminal_interface_options %}
+              {% if option.name != management_interface.name and option.web_terminal_allowed %}
+                <button type="button" data-tag-option="{{ option.name }}" data-tag-label="{{ option.name }}">
+                  <strong>{{ option.name }}</strong>
+                  <small>{{ option.role }} / {{ option.addresses|join(' / ') }}</small>
+                </button>
+              {% endif %}
+            {% endfor %}
+          </div>
+        </div>
+        <datalist id="web-terminal-interface-options">
+          {% for option in web_terminal_interface_options %}
+            {% if option.name != management_interface.name and option.web_terminal_allowed %}<option value="{{ option.name }}">{{ option.label }}</option>{% endif %}
+          {% endfor %}
+        </datalist>
+      </div>
+      <label class="switch-field">
         <span class="field-label"><span>Root SSH login</span><button class="help-icon" type="button" data-help="Allows direct SSH login as root for local appliance debugging after global appliance apply. Keep disabled unless a controlled Hyper-V or break-glass workflow needs it; disabling applies LabFoundry's root-login sshd drop-in off state.">i</button></span>
         <input class="switch-input" type="checkbox" name="root_ssh_enabled" {{ "checked" if appliance_settings.root_ssh_enabled else "" }}>
         <span class="switch-track" aria-hidden="true"></span>
       </label>
-      <label>
+      <label class="settings-inline-field">
         <span class="field-label"><span>Service DNS target names</span><button class="help-icon" type="button" data-help="Controls generated per-listener service DNS names. IP-derived names are clearer for clients on specific networks; interface-derived names preserve the previous eth-style convention.">i</button></span>
-        <select name="service_dns_target_naming">
+        <select name="service_dns_target_naming" aria-label="Service DNS target names">
           <option value="ip" {{ "selected" if appliance_settings.service_dns_target_naming == "ip" else "" }}>IP address</option>
           <option value="interface" {{ "selected" if appliance_settings.service_dns_target_naming == "interface" else "" }}>Interface name</option>
         </select>
@@ -146,6 +184,7 @@
         <div><span>Management interface</span><strong data-appliance-settings-management>{{ management_interface.name or "not found" }}{% if management_interface.ip %} / {{ management_interface.ip }}{% endif %}</strong></div>
         <div><span>Management UI/API</span><strong>{{ "HTTPS" if appliance_settings.management_https_enabled else "HTTP" }}{% if appliance_settings.management_https_enabled and management_https_cert_path %} / {{ management_https_cert_path }}{% endif %}</strong></div>
         <div><span>Root SSH</span><strong data-appliance-settings-root-ssh>{{ "enabled" if appliance_settings.root_ssh_enabled else "disabled" }}</strong></div>
+        <div><span>Web terminal</span><strong data-appliance-settings-web-terminal>{{ "enabled" if appliance_settings.web_terminal_enabled else "disabled" }}{% if web_terminal_addresses %} / {{ web_terminal_addresses|join(', ') }}{% endif %}</strong></div>
         <div><span>Service DNS targets</span><strong>{{ "IP address" if appliance_settings.service_dns_target_naming == "ip" else "Interface name" }}</strong></div>
         <div><span>Config path</span><strong data-appliance-settings-config-path>{{ appliance_settings.config_path }}</strong></div>
       </div>

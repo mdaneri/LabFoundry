@@ -5,12 +5,17 @@ from labfoundry.app.models import ApplianceSettings, AuditEvent, CaSettings, Dhc
 from labfoundry.app.services.networking import (
     HostPhysicalInterface,
     NETWORK_INVENTORY_CLEANUP_WARNING_KEY,
+    normalize_interface_role,
     parse_linux_ip_interfaces,
     reconcile_host_physical_interfaces,
     render_network_config,
     sync_host_physical_interfaces,
     validate_network_state,
 )
+
+
+def test_wan_is_not_an_interface_role_alias():
+    assert normalize_interface_role("wan") == "unused"
 
 
 def test_parse_linux_ip_interfaces_skips_loopback_and_vlans():

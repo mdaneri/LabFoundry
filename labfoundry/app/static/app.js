@@ -3156,6 +3156,7 @@ function newUserRow() {
     roles_label: "viewer",
     roles_text: "viewer",
     shell: "/sbin/nologin",
+    web_terminal_access: false,
     enabled: false,
     created_at: "",
     os_sync_status: "password not staged; reset to sync",
@@ -3314,6 +3315,16 @@ function initializeUsersTable() {
           editorParams: { values: shells },
           minWidth: 145,
           cellEdited: (cell) => autoSaveUser(cell, csrf),
+        },
+        {
+          title: "Web SSH",
+          field: "web_terminal_access",
+          formatter: labFoundryBooleanFormatter,
+          editor: "tickCross",
+          hozAlign: "center",
+          width: 105,
+          cellEdited: (cell) => autoSaveUser(cell, csrf),
+          headerTooltip: "Allows this enabled local user to open the appliance web terminal. An interactive shell is also required.",
         },
         {
           title: "Enabled",
@@ -7306,6 +7317,13 @@ function updateApplianceSettingsValidation(payload = {}) {
   if (rootSsh instanceof HTMLElement && payload.root_ssh_enabled !== undefined) {
     rootSsh.textContent = payload.root_ssh_enabled ? "enabled" : "disabled";
   }
+  const webTerminal = document.querySelector("[data-appliance-settings-web-terminal]");
+  if (webTerminal instanceof HTMLElement && payload.web_terminal_enabled !== undefined) {
+    const addresses = Array.isArray(payload.web_terminal_addresses) && payload.web_terminal_addresses.length
+      ? ` / ${payload.web_terminal_addresses.join(", ")}`
+      : "";
+    webTerminal.textContent = `${payload.web_terminal_enabled ? "enabled" : "disabled"}${addresses}`;
+  }
   updateApplianceSettingsDhcpDns(payload);
   const dnsStatus = document.querySelector("[data-appliance-settings-dns-status]");
   if (dnsStatus instanceof HTMLElement) {
@@ -10284,6 +10302,9 @@ function initializeTagEditors() {
     };
 
     const removeToken = (token) => {
+      if (token.hasAttribute("data-tag-locked")) {
+        return;
+      }
       token.remove();
       refreshMenu();
       input.focus();
@@ -10338,7 +10359,7 @@ function initializeTagEditors() {
         return;
       }
       if (singleValue) {
-        list.querySelectorAll(".tag-token").forEach((token) => token.remove());
+        list.querySelectorAll(".tag-token:not([data-tag-locked])").forEach((token) => token.remove());
       }
 
       const token = document.createElement("span");
@@ -10391,7 +10412,8 @@ function initializeTagEditors() {
           addInputValues();
         }
       } else if (event.key === "Backspace" && !input.value) {
-        const lastToken = list.querySelector(".tag-token:last-child");
+        const removableTokens = list.querySelectorAll(".tag-token:not([data-tag-locked])");
+        const lastToken = removableTokens[removableTokens.length - 1];
         if (lastToken instanceof HTMLElement) {
           removeToken(lastToken);
         }
@@ -10851,7 +10873,7 @@ function applianceApplyReviewRow(unit) {
   validity.textContent = unit.valid ? "valid" : "needs attention";
   const edit = document.createElement("a");
   edit.className = "text-link";
-  edit.href = unit.page_url || "/appliance-apply";
+  edit.href = unit.page_url || "/dashboard";
   edit.textContent = "Edit";
   actions.append(validity, edit);
   head.append(label, actions);
@@ -10917,6 +10939,13 @@ async function openApplianceApplyReview() {
     elements.status.className = "status-pill muted";
     elements.status.textContent = "loading";
   }
+  if (elements.submit instanceof HTMLButtonElement) {
+    elements.submit.classList.add("hidden");
+    elements.submit.disabled = true;
+  }
+  if (elements.selectionSummary instanceof HTMLElement) {
+    elements.selectionSummary.textContent = "Loading appliance changes…";
+  }
   setApplianceApplyModalError("");
   showApplianceApplyModal(elements.modal);
   try {
@@ -10941,6 +10970,9 @@ async function openApplianceApplyReview() {
     if (elements.status instanceof HTMLElement) {
       elements.status.className = `status-pill ${units.length ? "warn" : "good"}`;
       elements.status.textContent = `${units.length} changed`;
+    }
+    if (elements.submit instanceof HTMLButtonElement) {
+      elements.submit.classList.toggle("hidden", units.length === 0);
     }
     updateApplianceApplySelection();
   } catch (error) {
@@ -11013,7 +11045,7 @@ function renderApplianceApplyTask(task) {
   const grid = document.getElementById("appliance-apply-live-grid");
   if (grid instanceof HTMLElement && typeof window.Tabulator === "function") {
     const columns = [
-      { title: "Status", field: "status", width: 120, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
+      { title: "Status", field: "status", width: 150, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
       { title: "Task / component", field: "label", minWidth: 260, formatter: (cell) => escapeHtml(cell.getRow().getData().is_step ? cell.getValue() || "" : cell.getRow().getData().type_label || "Appliance Apply") },
       { title: "State", field: "state", minWidth: 170, formatter: (cell) => escapeHtml(cell.getValue() || "") },
       { title: "Progress", field: "progress_percent", width: 105, formatter: (cell) => `${Number(cell.getValue() || 0)}%` },
@@ -11101,7 +11133,9 @@ async function pollGlobalApplianceApply() {
 function initializeApplianceApplyProgress() {
   const elements = applianceApplyModalElements();
   if (!(elements.modal instanceof HTMLDialogElement)) return;
-  document.querySelector("[data-appliance-apply-sidebar]")?.addEventListener("click", (event) => {
+  document.addEventListener("click", (event) => {
+    const trigger = event.target.closest("[data-appliance-apply-open]");
+    if (!trigger) return;
     event.preventDefault();
     openApplianceApplyReview().catch(() => {});
   });
@@ -11116,12 +11150,6 @@ function initializeApplianceApplyProgress() {
   elements.reviewForm?.addEventListener("submit", (event) => {
     event.preventDefault();
     submitApplianceApplyForm(elements.reviewForm).catch(() => {});
-  });
-  const fallbackForm = document.querySelector("[data-appliance-apply-form]");
-  fallbackForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    showApplianceApplyModal(elements.modal);
-    submitApplianceApplyForm(fallbackForm).catch(() => {});
   });
   elements.cancel?.addEventListener("click", async () => {
     const taskId = elements.cancel?.dataset.taskId || "";
@@ -11151,6 +11179,9 @@ function initializeApplianceApplyProgress() {
     if (document.visibilityState !== "hidden") pollGlobalApplianceApply().catch(() => {});
   });
   pollGlobalApplianceApply().catch(() => {});
+  if (window.location.hash === "#appliance-apply-review") {
+    openApplianceApplyReview().catch(() => {});
+  }
 }
 
 function monitorFinite(value) {
@@ -12497,7 +12528,7 @@ function dashboardSnapshotMarkup(snapshot) {
       ${dashboardTimeMarkup(item.timestamp)}
     </a>`).join("");
   const pendingUnits = (pending.units || []).slice(0, 4).map((unit) => `<a href="${escapeDashboardHtml(unit.url)}">${escapeDashboardHtml(unit.label)}</a>`).join("");
-  const pendingMore = (pending.units || []).length > 4 ? `<a href="/appliance-apply">+${(pending.units || []).length - 4} more</a>` : "";
+  const pendingMore = (pending.units || []).length > 4 ? `<a href="/dashboard#appliance-apply-review" data-appliance-apply-open>+${(pending.units || []).length - 4} more</a>` : "";
   const serviceExceptions = (services.exceptions || []).map((item) => `<a href="${escapeDashboardHtml(item.url)}"><span>${escapeDashboardHtml(item.name)}</span><span class="status-pill warn">${escapeDashboardHtml(item.state)}</span></a>`).join("");
   const networkExceptions = (network.exceptions || []).map((item) => `<a href="${escapeDashboardHtml(item.url)}"><span>${escapeDashboardHtml(item.name)}</span><span class="status-pill warn">${escapeDashboardHtml(item.state)}</span></a>`).join("");
   const activityRows = activity.map((item) => `
@@ -12526,11 +12557,11 @@ function dashboardSnapshotMarkup(snapshot) {
       </article>
       <article class="panel dashboard-changes-panel">
         <div class="panel-head compact"><div><h2>Changes &amp; Tasks</h2><p class="muted">Desired-state drift and work in progress.</p></div></div>
-        <a class="dashboard-summary-row" href="/appliance-apply"><span><strong>Pending appliance changes</strong><small>Valid changed units ready for review</small></span><span class="dashboard-summary-value">${Number(pending.count) || 0}</span></a>
+        <a class="dashboard-summary-row" href="/dashboard#appliance-apply-review" data-appliance-apply-open><span><strong>Pending appliance changes</strong><small>Valid changed units ready for review</small></span><span class="dashboard-summary-value">${Number(pending.count) || 0}</span></a>
         ${(pending.units || []).length ? `<div class="dashboard-unit-links" aria-label="Valid pending apply units">${pendingUnits}${pendingMore}</div>` : '<p class="dashboard-inline-empty">No valid pending changes.</p>'}
         ${pending.invalid_count ? `<p class="dashboard-invalid-note"><span class="status-pill error">${Number(pending.invalid_count) || 0} invalid</span> Kept in Needs attention until resolved.</p>` : ""}
         <a class="dashboard-summary-row" href="/tasks"><span><strong>Tasks</strong><small>Pending and running work</small></span><span class="dashboard-task-counts"><b>${Number(tasks.pending) || 0}</b> pending <b>${Number(tasks.running) || 0}</b> running</span></a>
-        <div class="dashboard-panel-actions"><a class="text-link" href="/appliance-apply">Review changes</a><a class="text-link" href="/tasks">Open tasks</a></div>
+        <div class="dashboard-panel-actions"><a class="text-link" href="/dashboard#appliance-apply-review" data-appliance-apply-open>Review changes</a><a class="text-link" href="/tasks">Open tasks</a></div>
       </article>
     </section>
     <section class="dashboard-snapshot-grid">

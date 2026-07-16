@@ -104,17 +104,26 @@ def _ensure_sqlite_user_sync_columns() -> None:
         "external_email": "VARCHAR(240) DEFAULT ''",
         "role_override_json": "TEXT DEFAULT ''",
         "shell": "VARCHAR(80) DEFAULT '/sbin/nologin'",
+        "web_terminal_access": "BOOLEAN DEFAULT 0",
         "os_password_applied_at": "DATETIME",
         "os_sync_applied_at": "DATETIME",
         "os_sync_status": "VARCHAR(80) DEFAULT 'password_not_staged'",
         "os_sync_error": "TEXT",
         "os_unlock_requested_at": "DATETIME",
     }
+    added_web_terminal_access = "web_terminal_access" not in existing
     with engine.begin() as connection:
         for name, definition in columns.items():
             if name not in existing:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {name} {definition}"))
         connection.execute(text("""UPDATE users SET roles_json = '["' || role || '"]' WHERE COALESCE(roles_json, '') = ''"""))
+        if added_web_terminal_access:
+            connection.execute(
+                text(
+                    "UPDATE users SET web_terminal_access = 1 "
+                    "WHERE role = 'admin' OR roles_json LIKE '%\"admin\"%'"
+                )
+            )
 
 
 def _ensure_sqlite_appliance_settings_columns() -> None:
@@ -126,6 +135,8 @@ def _ensure_sqlite_appliance_settings_columns() -> None:
     existing = {column["name"] for column in inspector.get_columns("appliance_settings")}
     columns = {
         "management_https_enabled": "BOOLEAN DEFAULT 0",
+        "web_terminal_enabled": "BOOLEAN DEFAULT 0",
+        "web_terminal_interfaces_json": "TEXT DEFAULT '[]'",
         "root_ssh_enabled": "BOOLEAN DEFAULT 0",
         "service_dns_target_naming": "VARCHAR(20) DEFAULT 'ip'",
     }
