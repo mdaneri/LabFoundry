@@ -178,6 +178,47 @@ function Get-SshConnectionArguments {
     )
 }
 
+function Initialize-PasswordDeployPythonPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonCommand,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$TemporaryDirectory
+    )
+
+    $paramikoAvailable = $false
+    try {
+        & $PythonCommand -c 'import paramiko' 2>$null
+        $paramikoAvailable = $LASTEXITCODE -eq 0
+    } catch {
+        $paramikoAvailable = $false
+    }
+    if ($paramikoAvailable) {
+        return ''
+    }
+
+    $wheelDirectory = Join-Path $WorkingDirectory 'dist'
+    if (-not (Test-Path -LiteralPath $wheelDirectory -PathType Container)) {
+        throw "Paramiko is not installed and the local wheel directory does not exist: $wheelDirectory. Rerun without -SkipBuild or install the LabFoundry Python dependencies."
+    }
+
+    $dependencyDirectory = Join-Path $TemporaryDirectory 'python-dependencies'
+    New-Item -ItemType Directory -Force -Path $dependencyDirectory | Out-Null
+    Write-Host 'Preparing temporary Paramiko runtime from local deployment wheels...'
+    try {
+        Invoke-CheckedCommand -FilePath $PythonCommand -WorkingDirectory $WorkingDirectory -Arguments @(
+            '-m', 'pip', 'install',
+            '--disable-pip-version-check',
+            '--no-index',
+            '--find-links', $wheelDirectory,
+            '--target', $dependencyDirectory,
+            'paramiko>=3.5.0'
+        ) | Out-Host
+    } catch {
+        throw "Unable to prepare the temporary Paramiko runtime from $wheelDirectory. Rerun without -SkipBuild so dependency wheels are downloaded, or install the LabFoundry Python dependencies. $($_.Exception.Message)"
+    }
+    return $dependencyDirectory
+}
+
 function Invoke-PasswordBackedDeploy {
     param(
         [Parameter(Mandatory = $true)][string]$PythonCommand,
@@ -208,8 +249,8 @@ try:
     import paramiko
 except ImportError as exc:
     raise SystemExit(
-        "Paramiko is required when -SshPassword is used. "
-        "Install the LabFoundry Python dependencies or rerun without -SshPassword to use ssh/scp."
+        "Paramiko could not be loaded for password-backed deployment after dependency preparation. "
+        "Rerun without -SkipBuild or install the LabFoundry Python dependencies."
     ) from exc
 
 
@@ -293,9 +334,21 @@ finally:
 '@
     [System.IO.File]::WriteAllText($pythonDeploy, ($pythonDeploySource -replace "`r?`n", "`n"), [System.Text.UTF8Encoding]::new($false))
 
+    $temporaryPythonPath = Initialize-PasswordDeployPythonPath `
+        -PythonCommand $PythonCommand `
+        -WorkingDirectory $WorkingDirectory `
+        -TemporaryDirectory (Split-Path -Parent $LocalScriptPath)
     $previousPassword = $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD
+    $previousPythonPath = $env:PYTHONPATH
     try {
         $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD = $Password
+        if ($temporaryPythonPath) {
+            $env:PYTHONPATH = if ($previousPythonPath) {
+                "$temporaryPythonPath$([System.IO.Path]::PathSeparator)$previousPythonPath"
+            } else {
+                $temporaryPythonPath
+            }
+        }
         Invoke-CheckedCommand -FilePath $PythonCommand -WorkingDirectory $WorkingDirectory -Arguments @(
             $pythonDeploy,
             '--host', $HostAddress,
@@ -315,6 +368,11 @@ finally:
             Remove-Item Env:\LABFOUNDRY_DEPLOY_SSH_PASSWORD -ErrorAction SilentlyContinue
         } else {
             $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD = $previousPassword
+        }
+        if ($null -eq $previousPythonPath) {
+            Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
+        } else {
+            $env:PYTHONPATH = $previousPythonPath
         }
     }
 }

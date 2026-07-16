@@ -683,13 +683,17 @@ dist`, uploads the latest `labfoundry-*.whl`, installs it into
 `/opt/labfoundry/bin/labfoundry-helper`, restores virtualenv permissions,
 restarts `labfoundry.service`, and verifies both guest loopback and host-facing
 `/openapi.json`. With `-SshPassword`, the helper uses the local Python runtime
-and Paramiko so SSH and sudo do not prompt interactively; you can also set
-`LABFOUNDRY_DEPLOY_SSH_PASSWORD` instead of passing the password on the command
-line. Without a password, it preserves the original `scp`/`ssh` key or agent
-workflow. Helper sync matters because the privileged helper is installed outside
-the Python virtualenv and is not replaced by `pip install`. If the app takes
-longer to import after reinstalling the wheel, increase the readiness wait with
-`-ReadinessTimeoutSeconds 120`.
+and Paramiko so SSH and sudo do not prompt interactively. If the selected Python
+cannot already import Paramiko, the helper installs it and its dependencies into
+the temporary deployment directory from the wheels downloaded under `dist`; it
+does not modify the global Python environment. When using `-SkipBuild`, keep
+those dependency wheels in `dist` or install the LabFoundry Python dependencies
+first. You can also set `LABFOUNDRY_DEPLOY_SSH_PASSWORD` instead of passing the
+password on the command line. Without a password, it preserves the original
+`scp`/`ssh` key or agent workflow. Helper sync matters because the privileged
+helper is installed outside the Python virtualenv and is not replaced by `pip
+install`. If the app takes longer to import after reinstalling the wheel,
+increase the readiness wait with `-ReadinessTimeoutSeconds 120`.
 
 Pass `-IncludeLabNetworkAdapters` only after `VMnet2`, `VMnet3`, and `VMnet4`
 exist for the SiteA, WAN/SiteB, and trunk-like validation networks.

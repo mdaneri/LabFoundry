@@ -562,6 +562,12 @@ def test_vmware_deploy_wheel_supports_password_backed_noninteractive_deploy():
     readme = Path("README.md").read_text(encoding="utf-8")
 
     assert "[string]$SshPassword = $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD" in script
+    assert "function Initialize-PasswordDeployPythonPath" in script
+    assert "Preparing temporary Paramiko runtime from local deployment wheels" in script
+    assert "'--no-index'" in script
+    assert "'--find-links', $wheelDirectory" in script
+    assert "'--target', $dependencyDirectory" in script
+    assert "$env:PYTHONPATH" in script
     assert "function Invoke-PasswordBackedDeploy" in script
     assert "import paramiko" in script
     assert "LABFOUNDRY_DEPLOY_SSH_PASSWORD" in script
@@ -572,8 +578,10 @@ def test_vmware_deploy_wheel_supports_password_backed_noninteractive_deploy():
     assert "Test-RequiredCommand -Name 'scp'" in script
     assert "Invoke-PasswordBackedDeploy `" in script
     assert "-SshPassword '<admin-password>'" in readme
-    assert "Without a password, it preserves the original `scp`/`ssh` key or agent" in readme
-    assert "workflow." in readme
+    assert "does not modify the global Python environment" in readme
+    assert "When using `-SkipBuild`, keep" in readme
+    assert "Without a password, it preserves the original" in readme
+    assert "`scp`/`ssh` key or agent workflow." in readme
 
 
 def test_lifecycle_hyperv_script_does_not_cleanup_without_explicit_flag():
