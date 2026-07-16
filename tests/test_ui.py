@@ -7012,6 +7012,31 @@ def test_vcf_offline_depot_tool_upload_marks_apply_pending_without_profiles(clie
         assert "# Archive: vcf-download-tool-9.1.0.test.tar.gz" in unit["config_preview"]
 
 
+def test_vcf_offline_depot_generation_timestamp_does_not_reopen_apply_unit(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
+    )
+    from labfoundry.app.ui import appliance_apply_units, set_setting_value, update_appliance_apply_baselines
+
+    with SessionLocal() as db:
+        set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY, "generated-depot-id")
+        set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY, "2026-07-16T19:05:04.930993+00:00")
+        unit = next(unit for unit in appliance_apply_units(db) if unit["id"] == "vcf_offline_depot")
+        assert "# Software depot ID: generated" in unit["config_preview"]
+        assert "# Software depot ID generated:" not in unit["config_preview"]
+        update_appliance_apply_baselines(db, [unit], {"vcf_offline_depot"})
+        db.commit()
+
+        set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY, "2026-07-16T19:22:22.389728+00:00")
+        db.commit()
+
+        refreshed = next(unit for unit in appliance_apply_units(db) if unit["id"] == "vcf_offline_depot")
+        assert refreshed["changed"] is False
+        assert refreshed["config_diff"] == ""
+
+
 def test_vcf_offline_depot_apply_stages_tool_without_download_profiles(client, tmp_path, monkeypatch):
     from sqlalchemy import delete, select
 

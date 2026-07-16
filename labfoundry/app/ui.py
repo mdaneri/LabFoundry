@@ -2511,7 +2511,6 @@ def vcf_depot_tool_snapshot(context: dict[str, Any]) -> str:
             f"# Archive modified ns: {archive_mtime if archive_path else 'not staged'}",
             f"# Tool version: {settings.tool_version or 'not detected'}",
             f"# Software depot ID: {'generated' if software_depot_id.get('id') else 'not generated'}",
-            f"# Software depot ID generated: {software_depot_id.get('generated_at') or 'never'}",
             f"# Runtime reset pending: {'yes' if context.get('vcf_depot_runtime_reset_pending') else 'no'}",
         ]
     )
