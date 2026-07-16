@@ -279,6 +279,8 @@ class ApplianceSettings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     fqdn: Mapped[str] = mapped_column(String(180), default="labfoundry.labfoundry.internal")
     management_https_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    web_terminal_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    web_terminal_interfaces_json: Mapped[str] = mapped_column(Text, default="[]")
     root_ssh_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     service_dns_target_naming: Mapped[str] = mapped_column(String(20), default="ip")
     external_dns_servers: Mapped[str] = mapped_column(Text, default="1.1.1.1\n9.9.9.9")

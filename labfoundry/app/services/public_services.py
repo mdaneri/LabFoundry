@@ -157,6 +157,8 @@ def render_public_services_nginx_config(
     ca_key_path: str = "",
     depot_store_path: str = VCF_DEPOT_DEFAULT_STORE_PATH,
     esxi_http_base: str = ESXI_PXE_HTTP_BASE,
+    terminal_certificate_path: str = "",
+    terminal_key_path: str = "",
 ) -> str:
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
@@ -166,6 +168,7 @@ def render_public_services_nginx_config(
         address = str(entry.get("address") or "").strip()
         service_rows = entry.get("services") or []
         services = {str(service.get("id")) for service in service_rows}
+        terminal_enabled = bool(entry.get("web_terminal"))
         if not address:
             continue
         ca_service = next((service for service in service_rows if str(service.get("id")) == "ca"), None)
@@ -195,8 +198,21 @@ def render_public_services_nginx_config(
                         depot_store_path=depot_store_path,
                         depot_auth_required=not bool(depot_service.get("allow_unauthenticated_access")),
                         depot_http_username=str(depot_service.get("http_username") or ""),
+                        web_terminal=terminal_enabled,
                     )
                 )
+                terminal_enabled = False
+        if terminal_enabled:
+            lines.extend(
+                _terminal_https_server_lines(
+                    address,
+                    certificate_path=terminal_certificate_path,
+                    key_path=terminal_key_path,
+                    upstream_host=upstream_host,
+                    upstream_port=upstream_port,
+                    https_port=https_port,
+                )
+            )
         if "esxi_pxe" in services:
             lines.extend(_esxi_pxe_http_server_lines(address, upstream_host, upstream_port, http_port, esxi_http_base))
     return "\n".join(lines).strip() + "\n"
@@ -258,6 +274,7 @@ def _ip_scoped_https_server_lines(
     depot_store_path: str,
     depot_auth_required: bool,
     depot_http_username: str,
+    web_terminal: bool = False,
 ) -> list[str]:
     return [
         "",
@@ -294,10 +311,54 @@ def _ip_scoped_https_server_lines(
             auth_required=depot_auth_required,
             http_username=depot_http_username,
         ),
+        *(["", *_terminal_proxy_locations(upstream_host, upstream_port, include_static=False)] if web_terminal else []),
         "",
         "  location / {",
         "    return 404;",
         "  }",
+        "}",
+    ]
+
+
+def _terminal_proxy_locations(upstream_host: str, upstream_port: int, *, include_static: bool = True) -> list[str]:
+    paths = ["= /login", "= /logout", "= /terminal", "= /terminal/tickets"]
+    if include_static:
+        paths.append("^~ /static/")
+    lines: list[str] = []
+    for path in paths:
+        lines.extend([*_proxy_location(path, upstream_host, upstream_port, forwarded_proto="https"), ""])
+    lines.extend(
+        _proxy_location(
+            "= /terminal/ws",
+            upstream_host,
+            upstream_port,
+            forwarded_proto="https",
+            extra_directives=["    proxy_set_header Upgrade $http_upgrade;", '    proxy_set_header Connection "upgrade";'],
+        )
+    )
+    return lines
+
+
+def _terminal_https_server_lines(
+    address: str,
+    *,
+    certificate_path: str,
+    key_path: str,
+    upstream_host: str,
+    upstream_port: int,
+    https_port: int,
+) -> list[str]:
+    return [
+        "",
+        "server {",
+        "  # Terminal-only HTTPS front door.",
+        f"  listen {_nginx_listen(address, https_port)} ssl;",
+        f"  server_name {_nginx_server_name(address)};",
+        f"  ssl_certificate {certificate_path};",
+        f"  ssl_certificate_key {key_path};",
+        *_terminal_proxy_locations(upstream_host, upstream_port),
+        "",
+        "  location / { return 404; }",
         "}",
     ]
 
@@ -521,5 +582,6 @@ def _proxy_location(
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
         f"    proxy_set_header X-Forwarded-Proto {forwarded_proto};",
+        "    proxy_set_header X-LabFoundry-Listener-Address $server_addr;",
         "  }",
     ]

@@ -176,3 +176,59 @@ def test_public_services_nginx_config_omits_ip_depot_routes_when_depot_uses_diff
     assert "listen 192.168.87.32:443 ssl;" in config
     assert "IP-scoped HTTPS public services front door." not in config
     assert "/PROD/" not in config
+
+
+def test_public_services_nginx_config_can_expose_terminal_only_on_selected_address():
+    config = render_public_services_nginx_config(
+        [
+            {
+                "interface": "eth2",
+                "role": "access",
+                "address": "192.168.87.32",
+                "services": [],
+                "web_terminal": True,
+            }
+        ],
+        terminal_certificate_path="/etc/labfoundry/ca/certs/appliance.crt",
+        terminal_key_path="/etc/labfoundry/ca/private/appliance.key",
+    )
+
+    assert "# Terminal-only HTTPS front door." in config
+    assert "listen 192.168.87.32:443 ssl;" in config
+    assert "ssl_certificate /etc/labfoundry/ca/certs/appliance.crt;" in config
+    assert "ssl_certificate_key /etc/labfoundry/ca/private/appliance.key;" in config
+    assert "location = /login {" in config
+    assert "location = /terminal {" in config
+    assert "location = /terminal/tickets {" in config
+    assert "location = /terminal/ws {" in config
+    assert "proxy_set_header Upgrade $http_upgrade;" in config
+    assert "proxy_set_header X-LabFoundry-Listener-Address $server_addr;" in config
+    assert "location ^~ /static/ {" in config
+    assert "location = /dashboard {" not in config
+    assert "location = /api/" not in config
+
+
+def test_public_services_nginx_config_merges_terminal_without_duplicate_static_location():
+    config = render_public_services_nginx_config(
+        [
+            {
+                "interface": "eth1",
+                "role": "access",
+                "address": "192.168.87.22",
+                "services": [
+                    {"id": "ca"},
+                    {"id": "vcf_offline_depot"},
+                ],
+                "web_terminal": True,
+            }
+        ],
+        ca_certificate_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.crt",
+        ca_key_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.key",
+        terminal_certificate_path="/etc/labfoundry/https/certs/appliance.crt",
+        terminal_key_path="/etc/labfoundry/https/private/appliance.key",
+    )
+
+    assert "# Terminal-only HTTPS front door." not in config
+    assert "location = /terminal {" in config
+    assert "location = /terminal/ws {" in config
+    assert config.count("location ^~ /static/ {") == 2

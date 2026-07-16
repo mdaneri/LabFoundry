@@ -144,6 +144,15 @@ def test_routing_wan_only_plan_and_routing_rule_payload():
     }
 
 
+def test_full_lifecycle_plan_includes_passwordless_web_terminal_acceptance():
+    lifecycle = load_lifecycle_module()
+    args = lifecycle.parse_args(["--password", "test", "--plan-only"])
+
+    plan = lifecycle.lifecycle_plan(args)
+
+    assert "passwordless admin web terminal on management and one selected extra interface" in plan["checks"]
+
+
 def test_routing_probe_commands_cover_block_allow_and_route_role_paths():
     lifecycle = load_lifecycle_module()
     args = lifecycle.parse_args(["--password", "test"])
@@ -175,11 +184,21 @@ def test_host_state_checks_verify_vcf_trust_runtime_dependencies(monkeypatch):
     lifecycle.host_state_checks(args)
 
     assert "/opt/labfoundry/.venv/bin/python" in captured["vcf_trust_dependencies"]
-    assert "import httpx" in captured["vcf_trust_dependencies"]
+    encoded_httpx_probe = lifecycle.base64.b64encode(b"import httpx; print(httpx.__version__)").decode("ascii")
+    assert encoded_httpx_probe in captured["vcf_trust_dependencies"]
     assert "paramiko" not in captured["vcf_trust_dependencies"]
-    assert 'version("vcf-sdk") == "9.1.0.0"' in captured["vcf_automation_tooling"]
-    assert "VCF.PowerCLI" in captured["vcf_automation_tooling"]
-    assert "Connect-VIServer" in captured["vcf_automation_tooling"]
+    encoded_vcf_sdk_probe = lifecycle.base64.b64encode(
+        b'from importlib.metadata import version; assert version("vcf-sdk") == "9.1.0.0"'
+    ).decode("ascii")
+    encoded_powercli_probe = lifecycle.base64.b64encode(
+        (
+            '$m = Get-Module VCF.PowerCLI -ListAvailable | Where-Object Version -eq "9.1.0.25380678" | '
+            'Select-Object -First 1; if (-not $m) { exit 1 }; Import-Module $m.Path -Force; '
+            'if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { exit 1 }'
+        ).encode("utf-16le")
+    ).decode("ascii")
+    assert encoded_vcf_sdk_probe in captured["vcf_automation_tooling"]
+    assert encoded_powercli_probe in captured["vcf_automation_tooling"]
 
 
 def test_esxi_pxe_payload_uses_dhcp_lifecycle_host():

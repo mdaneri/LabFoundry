@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block page_title %}Web terminal{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="/static/vendor/xterm/xterm.css?v=5.5.0">{% endblock %}
+{% block content %}
+<section class="panel terminal-panel" data-web-terminal data-terminal-available="{{ 'true' if terminal_available else 'false' }}" data-csrf="{{ csrf_token }}">
+  <div class="panel-head">
+    <div>
+      <h2>Appliance Web Terminal</h2>
+      <p class="muted">Passwordless local SSH as {{ identity.username }}. Sudo continues to use the Photon OS account password.</p>
+    </div>
+    <div class="terminal-status-actions">
+      <span class="status-pill {{ 'good' if terminal_available else 'warn' }}" data-terminal-status>{{ 'ready' if terminal_available else 'unavailable' }}</span>
+    </div>
+  </div>
+
+  {% if not terminal_available %}
+    <div class="alert warning">{{ terminal_unavailable_reason }}</div>
+    <div class="button-row">
+      <a class="button secondary" href="/settings">Open Appliance Settings</a>
+      <a class="button secondary" href="/appliance-apply">Review appliance changes</a>
+    </div>
+  {% else %}
+    <div class="terminal-toolbar">
+      {% for interface in terminal_interfaces %}<span class="terminal-context-tag"><small>interface</small>{{ interface }}</span>{% endfor %}
+      {% for address in terminal_addresses %}<span class="terminal-context-tag"><small>address</small>{{ address }}</span>{% endfor %}
+    </div>
+    <div class="terminal-screen-frame">
+      <div class="terminal-screen" data-terminal-screen aria-label="Interactive appliance terminal"></div>
+      <div class="terminal-screen-actions" aria-label="Terminal session actions">
+        <button class="terminal-screen-action" type="button" data-terminal-copy aria-label="Copy terminal session" title="Copy terminal session">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+        <button class="terminal-screen-action" type="button" data-terminal-download aria-label="Download terminal session" title="Download terminal session">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+        </button>
+      </div>
+      <div class="alert warning terminal-overlay-message hidden" data-terminal-notice></div>
+      <div class="alert error terminal-overlay-message hidden" data-terminal-error></div>
+      <button class="button secondary compact-button terminal-overlay-reconnect hidden" type="button" data-terminal-reconnect>Reconnect</button>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}
+{% block extra_scripts %}
+  <script src="/static/vendor/xterm/xterm.js?v=5.5.0"></script>
+  <script src="/static/terminal.js?v=web-terminal-session-20260715-8"></script>
+{% endblock %}

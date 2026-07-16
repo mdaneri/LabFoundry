@@ -118,6 +118,179 @@ def test_login_and_dashboard_render(client):
     assert "LF</span>" not in response.text
     assert "/static/vendor/prism/prism-core.min.js" in response.text
     assert "/static/vendor/prism/prism-diff.min.js" in response.text
+
+
+def test_web_terminal_requires_login_and_renders_admin_only_unavailable_state(client):
+    unauthenticated = client.get("/terminal", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"] == "/login?next=/terminal"
+
+    login(client)
+    response = client.get("/terminal")
+
+    assert response.status_code == 200
+    assert "Appliance Web Terminal" in response.text
+    assert "Passwordless local SSH as admin" in response.text
+    assert "Web terminal access is disabled in Appliance Settings." in response.text
+    assert "/static/vendor/xterm/xterm.js?v=5.5.0" in response.text
+    assert "/static/terminal.js?v=web-terminal-session-20260715-8" in response.text
+    assert "data-terminal-connect" not in response.text
+    assert "data-terminal-disconnect" not in response.text
+
+    dashboard = client.get("/dashboard")
+    assert 'href="/terminal"' in dashboard.text
+    assert dashboard.text.count('href="/terminal"') == 1
+    assert '<a class="account-menu-item" href="/terminal"' not in dashboard.text
+    assert dashboard.text.index("Operations") < dashboard.text.index('href="/terminal"') < dashboard.text.index('href="/services"')
+
+
+def test_disabled_web_terminal_page_accepts_only_management_listener(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from labfoundry.app import web_terminal
+
+    allowed_addresses = []
+
+    def capture_listener(_headers, _client_host, addresses):
+        allowed_addresses.extend(addresses)
+        return addresses == ["192.168.49.1"]
+
+    monkeypatch.setattr(web_terminal, "get_settings", lambda: SimpleNamespace(environment="appliance"))
+    monkeypatch.setattr(
+        web_terminal,
+        "_terminal_network_state",
+        lambda _db: (SimpleNamespace(web_terminal_enabled=False), [], [], ["192.168.49.1"]),
+    )
+    monkeypatch.setattr(web_terminal, "_request_uses_selected_listener", capture_listener)
+
+    login(client)
+    response = client.get("/terminal")
+
+    assert response.status_code == 200
+    assert allowed_addresses == ["192.168.49.1"]
+    assert "Web terminal access is disabled in Appliance Settings." in response.text
+
+
+def test_web_terminal_uses_one_use_ticket_and_bridges_websocket_input(client, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from labfoundry.app import web_terminal
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings
+
+    class FakeChannel:
+        def __init__(self):
+            self.closed = False
+            self.sent = []
+            self.output_sent = False
+            self.finished = threading.Event()
+
+        def recv(self, _size):
+            if not self.output_sent:
+                self.output_sent = True
+                return b"shell ready\r\n"
+            self.finished.wait(timeout=2)
+            return b""
+
+        def sendall(self, data):
+            self.sent.append(data)
+            self.closed = True
+            self.finished.set()
+
+        def resize_pty(self, **_kwargs):
+            return None
+
+        def close(self):
+            self.closed = True
+            self.finished.set()
+
+    class FakeTransport:
+        def close(self):
+            return None
+
+    channel = FakeChannel()
+    open_count = 0
+
+    def open_channel(*_args):
+        nonlocal open_count
+        open_count += 1
+        return FakeTransport(), channel
+
+    monkeypatch.setattr(web_terminal, "get_settings", lambda: SimpleNamespace(environment="appliance"))
+    monkeypatch.setattr(web_terminal, "_request_uses_selected_listener", lambda *_args: True)
+    monkeypatch.setattr(web_terminal, "_request_is_https", lambda *_args: True)
+    monkeypatch.setattr(web_terminal, "_helper_applied", lambda: True)
+    monkeypatch.setattr(web_terminal, "_open_ssh_channel", open_channel)
+
+    login(client)
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        settings.management_https_enabled = True
+        settings.web_terminal_enabled = True
+        settings.web_terminal_interfaces_json = '["eth0"]'
+        db.commit()
+
+    page = client.get("/terminal")
+    assert page.status_code == 200
+    assert "data-terminal-reconnect" in page.text
+    assert "data-terminal-copy" in page.text
+    assert "data-terminal-download" in page.text
+    assert "data-terminal-connect" not in page.text
+    assert "data-terminal-disconnect" not in page.text
+    csrf = page.text.split('data-csrf="', 1)[1].split('"', 1)[0]
+    ticket_response = client.post(
+        "/terminal/tickets",
+        data={"csrf": csrf, "browser_session_id": "browser_session_1234"},
+    )
+    assert ticket_response.status_code == 200
+    assert ticket_response.headers["cache-control"] == "no-store"
+    ticket = ticket_response.json()["ticket"]
+
+    with client.websocket_connect("/terminal/ws", headers={"origin": "http://testserver"}) as websocket:
+        websocket.send_json({"type": "authenticate", "ticket": ticket})
+        first_ready = websocket.receive_json()
+        assert first_ready["type"] == "ready"
+        assert first_ready["resumed"] is False
+        assert websocket.receive_bytes() == b"shell ready\r\n"
+
+        reload_ticket = client.post(
+            "/terminal/tickets",
+            data={"csrf": csrf, "browser_session_id": "browser_session_1234"},
+        )
+        assert reload_ticket.status_code == 200
+        with client.websocket_connect("/terminal/ws", headers={"origin": "http://testserver"}) as reloaded_websocket:
+            reloaded_websocket.send_json({"type": "authenticate", "ticket": reload_ticket.json()["ticket"]})
+            reload_ready = reloaded_websocket.receive_json()
+            assert reload_ready["type"] == "ready"
+            assert reload_ready["resumed"] is True
+            assert reloaded_websocket.receive_bytes() == b"shell ready\r\n"
+
+        conflict = client.post(
+            "/terminal/tickets",
+            data={"csrf": csrf, "browser_session_id": "other_browser_1234"},
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["error_code"] == "TERMINAL_SESSION_ACTIVE"
+
+        takeover = client.post(
+            "/terminal/tickets",
+            data={"csrf": csrf, "browser_session_id": "other_browser_1234", "takeover": "true"},
+        )
+        assert takeover.status_code == 200
+        with client.websocket_connect("/terminal/ws", headers={"origin": "http://testserver"}) as moved_websocket:
+            moved_websocket.send_json({"type": "authenticate", "ticket": takeover.json()["ticket"]})
+            moved_ready = moved_websocket.receive_json()
+            assert moved_ready["type"] == "ready"
+            assert moved_ready["resumed"] is True
+            assert moved_websocket.receive_bytes() == b"shell ready\r\n"
+            moved_websocket.send_json({"type": "input", "data": "whoami\r"})
+
+    assert channel.sent == [b"whoami\r"]
+    assert open_count == 1
+    assert web_terminal._consume_ticket(ticket, 1, "admin", csrf) is None
     assert client.get("/static/brand/labfoundry-mark.svg").status_code == 200
     assert client.get("/static/brand/labfoundry-appliance-graphic.svg").status_code == 200
     favicon = client.get("/favicon.ico")
@@ -381,7 +554,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v84" in service_worker.text
+    assert "labfoundry-pwa-v98" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -393,8 +566,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=appliance-task-grid-20260715-4" in service_worker.text
-    assert "/static/app.js?v=appliance-task-grid-20260715-4" in service_worker.text
+    assert "/static/app.css?v=web-terminal-session-20260715-14" in service_worker.text
+    assert "/static/app.js?v=web-terminal-session-20260715-13" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -403,7 +576,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=appliance-task-grid-20260715-4" in offline.text
+    assert "/static/app.css?v=web-terminal-session-20260715-14" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -419,8 +592,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=appliance-task-grid-20260715-4" in page.text
-    assert "/static/app.js?v=appliance-task-grid-20260715-4" in page.text
+    assert "/static/app.css?v=web-terminal-session-20260715-14" in page.text
+    assert "/static/app.js?v=web-terminal-session-20260715-13" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -957,6 +1130,7 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "Management UI HTTPS" in response.text
     assert "Root SSH login" in response.text
     assert "Service DNS target names" in response.text
+    assert response.text.count('class="settings-inline-field"') >= 2
     assert 'select name="service_dns_target_naming"' in response.text
     assert '<option value="ip" selected>IP address</option>' in response.text
     assert "Operational Logging" in response.text
@@ -978,6 +1152,56 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert ".validation-settings-list div" in app_css.text
     assert "grid-template-columns: minmax(0, 130px) minmax(0, 1fr);" in app_css.text
     assert "overflow-wrap: anywhere;" in app_css.text
+    assert ".settings-inline-field" in app_css.text
+    assert "grid-template-columns: 160px minmax(0, 1fr);" in app_css.text
+
+
+def test_settings_autosave_enables_passwordless_terminal_on_management_interface(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings
+
+    login(client)
+    page = client.get("/settings")
+    assert "Web terminal access" in page.text
+    assert 'name="web_terminal_interfaces_present"' in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/settings",
+        data={
+            "fqdn": "labfoundry.labfoundry.internal",
+            "management_https_enabled": "on",
+            "web_terminal_enabled": "on",
+            "web_terminal_interfaces_present": "1",
+            "web_terminal_interfaces": "eth0",
+            "service_dns_target_naming": "ip",
+            "external_dns_servers": "1.1.1.1\n9.9.9.9",
+            "csrf": csrf,
+        },
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["web_terminal_enabled"] is True
+    assert payload["web_terminal_interfaces"] == ["eth0"]
+    assert payload["web_terminal_addresses"] == ["192.168.49.1"]
+    assert '"web_terminal_enabled": true' in payload["config_preview"]
+    assert '"web_terminal_interfaces": [' in payload["config_preview"]
+
+    refreshed = client.get("/settings")
+    assert 'class="tag-token" data-value="eth0" data-tag-locked' in refreshed.text
+    assert 'list="web-terminal-interface-options"' in refreshed.text
+    assert 'class="tag-chip" data-tag-value=' not in refreshed.text
+    app_js = client.get("/static/app.js")
+    assert '.tag-token:not([data-tag-locked])' in app_js.text
+
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        assert settings.web_terminal_enabled is True
+        assert settings.web_terminal_interfaces_json == '["eth0"]'
 
 
 def test_validation_rails_use_modal_config_previews(client):
@@ -4229,9 +4453,13 @@ def test_dns_and_dhcp_pages_render(client):
     assert "Submit appliance changes" in app_js.text
     assert "openApplianceApplyReview" in app_js.text
     assert "renderApplianceApplyTask" in app_js.text
+    assert 'elements.submit.classList.add("hidden")' in app_js.text
+    assert 'elements.submit.classList.toggle("hidden", units.length === 0)' in app_js.text
+    assert '{ title: "Status", field: "status", width: 150' in app_js.text
     assert 'applianceApplyModalTable.on("rowClick"' in app_js.text
     assert 'labFoundryTasksTable.on("rowClick"' in app_js.text
     assert "data-appliance-apply-modal" in app_js.text
+    assert 'class="button primary hidden" type="submit" data-appliance-apply-submit' in dns.text
     assert "data-apply-submit-tracker" not in app_js.text
     assert "index === 0 ? \"Applying\"" not in app_js.text
     assert "initializeDhcpScopesTable" in app_js.text
@@ -5090,6 +5318,8 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path, monkeypatc
     with SessionLocal() as db:
         appliance_settings = db.execute(select(ApplianceSettings)).scalar_one()
         appliance_settings.management_https_enabled = True
+        appliance_settings.web_terminal_enabled = True
+        appliance_settings.web_terminal_interfaces_json = '["eth0", "eth2"]'
         eth0 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
         eth0.role = "management"
         eth0.ip_cidr = "192.168.167.10/24"
@@ -5149,6 +5379,8 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path, monkeypatc
     assert "Certificate Authority" in page.text
     assert "VCF Offline Depot" in page.text
     assert "ESXi PXE" in page.text
+    assert "Web Terminal" in page.text
+    assert "Administrative appliance shell" in page.text
     assert "ca.labfoundry.internal" in page.text
     assert "depot.labfoundry.internal" in page.text
     assert "esxi-pxe.labfoundry.internal" in page.text
@@ -5161,6 +5393,8 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path, monkeypatc
     assert 'data-ip-href="https://192.168.87.32:8443/PROD/"' in page.text
     assert 'href="http://esxi-pxe.labfoundry.internal:8081/pxe/esxi/"' in page.text
     assert 'data-ip-href="http://192.168.87.32:8081/pxe/esxi/"' in page.text
+    assert 'href="https://192.168.87.32/terminal"' in page.text
+    assert 'data-ip-href="https://192.168.87.32/terminal"' in page.text
     assert "Appliance Information" not in page.text
     assert 'href="/ca/login"' in page.text
     assert ">Login<" in page.text
@@ -5346,6 +5580,7 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path, monkeypatc
     assert 'href="https://registry.labfoundry.internal:9443"' in registry_page.text
     assert "Certificate Authority" not in registry_page.text
     assert "VCF Offline Depot" not in registry_page.text
+    assert "Web Terminal" not in registry_page.text
 
 
 def test_public_service_home_empty_state_for_non_management_ip(client):
@@ -8596,7 +8831,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "appliance-task-grid-20260715-4" in page.text
+    assert "web-terminal-session-20260715-13" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

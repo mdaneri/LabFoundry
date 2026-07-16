@@ -53,6 +53,7 @@ COMMANDS: dict[str, set[str]] = {
     "staging": {"prepare"},
     "local-users": {"validate", "apply", "status", "authenticate"},
     "appliance-settings": {"validate", "apply"},
+    "web-terminal": {"status", "sign"},
     "network": {"validate", "apply"},
     "firewall": {"validate", "apply"},
     "dnsmasq": {"validate", "apply", "reload", "leases", "logs"},
@@ -94,6 +95,7 @@ NO_PATH_ACTIONS = {
     ("nginx", "error-logs"),
     ("appliance-power", "reboot"),
     ("appliance-power", "shutdown"),
+    ("web-terminal", "status"),
     ("vcf-offline-depot", "generate-software-depot-id"),
     ("vcf-offline-depot", "reset-tool"),
 }
@@ -203,6 +205,12 @@ NGINX_PUBLIC_SERVICES_SITE_PATH = NGINX_SITES_DIR / "public-services.conf"
 SSHD_CONFIG_DIR = Path("/etc/ssh/sshd_config.d")
 SSHD_MAIN_CONFIG_PATH = Path("/etc/ssh/sshd_config")
 SSHD_ROOT_LOGIN_CONFIG_PATH = SSHD_CONFIG_DIR / "labfoundry-root-login.conf"
+SSHD_WEB_TERMINAL_CONFIG_PATH = SSHD_CONFIG_DIR / "labfoundry-web-terminal.conf"
+WEB_TERMINAL_CONFIG_DIR = Path("/etc/labfoundry/ssh")
+WEB_TERMINAL_CA_KEY_PATH = WEB_TERMINAL_CONFIG_DIR / "web-terminal-ca"
+WEB_TERMINAL_CA_PUBLIC_KEY_PATH = WEB_TERMINAL_CONFIG_DIR / "web-terminal-ca.pub"
+WEB_TERMINAL_RUNTIME_DIR = LABFOUNDRY_STATE_DIR / "web-terminal"
+WEB_TERMINAL_REQUEST_DIR = WEB_TERMINAL_RUNTIME_DIR / "requests"
 VCF_DEPOT_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-offline-depot")
 VCF_DEPOT_SITE_PATH = NGINX_SITES_DIR / "vcf-offline-depot.conf"
 VCF_DEPOT_TOOL_DIR = Path("/opt/labfoundry/vcf-download-tool")
@@ -2170,6 +2178,27 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
         errors.append("management_upstream_host must be an IP address.")
     if not isinstance(payload.get("root_ssh_enabled", False), bool):
         errors.append("root_ssh_enabled must be a boolean.")
+    if not isinstance(payload.get("web_terminal_enabled", False), bool):
+        errors.append("web_terminal_enabled must be a boolean.")
+    terminal_interfaces = payload.get("web_terminal_interfaces") or []
+    terminal_addresses = payload.get("web_terminal_addresses") or []
+    if not isinstance(terminal_interfaces, list) or not all(_valid_network_interface_name(str(item)) for item in terminal_interfaces):
+        errors.append("web_terminal_interfaces must contain valid interface names.")
+    if not isinstance(terminal_addresses, list):
+        errors.append("web_terminal_addresses must be a list.")
+    else:
+        for address in terminal_addresses:
+            try:
+                ip_address(str(address))
+            except ValueError:
+                errors.append(f"web terminal address {address} must be an IP address.")
+    if bool(payload.get("web_terminal_enabled")):
+        if not bool(payload.get("management_https_enabled")):
+            errors.append("web terminal requires management HTTPS.")
+        if management_interface not in terminal_interfaces:
+            errors.append("web terminal interfaces must include the management interface.")
+        if management_ip not in terminal_addresses:
+            errors.append("web terminal addresses must include the management IP.")
 
     if bool(payload.get("management_https_enabled")):
         cert_path_value = str(payload.get("management_https_cert_path") or "")
@@ -2457,6 +2486,25 @@ def _public_services_config_errors(path: Path) -> list[str]:
         errors.append("Public services nginx config must not expose a broad server root.")
     if "/registry" in text:
         errors.append("Public services nginx config must not add registry proxy locations.")
+    if "location = /terminal/ws {" in text:
+        for required in [
+            "location = /login {",
+            "location = /logout {",
+            "location = /terminal {",
+            "location = /terminal/tickets {",
+            "location = /terminal/ws {",
+            "location ^~ /static/ {",
+            "proxy_set_header X-LabFoundry-Listener-Address $server_addr;",
+            "proxy_set_header Upgrade $http_upgrade;",
+            'proxy_set_header Connection "upgrade";',
+        ]:
+            if required not in text:
+                errors.append(f"Public services web terminal config must include {required}.")
+        if "location / { return 404; }" not in text and "location / {\n    return 404;" not in text:
+            errors.append("Public services web terminal config must keep the catch-all route closed.")
+        for forbidden in ["location = /dashboard", "location ^~ /api", "location /api", "location = /settings"]:
+            if forbidden in text:
+                errors.append(f"Public services web terminal config must not expose {forbidden}.")
     if "/PROD/" in text or "location = /PROD" in text or "location ~ ^/PROD/" in text:
         if "IP-scoped HTTPS public services front door." not in text:
             errors.append("Public services nginx config may expose VCF Offline Depot paths only in the IP-scoped HTTPS front door.")
@@ -2590,6 +2638,7 @@ def _management_proxy_location(upstream_host: str, upstream_port: int, forwarded
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
         f"    proxy_set_header X-Forwarded-Proto {forwarded_proto};",
+        "    proxy_set_header X-LabFoundry-Listener-Address $server_addr;",
         '    proxy_set_header X-LabFoundry-Depot-Basic-User "";',
         "    proxy_set_header Upgrade $http_upgrade;",
         '    proxy_set_header Connection "upgrade";',
@@ -2789,6 +2838,130 @@ def _configure_root_ssh(enabled: bool) -> int:
     return restart.returncode
 
 
+def _configure_web_terminal(enabled: bool) -> int:
+    SSHD_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    include_result = _ensure_sshd_dropin_include()
+    if include_result != 0:
+        return include_result
+    previous = SSHD_WEB_TERMINAL_CONFIG_PATH.read_text(encoding="utf-8") if SSHD_WEB_TERMINAL_CONFIG_PATH.exists() else None
+    if enabled:
+        WEB_TERMINAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(WEB_TERMINAL_CONFIG_DIR, 0o755)
+        ssh_keygen = shutil.which("ssh-keygen")
+        if ssh_keygen is None:
+            print("ssh-keygen command not found", file=sys.stderr)
+            return 127
+        if not WEB_TERMINAL_CA_KEY_PATH.exists():
+            generated = _run([ssh_keygen, "-q", "-t", "ed25519", "-N", "", "-C", "LabFoundry web terminal CA", "-f", str(WEB_TERMINAL_CA_KEY_PATH)])
+            if generated.returncode != 0:
+                print(generated.stderr or generated.stdout, end="", file=sys.stderr)
+                return generated.returncode
+        os.chmod(WEB_TERMINAL_CA_KEY_PATH, 0o600)
+        os.chmod(WEB_TERMINAL_CA_PUBLIC_KEY_PATH, 0o644)
+        SSHD_WEB_TERMINAL_CONFIG_PATH.write_text(
+            "# Managed by LabFoundry. Passwordless browser terminal certificates.\n"
+            f"TrustedUserCAKeys {WEB_TERMINAL_CA_PUBLIC_KEY_PATH}\n",
+            encoding="utf-8",
+        )
+        os.chmod(SSHD_WEB_TERMINAL_CONFIG_PATH, 0o644)
+        WEB_TERMINAL_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
+        service_account = pwd.getpwnam(LABFOUNDRY_SERVICE_USER)
+        _chown_path(WEB_TERMINAL_RUNTIME_DIR, service_account.pw_uid, service_account.pw_gid)
+        _chown_path(WEB_TERMINAL_REQUEST_DIR, service_account.pw_uid, service_account.pw_gid)
+        os.chmod(WEB_TERMINAL_RUNTIME_DIR, 0o750)
+        os.chmod(WEB_TERMINAL_REQUEST_DIR, 0o750)
+    else:
+        SSHD_WEB_TERMINAL_CONFIG_PATH.unlink(missing_ok=True)
+    validation = _validate_sshd_config()
+    if validation.returncode != 0:
+        if previous is None:
+            SSHD_WEB_TERMINAL_CONFIG_PATH.unlink(missing_ok=True)
+        else:
+            SSHD_WEB_TERMINAL_CONFIG_PATH.write_text(previous, encoding="utf-8")
+            os.chmod(SSHD_WEB_TERMINAL_CONFIG_PATH, 0o644)
+        print(validation.stderr or validation.stdout, end="", file=sys.stderr)
+        return validation.returncode
+    restart = _run(["systemctl", "restart", "sshd"])
+    print(restart.stdout, end="")
+    print(restart.stderr, end="", file=sys.stderr)
+    return restart.returncode
+
+
+def _validate_web_terminal_request_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".json" or not path.is_relative_to(WEB_TERMINAL_REQUEST_DIR):
+        raise ValueError(f"web terminal request must be JSON staged under {WEB_TERMINAL_REQUEST_DIR}")
+    if not path.is_file():
+        raise ValueError(f"web terminal request does not exist: {path}")
+    return path
+
+
+def _handle_web_terminal(action: str, args: list[str]) -> int:
+    if action == "status":
+        if args:
+            return 2
+        print(json.dumps({"enabled": SSHD_WEB_TERMINAL_CONFIG_PATH.is_file() and WEB_TERMINAL_CA_KEY_PATH.is_file()}, sort_keys=True))
+        return 0
+    if action != "sign" or len(args) != 1:
+        print("web-terminal sign requires one staged request path", file=sys.stderr)
+        return 2
+    if not SSHD_WEB_TERMINAL_CONFIG_PATH.is_file() or not WEB_TERMINAL_CA_KEY_PATH.is_file():
+        print("web terminal is not applied", file=sys.stderr)
+        return 2
+    try:
+        request_path = _validate_web_terminal_request_path(args[0])
+        payload = json.loads(request_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    username = str(payload.get("username") or "").strip().lower()
+    session_id = str(payload.get("session_id") or "").strip()
+    public_key = str(payload.get("public_key") or "").strip()
+    if not LOCAL_USERS_USERNAME_PATTERN.fullmatch(username) or username in LOCAL_USERS_RESERVED_USERNAMES:
+        print("web terminal username is not allowed", file=sys.stderr)
+        return 2
+    if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+(?: [^\r\n]+)?", public_key):
+        print("web terminal public key must be an OpenSSH Ed25519 key", file=sys.stderr)
+        return 2
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", session_id):
+        print("web terminal session id is invalid", file=sys.stderr)
+        return 2
+    try:
+        account = pwd.getpwnam(username)
+        wheel = grp.getgrnam("wheel")
+    except KeyError:
+        print("web terminal user must exist and belong to wheel", file=sys.stderr)
+        return 2
+    if account.pw_shell not in LOCAL_USERS_ALLOWED_SHELLS - {"/sbin/nologin"}:
+        print("web terminal user must have an interactive shell", file=sys.stderr)
+        return 2
+    if account.pw_gid != wheel.gr_gid and username not in wheel.gr_mem:
+        print("web terminal user must belong to wheel", file=sys.stderr)
+        return 2
+    ssh_keygen = shutil.which("ssh-keygen")
+    if ssh_keygen is None:
+        print("ssh-keygen command not found", file=sys.stderr)
+        return 127
+    with tempfile.TemporaryDirectory(prefix="labfoundry-web-terminal-") as temp_dir:
+        public_path = Path(temp_dir) / "session.pub"
+        public_path.write_text(public_key + "\n", encoding="utf-8")
+        result = _run(
+            [
+                ssh_keygen, "-q", "-s", str(WEB_TERMINAL_CA_KEY_PATH), "-I", f"labfoundry-{session_id}",
+                "-n", username, "-V", "-5s:+60s", "-O", "source-address=127.0.0.1/32",
+                "-O", "no-port-forwarding", "-O", "no-agent-forwarding", "-O", "no-x11-forwarding",
+                "-O", "no-user-rc", str(public_path),
+            ]
+        )
+        certificate_path = Path(temp_dir) / "session-cert.pub"
+        if result.returncode != 0 or not certificate_path.is_file():
+            print(result.stderr or result.stdout or "ssh-keygen did not issue a certificate", end="", file=sys.stderr)
+            return result.returncode or 2
+        print(certificate_path.read_text(encoding="utf-8").strip())
+    request_path.unlink(missing_ok=True)
+    return 0
+
+
 def _apply_hostname(fqdn: str) -> int:
     hostnamectl = shutil.which("hostnamectl")
     if hostnamectl is not None:
@@ -2832,10 +3005,11 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                     "appliance_settings": "validation ok",
                     "resolver_mode": payload["resolver_mode"],
                     "management_https_enabled": bool(payload.get("management_https_enabled")),
+                    "web_terminal_enabled": bool(payload.get("web_terminal_enabled")),
                     "root_ssh_enabled": bool(payload.get("root_ssh_enabled")),
                     "management_interface": payload["management_interface"],
                     "time_sync_mode": str(payload.get("time_sync_mode") or ""),
-                    "scope": "systemd-resolved, optional systemd-timesyncd, LabFoundry management UI, and root SSH login",
+                    "scope": "systemd-resolved, optional systemd-timesyncd, LabFoundry management UI, root SSH login, and web terminal trust",
                 },
                 sort_keys=True,
             )
@@ -2865,6 +3039,9 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     root_ssh = _configure_root_ssh(bool(payload.get("root_ssh_enabled")))
     if root_ssh != 0:
         return root_ssh
+    web_terminal = _configure_web_terminal(bool(payload.get("web_terminal_enabled")))
+    if web_terminal != 0:
+        return web_terminal
     management_https = _configure_labfoundry_management_https(payload)
     if management_https != 0:
         return management_https
@@ -2875,6 +3052,8 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                 "fqdn": fqdn,
                 "management_https_enabled": bool(payload.get("management_https_enabled")),
                 "root_ssh_enabled": bool(payload.get("root_ssh_enabled")),
+                "web_terminal_enabled": bool(payload.get("web_terminal_enabled")),
+                "web_terminal_interfaces": payload.get("web_terminal_interfaces") or [],
                 "resolver_mode": resolver_mode,
                 "resolver_servers": resolver_servers,
                 "time_sync_mode": str(payload.get("time_sync_mode") or ""),
@@ -5831,6 +6010,8 @@ def main(argv: list[str]) -> int:
         return _handle_esxi_pxe(action, normalized_args)
     if group == "appliance-settings":
         return _handle_appliance_settings(action, normalized_args)
+    if group == "web-terminal":
+        return _handle_web_terminal(action, normalized_args)
     if group == "local-users":
         return _handle_local_users(action, normalized_args)
     if group == "ca":

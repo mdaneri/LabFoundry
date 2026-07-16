@@ -89,8 +89,12 @@ from labfoundry.app.services.appliance_settings import (
     normalize_fqdn,
     normalize_multiline_values,
     normalize_service_dns_target_naming,
+    normalized_web_terminal_interfaces,
     SERVICE_DNS_TARGET_NAMING_CHOICES,
     validate_appliance_settings,
+    web_terminal_addresses,
+    web_terminal_interface_options,
+    web_terminal_interfaces_to_json,
 )
 from labfoundry.app.services.appliance_update import (
     APPLIANCE_UPDATE_INFO_PATH,
@@ -739,14 +743,19 @@ def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
     specs: list[ManagedCertificateSpec] = []
     appliance = get_appliance_settings_row(db)
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlans = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     management, observed_dhcp_dns_servers = management_dhcp_dns_context(interfaces)
+    terminal_options = web_terminal_interface_options(interfaces, vlans)
+    terminal_ips = web_terminal_addresses(normalized_web_terminal_interfaces(appliance, management), terminal_options) if appliance.web_terminal_enabled else []
+    appliance_ips = [management["ip"]] if management.get("ip") else []
+    appliance_ips.extend(address for address in terminal_ips if address not in appliance_ips)
     appliance_cert, appliance_key, appliance_chain = ca_service_cert_paths("https", appliance.fqdn)
     specs.append(
         ManagedCertificateSpec(
             owner="appliance:https",
             common_name=appliance.fqdn,
             dns_names=[appliance.fqdn],
-            ip_addresses=[management["ip"]] if management.get("ip") else [],
+            ip_addresses=appliance_ips,
             profile_name=CA_SERVER_PROFILE_NAME,
             description="Managed LabFoundry appliance HTTPS certificate.",
             cert_path=appliance_cert,
@@ -1786,7 +1795,9 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
     chrony_settings = get_chrony_settings_row(db)
     chrony_enabled = bool(chrony_settings.enabled)
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlans = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     management, observed_dhcp_dns_servers = management_dhcp_dns_context(interfaces)
+    terminal_options = web_terminal_interface_options(interfaces, vlans)
     ca_settings = get_ca_settings_row(db)
     management_https_cert_path, management_https_key_path, _management_https_chain_path = ca_managed_certificate_paths(db, "appliance:https")
     management_https_cert_available = bool(management_https_cert_path and management_https_key_path and ca_certificate_available(db, "appliance:https"))
@@ -1798,6 +1809,7 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         ca_enabled=bool(ca_settings.enabled),
         management_https_cert_available=management_https_cert_available,
         chrony_enabled=chrony_enabled,
+        web_terminal_options=terminal_options,
     )
     if settings.root_ssh_enabled and get_settings().dry_run_system_adapters:
         validation_warnings.append("Root SSH is enabled as desired state, but dry-run system adapters are active. Global appliance apply will record intent without changing sshd.")
@@ -1807,6 +1819,7 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         management_interface=management,
         management_https_cert_path=management_https_cert_path,
         management_https_key_path=management_https_key_path,
+        web_terminal_options=terminal_options,
     )
     if appliance_settings_preview["resolver_mode"] != "dhcp":
         observed_dhcp_dns_servers = []
@@ -1823,6 +1836,9 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "management_https_cert_path": management_https_cert_path,
         "management_https_key_path": management_https_key_path,
         "management_interface": management,
+        "web_terminal_interface_options": terminal_options,
+        "selected_web_terminal_interfaces": normalized_web_terminal_interfaces(settings, management),
+        "web_terminal_addresses": web_terminal_addresses(normalized_web_terminal_interfaces(settings, management), terminal_options),
         "logging_preferences": logging_preferences_to_dict(logging_preferences_from_db(db)),
         "appliance_settings_validation_errors": validation_errors,
         "appliance_settings_validation_warnings": validation_warnings,
@@ -2776,6 +2792,9 @@ def firewall_context(db: Session, *, reconcile: bool = True) -> dict:
     vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     interface_networks = firewall_interface_networks(physical_interfaces, vlan_interfaces)
     source_group_state = firewall_source_group_state(setting_value(db, FIREWALL_SOURCE_GROUPS_SETTING_KEY), interface_networks)
+    appliance_settings = get_appliance_settings_row(db)
+    management = management_interface_context(physical_interfaces)
+    terminal_interfaces = normalized_web_terminal_interfaces(appliance_settings, management) if appliance_settings.web_terminal_enabled else []
     generated_rules = managed_service_firewall_rules(
         dns_settings=dns_settings,
         dhcp_settings=dhcp_settings,
@@ -2795,6 +2814,7 @@ def firewall_context(db: Session, *, reconcile: bool = True) -> dict:
         interface_networks=interface_networks,
         source_groups=source_group_state["groups"],
         source_group_assignments=source_group_state["assignments"],
+        web_terminal_interfaces=terminal_interfaces,
     )
     generated_rules.extend(
         managed_routing_firewall_rules(
@@ -2979,14 +2999,28 @@ def public_services_context(db: Session, *, reconcile: bool = True) -> dict[str,
         vcf_depot_settings=depot_settings,
         vcf_registry_settings=registry_settings,
     )
+    appliance_settings = get_appliance_settings_row(db)
+    management = management_interface_context(interfaces)
+    terminal_options = web_terminal_interface_options(interfaces, vlans)
+    terminal_addresses = set(
+        web_terminal_addresses(normalized_web_terminal_interfaces(appliance_settings, management), terminal_options)
+        if appliance_settings.web_terminal_enabled
+        else []
+    )
+    management_address = management.get("ip", "")
+    for entry in entries:
+        entry["web_terminal"] = bool(entry.get("address") in terminal_addresses and entry.get("address") != management_address)
     ca_portal_hostname = normalize_dns_hostname(ca_settings.portal_hostname or CA_DEFAULT_PORTAL_HOSTNAME)
     ca_portal_cert_path, ca_portal_key_path, _ca_portal_chain_path = ca_service_cert_paths("ca-portal", ca_portal_hostname)
+    terminal_cert_path, terminal_key_path, _terminal_chain_path = ca_managed_certificate_paths(db, "appliance:https")
     config_preview = render_public_services_nginx_config(
         entries,
         depot_store_path=depot_settings.depot_store_path,
         http_port=int(esxi_boot.get("http_port") or 8080),
         ca_certificate_path=ca_portal_cert_path,
         ca_key_path=ca_portal_key_path,
+        terminal_certificate_path=terminal_cert_path,
+        terminal_key_path=terminal_key_path,
     )
     return {
         "public_service_entries": entries,
@@ -3075,6 +3109,9 @@ def public_service_link_variants(service: dict[str, Any], binding: dict[str, str
             http_port = 8080
         name_href = _absolute_public_url("http", hostname, "/pxe/esxi/", port=http_port)
         ip_href = _absolute_public_url("http", address, "/pxe/esxi/", port=http_port)
+    elif service_id == "web_terminal":
+        name_href = _absolute_public_url("https", address, "/terminal", port=service_port or 443)
+        ip_href = name_href
     else:
         name_href = str(service.get("href") or "")
         ip_href = name_href
@@ -3197,6 +3234,23 @@ def public_service_directory_context(db: Session, binding: dict[str, str]) -> di
         vcf_depot_settings=depot_settings,
         vcf_registry_settings=registry_settings,
     )
+    appliance_settings = get_appliance_settings_row(db)
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    management = management_interface_context(physical_interfaces)
+    terminal_interfaces = normalized_web_terminal_interfaces(appliance_settings, management)
+    if appliance_settings.web_terminal_enabled and binding.get("interface") in terminal_interfaces:
+        services.append(
+            {
+                "id": "web_terminal",
+                "name": "Web Terminal",
+                "summary": "Administrative appliance shell",
+                "dns_names": [],
+                "scheme": "https",
+                "port": 443,
+                "status": "enabled",
+                "pill": "good",
+            }
+        )
     services = [
         {
             **service,
@@ -3395,7 +3449,6 @@ def wan_routing_targets(db: Session) -> list[dict[str, str]]:
                 "ip_cidr": interface.ip_cidr or "",
                 "ipv6_cidr": interface.ipv6_cidr or "",
                 "addresses": addresses,
-                "wan": role == "route",
                 "routing_domain": routing_domain,
                 "route_allowed": routing_domain == "lab",
                 "label": f"{interface.name} - physical / {role} / {address_label}",
@@ -3416,7 +3469,6 @@ def wan_routing_targets(db: Session) -> list[dict[str, str]]:
                 "ip_cidr": vlan.ip_cidr or "",
                 "ipv6_cidr": vlan.ipv6_cidr or "",
                 "addresses": addresses,
-                "wan": role == "route",
                 "routing_domain": routing_domain,
                 "route_allowed": routing_domain == "lab",
                 "label": f"{vlan.name} - VLAN {vlan.vlan_id} on {vlan.parent_interface} / {role} / {address_label}",
@@ -15241,6 +15293,9 @@ def update_settings_from_ui(
     request: Request,
     fqdn: str = Form("labfoundry.labfoundry.internal"),
     management_https_enabled: bool = Form(False),
+    web_terminal_enabled: bool = Form(False),
+    web_terminal_interfaces: list[str] = Form(default_factory=list),
+    web_terminal_interfaces_present: str | None = Form(None),
     root_ssh_enabled: bool = Form(False),
     service_dns_target_naming: str = Form("ip"),
     external_dns_servers: str = Form(""),
@@ -15254,6 +15309,7 @@ def update_settings_from_ui(
     previous_service_dns_target_naming = normalize_service_dns_target_naming(settings.service_dns_target_naming)
     settings.fqdn = normalize_fqdn(fqdn) or "labfoundry.labfoundry.internal"
     settings.management_https_enabled = bool(management_https_enabled)
+    settings.web_terminal_enabled = bool(web_terminal_enabled)
     settings.root_ssh_enabled = bool(root_ssh_enabled)
     settings.service_dns_target_naming = normalize_service_dns_target_naming(service_dns_target_naming)
     settings.external_dns_servers = normalize_multiline_values(external_dns_servers)
@@ -15263,6 +15319,13 @@ def update_settings_from_ui(
     settings.updated_at = utcnow()
     dns_settings = get_dns_settings_row(db)
     management = appliance_settings_management_context(db)
+    physical_interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
+    vlan_interfaces = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
+    terminal_options = web_terminal_interface_options(physical_interfaces, vlan_interfaces)
+    requested_terminal_interfaces = web_terminal_interfaces if web_terminal_interfaces_present is not None else normalized_web_terminal_interfaces(settings, management)
+    if settings.web_terminal_enabled and management.get("name"):
+        requested_terminal_interfaces = [management["name"], *[name for name in requested_terminal_interfaces if name != management["name"]]]
+    settings.web_terminal_interfaces_json = web_terminal_interfaces_to_json(requested_terminal_interfaces)
     ca_settings = get_ca_settings_row(db)
     preflight_errors, _preflight_warnings = validate_appliance_settings(
         settings,
@@ -15272,6 +15335,7 @@ def update_settings_from_ui(
         ca_enabled=bool(ca_settings.enabled),
         management_https_cert_available=True,
         chrony_enabled=chrony_enabled,
+        web_terminal_options=terminal_options,
     )
     ca_state_errors: list[str] = []
     if settings.management_https_enabled and ca_settings.enabled and not preflight_errors:
@@ -15288,6 +15352,7 @@ def update_settings_from_ui(
         ca_enabled=bool(ca_settings.enabled),
         management_https_cert_available=management_https_cert_available,
         chrony_enabled=chrony_enabled,
+        web_terminal_options=terminal_options,
     )
     validation_errors = [*ca_state_errors, *validation_errors]
     dns_record_action = None
@@ -15307,6 +15372,9 @@ def update_settings_from_ui(
                 "updated_at": saved.updated_at.isoformat(),
                 "fqdn": saved.fqdn,
                 "management_https_enabled": saved.management_https_enabled,
+                "web_terminal_enabled": saved.web_terminal_enabled,
+                "web_terminal_interfaces": context["selected_web_terminal_interfaces"],
+                "web_terminal_addresses": context["web_terminal_addresses"],
                 "management_https_cert_available": context["management_https_cert_available"],
                 "root_ssh_enabled": saved.root_ssh_enabled,
                 "service_dns_target_naming": normalize_service_dns_target_naming(saved.service_dns_target_naming),

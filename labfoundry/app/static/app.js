@@ -7306,6 +7306,13 @@ function updateApplianceSettingsValidation(payload = {}) {
   if (rootSsh instanceof HTMLElement && payload.root_ssh_enabled !== undefined) {
     rootSsh.textContent = payload.root_ssh_enabled ? "enabled" : "disabled";
   }
+  const webTerminal = document.querySelector("[data-appliance-settings-web-terminal]");
+  if (webTerminal instanceof HTMLElement && payload.web_terminal_enabled !== undefined) {
+    const addresses = Array.isArray(payload.web_terminal_addresses) && payload.web_terminal_addresses.length
+      ? ` / ${payload.web_terminal_addresses.join(", ")}`
+      : "";
+    webTerminal.textContent = `${payload.web_terminal_enabled ? "enabled" : "disabled"}${addresses}`;
+  }
   updateApplianceSettingsDhcpDns(payload);
   const dnsStatus = document.querySelector("[data-appliance-settings-dns-status]");
   if (dnsStatus instanceof HTMLElement) {
@@ -10284,6 +10291,9 @@ function initializeTagEditors() {
     };
 
     const removeToken = (token) => {
+      if (token.hasAttribute("data-tag-locked")) {
+        return;
+      }
       token.remove();
       refreshMenu();
       input.focus();
@@ -10338,7 +10348,7 @@ function initializeTagEditors() {
         return;
       }
       if (singleValue) {
-        list.querySelectorAll(".tag-token").forEach((token) => token.remove());
+        list.querySelectorAll(".tag-token:not([data-tag-locked])").forEach((token) => token.remove());
       }
 
       const token = document.createElement("span");
@@ -10391,7 +10401,8 @@ function initializeTagEditors() {
           addInputValues();
         }
       } else if (event.key === "Backspace" && !input.value) {
-        const lastToken = list.querySelector(".tag-token:last-child");
+        const removableTokens = list.querySelectorAll(".tag-token:not([data-tag-locked])");
+        const lastToken = removableTokens[removableTokens.length - 1];
         if (lastToken instanceof HTMLElement) {
           removeToken(lastToken);
         }
@@ -10917,6 +10928,13 @@ async function openApplianceApplyReview() {
     elements.status.className = "status-pill muted";
     elements.status.textContent = "loading";
   }
+  if (elements.submit instanceof HTMLButtonElement) {
+    elements.submit.classList.add("hidden");
+    elements.submit.disabled = true;
+  }
+  if (elements.selectionSummary instanceof HTMLElement) {
+    elements.selectionSummary.textContent = "Loading appliance changes…";
+  }
   setApplianceApplyModalError("");
   showApplianceApplyModal(elements.modal);
   try {
@@ -10941,6 +10959,9 @@ async function openApplianceApplyReview() {
     if (elements.status instanceof HTMLElement) {
       elements.status.className = `status-pill ${units.length ? "warn" : "good"}`;
       elements.status.textContent = `${units.length} changed`;
+    }
+    if (elements.submit instanceof HTMLButtonElement) {
+      elements.submit.classList.toggle("hidden", units.length === 0);
     }
     updateApplianceApplySelection();
   } catch (error) {
@@ -11013,7 +11034,7 @@ function renderApplianceApplyTask(task) {
   const grid = document.getElementById("appliance-apply-live-grid");
   if (grid instanceof HTMLElement && typeof window.Tabulator === "function") {
     const columns = [
-      { title: "Status", field: "status", width: 120, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
+      { title: "Status", field: "status", width: 150, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
       { title: "Task / component", field: "label", minWidth: 260, formatter: (cell) => escapeHtml(cell.getRow().getData().is_step ? cell.getValue() || "" : cell.getRow().getData().type_label || "Appliance Apply") },
       { title: "State", field: "state", minWidth: 170, formatter: (cell) => escapeHtml(cell.getValue() || "") },
       { title: "Progress", field: "progress_percent", width: 105, formatter: (cell) => `${Number(cell.getValue() || 0)}%` },

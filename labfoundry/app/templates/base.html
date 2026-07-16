@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=appliance-task-grid-20260715-4">
+    <link rel="stylesheet" href="/static/app.css?v=web-terminal-session-20260715-14">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -58,6 +58,7 @@
               ("VCF Backups", "/vcf-backups", "read:vcf-backups")
             ]),
             ("Operations", [
+              ("Web terminal", "/terminal", "admin:all"),
               ("Services", "/services", "read:services"),
               ("Tasks", "/tasks", "read:dashboard"),
               ("Logs", "/logs", "read:logs"),
@@ -259,7 +260,7 @@
               <div class="appliance-apply-review-list" data-appliance-apply-review-list></div>
               <div class="appliance-apply-modal-actions">
                 <span class="muted" data-appliance-apply-selection-summary></span>
-                <button class="button primary" type="submit" data-appliance-apply-submit>Submit appliance changes</button>
+                <button class="button primary hidden" type="submit" data-appliance-apply-submit>Submit appliance changes</button>
               </div>
             </form>
           </section>
@@ -295,7 +296,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=appliance-task-grid-20260715-4"></script>
+    <script src="/static/app.js?v=web-terminal-session-20260715-13"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

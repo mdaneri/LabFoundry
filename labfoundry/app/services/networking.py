@@ -63,8 +63,6 @@ def normalize_interface_mode(mode: str | None) -> str:
 
 def normalize_interface_role(role: str | None) -> str:
     value = (role or "unused").strip().lower()
-    if value == "wan":
-        return "route"
     if value in {"management", "access", "route", "services", "storage", "unused"}:
         return value
     return "unused"

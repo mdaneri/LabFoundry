@@ -223,6 +223,24 @@ class SystemAdapter:
     def validate_appliance_settings_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("appliance-settings", "validate", config_path, dry_run_message="dry-run: appliance settings validation command recorded")
 
+    def web_terminal_status(self) -> AdapterResult:
+        return self._helper_result(
+            "web-terminal",
+            "status",
+            dry_run_message=json.dumps({"enabled": False, "dry_run": True}),
+            timeout_seconds=5,
+        )
+
+    def sign_web_terminal_key(self, request_path: str) -> AdapterResult:
+        return self._helper_result(
+            "web-terminal",
+            "sign",
+            request_path,
+            dry_run_message="dry-run: web terminal certificate signing is unavailable",
+            timeout_seconds=10,
+            dry_run_returncode=2,
+        )
+
     def apply_firewall_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("firewall", "apply", config_path, dry_run_message="dry-run: firewall apply command recorded")
 

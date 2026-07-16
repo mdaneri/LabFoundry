@@ -20,7 +20,6 @@ def test_render_wan_config_uses_ipv6_route_commands():
                 "role": "route",
                 "ip_cidr": "192.168.50.1/24",
                 "ipv6_cidr": "2001:db8:50::1/64",
-                "wan": True,
                 "routing_domain": "lab",
                 "route_allowed": True,
             }
@@ -44,7 +43,6 @@ def test_render_wan_config_keeps_management_and_lab_route_tables_separate():
                 "ip_cidr": "192.168.49.10/24",
                 "ipv6_cidr": "",
                 "gateway": "192.168.49.254",
-                "wan": False,
                 "routing_domain": "management",
                 "route_allowed": False,
             },
@@ -54,7 +52,6 @@ def test_render_wan_config_keeps_management_and_lab_route_tables_separate():
                 "role": "route",
                 "ip_cidr": "172.20.0.1/24",
                 "ipv6_cidr": "",
-                "wan": True,
                 "routing_domain": "lab",
                 "route_allowed": True,
             },

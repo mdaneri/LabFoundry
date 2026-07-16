@@ -492,6 +492,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "VCF Backup desired state, local user sync, SFTP listener, and client probe",
             "VCF Offline Depot browser login, curl/wget Basic auth, and Local Users password rotation",
             "ESXi PXE desired state, DHCP boot options, TFTP artifacts, and Hyper-V PXE VM smoke",
+            "passwordless admin web terminal on management and one selected extra interface",
             "client DNS/DHCP/routing probes",
         ],
         "client_checks_enabled": not args.skip_client_checks,
@@ -1003,9 +1004,14 @@ def configure_management_https(client: HttpClient, args: argparse.Namespace) -> 
     if status >= 400:
         raise LifecycleError(f"GET /settings failed with HTTP {status}")
     csrf = extract_csrf(body)
+    settings_payload = client.json_request("GET", "/api/v1/settings")
+    management_interface = str(settings_payload.get("management_interface") or "eth0")
     form = {
         "fqdn": "labfoundry.labfoundry.internal",
         "management_https_enabled": "on",
+        "web_terminal_enabled": "on",
+        "web_terminal_interfaces_present": "1",
+        "web_terminal_interfaces": [management_interface, args.site_interface],
         "external_dns_servers": "1.1.1.1\n9.9.9.9",
         "csrf": csrf,
     }
@@ -1022,10 +1028,15 @@ def configure_management_https(client: HttpClient, args: argparse.Namespace) -> 
         raise LifecycleError(f"Management HTTPS desired state is invalid: {payload.get('validation_errors')}")
     if not payload.get("management_https_enabled") or not payload.get("management_https_cert_available"):
         raise LifecycleError("Management HTTPS desired state did not report an available CA-managed certificate.")
+    if not payload.get("web_terminal_enabled") or payload.get("web_terminal_interfaces") != [management_interface, args.site_interface]:
+        raise LifecycleError(f"Web terminal desired state did not retain the selected interfaces: {payload.get('web_terminal_interfaces')}")
     return {
         "fqdn": payload.get("fqdn"),
         "management_https_enabled": payload.get("management_https_enabled"),
         "management_https_cert_available": payload.get("management_https_cert_available"),
+        "web_terminal_enabled": payload.get("web_terminal_enabled"),
+        "web_terminal_interfaces": payload.get("web_terminal_interfaces"),
+        "web_terminal_addresses": payload.get("web_terminal_addresses"),
         "config_path": payload.get("config_path"),
     }
 
@@ -1058,6 +1069,54 @@ def management_https_check(client: HttpClient, args: argparse.Namespace) -> dict
         raise LifecycleError(f"HTTPS management endpoint failed with HTTP {https_status}")
     client.base_url = f"https://{host}"
     return {"http_status": http_status, "redirect_location": location, "https_status": https_status, "https_url": https_url}
+
+
+def web_terminal_check(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    management_status, management_body, _headers = client.request("GET", "/terminal")
+    if management_status != 200 or 'data-terminal-available="true"' not in management_body:
+        raise LifecycleError(f"Management web terminal was not ready after apply: HTTP {management_status}")
+
+    host_evidence = ssh_command(
+        args.appliance_ssh_host,
+        args,
+        "/opt/labfoundry/bin/labfoundry-helper web-terminal status --real && sshd -T | grep -i '^trustedusercakeys '",
+        role="appliance",
+    )
+    require_success(host_evidence, "web terminal OpenSSH CA state")
+    if '"enabled": true' not in host_evidence.get("stdout", "") or "web-terminal-ca.pub" not in host_evidence.get("stdout", ""):
+        raise LifecycleError(f"OpenSSH did not report the applied web terminal CA state: {host_evidence.get('stdout', '')}")
+
+    site_address = str(ip_interface(args.site_cidr).ip)
+    site_client = HttpClient(f"https://{site_address}")
+    ui_login(site_client, args)
+    site_status, site_body, _site_headers = site_client.request("GET", "/terminal")
+    if site_status != 200 or 'data-terminal-available="true"' not in site_body:
+        raise LifecycleError(f"Selected extra-interface terminal route was not ready: HTTP {site_status}")
+    csrf_match = re.search(r'data-csrf="([^"]+)"', site_body)
+    if not csrf_match:
+        raise LifecycleError("Selected extra-interface terminal page did not include a session CSRF token.")
+    ticket_status, ticket_body, _ticket_headers = site_client.request(
+        "POST",
+        "/terminal/tickets",
+        form={"csrf": html.unescape(csrf_match.group(1))},
+    )
+    if ticket_status != 200:
+        raise LifecycleError(f"Selected extra-interface terminal ticket failed with HTTP {ticket_status}: {ticket_body[:300]}")
+    ticket_payload = json.loads(ticket_body)
+    if ticket_payload.get("websocket_path") != "/terminal/ws" or not ticket_payload.get("ticket"):
+        raise LifecycleError("Web terminal ticket response was incomplete.")
+    dashboard_status, _dashboard_body, _dashboard_headers = site_client.request("GET", "/dashboard", follow_redirects=False)
+    if dashboard_status != 404:
+        raise LifecycleError(f"Extra-interface terminal listener exposed /dashboard with HTTP {dashboard_status}")
+    return {
+        "management_status": management_status,
+        "extra_interface": args.site_interface,
+        "extra_address": site_address,
+        "extra_terminal_status": site_status,
+        "ticket_status": ticket_status,
+        "dashboard_status": dashboard_status,
+        "host_status": host_evidence.get("stdout", ""),
+    }
 
 
 def extract_ca_profile_id(body: str, profile_name: str) -> str:
@@ -2330,8 +2389,9 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "vcf-depot-auth-check", vcf_depot_auth_check, client, args)
     run_step(results, "vcf-depot-password-rotation", rotate_vcf_depot_password_without_depot_apply, client, args)
     run_step(results, "configure-management-https", configure_management_https, client, args)
-    run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings"], args)
+    run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings", "firewall", "public_services"], args)
     run_step(results, "management-https-check", management_https_check, client, args)
+    run_step(results, "web-terminal-check", web_terminal_check, client, args)
     if args.export_settings_backup:
         run_step(results, "export-settings-backup", export_settings_backup, client, args, args.export_settings_backup)
 
@@ -2382,8 +2442,9 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
     run_step(results, "restored-ca-archive-baseline-check", restored_ca_archive_baseline_check, args, restored_archive_path)
     run_step(results, "vcf-backup-client-check", vcf_backup_client_check, args)
     run_step(results, "vcf-depot-auth-check", vcf_depot_auth_check, client, args)
-    run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings"], args)
+    run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings", "firewall", "public_services"], args)
     run_step(results, "management-https-check", management_https_check, client, args)
+    run_step(results, "web-terminal-check", web_terminal_check, client, args)
 
 
 def format_step_summary(step: dict[str, Any]) -> str:
