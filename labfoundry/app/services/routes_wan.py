@@ -452,19 +452,27 @@ def render_wan_config(
         lines.append("sysctl -w net.ipv4.ip_forward=0  # no LabFoundry lab routing or NAT requires forwarding")
     target_network_owners = _target_network_owners(targets)
     for index, target in enumerate(targets):
-        table = MANAGEMENT_ROUTE_TABLE_ID if target.get("routing_domain") == "management" else LAB_ROUTE_TABLE_ID
-        priority = (1000 if target.get("routing_domain") == "management" else 2000) + index
+        management = target.get("routing_domain") == "management"
+        table = MANAGEMENT_ROUTE_TABLE_ID if management else LAB_ROUTE_TABLE_ID
+        priority = (1000 if management else 2000) + index
+        gateway = str(target.get("gateway", "") or "").strip()
+        try:
+            gateway_version = ip_address(gateway).version if gateway else None
+        except ValueError:
+            gateway_version = None
         for network in _target_networks(target):
             owner_index = target_network_owners[str(network)]
             if owner_index != index:
                 owner_name = targets[owner_index]["name"]
                 lines.append(f"# {network} on {target['name']} reuses the subnet owned by {owner_name}; no duplicate policy route generated")
                 continue
+            if management and gateway_version != network.version:
+                lines.append(f"# {network} on {target['name']} has no management default gateway; the main routing table remains authoritative")
+                continue
             route_family = "-6 " if network.version == 6 else ""
             lines.append(f"ip {route_family}rule add from {network} table {table} priority {priority}")
             lines.append(f"ip {route_family}route replace {network} dev {target['name']} table {table}")
-        gateway = str(target.get("gateway", "") or "").strip()
-        if target.get("routing_domain") == "management" and gateway:
+        if management and gateway:
             try:
                 gateway_address = ip_address(gateway)
             except ValueError:

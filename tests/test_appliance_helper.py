@@ -665,6 +665,29 @@ def test_network_helper_replaces_stale_preserved_management_gateway(monkeypatch,
     rendered = files["00-labfoundry-mgmt.network"]
     assert "Gateway=192.168.1.1" in rendered
     assert "Gateway=192.168.167.2" not in rendered
+    assert "From=192.168.1.0/24" in rendered
+    assert "Table=100" in rendered
+
+
+def test_network_helper_omits_management_policy_rule_without_default_gateway(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(
+        network_config_text().replace("  ip_cidr=192.168.49.1/24", "  ip_cidr=192.168.1.10/24", 1),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", tmp_path / "missing.network")
+    monkeypatch.setattr(helper, "_runtime_default_gateways_for_interface", lambda _interface_name: [])
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/sbin/{command}" if command == "ip" else None)
+
+    files, _reconfigure_links, _admin_down_links = helper._systemd_networkd_files(config_path)
+
+    rendered = files["00-labfoundry-mgmt.network"]
+    assert "Address=192.168.1.10/24" in rendered
+    assert "[RoutingPolicyRule]" not in rendered
+    assert "Table=100" not in rendered
+    assert "Gateway=" not in rendered
 
 
 def test_network_helper_renders_management_dhcp_networkd(tmp_path):
@@ -1019,6 +1042,8 @@ def test_wan_helper_skips_management_policy_rule_without_usable_gateway(monkeypa
 
     assert helper._apply_wan_target_routes(parsed) == 0
     assert helper._apply_wan_policy_rules(parsed) == 0
+    assert ["ip", "route", "replace", "192.168.1.0/24", "dev", "eth0", "table", "100"] not in commands
+    assert ["ip", "route", "del", "192.168.1.0/24", "dev", "eth0", "table", "100"] in commands
     assert ["ip", "route", "del", "default", "dev", "eth0", "table", "100"] in commands
     assert ["ip", "rule", "add", "from", "192.168.1.0/24", "table", "100", "priority", "1000"] not in commands
 
@@ -1651,9 +1676,8 @@ def test_network_helper_renders_systemd_networkd_files(tmp_path):
     assert "Name=eth0" in files["00-labfoundry-mgmt.network"]
     assert "Name=eth*" not in files["00-labfoundry-mgmt.network"]
     assert "Address=192.168.49.1/24" in files["00-labfoundry-mgmt.network"]
-    assert "[RoutingPolicyRule]" in files["00-labfoundry-mgmt.network"]
-    assert "From=192.168.49.0/24" in files["00-labfoundry-mgmt.network"]
-    assert "Table=100" in files["00-labfoundry-mgmt.network"]
+    assert "[RoutingPolicyRule]" not in files["00-labfoundry-mgmt.network"]
+    assert "Table=100" not in files["00-labfoundry-mgmt.network"]
     assert "10-labfoundry-eth2.network" in files
     assert "VLAN=eth2.20" in files["10-labfoundry-eth2.network"]
     assert "10-labfoundry-eth2.20.netdev" in files

@@ -3694,8 +3694,15 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
                 static_management_cidrs.append(interface["ip_cidr"])
             if ipv6_enabled and interface.get("ipv6_cidr"):
                 static_management_cidrs.append(interface["ipv6_cidr"])
+            gateway_candidates = list(preserved_management["Gateway"])
+            if shutil.which("ip") is not None:
+                gateway_candidates.extend(_runtime_default_gateways_for_interface(name))
+            usable_gateways = _usable_management_default_gateways(static_management_cidrs, gateway_candidates)
+            gateway_versions = {ip_address(gateway).version for gateway in usable_gateways}
             for cidr in static_management_cidrs:
                 network = ip_network(cidr, strict=False)
+                if network.version not in gateway_versions:
+                    continue
                 lines.extend(
                     [
                         "",
@@ -3705,10 +3712,7 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
                         f"Priority={MANAGEMENT_ROUTE_RULE_PRIORITY}",
                     ]
                 )
-            gateway_candidates = list(preserved_management["Gateway"])
-            if shutil.which("ip") is not None:
-                gateway_candidates.extend(_runtime_default_gateways_for_interface(name))
-            for gateway in _usable_management_default_gateways(static_management_cidrs, gateway_candidates):
+            for gateway in usable_gateways:
                 lines.extend(
                     [
                         "",
@@ -4473,8 +4477,17 @@ def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
     for index, target in enumerate(targets):
         table_id = _target_route_table_id(target)
         interface_name = target.get("name", "")
+        management = target.get("routing_domain", "lab") == "management"
+        gateways = _management_default_gateways_for_target(target) if management else []
+        gateways_by_version = {ip_address(gateway).version: gateway for gateway in gateways}
         for network in _target_networks(target):
             if network_owners[network] != index:
+                result = _run_target_route_delete(network, interface_name, table_id)
+                if result != 0:
+                    return result
+                continue
+            network_version = ip_network(network, strict=False).version
+            if management and network_version not in gateways_by_version:
                 result = _run_target_route_delete(network, interface_name, table_id)
                 if result != 0:
                     return result
@@ -4482,9 +4495,7 @@ def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
             result = _run_target_route_replace(network, interface_name, table_id)
             if result != 0:
                 return result
-        if target.get("routing_domain", "lab") == "management":
-            gateways = _management_default_gateways_for_target(target)
-            gateways_by_version = {ip_address(gateway).version: gateway for gateway in gateways}
+        if management:
             network_versions = {ip_network(network, strict=False).version for network in _target_networks(target)}
             for version in network_versions:
                 gateway = gateways_by_version.get(version)
