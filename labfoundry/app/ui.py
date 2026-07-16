@@ -8611,7 +8611,11 @@ def run_appliance_apply_job(job_id: str) -> None:
                 job.result = json.dumps({**current_payload, "units": unit_results}, indent=2)
                 persist_vcf_depot_metadata_from_apply(db, [result])
                 if result["success"]:
-                    update_appliance_apply_baselines(db, [unit], {unit["id"]})
+                    refreshed_unit = next(
+                        (candidate for candidate in appliance_apply_units(db) if candidate["id"] == unit["id"]),
+                        unit,
+                    )
+                    update_appliance_apply_baselines(db, [refreshed_unit], {unit["id"]})
                 else:
                     failed = True
                     for remaining_unit in selected_units[index:]:

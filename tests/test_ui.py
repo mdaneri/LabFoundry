@@ -9574,6 +9574,108 @@ def test_appliance_apply_master_steps_fail_fast_and_keep_successful_baselines(cl
         assert "dnsmasq" not in baseline_payload
 
 
+def test_successful_appliance_apply_baseline_uses_post_apply_snapshot(client, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    import labfoundry.app.ui as ui
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, JobStep, Setting
+
+    before = {
+        "id": "vcf_offline_depot",
+        "label": "VCF Offline Depot",
+        "snapshot_hash": "hash-before",
+        "summary": ["tool version not detected"],
+        "validation_errors": [],
+        "validation_warnings": [],
+        "config_path": "/tmp/vcf-offline-depot.conf",
+        "config_preview": "tool_version=not detected",
+        "config_diff": "",
+        "context": {},
+    }
+    after = {
+        **before,
+        "snapshot_hash": "hash-after",
+        "summary": ["tool version 9.1.0"],
+        "config_preview": "tool_version=9.1.0",
+    }
+    result = {
+        "selected_units": ["vcf_offline_depot"],
+        "captured_units": [
+            {
+                "unit_id": "vcf_offline_depot",
+                "snapshot_hash": before["snapshot_hash"],
+                "summary": before["summary"],
+            }
+        ],
+        "skipped_changed_units": [],
+        "units": [],
+        "dry_run": False,
+    }
+    with SessionLocal() as db:
+        job = Job(
+            id="job_post_apply_baseline",
+            type="appliance-apply",
+            status=JobStatus.PENDING.value,
+            created_by="admin",
+            progress_percent=0,
+            result=json.dumps(result),
+        )
+        db.add(job)
+        db.add(
+            JobStep(
+                id=f"{job.id}:vcf_offline_depot",
+                job=job,
+                component_key="vcf_offline_depot",
+                label="VCF Offline Depot",
+                position=1,
+                status=JobStatus.PENDING.value,
+                result=json.dumps({"summary": before["summary"]}),
+            )
+        )
+        db.commit()
+
+    apply_completed = False
+
+    def units(_db):
+        return [after if apply_completed else before]
+
+    def execute(unit):
+        nonlocal apply_completed
+        apply_completed = True
+        return {
+            "unit_id": unit["id"],
+            "label": unit["label"],
+            "status": "succeeded",
+            "success": True,
+            "dry_run": False,
+            "commands": [],
+            "summary": unit["summary"],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "config_path": unit["config_path"],
+            "config_preview": unit["config_preview"],
+            "config_diff": "",
+        }
+
+    monkeypatch.setattr(ui, "appliance_apply_units", units)
+    monkeypatch.setattr(ui, "execute_appliance_apply_unit", execute)
+    monkeypatch.setattr(ui, "persist_vcf_depot_metadata_from_apply", lambda _db, _results: None)
+    monkeypatch.setattr(ui, "log_appliance_apply_submission", lambda *_args, **_kwargs: None)
+
+    ui.run_appliance_apply_job("job_post_apply_baseline")
+
+    with SessionLocal() as db:
+        baseline = db.scalar(select(Setting).where(Setting.key == "appliance_apply.baselines.v1"))
+        assert baseline is not None
+        stored = json.loads(baseline.value)["vcf_offline_depot"]
+        assert stored["snapshot_hash"] == "hash-after"
+        assert stored["config_preview"] == "tool_version=9.1.0"
+        assert stored["summary"] == ["tool version 9.1.0"]
+
+
 def test_appliance_apply_parent_cancel_finishes_current_step_and_skips_remaining(client, monkeypatch):
     import json
 
