@@ -625,6 +625,48 @@ def test_network_helper_renders_dual_stack_networkd_addresses(tmp_path):
     assert "Address=2001:db8:20::1/64" in vlan_network
 
 
+def test_network_helper_replaces_stale_preserved_management_gateway(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(
+        network_config_text().replace("  ip_cidr=192.168.49.1/24", "  ip_cidr=192.168.1.10/24", 1),
+        encoding="utf-8",
+    )
+    management_network = tmp_path / "00-labfoundry-mgmt.network"
+    management_network.write_text(
+        "\n".join(
+            [
+                "[Match]",
+                "Name=eth0",
+                "",
+                "[Network]",
+                "Address=192.168.1.10/24",
+                "",
+                "[Route]",
+                "Gateway=192.168.167.2",
+                "Table=100",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command == ["ip", "route", "show", "default", "dev", "eth0"]:
+            return subprocess.CompletedProcess(command, 0, "default via 192.168.1.1 dev eth0\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", management_network)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/sbin/{command}" if command == "ip" else None)
+
+    files, _reconfigure_links, _admin_down_links = helper._systemd_networkd_files(config_path)
+
+    rendered = files["00-labfoundry-mgmt.network"]
+    assert "Gateway=192.168.1.1" in rendered
+    assert "Gateway=192.168.167.2" not in rendered
+
+
 def test_network_helper_renders_management_dhcp_networkd(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-network.conf"
@@ -885,6 +927,102 @@ def test_wan_helper_preserves_management_default_gateway(monkeypatch, tmp_path):
     assert ["ip", "route", "replace", "default", "via", "192.168.49.254", "dev", "eth0", "table", "100"] in commands
 
 
+def test_wan_helper_replaces_stale_preserved_management_gateway_with_runtime_gateway(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    management_network = tmp_path / "00-labfoundry-mgmt.network"
+    management_network.write_text(
+        "\n".join(
+            [
+                "[Match]",
+                "Name=eth0",
+                "",
+                "[Network]",
+                "Address=192.168.1.10/24",
+                "",
+                "[Route]",
+                "Gateway=192.168.167.2",
+                "Table=100",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "stale-management-gateway.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[targets]",
+                "target=eth0",
+                "  kind=physical",
+                "  role=management",
+                "  ip_cidr=192.168.1.10/24",
+                "  ipv6_cidr=",
+                "  routing_domain=management",
+                "  route_allowed=false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parsed = helper._parse_wan_config(config_path)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command == ["ip", "route", "show", "default", "dev", "eth0"]:
+            return subprocess.CompletedProcess(command, 0, "default via 192.168.1.1 dev eth0\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", management_network)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/sbin/{command}" if command == "ip" else None)
+
+    assert helper._management_default_gateways_for_target(parsed["targets"][0]) == ["192.168.1.1"]
+    assert helper._apply_wan_target_routes(parsed) == 0
+    assert helper._apply_wan_policy_rules(parsed) == 0
+    assert ["ip", "route", "replace", "default", "via", "192.168.1.1", "dev", "eth0", "table", "100"] in commands
+    assert ["ip", "route", "replace", "default", "via", "192.168.167.2", "dev", "eth0", "table", "100"] not in commands
+    assert ["ip", "rule", "add", "from", "192.168.1.0/24", "table", "100", "priority", "1000"] in commands
+
+
+def test_wan_helper_skips_management_policy_rule_without_usable_gateway(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "management-without-gateway.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[targets]",
+                "target=eth0",
+                "  kind=physical",
+                "  role=management",
+                "  ip_cidr=192.168.1.10/24",
+                "  ipv6_cidr=",
+                "  routing_domain=management",
+                "  route_allowed=false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parsed = helper._parse_wan_config(config_path)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command[:4] == ["ip", "route", "del", "default"]:
+            return subprocess.CompletedProcess(command, 2, "", "RTNETLINK answers: No such process\n")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", tmp_path / "missing.network")
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/sbin/{command}" if command == "ip" else None)
+
+    assert helper._apply_wan_target_routes(parsed) == 0
+    assert helper._apply_wan_policy_rules(parsed) == 0
+    assert ["ip", "route", "del", "default", "dev", "eth0", "table", "100"] in commands
+    assert ["ip", "rule", "add", "from", "192.168.1.0/24", "table", "100", "priority", "1000"] not in commands
+
+
 def test_wan_helper_gives_management_ownership_of_duplicate_vlan_network(monkeypatch, tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "duplicate-management-vlan.conf"
@@ -916,6 +1054,8 @@ def test_wan_helper_gives_management_ownership_of_duplicate_vlan_network(monkeyp
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
         commands.append(command)
+        if command == ["ip", "route", "show", "default", "dev", "eth0"]:
+            return subprocess.CompletedProcess(command, 0, "default via 192.168.1.1 dev eth0\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(helper, "_run", fake_run)

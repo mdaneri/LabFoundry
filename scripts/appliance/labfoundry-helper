@@ -3613,6 +3613,32 @@ def _read_existing_management_network_values() -> dict[str, list[str]]:
     return values
 
 
+def _usable_management_default_gateways(networks: list[str], candidates: list[str]) -> list[str]:
+    parsed_networks = []
+    for network in networks:
+        try:
+            parsed_networks.append(ip_network(network, strict=False))
+        except ValueError:
+            continue
+    selected_by_version: dict[int, str] = {}
+    for gateway in candidates:
+        try:
+            gateway_address = ip_address(gateway)
+        except ValueError:
+            continue
+        if gateway_address.version in selected_by_version:
+            continue
+        matching_networks = [network for network in parsed_networks if network.version == gateway_address.version]
+        if not matching_networks:
+            continue
+        if gateway_address.version == 6 and gateway_address.is_link_local:
+            selected_by_version[gateway_address.version] = str(gateway_address)
+            continue
+        if any(gateway_address in network for network in matching_networks):
+            selected_by_version[gateway_address.version] = str(gateway_address)
+    return [selected_by_version[version] for version in sorted(selected_by_version)]
+
+
 def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list[str]]:
     physical_interfaces, vlan_interfaces, _removed_vlan_interfaces = _parse_network_config(path)
     vlans_by_parent: dict[str, list[dict[str, str]]] = {}
@@ -3668,10 +3694,8 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
                 static_management_cidrs.append(interface["ip_cidr"])
             if ipv6_enabled and interface.get("ipv6_cidr"):
                 static_management_cidrs.append(interface["ipv6_cidr"])
-            static_versions = set()
             for cidr in static_management_cidrs:
                 network = ip_network(cidr, strict=False)
-                static_versions.add(network.version)
                 lines.extend(
                     [
                         "",
@@ -3681,13 +3705,10 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
                         f"Priority={MANAGEMENT_ROUTE_RULE_PRIORITY}",
                     ]
                 )
-            for gateway in preserved_management["Gateway"]:
-                try:
-                    gateway_version = ip_address(gateway).version
-                except ValueError:
-                    continue
-                if gateway_version not in static_versions:
-                    continue
+            gateway_candidates = list(preserved_management["Gateway"])
+            if shutil.which("ip") is not None:
+                gateway_candidates.extend(_runtime_default_gateways_for_interface(name))
+            for gateway in _usable_management_default_gateways(static_management_cidrs, gateway_candidates):
                 lines.extend(
                     [
                         "",
@@ -4400,10 +4421,23 @@ def _run_default_gateway_route_replace(gateway: str, interface_name: str, table_
     return result.returncode
 
 
+def _run_default_gateway_route_delete(interface_name: str, table_id: int, version: int) -> int:
+    prefix = ["ip", "-6", "route"] if version == 6 else ["ip", "route"]
+    result = _run([*prefix, "del", "default", "dev", interface_name, "table", str(table_id)])
+    if result.returncode == 2:
+        return 0
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
 def _runtime_default_gateways_for_interface(interface_name: str) -> list[str]:
     gateways: list[str] = []
     for prefix in (["ip", "route"], ["ip", "-6", "route"]):
-        result = _run([*prefix, "show", "default", "dev", interface_name])
+        try:
+            result = _run([*prefix, "show", "default", "dev", interface_name])
+        except OSError:
+            continue
         if result.returncode != 0:
             continue
         for line in result.stdout.splitlines():
@@ -4416,22 +4450,18 @@ def _runtime_default_gateways_for_interface(interface_name: str) -> list[str]:
 
 
 def _management_default_gateways_for_target(target: dict[str, str]) -> list[str]:
+    target_networks = _target_networks(target)
+    candidates: list[str] = []
     configured = target.get("gateway", "").strip()
     if configured:
-        return [configured]
+        candidates.append(configured)
     interface_name = target.get("name", "")
     preserved = _read_existing_management_network_values()
     management_names = set(preserved.get("Name", []))
-    gateways: list[str] = []
     if not management_names or interface_name in management_names:
-        gateways.extend(preserved.get("Gateway", []))
-    if not gateways:
-        gateways.extend(_runtime_default_gateways_for_interface(interface_name))
-    unique_gateways: list[str] = []
-    for gateway in gateways:
-        if gateway and gateway not in unique_gateways:
-            unique_gateways.append(gateway)
-    return unique_gateways
+        candidates.extend(preserved.get("Gateway", []))
+    candidates.extend(_runtime_default_gateways_for_interface(interface_name))
+    return _usable_management_default_gateways(target_networks, candidates)
 
 
 def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
@@ -4453,7 +4483,16 @@ def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
             if result != 0:
                 return result
         if target.get("routing_domain", "lab") == "management":
-            for gateway in _management_default_gateways_for_target(target):
+            gateways = _management_default_gateways_for_target(target)
+            gateways_by_version = {ip_address(gateway).version: gateway for gateway in gateways}
+            network_versions = {ip_network(network, strict=False).version for network in _target_networks(target)}
+            for version in network_versions:
+                gateway = gateways_by_version.get(version)
+                if gateway is None:
+                    result = _run_default_gateway_route_delete(interface_name, table_id, version)
+                    if result != 0:
+                        return result
+                    continue
                 result = _run_default_gateway_route_replace(gateway, interface_name, table_id)
                 if result != 0:
                     return result
@@ -4506,8 +4545,15 @@ def _apply_wan_policy_rules(parsed: dict[str, list[dict[str, str]]]) -> int:
         domain = target.get("routing_domain", "lab")
         table_id = _target_route_table_id(target)
         base_priority = MANAGEMENT_ROUTE_RULE_PRIORITY if domain == "management" else LAB_ROUTE_RULE_PRIORITY
+        management_gateway_versions = (
+            {ip_address(gateway).version for gateway in _management_default_gateways_for_target(target)}
+            if domain == "management"
+            else set()
+        )
         for source_network in _target_networks(target):
             if network_owners[source_network] != index:
+                continue
+            if domain == "management" and ip_network(source_network, strict=False).version not in management_gateway_versions:
                 continue
             result = _run_rule_replace(source_network, table_id, base_priority + index)
             if result != 0:
