@@ -5611,7 +5611,7 @@ function initializePhysicalInterfacesTable() {
             if (data.role !== "management" || data.mode === "trunk" || data.ipv4_method !== "static") return "";
             return dnsAddRowHintFormatter(cell, "192.168.1.1");
           },
-          headerTooltip: "Default IPv4 gateway for management traffic only. It must be on-link for the management CIDR and is installed in management route table 100.",
+          headerTooltip: "Default IPv4 gateway for management traffic only. It must be on-link for the management CIDR and is installed in the main table plus management route table 100.",
           minWidth: 145,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },

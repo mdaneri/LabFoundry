@@ -3484,6 +3484,7 @@ def wan_routing_targets(db: Session) -> list[dict[str, str]]:
                 "role": role,
                 "ip_cidr": interface.ip_cidr or "",
                 "gateway": interface.gateway or "",
+                "ipv4_method": normalize_ipv4_method(interface.ipv4_method),
                 "ipv6_cidr": interface.ipv6_cidr or "",
                 "addresses": addresses,
                 "routing_domain": routing_domain,

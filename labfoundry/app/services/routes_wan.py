@@ -328,6 +328,7 @@ def render_wan_config(
                 f"  ip_cidr={target.get('ip_cidr', '')}",
                 f"  ipv6_cidr={target.get('ipv6_cidr', '')}",
                 f"  gateway={target.get('gateway', '')}",
+                f"  ipv4_method={target.get('ipv4_method', 'static')}",
                 f"  routing_domain={target.get('routing_domain', 'lab')}",
                 f"  route_allowed={_bool_value(bool(target.get('route_allowed', True)))}",
             ]
@@ -479,7 +480,10 @@ def render_wan_config(
                 pass
             else:
                 route_family = "-6 " if gateway_address.version == 6 else ""
+                lines.append(f"ip {route_family}route replace default via {gateway} dev {target['name']}")
                 lines.append(f"ip {route_family}route replace default via {gateway} dev {target['name']} table {MANAGEMENT_ROUTE_TABLE_ID}")
+        elif management and target.get("ipv4_method", "static") == "static":
+            lines.append(f"ip route del default dev {target['name']}  # no static management gateway configured")
     if any(rule.enabled for rule in nat_rules):
         lines.append("nft -f /etc/labfoundry/nftables.d/labfoundry-nat.nft")
 

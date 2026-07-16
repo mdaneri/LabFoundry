@@ -3723,6 +3723,9 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
                         "",
                         "[Route]",
                         f"Gateway={gateway}",
+                        "",
+                        "[Route]",
+                        f"Gateway={gateway}",
                         f"Table={MANAGEMENT_ROUTE_TABLE_ID}",
                     ]
                 )
@@ -4453,23 +4456,28 @@ def _run_target_route_delete(network: str, interface_name: str, table_id: int) -
     return result.returncode
 
 
-def _run_default_gateway_route_replace(gateway: str, interface_name: str, table_id: int) -> int:
+def _run_default_gateway_route_replace(gateway: str, interface_name: str, table_id: int | None = None) -> int:
     try:
         gateway_address = ip_address(gateway)
     except ValueError:
         print(f"invalid gateway for {interface_name}: {gateway}", file=sys.stderr)
         return 2
     prefix = ["ip", "-6", "route"] if gateway_address.version == 6 else ["ip", "route"]
-    command = [*prefix, "replace", "default", "via", gateway, "dev", interface_name, "table", str(table_id)]
+    command = [*prefix, "replace", "default", "via", gateway, "dev", interface_name]
+    if table_id is not None:
+        command.extend(["table", str(table_id)])
     result = _run(command)
     print(result.stdout, end="")
     print(result.stderr, end="", file=sys.stderr)
     return result.returncode
 
 
-def _run_default_gateway_route_delete(interface_name: str, table_id: int, version: int) -> int:
+def _run_default_gateway_route_delete(interface_name: str, table_id: int | None, version: int) -> int:
     prefix = ["ip", "-6", "route"] if version == 6 else ["ip", "route"]
-    result = _run([*prefix, "del", "default", "dev", interface_name, "table", str(table_id)])
+    command = [*prefix, "del", "default", "dev", interface_name]
+    if table_id is not None:
+        command.extend(["table", str(table_id)])
+    result = _run(command)
     if result.returncode == 2:
         return 0
     print(result.stdout, end="")
@@ -4547,6 +4555,18 @@ def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
                         return result
                     continue
                 result = _run_default_gateway_route_replace(gateway, interface_name, table_id)
+                if result != 0:
+                    return result
+            for version, gateway in gateways_by_version.items():
+                result = _run_default_gateway_route_replace(gateway, interface_name)
+                if result != 0:
+                    return result
+            if (
+                "gateway" in target
+                and not target.get("gateway", "").strip()
+                and target.get("ipv4_method", "static").strip().lower() == "static"
+            ):
+                result = _run_default_gateway_route_delete(interface_name, None, 4)
                 if result != 0:
                     return result
     return 0

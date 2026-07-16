@@ -619,7 +619,7 @@ def test_network_helper_renders_explicit_management_gateway_without_runtime_fall
 
     rendered = files["00-labfoundry-mgmt.network"]
     assert "From=192.168.49.0/24" in rendered
-    assert "Gateway=192.168.49.254" in rendered
+    assert rendered.count("Gateway=192.168.49.254") == 2
     assert "Table=100" in rendered
 
 
@@ -984,6 +984,7 @@ def test_wan_helper_preserves_management_default_gateway(monkeypatch, tmp_path):
 
     assert helper._apply_wan_target_routes(parsed) == 0
     assert ["ip", "route", "replace", "192.168.49.0/24", "dev", "eth0", "table", "100"] in commands
+    assert ["ip", "route", "replace", "default", "via", "192.168.49.254", "dev", "eth0"] in commands
     assert ["ip", "route", "replace", "default", "via", "192.168.49.254", "dev", "eth0", "table", "100"] in commands
 
 
@@ -1040,6 +1041,7 @@ def test_wan_helper_replaces_stale_preserved_management_gateway_with_runtime_gat
     assert helper._management_default_gateways_for_target(parsed["targets"][0]) == ["192.168.1.1"]
     assert helper._apply_wan_target_routes(parsed) == 0
     assert helper._apply_wan_policy_rules(parsed) == 0
+    assert ["ip", "route", "replace", "default", "via", "192.168.1.1", "dev", "eth0"] in commands
     assert ["ip", "route", "replace", "default", "via", "192.168.1.1", "dev", "eth0", "table", "100"] in commands
     assert ["ip", "route", "replace", "default", "via", "192.168.167.2", "dev", "eth0", "table", "100"] not in commands
     assert ["ip", "rule", "add", "from", "192.168.1.0/24", "table", "100", "priority", "1000"] in commands
@@ -1083,8 +1085,45 @@ def test_wan_helper_skips_management_policy_rule_without_usable_gateway(monkeypa
     assert ["ip", "route", "replace", "192.168.1.0/24", "dev", "eth0", "table", "100"] not in commands
     assert ["ip", "route", "del", "192.168.1.0/24", "dev", "eth0", "table", "100"] in commands
     assert ["ip", "route", "del", "default", "dev", "eth0", "table", "100"] in commands
+    assert ["ip", "route", "del", "default", "dev", "eth0"] in commands
     assert ["ip", "route", "show", "default", "dev", "eth0"] not in commands
     assert ["ip", "rule", "add", "from", "192.168.1.0/24", "table", "100", "priority", "1000"] not in commands
+
+
+def test_wan_helper_does_not_delete_dhcp_management_default(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "dhcp-management.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[targets]",
+                "target=eth0",
+                "  kind=physical",
+                "  role=management",
+                "  ip_cidr=",
+                "  ipv6_cidr=",
+                "  gateway=",
+                "  ipv4_method=dhcp",
+                "  routing_domain=management",
+                "  route_allowed=false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parsed = helper._parse_wan_config(config_path)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", tmp_path / "missing.network")
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/sbin/{command}" if command == "ip" else None)
+
+    assert helper._apply_wan_target_routes(parsed) == 0
+    assert ["ip", "route", "del", "default", "dev", "eth0"] not in commands
 
 
 def test_wan_helper_gives_management_ownership_of_duplicate_vlan_network(monkeypatch, tmp_path):
