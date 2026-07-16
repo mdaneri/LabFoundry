@@ -2928,15 +2928,11 @@ def _handle_web_terminal(action: str, args: list[str]) -> int:
         return 2
     try:
         account = pwd.getpwnam(username)
-        wheel = grp.getgrnam("wheel")
     except KeyError:
-        print("web terminal user must exist and belong to wheel", file=sys.stderr)
+        print("web terminal user must exist", file=sys.stderr)
         return 2
     if account.pw_shell not in LOCAL_USERS_ALLOWED_SHELLS - {"/sbin/nologin"}:
         print("web terminal user must have an interactive shell", file=sys.stderr)
-        return 2
-    if account.pw_gid != wheel.gr_gid and username not in wheel.gr_mem:
-        print("web terminal user must belong to wheel", file=sys.stderr)
         return 2
     ssh_keygen = shutil.which("ssh-keygen")
     if ssh_keygen is None:

@@ -3300,7 +3300,7 @@ def test_web_terminal_helper_installs_ca_trust_and_disables_without_deleting_ca(
     assert ca_key.exists()
 
 
-def test_web_terminal_helper_signs_short_lived_restricted_certificate(monkeypatch, tmp_path, capsys):
+def test_web_terminal_helper_signs_short_lived_restricted_certificate_for_non_wheel_user(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
     request_dir = tmp_path / "requests"
     request_dir.mkdir()
@@ -3336,9 +3336,13 @@ def test_web_terminal_helper_signs_short_lived_restricted_certificate(monkeypatc
     monkeypatch.setattr(
         helper.pwd,
         "getpwnam",
-        lambda _name: SimpleNamespace(pw_shell="/usr/bin/pwsh", pw_gid=10),
+        lambda _name: SimpleNamespace(pw_shell="/usr/bin/pwsh", pw_gid=1000),
     )
-    monkeypatch.setattr(helper.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=10, gr_mem=[]))
+    monkeypatch.setattr(
+        helper.grp,
+        "getgrnam",
+        lambda _name: (_ for _ in ()).throw(AssertionError("Web terminal signing must not require wheel membership.")),
+    )
     monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/ssh-keygen" if command == "ssh-keygen" else None)
     monkeypatch.setattr(helper, "_run", fake_run)
 

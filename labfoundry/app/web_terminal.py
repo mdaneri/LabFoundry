@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import io
 import json
+import logging
 import re
 import socket
 import threading
@@ -45,6 +46,7 @@ from labfoundry.app.services.appliance_settings import (
 
 
 router = APIRouter()
+LOGGER = logging.getLogger("labfoundry.web_terminal")
 WEB_TERMINAL_REQUEST_DIR = Path("/var/lib/labfoundry/web-terminal/requests")
 SSH_HOST_PUBLIC_KEY_PATH = Path("/etc/ssh/ssh_host_ed25519_key.pub")
 TICKET_TTL_SECONDS = 30
@@ -544,6 +546,7 @@ async def terminal_websocket(websocket: WebSocket) -> None:
         username = user.username
     await websocket.accept()
     session: ActiveTerminalSession | None = None
+    session_id = ""
     try:
         auth_message = await asyncio.wait_for(websocket.receive_json(), timeout=5)
         ticket = _consume_ticket(str(auth_message.get("ticket") or ""), int(user_id), username, csrf_token)
@@ -614,6 +617,11 @@ async def terminal_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception:
+        LOGGER.exception(
+            "Unable to start or reattach web terminal user=%s session_id=%s",
+            username,
+            session_id or "unassigned",
+        )
         try:
             await websocket.send_json({"type": "error", "message": "The appliance terminal session could not be started or reattached."})
         except Exception:
