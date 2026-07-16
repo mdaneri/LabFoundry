@@ -255,6 +255,7 @@
             </div>
           </div>
           <div class="alert error hidden" data-appliance-apply-modal-error role="alert"></div>
+          <div class="alert warning hidden" data-appliance-apply-connection-warning role="alert"></div>
           <section class="appliance-apply-review" data-appliance-apply-review>
             <form class="form-stack" data-appliance-apply-review-form>
               <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -297,7 +298,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=managed-ldap-20260716-1"></script>
+    <script src="/static/app.js?v=managed-ldap-management-main-route-20260716-2"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

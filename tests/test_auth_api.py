@@ -101,6 +101,21 @@ def test_physical_interface_api_persists_optional_ipv6_enabled_state(client):
     )
     assert wrong_type.status_code == 422
 
+    gateway = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"ipv4_method": "static", "ip_cidr": "192.168.49.1/24", "gateway": "192.168.49.254"},
+    )
+    assert gateway.status_code == 200, gateway.text
+    assert gateway.json()["gateway"] == "192.168.49.254"
+
+    off_link_gateway = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"gateway": "192.168.50.254"},
+    )
+    assert off_link_gateway.status_code == 422
+
 
 def test_scope_restrictions_are_enforced(client):
     token, _metadata = create_token(client, scopes=["read:dashboard"])

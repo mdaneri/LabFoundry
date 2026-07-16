@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
-from ipaddress import ip_interface
+from ipaddress import ip_address, ip_interface
 from pathlib import Path
 import subprocess
 
@@ -86,6 +86,7 @@ def physical_interface_to_dict(interface: PhysicalInterface, vlan_count: int = 0
         "host_mtu": interface.host_mtu,
         "host_admin_state": interface.host_admin_state or "",
         "ip_cidr": interface.ip_cidr or "",
+        "gateway": interface.gateway or "",
         "ipv4_method": normalize_ipv4_method(interface.ipv4_method),
         "ipv6_enabled": bool(interface.ipv6_enabled),
         "ipv6_cidr": interface.ipv6_cidr or "",
@@ -720,6 +721,7 @@ def render_network_config(
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
         "# Dry-run preview of desired Linux network state.",
+        "# Static management gateways install in the main table and management policy table 100.",
         "",
         "[physical_interfaces]",
     ]
@@ -735,6 +737,7 @@ def render_network_config(
                 f"  mode={mode}",
                 f"  ipv4_method={normalize_ipv4_method(interface.ipv4_method)}",
                 f"  ip_cidr={interface.ip_cidr or ''}",
+                f"  gateway={interface.gateway or ''}",
                 f"  ipv6_enabled={'true' if interface.ipv6_enabled else 'false'}",
                 f"  ipv6_cidr={interface.ipv6_cidr or ''}",
                 f"  admin_state={interface.admin_state}",
@@ -785,6 +788,26 @@ def validate_network_state(
             errors.append(f"Interface {interface.name} can use DHCP only when its role is management.")
         if ipv4_method == "dhcp" and interface.ip_cidr:
             errors.append(f"Interface {interface.name} cannot set an IPv4 CIDR while IPv4 method is DHCP.")
+        if interface.gateway:
+            if role != "management":
+                errors.append(f"Interface {interface.name} can set an IPv4 gateway only when its role is management.")
+            elif ipv4_method != "static" or not interface.ip_cidr:
+                errors.append(f"Interface {interface.name} can set an IPv4 gateway only with static management IPv4.")
+            else:
+                try:
+                    gateway = ip_address(interface.gateway)
+                    address = ip_interface(interface.ip_cidr)
+                except ValueError:
+                    errors.append(f"Interface {interface.name} IPv4 gateway {interface.gateway} is invalid.")
+                else:
+                    if gateway.version != 4:
+                        errors.append(f"Interface {interface.name} IPv4 gateway {interface.gateway} uses the wrong IP family.")
+                    elif gateway not in address.network:
+                        errors.append(
+                            f"Interface {interface.name} IPv4 gateway {interface.gateway} is not on-link for {interface.ip_cidr}."
+                        )
+                    elif gateway == address.ip:
+                        errors.append(f"Interface {interface.name} IPv4 gateway cannot equal its interface address.")
         if not interface.ipv6_enabled and interface.ipv6_cidr:
             errors.append(f"Interface {interface.name} cannot set an IPv6 CIDR while IPv6 is disabled.")
         if role == "management" and ipv4_method == "static" and not interface.ip_cidr:

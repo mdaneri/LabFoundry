@@ -5152,6 +5152,15 @@ function isValidIpv4Address(value) {
   });
 }
 
+function ipv4GatewayIsOnLink(gateway, cidr) {
+  if (!isValidIpv4Address(gateway) || !isValidCidr(cidr, "ipv4")) return false;
+  const [address, prefixText] = String(cidr).split("/");
+  const toNumber = (value) => value.split(".").reduce((result, part) => ((result << 8) | Number(part)) >>> 0, 0);
+  const prefix = Number(prefixText);
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return (toNumber(gateway) & mask) === (toNumber(address) & mask) && gateway !== address;
+}
+
 function isValidIpv6Address(value) {
   const address = String(value || "");
   if (!address.includes(":") || /[\s[\]]/.test(address)) {
@@ -5364,7 +5373,9 @@ async function autoSavePhysicalInterface(cell, csrf) {
   data.admin_state = data.admin_up ? "up" : "down";
   if (data.ipv4_method === "dhcp") {
     data.ip_cidr = "";
+    data.gateway = "";
   }
+  if (data.role !== "management" || data.mode === "trunk") data.gateway = "";
   if (!data.ipv6_enabled) {
     data.ipv6_cidr = "";
   }
@@ -5386,7 +5397,9 @@ async function savePhysicalInterfaceRow(row, csrf, successMessage = "Saved") {
   data.admin_state = data.admin_up ? "up" : "down";
   if (data.ipv4_method === "dhcp") {
     data.ip_cidr = "";
+    data.gateway = "";
   }
+  if (data.role !== "management" || data.mode === "trunk") data.gateway = "";
   if (!data.ipv6_enabled) {
     data.ipv6_cidr = "";
   }
@@ -5627,7 +5640,7 @@ function initializePhysicalInterfacesTable() {
               return;
             }
             if (data.ipv4_method === "dhcp") {
-              await row.update({ ip_cidr: "" });
+              await row.update({ ip_cidr: "", gateway: "" });
             }
             await autoSavePhysicalInterface(cell, csrf);
           },
@@ -5656,6 +5669,30 @@ function initializePhysicalInterfacesTable() {
             return dnsAddRowHintFormatter(cell, "192.168.50.1/24");
           },
           minWidth: 160,
+          cellEdited: async (cell) => {
+            const row = cell.getRow();
+            const data = row.getData();
+            if (data.gateway && !ipv4GatewayIsOnLink(data.gateway, data.ip_cidr)) {
+              await row.update({ gateway: "" });
+            }
+            await autoSavePhysicalInterface(cell, csrf);
+          },
+        },
+        {
+          title: "IPv4 Gateway",
+          field: "gateway",
+          editor: "input",
+          editable: (cell) => {
+            const data = cell.getRow().getData();
+            return data.role === "management" && data.mode !== "trunk" && data.ipv4_method === "static";
+          },
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.role !== "management" || data.mode === "trunk" || data.ipv4_method !== "static") return "";
+            return dnsAddRowHintFormatter(cell, "192.168.1.1");
+          },
+          headerTooltip: "Default IPv4 gateway for management traffic only. It must be on-link for the management CIDR and is installed in the main table plus management route table 100.",
+          minWidth: 145,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
         {
@@ -5702,7 +5739,12 @@ function initializePhysicalInterfacesTable() {
           editable: (cell) => cell.getRow().getData().mode !== "trunk",
           formatter: physicalRoleFormatter,
           width: 125,
-          cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
+          cellEdited: async (cell) => {
+            if (cell.getValue() !== "management") {
+              await cell.getRow().update({ gateway: "" });
+            }
+            await autoSavePhysicalInterface(cell, csrf);
+          },
         },
         {
           title: "Link Type",
@@ -5724,7 +5766,7 @@ function initializePhysicalInterfacesTable() {
           minWidth: 220,
           cellEdited: async (cell) => {
             if (cell.getValue() === "trunk") {
-              await cell.getRow().update({ role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_enabled: false, ipv6_cidr: "" });
+              await cell.getRow().update({ role: "unused", ipv4_method: "static", ip_cidr: "", gateway: "", ipv6_enabled: false, ipv6_cidr: "" });
             }
             await autoSavePhysicalInterface(cell, csrf);
             cell.getRow().reformat();
@@ -10896,6 +10938,7 @@ function applianceApplyModalElements() {
     subtitle: modal?.querySelector("[data-appliance-apply-modal-subtitle]"),
     status: modal?.querySelector("[data-appliance-apply-modal-status]"),
     error: modal?.querySelector("[data-appliance-apply-modal-error]"),
+    connectionWarning: modal?.querySelector("[data-appliance-apply-connection-warning]"),
     review: modal?.querySelector("[data-appliance-apply-review]"),
     live: modal?.querySelector("[data-appliance-apply-live]"),
     reviewList: modal?.querySelector("[data-appliance-apply-review-list]"),
@@ -10926,6 +10969,7 @@ function applianceApplyReviewRow(unit) {
   const row = document.createElement("article");
   row.className = "appliance-apply-review-row";
   row.dataset.applyUnitId = unit.id || "";
+  row.dataset.applyConnectionWarnings = JSON.stringify(Array.isArray(unit.connection_warnings) ? unit.connection_warnings : []);
 
   const head = document.createElement("div");
   head.className = "appliance-apply-review-row-head";
@@ -10995,14 +11039,40 @@ function applianceApplyReviewRow(unit) {
 }
 
 function updateApplianceApplySelection() {
-  const { modal, selectionSummary, submit } = applianceApplyModalElements();
+  const { modal, selectionSummary, submit, connectionWarning } = applianceApplyModalElements();
   if (!(modal instanceof HTMLDialogElement)) return;
-  const selected = modal.querySelectorAll("[data-appliance-apply-review-checkbox]:checked").length;
+  const selectedCheckboxes = Array.from(modal.querySelectorAll("[data-appliance-apply-review-checkbox]:checked"));
+  const selected = selectedCheckboxes.length;
   if (selectionSummary instanceof HTMLElement) {
     selectionSummary.textContent = `${selected} component${selected === 1 ? "" : "s"} selected`;
   }
   if (submit instanceof HTMLButtonElement) {
     submit.disabled = selected === 0;
+  }
+  if (connectionWarning instanceof HTMLElement) {
+    const messages = new Set();
+    selectedCheckboxes.forEach((checkbox) => {
+      const row = checkbox.closest("[data-apply-unit-id]");
+      if (!(row instanceof HTMLElement)) return;
+      try {
+        const warnings = JSON.parse(row.dataset.applyConnectionWarnings || "[]");
+        if (Array.isArray(warnings)) warnings.forEach((warning) => messages.add(String(warning)));
+      } catch (_error) {
+        // Ignore malformed optional warning metadata and keep the apply review usable.
+      }
+    });
+    connectionWarning.replaceChildren();
+    if (messages.size) {
+      const title = document.createElement("strong");
+      title.textContent = "Management connection warning";
+      connectionWarning.append(title);
+      messages.forEach((message) => {
+        const line = document.createElement("div");
+        line.textContent = message;
+        connectionWarning.append(line);
+      });
+    }
+    connectionWarning.classList.toggle("hidden", messages.size === 0);
   }
 }
 
@@ -11027,6 +11097,10 @@ async function openApplianceApplyReview() {
     elements.selectionSummary.textContent = "Loading appliance changes…";
   }
   setApplianceApplyModalError("");
+  if (elements.connectionWarning instanceof HTMLElement) {
+    elements.connectionWarning.replaceChildren();
+    elements.connectionWarning.classList.add("hidden");
+  }
   showApplianceApplyModal(elements.modal);
   try {
     const response = await fetch("/appliance-apply/review", { credentials: "same-origin", headers: { Accept: "application/json" } });

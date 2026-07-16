@@ -2657,7 +2657,6 @@ def vcf_depot_tool_snapshot(context: dict[str, Any]) -> str:
             f"# Archive modified ns: {archive_mtime if archive_path else 'not staged'}",
             f"# Tool version: {settings.tool_version or 'not detected'}",
             f"# Software depot ID: {'generated' if software_depot_id.get('id') else 'not generated'}",
-            f"# Software depot ID generated: {software_depot_id.get('generated_at') or 'never'}",
             f"# Runtime reset pending: {'yes' if context.get('vcf_depot_runtime_reset_pending') else 'no'}",
         ]
     )
@@ -3747,6 +3746,8 @@ def wan_routing_targets(db: Session) -> list[dict[str, str]]:
                 "kind": "physical",
                 "role": role,
                 "ip_cidr": interface.ip_cidr or "",
+                "gateway": interface.gateway or "",
+                "ipv4_method": normalize_ipv4_method(interface.ipv4_method),
                 "ipv6_cidr": interface.ipv6_cidr or "",
                 "addresses": addresses,
                 "routing_domain": routing_domain,
@@ -6098,6 +6099,10 @@ def _normalize_vcf_trust_address(address: str) -> tuple[str, list[str]]:
 
 
 APPLIANCE_APPLY_BASELINES_KEY = "appliance_apply.baselines.v1"
+MANAGEMENT_CERTIFICATE_CONNECTION_WARNING = (
+    "Applying the selected management HTTPS change will replace or rebind the management certificate. "
+    "This browser connection will be interrupted; reconnect and verify or trust the certificate presented by the appliance."
+)
 APPLIANCE_APPLY_UNIT_IDS = {
     "local_users",
     "appliance_settings",
@@ -6225,6 +6230,124 @@ def config_diff_for_unit(unit_id: str, current_preview: str, baseline: dict[str,
             lineterm="",
         )
     )
+
+
+def network_management_signature(config_preview: str) -> dict[str, str]:
+    interfaces: list[dict[str, str]] = []
+    current_section = ""
+    current: dict[str, str] | None = None
+    for raw_line in (config_preview or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line.strip("[]")
+            current = None
+            continue
+        if "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if current_section == "physical_interfaces" and key == "interface":
+            current = {"name": value}
+            interfaces.append(current)
+            continue
+        if current_section == "physical_interfaces" and current is not None:
+            current[key] = value
+    management = next((interface for interface in interfaces if interface.get("role") == "management"), None)
+    if management is None:
+        return {}
+    return {
+        "name": management.get("name", ""),
+        "ipv4_method": management.get("ipv4_method", ""),
+        "ip_cidr": management.get("ip_cidr", ""),
+        "gateway": management.get("gateway", ""),
+        "ipv6_cidr": management.get("ipv6_cidr", ""),
+    }
+
+
+def management_address_label(signature: dict[str, str]) -> str:
+    if signature.get("ip_cidr"):
+        return signature["ip_cidr"]
+    if signature.get("ipv4_method") == "dhcp":
+        return "a DHCP-assigned address"
+    if signature.get("ipv6_cidr"):
+        return signature["ipv6_cidr"]
+    return "no configured management address"
+
+
+def json_config_object(config_preview: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(config_preview or "")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def management_tls_binding_signature(config_preview: str) -> dict[str, Any]:
+    payload = json_config_object(config_preview)
+    if not payload:
+        return {}
+    return {
+        "management_https_enabled": bool(payload.get("management_https_enabled")),
+        "management_https_cert_path": str(payload.get("management_https_cert_path") or ""),
+        "management_https_key_path": str(payload.get("management_https_key_path") or ""),
+    }
+
+
+def management_certificate_signature(config_preview: str) -> dict[str, str]:
+    payload = json_config_object(config_preview)
+    for certificate in payload.get("certificates", []):
+        if not isinstance(certificate, dict) or certificate.get("managed_owner") != "appliance:https":
+            continue
+        return {
+            "common_name": str(certificate.get("common_name") or ""),
+            "fingerprint": str(certificate.get("fingerprint") or ""),
+            "certificate_pem": str(certificate.get("certificate_pem") or ""),
+            "cert_path": str(certificate.get("cert_path") or ""),
+            "key_path": str(certificate.get("key_path") or ""),
+            "chain_path": str(certificate.get("chain_path") or ""),
+        }
+    return {}
+
+
+def appliance_apply_connection_warnings(
+    unit_id: str,
+    current_preview: str,
+    baseline: dict[str, Any] | None,
+) -> list[str]:
+    previous_preview = str((baseline or {}).get("config_preview") or "")
+    if not previous_preview:
+        return []
+    if unit_id == "network":
+        previous = network_management_signature(previous_preview)
+        current = network_management_signature(current_preview)
+        if previous and current:
+            warnings: list[str] = []
+            address_keys = ("name", "ipv4_method", "ip_cidr", "ipv6_cidr")
+            if any(previous.get(key) != current.get(key) for key in address_keys):
+                warnings.append(
+                    "Applying Network will change the management address "
+                    f"from {management_address_label(previous)} to {management_address_label(current)}. "
+                    "This browser connection will be lost; reconnect to the new management address after the task completes."
+                )
+            if previous.get("gateway", "") != current.get("gateway", ""):
+                warnings.append(
+                    "Applying Network will change the management IPv4 gateway "
+                    f"from {previous.get('gateway') or 'none'} to {current.get('gateway') or 'none'}. "
+                    "Existing management connections may be interrupted while policy routing is updated."
+                )
+            return warnings
+    if unit_id == "appliance_settings":
+        previous = management_tls_binding_signature(previous_preview)
+        current = management_tls_binding_signature(current_preview)
+        if previous and current and previous != current:
+            return [MANAGEMENT_CERTIFICATE_CONNECTION_WARNING]
+    if unit_id == "ca":
+        previous = management_certificate_signature(previous_preview)
+        current = management_certificate_signature(current_preview)
+        if previous != current and (previous or current):
+            return [MANAGEMENT_CERTIFICATE_CONNECTION_WARNING]
+    return []
 
 
 def network_vlan_entries_from_config(config_preview: str) -> list[dict[str, str]]:
@@ -6624,6 +6747,12 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
         successful_network_apply_vlan_entries(db, network_baseline),
     )
     network_summary = [f"{len(network['physical_interfaces'])} physical interfaces", f"{len(network['vlan_interfaces'])} VLAN interfaces"]
+    management_interface = next(
+        (interface for interface in network["physical_interfaces"] if normalize_interface_role(interface.role) == "management"),
+        None,
+    )
+    if management_interface is not None:
+        network_summary.append(f"management gateway {management_interface.gateway or 'none'}")
     if network_removed_vlans:
         network_summary.append(f"{len(network_removed_vlans)} VLAN removals")
     network_unit = make_appliance_apply_unit(
@@ -6660,7 +6789,7 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
     if wan_removed_routes:
         wan_summary.append(f"{len(wan_removed_routes)} route removals")
 
-    return [
+    units = [
         make_appliance_apply_unit(
             unit_id="local_users",
             label="Local Users",
@@ -6870,6 +6999,13 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
             baseline=baselines.get("public_services"),
         ),
     ]
+    for unit in units:
+        unit["connection_warnings"] = appliance_apply_connection_warnings(
+            unit["id"],
+            unit["config_preview"],
+            baselines.get(unit["id"]),
+        )
+    return units
 
 
 def appliance_apply_status(db: Session, unit_id: str) -> dict[str, Any]:
@@ -8664,6 +8800,7 @@ def appliance_apply_review(
             "valid": unit["valid"],
             "validation_errors": unit["validation_errors"],
             "validation_warnings": unit["validation_warnings"],
+            "connection_warnings": unit["connection_warnings"],
             "config_path": unit["config_path"],
             "config_preview": unit["config_preview"],
             "config_diff": unit["config_diff"],
@@ -10082,6 +10219,7 @@ def edit_physical_interface_from_ui(
     mode: str = Form("unused"),
     ipv4_method: str = Form("static"),
     ip_cidr: str = Form(""),
+    gateway: str | None = Form(None),
     ipv6_enabled: bool = Form(False),
     ipv6_cidr: str = Form(""),
     mtu: int = Form(1500),
@@ -10119,6 +10257,31 @@ def edit_physical_interface_from_ui(
         ip_value = cidr_for_family(ip_cidr, 4, "Interface IPv4 CIDR")
         if isinstance(ip_value, Response):
             return ip_value
+    gateway_value = (interface.gateway or "") if gateway is None else gateway.strip()
+    if role_value != "management" or ipv4_method_value != "static" or new_mode == "trunk":
+        gateway_value = ""
+    if gateway_value:
+        if role_value != "management" or ipv4_method_value != "static" or not ip_value:
+            return Response(
+                "IPv4 gateway is available only for a management interface using static IPv4.",
+                status_code=422,
+                media_type="text/plain",
+            )
+        try:
+            parsed_gateway = ip_address(gateway_value)
+            parsed_interface = ip_interface(ip_value)
+        except ValueError:
+            return Response(f"{gateway_value} is not a valid IPv4 gateway.", status_code=422, media_type="text/plain")
+        if parsed_gateway.version != 4:
+            return Response("Management gateway must be an IPv4 address.", status_code=422, media_type="text/plain")
+        if parsed_gateway not in parsed_interface.network:
+            return Response(
+                f"Management gateway {gateway_value} must be on-link for {ip_value}.",
+                status_code=422,
+                media_type="text/plain",
+            )
+        if parsed_gateway == parsed_interface.ip:
+            return Response("Management gateway cannot equal the management interface address.", status_code=422, media_type="text/plain")
     ipv6_value = None
     ipv6_enabled_value = bool(ipv6_enabled) and new_mode != "trunk"
     if new_mode != "trunk" and not ipv6_enabled_value and ipv6_cidr.strip():
@@ -10141,6 +10304,7 @@ def edit_physical_interface_from_ui(
     interface.mode = new_mode
     interface.ipv4_method = ipv4_method_value
     interface.ip_cidr = ip_value or None
+    interface.gateway = gateway_value or None
     interface.ipv6_enabled = ipv6_enabled_value
     interface.ipv6_cidr = ipv6_value or None
     interface.mtu = mtu

@@ -655,7 +655,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v101" in service_worker.text
+    assert "labfoundry-pwa-v104" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -668,7 +668,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in service_worker.text
-    assert "/static/app.js?v=managed-ldap-20260716-1" in service_worker.text
+    assert "/static/app.js?v=managed-ldap-management-main-route-20260716-2" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -694,7 +694,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in page.text
-    assert "/static/app.js?v=managed-ldap-20260716-1" in page.text
+    assert "/static/app.js?v=managed-ldap-management-main-route-20260716-2" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -4613,12 +4613,15 @@ def test_dns_and_dhcp_pages_render(client):
     assert "Submit appliance changes" in app_js.text
     assert "openApplianceApplyReview" in app_js.text
     assert "renderApplianceApplyTask" in app_js.text
+    assert "Management connection warning" in app_js.text
+    assert "applyConnectionWarnings" in app_js.text
     assert 'elements.submit.classList.add("hidden")' in app_js.text
     assert 'elements.submit.classList.toggle("hidden", units.length === 0)' in app_js.text
     assert '{ title: "Status", field: "status", width: 150' in app_js.text
     assert 'applianceApplyModalTable.on("rowClick"' in app_js.text
     assert 'labFoundryTasksTable.on("rowClick"' in app_js.text
     assert "data-appliance-apply-modal" in app_js.text
+    assert "data-appliance-apply-connection-warning" in dns.text
     assert 'class="button primary hidden" type="submit" data-appliance-apply-submit' in dns.text
     assert "data-apply-submit-tracker" not in app_js.text
     assert "index === 0 ? \"Applying\"" not in app_js.text
@@ -7056,6 +7059,31 @@ def test_vcf_offline_depot_tool_upload_marks_apply_pending_without_profiles(clie
         assert "# Archive: vcf-download-tool-9.1.0.test.tar.gz" in unit["config_preview"]
 
 
+def test_vcf_offline_depot_generation_timestamp_does_not_reopen_apply_unit(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.services.vcf_offline_depot import (
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY,
+        VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY,
+    )
+    from labfoundry.app.ui import appliance_apply_units, set_setting_value, update_appliance_apply_baselines
+
+    with SessionLocal() as db:
+        set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_KEY, "generated-depot-id")
+        set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY, "2026-07-16T19:05:04.930993+00:00")
+        unit = next(unit for unit in appliance_apply_units(db) if unit["id"] == "vcf_offline_depot")
+        assert "# Software depot ID: generated" in unit["config_preview"]
+        assert "# Software depot ID generated:" not in unit["config_preview"]
+        update_appliance_apply_baselines(db, [unit], {"vcf_offline_depot"})
+        db.commit()
+
+        set_setting_value(db, VCF_DEPOT_SOFTWARE_DEPOT_ID_GENERATED_AT_KEY, "2026-07-16T19:22:22.389728+00:00")
+        db.commit()
+
+        refreshed = next(unit for unit in appliance_apply_units(db) if unit["id"] == "vcf_offline_depot")
+        assert refreshed["changed"] is False
+        assert refreshed["config_diff"] == ""
+
+
 def test_vcf_offline_depot_apply_stages_tool_without_download_profiles(client, tmp_path, monkeypatch):
     from sqlalchemy import delete, select
 
@@ -8188,12 +8216,14 @@ def test_physical_and_vlan_pages_render(client):
     physical = client.get("/physical-interfaces")
     assert physical.status_code == 200
     assert "Physical Interfaces" in physical.text
-    assert "Review observed Photon NICs, then edit desired access, trunk, IPv4, IPv6, and admin state" in physical.text
+    assert "Review observed Photon NICs, then edit desired access, trunk, IPv4, management gateway, IPv6, and admin state" in physical.text
     assert "physical-interfaces-table" in physical.text
     assert "Refresh host inventory" in physical.text
     assert "Observed IPv4" in physical.text
     assert "Observed IPv6" in physical.text
     assert "IPv4 CIDR" in physical.text
+    assert "IPv4 Gateway" in physical.text
+    assert "Management gateway" in physical.text
     assert "IPv6 CIDR" in physical.text
     assert "network-state-icon up" in physical.text
     assert "eth0" in physical.text
@@ -8231,10 +8261,12 @@ def test_physical_and_vlan_pages_render(client):
     assert "physicalRoleFormatter" in app_js
     assert 'editable: (cell) => cell.getRow().getData().mode !== "trunk"' in app_js
     assert app_js.count('editable: (cell) => cell.getRow().getData().mode !== "trunk"') >= 3
-    assert 'role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_enabled: false, ipv6_cidr: ""' in app_js
+    assert 'role: "unused", ipv4_method: "static", ip_cidr: "", gateway: "", ipv6_enabled: false, ipv6_cidr: ""' in app_js
     assert "data.requires_activation && !data.is_activated" in app_js
     assert "cidrInputEditor" in app_js
     assert "isValidCidr" in app_js
+    assert "ipv4GatewayIsOnLink" in app_js
+    assert 'title: "IPv4 Gateway"' in app_js
     assert 'editorParams: { family: "ipv4", placeholder: "192.168.50.1/24" }' in app_js
     assert 'editorParams: { family: "ipv6", placeholder: "fd00:50::1/64" }' in app_js
     app_css = client.get("/static/app.css").text
@@ -8245,6 +8277,67 @@ def test_physical_and_vlan_pages_render(client):
     assert ".vlan-interfaces-table .tabulator-row.new-record-row .new-record-primary-cell" in app_css
     assert "Review appliance changes" in vlans.text
     assert "/var/lib/labfoundry/apply/network/labfoundry-network.conf" in vlans.text
+
+
+def test_management_interface_gateway_is_saved_and_drives_table_100(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+
+    login(client)
+    page = client.get("/physical-interfaces")
+    rows = json.loads(html.unescape(page.text.split("data-interfaces='", 1)[1].split("'", 1)[0]))
+    management = next(row for row in rows if row["role"] == "management")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    saved = client.post(
+        f"/physical-interfaces/{management['id']}/edit",
+        data={
+            "role": "management",
+            "mode": "access",
+            "ipv4_method": "static",
+            "ip_cidr": "192.168.49.1/24",
+            "gateway": "192.168.49.254",
+            "mtu": "1500",
+            "admin_state": "up",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+
+    assert saved.status_code == 303
+    refreshed = client.get("/physical-interfaces")
+    assert '"gateway": "192.168.49.254"' in refreshed.text
+    assert "gateway=192.168.49.254" in refreshed.text
+    assert "Static management gateways install in the main table and management policy table 100." in refreshed.text
+    routes_wan = client.get("/routes-wan")
+    assert "gateway=192.168.49.254" in routes_wan.text
+    assert "ip route replace default via 192.168.49.254 dev eth0\n" in routes_wan.text
+    assert "ip route replace default via 192.168.49.254 dev eth0 table 100" in routes_wan.text
+    with SessionLocal() as db:
+        row = db.scalar(select(PhysicalInterface).where(PhysicalInterface.id == management["id"]))
+        assert row is not None
+        assert row.gateway == "192.168.49.254"
+
+    invalid = client.post(
+        f"/physical-interfaces/{management['id']}/edit",
+        data={
+            "role": "management",
+            "mode": "access",
+            "ipv4_method": "static",
+            "ip_cidr": "192.168.49.1/24",
+            "gateway": "192.168.50.254",
+            "mtu": "1500",
+            "admin_state": "up",
+            "csrf": csrf,
+        },
+    )
+    assert invalid.status_code == 422
+    assert "must be on-link" in invalid.text
 
 
 def test_physical_interface_refresh_imports_host_inventory_without_apply_job(client, monkeypatch):
@@ -9055,7 +9148,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "managed-ldap-20260716-1" in page.text
+    assert "managed-ldap-management-main-route-20260716-2" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -9126,6 +9219,7 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     firewall_review = next(unit for unit in review.json()["units"] if unit["id"] == "firewall")
     assert firewall_review["has_baseline"] is False
     assert firewall_review["selected"] is True
+    assert firewall_review["connection_warnings"] == []
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     empty_response = client.post("/appliance-apply", data={"csrf": csrf})
@@ -9194,6 +9288,105 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
         assert job is not None
         assert "skipped_changed_units" in (job.result or "")
         assert '"unit_id": "firewall"' in (job.result or "")
+
+
+def test_appliance_apply_connection_warnings_detect_management_address_and_certificate_changes():
+    import json
+
+    from labfoundry.app.ui import (
+        MANAGEMENT_CERTIFICATE_CONNECTION_WARNING,
+        appliance_apply_connection_warnings,
+    )
+
+    previous_network = "\n".join(
+        [
+            "[physical_interfaces]",
+            "interface=eth0",
+            "  role=management",
+            "  ipv4_method=static",
+            "  ip_cidr=192.168.1.10/24",
+            "  ipv6_cidr=",
+        ]
+    )
+    current_network = previous_network.replace("192.168.1.10/24", "192.168.1.20/24")
+    network_warnings = appliance_apply_connection_warnings(
+        "network",
+        current_network,
+        {"config_preview": previous_network},
+    )
+    assert len(network_warnings) == 1
+    assert "from 192.168.1.10/24 to 192.168.1.20/24" in network_warnings[0]
+    assert "browser connection will be lost" in network_warnings[0]
+
+    previous_network_gateway = previous_network + "\n  gateway=192.168.1.1"
+    current_network_gateway = previous_network + "\n  gateway=192.168.1.254"
+    gateway_warnings = appliance_apply_connection_warnings(
+        "network",
+        current_network_gateway,
+        {"config_preview": previous_network_gateway},
+    )
+    assert len(gateway_warnings) == 1
+    assert "management IPv4 gateway from 192.168.1.1 to 192.168.1.254" in gateway_warnings[0]
+
+    previous_settings = json.dumps(
+        {
+            "management_https_enabled": True,
+            "management_https_cert_path": "/etc/labfoundry/https/certs/appliance-old.crt",
+            "management_https_key_path": "/etc/labfoundry/https/certs/appliance-old.key",
+        }
+    )
+    current_settings = previous_settings.replace("appliance-old", "appliance-new")
+    assert appliance_apply_connection_warnings(
+        "appliance_settings",
+        current_settings,
+        {"config_preview": previous_settings},
+    ) == [MANAGEMENT_CERTIFICATE_CONNECTION_WARNING]
+
+    previous_ca = json.dumps(
+        {
+            "certificates": [
+                {
+                    "managed_owner": "appliance:https",
+                    "common_name": "labfoundry.example",
+                    "fingerprint": "old-fingerprint",
+                    "certificate_pem": "old-certificate",
+                    "cert_path": "/etc/labfoundry/https/certs/appliance.crt",
+                    "key_path": "/etc/labfoundry/https/certs/appliance.key",
+                    "chain_path": "/etc/labfoundry/https/certs/appliance-chain.pem",
+                }
+            ]
+        }
+    )
+    current_ca = previous_ca.replace("old-fingerprint", "new-fingerprint").replace("old-certificate", "new-certificate")
+    assert appliance_apply_connection_warnings(
+        "ca",
+        current_ca,
+        {"config_preview": previous_ca},
+    ) == [MANAGEMENT_CERTIFICATE_CONNECTION_WARNING]
+
+
+def test_appliance_apply_review_returns_management_address_connection_warning(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+    from labfoundry.app.ui import appliance_apply_units, update_appliance_apply_baselines
+
+    login(client)
+    with SessionLocal() as db:
+        units = appliance_apply_units(db)
+        update_appliance_apply_baselines(db, units, {unit["id"] for unit in units})
+        management = db.scalar(select(PhysicalInterface).where(PhysicalInterface.name == "eth0"))
+        assert management is not None
+        management.ip_cidr = "192.168.49.20/24"
+        db.commit()
+
+    review = client.get("/appliance-apply/review")
+
+    assert review.status_code == 200
+    network = next(unit for unit in review.json()["units"] if unit["id"] == "network")
+    assert len(network["connection_warnings"]) == 1
+    assert "from 192.168.49.1/24 to 192.168.49.20/24" in network["connection_warnings"][0]
 
 
 def test_appliance_apply_json_submission_returns_master_with_live_child_status(client):
@@ -9428,6 +9621,108 @@ def test_appliance_apply_master_steps_fail_fast_and_keep_successful_baselines(cl
         assert "network" in baseline_payload
         assert "firewall" not in baseline_payload
         assert "dnsmasq" not in baseline_payload
+
+
+def test_successful_appliance_apply_baseline_uses_post_apply_snapshot(client, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+
+    import labfoundry.app.ui as ui
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, JobStep, Setting
+
+    before = {
+        "id": "vcf_offline_depot",
+        "label": "VCF Offline Depot",
+        "snapshot_hash": "hash-before",
+        "summary": ["tool version not detected"],
+        "validation_errors": [],
+        "validation_warnings": [],
+        "config_path": "/tmp/vcf-offline-depot.conf",
+        "config_preview": "tool_version=not detected",
+        "config_diff": "",
+        "context": {},
+    }
+    after = {
+        **before,
+        "snapshot_hash": "hash-after",
+        "summary": ["tool version 9.1.0"],
+        "config_preview": "tool_version=9.1.0",
+    }
+    result = {
+        "selected_units": ["vcf_offline_depot"],
+        "captured_units": [
+            {
+                "unit_id": "vcf_offline_depot",
+                "snapshot_hash": before["snapshot_hash"],
+                "summary": before["summary"],
+            }
+        ],
+        "skipped_changed_units": [],
+        "units": [],
+        "dry_run": False,
+    }
+    with SessionLocal() as db:
+        job = Job(
+            id="job_post_apply_baseline",
+            type="appliance-apply",
+            status=JobStatus.PENDING.value,
+            created_by="admin",
+            progress_percent=0,
+            result=json.dumps(result),
+        )
+        db.add(job)
+        db.add(
+            JobStep(
+                id=f"{job.id}:vcf_offline_depot",
+                job=job,
+                component_key="vcf_offline_depot",
+                label="VCF Offline Depot",
+                position=1,
+                status=JobStatus.PENDING.value,
+                result=json.dumps({"summary": before["summary"]}),
+            )
+        )
+        db.commit()
+
+    apply_completed = False
+
+    def units(_db, **_kwargs):
+        return [after if apply_completed else before]
+
+    def execute(unit):
+        nonlocal apply_completed
+        apply_completed = True
+        return {
+            "unit_id": unit["id"],
+            "label": unit["label"],
+            "status": "succeeded",
+            "success": True,
+            "dry_run": False,
+            "commands": [],
+            "summary": unit["summary"],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "config_path": unit["config_path"],
+            "config_preview": unit["config_preview"],
+            "config_diff": "",
+        }
+
+    monkeypatch.setattr(ui, "appliance_apply_units", units)
+    monkeypatch.setattr(ui, "execute_appliance_apply_unit", execute)
+    monkeypatch.setattr(ui, "persist_vcf_depot_metadata_from_apply", lambda _db, _results: None)
+    monkeypatch.setattr(ui, "log_appliance_apply_submission", lambda *_args, **_kwargs: None)
+
+    ui.run_appliance_apply_job("job_post_apply_baseline")
+
+    with SessionLocal() as db:
+        baseline = db.scalar(select(Setting).where(Setting.key == "appliance_apply.baselines.v1"))
+        assert baseline is not None
+        stored = json.loads(baseline.value)["vcf_offline_depot"]
+        assert stored["snapshot_hash"] == "hash-after"
+        assert stored["config_preview"] == "tool_version=9.1.0"
+        assert stored["summary"] == ["tool version 9.1.0"]
 
 
 def test_appliance_apply_parent_cancel_finishes_current_step_and_skips_remaining(client, monkeypatch):

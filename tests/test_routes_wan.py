@@ -63,10 +63,66 @@ def test_render_wan_config_keeps_management_and_lab_route_tables_separate():
     assert "  gateway=192.168.49.254" in config
     assert "ip rule add from 192.168.49.0/24 table 100 priority 1000" in config
     assert "ip route replace 192.168.49.0/24 dev eth0 table 100" in config
+    assert "ip route replace default via 192.168.49.254 dev eth0\n" in config
     assert "ip route replace default via 192.168.49.254 dev eth0 table 100" in config
     assert "ip rule add from 172.20.0.0/24 table 200 priority 2001" in config
     assert "ip route replace 172.20.0.0/24 dev eth1 table 200" in config
     assert "ip route replace 0.0.0.0/0 via 172.20.0.254 dev eth1 metric 100 table 200" in config
+
+
+def test_render_wan_config_gives_management_ownership_of_duplicate_vlan_network():
+    config = render_wan_config(
+        [],
+        targets=[
+            {
+                "name": "eth0",
+                "kind": "physical",
+                "role": "management",
+                "ip_cidr": "192.168.1.10/24",
+                "ipv6_cidr": "",
+                "gateway": "192.168.1.1",
+                "routing_domain": "management",
+                "route_allowed": False,
+            },
+            {
+                "name": "eth1.1",
+                "kind": "vlan",
+                "role": "access",
+                "ip_cidr": "192.168.1.20/24",
+                "ipv6_cidr": "",
+                "routing_domain": "lab",
+                "route_allowed": True,
+            },
+        ],
+    )
+
+    assert "ip rule add from 192.168.1.0/24 table 100 priority 1000" in config
+    assert "ip route replace 192.168.1.0/24 dev eth0 table 100" in config
+    assert "ip rule add from 192.168.1.0/24 table 200" not in config
+    assert "ip route replace 192.168.1.0/24 dev eth1.1 table 200" not in config
+    assert "# 192.168.1.0/24 on eth1.1 reuses the subnet owned by eth0; no duplicate policy route generated" in config
+
+
+def test_render_wan_config_keeps_gatewayless_management_on_main_table():
+    config = render_wan_config(
+        [],
+        targets=[
+            {
+                "name": "eth0",
+                "kind": "physical",
+                "role": "management",
+                "ip_cidr": "192.168.1.10/24",
+                "ipv6_cidr": "",
+                "gateway": "",
+                "routing_domain": "management",
+                "route_allowed": False,
+            }
+        ],
+    )
+
+    assert "ip rule add from 192.168.1.0/24 table 100" not in config
+    assert "ip route replace 192.168.1.0/24 dev eth0 table 100" not in config
+    assert "# 192.168.1.0/24 on eth0 has no management default gateway; the main routing table remains authoritative" in config
 
 
 def test_validate_wan_state_rejects_ipv6_nat_sources_and_gateway_family_mismatch():
