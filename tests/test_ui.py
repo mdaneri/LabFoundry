@@ -8266,6 +8266,7 @@ def test_management_interface_gateway_is_saved_and_drives_table_100(client):
     refreshed = client.get("/physical-interfaces")
     assert '"gateway": "192.168.49.254"' in refreshed.text
     assert "gateway=192.168.49.254" in refreshed.text
+    assert "Static management gateways install in the main table and management policy table 100." in refreshed.text
     routes_wan = client.get("/routes-wan")
     assert "gateway=192.168.49.254" in routes_wan.text
     assert "ip route replace default via 192.168.49.254 dev eth0\n" in routes_wan.text

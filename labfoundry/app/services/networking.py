@@ -721,6 +721,7 @@ def render_network_config(
     lines = [
         "# Managed by LabFoundry. Local changes may be overwritten.",
         "# Dry-run preview of desired Linux network state.",
+        "# Static management gateways install in the main table and management policy table 100.",
         "",
         "[physical_interfaces]",
     ]
