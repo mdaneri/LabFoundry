@@ -3694,9 +3694,14 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
                 static_management_cidrs.append(interface["ip_cidr"])
             if ipv6_enabled and interface.get("ipv6_cidr"):
                 static_management_cidrs.append(interface["ipv6_cidr"])
-            gateway_candidates = list(preserved_management["Gateway"])
-            if shutil.which("ip") is not None:
-                gateway_candidates.extend(_runtime_default_gateways_for_interface(name))
+            gateway_candidates = []
+            if "gateway" in interface:
+                if interface.get("gateway"):
+                    gateway_candidates.append(interface["gateway"])
+            else:
+                gateway_candidates.extend(preserved_management["Gateway"])
+                if shutil.which("ip") is not None:
+                    gateway_candidates.extend(_runtime_default_gateways_for_interface(name))
             usable_gateways = _usable_management_default_gateways(static_management_cidrs, gateway_candidates)
             gateway_versions = {ip_address(gateway).version for gateway in usable_gateways}
             for cidr in static_management_cidrs:
@@ -3788,6 +3793,27 @@ def _network_config_errors(path: Path) -> list[str]:
             errors.append(f"Interface {name or '<missing>'} cannot set an IPv4 CIDR while IPv4 method is DHCP.")
         if role == "management" and ipv4_method == "static" and not interface.get("ip_cidr"):
             errors.append(f"Interface {name or '<missing>'} must set an IPv4 CIDR when IPv4 method is static.")
+        gateway = interface.get("gateway", "").strip()
+        if gateway:
+            if role != "management" or ipv4_method != "static" or not interface.get("ip_cidr"):
+                errors.append(
+                    f"Interface {name or '<missing>'} can set an IPv4 gateway only when it is management with static IPv4."
+                )
+            else:
+                try:
+                    gateway_address = ip_address(gateway)
+                    interface_address = ip_interface(interface["ip_cidr"])
+                except ValueError:
+                    errors.append(f"Interface {name or '<missing>'} IPv4 gateway {gateway} is invalid.")
+                else:
+                    if gateway_address.version != 4:
+                        errors.append(f"Interface {name or '<missing>'} IPv4 gateway {gateway} uses the wrong IP family.")
+                    elif gateway_address not in interface_address.network:
+                        errors.append(
+                            f"Interface {name or '<missing>'} IPv4 gateway {gateway} is not on-link for {interface['ip_cidr']}."
+                        )
+                    elif gateway_address == interface_address.ip:
+                        errors.append(f"Interface {name or '<missing>'} IPv4 gateway cannot equal its interface address.")
         if ipv6_enabled_value not in {"true", "false"}:
             errors.append(f"Interface {name or '<missing>'} IPv6 enabled value {ipv6_enabled_value or '<missing>'} is invalid.")
         if ipv6_enabled_value == "false" and interface.get("ipv6_cidr"):
@@ -4141,9 +4167,25 @@ def _wan_config_errors(path: Path) -> list[str]:
             errors.append(f"WAN target {name or '<missing>'} must include an IPv4 or IPv6 CIDR.")
         if target.get("gateway"):
             try:
-                ip_address(target["gateway"])
+                gateway_address = ip_address(target["gateway"])
             except ValueError:
                 errors.append(f"WAN target {name or '<missing>'} gateway {target['gateway']} is not a valid IP address.")
+            else:
+                target_networks = []
+                for key in ("ip_cidr", "ipv6_cidr"):
+                    if target.get(key):
+                        try:
+                            target_networks.append(ip_network(target[key], strict=False))
+                        except ValueError:
+                            continue
+                if not any(
+                    network.version == gateway_address.version
+                    and (gateway_address in network or (gateway_address.version == 6 and gateway_address.is_link_local))
+                    for network in target_networks
+                ):
+                    errors.append(
+                        f"WAN target {name or '<missing>'} gateway {target['gateway']} is not on-link for its configured CIDR."
+                    )
         if target.get("ip_cidr"):
             try:
                 parsed_interface = ip_interface(target["ip_cidr"])
@@ -4455,10 +4497,10 @@ def _runtime_default_gateways_for_interface(interface_name: str) -> list[str]:
 
 def _management_default_gateways_for_target(target: dict[str, str]) -> list[str]:
     target_networks = _target_networks(target)
+    if "gateway" in target:
+        configured = target.get("gateway", "").strip()
+        return _usable_management_default_gateways(target_networks, [configured] if configured else [])
     candidates: list[str] = []
-    configured = target.get("gateway", "").strip()
-    if configured:
-        candidates.append(configured)
     interface_name = target.get("name", "")
     preserved = _read_existing_management_network_values()
     management_names = set(preserved.get("Name", []))

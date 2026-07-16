@@ -103,6 +103,7 @@ def network_config_text(
     include_vlan: bool = True,
     include_removed_vlan: bool = False,
     dual_stack: bool = False,
+    management_gateway: str = "",
 ) -> str:
     lines = [
         "[physical_interfaces]",
@@ -111,6 +112,7 @@ def network_config_text(
         "  mode=access",
         "  ipv4_method=static",
         "  ip_cidr=192.168.49.1/24",
+        f"  gateway={management_gateway}",
         f"  ipv6_cidr={'2001:db8:49::1/64' if dual_stack else ''}",
         "  admin_state=up",
         "  mtu=1500",
@@ -588,6 +590,39 @@ def test_network_helper_accepts_valid_vlan_config(tmp_path):
     assert helper._network_config_errors(config_path) == []
 
 
+def test_network_helper_validates_explicit_management_gateway(tmp_path):
+    helper = load_helper_module()
+    valid = tmp_path / "valid-gateway.conf"
+    valid.write_text(network_config_text(management_gateway="192.168.49.254"), encoding="utf-8")
+    off_link = tmp_path / "off-link-gateway.conf"
+    off_link.write_text(network_config_text(management_gateway="192.168.1.1"), encoding="utf-8")
+    non_management = tmp_path / "non-management-gateway.conf"
+    non_management.write_text(
+        network_config_text().replace("  ip_cidr=\n", "  ip_cidr=192.168.50.1/24\n  gateway=192.168.50.254\n", 1),
+        encoding="utf-8",
+    )
+
+    assert helper._network_config_errors(valid) == []
+    assert any("is not on-link" in error for error in helper._network_config_errors(off_link))
+    assert any("only when it is management" in error for error in helper._network_config_errors(non_management))
+
+
+def test_network_helper_renders_explicit_management_gateway_without_runtime_fallback(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "management-gateway.conf"
+    config_path.write_text(network_config_text(management_gateway="192.168.49.254"), encoding="utf-8")
+    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", tmp_path / "missing.network")
+    monkeypatch.setattr(helper, "_runtime_default_gateways_for_interface", lambda _interface_name: [])
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/sbin/{command}" if command == "ip" else None)
+
+    files, _links, _admin_down = helper._systemd_networkd_files(config_path)
+
+    rendered = files["00-labfoundry-mgmt.network"]
+    assert "From=192.168.49.0/24" in rendered
+    assert "Gateway=192.168.49.254" in rendered
+    assert "Table=100" in rendered
+
+
 def test_network_helper_rejects_static_management_without_ipv4(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-network.conf"
@@ -629,7 +664,9 @@ def test_network_helper_replaces_stale_preserved_management_gateway(monkeypatch,
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-network.conf"
     config_path.write_text(
-        network_config_text().replace("  ip_cidr=192.168.49.1/24", "  ip_cidr=192.168.1.10/24", 1),
+        network_config_text()
+        .replace("  ip_cidr=192.168.49.1/24", "  ip_cidr=192.168.1.10/24", 1)
+        .replace("  gateway=\n", "", 1),
         encoding="utf-8",
     )
     management_network = tmp_path / "00-labfoundry-mgmt.network"
@@ -1020,6 +1057,7 @@ def test_wan_helper_skips_management_policy_rule_without_usable_gateway(monkeypa
                 "  role=management",
                 "  ip_cidr=192.168.1.10/24",
                 "  ipv6_cidr=",
+                "  gateway=",
                 "  routing_domain=management",
                 "  route_allowed=false",
             ]
@@ -1045,6 +1083,7 @@ def test_wan_helper_skips_management_policy_rule_without_usable_gateway(monkeypa
     assert ["ip", "route", "replace", "192.168.1.0/24", "dev", "eth0", "table", "100"] not in commands
     assert ["ip", "route", "del", "192.168.1.0/24", "dev", "eth0", "table", "100"] in commands
     assert ["ip", "route", "del", "default", "dev", "eth0", "table", "100"] in commands
+    assert ["ip", "route", "show", "default", "dev", "eth0"] not in commands
     assert ["ip", "rule", "add", "from", "192.168.1.0/24", "table", "100", "priority", "1000"] not in commands
 
 

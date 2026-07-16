@@ -3484,6 +3484,7 @@ def wan_routing_targets(db: Session) -> list[dict[str, str]]:
                 "kind": "physical",
                 "role": role,
                 "ip_cidr": interface.ip_cidr or "",
+                "gateway": interface.gateway or "",
                 "ipv6_cidr": interface.ipv6_cidr or "",
                 "addresses": addresses,
                 "routing_domain": routing_domain,
@@ -5963,6 +5964,7 @@ def network_management_signature(config_preview: str) -> dict[str, str]:
         "name": management.get("name", ""),
         "ipv4_method": management.get("ipv4_method", ""),
         "ip_cidr": management.get("ip_cidr", ""),
+        "gateway": management.get("gateway", ""),
         "ipv6_cidr": management.get("ipv6_cidr", ""),
     }
 
@@ -6023,12 +6025,22 @@ def appliance_apply_connection_warnings(
     if unit_id == "network":
         previous = network_management_signature(previous_preview)
         current = network_management_signature(current_preview)
-        if previous and current and previous != current:
-            return [
-                "Applying Network will change the management address "
-                f"from {management_address_label(previous)} to {management_address_label(current)}. "
-                "This browser connection will be lost; reconnect to the new management address after the task completes."
-            ]
+        if previous and current:
+            warnings: list[str] = []
+            address_keys = ("name", "ipv4_method", "ip_cidr", "ipv6_cidr")
+            if any(previous.get(key) != current.get(key) for key in address_keys):
+                warnings.append(
+                    "Applying Network will change the management address "
+                    f"from {management_address_label(previous)} to {management_address_label(current)}. "
+                    "This browser connection will be lost; reconnect to the new management address after the task completes."
+                )
+            if previous.get("gateway", "") != current.get("gateway", ""):
+                warnings.append(
+                    "Applying Network will change the management IPv4 gateway "
+                    f"from {previous.get('gateway') or 'none'} to {current.get('gateway') or 'none'}. "
+                    "Existing management connections may be interrupted while policy routing is updated."
+                )
+            return warnings
     if unit_id == "appliance_settings":
         previous = management_tls_binding_signature(previous_preview)
         current = management_tls_binding_signature(current_preview)
@@ -6438,6 +6450,12 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
         successful_network_apply_vlan_entries(db, network_baseline),
     )
     network_summary = [f"{len(network['physical_interfaces'])} physical interfaces", f"{len(network['vlan_interfaces'])} VLAN interfaces"]
+    management_interface = next(
+        (interface for interface in network["physical_interfaces"] if normalize_interface_role(interface.role) == "management"),
+        None,
+    )
+    if management_interface is not None:
+        network_summary.append(f"management gateway {management_interface.gateway or 'none'}")
     if network_removed_vlans:
         network_summary.append(f"{len(network_removed_vlans)} VLAN removals")
     network_unit = make_appliance_apply_unit(
@@ -9846,6 +9864,7 @@ def edit_physical_interface_from_ui(
     mode: str = Form("unused"),
     ipv4_method: str = Form("static"),
     ip_cidr: str = Form(""),
+    gateway: str | None = Form(None),
     ipv6_enabled: bool = Form(False),
     ipv6_cidr: str = Form(""),
     mtu: int = Form(1500),
@@ -9883,6 +9902,31 @@ def edit_physical_interface_from_ui(
         ip_value = cidr_for_family(ip_cidr, 4, "Interface IPv4 CIDR")
         if isinstance(ip_value, Response):
             return ip_value
+    gateway_value = (interface.gateway or "") if gateway is None else gateway.strip()
+    if role_value != "management" or ipv4_method_value != "static" or new_mode == "trunk":
+        gateway_value = ""
+    if gateway_value:
+        if role_value != "management" or ipv4_method_value != "static" or not ip_value:
+            return Response(
+                "IPv4 gateway is available only for a management interface using static IPv4.",
+                status_code=422,
+                media_type="text/plain",
+            )
+        try:
+            parsed_gateway = ip_address(gateway_value)
+            parsed_interface = ip_interface(ip_value)
+        except ValueError:
+            return Response(f"{gateway_value} is not a valid IPv4 gateway.", status_code=422, media_type="text/plain")
+        if parsed_gateway.version != 4:
+            return Response("Management gateway must be an IPv4 address.", status_code=422, media_type="text/plain")
+        if parsed_gateway not in parsed_interface.network:
+            return Response(
+                f"Management gateway {gateway_value} must be on-link for {ip_value}.",
+                status_code=422,
+                media_type="text/plain",
+            )
+        if parsed_gateway == parsed_interface.ip:
+            return Response("Management gateway cannot equal the management interface address.", status_code=422, media_type="text/plain")
     ipv6_value = None
     ipv6_enabled_value = bool(ipv6_enabled) and new_mode != "trunk"
     if new_mode != "trunk" and not ipv6_enabled_value and ipv6_cidr.strip():
@@ -9905,6 +9949,7 @@ def edit_physical_interface_from_ui(
     interface.mode = new_mode
     interface.ipv4_method = ipv4_method_value
     interface.ip_cidr = ip_value or None
+    interface.gateway = gateway_value or None
     interface.ipv6_enabled = ipv6_enabled_value
     interface.ipv6_cidr = ipv6_value or None
     interface.mtu = mtu

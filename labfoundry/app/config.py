@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     bootstrap_admin_password: str = "labfoundry-admin"
     appliance_fqdn: str = "labfoundry.labfoundry.internal"
     appliance_management_cidr: str = "192.168.49.1/24"
+    appliance_management_gateway: str = ""
     appliance_management_ipv6_enabled: bool = False
     appliance_management_ipv6_cidr: str = ""
     appliance_root_ssh_enabled: bool = False

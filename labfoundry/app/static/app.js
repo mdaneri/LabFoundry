@@ -5072,6 +5072,15 @@ function isValidIpv4Address(value) {
   });
 }
 
+function ipv4GatewayIsOnLink(gateway, cidr) {
+  if (!isValidIpv4Address(gateway) || !isValidCidr(cidr, "ipv4")) return false;
+  const [address, prefixText] = String(cidr).split("/");
+  const toNumber = (value) => value.split(".").reduce((result, part) => ((result << 8) | Number(part)) >>> 0, 0);
+  const prefix = Number(prefixText);
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return (toNumber(gateway) & mask) === (toNumber(address) & mask) && gateway !== address;
+}
+
 function isValidIpv6Address(value) {
   const address = String(value || "");
   if (!address.includes(":") || /[\s[\]]/.test(address)) {
@@ -5284,7 +5293,9 @@ async function autoSavePhysicalInterface(cell, csrf) {
   data.admin_state = data.admin_up ? "up" : "down";
   if (data.ipv4_method === "dhcp") {
     data.ip_cidr = "";
+    data.gateway = "";
   }
+  if (data.role !== "management" || data.mode === "trunk") data.gateway = "";
   if (!data.ipv6_enabled) {
     data.ipv6_cidr = "";
   }
@@ -5306,7 +5317,9 @@ async function savePhysicalInterfaceRow(row, csrf, successMessage = "Saved") {
   data.admin_state = data.admin_up ? "up" : "down";
   if (data.ipv4_method === "dhcp") {
     data.ip_cidr = "";
+    data.gateway = "";
   }
+  if (data.role !== "management" || data.mode === "trunk") data.gateway = "";
   if (!data.ipv6_enabled) {
     data.ipv6_cidr = "";
   }
@@ -5547,7 +5560,7 @@ function initializePhysicalInterfacesTable() {
               return;
             }
             if (data.ipv4_method === "dhcp") {
-              await row.update({ ip_cidr: "" });
+              await row.update({ ip_cidr: "", gateway: "" });
             }
             await autoSavePhysicalInterface(cell, csrf);
           },
@@ -5576,6 +5589,30 @@ function initializePhysicalInterfacesTable() {
             return dnsAddRowHintFormatter(cell, "192.168.50.1/24");
           },
           minWidth: 160,
+          cellEdited: async (cell) => {
+            const row = cell.getRow();
+            const data = row.getData();
+            if (data.gateway && !ipv4GatewayIsOnLink(data.gateway, data.ip_cidr)) {
+              await row.update({ gateway: "" });
+            }
+            await autoSavePhysicalInterface(cell, csrf);
+          },
+        },
+        {
+          title: "IPv4 Gateway",
+          field: "gateway",
+          editor: "input",
+          editable: (cell) => {
+            const data = cell.getRow().getData();
+            return data.role === "management" && data.mode !== "trunk" && data.ipv4_method === "static";
+          },
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.role !== "management" || data.mode === "trunk" || data.ipv4_method !== "static") return "";
+            return dnsAddRowHintFormatter(cell, "192.168.1.1");
+          },
+          headerTooltip: "Default IPv4 gateway for management traffic only. It must be on-link for the management CIDR and is installed in management route table 100.",
+          minWidth: 145,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
         {
@@ -5622,7 +5659,12 @@ function initializePhysicalInterfacesTable() {
           editable: (cell) => cell.getRow().getData().mode !== "trunk",
           formatter: physicalRoleFormatter,
           width: 125,
-          cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
+          cellEdited: async (cell) => {
+            if (cell.getValue() !== "management") {
+              await cell.getRow().update({ gateway: "" });
+            }
+            await autoSavePhysicalInterface(cell, csrf);
+          },
         },
         {
           title: "Link Type",
@@ -5644,7 +5686,7 @@ function initializePhysicalInterfacesTable() {
           minWidth: 220,
           cellEdited: async (cell) => {
             if (cell.getValue() === "trunk") {
-              await cell.getRow().update({ role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_enabled: false, ipv6_cidr: "" });
+              await cell.getRow().update({ role: "unused", ipv4_method: "static", ip_cidr: "", gateway: "", ipv6_enabled: false, ipv6_cidr: "" });
             }
             await autoSavePhysicalInterface(cell, csrf);
             cell.getRow().reformat();

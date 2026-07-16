@@ -654,7 +654,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v102" in service_worker.text
+    assert "labfoundry-pwa-v103" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -667,7 +667,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in service_worker.text
-    assert "/static/app.js?v=management-apply-warning-20260716-1" in service_worker.text
+    assert "/static/app.js?v=management-gateway-20260716-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -693,7 +693,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in page.text
-    assert "/static/app.js?v=management-apply-warning-20260716-1" in page.text
+    assert "/static/app.js?v=management-gateway-20260716-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -8144,12 +8144,14 @@ def test_physical_and_vlan_pages_render(client):
     physical = client.get("/physical-interfaces")
     assert physical.status_code == 200
     assert "Physical Interfaces" in physical.text
-    assert "Review observed Photon NICs, then edit desired access, trunk, IPv4, IPv6, and admin state" in physical.text
+    assert "Review observed Photon NICs, then edit desired access, trunk, IPv4, management gateway, IPv6, and admin state" in physical.text
     assert "physical-interfaces-table" in physical.text
     assert "Refresh host inventory" in physical.text
     assert "Observed IPv4" in physical.text
     assert "Observed IPv6" in physical.text
     assert "IPv4 CIDR" in physical.text
+    assert "IPv4 Gateway" in physical.text
+    assert "Management gateway" in physical.text
     assert "IPv6 CIDR" in physical.text
     assert "network-state-icon up" in physical.text
     assert "eth0" in physical.text
@@ -8187,10 +8189,12 @@ def test_physical_and_vlan_pages_render(client):
     assert "physicalRoleFormatter" in app_js
     assert 'editable: (cell) => cell.getRow().getData().mode !== "trunk"' in app_js
     assert app_js.count('editable: (cell) => cell.getRow().getData().mode !== "trunk"') >= 3
-    assert 'role: "unused", ipv4_method: "static", ip_cidr: "", ipv6_enabled: false, ipv6_cidr: ""' in app_js
+    assert 'role: "unused", ipv4_method: "static", ip_cidr: "", gateway: "", ipv6_enabled: false, ipv6_cidr: ""' in app_js
     assert "data.requires_activation && !data.is_activated" in app_js
     assert "cidrInputEditor" in app_js
     assert "isValidCidr" in app_js
+    assert "ipv4GatewayIsOnLink" in app_js
+    assert 'title: "IPv4 Gateway"' in app_js
     assert 'editorParams: { family: "ipv4", placeholder: "192.168.50.1/24" }' in app_js
     assert 'editorParams: { family: "ipv6", placeholder: "fd00:50::1/64" }' in app_js
     app_css = client.get("/static/app.css").text
@@ -8201,6 +8205,65 @@ def test_physical_and_vlan_pages_render(client):
     assert ".vlan-interfaces-table .tabulator-row.new-record-row .new-record-primary-cell" in app_css
     assert "Review appliance changes" in vlans.text
     assert "/var/lib/labfoundry/apply/network/labfoundry-network.conf" in vlans.text
+
+
+def test_management_interface_gateway_is_saved_and_drives_table_100(client):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+
+    login(client)
+    page = client.get("/physical-interfaces")
+    rows = json.loads(html.unescape(page.text.split("data-interfaces='", 1)[1].split("'", 1)[0]))
+    management = next(row for row in rows if row["role"] == "management")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    saved = client.post(
+        f"/physical-interfaces/{management['id']}/edit",
+        data={
+            "role": "management",
+            "mode": "access",
+            "ipv4_method": "static",
+            "ip_cidr": "192.168.49.1/24",
+            "gateway": "192.168.49.254",
+            "mtu": "1500",
+            "admin_state": "up",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+
+    assert saved.status_code == 303
+    refreshed = client.get("/physical-interfaces")
+    assert '"gateway": "192.168.49.254"' in refreshed.text
+    assert "gateway=192.168.49.254" in refreshed.text
+    routes_wan = client.get("/routes-wan")
+    assert "gateway=192.168.49.254" in routes_wan.text
+    assert "ip route replace default via 192.168.49.254 dev eth0 table 100" in routes_wan.text
+    with SessionLocal() as db:
+        row = db.scalar(select(PhysicalInterface).where(PhysicalInterface.id == management["id"]))
+        assert row is not None
+        assert row.gateway == "192.168.49.254"
+
+    invalid = client.post(
+        f"/physical-interfaces/{management['id']}/edit",
+        data={
+            "role": "management",
+            "mode": "access",
+            "ipv4_method": "static",
+            "ip_cidr": "192.168.49.1/24",
+            "gateway": "192.168.50.254",
+            "mtu": "1500",
+            "admin_state": "up",
+            "csrf": csrf,
+        },
+    )
+    assert invalid.status_code == 422
+    assert "must be on-link" in invalid.text
 
 
 def test_physical_interface_refresh_imports_host_inventory_without_apply_job(client, monkeypatch):
@@ -9011,7 +9074,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "management-apply-warning-20260716-1" in page.text
+    assert "management-gateway-20260716-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -9180,6 +9243,16 @@ def test_appliance_apply_connection_warnings_detect_management_address_and_certi
     assert len(network_warnings) == 1
     assert "from 192.168.1.10/24 to 192.168.1.20/24" in network_warnings[0]
     assert "browser connection will be lost" in network_warnings[0]
+
+    previous_network_gateway = previous_network + "\n  gateway=192.168.1.1"
+    current_network_gateway = previous_network + "\n  gateway=192.168.1.254"
+    gateway_warnings = appliance_apply_connection_warnings(
+        "network",
+        current_network_gateway,
+        {"config_preview": previous_network_gateway},
+    )
+    assert len(gateway_warnings) == 1
+    assert "management IPv4 gateway from 192.168.1.1 to 192.168.1.254" in gateway_warnings[0]
 
     previous_settings = json.dumps(
         {
