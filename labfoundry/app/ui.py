@@ -594,6 +594,7 @@ def user_to_dict(user: User, current_user_id: int | None = None, os_status: dict
         "roles_text": ", ".join(user_roles(user)),
         "auth_provider": user.auth_provider or "local",
         "shell": normalize_user_shell(user.shell),
+        "web_terminal_access": bool(user.web_terminal_access),
         "enabled": user.enabled,
         "created_at": user.created_at.strftime("%Y-%m-%d"),
         "os_sync_status": local_user_sync_rows([user])[0]["sync_status"],
@@ -7898,15 +7899,53 @@ def public_depot_browser(
     return render(request, "depot_browser.html", {"identity": identity, **_depot_browser_context(db, depot_path.rstrip("/"))})
 
 
+def public_terminal_login_response(
+    request: Request,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+    db: Session,
+) -> HTMLResponse:
+    return render(
+        request,
+        "ca_request_login.html",
+        {
+            "error": error,
+            "return_to": "/terminal",
+            "login_action": "/login",
+            "portal_title": "LabFoundry Web Terminal",
+            "login_heading": "Sign in to Web Terminal",
+            "login_copy": "Use a LabFoundry local user with Web SSH access enabled.",
+            "back_href": "/",
+            "back_label": "Back to Public Services",
+            **public_portal_links_context(db),
+        },
+        status_code=status_code,
+    )
+
+
+def local_user_has_web_terminal_access(user: User | None) -> bool:
+    return bool(
+        user
+        and user.enabled
+        and user.web_terminal_access
+        and (user.auth_provider or "local") == "local"
+        and normalize_user_shell(user.shell) != DEFAULT_LOCAL_USER_SHELL
+    )
+
+
 @router.get("/login", response_class=HTMLResponse, response_model=None)
 def login_page(
     request: Request,
     next: str = Query(""),
     identity: Identity | None = Depends(get_session_identity),
+    db: Session = Depends(get_db),
 ) -> HTMLResponse | RedirectResponse:
     return_to = safe_login_next(next)
     if identity:
         return RedirectResponse(return_to, status_code=303)
+    if return_to == "/terminal" and request_allows_public_service(db, request, "web_terminal"):
+        return public_terminal_login_response(request, db=db)
     return render(request, "login.html", {"error": None, "return_to": return_to})
 
 
@@ -7921,9 +7960,18 @@ def login(
 ) -> RedirectResponse | HTMLResponse | JSONResponse:
     verify_csrf(request, csrf)
     return_to = safe_login_next(next)
+    public_terminal_login = return_to == "/terminal" and request_allows_public_service(db, request, "web_terminal")
     user = authenticate_user(db, username, password)
+    if user is None and public_terminal_login:
+        local_user = db.execute(select(User).where(User.username == username.strip().lower())).scalar_one_or_none()
+        if local_user_has_web_terminal_access(local_user):
+            authentication = SystemAdapter().authenticate_local_user(local_user.username, password)
+            if authentication.returncode == 0 and not authentication.dry_run:
+                user = local_user
     if not user:
         record_audit(db, actor=username, action="ui_login_failed", resource_type="auth", success=False)
+        if public_terminal_login:
+            return public_terminal_login_response(request, error="Invalid username or password", status_code=401, db=db)
         return render(request, "login.html", {"error": "Invalid username or password", "return_to": return_to})
     request.session["user_id"] = user.id
     request.session[SESSION_APPLIANCE_INSTANCE_SESSION_KEY] = ensure_appliance_instance_id(db)
@@ -8218,13 +8266,11 @@ def run_appliance_update(
     )
 
 
-@router.get("/appliance-apply", response_class=HTMLResponse, response_model=None)
+@router.get("/appliance-apply", response_class=RedirectResponse, response_model=None)
 def appliance_apply_page(
-    request: Request,
-    identity: Identity = Depends(require_session_identity),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    return render(request, "appliance_apply.html", {"identity": identity, **appliance_apply_context(db)})
+    _identity: Identity = Depends(require_session_identity),
+) -> RedirectResponse:
+    return RedirectResponse("/dashboard#appliance-apply-review", status_code=303)
 
 
 @router.get("/appliance-apply/review", response_class=JSONResponse, response_model=None)
@@ -8512,34 +8558,12 @@ def submit_appliance_apply(
     unit_map = {unit["id"]: unit for unit in units}
     selected_ids = {unit_id for unit_id in selected_units if unit_id in APPLIANCE_APPLY_UNIT_IDS}
     if not selected_ids:
-        if wants_json:
-            return JSONResponse({"detail": "Select at least one appliance change to submit."}, status_code=422)
-        return render(
-            request,
-            "appliance_apply.html",
-            {
-                "identity": identity,
-                **appliance_apply_context(db),
-                "apply_error": "Select at least one appliance change to submit.",
-                "selected_apply_unit_ids": selected_ids,
-            },
-            status_code=422,
-        )
+        detail = "Select at least one appliance change to submit."
+        return JSONResponse({"detail": detail}, status_code=422) if wants_json else Response(detail, status_code=422, media_type="text/plain")
     invalid_units = [unit for unit in units if unit["id"] in selected_ids and unit["validation_errors"]]
     if invalid_units:
-        if wants_json:
-            return JSONResponse({"detail": "Resolve validation errors before submitting appliance changes."}, status_code=422)
-        return render(
-            request,
-            "appliance_apply.html",
-            {
-                "identity": identity,
-                **appliance_apply_context(db),
-                "selected_apply_unit_ids": selected_ids,
-                "apply_error": "Resolve validation errors before submitting appliance changes.",
-            },
-            status_code=422,
-        )
+        detail = "Resolve validation errors before submitting appliance changes."
+        return JSONResponse({"detail": detail}, status_code=422) if wants_json else Response(detail, status_code=422, media_type="text/plain")
 
     selected_ordered_units = [unit for unit in units if unit["id"] in selected_ids]
     skipped_changed_units = [
@@ -8571,20 +8595,11 @@ def submit_appliance_apply(
         db.expire_all()
         active_job = active_appliance_apply_job(db)
         if active_job is not None:
-            return render(
-                request,
-                "appliance_apply.html",
-                {
-                    "identity": identity,
-                    **appliance_apply_context(db),
-                    "selected_apply_unit_ids": selected_ids,
-                    "apply_error": (
-                        f"Appliance apply task {active_job.id} is already {active_job.status}. "
-                        "Wait for it to finish before submitting another appliance apply task."
-                    ),
-                },
-                status_code=409,
+            detail = (
+                f"Appliance apply task {active_job.id} is already {active_job.status}. "
+                "Wait for it to finish before submitting another appliance apply task."
             )
+            return JSONResponse({"detail": detail}, status_code=409) if wants_json else Response(detail, status_code=409, media_type="text/plain")
 
         job_id = f"job_{uuid4().hex[:12]}"
         job = Job(
@@ -13200,7 +13215,7 @@ def generate_vcf_depot_software_depot_id_from_ui(
             },
             status_code=409,
         )
-    return RedirectResponse("/appliance-apply", status_code=303)
+    return RedirectResponse("/dashboard#appliance-apply-review", status_code=303)
 
 
 @router.get("/vcf-offline-depot/profiles/{profile_id}/preview", response_model=None)
@@ -13880,6 +13895,7 @@ def create_user_from_ui(
     roles: list[str] = Form(default=[]),
     roles_text: str = Form(""),
     shell: str = Form(DEFAULT_LOCAL_USER_SHELL),
+    web_terminal_access: bool = Form(False),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -13895,7 +13911,16 @@ def create_user_from_ui(
     shell = normalize_user_shell(shell)
     if db.execute(select(User).where(User.username == username)).scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"User {username} already exists.")
-    user = User(username=username, role=primary_role(next_roles), roles_json=roles_to_json(next_roles), shell=shell, enabled=False)
+    if web_terminal_access and shell == DEFAULT_LOCAL_USER_SHELL:
+        raise HTTPException(status_code=400, detail="Web SSH access requires an interactive shell.")
+    user = User(
+        username=username,
+        role=primary_role(next_roles),
+        roles_json=roles_to_json(next_roles),
+        shell=shell,
+        web_terminal_access=bool(web_terminal_access),
+        enabled=False,
+    )
     db.add(user)
     db.commit()
     record_audit(db, actor=identity.username, action="create_local_user", resource_type="user", resource_id=str(user.id))
@@ -13911,6 +13936,7 @@ def update_user_from_ui(
     roles: list[str] = Form(default=[]),
     roles_text: str = Form(""),
     shell: str = Form(DEFAULT_LOCAL_USER_SHELL),
+    web_terminal_access: bool = Form(False),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -13927,15 +13953,19 @@ def update_user_from_ui(
     if not is_valid_user_shell(shell):
         raise HTTPException(status_code=400, detail=f"Shell must be one of {', '.join(LOCAL_USER_SHELLS)}.")
     shell = normalize_user_shell(shell)
+    if web_terminal_access and shell == DEFAULT_LOCAL_USER_SHELL:
+        raise HTTPException(status_code=400, detail="Web SSH access requires an interactive shell.")
     next_enabled = user.enabled
     protect_last_admin(db, user, next_roles=next_roles, next_enabled=next_enabled)
     existing = db.execute(select(User).where(User.username == username, User.id != user.id)).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail=f"User {username} already exists.")
     old_username = user.username
+    had_web_terminal_access = bool(user.web_terminal_access)
     user.username = username
     user.role = primary_role(next_roles)
     user.roles_json = roles_to_json(next_roles)
+    user.web_terminal_access = bool(web_terminal_access)
     shell_changed = user.shell != shell
     user.shell = shell
     if old_username != username:
@@ -13951,6 +13981,10 @@ def update_user_from_ui(
             db.add(token)
     db.add(user)
     db.commit()
+    if old_username != username or (had_web_terminal_access and not user.web_terminal_access):
+        from labfoundry.app.web_terminal import revoke_user_terminal_sessions
+
+        revoke_user_terminal_sessions(user.id)
     record_audit(db, actor=identity.username, action="update_local_user", resource_type="user", resource_id=str(user.id))
     db.refresh(user)
     return JSONResponse({"user": user_to_dict(user, identity.user_id)})
@@ -13979,6 +14013,9 @@ def disable_user_from_ui(
     user.os_unlock_requested_at = None
     clear_pending_os_password(user)
     revoke_user_tokens(db, user, identity.username)
+    from labfoundry.app.web_terminal import revoke_user_terminal_sessions
+
+    revoke_user_terminal_sessions(user.id, "Local user disabled")
     db.add(user)
     db.commit()
     record_audit(db, actor=identity.username, action="disable_local_user", resource_type="user", resource_id=str(user.id))
@@ -14027,6 +14064,9 @@ def delete_user_from_ui(
         raise HTTPException(status_code=400, detail="You cannot remove your own active session account.")
     protect_last_admin(db, user, next_enabled=False)
     revoke_user_tokens(db, user, identity.username)
+    from labfoundry.app.web_terminal import revoke_user_terminal_sessions
+
+    revoke_user_terminal_sessions(user.id, "Local user removed")
     for token in db.execute(select(ApiToken).where(ApiToken.owner_user_id == user.id)).scalars().all():
         db.delete(token)
     db.delete(user)

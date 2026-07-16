@@ -136,7 +136,7 @@
     if (response.status === 409 && payload?.error_code === "TERMINAL_SESSION_ACTIVE" && !takeover) {
       const confirmed = typeof window.requestConfirmation === "function" && await window.requestConfirmation({
         title: "Move terminal session here?",
-        message: "This administrator already has a live terminal in another browser. Moving it here preserves the shell and terminal history, and disconnects the original browser.",
+        message: "This user already has a live terminal in another browser. Moving it here preserves the shell and terminal history, and disconnects the original browser.",
         label: "Move session here",
       });
       if (!confirmed) return null;

@@ -28,13 +28,12 @@ from labfoundry.app.adapters.system import SystemAdapter
 from labfoundry.app.audit import record_audit
 from labfoundry.app.config import get_settings
 from labfoundry.app.database import SessionLocal, get_db
-from labfoundry.app.models import ApplianceSettings, PhysicalInterface, Role, User, VlanInterface
+from labfoundry.app.models import ApplianceSettings, PhysicalInterface, User, VlanInterface
 from labfoundry.app.security import (
     SESSION_APPLIANCE_INSTANCE_SESSION_KEY,
     ensure_appliance_instance_id,
     get_session_identity,
     require_session_identity,
-    user_roles,
 )
 from labfoundry.app.services.appliance_settings import (
     management_interface_context,
@@ -169,6 +168,27 @@ def _active_session_for_user(user_id: int) -> ActiveTerminalSession | None:
         return next((session for (session_user_id, _browser_id), session in _sessions.items() if session_user_id == user_id), None)
 
 
+def revoke_user_terminal_sessions(user_id: int, reason: str = "Web SSH access revoked") -> None:
+    with _ticket_lock:
+        stale_tickets = [digest for digest, ticket in _tickets.items() if ticket.user_id == user_id]
+        for digest in stale_tickets:
+            _tickets.pop(digest, None)
+    with _session_lock:
+        stale_keys = [key for key in _sessions if key[0] == user_id]
+        sessions = [_sessions.pop(key) for key in stale_keys]
+        _pending_sessions.difference_update({key for key in _pending_sessions if key[0] == user_id})
+    for session in sessions:
+        session.close_reason = reason
+        try:
+            session.channel.close()
+        except Exception:
+            pass
+        try:
+            session.transport.close()
+        except Exception:
+            pass
+
+
 def _reserve_new_session(key: tuple[int, str]) -> bool:
     with _session_lock:
         if key in _sessions:
@@ -184,6 +204,19 @@ def _release_session_reservation(key: tuple[int, str]) -> None:
         _pending_sessions.discard(key)
 
 
+def _user_has_terminal_permission(user: User | None) -> bool:
+    return bool(
+        user
+        and user.enabled
+        and user.web_terminal_access
+        and (user.auth_provider or "local") == "local"
+    )
+
+
+def _user_can_access_terminal(user: User | None) -> bool:
+    return bool(_user_has_terminal_permission(user) and (user.shell or "/sbin/nologin") != "/sbin/nologin")
+
+
 @router.get("/terminal", response_class=HTMLResponse, response_model=None)
 def terminal_page(
     request: Request,
@@ -192,18 +225,24 @@ def terminal_page(
 ) -> HTMLResponse | RedirectResponse:
     if identity is None:
         return RedirectResponse("/login?next=/terminal", status_code=303)
-    if not identity.has_role(Role.ADMIN.value):
-        raise HTTPException(status_code=403, detail="Administrator role required")
+    user = db.get(User, int(identity.user_id))
+    if not _user_has_terminal_permission(user):
+        raise HTTPException(status_code=403, detail="Web SSH access is not enabled for this user")
     desired, selected, addresses, management_addresses = _terminal_network_state(db)
     server_host = str((request.scope.get("server") or ("", 0))[0])
     page_addresses = addresses if desired.web_terminal_enabled else management_addresses
     if not _request_uses_selected_listener(request.headers, server_host, page_addresses):
         raise HTTPException(status_code=404, detail="Not found")
-    from labfoundry.app.ui import appliance_apply_status, render
+    public_listener = (
+        _request_uses_selected_listener(request.headers, server_host, addresses)
+        and not _request_uses_selected_listener(request.headers, server_host, management_addresses)
+    )
+    from labfoundry.app.ui import appliance_apply_status, public_portal_links_context, render
 
     available = bool(
         get_settings().environment == "appliance"
         and desired.web_terminal_enabled
+        and _user_can_access_terminal(user)
         and _request_is_https(request.headers, request.url.scheme)
         and _helper_applied()
     )
@@ -212,21 +251,35 @@ def terminal_page(
         reason = "Web terminal access is disabled in Appliance Settings."
     elif get_settings().environment != "appliance":
         reason = "Web terminal sessions are available only on a deployed appliance."
+    elif not _user_can_access_terminal(user):
+        reason = "Web SSH access requires an interactive local-user shell."
     elif not _request_is_https(request.headers, request.url.scheme):
         reason = "Web terminal access requires HTTPS."
     elif not available:
         reason = "Web terminal desired state has not been applied yet."
+    context = {
+        "identity": identity,
+        "terminal_available": available,
+        "terminal_unavailable_reason": reason,
+        "terminal_interfaces": selected,
+        "terminal_addresses": addresses,
+        "terminal_public": public_listener,
+    }
+    if public_listener:
+        context.update(
+            {
+                "public_address_mode_switch": False,
+                "public_logout_action": "/requests/logout",
+                "public_logout_next": "/",
+                **public_portal_links_context(db),
+            }
+        )
+    else:
+        context["appliance_apply_status"] = appliance_apply_status(db, "appliance_settings")
     return render(
         request,
-        "terminal.html",
-        {
-            "identity": identity,
-            "terminal_available": available,
-            "terminal_unavailable_reason": reason,
-            "terminal_interfaces": selected,
-            "terminal_addresses": addresses,
-            "appliance_apply_status": appliance_apply_status(db, "appliance_settings"),
-        },
+        "public_terminal.html" if public_listener else "terminal.html",
+        context,
     )
 
 
@@ -239,8 +292,9 @@ def create_terminal_ticket(
     identity=Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    if not identity.has_role(Role.ADMIN.value):
-        raise HTTPException(status_code=403, detail="Administrator role required")
+    user = db.get(User, int(identity.user_id))
+    if not _user_can_access_terminal(user):
+        raise HTTPException(status_code=403, detail="Web SSH access is not enabled for this user")
     if not csrf or csrf != request.session.get("csrf_token"):
         raise HTTPException(status_code=403, detail="Invalid CSRF token")
     browser_session_id = browser_session_id.strip()
@@ -262,7 +316,7 @@ def create_terminal_ticket(
         return JSONResponse(
             {
                 "error_code": "TERMINAL_SESSION_ACTIVE",
-                "detail": "This administrator already has an active web terminal session in another browser.",
+                "detail": "This user already has an active web terminal session in another browser.",
             },
             status_code=409,
             headers={"Cache-Control": "no-store"},
@@ -463,7 +517,7 @@ async def terminal_websocket(websocket: WebSocket) -> None:
             await websocket.close(code=4401)
             return
         user = db.get(User, int(user_id))
-        if not user or not user.enabled or Role.ADMIN.value not in user_roles(user):
+        if not _user_can_access_terminal(user):
             await websocket.close(code=4403)
             return
         desired, _selected, addresses, _management_addresses = _terminal_network_state(db)

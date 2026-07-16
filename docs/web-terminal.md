@@ -1,6 +1,6 @@
 # Web Terminal
 
-LabFoundry provides an administrator-only browser terminal for the appliance shell. It is disabled by default and appears under **Operations > Web terminal** after it is enabled in **Settings** and the related appliance changes are applied.
+LabFoundry provides a permission-controlled browser terminal for the appliance shell. It is disabled globally by default and appears under **Operations > Web terminal** on management after it is enabled in **Settings** and the related appliance changes are applied. Selected additional listeners expose it through the Public Services portal instead of the admin shell.
 
 ## Configure access
 
@@ -8,15 +8,16 @@ LabFoundry provides an administrator-only browser terminal for the appliance she
 2. Enable **Web terminal access**.
 3. Select any additional addressed interfaces in **Web terminal interfaces**. The management interface is always selected and cannot be removed.
 4. Review and submit the changed **Appliance Settings**, **Public Services**, and **Firewall** units from the global appliance-apply workflow.
+5. On **Users**, enable **Web SSH** for each local user who may open a terminal. The user must also be enabled, use an interactive shell such as `/bin/bash` or `/usr/bin/pwsh`, and have a Photon password applied through Local Users.
 
 Only enabled, addressed access/route physical interfaces and enabled VLANs are valid additional bindings. Missing, disabled, unused, trunk-only, or addressless interfaces fail validation. LabFoundry has no WAN interface role and web-terminal exposure does not infer internet or WAN connectivity.
 
-On a selected non-management address, nginx exposes only the login/logout, terminal, WebSocket, and required static-asset routes. Management dashboard and API routes remain unavailable. The Public Services directory for that address includes a **Web Terminal** tile linked to `https://<selected-address>/terminal`; unselected interfaces do not show the tile.
+On a selected non-management address, nginx exposes only the login/logout, terminal, WebSocket, and required static-asset routes. Management dashboard and API routes remain unavailable. The Public Services directory for that address includes a **Web Terminal** tile linked to `https://<selected-address>/terminal`; unselected interfaces do not show the tile. The terminal and its login page use the Public Services header, sign-out action, and footer rather than the admin application shell.
 
 ## Session behavior
 
 - The terminal connects automatically; there is no separate Connect button.
-- One bounded server-side shell is retained per administrator across page reloads and short WebSocket interruptions.
+- One bounded server-side shell is retained per authorized user across page reloads and short WebSocket interruptions.
 - Opening the terminal in another browser prompts for confirmation. Confirming moves the existing shell, current working directory, buffered output, and input ownership to the new browser. The original browser shows an overlay with an in-terminal reconnect action.
 - `Ctrl-D` and the `exit` command intentionally end the current shell. The disconnected transcript remains visible until a new session is started.
 - Copy and download icons in the terminal's top-right corner export the visible session transcript. Their success notifications disappear automatically and remain above the application footer.
@@ -24,7 +25,7 @@ On a selected non-management address, nginx exposes only the login/logout, termi
 
 ## Authentication and security boundaries
 
-The web login session authorizes access, while the local SSH connection uses a one-use browser ticket, an ephemeral Ed25519 key, and a short-lived OpenSSH user certificate issued by the appliance-owned user CA. The certificate is restricted to loopback source and disables forwarding, agent forwarding, X11, and user RC processing. Host keys are pinned locally.
+The web login session and the user's explicit Web SSH permission authorize access. On a Public Services listener, non-bootstrap local users authenticate against their applied Photon password. The local SSH connection then uses a one-use browser ticket, an ephemeral Ed25519 key, and a short-lived OpenSSH user certificate issued by the appliance-owned user CA. The certificate is restricted to loopback source and disables forwarding, agent forwarding, X11, and user RC processing. Host keys are pinned locally.
 
 This removes the SSH password prompt only. `sudo` continues to require the Photon OS account password according to the normal OS policy. Root certificates and passwordless sudo are not permitted.
 

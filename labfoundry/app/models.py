@@ -40,6 +40,7 @@ class User(Base):
     external_email: Mapped[str] = mapped_column(String(240), default="")
     role_override_json: Mapped[str] = mapped_column(Text, default="")
     shell: Mapped[str] = mapped_column(String(80), default="/sbin/nologin")
+    web_terminal_access: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     os_password_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     os_sync_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

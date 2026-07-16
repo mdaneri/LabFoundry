@@ -133,7 +133,7 @@ def test_web_terminal_requires_login_and_renders_admin_only_unavailable_state(cl
     assert "Passwordless local SSH as admin" in response.text
     assert "Web terminal access is disabled in Appliance Settings." in response.text
     assert "/static/vendor/xterm/xterm.js?v=5.5.0" in response.text
-    assert "/static/terminal.js?v=web-terminal-session-20260715-8" in response.text
+    assert "/static/terminal.js?v=web-terminal-access-20260716-2" in response.text
     assert "data-terminal-connect" not in response.text
     assert "data-terminal-disconnect" not in response.text
 
@@ -171,6 +171,91 @@ def test_disabled_web_terminal_page_accepts_only_management_listener(client, mon
     assert "Web terminal access is disabled in Appliance Settings." in response.text
 
 
+def test_public_web_terminal_uses_public_shell_and_explicit_user_access(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from labfoundry.app import ui, web_terminal
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, PhysicalInterface, User
+
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        settings.management_https_enabled = True
+        settings.web_terminal_enabled = True
+        settings.web_terminal_interfaces_json = '["eth0", "eth2"]'
+        eth0 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
+        eth0.role = "management"
+        eth0.ip_cidr = "192.168.167.10/24"
+        eth2 = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
+        eth2.role = "access"
+        eth2.mode = "access"
+        eth2.ip_cidr = "192.168.87.32/24"
+        user = User(
+            username="test",
+            role="viewer",
+            roles_json='["viewer"]',
+            shell="/bin/bash",
+            web_terminal_access=True,
+            enabled=True,
+        )
+        db.add(user)
+        db.commit()
+        user_id = user.id
+
+    class LocalAuthenticationAdapter:
+        dry_run = False
+
+        def authenticate_local_user(self, username: str, password: str) -> AdapterResult:
+            return AdapterResult(
+                command=["labfoundry-helper", "local-users", "authenticate", username],
+                dry_run=False,
+                returncode=0 if username == "test" and password == "Test-user1!" else 1,
+            )
+
+    monkeypatch.setattr(ui, "SystemAdapter", LocalAuthenticationAdapter)
+    monkeypatch.setattr(web_terminal, "get_settings", lambda: SimpleNamespace(environment="appliance"))
+    monkeypatch.setattr(web_terminal, "_helper_applied", lambda: True)
+    monkeypatch.setattr(web_terminal, "_request_is_https", lambda *_args: True)
+    monkeypatch.setattr(
+        web_terminal,
+        "_request_uses_selected_listener",
+        lambda _headers, _server_host, addresses: "192.168.87.32" in addresses,
+    )
+
+    login_page = client.get("/login?next=/terminal", headers={"host": "192.168.87.32"})
+    assert login_page.status_code == 200
+    assert "Sign in to Web Terminal" in login_page.text
+    assert 'class="public-portal-shell"' in login_page.text
+    assert 'class="app-shell"' not in login_page.text
+    csrf = login_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    signed_in = client.post(
+        "/login",
+        headers={"host": "192.168.87.32"},
+        data={"username": "test", "password": "Test-user1!", "csrf": csrf, "next": "/terminal"},
+        follow_redirects=False,
+    )
+    assert signed_in.status_code == 303
+    assert signed_in.headers["location"] == "/terminal"
+
+    terminal = client.get("/terminal", headers={"host": "192.168.87.32"})
+    assert terminal.status_code == 200
+    assert "Passwordless local SSH as test" in terminal.text
+    assert 'class="public-portal-shell"' in terminal.text
+    assert 'class="app-shell"' not in terminal.text
+    assert "Back to Public Services" not in terminal.text
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        user.web_terminal_access = False
+        db.commit()
+    denied = client.get("/terminal", headers={"host": "192.168.87.32"})
+    assert denied.status_code == 403
+    assert "Web SSH access is not enabled" in denied.text
+
+
 def test_web_terminal_uses_one_use_ticket_and_bridges_websocket_input(client, monkeypatch):
     import threading
     from types import SimpleNamespace
@@ -179,7 +264,7 @@ def test_web_terminal_uses_one_use_ticket_and_bridges_websocket_input(client, mo
 
     from labfoundry.app import web_terminal
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ApplianceSettings
+    from labfoundry.app.models import ApplianceSettings, User
 
     class FakeChannel:
         def __init__(self):
@@ -231,6 +316,8 @@ def test_web_terminal_uses_one_use_ticket_and_bridges_websocket_input(client, mo
         settings.management_https_enabled = True
         settings.web_terminal_enabled = True
         settings.web_terminal_interfaces_json = '["eth0"]'
+        admin = db.execute(select(User).where(User.username == "admin")).scalar_one()
+        admin.shell = "/bin/bash"
         db.commit()
 
     page = client.get("/terminal")
@@ -554,7 +641,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v98" in service_worker.text
+    assert "labfoundry-pwa-v100" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -567,7 +654,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in service_worker.text
-    assert "/static/app.js?v=web-terminal-session-20260715-13" in service_worker.text
+    assert "/static/app.js?v=web-terminal-access-20260716-2" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -593,7 +680,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=web-terminal-session-20260715-14" in page.text
-    assert "/static/app.js?v=web-terminal-session-20260715-13" in page.text
+    assert "/static/app.js?v=web-terminal-access-20260716-2" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -658,8 +745,9 @@ def test_sidebar_appliance_apply_uses_bottom_pending_cta(client):
 
     assert response.status_code == 200
     assert 'class="sidebar-apply-link pending' in response.text
-    assert 'href="/appliance-apply"' in response.text
+    assert 'href="/dashboard#appliance-apply-review"' in response.text
     assert "data-appliance-apply-sidebar" in response.text
+    assert "data-appliance-apply-open" in response.text
     assert "data-appliance-apply-sidebar-title" in response.text
     assert "data-appliance-apply-sidebar-detail" in response.text
     assert "data-appliance-apply-sidebar-badge" in response.text
@@ -1011,25 +1099,28 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
 
     monitor = client.get("/monitor")
     assert monitor.status_code == 200
-    assert 'data-appliance-apply-sidebar data-pending-count="0"' in monitor.text
+    assert "data-appliance-apply-sidebar" in monitor.text
+    assert 'data-pending-count="0"' in monitor.text
     assert 'class="page-apply-notice' not in monitor.text
     assert "pending appliance units need review" not in monitor.text
 
     users = client.get("/users")
     assert users.status_code == 200
-    assert f'data-appliance-apply-sidebar data-pending-count="{pending_count}"' in users.text
+    assert "data-appliance-apply-sidebar" in users.text
+    assert f'data-pending-count="{pending_count}"' in users.text
     assert 'class="page-apply-notice' not in users.text
     assert "pending appliance units need review" not in users.text
 
     dns_page = client.get("/dns")
     assert dns_page.status_code == 200
-    assert 'data-appliance-apply-sidebar data-pending-count="1"' in dns_page.text
+    assert "data-appliance-apply-sidebar" in dns_page.text
+    assert 'data-pending-count="1"' in dns_page.text
     assert "DNS/DHCP (dnsmasq) has pending appliance changes" in dns_page.text
     assert "Review and submit them from the global apply workflow." in dns_page.text
 
-    apply_page = client.get("/appliance-apply")
-    assert apply_page.status_code == 200
-    assert "need review" not in apply_page.text
+    apply_page = client.get("/appliance-apply", follow_redirects=False)
+    assert apply_page.status_code == 303
+    assert apply_page.headers["location"] == "/dashboard#appliance-apply-review"
 
 
 def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(client):
@@ -2354,7 +2445,8 @@ def test_esxi_pxe_ui_create_apply_and_job_redaction(client):
 
     login(client)
     apply_page = client.get("/appliance-apply")
-    assert 'value="esxi_pxe"' in apply_page.text
+    review = client.get("/appliance-apply/review")
+    assert any(unit["id"] == "esxi_pxe" for unit in review.json()["units"])
     apply_csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     applied = client.post("/appliance-apply", data={"csrf": apply_csrf, "selected_units": "esxi_pxe"})
 
@@ -3680,6 +3772,7 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert "Photon OS" in users.text
     assert "OS account" in users.text
     assert "Shell" in users.text
+    assert "Web SSH" in users.text
     assert "Temp Password" not in users.text
     assert "admin" in users.text
     assert "vcf-backup" in users.text
@@ -3688,12 +3781,13 @@ def test_local_users_page_separates_ldap_authentication(client):
     csrf = users.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     created = client.post(
         "/users",
-        data={"username": "operator", "role": "viewer", "shell": "/bin/bash", "csrf": csrf},
+        data={"username": "operator", "role": "viewer", "shell": "/bin/bash", "web_terminal_access": "true", "csrf": csrf},
         follow_redirects=True,
     )
     assert created.status_code == 200
     assert "operator" in created.text
     assert "/bin/bash" in created.text
+    assert "allowed" in created.text
     assert "disabled" in created.text
     multi_role_created = client.post(
         "/users",
@@ -3713,6 +3807,8 @@ def test_local_users_page_separates_ldap_authentication(client):
     from labfoundry.app.models import User
 
     with SessionLocal() as db:
+        operator = db.execute(select(User).where(User.username == "operator")).scalar_one()
+        assert operator.web_terminal_access is True
         multi_role_user = db.execute(select(User).where(User.username == "multi-role")).scalar_one()
         assert multi_role_user.roles_json == '["service-admin", "certificate-operator"]'
         demote_user = db.execute(select(User).where(User.username == "demote-me")).scalar_one()
@@ -3756,6 +3852,8 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert '".help-icon, .password-toggle"' in app_js.text
     assert 'control.setAttribute("tabindex", "-1")' in app_js.text
     assert 'field: "shell"' in app_js.text
+    assert 'field: "web_terminal_access"' in app_js.text
+    assert 'title: "Web SSH"' in app_js.text
     assert "Temp Password" not in app_js.text
 
 
@@ -3814,8 +3912,9 @@ def test_local_user_reset_modal_endpoint_and_remove(client):
         staged_user = db.execute(select(User).where(User.username == "remove-me")).scalar_one()
         assert staged_user.os_unlock_requested_at is not None
         assert staged_user.os_sync_status == "pending"
-    apply_page = client.get("/appliance-apply")
-    assert "1 unlock requests" in apply_page.text
+    review = client.get("/appliance-apply/review")
+    local_users_unit = next(unit for unit in review.json()["units"] if unit["id"] == "local_users")
+    assert "1 unlock requests" in " ".join(local_users_unit["summary"])
 
     deleted = client.post(f"/users/{user_id}/delete", data={"csrf": csrf}, follow_redirects=False)
     assert deleted.status_code == 303
@@ -3885,10 +3984,11 @@ def test_local_users_password_policy_staging_and_apply_redaction(client):
 
     apply_page = client.get("/appliance-apply")
     assert apply_page.status_code == 200
-    assert 'value="local_users"' in apply_page.text
-    assert "Local Users" in apply_page.text
-    assert "pending OS passwords" in apply_page.text
-    assert plaintext not in apply_page.text
+    review = client.get("/appliance-apply/review")
+    local_users_unit = next(unit for unit in review.json()["units"] if unit["id"] == "local_users")
+    assert local_users_unit["label"] == "Local Users"
+    assert "pending OS passwords" in " ".join(local_users_unit["summary"])
+    assert plaintext not in review.text
 
     csrf = apply_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     applied = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "local_users"})
@@ -4379,7 +4479,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "Delete labfoundry.internal?" in dns.text
     assert "It will not touch the appliance until global appliance apply runs." in dns.text
     assert 'action="/dns/zones/import"' in dns.text
-    assert 'href="/appliance-apply"' in dns.text
+    assert 'href="/dashboard#appliance-apply-review"' in dns.text
     assert "labfoundry.internal or sitea.internal" in dns.text
     assert "Changes save automatically." in dns.text
     assert "Review appliance changes" in dns.text
@@ -4575,7 +4675,7 @@ def test_dns_and_dhcp_pages_render(client):
     assert "DNS name / FQDN" in dhcp.text
     assert 'data-autosave-status-id="dhcp-settings-autosave-status"' in dhcp.text
     assert "Changes save automatically." in dhcp.text
-    assert 'href="/appliance-apply"' in dhcp.text
+    assert 'href="/dashboard#appliance-apply-review"' in dhcp.text
     assert "Review appliance changes" in dhcp.text
     assert "Save DHCP" not in dhcp.text
     assert "192.168.50.100" in dhcp.text
@@ -5049,9 +5149,11 @@ def test_firewall_preview_derives_dns_dhcp_rule_from_dhcp_scope_vlan(client):
 
     apply_page = client.get("/appliance-apply")
     assert apply_page.status_code == 200
-    assert "DNS/DHCP (dnsmasq)" in apply_page.text
-    assert "Firewall" in apply_page.text
-    assert "eth2.50" in apply_page.text
+    review = client.get("/appliance-apply/review")
+    units = {unit["id"]: unit for unit in review.json()["units"]}
+    assert units["dnsmasq"]["label"] == "DNS/DHCP (dnsmasq)"
+    assert units["firewall"]["label"] == "Firewall"
+    assert "eth2.50" in units["firewall"]["config_preview"]
 
 
 def test_dns_listen_options_include_access_and_vlans_not_trunks(client):
@@ -5139,7 +5241,7 @@ def test_certificate_authority_page_renders(client):
     assert 'name="listen_interface"' not in ca.text
     assert 'name="listen_address"' not in ca.text
     assert "Changes save automatically." in ca.text
-    assert 'href="/appliance-apply"' in ca.text
+    assert 'href="/dashboard#appliance-apply-review"' in ca.text
     assert "Review appliance changes" in ca.text
     assert "labfoundry-ca.json" in ca.text
     assert 'class="validation-preview-source language-json"' in ca.text
@@ -5428,8 +5530,10 @@ def test_public_service_home_is_scoped_to_called_ip(client, tmp_path, monkeypatc
     login(client)
     apply_page = client.get("/appliance-apply")
     assert apply_page.status_code == 200
-    assert "listen 192.168.87.32:8081;" in apply_page.text
-    assert "return 301 /pxe/esxi/;" in apply_page.text
+    review = client.get("/appliance-apply/review")
+    public_services_unit = next(unit for unit in review.json()["units"] if unit["id"] == "public_services")
+    assert "listen 192.168.87.32:8081;" in public_services_unit["config_preview"]
+    assert "return 301 /pxe/esxi/;" in public_services_unit["config_preview"]
     client.cookies.clear()
 
     depot_redirect = client.get("/PROD/", headers={"host": "192.168.87.32"}, follow_redirects=False)
@@ -5837,7 +5941,7 @@ def test_kms_page_renders(client):
     assert "eth2 - access / access / 192.168.50.1" in kms.text
     assert 'data-autosave-status-id="kms-settings-autosave-status"' in kms.text
     assert "Changes save automatically." in kms.text
-    assert 'href="/appliance-apply"' in kms.text
+    assert 'href="/dashboard#appliance-apply-review"' in kms.text
     assert "Review appliance changes" in kms.text
     assert "pykmip.conf" in kms.text
     assert "/var/lib/labfoundry/kms/pykmip.db" in kms.text
@@ -6027,7 +6131,7 @@ def test_vcf_backups_page_uses_local_user_for_sftp(client):
     assert "/backups" in page.text
     assert 'action="/vcf-backups/settings"' in page.text
     assert 'data-autosave-status-id="vcf-backup-settings-status"' in page.text
-    assert 'href="/appliance-apply"' in page.text
+    assert 'href="/dashboard#appliance-apply-review"' in page.text
     assert "Review appliance changes" in page.text
     assert "VCF Backup SFTP desired state is disabled" in page.text
     assert "Listen interfaces" in page.text
@@ -6423,7 +6527,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "VSAN_FILE_SERVICES" in page.text
     assert "embeddedEsx-6.7-INT" in page.text
     assert "esxio-9.1-INTL" in page.text
-    assert 'href="/appliance-apply"' in page.text
+    assert 'href="/dashboard#appliance-apply-review"' in page.text
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "initializeVcfDepotSettings" in app_js.text
@@ -7466,7 +7570,9 @@ def test_vcf_offline_depot_profile_credentials_block_start_not_apply(client, tmp
 
     apply_page = client.get("/appliance-apply")
     assert apply_page.status_code == 200
-    assert "requires an uploaded download token or activation-code file" not in apply_page.text
+    review = client.get("/appliance-apply/review")
+    depot_unit = next(unit for unit in review.json()["units"] if unit["id"] == "vcf_offline_depot")
+    assert "requires an uploaded download token or activation-code file" not in " ".join(depot_unit["validation_errors"])
 
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
@@ -7889,9 +7995,10 @@ def test_vcf_backups_disabled_disables_default_backup_user(client):
         backup_user = db.execute(select(User).where(User.username == "vcf-backup")).scalar_one()
         assert backup_user.enabled is False
         assert backup_user.os_sync_status == "pending"
-    apply_page = client.get("/appliance-apply")
-    assert "Local Users" in apply_page.text
-    assert "pending OS passwords" in apply_page.text
+    review = client.get("/appliance-apply/review")
+    local_users_unit = next(unit for unit in review.json()["units"] if unit["id"] == "local_users")
+    assert local_users_unit["label"] == "Local Users"
+    assert "pending OS passwords" in " ".join(local_users_unit["summary"])
 
 
 def test_vcf_backups_apply_task_captures_sftp_config(client):
@@ -8831,7 +8938,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "web-terminal-session-20260715-13" in page.text
+    assert "web-terminal-access-20260716-2" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -8889,24 +8996,24 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     from labfoundry.app.models import Job, JobStep, Setting
 
     login(client)
-    page = client.get("/appliance-apply")
+    page = client.get("/dashboard")
     assert page.status_code == 200
-    assert "Appliance Change Set" in page.text
-    change_set_markup = page.text.split('class="panel apply-change-set-panel"', 1)[1].split('<div class="apply-unit-list">', 1)[0]
-    assert "Submit appliance changes" not in change_set_markup
-    assert "data-apply-submit-tracker" not in change_set_markup
-    assert "apply-submit-panel" in page.text
-    assert page.text.count("Submit appliance changes") >= 2
     assert "appliance-apply-modal" in page.text
-    assert "No last-applied baseline exists yet" in page.text
-    assert 'value="firewall"' in page.text
+    assert 'class="button primary hidden" type="submit" data-appliance-apply-submit' in page.text
+    assert "data-apply-submit-tracker" not in page.text
+    direct = client.get("/appliance-apply", follow_redirects=False)
+    assert direct.status_code == 303
+    assert direct.headers["location"] == "/dashboard#appliance-apply-review"
+    review = client.get("/appliance-apply/review")
+    assert review.status_code == 200
+    firewall_review = next(unit for unit in review.json()["units"] if unit["id"] == "firewall")
+    assert firewall_review["has_baseline"] is False
+    assert firewall_review["selected"] is True
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     empty_response = client.post("/appliance-apply", data={"csrf": csrf})
     assert empty_response.status_code == 422
     assert "Select at least one appliance change to submit." in empty_response.text
-    firewall_input = empty_response.text.split('value="firewall"', 1)[1].split(">", 1)[0]
-    assert "checked" not in firewall_input
 
     baseline_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "firewall"}, follow_redirects=False)
     assert baseline_response.status_code == 303
@@ -8952,14 +9059,15 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
     )
     assert created.status_code == 303
 
-    changed_page = client.get("/appliance-apply")
-    assert "--- last-applied/firewall" in changed_page.text
-    assert "+++ current/firewall" in changed_page.text
-    assert "allow-global-apply-test" in changed_page.text
-    assert 'class="language-diff"' in changed_page.text
-    assert "/static/vendor/prism/prism-core.min.js" in changed_page.text
-    assert "/static/vendor/prism/prism-diff.min.js" in changed_page.text
-    assert "Prism.manual = true" in changed_page.text
+    changed_review = client.get("/appliance-apply/review")
+    assert changed_review.status_code == 200
+    changed_firewall = next(unit for unit in changed_review.json()["units"] if unit["id"] == "firewall")
+    assert "--- last-applied/firewall" in changed_firewall["config_diff"]
+    assert "+++ current/firewall" in changed_firewall["config_diff"]
+    assert "allow-global-apply-test" in changed_firewall["config_diff"]
+    assert "/static/vendor/prism/prism-core.min.js" in page.text
+    assert "/static/vendor/prism/prism-diff.min.js" in page.text
+    assert "Prism.manual = true" in page.text
     assert "highlightConfigPreviews" in client.get("/static/app.js").text
 
     skipped_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "network"}, follow_redirects=False)
@@ -8973,7 +9081,7 @@ def test_global_appliance_apply_tracks_baselines_diffs_and_skips(client):
 
 def test_appliance_apply_json_submission_returns_master_with_live_child_status(client):
     login(client)
-    page = client.get("/appliance-apply")
+    page = client.get("/dashboard")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     response = client.post(
@@ -9003,7 +9111,7 @@ def test_appliance_apply_rejects_submission_while_another_task_is_active(client)
     from labfoundry.app.models import Job, JobStatus
 
     login(client)
-    page = client.get("/appliance-apply")
+    page = client.get("/dashboard")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     with SessionLocal() as db:
         db.add(
@@ -9318,10 +9426,12 @@ def test_appliance_startup_initializes_factory_apply_baseline(monkeypatch, tmp_p
 
     with TestClient(create_app()) as test_client:
         login(test_client)
-        page = test_client.get("/appliance-apply")
-        assert page.status_code == 200
-        assert "No Pending Appliance Changes" in page.text
-        assert "11 changed" not in page.text
+        page = test_client.get("/appliance-apply", follow_redirects=False)
+        assert page.status_code == 303
+        assert page.headers["location"] == "/dashboard#appliance-apply-review"
+        review = test_client.get("/appliance-apply/review")
+        assert review.status_code == 200
+        assert review.json()["units"] == []
 
     with database.SessionLocal() as db:
         baseline = db.execute(select(Setting).where(Setting.key == "appliance_apply.baselines.v1")).scalar_one()

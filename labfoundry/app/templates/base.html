@@ -82,7 +82,7 @@
         </nav>
         {% if identity %}
           <div class="sidebar-apply">
-            <a class="sidebar-apply-link pending {% if not pending_apply_count %}hidden{% endif %} {% if request.url.path == '/appliance-apply' %}active{% endif %}" href="/appliance-apply" data-appliance-apply-sidebar data-pending-count="{{ pending_apply_count }}">
+            <a class="sidebar-apply-link pending {% if not pending_apply_count %}hidden{% endif %}" href="/dashboard#appliance-apply-review" data-appliance-apply-sidebar data-appliance-apply-open data-pending-count="{{ pending_apply_count }}">
               <span class="sidebar-apply-text">
                 <strong data-appliance-apply-sidebar-title>Review appliance changes</strong>
                 <small data-appliance-apply-sidebar-detail>{{ pending_apply_count }} pending {{ 'unit' if pending_apply_count == 1 else 'units' }}</small>
@@ -132,14 +132,14 @@
 
         {% set page_apply_status = appliance_apply_status|default(None) %}
         {% set current_page_apply_changed = page_apply_status and page_apply_status.changed %}
-        {% if identity and current_page_apply_changed and request.url.path != '/appliance-apply' %}
+        {% if identity and current_page_apply_changed %}
           <div class="page-apply-notice {{ 'needs-attention' if page_apply_status.validation_errors else 'pending' }}">
             <div class="page-apply-notice-main">
               <span class="status-pill {{ page_apply_status.pill }}">{{ page_apply_status.state }}</span>
               <strong>{{ page_apply_status.label }} has pending appliance changes</strong>
               <span>Review and submit them from the global apply workflow.</span>
             </div>
-            <a class="button secondary compact-button" href="/appliance-apply">Review appliance changes</a>
+            <a class="button secondary compact-button" href="/dashboard#appliance-apply-review" data-appliance-apply-open>Review appliance changes</a>
           </div>
         {% endif %}
 
@@ -296,7 +296,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=web-terminal-session-20260715-13"></script>
+    <script src="/static/app.js?v=web-terminal-access-20260716-2"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>
