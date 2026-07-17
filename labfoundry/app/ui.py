@@ -12812,7 +12812,8 @@ def configure_ldap_vcf_from_ui(
     )
 
 
-@router.post("/ldap/recovery/export", response_model=None)
+@router.post("/ldap/recovery/export", response_model=None, include_in_schema=False)
+@router.post("/backup-restore/ldap/export", response_model=None)
 def export_ldap_recovery_from_ui(
     request: Request,
     passphrase: str = Form(...),
@@ -12820,6 +12821,7 @@ def export_ldap_recovery_from_ui(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> Response:
+    require_admin_identity(identity)
     verify_csrf(request, csrf)
     timestamp = utcnow().strftime("%Y%m%dT%H%M%SZ")
     plain_path = Path(LDAP_RECOVERY_DIR) / f"ldap-recovery-{timestamp}.tar.gz"
@@ -12840,7 +12842,8 @@ def export_ldap_recovery_from_ui(
     )
 
 
-@router.post("/ldap/recovery/import", response_model=None)
+@router.post("/ldap/recovery/import", response_model=None, include_in_schema=False)
+@router.post("/backup-restore/ldap/import", response_model=None)
 async def import_ldap_recovery_from_ui(
     request: Request,
     archive: UploadFile = File(...),
@@ -12849,6 +12852,7 @@ async def import_ldap_recovery_from_ui(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> Response:
+    require_admin_identity(identity)
     verify_csrf(request, csrf)
     encrypted = await archive.read()
     try:
@@ -12876,7 +12880,7 @@ async def import_ldap_recovery_from_ui(
     row.organization_count = len(manifest.get("databases") or [])
     db.commit()
     record_audit(db, actor=identity.username, action="stage_ldap_recovery_import", resource_type="ldap_recovery", resource_id=str(row.id), detail=f"sha256={row.sha256}; databases={row.organization_count}")
-    return RedirectResponse("/ldap#ldap-recovery-panel", status_code=303)
+    return RedirectResponse("/backup-restore#ldap-directory-recovery", status_code=303)
 
 
 @router.get("/kms", response_class=HTMLResponse, response_model=None)
@@ -15484,11 +15488,20 @@ def services_template_context(db: Session) -> dict[str, object]:
 
 def backup_restore_context(db: Session, result: dict[str, Any] | None = None, error: str | None = None) -> dict[str, Any]:
     counts = desired_state_counts(db)
+    ldap_recovery_archive = db.execute(
+        select(LdapRecoveryArchive)
+        .where(LdapRecoveryArchive.state == "staged")
+        .order_by(LdapRecoveryArchive.created_at.desc())
+    ).scalars().first()
     return {
         "settings_backup_counts": counts,
         "settings_backup_total_rows": sum(counts.values()),
         "backup_restore_result": result,
         "backup_restore_error": error,
+        "ldap_recovery_archive": ldap_recovery_archive,
+        "ldap_recovery_ready": bool(
+            ldap_recovery_archive is not None and ldap_recovery_archive.id in LDAP_PENDING_RECOVERY_PAYLOADS
+        ),
     }
 
 

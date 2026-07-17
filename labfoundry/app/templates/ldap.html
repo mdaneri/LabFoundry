@@ -102,7 +102,6 @@
 
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="Managed LDAP views">
       <button class="tab-button active" type="button" role="tab" data-tab-target="ldap-directory-panel" aria-controls="ldap-directory-panel" aria-selected="true">Directory</button>
-      <button class="tab-button" type="button" role="tab" data-tab-target="ldap-recovery-panel" aria-controls="ldap-recovery-panel" aria-selected="false">Recovery</button>
     </div>
 
     <div class="tab-panels">
@@ -225,27 +224,6 @@
         {% endif %}
       </div>
 
-      <div id="ldap-recovery-panel" class="tab-panel" role="tabpanel" hidden>
-        <div class="section-head"><div><h2>Encrypted LDAP Recovery</h2><p class="muted">This archive is separate from the normal settings backup and preserves slapcat password hashes.</p></div></div>
-        <div class="form-grid two">
-          <form class="form-stack" action="/ldap/recovery/export" method="post">
-            <input type="hidden" name="csrf" value="{{ csrf_token }}">
-            <h3>Export</h3>
-            <label><span class="field-label"><span>Archive passphrase</span><button class="help-icon" type="button" data-help="Encrypts the slapcat recovery archive in the LabFoundry recovery envelope. The passphrase is not stored.">i</button></span><input type="password" name="passphrase" minlength="12" autocomplete="new-password" required></label>
-            <button class="button primary" type="submit">Export encrypted LDAP recovery</button>
-          </form>
-          <form class="form-stack" action="/ldap/recovery/import" method="post" enctype="multipart/form-data">
-            <input type="hidden" name="csrf" value="{{ csrf_token }}">
-            <h3>Stage import</h3>
-            <label><span class="field-label"><span>Recovery archive</span><button class="help-icon" type="button" data-help="Passphrase-encrypted .lfldap archive previously exported by LabFoundry. Import is staged in memory and executes only through global LDAP apply.">i</button></span><input type="file" name="archive" accept=".lfldap,application/octet-stream" required></label>
-            <label><span class="field-label"><span>Archive passphrase</span><button class="help-icon" type="button" data-help="Decrypts and validates the manifest for staging. The passphrase and decrypted slapcat data are not written to the application database.">i</button></span><input type="password" name="passphrase" minlength="12" autocomplete="current-password" required></label>
-            <button class="button primary" type="submit">Stage recovery import</button>
-          </form>
-        </div>
-        {% if ldap_recovery_archive %}
-          <div class="alert warning">Recovery import {{ ldap_recovery_archive.filename }} is staged for global LDAP apply. A LabFoundry restart requires the archive and passphrase to be entered again.</div>
-        {% endif %}
-      </div>
     </div>
   </div>
 

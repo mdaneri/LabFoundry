@@ -2345,6 +2345,11 @@ def test_backup_restore_page_exports_settings_archive(client):
     assert "Download settings backup" in page.text
     assert "Restore settings backup" in page.text
     assert "Factory reset settings" in page.text
+    assert "LDAP Directory Recovery" in page.text
+    assert "not part of the normal settings backup" in page.text
+    assert 'action="/backup-restore/ldap/export"' in page.text
+    assert 'action="/backup-restore/ldap/import"' in page.text
+    assert 'accept=".lfldap,application/octet-stream"' in page.text
     assert "Audit events, jobs, API tokens, password hashes, uploaded secret bodies; CA private material stays encrypted" in page.text
     assert "data-confirm-modal" in page.text
 
@@ -3887,7 +3892,10 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert "LDAPS / TCP 636 only" not in page.text
     assert "VCF Connections" not in page.text
     assert 'id="ldap-vcf-panel"' not in page.text
-    assert "Encrypted LDAP Recovery" in page.text
+    assert "Recovery" not in page.text
+    assert "Encrypted LDAP Recovery" not in page.text
+    assert "/ldap/recovery/export" not in page.text
+    assert "/ldap/recovery/import" not in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     created = client.post(
