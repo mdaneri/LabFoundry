@@ -9748,7 +9748,7 @@ def test_appliance_apply_master_steps_fail_fast_and_keep_successful_baselines(cl
 
     executed = []
 
-    def execute(unit):
+    def execute(unit, *, adapter=None):
         executed.append(unit["id"])
         success = unit["id"] == "network"
         return {
@@ -9856,7 +9856,7 @@ def test_successful_appliance_apply_baseline_uses_post_apply_snapshot(client, mo
     def units(_db, **_kwargs):
         return [after if apply_completed else before]
 
-    def execute(unit):
+    def execute(unit, *, adapter=None):
         nonlocal apply_completed
         apply_completed = True
         return {
@@ -9940,7 +9940,7 @@ def test_appliance_apply_parent_cancel_finishes_current_step_and_skips_remaining
         )
         db.commit()
 
-    def execute(unit):
+    def execute(unit, *, adapter=None):
         with SessionLocal() as other_db:
             parent = other_db.get(Job, "job_cancel_apply")
             current = json.loads(parent.result or "{}")
