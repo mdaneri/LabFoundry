@@ -58,7 +58,7 @@ SERVICE_STATE_DEFAULTS = [
         "running": False,
         "enabled": False,
         "health": "disabled",
-        "detail": "OpenLDAP / LDAPS TCP 636",
+        "detail": "OpenLDAP / configurable LDAP and LDAPS listeners",
     },
     {"service": "auth", "display_name": "Authentication", "running": True, "enabled": True, "health": "healthy"},
 ]

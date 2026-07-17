@@ -1,12 +1,87 @@
 {% extends "base.html" %}
 {% block page_title %}Managed LDAP{% endblock %}
 {% block content %}
-<section class="split-workspace">
+<section class="split-workspace service-settings-workspace">
+  <aside class="side-stack service-settings-column">
+    <div class="panel detail-panel">
+      <div class="panel-head">
+        <h2>LDAP Settings</h2>
+        <span class="status-pill {{ ldap_service_status.pill }}">{{ ldap_service_status.label }}</span>
+      </div>
+      <form class="form-stack" action="/ldap/settings" method="post" data-autosave-form data-autosave-status-id="ldap-settings-autosave-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label class="switch-field">
+          <span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Enables managed OpenLDAP desired state. The service starts only after global appliance apply validates its dependencies and listener configuration. Dry-run environments record command intent without changing the host.">i</button></span>
+          <input class="switch-input" type="checkbox" name="enabled" {{ "checked" if ldap_settings.enabled else "" }}>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <label>
+          <span class="field-label"><span>LDAP hostname</span><button class="help-icon" type="button" data-help="DNS name VCF Automation uses for the directory. When LDAPS is enabled, LabFoundry also issues the CA-managed certificate for this hostname.">i</button></span>
+          <input name="hostname" value="{{ ldap_settings.hostname }}" required>
+        </label>
+        <input type="hidden" name="listen_interfaces_present" value="1">
+        <div class="form-field">
+          <span class="field-label"><span>Listener interfaces</span><button class="help-icon" type="button" data-help="Addressed access or route interfaces and enabled VLANs where LDAP should be reachable. Management, unused, down, missing, trunk-only, and addressless targets are rejected.">i</button></span>
+          <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces">
+            <div class="tag-editor-tags" data-tag-list>
+              {% for interface_name in ldap_selected_interfaces %}
+                <span class="tag-token" data-value="{{ interface_name }}">
+                  <span>{{ interface_name }}</span>
+                  <button type="button" data-tag-remove aria-label="Remove {{ interface_name }}">×</button>
+                  <input type="hidden" name="listen_interfaces" value="{{ interface_name }}">
+                </span>
+              {% endfor %}
+            </div>
+            <input class="tag-editor-input" type="text" placeholder="Add interface..." list="ldap-interface-options" data-tag-entry autocomplete="off">
+            <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface">+</button>
+            <div class="tag-suggestions" data-tag-menu data-tag-empty-message="No non-management interfaces available." hidden>
+              {% for interface in ldap_available_interfaces %}
+                <button type="button" data-tag-option="{{ interface.name }}"><strong>{{ interface.name }}</strong><small>{{ interface.label }}</small></button>
+              {% endfor %}
+            </div>
+          </div>
+          <datalist id="ldap-interface-options">
+            {% for interface in ldap_available_interfaces %}<option value="{{ interface.name }}">{{ interface.label }}</option>{% endfor %}
+          </datalist>
+        </div>
+        <div class="derived-field fixed-value-field">
+          <span class="field-label"><span>Derived listener addresses</span><button class="help-icon" type="button" data-help="Read-only IPv4 and IPv6 addresses derived from selected non-management interfaces. Firewall rules use these same bind targets after global apply.">i</button></span>
+          <strong>{{ ldap_selected_addresses|join(", ") if ldap_selected_addresses else "No listener selected" }}</strong>
+        </div>
+
+        <div class="settings-subsection">
+          <h3>Secure LDAPS</h3>
+          <label class="switch-field"><span class="field-label"><span>LDAPS enabled</span><button class="help-icon" type="button" data-help="Exposes TLS-protected LDAP on the selected interfaces using the LabFoundry CA-managed certificate. Enabled by default.">i</button></span><input class="switch-input" type="checkbox" name="ldaps_enabled" {{ "checked" if ldap_settings.ldaps_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+          <label><span class="field-label"><span>LDAPS port</span><button class="help-icon" type="button" data-help="TCP port for encrypted LDAPS listeners and generated firewall rules. VCF configuration uses this port when LDAPS is enabled.">i</button></span><input type="number" name="port" min="1" max="65535" value="{{ ldap_settings.port }}"></label>
+        </div>
+        <div class="settings-subsection">
+          <h3>Plaintext LDAP</h3>
+          <label class="switch-field"><span class="field-label"><span>LDAP enabled</span><button class="help-icon" type="button" data-help="Exposes unencrypted LDAP on the selected interfaces. Disabled by default; credentials and directory data are not protected in transit when enabled.">i</button></span><input class="switch-input" type="checkbox" name="ldap_enabled" {{ "checked" if ldap_settings.ldap_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+          <label><span class="field-label"><span>LDAP port</span><button class="help-icon" type="button" data-help="TCP port for plaintext LDAP listeners and generated firewall rules. The default is 389.">i</button></span><input type="number" name="ldap_port" min="1" max="65535" value="{{ ldap_settings.ldap_port }}"></label>
+        </div>
+
+        <div class="settings-subsection"><h3>Password policy defaults</h3><p class="muted">Applied through the OpenLDAP ppolicy overlay.</p></div>
+        <label><span class="field-label"><span>Minimum length</span><button class="help-icon" type="button" data-help="Rejects newly staged user passwords shorter than this value and configures the per-organization OpenLDAP password policy.">i</button></span><input type="number" name="min_password_length" min="8" max="128" value="{{ ldap_settings.min_password_length }}"></label>
+        <label><span class="field-label"><span>Password history</span><button class="help-icon" type="button" data-help="Number of previous password hashes OpenLDAP retains to prevent immediate reuse.">i</button></span><input type="number" name="password_history" min="0" max="24" value="{{ ldap_settings.password_history }}"></label>
+        <label><span class="field-label"><span>Maximum failures</span><button class="help-icon" type="button" data-help="Consecutive failed binds allowed before OpenLDAP locks the user account. VCF bind identities are excluded.">i</button></span><input type="number" name="max_failures" min="1" max="100" value="{{ ldap_settings.max_failures }}"></label>
+        <label><span class="field-label"><span>Failure window (minutes)</span><button class="help-icon" type="button" data-help="Time window used when counting failed binds toward lockout.">i</button></span><input type="number" name="failure_window_minutes" min="1" max="1440" value="{{ ldap_settings.failure_window_minutes }}"></label>
+        <label><span class="field-label"><span>Lockout duration (minutes)</span><button class="help-icon" type="button" data-help="How long a user remains locked after reaching the failure limit unless an administrator requests unlock and applies LDAP.">i</button></span><input type="number" name="lockout_minutes" min="1" max="1440" value="{{ ldap_settings.lockout_minutes }}"></label>
+        <label><span class="field-label"><span>Maximum age (days)</span><button class="help-icon" type="button" data-help="Optional password expiry. Keep zero unless the lab has an operational reset process because there is no end-user password-change portal.">i</button></span><input type="number" name="password_max_age_days" min="0" max="3650" value="{{ ldap_settings.password_max_age_days }}"></label>
+        <label class="switch-field"><span class="field-label"><span>Require uppercase</span><button class="help-icon" type="button" data-help="Requires an uppercase character in new or reset user passwords.">i</button></span><input class="switch-input" type="checkbox" name="require_uppercase" {{ "checked" if ldap_settings.require_uppercase else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Require lowercase</span><button class="help-icon" type="button" data-help="Requires a lowercase character in new or reset user passwords.">i</button></span><input class="switch-input" type="checkbox" name="require_lowercase" {{ "checked" if ldap_settings.require_lowercase else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Require number</span><button class="help-icon" type="button" data-help="Requires a number in new or reset user passwords.">i</button></span><input class="switch-input" type="checkbox" name="require_number" {{ "checked" if ldap_settings.require_number else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Require special character</span><button class="help-icon" type="button" data-help="Requires a non-alphanumeric character in new or reset user passwords.">i</button></span><input class="switch-input" type="checkbox" name="require_special" {{ "checked" if ldap_settings.require_special else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Block username</span><button class="help-icon" type="button" data-help="Rejects passwords containing the LDAP uid, ignoring case.">i</button></span><input class="switch-input" type="checkbox" name="disallow_username" {{ "checked" if ldap_settings.disallow_username else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <p id="ldap-settings-autosave-status" class="autosave-status" aria-live="polite">Changes save automatically.</p>
+      </form>
+    </div>
+  </aside>
+
   <div class="panel wide-panel">
     <div class="panel-head">
       <div>
         <h2>Managed LDAP for VCF Automation</h2>
-        <p class="muted">LabFoundry owns one LDAPS service and keeps every VCF organization in a separate LDAP suffix and LMDB database.</p>
+        <p class="muted">LabFoundry owns one LDAP service and keeps every VCF organization in a separate LDAP suffix and LMDB database.</p>
       </div>
       <span class="status-pill {{ 'good' if ldap_settings.enabled else 'muted' }}">{{ "enabled" if ldap_settings.enabled else "disabled" }}</span>
     </div>
@@ -26,87 +101,13 @@
     </div>
 
     <div class="tab-buttons tool-tabs" role="tablist" aria-label="Managed LDAP views">
-      <button class="tab-button active" type="button" role="tab" data-tab-target="ldap-service-panel" aria-controls="ldap-service-panel" aria-selected="true">Service</button>
-      <button class="tab-button" type="button" role="tab" data-tab-target="ldap-directory-panel" aria-controls="ldap-directory-panel" aria-selected="false">Directory</button>
+      <button class="tab-button active" type="button" role="tab" data-tab-target="ldap-directory-panel" aria-controls="ldap-directory-panel" aria-selected="true">Directory</button>
       <button class="tab-button" type="button" role="tab" data-tab-target="ldap-vcf-panel" aria-controls="ldap-vcf-panel" aria-selected="false">VCF Connections</button>
       <button class="tab-button" type="button" role="tab" data-tab-target="ldap-recovery-panel" aria-controls="ldap-recovery-panel" aria-selected="false">Recovery</button>
     </div>
 
     <div class="tab-panels">
-      <div id="ldap-service-panel" class="tab-panel active" role="tabpanel">
-        <div class="section-head">
-          <div>
-            <h2>LDAPS Service</h2>
-            <p class="muted">Desired state is saved immediately. Host changes run only through global appliance apply.</p>
-          </div>
-          <span class="status-pill {{ ldap_service_status.pill }}">{{ ldap_service_status.label }}</span>
-        </div>
-        <form class="form-stack" action="/ldap/settings" method="post" data-autosave-form data-autosave-status-id="ldap-settings-autosave-status">
-          <input type="hidden" name="csrf" value="{{ csrf_token }}">
-          <label class="switch-field">
-            <span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Enables managed OpenLDAP desired state. The service starts only after global appliance apply validates CA, DNS, firewall, and LDAP together.">i</button></span>
-            <input class="switch-input" type="checkbox" name="enabled" {{ "checked" if ldap_settings.enabled else "" }}>
-            <span class="switch-track" aria-hidden="true"></span>
-          </label>
-          <label>
-            <span class="field-label"><span>LDAPS hostname</span><button class="help-icon" type="button" data-help="DNS name VCF Automation uses for LDAPS. LabFoundry creates the managed DNS alias and CA-issued certificate for this hostname.">i</button></span>
-            <input name="hostname" value="{{ ldap_settings.hostname }}" required>
-          </label>
-          <input type="hidden" name="listen_interfaces_present" value="1">
-          <div class="form-field">
-            <span class="field-label"><span>Listener interfaces</span><button class="help-icon" type="button" data-help="Addressed management, access, or route interfaces and enabled VLANs where TCP 636 should be reachable. Unused, down, missing, trunk-only, and addressless targets are rejected.">i</button></span>
-            <div class="tag-editor" data-tag-editor data-tag-name="listen_interfaces">
-              <div class="tag-editor-tags" data-tag-list>
-                {% for interface_name in ldap_selected_interfaces %}
-                  <span class="tag-token" data-value="{{ interface_name }}">
-                    <span>{{ interface_name }}</span>
-                    <button type="button" data-tag-remove aria-label="Remove {{ interface_name }}">×</button>
-                    <input type="hidden" name="listen_interfaces" value="{{ interface_name }}">
-                  </span>
-                {% endfor %}
-              </div>
-              <input class="tag-editor-input" type="text" placeholder="Add interface..." list="ldap-interface-options" data-tag-entry autocomplete="off">
-              <button class="tag-add-button" type="button" data-tag-menu-toggle aria-label="Add existing interface">+</button>
-              <div class="tag-suggestions" data-tag-menu hidden>
-                {% for interface in ldap_available_interfaces %}
-                  <button type="button" data-tag-option="{{ interface.name }}"><strong>{{ interface.name }}</strong><small>{{ interface.label }}</small></button>
-                {% endfor %}
-              </div>
-            </div>
-            <datalist id="ldap-interface-options">
-              {% for interface in ldap_available_interfaces %}<option value="{{ interface.name }}">{{ interface.label }}</option>{% endfor %}
-            </datalist>
-          </div>
-          <div class="derived-field fixed-value-field">
-            <span class="field-label"><span>Derived listener addresses</span><button class="help-icon" type="button" data-help="Read-only IPv4 and IPv6 addresses derived from the selected interfaces. OpenLDAP exposes LDAPS on these addresses through TCP 636 firewall rules.">i</button></span>
-            <strong>{{ ldap_selected_addresses|join(", ") if ldap_selected_addresses else "No listener selected" }}</strong>
-          </div>
-          <div class="derived-field fixed-value-field">
-            <span class="field-label"><span>External protocol</span><button class="help-icon" type="button" data-help="External access is fixed to LDAPS on TCP 636. Plaintext LDAP on TCP 389 is never configured; privileged reconciliation uses local ldapi with SASL EXTERNAL.">i</button></span>
-            <strong>LDAPS / TCP 636 only</strong>
-          </div>
-
-          <div class="section-head"><div><h3>Password policy defaults</h3><p class="muted">Applied through the OpenLDAP ppolicy overlay.</p></div></div>
-          <div class="form-grid two">
-            <label><span class="field-label"><span>Minimum length</span><button class="help-icon" type="button" data-help="Rejects newly staged user passwords shorter than this value and configures the per-organization OpenLDAP password policy.">i</button></span><input type="number" name="min_password_length" min="8" max="128" value="{{ ldap_settings.min_password_length }}"></label>
-            <label><span class="field-label"><span>Password history</span><button class="help-icon" type="button" data-help="Number of previous password hashes OpenLDAP retains to prevent immediate reuse.">i</button></span><input type="number" name="password_history" min="0" max="24" value="{{ ldap_settings.password_history }}"></label>
-            <label><span class="field-label"><span>Maximum failures</span><button class="help-icon" type="button" data-help="Consecutive failed binds allowed before OpenLDAP locks the user account. VCF bind identities are managed separately and are not assigned the expiring user policy.">i</button></span><input type="number" name="max_failures" min="1" max="100" value="{{ ldap_settings.max_failures }}"></label>
-            <label><span class="field-label"><span>Failure window (minutes)</span><button class="help-icon" type="button" data-help="Time window used when counting failed binds toward lockout.">i</button></span><input type="number" name="failure_window_minutes" min="1" max="1440" value="{{ ldap_settings.failure_window_minutes }}"></label>
-            <label><span class="field-label"><span>Lockout duration (minutes)</span><button class="help-icon" type="button" data-help="How long a user remains locked after reaching the failure limit unless an administrator requests unlock and applies LDAP.">i</button></span><input type="number" name="lockout_minutes" min="1" max="1440" value="{{ ldap_settings.lockout_minutes }}"></label>
-            <label><span class="field-label"><span>Maximum age (days)</span><button class="help-icon" type="button" data-help="Optional password expiry. Keep zero unless the lab has an operational reset process because v1 has no end-user password-change portal.">i</button></span><input type="number" name="password_max_age_days" min="0" max="3650" value="{{ ldap_settings.password_max_age_days }}"></label>
-          </div>
-          <div class="form-grid two">
-            <label class="switch-field"><span class="field-label"><span>Require uppercase</span><button class="help-icon" type="button" data-help="Requires an uppercase character before LabFoundry accepts a new or reset password.">i</button></span><input class="switch-input" type="checkbox" name="require_uppercase" {{ "checked" if ldap_settings.require_uppercase else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-            <label class="switch-field"><span class="field-label"><span>Require lowercase</span><button class="help-icon" type="button" data-help="Requires a lowercase character before LabFoundry accepts a new or reset password.">i</button></span><input class="switch-input" type="checkbox" name="require_lowercase" {{ "checked" if ldap_settings.require_lowercase else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-            <label class="switch-field"><span class="field-label"><span>Require number</span><button class="help-icon" type="button" data-help="Requires a number before LabFoundry accepts a new or reset password.">i</button></span><input class="switch-input" type="checkbox" name="require_number" {{ "checked" if ldap_settings.require_number else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-            <label class="switch-field"><span class="field-label"><span>Require special character</span><button class="help-icon" type="button" data-help="Requires a non-alphanumeric character before LabFoundry accepts a new or reset password.">i</button></span><input class="switch-input" type="checkbox" name="require_special" {{ "checked" if ldap_settings.require_special else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-            <label class="switch-field"><span class="field-label"><span>Block username</span><button class="help-icon" type="button" data-help="Rejects passwords containing the LDAP uid, ignoring case.">i</button></span><input class="switch-input" type="checkbox" name="disallow_username" {{ "checked" if ldap_settings.disallow_username else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-          </div>
-          <p id="ldap-settings-autosave-status" class="autosave-status" aria-live="polite">Changes save automatically.</p>
-        </form>
-      </div>
-
-      <div id="ldap-directory-panel" class="tab-panel" role="tabpanel" hidden>
+      <div id="ldap-directory-panel" class="tab-panel active" role="tabpanel">
         <div class="section-head">
           <div><h2>Organizations</h2><p class="muted">Each organization receives an isolated suffix, database, users OU, groups OU, and read-only VCF bind identity.</p></div>
           <span class="status-pill muted">{{ ldap_organizations|length }} organizations</span>
@@ -306,7 +307,7 @@
       {% if ldap_validation_errors %}
         <div class="alert error">{% for error in ldap_validation_errors %}<div>{{ error }}</div>{% endfor %}</div>
       {% else %}
-        <p class="muted">The desired LDAP state passes LabFoundry validation. The helper still validates OpenLDAP configuration, certificates, suffix isolation, overlays, and LDAPS-only listeners before host mutation.</p>
+        <p class="muted">The desired LDAP state passes LabFoundry validation. The helper still validates OpenLDAP configuration, certificates when LDAPS is enabled, suffix isolation, overlays, listener protocols, and ports before host mutation.</p>
       {% endif %}
       {% if ldap_validation_warnings %}
         <div class="alert warning">{% for warning in ldap_validation_warnings %}<div>{{ warning }}</div>{% endfor %}</div>

@@ -7,7 +7,9 @@ from labfoundry.app.services.ldap import (
     decrypt_recovery_payload,
     encrypt_recovery_payload,
     ldap_apply_payload,
+    manual_vcf_bundle,
     validate_group_cycles,
+    validate_ldap_state,
     validate_ldap_password,
     validate_ldap_recovery_payload,
     vcf_ldap_settings,
@@ -30,6 +32,9 @@ def test_ldap_api_manages_isolated_organizations_users_groups_and_vcf_mapping(cl
     settings = client.get("/api/v1/ldap/settings", headers=headers)
     assert settings.status_code == 200
     assert settings.json()["port"] == 636
+    assert settings.json()["ldaps_enabled"] is True
+    assert settings.json()["ldap_enabled"] is False
+    assert settings.json()["ldap_port"] == 389
 
     org_a = client.post("/api/v1/ldap/organizations", headers=headers, json={"name": "Org A"})
     org_b = client.post("/api/v1/ldap/organizations", headers=headers, json={"name": "Org B"})
@@ -87,6 +92,8 @@ def test_ldap_api_manages_isolated_organizations_users_groups_and_vcf_mapping(cl
     health = client.get("/api/v1/ldap/health", headers=headers)
     assert health.status_code == 200
     assert health.json()["ldaps_only"] is True
+    assert health.json()["ldaps_enabled"] is True
+    assert health.json()["ldap_enabled"] is False
     assert health.json()["organization_count"] == 2
 
 
@@ -158,6 +165,17 @@ def test_ldap_password_policy_and_renderer_never_expose_unstaged_hashes():
     assert "userPassword" not in rendered
     assert vcf_ldap_settings(settings, organization, include_password=False)["definedSettings"]["userAttributes"]["serviceAccount"] == "employeeType"
 
+    settings.ldaps_enabled = False
+    settings.ldap_enabled = True
+    settings.ldap_port = 1389
+    plaintext_vcf = vcf_ldap_settings(settings, organization, include_password=False)
+    assert plaintext_vcf["definedSettings"]["ssl"] is False
+    assert plaintext_vcf["definedSettings"]["port"] == 1389
+    bundle = manual_vcf_bundle(settings, organization, root_ca_pem="test-ca")
+    assert bundle["endpoint"]["url"] == "ldap://ldap.labfoundry.internal:1389"
+    assert bundle["endpoint"]["rootCaFilename"] == ""
+    assert bundle["rootCaPem"] == ""
+
 
 def test_ldap_nested_group_cycle_detection():
     organization = LdapOrganization(id=1, name="Org", slug="org", suffix_dn="dc=org,dc=example")
@@ -166,6 +184,50 @@ def test_ldap_nested_group_cycle_detection():
     first.members = [LdapGroupMembership(group=first, member_group=second, member_group_id=2)]
     second.members = [LdapGroupMembership(group=second, member_group=first, member_group_id=1)]
     assert "cycle" in validate_group_cycles([first, second])[0].lower()
+
+
+def test_plaintext_only_ldap_does_not_require_ca_but_requires_one_external_protocol():
+    settings = LdapSettings(
+        enabled=True,
+        hostname="ldap.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        ldaps_enabled=False,
+        port=636,
+        ldap_enabled=True,
+        ldap_port=389,
+        min_password_length=14,
+        max_failures=5,
+        lockout_minutes=15,
+        password_history=5,
+        password_max_age_days=0,
+    )
+    organization = LdapOrganization(
+        name="Org A",
+        slug="org-a",
+        suffix_dn="dc=org-a,dc=ldap,dc=labfoundry,dc=internal",
+        bind_dn="uid=vcf-bind,ou=service-accounts,dc=org-a,dc=ldap,dc=labfoundry,dc=internal",
+        bind_password_encrypted="encrypted",
+    )
+    organization.users = []
+    organization.groups = []
+
+    errors, _warnings = validate_ldap_state(
+        settings,
+        [organization],
+        available_interfaces={"eth2"},
+        ca_ready=False,
+    )
+
+    assert not any("CA" in error for error in errors)
+    settings.ldap_enabled = False
+    errors, _warnings = validate_ldap_state(
+        settings,
+        [organization],
+        available_interfaces={"eth2"},
+        ca_ready=False,
+    )
+    assert "Enable at least one LDAP or LDAPS listener before enabling the service." in errors
 
 
 def test_ldap_recovery_envelope_and_manifest_validation():
@@ -192,7 +254,7 @@ def test_ldap_recovery_envelope_and_manifest_validation():
     assert decrypt_recovery_payload(encrypted, "A sufficiently long recovery passphrase") == payload
 
 
-def test_ldap_api_settings_accept_observed_management_dhcp_address(client):
+def test_ldap_api_settings_reject_management_and_accept_addressed_access_interface(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -225,8 +287,37 @@ def test_ldap_api_settings_accept_observed_management_dhcp_address(client):
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["listen_interfaces"] == []
+    assert payload["listen_addresses"] == []
+
+    with SessionLocal() as db:
+        interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
+        interface.role = "access"
+        db.commit()
+
+    response = client.patch(
+        "/api/v1/ldap/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "enabled": False,
+            "hostname": "ldap.labfoundry.internal",
+            "listen_interfaces": ["eth0"],
+            "listen_addresses": [],
+            "ldaps_enabled": True,
+            "port": 1636,
+            "ldap_enabled": True,
+            "ldap_port": 1389,
+            "password_policy": {},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
     assert payload["listen_interfaces"] == ["eth0"]
     assert payload["listen_addresses"] == ["192.168.167.219"]
+    assert payload["port"] == 1636
+    assert payload["ldap_enabled"] is True
+    assert payload["ldap_port"] == 1389
 
 
 def test_ldap_dns_reconciliation_does_not_change_ldap_snapshot_timestamp(client):
@@ -238,7 +329,7 @@ def test_ldap_dns_reconciliation_does_not_change_ldap_snapshot_timestamp(client)
 
     with SessionLocal() as db:
         interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth0")).scalar_one()
-        interface.role = "management"
+        interface.role = "access"
         interface.mode = "access"
         interface.admin_state = "up"
         interface.oper_state = "up"

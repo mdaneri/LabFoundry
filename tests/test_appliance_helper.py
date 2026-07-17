@@ -82,7 +82,10 @@ def ldap_payload(*, enabled: bool = False) -> dict:
             "hostname": "ldap.labfoundry.internal",
             "listen_interface": "eth0",
             "listen_address": "192.168.49.1",
+            "ldaps_enabled": True,
             "port": 636,
+            "ldap_enabled": False,
+            "ldap_port": 389,
             "certificate_path": "/etc/labfoundry/ldap/tls/server.crt",
             "key_path": "/etc/labfoundry/ldap/tls/server.key",
             "chain_path": "/etc/labfoundry/ldap/tls/server-chain.crt",
@@ -141,7 +144,7 @@ def ldap_payload(*, enabled: bool = False) -> dict:
     }
 
 
-def test_ldap_helper_renders_separate_mdb_acl_overlays_and_ldaps_only_listener():
+def test_ldap_helper_renders_separate_mdb_acl_overlays_and_configurable_listeners():
     helper = load_helper_module()
     payload = ldap_payload()
 
@@ -158,6 +161,20 @@ def test_ldap_helper_renders_separate_mdb_acl_overlays_and_ldaps_only_listener()
     assert 'by dn.exact="uid=vcf-bind,ou=service-accounts,dc=org-a,dc=ldap,dc=labfoundry,dc=internal" read' in config
     assert helper._ldap_listener_urls(payload["service"]) == "ldapi:/// ldaps://192.168.49.1:636/"
     assert "ldap:///" not in helper._ldap_listener_urls(payload["service"])
+
+    payload["service"].update({"port": 1636, "ldap_enabled": True, "ldap_port": 1389})
+    assert helper._ldap_config_errors(payload) == []
+    assert helper._ldap_listener_urls(payload["service"]) == (
+        "ldapi:/// ldaps://192.168.49.1:1636/ ldap://192.168.49.1:1389/"
+    )
+
+    payload["service"]["ldap_port"] = 1636
+    assert "different TCP ports" in " ".join(helper._ldap_config_errors(payload))
+
+    payload["service"].update({"ldaps_enabled": False, "port": 636, "ldap_enabled": True, "ldap_port": 1389})
+    plaintext_config = helper._render_ldap_slapd_config(payload)
+    assert "TLSCertificateFile" not in plaintext_config
+    assert helper._ldap_listener_urls(payload["service"]) == "ldapi:/// ldap://192.168.49.1:1389/"
 
 
 def test_ldap_render_can_use_isolated_validation_data_root(tmp_path):
@@ -186,6 +203,26 @@ def test_ldap_listener_dropin_overrides_photon_hard_coded_plaintext_listener(mon
     assert "ExecStart=" in rendered
     assert 'ExecStart=/usr/sbin/slapd -u ldap -F /etc/openldap/slapd.d -h "ldapi:/// ldaps://192.168.49.1:636/"' in rendered
     assert "ldap:///" not in rendered
+
+
+def test_ldap_listener_dropin_supports_custom_ldaps_and_opt_in_plaintext_ports(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    dropin_dir = tmp_path / "slapd.service.d"
+    dropin_path = dropin_dir / "labfoundry.conf"
+    sysconfig_path = tmp_path / "slapd"
+    monkeypatch.setattr(helper, "LDAP_SYSTEMD_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "LDAP_SYSTEMD_DROPIN_PATH", dropin_path)
+    monkeypatch.setattr(helper, "LDAP_SYSCONFIG_PATH", sysconfig_path)
+    monkeypatch.setattr(helper, "LDAP_CONFIG_DIR", "/etc/openldap/slapd.d")
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
+    service = ldap_payload(enabled=True)["service"]
+    service.update({"port": 1636, "ldap_enabled": True, "ldap_port": 1389})
+
+    helper._install_ldap_listener_config(service)
+
+    rendered = dropin_path.read_text(encoding="utf-8")
+    assert "ldaps://192.168.49.1:1636/" in rendered
+    assert "ldap://192.168.49.1:1389/" in rendered
 
 
 def test_ldap_private_key_is_group_readable_only_for_slapd(monkeypatch, tmp_path):

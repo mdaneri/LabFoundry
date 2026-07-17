@@ -32,6 +32,7 @@ from labfoundry.app.secrets import decrypt_secret, encrypt_secret
 
 LDAP_DEFAULT_HOSTNAME = "ldap.labfoundry.internal"
 LDAP_DEFAULT_PORT = 636
+LDAP_DEFAULT_PLAINTEXT_PORT = 389
 LDAP_DNS_RECORD_DESCRIPTION = "Managed by LabFoundry LDAP service"
 LDAP_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json"
 LDAP_RECOVERY_DIR = "/var/lib/labfoundry/ldap/recovery"
@@ -242,7 +243,10 @@ def ldap_settings_to_dict(settings: LdapSettings) -> dict[str, Any]:
         "hostname": settings.hostname,
         "listen_interface": settings.listen_interface,
         "listen_address": settings.listen_address,
+        "ldaps_enabled": settings.ldaps_enabled,
         "port": settings.port,
+        "ldap_enabled": settings.ldap_enabled,
+        "ldap_port": settings.ldap_port,
         "password_policy": {
             "min_length": settings.min_password_length,
             "require_uppercase": settings.require_uppercase,
@@ -398,8 +402,12 @@ def validate_ldap_state(
     warnings: list[str] = []
     if settings.hostname.strip().lower().endswith(".local"):
         warnings.append("Avoid .local for LDAP; use an internal DNS domain such as labfoundry.internal.")
-    if settings.port != LDAP_DEFAULT_PORT:
-        errors.append("LDAP v1 exposes LDAPS on TCP 636 only.")
+    if settings.port < 1 or settings.port > 65535:
+        errors.append("LDAPS port must be between 1 and 65535.")
+    if settings.ldap_port < 1 or settings.ldap_port > 65535:
+        errors.append("LDAP port must be between 1 and 65535.")
+    if settings.ldaps_enabled and settings.ldap_enabled and settings.port == settings.ldap_port:
+        errors.append("LDAP and LDAPS listeners must use different TCP ports.")
     if settings.min_password_length < 8 or settings.min_password_length > 128:
         errors.append("LDAP minimum password length must be between 8 and 128.")
     if settings.max_failures < 1 or settings.max_failures > 100:
@@ -409,10 +417,12 @@ def validate_ldap_state(
     if settings.password_history < 0 or settings.password_history > 24:
         errors.append("LDAP password history must be between 0 and 24.")
     if settings.enabled:
+        if not settings.ldaps_enabled and not settings.ldap_enabled:
+            errors.append("Enable at least one LDAP or LDAPS listener before enabling the service.")
         if not settings.listen_interface.strip() or not settings.listen_address.strip():
             errors.append("Select at least one addressed interface before enabling LDAP.")
-        if not ca_ready:
-            errors.append("Enable and initialize the LabFoundry CA before enabling LDAP.")
+        if settings.ldaps_enabled and not ca_ready:
+            errors.append("Enable and initialize the LabFoundry CA before enabling LDAPS.")
         if available_interfaces is not None:
             for interface_name in split_ldap_values(settings.listen_interface):
                 if interface_name not in available_interfaces:
@@ -469,10 +479,12 @@ def validate_ldap_state(
 
 
 def vcf_ldap_settings(settings: LdapSettings, organization: LdapOrganization, *, include_password: bool) -> dict[str, Any]:
+    use_ldaps = bool(settings.ldaps_enabled)
+    hostname = settings.hostname or LDAP_DEFAULT_HOSTNAME
     defined_settings: dict[str, Any] = {
-        "hostName": settings.hostname,
-        "port": settings.port,
-        "ssl": True,
+        "hostName": hostname,
+        "port": settings.port if use_ldaps else settings.ldap_port,
+        "ssl": use_ldaps,
         "pagedSearchDisabled": False,
         "pageSize": 200,
         "maxResults": 1000,
@@ -597,18 +609,22 @@ def manual_vcf_bundle(
     *,
     root_ca_pem: str,
 ) -> dict[str, Any]:
+    use_ldaps = bool(settings.ldaps_enabled)
+    endpoint_port = settings.port if use_ldaps else settings.ldap_port
+    hostname = settings.hostname or LDAP_DEFAULT_HOSTNAME
     return {
         "manifestVersion": 1,
         "generatedAt": utcnow().isoformat(),
         "organization": ldap_organization_to_dict(organization),
         "endpoint": {
-            "url": f"ldaps://{settings.hostname}:{settings.port}",
-            "hostname": settings.hostname,
-            "port": settings.port,
-            "rootCaFilename": "labfoundry-root-ca.pem",
+            "url": f"{'ldaps' if use_ldaps else 'ldap'}://{hostname}:{endpoint_port}",
+            "hostname": hostname,
+            "port": endpoint_port,
+            "ssl": use_ldaps,
+            "rootCaFilename": "labfoundry-root-ca.pem" if use_ldaps else "",
         },
         "vcfAutomation91": vcf_ldap_settings(settings, organization, include_password=False),
-        "rootCaPem": root_ca_pem,
+        "rootCaPem": root_ca_pem if use_ldaps else "",
         "instructions": [
             "Configure custom organization LDAP settings using settingsSource DEFINED.",
             "Supply the one-time VCF bind password separately; it is intentionally absent from this bundle.",

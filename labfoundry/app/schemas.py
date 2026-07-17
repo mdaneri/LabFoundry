@@ -191,7 +191,10 @@ class LdapSettingsUpdate(BaseModel):
     hostname: str = Field(default="ldap.labfoundry.internal", min_length=1, max_length=180)
     listen_interfaces: list[str] = Field(default_factory=list)
     listen_addresses: list[str] = Field(default_factory=list)
+    ldaps_enabled: bool = True
     port: int = Field(default=636, ge=1, le=65535)
+    ldap_enabled: bool = False
+    ldap_port: int = Field(default=389, ge=1, le=65535)
     password_policy: LdapPasswordPolicy = Field(default_factory=LdapPasswordPolicy)
 
 
@@ -333,6 +336,10 @@ class LdapHealthResponse(BaseModel):
     running: bool
     health: str
     ldaps_only: bool
+    ldaps_enabled: bool
+    ldaps_port: int
+    ldap_enabled: bool
+    ldap_port: int
     hostname: str
     port: int
     organization_count: int

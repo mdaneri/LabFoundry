@@ -489,7 +489,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "firewall, routing, NAT, and WAN desired state",
             "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification",
             "KMS desired state, DNS/firewall apply, PyKMIP service, and TLS client-certificate probe",
-            "Managed LDAP desired state, two isolated organization suffixes, duplicate uid support, nested groups, LDAPS-only listener, and CA hostname verification",
+            "Managed LDAP desired state, two isolated organization suffixes, duplicate uid support, nested groups, configurable LDAP/LDAPS listeners, management-interface exclusion, and CA hostname verification",
             "VCF Backup desired state, local user sync, SFTP listener, and client probe",
             "VCF Offline Depot browser login, curl/wget Basic auth, and Local Users password rotation",
             "ESXi PXE desired state, DHCP boot options, TFTP artifacts, and Hyper-V PXE VM smoke",

@@ -1102,6 +1102,22 @@ textarea {
   min-height: calc(100vh - 144px);
 }
 
+.service-settings-workspace {
+  grid-template-columns: 360px minmax(0, 1fr) 360px;
+}
+
+.service-settings-column {
+  grid-column: 1;
+}
+
+.service-settings-workspace > .wide-panel {
+  grid-column: 2;
+}
+
+.service-settings-workspace > .side-stack:last-child {
+  grid-column: 3;
+}
+
 .panel {
   padding: 16px;
   margin-bottom: 14px;
@@ -5809,6 +5825,12 @@ textarea {
   .metric-grid,
   .ca-trust-grid {
     grid-template-columns: 1fr;
+  }
+
+  .service-settings-column,
+  .service-settings-workspace > .wide-panel,
+  .service-settings-workspace > .side-stack:last-child {
+    grid-column: auto;
   }
 
   .ca-fingerprint-block {

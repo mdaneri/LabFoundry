@@ -4,10 +4,11 @@ LabFoundry can operate a single OpenLDAP 2.6 service for VCF Automation while ke
 
 ## Security boundary
 
-- External access is LDAPS on TCP 636 only. Plaintext LDAP on TCP 389 is not configured.
+- LDAPS is enabled by default on configurable TCP port 636 and uses a CA-managed certificate.
+- Optional plaintext LDAP is disabled by default and has an independently configurable TCP port, defaulting to 389. Enabling it exposes credentials and directory data without transport encryption, so use it only on an isolated lab network when a client cannot use LDAPS.
 - Privileged reconciliation uses local `ldapi:///` with SASL EXTERNAL through `labfoundry-helper ldap`.
-- The integrated LabFoundry CA issues the `ldap:ldaps` certificate for the configured hostname and listener addresses.
-- Firewall apply owns TCP/636 rules for selected addressed management, access, or route interfaces and enabled VLANs.
+- The integrated LabFoundry CA issues the `ldap:ldaps` certificate for the configured hostname and listener addresses whenever LDAPS is enabled.
+- Firewall apply owns rules for each enabled LDAP/LDAPS port on selected addressed access or route interfaces and enabled VLANs. Management interfaces are not eligible LDAP listener targets.
 - Each organization receives a separate suffix and database. Its generated VCF bind identity can read only that suffix.
 - VCF bind secrets are encrypted with `LABFOUNDRY_SECRETS_KEY`. A generated or rotated secret is displayed once.
 - User passwords are held only in process memory until global LDAP apply. Password plaintext and hashes are never stored in the application database, previews, tasks, or audit details.
@@ -30,7 +31,7 @@ The default password policy requires 14 characters with uppercase, lowercase, nu
 
 ## VCF Automation integration
 
-Every organization can download a manual ZIP bundle containing the LDAPS endpoint, root CA PEM, search bases, bind DN, VCF Automation 9.1 JSON, and operator instructions. The bind password is intentionally separate.
+Every organization can download a manual ZIP bundle containing the selected VCF LDAP endpoint, root CA PEM when LDAPS is used, search bases, bind DN, VCF Automation 9.1 JSON, and operator instructions. The bind password is intentionally separate. Generated VCF settings prefer LDAPS whenever it is enabled; plaintext LDAP is used only when LDAPS is disabled and LDAP is enabled.
 
 The guided workflow pins the VCF Automation TLS SHA-256 fingerprint, reads current organization LDAP settings, requires explicit replacement approval, writes `settingsSource=DEFINED`, tests LDAP, and verifies that VCF can find at least one user and group. Administrator credentials are transient and are not stored.
 

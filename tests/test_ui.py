@@ -655,7 +655,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v104" in service_worker.text
+    assert "labfoundry-pwa-v105" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -667,7 +667,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=web-terminal-session-20260715-14" in service_worker.text
+    assert "/static/app.css?v=managed-ldap-listeners-20260716-1" in service_worker.text
     assert "/static/app.js?v=managed-ldap-management-main-route-20260716-2" in service_worker.text
 
     registration = client.get("/static/pwa.js")
@@ -677,7 +677,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=web-terminal-session-20260715-14" in offline.text
+    assert "/static/app.css?v=managed-ldap-listeners-20260716-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -693,7 +693,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=web-terminal-session-20260715-14" in page.text
+    assert "/static/app.css?v=managed-ldap-listeners-20260716-1" in page.text
     assert "/static/app.js?v=managed-ldap-management-main-route-20260716-2" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
@@ -3877,7 +3877,14 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     page = client.get("/ldap")
     assert page.status_code == 200
     assert "Managed LDAP for VCF Automation" in page.text
-    assert "LDAPS / TCP 636 only" in page.text
+    assert 'class="split-workspace service-settings-workspace"' in page.text
+    assert "LDAP Settings" in page.text
+    assert 'name="ldaps_enabled"' in page.text
+    assert 'name="port"' in page.text
+    assert 'name="ldap_enabled"' in page.text
+    assert 'name="ldap_port"' in page.text
+    assert "Management, unused, down, missing, trunk-only" in page.text
+    assert "LDAPS / TCP 636 only" not in page.text
     assert "VCF Connections" in page.text
     assert "Encrypted LDAP Recovery" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]

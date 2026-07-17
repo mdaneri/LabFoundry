@@ -11,6 +11,7 @@
 ## Appliance Configuration UX
 
 - Use the DNS page as the default pattern for configurable appliance services where applicable.
+- Place configurable service settings in a dedicated left column. Keep the service's primary resources or workflow in the center and the pending-change and validation rail on the right; collapse these columns responsively without changing their order.
 - Treat forms as desired-state editors. Settings should autosave on change with `data-autosave-form`, a small `.autosave-status` message, and the existing CSRF/session protections. Avoid visible "Save" buttons for routine desired-state settings when autosave is safe.
 - Keep enforcement separate from editing. Applying changes to the appliance should be a deliberate task action after the user is done, not part of every field change.
 - Do not add service-specific apply cards or service-specific apply submit routes. Applying is a global appliance workflow owned by `/appliance-apply`.

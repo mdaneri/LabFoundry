@@ -335,6 +335,7 @@ from labfoundry.app.services.ldap import (
     LDAP_CERT_PATH,
     LDAP_CHAIN_PATH,
     LDAP_DEFAULT_HOSTNAME,
+    LDAP_DEFAULT_PLAINTEXT_PORT,
     LDAP_DEFAULT_PORT,
     LDAP_DNS_RECORD_DESCRIPTION,
     LDAP_GROUP_PATTERN,
@@ -867,13 +868,19 @@ def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
             )
 
     ldap_settings = get_ldap_settings_row(db)
-    if ldap_settings.enabled:
+    if ldap_settings.enabled and ldap_settings.ldaps_enabled:
+        _ldap_interfaces, ldap_certificate_addresses = resolve_ldap_bind_targets(
+            db,
+            split_interfaces(ldap_settings.listen_interface),
+            current_interface=ldap_settings.listen_interface,
+            listen_interfaces_present="1",
+        )
         specs.append(
             ManagedCertificateSpec(
                 owner="ldap:ldaps",
                 common_name=ldap_settings.hostname,
                 dns_names=[ldap_settings.hostname],
-                ip_addresses=split_addresses(ldap_settings.listen_address),
+                ip_addresses=split_addresses(ldap_certificate_addresses),
                 profile_name=CA_SERVER_PROFILE_NAME,
                 description="Managed OpenLDAP LDAPS server certificate.",
                 cert_path=LDAP_CERT_PATH,
@@ -1224,7 +1231,7 @@ def ldap_service_bind_options(db: Session) -> list[dict[str, Any]]:
         ipv4_cidr = interface.host_ip_cidr if interface.ipv4_method == "dhcp" else interface.ip_cidr
         ipv6_cidr = interface.ipv6_cidr or interface.host_ipv6_cidr
         addresses = interface_addresses_from_cidrs(ipv4_cidr, ipv6_cidr)
-        if interface.oper_state == "missing" or interface.admin_state == "down" or role == "unused" or mode == "trunk" or not addresses:
+        if interface.oper_state == "missing" or interface.admin_state == "down" or role in {"management", "unused"} or mode == "trunk" or not addresses:
             continue
         options.append(
             {
@@ -1239,7 +1246,7 @@ def ldap_service_bind_options(db: Session) -> list[dict[str, Any]]:
         parent = interfaces_by_name.get(vlan.parent_interface)
         role = normalize_interface_role(vlan.role)
         addresses = interface_addresses_from_cidrs(vlan.ip_cidr, vlan.ipv6_cidr)
-        if (parent and (parent.oper_state == "missing" or parent.admin_state == "down")) or role == "unused" or not addresses:
+        if (parent and (parent.oper_state == "missing" or parent.admin_state == "down")) or role in {"management", "unused"} or not addresses:
             continue
         options.append(
             {
@@ -3642,7 +3649,7 @@ def ldap_context(db: Session, *, reconcile: bool = True, selected_organization_i
     if settings.enabled:
         if ldap_dns_record_conflict(db, settings.hostname):
             validation_errors.append("LDAP hostname conflicts with an existing non-LDAP DNS record.")
-        if not ca_certificate_available(db, "ldap:ldaps"):
+        if settings.ldaps_enabled and not ca_certificate_available(db, "ldap:ldaps"):
             validation_errors.append("LDAP requires an issued CA-managed LDAPS certificate before apply.")
 
     if recovery_archive is not None and not recovery_ready:
@@ -12236,6 +12243,10 @@ def update_ldap_settings_from_ui(
     hostname: str = Form(LDAP_DEFAULT_HOSTNAME),
     listen_interfaces: list[str] = Form(default_factory=list),
     listen_interfaces_present: str | None = Form(None),
+    ldaps_enabled: str | None = Form(None),
+    port: int = Form(LDAP_DEFAULT_PORT),
+    ldap_enabled: str | None = Form(None),
+    ldap_port: int = Form(LDAP_DEFAULT_PLAINTEXT_PORT),
     min_password_length: int = Form(14),
     require_uppercase: str | None = Form(None),
     require_lowercase: str | None = Form(None),
@@ -12264,7 +12275,10 @@ def update_ldap_settings_from_ui(
     settings.hostname = normalize_dns_hostname(hostname or LDAP_DEFAULT_HOSTNAME)
     settings.listen_interface = selected_interfaces
     settings.listen_address = selected_addresses
-    settings.port = LDAP_DEFAULT_PORT
+    settings.ldaps_enabled = ldaps_enabled is not None
+    settings.port = port
+    settings.ldap_enabled = ldap_enabled is not None
+    settings.ldap_port = ldap_port
     settings.min_password_length = min_password_length
     settings.require_uppercase = require_uppercase is not None
     settings.require_lowercase = require_lowercase is not None

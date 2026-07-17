@@ -68,6 +68,35 @@ def test_physical_interface_ipv6_enabled_migration_backfills_only_static_ipv6(tm
     assert "gateway" in columns
 
 
+def test_ldap_listener_migration_adds_protocol_controls_and_ports(tmp_path):
+    from labfoundry.app import database
+
+    db_path = tmp_path / "legacy-ldap.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE ldap_settings (id INTEGER PRIMARY KEY, port INTEGER DEFAULT 636)")
+    connection.execute("INSERT INTO ldap_settings (id, port) VALUES (1, 1636)")
+    connection.commit()
+    connection.close()
+
+    previous_engine = database.engine
+    migrated_engine = database.create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    try:
+        database.engine = migrated_engine
+        database._ensure_sqlite_ldap_columns()
+        connection = sqlite3.connect(db_path)
+        row = connection.execute(
+            "SELECT ldaps_enabled, port, ldap_enabled, ldap_port FROM ldap_settings WHERE id = 1"
+        ).fetchone()
+        columns = {column[1] for column in connection.execute("PRAGMA table_info(ldap_settings)").fetchall()}
+        connection.close()
+    finally:
+        migrated_engine.dispose()
+        database.engine = previous_engine
+
+    assert row == (1, 1636, 0, 389)
+    assert {"ldaps_enabled", "ldap_enabled", "ldap_port"} <= columns
+
+
 def test_vcf_trust_target_migration_uses_api_port_uniqueness(tmp_path):
     from labfoundry.app import database
 

@@ -222,18 +222,32 @@ def managed_service_firewall_rules(
             )
     if ldap_settings and ldap_settings.enabled:
         for index, interface_name in enumerate(split_interfaces(ldap_settings.listen_interface), start=1):
-            rule_name = f"ldap-ldaps-{interface_name}"
-            rules.append(
-                _service_firewall_rule(
-                    name=rule_name,
-                    service="Managed LDAP / LDAPS",
-                    interface_name=interface_name,
-                    source=_managed_rule_source(rule_name, interface_name, interface_networks, source_groups_by_id, source_group_assignments),
-                    protocol="tcp",
-                    ports="636",
-                    priority=63 + index,
+            if ldap_settings.ldaps_enabled:
+                rule_name = f"ldap-ldaps-{interface_name}"
+                rules.append(
+                    _service_firewall_rule(
+                        name=rule_name,
+                        service="Managed LDAP / LDAPS",
+                        interface_name=interface_name,
+                        source=_managed_rule_source(rule_name, interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                        protocol="tcp",
+                        ports=str(ldap_settings.port),
+                        priority=63 + index,
+                    )
                 )
-            )
+            if ldap_settings.ldap_enabled:
+                rule_name = f"ldap-plaintext-{interface_name}"
+                rules.append(
+                    _service_firewall_rule(
+                        name=rule_name,
+                        service="Managed LDAP / plaintext LDAP",
+                        interface_name=interface_name,
+                        source=_managed_rule_source(rule_name, interface_name, interface_networks, source_groups_by_id, source_group_assignments),
+                        protocol="tcp",
+                        ports=str(ldap_settings.ldap_port),
+                        priority=64 + index,
+                    )
+                )
     if chrony_settings.enabled:
         for index, interface_name in enumerate(split_interfaces(chrony_settings.listen_interface), start=1):
             rule_name = f"chronyd-{interface_name}"

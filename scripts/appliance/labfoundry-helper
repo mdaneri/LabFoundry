@@ -1632,8 +1632,18 @@ def _ldap_config_errors(payload: dict) -> list[str]:
         return [*errors, "LDAP staged config must include service settings."]
     if not isinstance(organizations, list):
         return [*errors, "LDAP staged config must include an organizations list."]
-    if int(service.get("port") or 0) != 636:
-        errors.append("LDAP external listener port must be TCP 636.")
+    ldaps_port = int(service.get("port") or 0)
+    ldap_port = int(service.get("ldap_port") or 0)
+    ldaps_enabled = bool(service.get("ldaps_enabled", True))
+    ldap_enabled = bool(service.get("ldap_enabled", False))
+    if not 1 <= ldaps_port <= 65535:
+        errors.append("LDAPS listener port must be between 1 and 65535.")
+    if not 1 <= ldap_port <= 65535:
+        errors.append("LDAP listener port must be between 1 and 65535.")
+    if ldaps_enabled and ldap_enabled and ldaps_port == ldap_port:
+        errors.append("LDAP and LDAPS listeners must use different TCP ports.")
+    if service.get("enabled") and not ldaps_enabled and not ldap_enabled:
+        errors.append("Enabled LDAP requires at least one LDAP or LDAPS listener.")
     if service.get("enabled") and (not service.get("listen_interface") or not service.get("listen_address")):
         errors.append("Enabled LDAP requires at least one listener interface and address.")
     password_policy = service.get("password_policy")
@@ -1778,17 +1788,26 @@ def _render_ldap_slapd_config(payload: dict, *, state_root: Path = LDAP_STATE_DI
         "moduleload ppolicy.so",
         "moduleload memberof.so",
         "moduleload refint.so",
-        f"TLSCertificateFile {service['certificate_path']}",
-        f"TLSCertificateKeyFile {service['key_path']}",
-        f"TLSCACertificateFile {service['root_ca_path']}",
-        "TLSProtocolMin 3.3",
-        "TLSCipherSuite HIGH:!aNULL:!MD5:!RC4",
-        "password-hash {SSHA}",
-        "",
-        "database config",
-        'access to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by * none',
-        "",
     ]
+    if service.get("ldaps_enabled", True):
+        lines.extend(
+            [
+                f"TLSCertificateFile {service['certificate_path']}",
+                f"TLSCertificateKeyFile {service['key_path']}",
+                f"TLSCACertificateFile {service['root_ca_path']}",
+                "TLSProtocolMin 3.3",
+                "TLSCipherSuite HIGH:!aNULL:!MD5:!RC4",
+            ]
+        )
+    lines.extend(
+        [
+            "password-hash {SSHA}",
+            "",
+            "database config",
+            'access to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by * none',
+            "",
+        ]
+    )
     for index, organization in enumerate(payload["organizations"], start=1):
         if not organization.get("enabled", True):
             continue
@@ -2061,7 +2080,10 @@ def _ldap_listener_urls(service: dict) -> str:
         except ValueError:
             continue
         host = f"[{parsed}]" if parsed.version == 6 else str(parsed)
-        urls.append(f"ldaps://{host}:636/")
+        if service.get("ldaps_enabled", True):
+            urls.append(f"ldaps://{host}:{int(service.get('port') or 636)}/")
+        if service.get("ldap_enabled", False):
+            urls.append(f"ldap://{host}:{int(service.get('ldap_port') or 389)}/")
     return " ".join(urls)
 
 
@@ -2257,13 +2279,14 @@ def _apply_ldap_config(payload: dict) -> int:
         restore_result = _restore_ldap_recovery(payload, LDAP_CONFIG_DIR)
         if restore_result != 0:
             return restore_result
-        key_path = Path(str(service["key_path"]))
-        try:
-            shutil.chown(key_path, user="root", group=account_name)
-        except (LookupError, OSError) as exc:
-            print(f"Could not assign the LDAP private key to the slapd group: {exc}", file=sys.stderr)
-            return 1
-        os.chmod(key_path, 0o640)
+        if service.get("ldaps_enabled", True):
+            key_path = Path(str(service["key_path"]))
+            try:
+                shutil.chown(key_path, user="root", group=account_name)
+            except (LookupError, OSError) as exc:
+                print(f"Could not assign the LDAP private key to the slapd group: {exc}", file=sys.stderr)
+                return 1
+            os.chmod(key_path, 0o640)
         _install_ldap_listener_config(service)
         daemon_reload = _run(["systemctl", "daemon-reload"])
         if daemon_reload.returncode != 0:
@@ -2289,11 +2312,22 @@ def _handle_ldap(action: str, args: list[str]) -> int:
             return 2
         result = _run(["systemctl", "is-active", "slapd.service"])
         listeners = _run(["ss", "-lnt"])
+        configured_urls = LDAP_SYSCONFIG_PATH.read_text(encoding="utf-8") if LDAP_SYSCONFIG_PATH.is_file() else ""
+        ldaps_ports = sorted({int(port) for port in re.findall(r"ldaps://[^\s\"]+:(\d+)/", configured_urls)})
+        ldap_ports = sorted({int(port) for port in re.findall(r"(?<!s)ldap://[^\s\"]+:(\d+)/", configured_urls)})
+        configured_ports = {*ldaps_ports, *ldap_ports}
+        listener_lines = [
+            line.strip()
+            for line in listeners.stdout.splitlines()
+            if any(re.search(rf":{port}\s", line) for port in configured_ports)
+        ]
         payload = {
             "active": result.stdout.strip() or "unknown",
             "ldaps_636": any(":636" in line for line in listeners.stdout.splitlines()),
             "plaintext_389": any(":389" in line for line in listeners.stdout.splitlines()),
-            "listeners": [line.strip() for line in listeners.stdout.splitlines() if ":636" in line or ":389" in line],
+            "ldaps_ports": ldaps_ports,
+            "ldap_ports": ldap_ports,
+            "listeners": listener_lines,
         }
         print(json.dumps(payload, sort_keys=True))
         return 0
@@ -2383,13 +2417,31 @@ def _handle_ldap(action: str, args: list[str]) -> int:
                 if result.returncode != 0:
                     print(result.stderr, end="", file=sys.stderr)
                     return result.returncode
-        print(json.dumps({"ldap": "validation ok", "organizations": len(payload["organizations"]), "ldaps_only": True}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "ldap": "validation ok",
+                    "organizations": len(payload["organizations"]),
+                    "ldaps_only": bool(payload["service"].get("ldaps_enabled", True) and not payload["service"].get("ldap_enabled", False)),
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     if action == "apply":
         try:
             returncode = _apply_ldap_config(payload)
             if returncode == 0:
-                print(json.dumps({"ldap": "apply complete", "organizations": len(payload["organizations"]), "ldaps_only": True}, sort_keys=True))
+                print(
+                    json.dumps(
+                        {
+                            "ldap": "apply complete",
+                            "organizations": len(payload["organizations"]),
+                            "ldaps_only": bool(payload["service"].get("ldaps_enabled", True) and not payload["service"].get("ldap_enabled", False)),
+                        },
+                        sort_keys=True,
+                    )
+                )
             return returncode
         finally:
             try:

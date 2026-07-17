@@ -346,7 +346,12 @@ def service_state_response(row: ServiceState, db: Session | None = None) -> Serv
         if active is not None:
             data["running"] = active
         data["health"] = "healthy" if data["enabled"] and data["running"] else "degraded" if data["enabled"] else "disabled"
-        data["detail"] = "OpenLDAP / LDAPS TCP 636"
+        protocols = []
+        if settings.ldaps_enabled:
+            protocols.append(f"LDAPS TCP {settings.port}")
+        if settings.ldap_enabled:
+            protocols.append(f"LDAP TCP {settings.ldap_port}")
+        data["detail"] = "OpenLDAP / " + (", ".join(protocols) if protocols else "no external listener")
         return ServiceStateResponse(**data)
     if row.service == "vcf-backups" and db is not None:
         data.update(vcf_backup_service_state(get_vcf_backup_settings(db), sshd_active=backing_systemd_unit_active("sshd.service")))
@@ -2922,7 +2927,7 @@ def _ldap_api_interface_addresses(db: Session) -> dict[str, list[str]]:
         if (
             row.oper_state == "missing"
             or row.admin_state == "down"
-            or normalize_interface_role(row.role) == "unused"
+            or normalize_interface_role(row.role) in {"management", "unused"}
             or normalize_interface_mode(row.mode) == "trunk"
         ):
             continue
@@ -2942,7 +2947,7 @@ def _ldap_api_interface_addresses(db: Session) -> dict[str, list[str]]:
         parent = physical_by_name.get(row.parent_interface)
         if (
             not row.enabled
-            or normalize_interface_role(row.role) == "unused"
+            or normalize_interface_role(row.role) in {"management", "unused"}
             or (parent and (parent.oper_state == "missing" or parent.admin_state == "down"))
         ):
             continue
@@ -2978,7 +2983,10 @@ def _ldap_settings_response(db: Session) -> LdapSettingsResponse:
         hostname=settings.hostname,
         listen_interfaces=split_interfaces(settings.listen_interface),
         listen_addresses=split_addresses(settings.listen_address),
+        ldaps_enabled=settings.ldaps_enabled,
         port=settings.port,
+        ldap_enabled=settings.ldap_enabled,
+        ldap_port=settings.ldap_port,
         password_policy=policy,
         config_path=settings.config_path,
         certificate_path=data["certificate_path"],
@@ -3016,7 +3024,11 @@ def get_ldap_health(
         enabled=response.enabled,
         running=running,
         health=health,
-        ldaps_only=True,
+        ldaps_only=bool(response.ldaps_enabled and not response.ldap_enabled),
+        ldaps_enabled=response.ldaps_enabled,
+        ldaps_port=response.port,
+        ldap_enabled=response.ldap_enabled,
+        ldap_port=response.ldap_port,
         hostname=response.hostname,
         port=response.port,
         organization_count=len(organizations),
@@ -3046,7 +3058,10 @@ def update_ldap_settings(
             for address in available[interface_name]
         )
     )
+    settings.ldaps_enabled = payload.ldaps_enabled
     settings.port = payload.port
+    settings.ldap_enabled = payload.ldap_enabled
+    settings.ldap_port = payload.ldap_port
     settings.min_password_length = payload.password_policy.min_length
     settings.require_uppercase = payload.password_policy.require_uppercase
     settings.require_lowercase = payload.password_policy.require_lowercase
