@@ -1,3 +1,4 @@
+import base64
 import importlib.machinery
 import importlib.util
 import io
@@ -184,6 +185,74 @@ def test_ldap_render_can_use_isolated_validation_data_root(tmp_path):
 
     assert f"directory {tmp_path / 'validation-data' / 'org-a'}" in config
     assert str(helper.LDAP_STATE_DIR / "org-a") not in config
+
+
+def test_ldap_reconcile_clears_lock_for_every_enabled_user(monkeypatch):
+    helper = load_helper_module()
+    payload = ldap_payload(enabled=True)
+    organization = payload["organizations"][0]
+    user = organization["users"][0]
+    user.update({"password": "", "unlock_requested": False, "enabled": True})
+    deleted_attributes: list[tuple[str, str]] = []
+    monkeypatch.setattr(helper, "_ldap_upsert_entry", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(helper, "_ldap_delete_attribute", lambda dn, attribute: deleted_attributes.append((dn, attribute)) or 0)
+    monkeypatch.setattr(helper, "_ldap_list_dns", lambda _base_dn: [])
+    monkeypatch.setattr(helper, "_ldap_delete_entries", lambda _dns: 0)
+
+    assert helper._ldap_reconcile_organization(organization, payload["service"]["password_policy"]) == 0
+    assert (user["dn"], "pwdAccountLockedTime") in deleted_attributes
+
+
+def test_ldap_recovery_restores_slapd_ownership(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    payload = ldap_payload(enabled=True)
+    suffix = payload["organizations"][0]["suffix_dn"]
+    ldif_path = tmp_path / "org-a.ldif"
+    ldif_path.write_text(f"dn: {suffix}\nobjectClass: domain\ndc: org-a\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "format": "labfoundry-ldap-slapcat-v1",
+                "databases": [
+                    {
+                        "suffix": suffix,
+                        "filename": ldif_path.name,
+                        "sha256": hashlib.sha256(ldif_path.read_bytes()).hexdigest(),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+        archive.add(manifest_path, arcname="manifest.json")
+        archive.add(ldif_path, arcname=ldif_path.name)
+    archive_bytes = archive_buffer.getvalue()
+    payload["recovery_import"] = {
+        "payload_b64": base64.b64encode(archive_bytes).decode("ascii"),
+        "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+    }
+    state_dir = tmp_path / "ldap-state"
+    data_dir = state_dir / "org-a"
+    data_dir.mkdir(parents=True)
+    ownership: list[tuple[Path, str, str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if Path(command[0]).name == "slapadd":
+            (data_dir / "data.mdb").write_text("restored", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "LDAP_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: command)
+    monkeypatch.setattr(helper.shutil, "chown", lambda path, *, user, group: ownership.append((Path(path), user, group)))
+
+    assert helper._restore_ldap_recovery(payload, tmp_path / "slapd.d") == 0
+    assert (data_dir, "ldap", "ldap") in ownership
+    assert (data_dir / "data.mdb", "ldap", "ldap") in ownership
 
 
 def test_ldap_listener_dropin_overrides_photon_hard_coded_plaintext_listener(monkeypatch, tmp_path):

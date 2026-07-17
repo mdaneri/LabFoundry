@@ -2022,7 +2022,7 @@ def _ldap_reconcile_organization(organization: dict, policy: dict) -> int:
         returncode = _ldap_upsert_entry(dn, attributes, secret_attributes={"userPassword"})
         if returncode != 0:
             return returncode
-        if user.get("enabled") and (user.get("unlock_requested") or user.get("password")):
+        if user.get("enabled"):
             returncode = _ldap_delete_attribute(dn, "pwdAccountLockedTime")
             if returncode != 0:
                 return returncode
@@ -2177,6 +2177,7 @@ def _restore_ldap_recovery(payload: dict, config_dir: Path) -> int:
             )
         }
         slapadd = shutil.which("slapadd") or "slapadd"
+        account_name = _ldap_account_name()
         for database in manifest.get("databases", []):
             suffix = str(database.get("suffix") or "").lower()
             if not suffix or suffix not in desired_indexes:
@@ -2205,6 +2206,13 @@ def _restore_ldap_recovery(payload: dict, config_dir: Path) -> int:
             if result.returncode != 0:
                 print(result.stderr, end="", file=sys.stderr)
                 return result.returncode
+            try:
+                shutil.chown(data_dir, user=account_name, group=account_name)
+                for path in data_dir.rglob("*"):
+                    shutil.chown(path, user=account_name, group=account_name)
+            except (LookupError, OSError) as exc:
+                print(f"LDAP recovery data ownership could not be restored for {suffix}: {exc}", file=sys.stderr)
+                return 2
     return 0
 
 

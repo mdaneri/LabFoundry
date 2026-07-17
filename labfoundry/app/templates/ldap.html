@@ -106,12 +106,7 @@
       This is single-node lab identity infrastructure. Keep local break-glass administrators in every VCF organization.
     </div>
 
-    <div class="tab-buttons tool-tabs" role="tablist" aria-label="Managed LDAP views">
-      <button class="tab-button active" type="button" role="tab" data-tab-target="ldap-directory-panel" aria-controls="ldap-directory-panel" aria-selected="true">Directory</button>
-    </div>
-
-    <div class="tab-panels">
-      <div id="ldap-directory-panel" class="tab-panel active" role="tabpanel">
+    <div id="ldap-directory-panel">
         <div class="section-head">
           <div><h2>Organizations</h2><p class="muted">Each organization receives an isolated suffix, database, users OU, groups OU, and read-only VCF bind identity.</p></div>
           <span class="status-pill muted">{{ ldap_organizations|length }} organizations</span>
@@ -204,8 +199,6 @@
             </div>
           </div>
         </div>
-      </div>
-
     </div>
   </div>
 

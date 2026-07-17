@@ -655,7 +655,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v107" in service_worker.text
+    assert "labfoundry-pwa-v108" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -667,7 +667,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=managed-ldap-listeners-20260716-1" in service_worker.text
+    assert "/static/app.css?v=ldap-full-width-20260717-1" in service_worker.text
     assert "/static/app.js?v=ldap-directory-grid-20260716-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
@@ -677,7 +677,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=managed-ldap-listeners-20260716-1" in offline.text
+    assert "/static/app.css?v=ldap-full-width-20260717-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -693,7 +693,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=managed-ldap-listeners-20260716-1" in page.text
+    assert "/static/app.css?v=ldap-full-width-20260717-1" in page.text
     assert "/static/app.js?v=ldap-directory-grid-20260716-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
@@ -3883,6 +3883,7 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert page.status_code == 200
     assert "Managed LDAP for VCF Automation" in page.text
     assert 'class="split-workspace service-settings-workspace"' in page.text
+    assert 'aria-label="Managed LDAP views"' not in page.text
     assert "LDAP Settings" in page.text
     main_panel_index = page.text.index('<div class="panel wide-panel">')
     settings_rail_index = page.text.index('<aside class="side-stack service-settings-column">')
@@ -3901,6 +3902,10 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert "Encrypted LDAP Recovery" not in page.text
     assert "/ldap/recovery/export" not in page.text
     assert "/ldap/recovery/import" not in page.text
+    app_css = client.get("/static/app.css").text
+    assert ".service-settings-workspace {\n  grid-template-columns: minmax(0, 1fr) 360px;" in app_css
+    assert '.tabulator-cell[tabulator-field="uid"] .add-row-hint' in app_css
+    assert ".zone-tabs .tab-button" in app_css
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
     created = client.post(
@@ -8329,6 +8334,46 @@ def test_appliance_apply_unit_keeps_raw_config_for_helper_staging():
     assert "PasswordAuthentication yes" in unit["raw_config_preview"]
     assert "[redacted sensitive line]" in unit["config_preview"]
     assert "PasswordAuthentication yes" not in unit["config_preview"]
+
+
+def test_appliance_apply_unit_separates_secret_staging_from_snapshot_change_marker():
+    from labfoundry.app.ui import _redact_task_value, make_appliance_apply_unit
+
+    current = make_appliance_apply_unit(
+        unit_id="ldap",
+        label="Managed LDAP",
+        page_url="/ldap",
+        context={},
+        summary=["1 user"],
+        validation_errors=[],
+        config_path="/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json",
+        config_preview='{"payload_b64":"[pending]","password":"[pending]"}',
+        raw_config_preview='{"payload_b64":"c2xhcGNhdC1wYXNzd29yZC1oYXNoZXM=","password":"VeryStrong1!Directory"}',
+        snapshot_marker={"pending_password_user_ids": [7], "recovery_sha256": "archive-sha"},
+        baseline=None,
+    )
+    baseline = {"snapshot_hash": current["snapshot_hash"], "config_preview": current["config_preview"]}
+    rotated = make_appliance_apply_unit(
+        unit_id="ldap",
+        label="Managed LDAP",
+        page_url="/ldap",
+        context={},
+        summary=["1 user"],
+        validation_errors=[],
+        config_path="/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json",
+        config_preview='{"payload_b64":"[pending]","password":"[pending]"}',
+        raw_config_preview='{"payload_b64":"bmV3LXNsYXBjYXQtYXJjaGl2ZQ==","password":"AnotherStrong1!Directory"}',
+        snapshot_marker={"pending_password_user_ids": [7], "recovery_sha256": "new-archive-sha"},
+        baseline=baseline,
+    )
+
+    assert current["raw_config_preview"] != current["config_preview"]
+    assert "c2xhcGNhdC" not in current["config_preview"]
+    assert "VeryStrong1!Directory" not in current["config_preview"]
+    assert "payload_b64" in current["config_preview"]
+    assert "[redacted]" in current["config_preview"]
+    assert rotated["changed"] is True
+    assert _redact_task_value({"payload_b64": "c2xhcGNhdC1wYXNzd29yZC1oYXNoZXM="}) == {"payload_b64": "[redacted]"}
 
 
 def test_physical_and_vlan_pages_render(client):

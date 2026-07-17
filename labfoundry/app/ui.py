@@ -351,6 +351,7 @@ from labfoundry.app.services.ldap import (
     decrypt_recovery_payload,
     encrypt_recovery_payload,
     ensure_organization_bind_secret,
+    has_pending_ldap_password,
     ldap_group_to_dict,
     ldap_organization_to_dict,
     ldap_settings_to_dict,
@@ -5407,7 +5408,7 @@ SERVICE_ADMIN_CANCELLABLE_JOB_TYPES = {
     "vcf-offline-depot-target-config",
     "vcf-ca-trust",
 }
-TASK_SECRET_KEY_RE = re.compile(r"(password|passwd|secret|token|credential|authorization|activation|private[_-]?key|api[_-]?key)", re.IGNORECASE)
+TASK_SECRET_KEY_RE = re.compile(r"(password|passwd|secret|token|credential|authorization|activation|private[_-]?key|api[_-]?key|payload[_-]?b64)", re.IGNORECASE)
 TASK_SECRET_VALUE_RE = re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----|sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{12,})", re.IGNORECASE)
 
 
@@ -6144,7 +6145,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "public_services",
 }
 SECRET_LINE_PATTERN = re.compile(
-    r"(rootpw|password|passwd|token|secret|credential|private[_.-]?key|robot[_.-]?account|ca[_.-]?bundle[_.-]?pem|activation[_.-]?code|license|ipxe[_.-]?script)",
+    r"(rootpw|password|passwd|token|secret|credential|private[_.-]?key|robot[_.-]?account|ca[_.-]?bundle[_.-]?pem|activation[_.-]?code|license|ipxe[_.-]?script|payload[_.-]?b64)",
     re.IGNORECASE,
 )
 PRIVATE_KEY_BEGIN_PATTERN = re.compile(r"-----BEGIN .*PRIVATE KEY-----")
@@ -6542,6 +6543,8 @@ def make_appliance_apply_unit(
     config_path: str,
     config_preview: str,
     baseline: dict[str, Any] | None,
+    raw_config_preview: str | None = None,
+    snapshot_marker: Any = None,
 ) -> dict[str, Any]:
     redacted_preview = redact_config_preview(config_preview)
     snapshot_payload = {
@@ -6549,6 +6552,7 @@ def make_appliance_apply_unit(
         "summary": summary,
         "config_path": config_path,
         "config_preview": redacted_preview,
+        "snapshot_marker": snapshot_marker,
     }
     current_hash = appliance_snapshot_hash(snapshot_payload)
     baseline_hash = str((baseline or {}).get("snapshot_hash") or "")
@@ -6562,7 +6566,7 @@ def make_appliance_apply_unit(
         "validation_warnings": validation_warnings or [],
         "valid": not validation_errors,
         "config_path": config_path,
-        "raw_config_preview": config_preview,
+        "raw_config_preview": raw_config_preview if raw_config_preview is not None else config_preview,
         "config_preview": redacted_preview,
         "snapshot_hash": current_hash,
         "changed": current_hash != baseline_hash,
@@ -6947,7 +6951,25 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
             validation_errors=ldap["ldap_validation_errors"],
             validation_warnings=ldap["ldap_validation_warnings"],
             config_path=LDAP_STAGED_CONFIG_PATH,
-            config_preview=ldap["ldap_apply_config"],
+            config_preview=ldap["ldap_config_preview"],
+            raw_config_preview=ldap["ldap_apply_config"],
+            snapshot_marker={
+                "bind_secret_fingerprints": [
+                    hashlib.sha256(row.bind_password_encrypted.encode("utf-8")).hexdigest()
+                    for row in ldap["ldap_organizations"]
+                ],
+                "pending_password_user_ids": sorted(
+                    user.id
+                    for row in ldap["ldap_organizations"]
+                    for user in row.users
+                    if user.id is not None and has_pending_ldap_password(user)
+                ),
+                "recovery_sha256": (
+                    ldap["ldap_recovery_archive"].sha256
+                    if ldap.get("ldap_recovery_archive") is not None
+                    else ""
+                ),
+            },
             baseline=baselines.get("ldap"),
         ),
         make_appliance_apply_unit(

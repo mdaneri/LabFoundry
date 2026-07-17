@@ -1103,19 +1103,19 @@ textarea {
 }
 
 .service-settings-workspace {
-  grid-template-columns: 360px minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) 360px;
 }
 
 .service-settings-column {
-  grid-column: 1;
-}
-
-.service-settings-workspace > .wide-panel {
   grid-column: 2;
 }
 
+.service-settings-workspace > .wide-panel {
+  grid-column: 1;
+}
+
 .service-settings-workspace > .side-stack:last-child {
-  grid-column: 3;
+  grid-column: 2;
 }
 
 .panel {
@@ -1936,6 +1936,14 @@ textarea {
   overflow-x: auto;
 }
 
+.zone-tabs .tab-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  text-decoration: none;
+}
+
 .tool-tabs {
   margin-bottom: 10px;
 }
@@ -2501,6 +2509,11 @@ textarea {
 }
 
 .tabulator .tabulator-row.new-record-row .tabulator-cell[tabulator-field="common_name"] .add-row-hint {
+  color: var(--accent-dark);
+  font-weight: 800;
+}
+
+.tabulator .tabulator-row.new-record-row .tabulator-cell[tabulator-field="uid"] .add-row-hint {
   color: var(--accent-dark);
   font-weight: 800;
 }
