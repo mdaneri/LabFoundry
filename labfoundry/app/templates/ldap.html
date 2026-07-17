@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 {% block page_title %}Managed LDAP{% endblock %}
-{% block content %}
-<section class="split-workspace service-settings-workspace">
-  <aside class="side-stack service-settings-column">
+{% macro render_ldap_settings_panel() %}
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>LDAP Settings</h2>
@@ -75,8 +73,9 @@
         <p id="ldap-settings-autosave-status" class="autosave-status" aria-live="polite">Changes save automatically.</p>
       </form>
     </div>
-  </aside>
-
+{% endmacro %}
+{% block content %}
+<section class="split-workspace service-settings-workspace">
   <div class="panel wide-panel">
     <div class="panel-head">
       <div>
@@ -96,6 +95,13 @@
         <textarea readonly rows="3" aria-label="One-time LDAP bind password">{{ ldap_one_time_bind_secret }}</textarea>
       </div>
     {% endif %}
+    {% if ldap_generated_credentials_text %}
+      <div class="alert warning">
+        <strong>Copy the generated LDAP credentials now.</strong>
+        <p>These passwords are shown once and remain only in process memory until global LDAP apply.</p>
+        <textarea class="config-preview" readonly rows="10" aria-label="One-time generated LDAP credentials">{{ ldap_generated_credentials_text }}</textarea>
+      </div>
+    {% endif %}
     <div class="alert warning">
       This is single-node lab identity infrastructure. Keep local break-glass administrators in every VCF organization.
     </div>
@@ -110,24 +116,15 @@
           <div><h2>Organizations</h2><p class="muted">Each organization receives an isolated suffix, database, users OU, groups OU, and read-only VCF bind identity.</p></div>
           <span class="status-pill muted">{{ ldap_organizations|length }} organizations</span>
         </div>
-        <div class="tab-buttons compact-tabs" aria-label="LDAP organizations">
+        <div class="tab-buttons zone-tabs" role="tablist" aria-label="LDAP organizations">
           {% for organization in ldap_organizations %}
-            <a class="tab-button {{ 'active' if ldap_selected_organization and organization.id == ldap_selected_organization.id else '' }}" href="/ldap?organization_id={{ organization.id }}#ldap-directory-panel">{{ organization.name }}</a>
+            <a class="tab-button {{ 'active' if ldap_selected_organization and organization.id == ldap_selected_organization.id else '' }}" role="tab" aria-selected="{{ 'true' if ldap_selected_organization and organization.id == ldap_selected_organization.id else 'false' }}" href="/ldap?organization_id={{ organization.id }}#ldap-directory-panel">{{ organization.name }}</a>
           {% endfor %}
+          <button class="tab-button" type="button" role="tab" data-tab-target="ldap-organization-new" aria-controls="ldap-organization-new" aria-selected="false">+ Organization</button>
         </div>
-        <details class="details-card">
-          <summary>Create organization</summary>
-          <form class="form-stack" action="/ldap/organizations" method="post">
-            <input type="hidden" name="csrf" value="{{ csrf_token }}">
-            <label><span class="field-label"><span>Name</span><button class="help-icon" type="button" data-help="Operator-facing VCF organization label stored in LabFoundry.">i</button></span><input name="name" required></label>
-            <label><span class="field-label"><span>Slug</span><button class="help-icon" type="button" data-help="Lowercase stable identifier used in the default suffix and OpenLDAP data directory. Leave blank to derive it from the name.">i</button></span><input name="slug" placeholder="org-a"></label>
-            <label><span class="field-label"><span>Suffix DN</span><button class="help-icon" type="button" data-help="Unique naming context for this organization. Leave blank for dc=&lt;slug&gt;,dc=ldap,dc=labfoundry,dc=internal.">i</button></span><input name="suffix_dn" placeholder="dc=org-a,dc=ldap,dc=labfoundry,dc=internal"></label>
-            <label class="switch-field"><span class="field-label"><span>Enabled</span><button class="help-icon" type="button" data-help="Includes this organization database in the next global LDAP apply.">i</button></span><input class="switch-input" type="checkbox" name="enabled" checked><span class="switch-track" aria-hidden="true"></span></label>
-            <button class="button primary" type="submit">Create organization</button>
-          </form>
-        </details>
-
-        {% if ldap_selected_organization %}
+        <div class="tab-panels">
+          <div id="ldap-organization-current" class="tab-panel active" role="tabpanel">
+          {% if ldap_selected_organization %}
           <div class="settings-list compact-list">
             <div><span>Suffix</span><strong>{{ ldap_selected_organization.suffix_dn }}</strong></div>
             <div><span>Users base</span><strong>ou=users,{{ ldap_selected_organization.suffix_dn }}</strong></div>
@@ -135,6 +132,7 @@
             <div><span>VCF bind DN</span><strong>{{ ldap_selected_organization.bind_dn }}</strong></div>
           </div>
           <div class="button-row">
+            <button class="button secondary" type="button" data-ldap-generate-open>Generate test directory</button>
             <form action="/ldap/organizations/{{ ldap_selected_organization.id }}/bind-credential/rotate" method="post" data-confirm-modal data-confirm-title="Rotate VCF bind credential?" data-confirm-message="The new password is shown once. VCF continues using the old password until LDAP is applied and the VCF organization settings are updated." data-confirm-label="Rotate credential">
               <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button secondary" type="submit">Rotate bind credential</button>
             </form>
@@ -149,7 +147,8 @@
           </div>
           <div class="tab-panels">
             <div id="ldap-users-panel" class="tab-panel active" role="tabpanel">
-              <div id="ldap-users-table" class="tabulator-shell" data-users='{{ ldap_user_rows|tojson }}' data-csrf="{{ csrf_token }}" data-fallback-id="ldap-users-fallback"></div>
+              <div id="ldap-user-error" class="alert error hidden"></div>
+              <div id="ldap-users-table" class="tabulator-shell" data-users='{{ ldap_user_rows|tojson }}' data-organization-id="{{ ldap_selected_organization.id }}" data-csrf="{{ csrf_token }}" data-fallback-id="ldap-users-fallback"></div>
               <table id="ldap-users-fallback" class="data-table compact dns-fallback-table">
                 <thead><tr><th>UID</th><th>Display name</th><th>Email</th><th>Password</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>
@@ -168,26 +167,10 @@
                   {% endfor %}
                 </tbody>
               </table>
-              <details class="details-card">
-                <summary>Add user</summary>
-                <form class="form-stack" action="/ldap/organizations/{{ ldap_selected_organization.id }}/users" method="post">
-                  <input type="hidden" name="csrf" value="{{ csrf_token }}">
-                  <label><span class="field-label"><span>UID</span><button class="help-icon" type="button" data-help="Organization-local login name. The same uid may exist independently in another organization suffix.">i</button></span><input name="uid" required></label>
-                  <div class="form-grid two">
-                    <label><span class="field-label"><span>Given name</span><button class="help-icon" type="button" data-help="Maps to the LDAP givenName attribute used by VCF user display.">i</button></span><input name="given_name"></label>
-                    <label><span class="field-label"><span>Surname</span><button class="help-icon" type="button" data-help="Maps to the required LDAP sn attribute. Defaults to uid when blank.">i</button></span><input name="surname"></label>
-                  </div>
-                  <label><span class="field-label"><span>Display name</span><button class="help-icon" type="button" data-help="Maps to displayName and cn for VCF search results.">i</button></span><input name="display_name"></label>
-                  <label><span class="field-label"><span>Email</span><button class="help-icon" type="button" data-help="Optional mail attribute returned to VCF Automation.">i</button></span><input type="email" name="email"></label>
-                  <label><span class="field-label"><span>Telephone</span><button class="help-icon" type="button" data-help="Optional telephoneNumber attribute returned to VCF Automation.">i</button></span><input name="telephone"></label>
-                  <label><span class="field-label"><span>Initial password</span><button class="help-icon" type="button" data-help="Held only in LabFoundry process memory until global LDAP apply. A restart before apply requires re-entry.">i</button></span><input type="password" name="password" autocomplete="new-password"></label>
-                  <label class="switch-field"><span class="field-label"><span>Enabled</span><button class="help-icon" type="button" data-help="Enabled users may authenticate after a compliant password has been applied. Disabled users are locked in OpenLDAP.">i</button></span><input class="switch-input" type="checkbox" name="enabled" checked><span class="switch-track" aria-hidden="true"></span></label>
-                  <button class="button primary" type="submit">Add directory user</button>
-                </form>
-              </details>
             </div>
             <div id="ldap-groups-panel" class="tab-panel" role="tabpanel" hidden>
-              <div id="ldap-groups-table" class="tabulator-shell" data-groups='{{ ldap_group_rows|tojson }}' data-csrf="{{ csrf_token }}" data-fallback-id="ldap-groups-fallback"></div>
+              <div id="ldap-group-error" class="alert error hidden"></div>
+              <div id="ldap-groups-table" class="tabulator-shell" data-groups='{{ ldap_group_rows|tojson }}' data-organization-id="{{ ldap_selected_organization.id }}" data-csrf="{{ csrf_token }}" data-fallback-id="ldap-groups-fallback"></div>
               <table id="ldap-groups-fallback" class="data-table compact dns-fallback-table">
                 <thead><tr><th>Name</th><th>Members</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>
@@ -201,33 +184,33 @@
                   {% endfor %}
                 </tbody>
               </table>
-              <details class="details-card">
-                <summary>Add group</summary>
-                <form class="form-stack" action="/ldap/organizations/{{ ldap_selected_organization.id }}/groups" method="post">
-                  <input type="hidden" name="csrf" value="{{ csrf_token }}">
-                  <label><span class="field-label"><span>Name</span><button class="help-icon" type="button" data-help="Maps to the LDAP cn attribute and the group name shown by VCF searches.">i</button></span><input name="name" required></label>
-                  <label><span class="field-label"><span>Description</span><button class="help-icon" type="button" data-help="Optional group description stored in LDAP and LabFoundry metadata.">i</button></span><input name="description"></label>
-                  <label><span class="field-label"><span>Members</span><button class="help-icon" type="button" data-help="Select users or groups from this organization only. LabFoundry rejects direct and indirect nested-group cycles before save and apply.">i</button></span>
-                    <select name="members" multiple size="8">
-                      {% for user in ldap_users %}<option value="user:{{ user.id }}">User: {{ user.uid }}</option>{% endfor %}
-                      {% for group in ldap_groups %}<option value="group:{{ group.id }}">Group: {{ group.name }}</option>{% endfor %}
-                    </select>
-                  </label>
-                  <label class="switch-field"><span class="field-label"><span>Enabled</span><button class="help-icon" type="button" data-help="Enabled groups are reconciled to OpenLDAP. An enabled group must contain at least one user or nested group.">i</button></span><input class="switch-input" type="checkbox" name="enabled" checked><span class="switch-track" aria-hidden="true"></span></label>
-                  <button class="button primary" type="submit">Add directory group</button>
-                </form>
-              </details>
             </div>
           </div>
-        {% else %}
-          <div class="empty-state"><h3>Create an organization first</h3><p>Directory users, groups, bind credentials, VCF connections, and suffix-specific bundles appear here.</p></div>
-        {% endif %}
+          {% else %}
+            <div class="empty-state"><h3>Create an organization first</h3><p>Directory users, groups, bind credentials, VCF connections, and suffix-specific bundles appear here.</p></div>
+          {% endif %}
+          </div>
+          <div id="ldap-organization-new" class="tab-panel" role="tabpanel" hidden>
+            <div class="empty-state zone-create">
+              <div><h2>New Organization</h2><p class="muted">Create an isolated LDAP suffix. A new organization tab will be added for its users and groups.</p></div>
+              <form class="form-stack" action="/ldap/organizations" method="post">
+                <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                <label><span class="field-label"><span>Name</span><button class="help-icon" type="button" data-help="Operator-facing VCF organization label stored in LabFoundry.">i</button></span><input name="name" required></label>
+                <label><span class="field-label"><span>Slug</span><button class="help-icon" type="button" data-help="Lowercase stable identifier used in the default suffix and OpenLDAP data directory. Leave blank to derive it from the name.">i</button></span><input name="slug" placeholder="org-a"></label>
+                <label><span class="field-label"><span>Suffix DN</span><button class="help-icon" type="button" data-help="Unique naming context for this organization. Leave blank for dc=&lt;slug&gt;,dc=ldap,dc=labfoundry,dc=internal.">i</button></span><input name="suffix_dn" placeholder="dc=org-a,dc=ldap,dc=labfoundry,dc=internal"></label>
+                <label class="switch-field"><span class="field-label"><span>Enabled</span><button class="help-icon" type="button" data-help="Includes this organization database in the next global LDAP apply.">i</button></span><input class="switch-input" type="checkbox" name="enabled" checked><span class="switch-track" aria-hidden="true"></span></label>
+                <button class="button primary" type="submit">Create organization</button>
+              </form>
+            </div>
+          </div>
+        </div>
       </div>
 
     </div>
   </div>
 
-  <aside class="side-stack">
+  <aside class="side-stack service-settings-column">
+    {{ render_ldap_settings_panel() }}
     {% include "partials/appliance_apply_status.html" %}
     <div class="panel">
       <div class="panel-head">
@@ -264,4 +247,40 @@
     <div class="confirm-modal-actions"><button class="button secondary" type="button" data-ldap-password-cancel>Cancel</button><button class="button primary" type="submit">Stage password reset</button></div>
   </form>
 </dialog>
+
+{% if ldap_selected_organization %}
+<dialog id="ldap-generate-modal" class="confirm-modal" aria-labelledby="ldap-generate-modal-title">
+  <form class="confirm-modal-panel form-stack" action="/ldap/organizations/{{ ldap_selected_organization.id }}/generate-directory" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="confirm-modal-body">
+      <p class="kicker">Synthetic lab directory</p>
+      <h2 id="ldap-generate-modal-title">Generate users and groups</h2>
+      <p class="muted">Invents complete names, email addresses, telephone numbers, compliant passwords, group descriptions, and memberships for {{ ldap_selected_organization.name }}.</p>
+      <div class="form-grid two">
+        <label><span class="field-label"><span>Users to create</span><button class="help-icon" type="button" data-help="Creates this many unique enabled directory users with complete synthetic profile data and one-time staged passwords.">i</button></span><input type="number" name="user_count" min="0" max="500" value="10" required></label>
+        <label><span class="field-label"><span>Groups to create</span><button class="help-icon" type="button" data-help="Creates this many enabled groups with invented descriptions and distributes organization users across their memberships. Later groups may nest earlier groups without cycles.">i</button></span><input type="number" name="group_count" min="0" max="100" value="3" required></label>
+      </div>
+      <div class="alert warning">Generated passwords are displayed once. Copy them before leaving the result page; a restart before global LDAP apply requires password reset.</div>
+    </div>
+    <div class="confirm-modal-actions"><button class="button secondary" type="button" data-ldap-generate-cancel>Cancel</button><button class="button primary" type="submit">Generate directory entries</button></div>
+  </form>
+</dialog>
+
+<dialog id="ldap-group-members-modal" class="confirm-modal" aria-labelledby="ldap-group-members-modal-title">
+  <form id="ldap-group-members-form" class="confirm-modal-panel form-stack" action="/ldap/groups/0/members" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="confirm-modal-body">
+      <p class="kicker">Directory group</p>
+      <h2 id="ldap-group-members-modal-title">Edit group membership</h2>
+      <label><span class="field-label"><span>Members</span><button class="help-icon" type="button" data-help="Select users or nested groups from this organization. LabFoundry rejects direct and indirect membership cycles before saving and again during global apply.">i</button></span>
+        <select name="members" multiple size="10">
+          {% for user in ldap_users %}<option value="user:{{ user.id }}">User: {{ user.uid }}</option>{% endfor %}
+          {% for group in ldap_groups %}<option value="group:{{ group.id }}" data-member-group-id="{{ group.id }}">Group: {{ group.name }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+    <div class="confirm-modal-actions"><button class="button secondary" type="button" data-ldap-group-members-cancel>Cancel</button><button class="button primary" type="submit">Save membership</button></div>
+  </form>
+</dialog>
+{% endif %}
 {% endblock %}

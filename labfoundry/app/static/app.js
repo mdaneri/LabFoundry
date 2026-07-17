@@ -3899,59 +3899,189 @@ function initializeKmsSettings() {
   });
 }
 
+function newLdapUserRow(organizationId) {
+  return { id: "__new_ldap_user__", organization_id: organizationId, uid: "", given_name: "", surname: "", display_name: "", email: "", telephone: "", enabled: true, password_status: "", is_new: true };
+}
+
+function newLdapGroupRow(organizationId) {
+  return { id: "__new_ldap_group__", organization_id: organizationId, name: "", description: "", enabled: false, members: [], member_count: 0, member_names: "", is_new: true };
+}
+
+async function postLdapDirectoryAction(url, data, csrf, options = {}) {
+  const body = new FormData();
+  body.set("csrf", csrf);
+  Object.entries(data || {}).forEach(([key, value]) => {
+    if (["id", "is_new", "dn", "password_status", "password_applied_at", "unlock_requested", "created_at", "updated_at", "member_count", "member_names", "members", "organization_id"].includes(key)) return;
+    if (Array.isArray(value)) value.forEach((item) => body.append(key, item ?? ""));
+    else body.set(key, value ?? "");
+  });
+  const response = await fetch(url, { method: "POST", body, credentials: "same-origin", headers: { Accept: "application/json" } });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text.trim().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ") || "The LDAP directory entry could not be saved.");
+  }
+  if (options.reload !== false) window.location.reload();
+  return response.headers.get("content-type")?.includes("application/json") ? response.json() : null;
+}
+
+async function autoSaveLdapUser(cell, csrf, organizationId) {
+  clearCaMessage("ldap-user-error");
+  const row = cell.getRow();
+  const data = row.getData();
+  if (data.is_new) {
+    reformatPendingNewRecord(cell);
+    if (!String(data.uid || "").trim()) return;
+    try {
+      await postLdapDirectoryAction(`/ldap/organizations/${organizationId}/users`, data, csrf);
+    } catch (error) {
+      showCaMessage("ldap-user-error", error instanceof Error ? error.message : "The LDAP user could not be added.");
+      if (typeof cell.restoreOldValue === "function") cell.restoreOldValue();
+    }
+    return;
+  }
+  try {
+    await postLdapDirectoryAction(`/ldap/users/${data.id}/edit`, data, csrf, { reload: false });
+    showTransientGridStatus("Saved");
+  } catch (error) {
+    showCaMessage("ldap-user-error", error instanceof Error ? error.message : "The LDAP user could not be saved.");
+    if (typeof cell.restoreOldValue === "function") cell.restoreOldValue();
+  }
+}
+
+function openLdapPasswordModal(data) {
+  const dialog = document.getElementById("ldap-password-modal");
+  const form = document.getElementById("ldap-password-form");
+  const title = document.getElementById("ldap-password-modal-title");
+  if (!(dialog instanceof HTMLDialogElement) || !(form instanceof HTMLFormElement)) return;
+  form.action = `/ldap/users/${encodeURIComponent(data.id)}/password`;
+  form.reset();
+  if (title) title.textContent = `Reset ${data.uid} password`;
+  dialog.showModal();
+  const passwordInput = form.querySelector('input[name="password"]');
+  if (passwordInput instanceof HTMLInputElement) passwordInput.focus();
+}
+
+async function deleteLdapUserFromMenu(row, csrf) {
+  const data = row.getData();
+  if (data.is_new) return;
+  const confirmed = await requestConfirmation({ title: `Delete ${data.uid}?`, message: "This permanently removes the user from desired state and from OpenLDAP on the next global appliance apply.", label: "Delete user" });
+  if (!confirmed) return;
+  try { await postLdapDirectoryAction(`/ldap/users/${data.id}/delete`, {}, csrf); }
+  catch (error) { showCaMessage("ldap-user-error", error instanceof Error ? error.message : "The LDAP user could not be deleted."); }
+}
+
+async function unlockLdapUserFromMenu(row, csrf) {
+  const data = row.getData();
+  if (data.is_new) return;
+  try { await postLdapDirectoryAction(`/ldap/users/${data.id}/unlock`, {}, csrf); }
+  catch (error) { showCaMessage("ldap-user-error", error instanceof Error ? error.message : "The LDAP user could not be unlocked."); }
+}
+
+async function autoSaveLdapGroup(cell, csrf, organizationId) {
+  clearCaMessage("ldap-group-error");
+  const row = cell.getRow();
+  const data = row.getData();
+  if (data.is_new) {
+    reformatPendingNewRecord(cell);
+    if (!String(data.name || "").trim()) return;
+    try { await postLdapDirectoryAction(`/ldap/organizations/${organizationId}/groups`, data, csrf); }
+    catch (error) {
+      showCaMessage("ldap-group-error", error instanceof Error ? error.message : "The LDAP group could not be added.");
+      if (typeof cell.restoreOldValue === "function") cell.restoreOldValue();
+    }
+    return;
+  }
+  try {
+    await postLdapDirectoryAction(`/ldap/groups/${data.id}/edit`, data, csrf, { reload: false });
+    showTransientGridStatus("Saved");
+  } catch (error) {
+    showCaMessage("ldap-group-error", error instanceof Error ? error.message : "The LDAP group could not be saved.");
+    if (typeof cell.restoreOldValue === "function") cell.restoreOldValue();
+  }
+}
+
+function openLdapGroupMembersModal(data) {
+  const dialog = document.getElementById("ldap-group-members-modal");
+  const form = document.getElementById("ldap-group-members-form");
+  const title = document.getElementById("ldap-group-members-modal-title");
+  if (!(dialog instanceof HTMLDialogElement) || !(form instanceof HTMLFormElement)) return;
+  form.action = `/ldap/groups/${encodeURIComponent(data.id)}/members`;
+  if (title) title.textContent = `Edit ${data.name} membership`;
+  const selected = new Set((data.members || []).map((member) => `${member.type}:${member.id}`));
+  form.querySelectorAll('select[name="members"] option').forEach((option) => {
+    option.hidden = option.dataset.memberGroupId === String(data.id);
+    option.disabled = option.hidden;
+    option.selected = selected.has(option.value);
+  });
+  dialog.showModal();
+}
+
+async function deleteLdapGroupFromMenu(row, csrf) {
+  const data = row.getData();
+  if (data.is_new) return;
+  const confirmed = await requestConfirmation({ title: `Delete ${data.name}?`, message: "This removes the group and its nested memberships from desired state and OpenLDAP on the next global appliance apply.", label: "Delete group" });
+  if (!confirmed) return;
+  try { await postLdapDirectoryAction(`/ldap/groups/${data.id}/delete`, {}, csrf); }
+  catch (error) { showCaMessage("ldap-group-error", error instanceof Error ? error.message : "The LDAP group could not be deleted."); }
+}
+
 function initializeLdapDirectoryTables() {
   const usersElement = document.getElementById("ldap-users-table");
   if (usersElement instanceof HTMLElement && typeof Tabulator !== "undefined") {
+    const csrf = usersElement.dataset.csrf || "";
+    const organizationId = usersElement.dataset.organizationId || "0";
     try {
-      const users = JSON.parse(usersElement.dataset.users || "[]");
+      const users = [...JSON.parse(usersElement.dataset.users || "[]"), newLdapUserRow(organizationId)];
       new Tabulator(usersElement, {
-        data: users,
-        index: "id",
-        layout: "fitColumns",
-        responsiveLayout: "collapse",
-        placeholder: "No directory users",
-        columns: [
-          { title: "UID", field: "uid", minWidth: 130 },
-          { title: "Display name", field: "display_name", minWidth: 170 },
-          { title: "Email", field: "email", minWidth: 190 },
-          { title: "Password", field: "password_status", minWidth: 130 },
-          { title: "Enabled", field: "enabled", formatter: "tickCross", hozAlign: "center", width: 95 },
-          { title: "DN", field: "dn", minWidth: 260, visible: false },
+        data: users, index: "id", layout: "fitColumns", height: "420px", rowHeight: 28, placeholder: "No directory users", reactiveData: false,
+        rowContextMenu: [
+          { label: "Reset password", action: (_event, row) => openLdapPasswordModal(row.getData()), disabled: (component) => component.getData().is_new },
+          { label: "Administrative unlock", action: (_event, row) => unlockLdapUserFromMenu(row, csrf), disabled: (component) => component.getData().is_new },
+          { label: "Delete user", action: (_event, row) => deleteLdapUserFromMenu(row, csrf), disabled: (component) => component.getData().is_new },
         ],
+        columns: lockNewRecordColumns([
+          { title: "UID", field: "uid", editor: "input", formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add user here"), minWidth: 145, cellEdited: (cell) => autoSaveLdapUser(cell, csrf, organizationId) },
+          { title: "Given name", field: "given_name", editor: "input", minWidth: 130, cellEdited: (cell) => autoSaveLdapUser(cell, csrf, organizationId) },
+          { title: "Surname", field: "surname", editor: "input", minWidth: 130, cellEdited: (cell) => autoSaveLdapUser(cell, csrf, organizationId) },
+          { title: "Display name", field: "display_name", editor: "input", minWidth: 175, cellEdited: (cell) => autoSaveLdapUser(cell, csrf, organizationId) },
+          { title: "Email", field: "email", editor: "input", minWidth: 195, cellEdited: (cell) => autoSaveLdapUser(cell, csrf, organizationId) },
+          { title: "Telephone", field: "telephone", editor: "input", minWidth: 145, cellEdited: (cell) => autoSaveLdapUser(cell, csrf, organizationId) },
+          { title: "Password", field: "password_status", minWidth: 125, editable: false },
+          { title: "Enabled", field: "enabled", formatter: labFoundryBooleanFormatter, editor: "tickCross", hozAlign: "center", width: 95, cellEdited: (cell) => autoSaveLdapUser(cell, csrf, organizationId) },
+          { title: "DN", field: "dn", minWidth: 260, visible: false, editable: false },
+        ], "uid"),
+        rowFormatter: (row) => markNewRecordRow(row, "uid"),
       });
       const fallback = document.getElementById(usersElement.dataset.fallbackId || "");
       if (fallback instanceof HTMLElement) fallback.hidden = true;
-    } catch (error) {
-      showCaMessage("ldap-user-error", error instanceof Error ? error.message : "LDAP users could not render.");
-    }
+    } catch (error) { showCaMessage("ldap-user-error", error instanceof Error ? error.message : "LDAP users could not render."); }
   }
 
   const groupsElement = document.getElementById("ldap-groups-table");
   if (groupsElement instanceof HTMLElement && typeof Tabulator !== "undefined") {
+    const csrf = groupsElement.dataset.csrf || "";
+    const organizationId = groupsElement.dataset.organizationId || "0";
     try {
-      const groups = JSON.parse(groupsElement.dataset.groups || "[]").map((group) => ({
-        ...group,
-        member_count: Array.isArray(group.members) ? group.members.length : 0,
-        member_names: Array.isArray(group.members) ? group.members.map((member) => `${member.type}: ${member.name}`).join(", ") : "",
-      }));
+      const groups = JSON.parse(groupsElement.dataset.groups || "[]").map((group) => ({ ...group, member_count: Array.isArray(group.members) ? group.members.length : 0, member_names: Array.isArray(group.members) ? group.members.map((member) => `${member.type}: ${member.name}`).join(", ") : "" }));
+      groups.push(newLdapGroupRow(organizationId));
       new Tabulator(groupsElement, {
-        data: groups,
-        index: "id",
-        layout: "fitColumns",
-        responsiveLayout: "collapse",
-        placeholder: "No directory groups",
-        columns: [
-          { title: "Name", field: "name", minWidth: 150 },
-          { title: "Members", field: "member_count", width: 105, hozAlign: "right" },
-          { title: "Membership", field: "member_names", minWidth: 240 },
-          { title: "Enabled", field: "enabled", formatter: "tickCross", hozAlign: "center", width: 95 },
+        data: groups, index: "id", layout: "fitColumns", height: "420px", rowHeight: 28, responsiveLayout: "collapse", placeholder: "No directory groups", reactiveData: false,
+        rowContextMenu: [
+          { label: "Edit membership", action: (_event, row) => openLdapGroupMembersModal(row.getData()), disabled: (component) => component.getData().is_new },
+          { label: "Delete group", action: (_event, row) => deleteLdapGroupFromMenu(row, csrf), disabled: (component) => component.getData().is_new },
         ],
+        columns: lockNewRecordColumns([
+          { title: "Name", field: "name", editor: "input", formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add group here"), minWidth: 170, cellEdited: (cell) => autoSaveLdapGroup(cell, csrf, organizationId) },
+          { title: "Description", field: "description", editor: "input", minWidth: 240, cellEdited: (cell) => autoSaveLdapGroup(cell, csrf, organizationId) },
+          { title: "Members", field: "member_count", width: 105, hozAlign: "right", editable: false },
+          { title: "Membership", field: "member_names", minWidth: 260, editable: false },
+          { title: "Enabled", field: "enabled", formatter: labFoundryBooleanFormatter, editor: "tickCross", hozAlign: "center", width: 95, cellEdited: (cell) => autoSaveLdapGroup(cell, csrf, organizationId) },
+        ], "name"),
+        rowFormatter: (row) => markNewRecordRow(row, "name"),
       });
       const fallback = document.getElementById(groupsElement.dataset.fallbackId || "");
       if (fallback instanceof HTMLElement) fallback.hidden = true;
-    } catch (error) {
-      showCaMessage("ldap-group-error", error instanceof Error ? error.message : "LDAP groups could not render.");
-    }
+    } catch (error) { showCaMessage("ldap-group-error", error instanceof Error ? error.message : "LDAP groups could not render."); }
   }
 }
 
@@ -3962,21 +4092,24 @@ function initializeLdapPasswordModal() {
   const cancel = dialog?.querySelector("[data-ldap-password-cancel]");
   if (!(dialog instanceof HTMLDialogElement) || !(form instanceof HTMLFormElement)) return;
   document.querySelectorAll("[data-ldap-password-button]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const userId = button.dataset.userId || "0";
-      const uid = button.dataset.userUid || "directory user";
-      form.action = `/ldap/users/${encodeURIComponent(userId)}/password`;
-      if (title) title.textContent = `Reset ${uid} password`;
-      const passwordInput = form.querySelector('input[name="password"]');
-      if (passwordInput instanceof HTMLInputElement) passwordInput.value = "";
-      dialog.showModal();
-      if (passwordInput instanceof HTMLInputElement) passwordInput.focus();
-    });
+    button.addEventListener("click", () => openLdapPasswordModal({ id: button.dataset.userId || "0", uid: button.dataset.userUid || "directory user" }));
   });
   cancel?.addEventListener("click", () => dialog.close());
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   });
+
+  const generateDialog = document.getElementById("ldap-generate-modal");
+  const generateOpen = document.querySelector("[data-ldap-generate-open]");
+  const generateCancel = generateDialog?.querySelector("[data-ldap-generate-cancel]");
+  if (generateDialog instanceof HTMLDialogElement) {
+    generateOpen?.addEventListener("click", () => generateDialog.showModal());
+    generateCancel?.addEventListener("click", () => generateDialog.close());
+  }
+
+  const membersDialog = document.getElementById("ldap-group-members-modal");
+  const membersCancel = membersDialog?.querySelector("[data-ldap-group-members-cancel]");
+  if (membersDialog instanceof HTMLDialogElement) membersCancel?.addEventListener("click", () => membersDialog.close());
 }
 
 function chronyBlankUpstreamRow() {
@@ -10723,11 +10856,11 @@ function initializeTabs() {
       if (!tabList || !panel) {
         return;
       }
-      if (tabList.classList.contains("zone-tabs")) {
+      if (tabList.classList.contains("zone-tabs") && button.hasAttribute("data-domain")) {
         rememberDnsActiveZone(button.dataset.domain || "");
       }
       rememberActiveTab(tabList.dataset.tabStorageKey || "", targetId);
-      tabList.querySelectorAll("[data-tab-target]").forEach((item) => {
+      tabList.querySelectorAll(".tab-button").forEach((item) => {
         item.classList.toggle("active", item === button);
         item.setAttribute("aria-selected", item === button ? "true" : "false");
       });

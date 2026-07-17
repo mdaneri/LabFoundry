@@ -7906,9 +7906,9 @@ def stage_appliance_apply_config(config_path: str, config_preview: str) -> str:
     return str(path)
 
 
-def execute_appliance_apply_unit(unit: dict[str, Any]) -> dict[str, Any]:
+def execute_appliance_apply_unit(unit: dict[str, Any], *, adapter: SystemAdapter | None = None) -> dict[str, Any]:
     context = unit["context"]
-    adapter = SystemAdapter()
+    adapter = adapter or SystemAdapter()
     unit_id = unit["id"]
 
     def run_adapter_steps(steps: list[Any]) -> list[Any]:
@@ -8891,7 +8891,7 @@ def active_appliance_apply_submitted_unit_ids(db: Session) -> set[str]:
     return {str(unit_id) for unit_id in _job_payload(job).get("selected_units", [])}
 
 
-def run_appliance_apply_job(job_id: str) -> None:
+def run_appliance_apply_job(job_id: str, *, force_real: bool = False) -> None:
     with SessionLocal() as db:
         job = db.scalar(select(Job).options(selectinload(Job.steps)).where(Job.id == job_id))
         if job is None or job.status != JobStatus.PENDING.value:
@@ -8959,7 +8959,10 @@ def run_appliance_apply_job(job_id: str) -> None:
                 job.progress_percent = min(95, int(((index - 1) / total_steps) * 100))
                 db.commit()
 
-                result = execute_appliance_apply_unit(unit)
+                result = execute_appliance_apply_unit(
+                    unit,
+                    adapter=SystemAdapter(dry_run=False) if force_real else None,
+                )
                 result = _redact_task_value(result)
                 db.refresh(job)
                 current_payload = _job_payload(job)
@@ -12430,6 +12433,137 @@ def rotate_ldap_bind_credential_from_ui(
     )
 
 
+LDAP_SYNTHETIC_FIRST_NAMES = (
+    "Avery", "Cameron", "Diego", "Elena", "Fatima", "Harper", "Isaac", "Jia", "Kai", "Leila",
+    "Mateo", "Nora", "Owen", "Priya", "Quinn", "Rafael", "Sofia", "Theo", "Uma", "Zoe",
+)
+LDAP_SYNTHETIC_SURNAMES = (
+    "Anders", "Bennett", "Chen", "Diaz", "Edwards", "Farah", "Gupta", "Hughes", "Ibrahim", "Jensen",
+    "Keller", "Lopez", "Morgan", "Novak", "Okafor", "Patel", "Reyes", "Singh", "Turner", "Wilson",
+)
+LDAP_SYNTHETIC_GROUPS = (
+    "Cloud Operations", "Platform Engineering", "Automation Authors", "Security Reviewers", "Application Owners",
+    "Network Engineering", "Identity Administrators", "Backup Operators", "Lab Developers", "VCF Auditors",
+)
+
+
+def _unique_ldap_synthetic_name(base: str, existing: set[str]) -> str:
+    candidate = base
+    suffix = 2
+    while candidate.lower() in existing:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    existing.add(candidate.lower())
+    return candidate
+
+
+def _synthetic_ldap_password(settings: LdapSettings) -> str:
+    length = max(14, settings.min_password_length)
+    return ("Aa1!" + (uuid4().hex * 8))[:length]
+
+
+@router.post("/ldap/organizations/{organization_id}/generate-directory", response_model=None)
+def generate_ldap_directory_from_ui(
+    request: Request,
+    organization_id: int,
+    user_count: int = Form(...),
+    group_count: int = Form(...),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    organization = db.get(LdapOrganization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="LDAP organization not found")
+    if not 0 <= user_count <= 500 or not 0 <= group_count <= 100 or user_count + group_count == 0:
+        raise HTTPException(status_code=400, detail="Generate between 0 and 500 users and 0 and 100 groups, with at least one entry.")
+    settings = get_ldap_settings_row(db)
+    existing_uids = {row.uid.lower() for row in organization.users}
+    existing_group_names = {row.name.lower() for row in organization.groups}
+    generated_users: list[LdapUser] = []
+    generated_groups: list[LdapGroup] = []
+    credentials: list[dict[str, str]] = []
+    offset = int(uuid4().hex[:8], 16)
+    try:
+        for index in range(user_count):
+            given_name = LDAP_SYNTHETIC_FIRST_NAMES[(offset + index) % len(LDAP_SYNTHETIC_FIRST_NAMES)]
+            surname = LDAP_SYNTHETIC_SURNAMES[(offset // 7 + index * 3) % len(LDAP_SYNTHETIC_SURNAMES)]
+            uid = _unique_ldap_synthetic_name(f"{given_name}.{surname}".lower(), existing_uids)
+            phone_seed = int(uuid4().hex[:8], 16)
+            telephone = f"+1-555-{(phone_seed // 10_000) % 1_000:03d}-{phone_seed % 10_000:04d}"
+            user = LdapUser(
+                organization=organization,
+                uid=uid,
+                given_name=given_name,
+                surname=surname,
+                display_name=f"{given_name} {surname}",
+                email=f"{uid}@{organization.slug}.test",
+                telephone=telephone,
+                enabled=True,
+            )
+            db.add(user)
+            db.flush()
+            password = _synthetic_ldap_password(settings)
+            stage_ldap_user_password(user, password, settings)
+            generated_users.append(user)
+            credentials.append({"uid": uid, "password": password, "display_name": user.display_name, "email": user.email, "telephone": telephone})
+
+        available_users = [*organization.users]
+        if group_count and not available_users:
+            raise ValueError("Create at least one user before generating groups.")
+        for index in range(group_count):
+            base_name = LDAP_SYNTHETIC_GROUPS[index % len(LDAP_SYNTHETIC_GROUPS)]
+            name = _unique_ldap_synthetic_name(base_name, existing_group_names)
+            group = LdapGroup(
+                organization=organization,
+                name=name,
+                description=f"Synthetic {name.lower()} group for {organization.name} lab validation.",
+                enabled=True,
+            )
+            db.add(group)
+            db.flush()
+            member_total = min(4, len(available_users))
+            start = (offset + index * max(1, member_total)) % len(available_users)
+            for member_offset in range(member_total):
+                group.members.append(LdapGroupMembership(member_user=available_users[(start + member_offset) % len(available_users)]))
+            if generated_groups and index % 2 == 1:
+                group.members.append(LdapGroupMembership(member_group=generated_groups[-1]))
+            generated_groups.append(group)
+        db.commit()
+    except (IntegrityError, ValueError) as exc:
+        for user in generated_users:
+            clear_pending_ldap_password(user)
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        actor=identity.username,
+        action="generate_ldap_directory",
+        resource_type="ldap_organization",
+        resource_id=str(organization.id),
+        detail=f"users={user_count}; groups={group_count}",
+    )
+    credential_lines = ["uid\tpassword\tdisplay name\temail\ttelephone"]
+    credential_lines.extend(
+        f"{row['uid']}\t{row['password']}\t{row['display_name']}\t{row['email']}\t{row['telephone']}" for row in credentials
+    )
+    return render(
+        request,
+        "ldap.html",
+        {
+            "identity": identity,
+            **ldap_context(db, selected_organization_id=organization.id),
+            "ldap_generated_credentials_text": "\n".join(credential_lines),
+            "ldap_generated_user_count": user_count,
+            "ldap_generated_group_count": group_count,
+            "appliance_apply_status": appliance_apply_status(db, "ldap"),
+        },
+        status_code=201,
+    )
+
+
 @router.post("/ldap/organizations/{organization_id}/users", response_model=None)
 def create_ldap_user_from_ui(
     request: Request,
@@ -12461,7 +12595,7 @@ def create_ldap_user_from_ui(
         display_name=display_name.strip() or " ".join(part for part in [given_name.strip(), surname.strip()] if part).strip() or normalized_uid,
         email=email.strip().lower(),
         telephone=telephone.strip(),
-        enabled=enabled is not None,
+        enabled=enabled is not None and enabled.lower() not in {"false", "0", "off"},
     )
     db.add(user)
     try:
@@ -12473,7 +12607,48 @@ def create_ldap_user_from_ui(
         db.rollback()
         raise HTTPException(status_code=409 if isinstance(exc, IntegrityError) else 400, detail="LDAP uid already exists in this organization." if isinstance(exc, IntegrityError) else str(exc)) from exc
     record_audit(db, actor=identity.username, action="create_ldap_user", resource_type="ldap_user", resource_id=str(user.id), detail=f"organization_id={organization_id}")
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse(ldap_user_to_dict(user), status_code=201)
     return RedirectResponse(f"/ldap?organization_id={organization_id}", status_code=303)
+
+
+@router.post("/ldap/users/{user_id}/edit", response_model=None)
+def edit_ldap_user_from_ui(
+    request: Request,
+    user_id: int,
+    uid: str = Form(...),
+    given_name: str = Form(""),
+    surname: str = Form(""),
+    display_name: str = Form(""),
+    email: str = Form(""),
+    telephone: str = Form(""),
+    enabled: str = Form("false"),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    user = db.get(LdapUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="LDAP user not found")
+    normalized_uid = uid.strip().lower()
+    if not LDAP_UID_PATTERN.fullmatch(normalized_uid):
+        raise HTTPException(status_code=400, detail="LDAP uid contains unsupported characters.")
+    user.uid = normalized_uid
+    user.given_name = given_name.strip()
+    user.surname = surname.strip() or normalized_uid
+    user.display_name = display_name.strip() or " ".join(part for part in [given_name.strip(), surname.strip()] if part).strip() or normalized_uid
+    user.email = email.strip().lower()
+    user.telephone = telephone.strip()
+    user.enabled = enabled.lower() == "true"
+    user.updated_at = utcnow()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="LDAP uid already exists in this organization.") from exc
+    record_audit(db, actor=identity.username, action="update_ldap_user", resource_type="ldap_user", resource_id=str(user.id))
+    return JSONResponse(ldap_user_to_dict(user))
 
 
 @router.post("/ldap/users/{user_id}/password", response_model=None)
@@ -12597,7 +12772,7 @@ def create_ldap_group_from_ui(
     normalized_name = name.strip()
     if not LDAP_GROUP_PATTERN.fullmatch(normalized_name):
         raise HTTPException(status_code=400, detail="LDAP group name contains unsupported characters.")
-    group = LdapGroup(organization_id=organization_id, name=normalized_name, description=description.strip(), enabled=enabled is not None)
+    group = LdapGroup(organization_id=organization_id, name=normalized_name, description=description.strip(), enabled=enabled is not None and enabled.lower() not in {"false", "0", "off"})
     db.add(group)
     try:
         db.flush()
@@ -12611,7 +12786,70 @@ def create_ldap_group_from_ui(
         db.rollback()
         raise HTTPException(status_code=409 if isinstance(exc, IntegrityError) else 400, detail="LDAP group already exists in this organization." if isinstance(exc, IntegrityError) else str(exc)) from exc
     record_audit(db, actor=identity.username, action="create_ldap_group", resource_type="ldap_group", resource_id=str(group.id))
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse(ldap_group_to_dict(group), status_code=201)
     return RedirectResponse(f"/ldap?organization_id={organization_id}", status_code=303)
+
+
+@router.post("/ldap/groups/{group_id}/edit", response_model=None)
+def edit_ldap_group_from_ui(
+    request: Request,
+    group_id: int,
+    name: str = Form(...),
+    description: str = Form(""),
+    enabled: str = Form("false"),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    group = db.get(LdapGroup, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="LDAP group not found")
+    normalized_name = name.strip()
+    if not LDAP_GROUP_PATTERN.fullmatch(normalized_name):
+        raise HTTPException(status_code=400, detail="LDAP group name contains unsupported characters.")
+    group.name = normalized_name
+    group.description = description.strip()
+    group.enabled = enabled.lower() == "true"
+    group.updated_at = utcnow()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="LDAP group already exists in this organization.") from exc
+    record_audit(db, actor=identity.username, action="update_ldap_group", resource_type="ldap_group", resource_id=str(group.id))
+    return JSONResponse(ldap_group_to_dict(group))
+
+
+@router.post("/ldap/groups/{group_id}/members", response_model=None)
+def update_ldap_group_members_from_ui(
+    request: Request,
+    group_id: int,
+    members: list[str] = Form(default_factory=list),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    group = db.get(LdapGroup, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="LDAP group not found")
+    group.members.clear()
+    db.flush()
+    group.members = ldap_group_members_from_form(db, group.organization_id, members)
+    try:
+        db.flush()
+        cycle_errors = validate_group_cycles(db.execute(select(LdapGroup).where(LdapGroup.organization_id == group.organization_id)).scalars().all())
+        if cycle_errors:
+            raise ValueError(cycle_errors[0])
+        group.updated_at = utcnow()
+        db.commit()
+    except (IntegrityError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_audit(db, actor=identity.username, action="update_ldap_group_members", resource_type="ldap_group", resource_id=str(group.id), detail=f"members={len(members)}")
+    return RedirectResponse(f"/ldap?organization_id={group.organization_id}#ldap-groups-panel", status_code=303)
 
 
 @router.post("/ldap/groups/{group_id}/delete", response_model=None)

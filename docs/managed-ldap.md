@@ -29,6 +29,8 @@ The helper generates one MDB database per enabled organization and configures th
 
 The default password policy requires 14 characters with uppercase, lowercase, number, special-character, and username checks. Five failures lock a user for 15 minutes, and five previous passwords are retained. Expiry is disabled by default because v1 has no end-user password-change portal. Administrators can stage password resets, enable or disable users, and request an unlock; enforcement occurs only through global LDAP apply.
 
+The Directory UI treats organizations like DNS zones: each organization is a tab and `+ Organization` opens an in-context creation panel. Users and groups use editable Tabulator grids with bottom add rows and row menus for password, membership, unlock, and deletion actions. **Generate test directory** asks for user and group counts, invents complete synthetic identities and memberships, and shows generated passwords once; those passwords follow the same in-memory-only staging boundary as manually entered passwords.
+
 ## VCF Automation integration
 
 Open the **Managed LDAP for VCF** tile on the VCF Helper page for both manual bundles and the guided inspection, configuration, and verification workflow. The Managed LDAP page remains focused on directory service settings, organizations, accounts, and groups. Encrypted LDAP recovery is integrated into Backup / Restore as a separate LDAP-specific archive.

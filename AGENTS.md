@@ -11,7 +11,7 @@
 ## Appliance Configuration UX
 
 - Use the DNS page as the default pattern for configurable appliance services where applicable.
-- Place configurable service settings in a dedicated left column. Keep the service's primary resources or workflow in the center and the pending-change and validation rail on the right; collapse these columns responsively without changing their order.
+- Place configurable service settings in the right-side rail, matching the DNS page. Keep the service's primary resources or workflow in the main column and place service validation below the settings in that rail; collapse responsively without changing their order.
 - Treat forms as desired-state editors. Settings should autosave on change with `data-autosave-form`, a small `.autosave-status` message, and the existing CSRF/session protections. Avoid visible "Save" buttons for routine desired-state settings when autosave is safe.
 - Keep enforcement separate from editing. Applying changes to the appliance should be a deliberate task action after the user is done, not part of every field change.
 - Do not add service-specific apply cards or service-specific apply submit routes. Applying is a global appliance workflow owned by `/appliance-apply`.
@@ -150,6 +150,7 @@
 
 - Keep local Users separate from authentication provider settings. LDAP is an authentication source, not the local user list.
 - Users need roles because LabFoundry is expected to support OIDC. LDAP/OIDC integrations should support group-to-role mapping.
+- Managed LDAP organizations follow the DNS-zone interaction pattern: organization tabs include a `+ Organization` creation tab, while users and groups are compact editable Tabulator grids with bottom add rows and context-menu actions. Synthetic lab-directory generation asks for user and group counts, invents complete profile and membership data, and displays compliant generated passwords once without persisting or auditing them.
 - Users can hold multiple roles. Store normalized role sets in `roles_json`, keep `role` as the primary compatibility value, evaluate permissions as the union of selected roles, and use a multi-select grid/list editor instead of comma-separated free text where possible.
 - Default local users should be created by seed logic when needed. The VCF Backup SFTP service has a default local user named `vcf-backup`, and the VCF Offline Depot HTTP service has a default local user named `vcf-depot`; keep them visible under Users and selectable by their services.
 - Local Users owns Photon OS account synchronization through the global `/appliance-apply` unit `local_users`. It stages `/var/lib/labfoundry/apply/local-users/labfoundry-users.json`, creates or updates enabled users under `/var/lib/labfoundry/users` with their desired shell, removes disabled or removed managed users with `userdel -r`, and applies staged unlock requests through `passwd -u` plus `faillock --reset`.
