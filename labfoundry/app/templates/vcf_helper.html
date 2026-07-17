@@ -52,7 +52,7 @@
           <span class="muted">Point a VCF Installer or SDDC Manager at {{ vcf_target_depot.url }} and monitor metadata synchronization.</span>
         </span>
       </button>
-      <button class="info-band vcf-helper-action-band" type="button" data-vcf-ldap-open aria-haspopup="dialog" aria-controls="vcf-ldap-modal" {% if not vcf_ldap_authorized %}disabled{% endif %}>
+      <button class="info-band vcf-helper-action-band" type="button" data-vcf-ldap-open aria-haspopup="dialog" aria-controls="vcf-ldap-modal" {% if not vcf_ldap_authorized or not vcf_ldap_available %}disabled{% endif %} {% if not vcf_ldap_available %}title="Enable Managed LDAP and at least one organization before using this helper."{% endif %}>
         <span class="vcf-helper-action-copy">
           <span class="vcf-helper-action-title">Managed LDAP for VCF</span>
           <span class="muted">Download the organization bundle or inspect, configure, and verify VCF Automation 9.1 LDAP settings.</span>

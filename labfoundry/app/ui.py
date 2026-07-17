@@ -5321,11 +5321,13 @@ def vcf_ldap_helper_context(db: Session, *, selected_organization_id: int | None
     selected_organization = next((row for row in organizations if row.id == selected_organization_id), None)
     if selected_organization is None and organizations:
         selected_organization = organizations[0]
+    settings = get_ldap_settings_row(db)
     return {
         "vcf_ldap_organizations": organizations,
         "vcf_ldap_selected_organization": selected_organization,
+        "vcf_ldap_available": settings.enabled and any(organization.enabled for organization in organizations),
         "vcf_ldap_mapping": (
-            vcf_ldap_settings(get_ldap_settings_row(db), selected_organization, include_password=False)
+            vcf_ldap_settings(settings, selected_organization, include_password=False)
             if selected_organization
             else {}
         ),
@@ -12501,6 +12503,8 @@ def generate_ldap_directory_from_ui(
     if not 0 <= user_count <= 500 or not 0 <= group_count <= 100 or user_count + group_count == 0:
         raise HTTPException(status_code=400, detail="Generate between 0 and 500 users and 0 and 100 groups, with at least one entry.")
     settings = get_ldap_settings_row(db)
+    if not settings.enabled or not organization.enabled:
+        raise HTTPException(status_code=400, detail="Enable Managed LDAP and this organization before generating test entries.")
     existing_uids = {row.uid.lower() for row in organization.users}
     existing_group_names = {row.name.lower() for row in organization.groups}
     generated_users: list[LdapUser] = []
@@ -12573,15 +12577,18 @@ def generate_ldap_directory_from_ui(
     )
     return render(
         request,
-        "ldap.html",
-        {
-            "identity": identity,
-            **ldap_context(db, selected_organization_id=organization.id),
-            "ldap_generated_credentials_text": "\n".join(credential_lines),
-            "ldap_generated_user_count": user_count,
-            "ldap_generated_group_count": group_count,
-            "appliance_apply_status": appliance_apply_status(db, "ldap"),
-        },
+        "vcf_helper.html",
+        vcf_helper_page_context(
+            db,
+            identity,
+            selected_ldap_organization_id=organization.id,
+            ldap_vcf_auto_open=True,
+            extra={
+                "ldap_generated_credentials_text": "\n".join(credential_lines),
+                "ldap_generated_user_count": user_count,
+                "ldap_generated_group_count": group_count,
+            },
+        ),
         status_code=201,
     )
 
@@ -13632,6 +13639,7 @@ def vcf_helper_page_context(
     dns_context = dnsmasq_context(db)
     ldap_context_data: dict[str, Any] = {
         "vcf_ldap_authorized": False,
+        "vcf_ldap_available": False,
         "vcf_ldap_organizations": [],
         "vcf_ldap_selected_organization": None,
         "vcf_ldap_mapping": {},

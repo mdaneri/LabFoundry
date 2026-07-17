@@ -95,13 +95,6 @@
         <textarea readonly rows="3" aria-label="One-time LDAP bind password">{{ ldap_one_time_bind_secret }}</textarea>
       </div>
     {% endif %}
-    {% if ldap_generated_credentials_text %}
-      <div class="alert warning">
-        <strong>Copy the generated LDAP credentials now.</strong>
-        <p>These passwords are shown once and remain only in process memory until global LDAP apply.</p>
-        <textarea class="config-preview" readonly rows="10" aria-label="One-time generated LDAP credentials">{{ ldap_generated_credentials_text }}</textarea>
-      </div>
-    {% endif %}
     <div class="alert warning">
       This is single-node lab identity infrastructure. Keep local break-glass administrators in every VCF organization.
     </div>
@@ -127,7 +120,6 @@
             <div><span>VCF bind DN</span><strong>{{ ldap_selected_organization.bind_dn }}</strong></div>
           </div>
           <div class="button-row">
-            <button class="button secondary" type="button" data-ldap-generate-open>Generate test directory</button>
             <form action="/ldap/organizations/{{ ldap_selected_organization.id }}/bind-credential/rotate" method="post" data-confirm-modal data-confirm-title="Rotate VCF bind credential?" data-confirm-message="The new password is shown once. VCF continues using the old password until LDAP is applied and the VCF organization settings are updated." data-confirm-label="Rotate credential">
               <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button secondary" type="submit">Rotate bind credential</button>
             </form>
@@ -242,23 +234,6 @@
 </dialog>
 
 {% if ldap_selected_organization %}
-<dialog id="ldap-generate-modal" class="confirm-modal" aria-labelledby="ldap-generate-modal-title">
-  <form class="confirm-modal-panel form-stack" action="/ldap/organizations/{{ ldap_selected_organization.id }}/generate-directory" method="post">
-    <input type="hidden" name="csrf" value="{{ csrf_token }}">
-    <div class="confirm-modal-body">
-      <p class="kicker">Synthetic lab directory</p>
-      <h2 id="ldap-generate-modal-title">Generate users and groups</h2>
-      <p class="muted">Invents complete names, email addresses, telephone numbers, compliant passwords, group descriptions, and memberships for {{ ldap_selected_organization.name }}.</p>
-      <div class="form-grid two">
-        <label><span class="field-label"><span>Users to create</span><button class="help-icon" type="button" data-help="Creates this many unique enabled directory users with complete synthetic profile data and one-time staged passwords.">i</button></span><input type="number" name="user_count" min="0" max="500" value="10" required></label>
-        <label><span class="field-label"><span>Groups to create</span><button class="help-icon" type="button" data-help="Creates this many enabled groups with invented descriptions and distributes organization users across their memberships. Later groups may nest earlier groups without cycles.">i</button></span><input type="number" name="group_count" min="0" max="100" value="3" required></label>
-      </div>
-      <div class="alert warning">Generated passwords are displayed once. Copy them before leaving the result page; a restart before global LDAP apply requires password reset.</div>
-    </div>
-    <div class="confirm-modal-actions"><button class="button secondary" type="button" data-ldap-generate-cancel>Cancel</button><button class="button primary" type="submit">Generate directory entries</button></div>
-  </form>
-</dialog>
-
 <dialog id="ldap-group-members-modal" class="confirm-modal" aria-labelledby="ldap-group-members-modal-title">
   <form id="ldap-group-members-form" class="confirm-modal-panel form-stack" action="/ldap/groups/0/members" method="post">
     <input type="hidden" name="csrf" value="{{ csrf_token }}">

@@ -668,7 +668,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=ldap-full-width-20260717-1" in service_worker.text
-    assert "/static/app.js?v=ldap-directory-grid-20260716-1" in service_worker.text
+    assert "/static/app.js?v=ldap-vcf-workflow-20260717-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -694,7 +694,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=ldap-full-width-20260717-1" in page.text
-    assert "/static/app.js?v=ldap-directory-grid-20260716-1" in page.text
+    assert "/static/app.js?v=ldap-vcf-workflow-20260717-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3921,13 +3921,24 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert "<summary>Create organization</summary>" not in created.text
     assert "<summary>Add user</summary>" not in created.text
     assert "<summary>Add group</summary>" not in created.text
-    assert "Generate test directory" in created.text
-    assert 'name="user_count"' in created.text
-    assert 'name="group_count"' in created.text
+    assert "Generate test directory" not in created.text
+    assert 'name="user_count"' not in created.text
+    assert 'name="group_count"' not in created.text
     assert "uid=vcf-bind,ou=service-accounts,dc=org-a,dc=ldap,dc=labfoundry,dc=internal" in created.text
     assert "serviceAccount → employeeType" not in created.text
 
     organization_id = created.text.split('/ldap/organizations/', 1)[1].split("/", 1)[0]
+    disabled_helper = client.get(f"/vcf-helper?ldap_vcf=1&ldap_organization_id={organization_id}")
+    ldap_tile = disabled_helper.text.split("data-vcf-ldap-open", 1)[1].split(">", 1)[0]
+    assert "disabled" in ldap_tile
+    assert "Enable Managed LDAP first" in disabled_helper.text
+
+    enabled = client.post(
+        "/ldap/settings",
+        data={"enabled": "on", "hostname": "ldap.labfoundry.internal", "listen_interfaces_present": "1", "ldaps_enabled": "on", "port": "636", "ldap_port": "389", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert enabled.status_code == 303
     vcf_helper = client.get(f"/vcf-helper?ldap_vcf=1&ldap_organization_id={organization_id}")
     assert vcf_helper.status_code == 200
     assert "Managed LDAP for VCF Automation 9.1" in vcf_helper.text
@@ -3936,6 +3947,15 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert f'/ldap/organizations/{organization_id}/vcf/inspect' in vcf_helper.text
     assert f'/ldap/organizations/{organization_id}/vcf/configure' in vcf_helper.text
     assert "serviceAccount → employeeType" in vcf_helper.text
+    assert "Load organization" not in vcf_helper.text
+    assert "data-vcf-ldap-organization-form" in vcf_helper.text
+    assert "data-vcf-ldap-organization-select" in vcf_helper.text
+    vcf_ldap_modal = vcf_helper.text.split('<dialog id="vcf-ldap-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert vcf_ldap_modal.count('name="target_url"') == 1
+    assert vcf_ldap_modal.count('name="vcf_organization_id"') == 1
+    assert vcf_ldap_modal.count('name="username"') == 1
+    assert vcf_ldap_modal.count('name="password"') == 1
+    assert "Generate test directory" in vcf_helper.text
 
     page = client.get("/ldap")
     assert "Copy this VCF bind credential now" not in page.text
@@ -4004,7 +4024,7 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import AuditEvent, LdapGroup, LdapOrganization, LdapUser
+    from labfoundry.app.models import AuditEvent, LdapGroup, LdapOrganization, LdapSettings, LdapUser
 
     login(client)
     page = client.get("/ldap")
@@ -4015,6 +4035,11 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
     )
     organization_id = int(created.text.split('/ldap/organizations/', 1)[1].split("/", 1)[0])
 
+    with SessionLocal() as db:
+        settings = db.execute(select(LdapSettings)).scalar_one()
+        settings.enabled = True
+        db.commit()
+
     generated = client.post(
         f"/ldap/organizations/{organization_id}/generate-directory",
         data={"user_count": "6", "group_count": "3", "csrf": csrf},
@@ -4023,6 +4048,8 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
     assert "Copy the generated LDAP credentials now" in generated.text
     assert "uid\tpassword\tdisplay name\temail\ttelephone" in generated.text
     assert "These passwords are shown once" in generated.text
+    assert "Managed LDAP for VCF Automation 9.1" in generated.text
+    assert "data-vcf-ldap-auto-open" in generated.text
 
     with SessionLocal() as db:
         organization = db.get(LdapOrganization, organization_id)
@@ -9313,7 +9340,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "ldap-directory-grid-20260716-1" in page.text
+    assert "ldap-vcf-workflow-20260717-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

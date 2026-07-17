@@ -4099,14 +4099,6 @@ function initializeLdapPasswordModal() {
     if (event.target === dialog) dialog.close();
   });
 
-  const generateDialog = document.getElementById("ldap-generate-modal");
-  const generateOpen = document.querySelector("[data-ldap-generate-open]");
-  const generateCancel = generateDialog?.querySelector("[data-ldap-generate-cancel]");
-  if (generateDialog instanceof HTMLDialogElement) {
-    generateOpen?.addEventListener("click", () => generateDialog.showModal());
-    generateCancel?.addEventListener("click", () => generateDialog.close());
-  }
-
   const membersDialog = document.getElementById("ldap-group-members-modal");
   const membersCancel = membersDialog?.querySelector("[data-ldap-group-members-cancel]");
   if (membersDialog instanceof HTMLDialogElement) membersCancel?.addEventListener("click", () => membersDialog.close());
@@ -12927,8 +12919,20 @@ function initializeVcfLdapHelper() {
   if (!(dialog instanceof HTMLDialogElement)) return;
   const openButton = document.querySelector("[data-vcf-ldap-open]");
   const closeButton = dialog.querySelector("[data-vcf-ldap-close]");
+  const organizationForm = dialog.querySelector("[data-vcf-ldap-organization-form]");
+  const organizationSelect = dialog.querySelector("[data-vcf-ldap-organization-select]");
+  const generateDialog = document.getElementById("ldap-generate-modal");
+  const generateOpen = dialog.querySelector("[data-ldap-generate-open]");
+  const generateCancel = generateDialog?.querySelector("[data-ldap-generate-cancel]");
   openButton?.addEventListener("click", () => dialog.showModal());
   closeButton?.addEventListener("click", () => dialog.close());
+  if (organizationForm instanceof HTMLFormElement && organizationSelect instanceof HTMLSelectElement) {
+    organizationSelect.addEventListener("change", () => organizationForm.requestSubmit());
+  }
+  if (generateDialog instanceof HTMLDialogElement) {
+    generateOpen?.addEventListener("click", () => generateDialog.showModal());
+    generateCancel?.addEventListener("click", () => generateDialog.close());
+  }
   if (dialog.hasAttribute("data-vcf-ldap-auto-open") && !dialog.open) {
     dialog.showModal();
   }
