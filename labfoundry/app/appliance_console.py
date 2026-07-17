@@ -50,6 +50,7 @@ PHOTON_RELEASE_PATH = Path("/etc/photon-release")
 MAINTENANCE_STATE_PATH = Path("/var/lib/labfoundry/console/services.json")
 CONSOLE_ACTOR = "console:root"
 CONSOLE_REFRESH_ENV = "LABFOUNDRY_CONSOLE_REFRESH_SECONDS"
+BASH_PATH = "/usr/bin/bash"
 HOSTNAME_PATTERN = re.compile(
     r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 )
@@ -240,10 +241,17 @@ def _fallback_dns_servers(interface_name: str) -> tuple[str, ...]:
     return tuple(servers)
 
 
-def management_urls(fqdn: str, ipv4_cidr: str, ipv6_cidr: str) -> tuple[str, ...]:
+def management_urls(
+    fqdn: str,
+    ipv4_cidr: str,
+    ipv6_cidr: str,
+    *,
+    https_enabled: bool = True,
+) -> tuple[str, ...]:
+    scheme = "https" if https_enabled else "http"
     urls: list[str] = []
     if fqdn:
-        urls.append(f"https://{fqdn}/")
+        urls.append(f"{scheme}://{fqdn}/")
     for candidate, ipv6 in ((ipv4_cidr, False), (ipv6_cidr, True)):
         if not candidate:
             continue
@@ -253,7 +261,7 @@ def management_urls(fqdn: str, ipv4_cidr: str, ipv6_cidr: str) -> tuple[str, ...
             continue
         if parsed_address.is_link_local:
             continue
-        urls.append(f"https://[{parsed_address}]/" if ipv6 else f"https://{parsed_address}/")
+        urls.append(f"{scheme}://[{parsed_address}]/" if ipv6 else f"{scheme}://{parsed_address}/")
     return tuple(dict.fromkeys(urls))
 
 
@@ -277,7 +285,12 @@ def load_console_status() -> ConsoleStatus:
         ntp_servers = tuple(split_servers(chrony.upstream_servers if chrony else (settings.ntp_servers if settings else "")))
         fqdn = settings.fqdn if settings and settings.fqdn else socket.getfqdn()
 
-    urls = management_urls(fqdn, cidr, ipv6_cidr)
+    urls = management_urls(
+        fqdn,
+        cidr,
+        ipv6_cidr,
+        https_enabled=bool(settings and settings.management_https_enabled),
+    )
     return ConsoleStatus(
         hostname=fqdn or socket.gethostname(),
         release=_first_display_line(_read_text(PHOTON_RELEASE_PATH), platform.system()),
@@ -529,13 +542,18 @@ def configure_management(
     ipv6_mode: str,
     ipv6_cidr: str,
     ipv6_gateway: str,
+    raw_dns_servers: str,
 ) -> str:
     method, cidr, gateway_value = validate_management_values(ipv4_method, ipv4_cidr, gateway)
     mode, ipv6_cidr_value, ipv6_gateway_value = validate_ipv6_management_values(ipv6_mode, ipv6_cidr, ipv6_gateway)
+    dns_servers = validate_dns_servers(raw_dns_servers)
     _ensure_no_active_apply()
-    dependent_hashes = _console_unit_hashes({"appliance_settings", "firewall"})
+    dependent_hashes = _console_unit_hashes({"firewall"})
     with SessionLocal() as db:
         interface = _management_interface(db)
+        settings = db.scalar(select(ApplianceSettings).order_by(ApplianceSettings.id))
+        if settings is None:
+            raise ConsoleOperationError("Appliance Settings desired state is unavailable.")
         interface.ipv4_method = method
         interface.ip_cidr = cidr or None
         interface.gateway = gateway_value or None
@@ -543,6 +561,7 @@ def configure_management(
         interface.ipv6_cidr = ipv6_cidr_value or None
         interface.ipv6_gateway = ipv6_gateway_value or None
         interface.desired_state_source = "console"
+        settings.external_dns_servers = join_servers(dns_servers)
         db.commit()
         record_audit(
             db,
@@ -550,9 +569,9 @@ def configure_management(
             action="console_update_management_network",
             resource_type="interface",
             resource_id=interface.name,
-            detail=f"ipv4_method={method}; ipv6_mode={mode}",
+            detail=f"ipv4_method={method}; ipv6_mode={mode}; dns_servers={len(dns_servers)}",
         )
-    return _submit_console_apply({"network"}, changed_dependents=dependent_hashes)
+    return _submit_console_apply({"network", "appliance_settings"}, changed_dependents=dependent_hashes)
 
 
 def configure_dns(raw_servers: str) -> str:
@@ -827,7 +846,9 @@ class CursesConsole:
             self._safe_add(1, 2, "LabFoundry appliance console requires at least 72 x 22 characters.", curses.color_pair(7) | curses.A_BOLD)
             self._refresh_screen()
             return
-        header_height = 8
+        # Keep a complete pale-blue spacer row below Load, followed by a body
+        # spacer row, so the management URLs do not visually touch host status.
+        header_height = 9
         for y in range(header_height):
             self._fill_line(y, curses.color_pair(1))
         for y in range(header_height, height - 1):
@@ -848,33 +869,96 @@ class CursesConsole:
         self._safe_add(6, 4, f"Memory: {status.memory}", curses.color_pair(1))
         self._safe_add(7, 4, f"Load: {status.load}", curses.color_pair(1))
 
-        self._safe_add(9, 4, "Manage this appliance at:", curses.color_pair(2) | curses.A_BOLD)
-        row = 10
+        self._safe_add(10, 4, "Manage this appliance at:", curses.color_pair(2) | curses.A_BOLD)
+        row = 11
         for url in status.urls[:3]:
             self._safe_add(row, 6, url, curses.color_pair(2))
             row += 1
-        self._safe_add(13, 4, "Management network", curses.color_pair(2) | curses.A_BOLD)
+        self._safe_add(14, 4, "Management network", curses.color_pair(2) | curses.A_BOLD)
         address = "DHCP" if status.ipv4_method == "dhcp" and not status.ipv4_cidr else (status.ipv4_cidr or "Not configured")
-        self._safe_add(14, 6, f"Interface: {status.interface}", curses.color_pair(2))
-        ipv4 = f"IPv4: {address}    GW: {status.gateway or 'none'}    Mode: {status.ipv4_method}"
-        self._safe_add(15, 6, ipv4, curses.color_pair(2))
+        self._safe_add(15, 6, self._network_table_row("Interface", status.interface, width), curses.color_pair(2))
+        ipv4 = self._network_table_row(
+            "IPv4",
+            address,
+            width,
+            gateway=status.gateway or "none",
+            mode=status.ipv4_method,
+        )
+        self._safe_add(16, 6, ipv4, curses.color_pair(2))
         ipv6_address = status.ipv6_cidr or ("Not configured" if status.ipv6_mode == "disabled" else "Awaiting RA/SLAAC")
-        ipv6 = f"IPv6: {ipv6_address}    GW: {status.ipv6_gateway or 'none'}    Mode: {status.ipv6_mode}"
-        self._safe_add(16, 6, ipv6, curses.color_pair(2))
-        self._safe_add(17, 6, f"DNS: {', '.join(status.dns_servers) or 'Not configured'}", curses.color_pair(2))
-        ntp = f"NTP: {', '.join(status.ntp_servers) or 'Not configured'}    Chrony: {'enabled' if status.chrony_enabled else 'disabled'}"
-        self._safe_add(18, 6, ntp, curses.color_pair(2))
+        ipv6 = self._network_table_row(
+            "IPv6",
+            ipv6_address,
+            width,
+            gateway=status.ipv6_gateway or "none",
+            mode=status.ipv6_mode,
+        )
+        self._safe_add(17, 6, ipv6, curses.color_pair(2))
+        self._safe_add(
+            18,
+            6,
+            self._network_table_row("DNS", ", ".join(status.dns_servers) or "Not configured", width),
+            curses.color_pair(2),
+        )
+        ntp = self._network_table_row(
+            "NTP",
+            ", ".join(status.ntp_servers) or "Not configured",
+            width,
+            auxiliary=("Chrony", "enabled" if status.chrony_enabled else "disabled"),
+        )
+        self._safe_add(19, 6, ntp, curses.color_pair(2))
+        auxiliary: tuple[str, str] | None = None
         if status.maintenance_isolation:
-            self._safe_add(19, 4, "Maintenance isolation: enabled", curses.color_pair(6) | curses.A_BOLD)
+            auxiliary = ("Isolation", "enabled")
         elif not status.app_active:
-            self._safe_add(19, 4, "Control plane: unavailable", curses.color_pair(7) | curses.A_BOLD)
-        firewall = f"Firewall status: {'enabled' if status.firewall_enabled else 'disabled'}"
+            auxiliary = ("Control plane", "unavailable")
+        firewall = self._network_table_row(
+            "Firewall",
+            "enabled" if status.firewall_enabled else "disabled",
+            width,
+            auxiliary=auxiliary,
+        )
         self._safe_add(20, 6, firewall, curses.color_pair(5 if status.firewall_enabled else 6) | curses.A_BOLD)
         if self.message:
             message_row = height - 2 if height > 22 else 19
             self._safe_add(message_row, 4, self.message, curses.color_pair(7 if self.message_error else 5) | curses.A_BOLD)
         self._draw_footer(height, width)
         self._refresh_screen()
+
+    @staticmethod
+    def _network_table_row(
+        label: str,
+        value: str,
+        screen_width: int,
+        *,
+        gateway: str | None = None,
+        mode: str | None = None,
+        auxiliary: tuple[str, str] | None = None,
+    ) -> str:
+        """Format management state with stable columns for the current tty width."""
+        content_width = max(screen_width - 8, 1)
+        label_width = 10
+        if gateway is not None or mode is not None:
+            address_width, gateway_width = (
+                (36, 22)
+                if screen_width >= 100
+                else (24, 16)
+                if screen_width >= 80
+                else (18, 14)
+            )
+            address = value[:address_width]
+            gateway_value = (gateway or "none")[:gateway_width]
+            row = (
+                f"{label:<{label_width}}{address:<{address_width}}"
+                f" GW {gateway_value:<{gateway_width}} Mode {mode or 'none'}"
+            )
+            return row[:content_width].rstrip()
+        if auxiliary:
+            auxiliary_text = f"{auxiliary[0]}: {auxiliary[1]}"
+            value_width = max(content_width - label_width - len(auxiliary_text) - 1, 1)
+            row = f"{label:<{label_width}}{value[:value_width]:<{value_width}} {auxiliary_text}"
+            return row[:content_width].rstrip()
+        return f"{label:<{label_width}}{value}"[:content_width].rstrip()
 
     def _draw_footer(self, height: int, width: int) -> None:
         curses = self.curses
@@ -966,7 +1050,7 @@ class CursesConsole:
             return value[:cursor] + chr(key) + value[cursor:], cursor + 1
         return value, cursor
 
-    def _management_form(self, status: ConsoleStatus) -> tuple[str, str, str, str, str, str] | None:
+    def _management_form(self, status: ConsoleStatus) -> tuple[str, str, str, str, str, str, str] | None:
         curses = self.curses
         height, width = self.stdscr.getmaxyx()
         box_height = min(20, height - 2)
@@ -983,9 +1067,20 @@ class CursesConsole:
             "ipv6_mode": status.ipv6_mode,
             "ipv6_cidr": status.ipv6_cidr,
             "ipv6_gateway": status.ipv6_gateway,
+            "dns_servers": ", ".join(status.dns_servers),
         }
         cursors = {name: len(value) for name, value in values.items()}
-        order = ["ipv4_method", "ipv4_cidr", "gateway", "ipv6_mode", "ipv6_cidr", "ipv6_gateway", "apply", "cancel"]
+        order = [
+            "ipv4_method",
+            "ipv4_cidr",
+            "gateway",
+            "ipv6_mode",
+            "ipv6_cidr",
+            "ipv6_gateway",
+            "dns_servers",
+            "apply",
+            "cancel",
+        ]
         selected = 0
         modes = {"ipv4_method": ("dhcp", "static"), "ipv6_mode": ("disabled", "automatic", "static")}
 
@@ -1010,6 +1105,7 @@ class CursesConsole:
             "ipv6_mode": (10, "Mode"),
             "ipv6_cidr": (11, "Address / prefix"),
             "ipv6_gateway": (12, "Gateway"),
+            "dns_servers": (14, "DNS servers"),
         }
         label_x = 5
         field_x = 25
@@ -1020,7 +1116,8 @@ class CursesConsole:
             window.erase()
             window.bkgd(" ", curses.color_pair(2))
             window.box()
-            window.addnstr(0, max((box_width - 29) // 2, 2), " Management IP and gateways ", 29, curses.color_pair(2) | curses.A_BOLD)
+            title = " Management IP, gateways, and DNS "
+            window.addnstr(0, max((box_width - len(title)) // 2, 2), title, len(title), curses.color_pair(2) | curses.A_BOLD)
             window.addnstr(2, 3, "IPv4 configuration", box_width - 6, curses.color_pair(3) | curses.A_BOLD)
             window.addnstr(8, 3, "IPv6 configuration", box_width - 6, curses.color_pair(3) | curses.A_BOLD)
 
@@ -1043,9 +1140,9 @@ class CursesConsole:
 
             apply_attr = curses.color_pair(3 if active_name == "apply" else 9) | (curses.A_BOLD if active_name == "apply" else 0)
             cancel_attr = curses.color_pair(3 if active_name == "cancel" else 9) | (curses.A_BOLD if active_name == "cancel" else 0)
-            window.addnstr(15, box_width // 2 - 12, " < Apply > ", 11, apply_attr)
-            window.addnstr(15, box_width // 2 + 2, " < Cancel > ", 12, cancel_attr)
-            window.addnstr(17, 3, "Tab/Up/Down: move   Left/Right: edit/select   Esc: cancel", box_width - 6, curses.color_pair(4))
+            window.addnstr(16, box_width // 2 - 12, " < Apply > ", 11, apply_attr)
+            window.addnstr(16, box_width // 2 + 2, " < Cancel > ", 12, cancel_attr)
+            window.addnstr(18, 3, "Tab/Up/Down: move   Left/Right: edit/select   Esc: cancel", box_width - 6, curses.color_pair(4))
 
             if active_name in field_rows and active_name not in modes:
                 row, _ = field_rows[active_name]
@@ -1089,6 +1186,7 @@ class CursesConsole:
                     values["ipv6_mode"],
                     values["ipv6_cidr"] if values["ipv6_mode"] == "static" else "",
                     values["ipv6_gateway"] if values["ipv6_mode"] == "static" else "",
+                    values["dns_servers"],
                 )
             if active_name == "cancel" and key in {10, 13, curses.KEY_ENTER, ord(" ")}:
                 curses.curs_set(0)
@@ -1128,7 +1226,17 @@ class CursesConsole:
         try:
             curses.def_prog_mode()
             curses.endwin()
-            result = subprocess.run(command, check=False)
+            self._clear_terminal()
+            # The service sends its own stderr to the journal. Interactive child
+            # programs must explicitly bind all three streams to tty1 so Bash's
+            # prompt and errors remain visible to the local operator.
+            result = subprocess.run(
+                command,
+                check=False,
+                stdin=sys.stdin,
+                stdout=sys.stdout,
+                stderr=sys.stdout,
+            )
             if result.returncode not in {0, 130}:
                 self.message = f"{label} exited with status {result.returncode}."
                 self.message_error = True
@@ -1144,12 +1252,22 @@ class CursesConsole:
             self.message_error = True
             return None
         finally:
+            self._clear_terminal()
             try:
                 curses.reset_prog_mode()
             except curses.error:
                 pass
             self._initialize_screen()
             self._force_clear = True
+
+    @staticmethod
+    def _clear_terminal() -> None:
+        """Clear the physical tty before and after an interactive handoff."""
+        try:
+            sys.stdout.write("\x1b[2J\x1b[H")
+            sys.stdout.flush()
+        except OSError:
+            pass
 
     def show_top(self) -> None:
         """Temporarily hand tty1 to top, then restore the curses console."""
@@ -1164,7 +1282,7 @@ class CursesConsole:
             self.message_error = True
             return
         try:
-            self._run_interactive(["/bin/bash", "--login"], "Bash console")
+            self._run_interactive([BASH_PATH, "--login"], "Bash console")
         finally:
             try:
                 record_console_shell("close")
@@ -1181,39 +1299,46 @@ class CursesConsole:
             choice = self._dialog(
                 "Customize LabFoundry",
                 ["Only management recovery settings are available from the local console."],
-                ["Management IP and gateways", "DNS servers", "NTP servers", "Enable firewall" if not status.firewall_enabled else "Disable firewall", isolation_label, "Back"],
+                ["Management IP, gateways, and DNS", "NTP servers", "Enable firewall" if not status.firewall_enabled else "Disable firewall", isolation_label, "Back"],
             )
-            if choice == 5:
+            if choice == 4:
                 return
             if choice == 0:
                 management = self._management_form(status)
                 if management is None:
+                    self._restore_main_surface()
                     continue
-                ipv4_method, cidr, gateway, ipv6_mode, ipv6_cidr, ipv6_gateway = management
+                ipv4_method, cidr, gateway, ipv6_mode, ipv6_cidr, ipv6_gateway, dns_servers = management
                 confirm = self._dialog(
-                    "Apply management network",
+                    "Apply management network and DNS",
                     [
                         f"IPv4: {ipv4_method} {cidr}",
                         f"IPv4 gateway: {gateway or 'none'}",
                         f"IPv6: {ipv6_mode} {ipv6_cidr}",
                         f"IPv6 gateway: {ipv6_gateway or 'none'}",
+                        f"DNS: {dns_servers}",
                     ],
                     ["Apply", "Cancel"],
                 )
                 if confirm == 0:
                     self._apply_action(
-                        lambda: configure_management(ipv4_method, cidr, gateway, ipv6_mode, ipv6_cidr, ipv6_gateway),
-                        "Management networking applied",
+                        lambda: configure_management(
+                            ipv4_method,
+                            cidr,
+                            gateway,
+                            ipv6_mode,
+                            ipv6_cidr,
+                            ipv6_gateway,
+                            dns_servers,
+                        ),
+                        "Management networking and DNS applied",
                     )
+                self._restore_main_surface()
             elif choice == 1:
-                value = self._prompt("DNS servers", "Comma- or space-separated IP addresses:", ", ".join(status.dns_servers))
-                if value is not None and self._dialog("Apply DNS servers", [value], ["Apply", "Cancel"]) == 0:
-                    self._apply_action(lambda: configure_dns(value), "DNS desired state applied")
-            elif choice == 2:
                 value = self._prompt("NTP servers", "Comma- or space-separated names or IP addresses:", ", ".join(status.ntp_servers))
                 if value is not None and self._dialog("Apply NTP servers", [value], ["Apply", "Cancel"]) == 0:
                     self._apply_action(lambda: configure_ntp(value), "NTP desired state applied")
-            elif choice == 3:
+            elif choice == 2:
                 enabling_firewall = not status.firewall_enabled
                 firewall_label = "Enable firewall" if enabling_firewall else "Disable firewall"
                 warning = (
@@ -1224,7 +1349,7 @@ class CursesConsole:
                 confirm = self._dialog(firewall_label, [warning], [firewall_label, "Cancel"])
                 if confirm == 0:
                     self._apply_action(lambda: configure_firewall(enabling_firewall), f"{firewall_label} completed")
-            elif choice == 4:
+            elif choice == 3:
                 enabling = not status.maintenance_isolation
                 warning = (
                     "Stops and disables the web UI, SSH, DNS/DHCP, Chrony, LDAP, and KMS."
@@ -1238,6 +1363,11 @@ class CursesConsole:
                 )
                 if confirm == 0:
                     self._apply_action(lambda: set_maintenance_isolation(enabling), f"{isolation_label} completed")
+
+    def _restore_main_surface(self) -> None:
+        """Physically clear nested form remnants before rebuilding a parent menu."""
+        self._force_clear = True
+        self.draw_main()
 
     def power_menu(self) -> None:
         if not self._require_authentication():

@@ -87,6 +87,16 @@ def test_console_management_urls_bracket_ipv6_and_ignore_link_local_addresses():
         "https://[2001:db8:49::10]/",
     )
     assert management_urls("", "", "fe80::10/64") == ()
+    assert management_urls(
+        "appliance.labfoundry.internal",
+        "192.168.49.10/24",
+        "2001:db8:49::10/64",
+        https_enabled=False,
+    ) == (
+        "http://appliance.labfoundry.internal/",
+        "http://192.168.49.10/",
+        "http://[2001:db8:49::10]/",
+    )
 
 
 def test_console_load_summary_uses_one_five_and_fifteen_minute_averages(monkeypatch):
@@ -142,7 +152,7 @@ def test_console_text_editor_supports_cursor_navigation_insertion_and_deletion()
 
 
 def test_console_management_form_uses_field_navigation_and_cursor_editing():
-    keys = [2, 1, ord("9"), 9, 9, 9, 9, 9, 10]
+    keys = [2, 1, ord("9"), 9, 9, 9, 9, 9, 9, 10]
 
     class FakeWindow:
         def keypad(self, _enabled):
@@ -205,6 +215,7 @@ def test_console_management_form_uses_field_navigation_and_cursor_editing():
         ipv6_mode="static",
         ipv6_cidr="2001:db8::10/64",
         ipv6_gateway="fe80::1",
+        dns_servers=("192.168.1.2", "2001:db8::53"),
     )
 
     result = console._management_form(status)
@@ -216,6 +227,7 @@ def test_console_management_form_uses_field_navigation_and_cursor_editing():
         "static",
         "2001:db8::10/64",
         "fe80::1",
+        "192.168.1.2, 2001:db8::53",
     )
 
 
@@ -244,17 +256,21 @@ def test_console_top_temporarily_leaves_and_restores_curses(monkeypatch):
     console.message_error = False
     console._force_clear = False
     console._initialize_screen = lambda: events.append("initialize")
-    commands: list[list[str]] = []
+    console._clear_terminal = lambda: events.append("clear")
+    calls: list[tuple[list[str], dict[str, object]]] = []
     monkeypatch.setattr(
         appliance_console.subprocess,
         "run",
-        lambda command, **kwargs: commands.append(command) or subprocess.CompletedProcess(command, 0),
+        lambda command, **kwargs: calls.append((command, kwargs)) or subprocess.CompletedProcess(command, 0),
     )
 
     console.show_top()
 
-    assert commands == [["top"]]
-    assert events == ["save", "end", "restore", "initialize"]
+    assert [command for command, _kwargs in calls] == [["top"]]
+    assert calls[0][1]["stdin"] is appliance_console.sys.stdin
+    assert calls[0][1]["stdout"] is appliance_console.sys.stdout
+    assert calls[0][1]["stderr"] is appliance_console.sys.stdout
+    assert events == ["save", "end", "clear", "clear", "restore", "initialize"]
     assert console._force_clear is True
 
 
@@ -268,7 +284,37 @@ def test_console_shell_is_audited_and_returns_to_curses(monkeypatch):
 
     console.show_shell()
 
-    assert events == ["open", (["/bin/bash", "--login"], "Bash console"), "close"]
+    assert events == ["open", (["/usr/bin/bash", "--login"], "Bash console"), "close"]
+
+
+def test_console_management_rows_use_stable_table_columns():
+    ipv4 = CursesConsole._network_table_row(
+        "IPv4", "192.168.167.219/24", 128, gateway="192.168.167.2", mode="dhcp"
+    )
+    ipv6 = CursesConsole._network_table_row(
+        "IPv6", "Awaiting RA/SLAAC", 128, gateway="none", mode="automatic"
+    )
+    ntp = CursesConsole._network_table_row(
+        "NTP", "time.cloudflare.com, nts.netnod.se", 128, auxiliary=("Chrony", "enabled")
+    )
+
+    assert ipv4.index("GW ") == ipv6.index("GW ")
+    assert ipv4.index("Mode ") == ipv6.index("Mode ")
+    assert ipv4.startswith("IPv4      192.168.167.219/24")
+    assert ipv6.startswith("IPv6      Awaiting RA/SLAAC")
+    assert ntp.startswith("NTP       time.cloudflare.com, nts.netnod.se")
+    assert ntp.endswith("Chrony: enabled")
+
+
+def test_console_restores_main_surface_before_reopening_parent_menu():
+    console = CursesConsole.__new__(CursesConsole)
+    console._force_clear = False
+    draws: list[bool] = []
+    console.draw_main = lambda: draws.append(console._force_clear)
+
+    console._restore_main_surface()
+
+    assert draws == [True]
 
 
 def test_console_authentication_is_requested_for_each_menu_entry(monkeypatch):
