@@ -52,6 +52,12 @@
           <span class="muted">Point a VCF Installer or SDDC Manager at {{ vcf_target_depot.url }} and monitor metadata synchronization.</span>
         </span>
       </button>
+      <button class="info-band vcf-helper-action-band" type="button" data-vcf-ldap-open aria-haspopup="dialog" aria-controls="vcf-ldap-modal" {% if not vcf_ldap_authorized %}disabled{% endif %}>
+        <span class="vcf-helper-action-copy">
+          <span class="vcf-helper-action-title">Managed LDAP for VCF</span>
+          <span class="muted">Download the organization bundle or inspect, configure, and verify VCF Automation 9.1 LDAP settings.</span>
+        </span>
+      </button>
     </div>
 
     {% if not vcf_sddc_ovas %}<div class="alert warn">SDDC Manager deployment becomes available when a valid OVA is present under <span class="mono-text">{{ vcf_sddc_ova_root }}</span>.</div>{% endif %}
@@ -63,6 +69,7 @@
 {% include "partials/vcf_trust_modal.html" %}
 {% include "partials/vcf_sddc_deploy_modal.html" %}
 {% include "partials/vcf_target_depot_modal.html" %}
+{% include "partials/vcf_ldap_modal.html" %}
 
 <dialog id="vcf-fqdn-modal" class="confirm-modal wide-modal vcf-fqdn-modal" aria-labelledby="vcf-fqdn-modal-title">
   <form class="confirm-modal-panel form-stack" action="/vcf-helper/generated-fqdns" method="post" data-vcf-fqdn-form>

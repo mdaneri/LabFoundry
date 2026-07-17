@@ -12789,6 +12789,18 @@ function initializeDashboard() {
   schedule();
 }
 
+function initializeVcfLdapHelper() {
+  const dialog = document.getElementById("vcf-ldap-modal");
+  if (!(dialog instanceof HTMLDialogElement)) return;
+  const openButton = document.querySelector("[data-vcf-ldap-open]");
+  const closeButton = dialog.querySelector("[data-vcf-ldap-close]");
+  openButton?.addEventListener("click", () => dialog.showModal());
+  closeButton?.addEventListener("click", () => dialog.close());
+  if (dialog.hasAttribute("data-vcf-ldap-auto-open") && !dialog.open) {
+    dialog.showModal();
+  }
+}
+
 document.addEventListener("DOMContentLoaded", initializeDashboard);
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
@@ -12845,6 +12857,7 @@ document.addEventListener("DOMContentLoaded", initializeVcfFqdnGenerator);
 document.addEventListener("DOMContentLoaded", initializeVcfTrustForm);
 document.addEventListener("DOMContentLoaded", initializeVcfSddcDeployment);
 document.addEventListener("DOMContentLoaded", initializeVcfTargetDepotHelper);
+document.addEventListener("DOMContentLoaded", initializeVcfLdapHelper);
 document.addEventListener("DOMContentLoaded", initializeVcfBackupSettings);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistrySettings);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotSettings);

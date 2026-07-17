@@ -5315,6 +5315,22 @@ def vcf_helper_context(db: Session) -> dict[str, Any]:
     }
 
 
+def vcf_ldap_helper_context(db: Session, *, selected_organization_id: int | None = None) -> dict[str, Any]:
+    organizations = ldap_organizations_query(db)
+    selected_organization = next((row for row in organizations if row.id == selected_organization_id), None)
+    if selected_organization is None and organizations:
+        selected_organization = organizations[0]
+    return {
+        "vcf_ldap_organizations": organizations,
+        "vcf_ldap_selected_organization": selected_organization,
+        "vcf_ldap_mapping": (
+            vcf_ldap_settings(get_ldap_settings_row(db), selected_organization, include_password=False)
+            if selected_organization
+            else {}
+        ),
+    }
+
+
 def local_vcf_depot_target_context(db: Session) -> dict[str, Any]:
     settings = get_vcf_offline_depot_settings_row(db)
     software_depot = vcf_depot_software_depot_id_context(db)
@@ -12709,13 +12725,14 @@ def inspect_ldap_vcf_from_ui(
     record_audit(db, actor=identity.username, action="inspect_vcf_organization_ldap", resource_type="ldap_organization", resource_id=str(organization.id), detail=f"target={normalized_target}; org_id={vcf_organization_id}")
     return render(
         request,
-        "ldap.html",
-        {
-            "identity": identity,
-            **ldap_context(db, selected_organization_id=organization_id),
-            "ldap_vcf_inspection": result,
-            "appliance_apply_status": appliance_apply_status(db, "ldap"),
-        },
+        "vcf_helper.html",
+        vcf_helper_page_context(
+            db,
+            identity,
+            selected_ldap_organization_id=organization_id,
+            ldap_vcf_auto_open=True,
+            extra={"ldap_vcf_inspection": result},
+        ),
     )
 
 
@@ -12777,18 +12794,21 @@ def configure_ldap_vcf_from_ui(
         verified["definedSettings"]["password"] = "[redacted]"
     return render(
         request,
-        "ldap.html",
-        {
-            "identity": identity,
-            **ldap_context(db, selected_organization_id=organization_id),
-            "ldap_vcf_configuration_result": {
-                "verified_settings": verified,
-                "test_result": test_result,
-                "user_count": len(users),
-                "group_count": len(groups),
+        "vcf_helper.html",
+        vcf_helper_page_context(
+            db,
+            identity,
+            selected_ldap_organization_id=organization_id,
+            ldap_vcf_auto_open=True,
+            extra={
+                "ldap_vcf_configuration_result": {
+                    "verified_settings": verified,
+                    "test_result": test_result,
+                    "user_count": len(users),
+                    "group_count": len(groups),
+                }
             },
-            "appliance_apply_status": appliance_apply_status(db, "ldap"),
-        },
+        ),
     )
 
 
@@ -13319,21 +13339,54 @@ def legacy_https_repository_redirect(identity: Identity = Depends(require_sessio
 @router.get("/vcf-helper", response_class=HTMLResponse, response_model=None)
 def vcf_helper_page(
     request: Request,
+    ldap_organization_id: int | None = Query(None),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
-    context = dnsmasq_context(db)
     return render(
         request,
         "vcf_helper.html",
-        {
-            "identity": identity,
-            **vcf_helper_context(db),
-            **vcf_trust_context(db),
-            "vcf_trust_auto_open": request.query_params.get("vcf_trust") == "1",
-            "appliance_apply_status": dnsmasq_apply_status(db, context),
-        },
+        vcf_helper_page_context(
+            db,
+            identity,
+            selected_ldap_organization_id=ldap_organization_id,
+            ldap_vcf_auto_open=request.query_params.get("ldap_vcf") == "1",
+            vcf_trust_auto_open=request.query_params.get("vcf_trust") == "1",
+        ),
     )
+
+
+def vcf_helper_page_context(
+    db: Session,
+    identity: Identity,
+    *,
+    selected_ldap_organization_id: int | None = None,
+    ldap_vcf_auto_open: bool = False,
+    vcf_trust_auto_open: bool = False,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    dns_context = dnsmasq_context(db)
+    ldap_context_data: dict[str, Any] = {
+        "vcf_ldap_authorized": False,
+        "vcf_ldap_organizations": [],
+        "vcf_ldap_selected_organization": None,
+        "vcf_ldap_mapping": {},
+    }
+    if identity.has_role("admin"):
+        ldap_context_data = {
+            "vcf_ldap_authorized": True,
+            **vcf_ldap_helper_context(db, selected_organization_id=selected_ldap_organization_id),
+        }
+    return {
+        "identity": identity,
+        **vcf_helper_context(db),
+        **vcf_trust_context(db),
+        **ldap_context_data,
+        "vcf_trust_auto_open": vcf_trust_auto_open,
+        "ldap_vcf_auto_open": ldap_vcf_auto_open,
+        "appliance_apply_status": dnsmasq_apply_status(db, dns_context),
+        **(extra or {}),
+    }
 
 
 async def _vcf_helper_json(request: Request) -> dict[str, Any]:

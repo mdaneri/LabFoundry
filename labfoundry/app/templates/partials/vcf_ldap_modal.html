@@ -1,0 +1,78 @@
+<dialog id="vcf-ldap-modal" class="confirm-modal wide-modal" aria-labelledby="vcf-ldap-modal-title" {% if ldap_vcf_auto_open %}data-vcf-ldap-auto-open{% endif %}>
+  <div class="confirm-modal-panel form-stack">
+    <div class="confirm-modal-body">
+      <p class="kicker">VCF Helper</p>
+      <div class="panel-head">
+        <div>
+          <h2 id="vcf-ldap-modal-title">Managed LDAP for VCF Automation 9.1</h2>
+          <p class="muted">Inspect, configure, and verify organization-specific LDAP settings. VCF remains responsible for group imports and role assignments.</p>
+        </div>
+        {% if vcf_ldap_selected_organization %}
+          <span class="status-pill {{ 'good' if vcf_ldap_selected_organization.vcf_last_status == 'verified' else 'muted' }}">{{ vcf_ldap_selected_organization.vcf_last_status or "not configured" }}</span>
+        {% endif %}
+      </div>
+
+      {% if not vcf_ldap_authorized %}
+        <div class="alert warning">Managed LDAP VCF configuration is available only to LabFoundry administrators.</div>
+      {% elif not vcf_ldap_organizations %}
+        <div class="empty-state"><h3>Create an LDAP organization first</h3><p>Organizations, directory accounts, and groups are managed on the Managed LDAP page.</p><a class="button primary" href="/ldap">Open Managed LDAP</a></div>
+      {% else %}
+        <form class="form-grid two" action="/vcf-helper" method="get">
+          <input type="hidden" name="ldap_vcf" value="1">
+          <label>
+            <span class="field-label"><span>LDAP organization</span><button class="help-icon" type="button" data-help="Selects the LabFoundry LDAP suffix and bind identity whose settings will be configured in the target VCF organization.">i</button></span>
+            <select name="ldap_organization_id">
+              {% for organization in vcf_ldap_organizations %}
+                <option value="{{ organization.id }}" {{ "selected" if vcf_ldap_selected_organization and organization.id == vcf_ldap_selected_organization.id else "" }}>{{ organization.name }} — {{ organization.suffix_dn }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <div class="form-action-end"><button class="button secondary" type="submit">Load organization</button></div>
+        </form>
+
+        {% if vcf_ldap_selected_organization %}
+          <div class="button-row"><a class="button secondary" href="/ldap/organizations/{{ vcf_ldap_selected_organization.id }}/vcf-bundle.zip">Download manual bundle</a></div>
+          <div class="settings-list compact-list">
+            <div><span>Mandatory VCF mapping</span><strong>serviceAccount → employeeType</strong></div>
+            <div><span>User search base</span><strong>ou=users,{{ vcf_ldap_selected_organization.suffix_dn }}</strong></div>
+            <div><span>Group search base</span><strong>ou=groups,{{ vcf_ldap_selected_organization.suffix_dn }}</strong></div>
+            <div><span>Group role assignment</span><strong>performed in VCF</strong></div>
+          </div>
+          {% if ldap_vcf_inspection %}
+            <div class="alert warning"><strong>Confirm this TLS fingerprint before configuration:</strong><br>{{ ldap_vcf_inspection.tls_fingerprint }}</div>
+            <pre class="config-preview">{{ ldap_vcf_inspection|tojson(indent=2) }}</pre>
+          {% endif %}
+          {% if ldap_vcf_configuration_result %}
+            <div class="alert success">VCF verified {{ ldap_vcf_configuration_result.user_count }} users and {{ ldap_vcf_configuration_result.group_count }} groups. Import the desired groups and grant organization roles in VCF.</div>
+          {% endif %}
+          <div class="form-grid two">
+            <form class="form-stack" action="/ldap/organizations/{{ vcf_ldap_selected_organization.id }}/vcf/inspect" method="post">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <h3>1. Inspect</h3>
+              <label><span class="field-label"><span>VCF Automation URL</span><button class="help-icon" type="button" data-help="HTTPS address of the VCF Automation endpoint. LabFoundry reads the presented TLS fingerprint before sending credentials.">i</button></span><input name="target_url" value="{{ vcf_ldap_selected_organization.vcf_target_url }}" required></label>
+              <label><span class="field-label"><span>VCF organization ID</span><button class="help-icon" type="button" data-help="All Apps or VM Apps organization identity used as the VCF tenant context header.">i</button></span><input name="vcf_organization_id" value="{{ vcf_ldap_selected_organization.vcf_org_id }}" required></label>
+              <label><span class="field-label"><span>VCF organization name</span><button class="help-icon" type="button" data-help="Human-readable organization name retained only as connection metadata.">i</button></span><input name="vcf_organization_name" value="{{ vcf_ldap_selected_organization.vcf_org_name }}"></label>
+              <label><span class="field-label"><span>Administrator username</span><button class="help-icon" type="button" data-help="Transient VCF Automation administrator identity used only for this inspection request. It is never stored.">i</button></span><input name="username" autocomplete="username" required></label>
+              <label><span class="field-label"><span>Administrator password</span><button class="help-icon" type="button" data-help="Transient VCF Automation administrator password used only for this request. It is never stored or audited.">i</button></span><input type="password" name="password" autocomplete="current-password" required></label>
+              <label><span class="field-label"><span>Confirmed TLS fingerprint</span><button class="help-icon" type="button" data-help="Leave blank to inspect the presented fingerprint. Enter the exact SHA-256 fingerprint on the next request to read current LDAP settings.">i</button></span><input name="confirmed_tls_fingerprint"></label>
+              <button class="button primary" type="submit">Inspect VCF LDAP settings</button>
+            </form>
+            <form class="form-stack" action="/ldap/organizations/{{ vcf_ldap_selected_organization.id }}/vcf/configure" method="post">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <h3>2. Configure and verify</h3>
+              <label><span class="field-label"><span>VCF Automation URL</span><button class="help-icon" type="button" data-help="The HTTPS VCF endpoint whose fingerprint you inspected and confirmed.">i</button></span><input name="target_url" value="{{ vcf_ldap_selected_organization.vcf_target_url }}" required></label>
+              <label><span class="field-label"><span>VCF organization ID</span><button class="help-icon" type="button" data-help="Organization receiving settingsSource DEFINED and the suffix-specific LDAP configuration.">i</button></span><input name="vcf_organization_id" value="{{ vcf_ldap_selected_organization.vcf_org_id }}" required></label>
+              <label><span class="field-label"><span>VCF organization name</span><button class="help-icon" type="button" data-help="Human-readable connection metadata saved after successful verification.">i</button></span><input name="vcf_organization_name" value="{{ vcf_ldap_selected_organization.vcf_org_name }}"></label>
+              <label><span class="field-label"><span>Administrator username</span><button class="help-icon" type="button" data-help="Transient VCF administrator username. LabFoundry never stores it.">i</button></span><input name="username" autocomplete="username" required></label>
+              <label><span class="field-label"><span>Administrator password</span><button class="help-icon" type="button" data-help="Transient VCF administrator password. LabFoundry never stores it.">i</button></span><input type="password" name="password" autocomplete="current-password" required></label>
+              <label><span class="field-label"><span>Confirmed TLS fingerprint</span><button class="help-icon" type="button" data-help="Exact SHA-256 fingerprint confirmed during inspection. Configuration fails closed if the certificate changes.">i</button></span><input name="confirmed_tls_fingerprint" value="{{ vcf_ldap_selected_organization.vcf_tls_fingerprint }}" required></label>
+              <label class="switch-field"><span class="field-label"><span>Replace existing LDAP settings</span><button class="help-icon" type="button" data-help="Explicit approval required when the VCF organization already has LDAP enabled.">i</button></span><input class="switch-input" type="checkbox" name="replace_existing"><span class="switch-track" aria-hidden="true"></span></label>
+              <button class="button primary" type="submit">Configure and verify VCF</button>
+            </form>
+          </div>
+        {% endif %}
+      {% endif %}
+    </div>
+    <div class="confirm-modal-actions"><button class="button ghost" type="button" data-vcf-ldap-close>Close</button></div>
+  </div>
+</dialog>

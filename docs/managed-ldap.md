@@ -31,6 +31,8 @@ The default password policy requires 14 characters with uppercase, lowercase, nu
 
 ## VCF Automation integration
 
+Open the **Managed LDAP for VCF** tile on the VCF Helper page for both manual bundles and the guided inspection, configuration, and verification workflow. The Managed LDAP page remains focused on directory service settings, organizations, accounts, groups, and recovery.
+
 Every organization can download a manual ZIP bundle containing the selected VCF LDAP endpoint, root CA PEM when LDAPS is used, search bases, bind DN, VCF Automation 9.1 JSON, and operator instructions. The bind password is intentionally separate. Generated VCF settings prefer LDAPS whenever it is enabled; plaintext LDAP is used only when LDAPS is disabled and LDAP is enabled.
 
 The guided workflow pins the VCF Automation TLS SHA-256 fingerprint, reads current organization LDAP settings, requires explicit replacement approval, writes `settingsSource=DEFINED`, tests LDAP, and verifies that VCF can find at least one user and group. Administrator credentials are transient and are not stored.

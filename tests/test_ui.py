@@ -655,7 +655,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v105" in service_worker.text
+    assert "labfoundry-pwa-v106" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -668,7 +668,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=managed-ldap-listeners-20260716-1" in service_worker.text
-    assert "/static/app.js?v=managed-ldap-management-main-route-20260716-2" in service_worker.text
+    assert "/static/app.js?v=vcf-helper-ldap-tile-20260716-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -694,7 +694,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=managed-ldap-listeners-20260716-1" in page.text
-    assert "/static/app.js?v=managed-ldap-management-main-route-20260716-2" in page.text
+    assert "/static/app.js?v=vcf-helper-ldap-tile-20260716-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3885,7 +3885,8 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert 'name="ldap_port"' in page.text
     assert "Management, unused, down, missing, trunk-only" in page.text
     assert "LDAPS / TCP 636 only" not in page.text
-    assert "VCF Connections" in page.text
+    assert "VCF Connections" not in page.text
+    assert 'id="ldap-vcf-panel"' not in page.text
     assert "Encrypted LDAP Recovery" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
@@ -3898,7 +3899,17 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert "ldap-users-table" in created.text
     assert "ldap-groups-table" in created.text
     assert "uid=vcf-bind,ou=service-accounts,dc=org-a,dc=ldap,dc=labfoundry,dc=internal" in created.text
-    assert "serviceAccount → employeeType" in created.text
+    assert "serviceAccount → employeeType" not in created.text
+
+    organization_id = created.text.split('/ldap/organizations/', 1)[1].split("/", 1)[0]
+    vcf_helper = client.get(f"/vcf-helper?ldap_vcf=1&ldap_organization_id={organization_id}")
+    assert vcf_helper.status_code == 200
+    assert "Managed LDAP for VCF Automation 9.1" in vcf_helper.text
+    assert 'data-vcf-ldap-auto-open' in vcf_helper.text
+    assert f'/ldap/organizations/{organization_id}/vcf-bundle.zip' in vcf_helper.text
+    assert f'/ldap/organizations/{organization_id}/vcf/inspect' in vcf_helper.text
+    assert f'/ldap/organizations/{organization_id}/vcf/configure' in vcf_helper.text
+    assert "serviceAccount → employeeType" in vcf_helper.text
 
     page = client.get("/ldap")
     assert "Copy this VCF bind credential now" not in page.text
@@ -9155,7 +9166,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "managed-ldap-management-main-route-20260716-2" in page.text
+    assert "vcf-helper-ldap-tile-20260716-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -11202,7 +11213,7 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     visible_workspace = response.text.split('<section class="split-workspace vcf-helper-workspace"', 1)[1].split("</section>", 1)[0]
     assert "VCF Certificate Trust" in visible_workspace
     assert "Review DNS" not in visible_workspace
-    assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 4
+    assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 5
     assert "vcf-helper-action-arrow" not in visible_workspace
     assert "service-summary-grid" not in visible_workspace
     assert "Generated names" not in visible_workspace
@@ -11210,8 +11221,10 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert "<aside" not in visible_workspace
     assert "Deploy SDDC Manager" in visible_workspace
     assert "Configure VCF Offline Depot" in visible_workspace
+    assert "Managed LDAP for VCF" in visible_workspace
     assert 'data-vcf-fqdn-modal-open aria-haspopup="dialog" aria-controls="vcf-fqdn-modal"' in visible_workspace
     assert 'aria-controls="vcf-trust-modal"' in visible_workspace
+    assert 'data-vcf-ldap-open aria-haspopup="dialog" aria-controls="vcf-ldap-modal"' in visible_workspace
     assert "Root CA subject" not in visible_workspace
     assert '<option value="labfoundry.internal"' in response.text
     assert '<option value="vcf.internal"' in response.text
