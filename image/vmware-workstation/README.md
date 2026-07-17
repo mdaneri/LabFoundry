@@ -176,7 +176,7 @@ intended for vSphere/ESXi import:
 | Management network | `labfoundry.gateway` | no | Required with a static IPv4 CIDR and invalid without one. |
 | Management network | `labfoundry.ipv6_enabled` | no | Boolean, default `false`. Enables management IPv6. |
 | Management network | `labfoundry.ipv6_cidr` | no | Blank while IPv6 is enabled uses RA/SLAAC; a value selects static IPv6. |
-| Management network | `labfoundry.ipv6_gateway` | no | Required with a static IPv6 CIDR. |
+| Management network | `labfoundry.ipv6_gateway` | no | Optional with a static IPv6 CIDR; accepts an on-link global address or link-local address. |
 | Management network | `labfoundry.dns_servers` | no | Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS. |
 | Appliance identity and time | `labfoundry.fqdn` | yes | Appliance FQDN applied to Photon OS and LabFoundry desired state. |
 | Appliance identity and time | `labfoundry.ntp_servers` | no | Optional NTP names or IPs. Blank keeps the image defaults. |
@@ -243,6 +243,12 @@ deployed VM's first boot, not baked into the reusable Packer-built VMX.
 After the VM starts, the wrapper prints a connection summary with the HTTPS
 console URL, Swagger URL, OpenAPI URL, root certificate URL, and
 `ssh admin@<appliance-ip>` command.
+
+The VM's first virtual terminal runs the LabFoundry recovery console; tty2 and
+later terminals retain Photon login prompts. F3 temporarily runs `top`, while
+F4 requires the Photon root password before opening an audited root Bash
+session. Exiting either process restores and physically redraws the appliance
+screen. See [Local appliance console](../../docs/appliance-console.md).
 
 ### Windows DNS for lab FQDNs
 

@@ -81,7 +81,7 @@ case "$LABFOUNDRY_GUEST_PLATFORM" in
     exit 2
     ;;
 esac
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony ipxe syslinux nginx powershell
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv python3-curses sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite procps-ng $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony ipxe syslinux nginx powershell
 
 log_step "installing VCF PowerCLI $LABFOUNDRY_POWERCLI_VERSION"
 export LABFOUNDRY_POWERCLI_VERSION
@@ -227,6 +227,7 @@ LABFOUNDRY_SECRETS_KEY=$SECRETS_KEY
 LABFOUNDRY_BOOTSTRAP_ADMIN_USERNAME=$BOOTSTRAP_USERNAME
 LABFOUNDRY_BOOTSTRAP_ADMIN_PASSWORD=$BOOTSTRAP_PASSWORD
 LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS=$LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS
+LABFOUNDRY_CONSOLE_REFRESH_SECONDS=5
 LABFOUNDRY_REPOSITORY_PATH=/mnt/labfoundry-vcf-offline-depot
 LABFOUNDRY_VCF_BACKUP_PATH=/mnt/labfoundry-vcf-backups
 LABFOUNDRY_APPLIANCE_MANAGEMENT_CIDR=$LABFOUNDRY_MGMT_ADDRESS
@@ -236,6 +237,9 @@ chmod 0640 /etc/labfoundry/labfoundry.env
 chown root:labfoundry /etc/labfoundry/labfoundry.env
 
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
+install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/common/systemd/labfoundry-console.service" /etc/systemd/system/labfoundry-console.service
+install -d -o root -g root -m 0755 /etc/systemd/system.conf.d
+install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/common/systemd/labfoundry-console-manager.conf" /etc/systemd/system.conf.d/labfoundry-console.conf
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-bootstrap-https" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
@@ -244,7 +248,7 @@ if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry-vmware-ovf-customize.service" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
 install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
-sed -i 's/\r$//' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper
+sed -i 's/\r$//' /etc/systemd/system/labfoundry.service /etc/systemd/system/labfoundry-console.service /etc/systemd/system.conf.d/labfoundry-console.conf "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   sed -i 's/\r$//' "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
@@ -371,6 +375,7 @@ fi
 nginx -t
 
 log_step "enabling appliance services"
+systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable systemd-networkd
 systemctl enable systemd-resolved || true
@@ -386,6 +391,8 @@ fi
 systemctl enable labfoundry-data-disks.service
 systemctl enable labfoundry-bootstrap-https.service
 systemctl enable labfoundry
+systemctl mask getty@tty1.service
+systemctl enable labfoundry-console.service
 systemctl enable --now nginx
 
 log_step "configuring LabFoundry nftables firewall"

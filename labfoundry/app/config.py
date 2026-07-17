@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     appliance_management_gateway: str = ""
     appliance_management_ipv6_enabled: bool = False
     appliance_management_ipv6_cidr: str = ""
+    appliance_management_ipv6_gateway: str = ""
     appliance_root_ssh_enabled: bool = False
     appliance_external_dns_servers: str = "1.1.1.1\n9.9.9.9"
     appliance_ntp_servers: str = "time.cloudflare.com\nnts.netnod.se"

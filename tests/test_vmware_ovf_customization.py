@@ -2,6 +2,8 @@ from pathlib import Path
 import importlib.util
 import sys
 
+import pytest
+
 
 def load_customizer():
     path = Path("scripts/appliance/labfoundry-vmware-ovf-customize.py")
@@ -150,6 +152,12 @@ def test_vmware_ovf_customizer_supports_disabled_auto_and_static_ipv6(tmp_path):
     assert "Gateway=fe80::1" in rendered
     assert "IPv6AcceptRA=no" in rendered
 
+    properties["labfoundry.ipv6_gateway"] = ""
+    static_without_gateway = customizer.validate_properties(properties)
+    customizer.write_networkd_config(static_without_gateway)
+    assert "Address=fd00:10::10/64" in customizer.NETWORKD_PATH.read_text(encoding="utf-8")
+    assert "Gateway=fe80::1" not in customizer.NETWORKD_PATH.read_text(encoding="utf-8")
+
 
 def test_vmware_ovf_customizer_rejects_contradictory_or_incomplete_ipv6():
     customizer = load_customizer()
@@ -163,12 +171,16 @@ def test_vmware_ovf_customizer_rejects_contradictory_or_incomplete_ipv6():
         raise AssertionError("disabled IPv6 with a CIDR should fail")
 
     properties["labfoundry.ipv6_enabled"] = "true"
-    try:
+    static_without_gateway = customizer.validate_properties(properties)
+    assert static_without_gateway["ipv6_gateway"] == ""
+
+    properties["labfoundry.ipv6_gateway"] = "fd00:20::1"
+    with pytest.raises(customizer.OvfCustomizationError, match="link-local or on-link"):
         customizer.validate_properties(properties)
-    except customizer.OvfCustomizationError as exc:
-        assert "ipv6_gateway is required" in str(exc)
-    else:
-        raise AssertionError("static IPv6 without a gateway should fail")
+
+    properties["labfoundry.ipv6_gateway"] = "fd00:10::10"
+    with pytest.raises(customizer.OvfCustomizationError, match="cannot equal"):
+        customizer.validate_properties(properties)
 
 
 def test_vmware_ovf_customizer_renders_family_specific_management_firewall(tmp_path):

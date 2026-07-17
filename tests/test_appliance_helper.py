@@ -791,6 +791,42 @@ def test_network_helper_preserves_automatic_ipv6_for_management(tmp_path):
     assert "LinkLocalAddressing=ipv6" in management_network
 
 
+def test_network_helper_renders_static_management_ipv6_gateway_in_main_and_table_100(tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-network.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[physical_interfaces]",
+                "interface=eth0",
+                "  role=management",
+                "  mode=access",
+                "  ipv4_method=dhcp",
+                "  ip_cidr=",
+                "  gateway=",
+                "  ipv6_enabled=true",
+                "  ipv6_cidr=2001:db8:49::10/64",
+                "  ipv6_gateway=fe80::1",
+                "  admin_state=up",
+                "  mtu=1500",
+                "",
+                "[vlan_interfaces]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert helper._network_config_errors(config_path) == []
+    files, _reconfigure_links, _admin_down_links = helper._systemd_networkd_files(config_path)
+    rendered = files["00-labfoundry-mgmt.network"]
+    assert "IPv6AcceptRA=no" in rendered
+    assert "LinkLocalAddressing=ipv6" in rendered
+    assert "Address=2001:db8:49::10/64" in rendered
+    assert "From=2001:db8:49::/64" in rendered
+    assert rendered.count("Gateway=fe80::1") == 2
+    assert "Table=100" in rendered
+
+
 def test_wan_helper_rejects_config_outside_apply_dir(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-wan.conf"

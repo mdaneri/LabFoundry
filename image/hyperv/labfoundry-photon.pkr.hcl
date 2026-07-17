@@ -169,7 +169,7 @@ build {
 
   provisioner "shell" {
     inline = [
-      "mkdir -p /tmp/labfoundry-src/scripts /tmp/labfoundry-src/image/hyperv /tmp/labfoundry-src/third_party"
+      "mkdir -p /tmp/labfoundry-src/scripts /tmp/labfoundry-src/image/common /tmp/labfoundry-src/image/hyperv /tmp/labfoundry-src/third_party"
     ]
   }
 
@@ -206,6 +206,11 @@ build {
   provisioner "file" {
     source      = "systemd"
     destination = "/tmp/labfoundry-src/image/hyperv/systemd"
+  }
+
+  provisioner "file" {
+    source      = "../common/systemd"
+    destination = "/tmp/labfoundry-src/image/common/systemd"
   }
 
   provisioner "file" {

@@ -150,6 +150,7 @@ The lifecycle runner records structured evidence in
 
 - appliance boot, SSH, `labfoundry.service`, `/openapi.json`, and dashboard API
 - physical interface refresh, access NICs, trunk NIC, and VLAN desired state
+- tty1 LabFoundry console service ownership, masked tty1 getty, untouched tty2 getty template, installed console executable, and non-isolated recovery state
 - DNS and DHCP desired state plus dnsmasq host-state checks
 - first-boot `vcf-sdk` and VCF PowerCLI version/import checks, including `Connect-VIServer`
 - firewall settings, NAT, WAN policy, nftables, routes, and `tc` state

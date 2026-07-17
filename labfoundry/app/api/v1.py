@@ -840,10 +840,12 @@ def update_physical_interface(
     next_ipv6_enabled = requested_ipv6_enabled
     if next_ipv4_method == "dhcp" and next_role != "management":
         raise HTTPException(status_code=422, detail="IPv4 DHCP is available only for the management interface.")
-    requested_ipv6_cidr = str(payload.get("ipv6_cidr", interface.ipv6_cidr) or "").strip()
-    if not next_ipv6_enabled and requested_ipv6_cidr:
-        raise HTTPException(status_code=422, detail="IPv6 CIDR must be blank while IPv6 is disabled.")
-    for field in ("role", "mtu", "admin_state", "ip_cidr", "gateway", "ipv6_cidr", "ipv4_method", "ipv6_enabled"):
+    disabling_ipv6 = "ipv6_enabled" in payload and not next_ipv6_enabled
+    requested_ipv6_cidr = str(payload.get("ipv6_cidr", "" if disabling_ipv6 else interface.ipv6_cidr) or "").strip()
+    requested_ipv6_gateway = str(payload.get("ipv6_gateway", "" if disabling_ipv6 else interface.ipv6_gateway) or "").strip()
+    if not next_ipv6_enabled and (requested_ipv6_cidr or requested_ipv6_gateway):
+        raise HTTPException(status_code=422, detail="IPv6 CIDR and gateway must be blank while IPv6 is disabled.")
+    for field in ("role", "mtu", "admin_state", "ip_cidr", "gateway", "ipv6_cidr", "ipv6_gateway", "ipv4_method", "ipv6_enabled"):
         if field in payload:
             if field == "ipv4_method":
                 interface.ipv4_method = next_ipv4_method
@@ -855,6 +857,7 @@ def update_physical_interface(
                 interface.ipv6_enabled = next_ipv6_enabled
                 if not next_ipv6_enabled:
                     interface.ipv6_cidr = None
+                    interface.ipv6_gateway = None
                 continue
             if field in {"ip_cidr", "ipv6_cidr"} and payload[field]:
                 try:
@@ -869,11 +872,17 @@ def update_physical_interface(
                 setattr(interface, field, next_role)
                 if next_role != "management":
                     interface.gateway = None
+                    interface.ipv6_gateway = None
                 continue
-            if field == "gateway":
-                interface.gateway = str(payload[field] or "").strip() or None
+            if field in {"gateway", "ipv6_gateway"}:
+                if field == "ipv6_gateway":
+                    interface.ipv6_gateway = str(payload[field] or "").strip() or None
+                else:
+                    interface.gateway = str(payload[field] or "").strip() or None
                 continue
             setattr(interface, field, payload[field])
+            if field == "ipv6_cidr" and not str(payload[field] or "").strip():
+                interface.ipv6_gateway = None
     if "mode" in payload:
         new_mode = normalize_interface_mode(payload["mode"])
         vlan_count = db.scalar(select(func.count()).select_from(VlanInterface).where(VlanInterface.parent_interface == interface.name)) or 0
@@ -888,6 +897,7 @@ def update_physical_interface(
         interface.mode = new_mode
         if new_mode == "trunk":
             interface.gateway = None
+            interface.ipv6_gateway = None
     if interface.gateway:
         if normalize_interface_role(interface.role) != "management" or normalize_ipv4_method(interface.ipv4_method) != "static" or not interface.ip_cidr:
             raise HTTPException(
@@ -905,6 +915,23 @@ def update_physical_interface(
             raise HTTPException(status_code=422, detail=f"gateway must be on-link for {interface.ip_cidr}.")
         if gateway_address == management_address.ip:
             raise HTTPException(status_code=422, detail="gateway cannot equal the management interface address.")
+    if interface.ipv6_gateway:
+        if normalize_interface_role(interface.role) != "management" or not interface.ipv6_enabled or not interface.ipv6_cidr:
+            raise HTTPException(
+                status_code=422,
+                detail="IPv6 gateway is available only for a management interface using static IPv6.",
+            )
+        try:
+            gateway_address = ip_address(interface.ipv6_gateway)
+            management_address = ip_interface(interface.ipv6_cidr)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="ipv6_gateway must be a valid IPv6 address.") from exc
+        if gateway_address.version != 6:
+            raise HTTPException(status_code=422, detail="ipv6_gateway must be an IPv6 address.")
+        if not gateway_address.is_link_local and gateway_address not in management_address.network:
+            raise HTTPException(status_code=422, detail=f"ipv6_gateway must be link-local or on-link for {interface.ipv6_cidr}.")
+        if gateway_address == management_address.ip:
+            raise HTTPException(status_code=422, detail="ipv6_gateway cannot equal the management interface address.")
     interface.desired_state_source = "user"
     db.add(interface)
     db.commit()
