@@ -631,7 +631,7 @@ function Add-LabFoundryOvfProperties {
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'gateway' -Label 'Management IPv4 gateway' -Description 'Required when a static IPv4 CIDR is supplied. Leave blank with DHCPv4.' -Required $false
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ipv6_enabled' -Label 'Enable management IPv6' -Description 'Enables IPv6 on eth0. Blank IPv6 addressing then uses router advertisements and SLAAC.' -Required $false -Boolean $true -DefaultValue 'false'
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ipv6_cidr' -Label 'Management IPv6 CIDR' -Description 'Optional static IPv6 address and prefix. Leave blank while IPv6 is enabled to use RA/SLAAC.' -Required $false
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ipv6_gateway' -Label 'Management IPv6 gateway' -Description 'Required with a static IPv6 CIDR; leave blank for automatic IPv6.' -Required $false
+    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ipv6_gateway' -Label 'Management IPv6 gateway' -Description 'Optional with a static IPv6 CIDR. Use an on-link global address or a link-local address; leave blank when no IPv6 default route is required.' -Required $false
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'dns_servers' -Label 'DNS servers' -Description 'Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS.' -Required $false
 
     Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Appliance identity and time'

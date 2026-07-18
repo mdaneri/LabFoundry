@@ -21,6 +21,9 @@ dependencies = [
   "vcf-sdk==9.1.0.0",
 ]
 
+[project.scripts]
+labfoundry-console = "labfoundry.app.appliance_console:main"
+
 [project.optional-dependencies]
 dev = [
   "httpx>=0.27.2",

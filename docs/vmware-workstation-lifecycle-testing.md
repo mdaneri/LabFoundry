@@ -126,7 +126,8 @@ after creating the SiteA, WAN/SiteB, and trunk-like vmnets.
 VMware Workstation vmnets provide isolated layer-2 segments, but they do not
 match Hyper-V's explicit access/trunk VLAN port model. The Workstation lifecycle
 therefore validates the appliance workflow, management reachability, service
-apply behavior, backup/restore portability, and host/client integration where
+apply behavior, tty1 console ownership with tty2 left available for normal login,
+backup/restore portability, and host/client integration where
 separate vmnets are equivalent. Keep Hyper-V lifecycle results as the
 authoritative acceptance evidence for VLAN access/trunk behavior until a
 Workstation-specific tagged-client strategy is added and proven.

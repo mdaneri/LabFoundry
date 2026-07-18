@@ -107,6 +107,7 @@ class PhysicalInterface(Base):
     ipv4_method: Mapped[str] = mapped_column(String(20), default="static")
     ipv6_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     ipv6_cidr: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ipv6_gateway: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mtu: Mapped[int] = mapped_column(Integer, default=1500)
     admin_state: Mapped[str] = mapped_column(String(20), default="up")
     oper_state: Mapped[str] = mapped_column(String(20), default="up")

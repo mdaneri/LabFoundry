@@ -87,12 +87,45 @@ def test_physical_interface_api_persists_optional_ipv6_enabled_state(client):
     assert preserved.status_code == 200, preserved.text
     assert preserved.json()["ipv6_enabled"] is True
 
+    static_ipv6 = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"ipv6_cidr": "2001:db8:49::10/64", "ipv6_gateway": "fe80::1"},
+    )
+    assert static_ipv6.status_code == 200, static_ipv6.text
+    assert static_ipv6.json()["ipv6_cidr"] == "2001:db8:49::10/64"
+    assert static_ipv6.json()["ipv6_gateway"] == "fe80::1"
+
+    off_link_ipv6_gateway = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"ipv6_gateway": "2001:db8:50::1"},
+    )
+    assert off_link_ipv6_gateway.status_code == 422
+
+    automatic_ipv6 = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"ipv6_cidr": ""},
+    )
+    assert automatic_ipv6.status_code == 200, automatic_ipv6.text
+    assert automatic_ipv6.json()["ipv6_gateway"] is None
+
     contradictory = client.patch(
         f"/api/v1/interfaces/physical/{management['name']}",
         headers=headers,
         json={"ipv6_enabled": False, "ipv6_cidr": "fd00:10::1/64"},
     )
     assert contradictory.status_code == 422
+
+    disabled = client.patch(
+        f"/api/v1/interfaces/physical/{management['name']}",
+        headers=headers,
+        json={"ipv6_enabled": False},
+    )
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["ipv6_cidr"] is None
+    assert disabled.json()["ipv6_gateway"] is None
 
     wrong_type = client.patch(
         f"/api/v1/interfaces/physical/{management['name']}",

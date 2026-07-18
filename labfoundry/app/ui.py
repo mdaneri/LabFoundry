@@ -800,7 +800,7 @@ def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
     management, observed_dhcp_dns_servers = management_dhcp_dns_context(interfaces)
     terminal_options = web_terminal_interface_options(interfaces, vlans)
     terminal_ips = web_terminal_addresses(normalized_web_terminal_interfaces(appliance, management), terminal_options) if appliance.web_terminal_enabled else []
-    appliance_ips = [management["ip"]] if management.get("ip") else []
+    appliance_ips = list(management.get("addresses") or ([management["ip"]] if management.get("ip") else []))
     appliance_ips.extend(address for address in terminal_ips if address not in appliance_ips)
     appliance_cert, appliance_key, appliance_chain = ca_service_cert_paths("https", appliance.fqdn)
     specs.append(
@@ -3757,6 +3757,7 @@ def wan_routing_targets(db: Session) -> list[dict[str, str]]:
                 "gateway": interface.gateway or "",
                 "ipv4_method": normalize_ipv4_method(interface.ipv4_method),
                 "ipv6_cidr": interface.ipv6_cidr or "",
+                "ipv6_gateway": interface.ipv6_gateway or "",
                 "addresses": addresses,
                 "routing_domain": routing_domain,
                 "route_allowed": routing_domain == "lab",
@@ -6287,7 +6288,9 @@ def network_management_signature(config_preview: str) -> dict[str, str]:
         "ipv4_method": management.get("ipv4_method", ""),
         "ip_cidr": management.get("ip_cidr", ""),
         "gateway": management.get("gateway", ""),
+        "ipv6_enabled": management.get("ipv6_enabled", ""),
         "ipv6_cidr": management.get("ipv6_cidr", ""),
+        "ipv6_gateway": management.get("ipv6_gateway", ""),
     }
 
 
@@ -6781,7 +6784,8 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
         None,
     )
     if management_interface is not None:
-        network_summary.append(f"management gateway {management_interface.gateway or 'none'}")
+        network_summary.append(f"management IPv4 gateway {management_interface.gateway or 'none'}")
+        network_summary.append(f"management IPv6 gateway {management_interface.ipv6_gateway or 'none'}")
     if network_removed_vlans:
         network_summary.append(f"{len(network_removed_vlans)} VLAN removals")
     network_unit = make_appliance_apply_unit(
@@ -8920,6 +8924,8 @@ def run_appliance_apply_job(job_id: str, *, force_real: bool = False) -> None:
         job = db.scalar(select(Job).options(selectinload(Job.steps)).where(Job.id == job_id))
         if job is None or job.status != JobStatus.PENDING.value:
             return
+        if force_real and job.created_by != "console:root":
+            raise ValueError("Forced-real appliance apply is restricted to local console tasks.")
         job.status = JobStatus.RUNNING.value
         job.started_at = utcnow()
         job.progress_percent = 1
@@ -10272,6 +10278,7 @@ def edit_physical_interface_from_ui(
     gateway: str | None = Form(None),
     ipv6_enabled: bool = Form(False),
     ipv6_cidr: str = Form(""),
+    ipv6_gateway: str = Form(""),
     mtu: int = Form(1500),
     admin_state: str = Form("up"),
     csrf: str = Form(...),
@@ -10340,6 +10347,25 @@ def edit_physical_interface_from_ui(
         ipv6_value = cidr_for_family(ipv6_cidr, 6, "Interface IPv6 CIDR")
         if isinstance(ipv6_value, Response):
             return ipv6_value
+    ipv6_gateway_value = ipv6_gateway.strip()
+    if role_value != "management" or new_mode == "trunk" or not ipv6_enabled_value or not ipv6_value:
+        ipv6_gateway_value = ""
+    if ipv6_gateway_value:
+        try:
+            parsed_ipv6_gateway = ip_address(ipv6_gateway_value)
+            parsed_ipv6_interface = ip_interface(ipv6_value)
+        except ValueError:
+            return Response(f"{ipv6_gateway_value} is not a valid IPv6 gateway.", status_code=422, media_type="text/plain")
+        if parsed_ipv6_gateway.version != 6:
+            return Response("Management IPv6 gateway must be an IPv6 address.", status_code=422, media_type="text/plain")
+        if not parsed_ipv6_gateway.is_link_local and parsed_ipv6_gateway not in parsed_ipv6_interface.network:
+            return Response(
+                f"Management IPv6 gateway {ipv6_gateway_value} must be link-local or on-link for {ipv6_value}.",
+                status_code=422,
+                media_type="text/plain",
+            )
+        if parsed_ipv6_gateway == parsed_ipv6_interface.ip:
+            return Response("Management IPv6 gateway cannot equal the management interface address.", status_code=422, media_type="text/plain")
     old_ip_cidr = interface.ip_cidr
     old_ipv6_cidr = interface.ipv6_cidr
     old_ipv4_method = normalize_ipv4_method(interface.ipv4_method)
@@ -10357,6 +10383,7 @@ def edit_physical_interface_from_ui(
     interface.gateway = gateway_value or None
     interface.ipv6_enabled = ipv6_enabled_value
     interface.ipv6_cidr = ipv6_value or None
+    interface.ipv6_gateway = ipv6_gateway_value or None
     interface.mtu = mtu
     interface.admin_state = admin_state_value
     interface.desired_state_source = "user"

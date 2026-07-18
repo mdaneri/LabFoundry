@@ -655,7 +655,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v109" in service_worker.text
+    assert "labfoundry-pwa-v110" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -667,8 +667,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=ldap-full-width-20260717-1" in service_worker.text
-    assert "/static/app.js?v=ldap-vcf-workflow-20260717-1" in service_worker.text
+    assert "/static/app.css?v=ldap-console-20260718-1" in service_worker.text
+    assert "/static/app.js?v=ldap-console-20260718-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -677,7 +677,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=ldap-full-width-20260717-1" in offline.text
+    assert "/static/app.css?v=ldap-console-20260718-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -693,8 +693,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=ldap-full-width-20260717-1" in page.text
-    assert "/static/app.js?v=ldap-vcf-workflow-20260717-1" in page.text
+    assert "/static/app.css?v=ldap-console-20260718-1" in page.text
+    assert "/static/app.js?v=ldap-console-20260718-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -2372,6 +2372,33 @@ def test_backup_restore_page_exports_settings_archive(client):
     with SessionLocal() as db:
         event = db.execute(select(AuditEvent).where(AuditEvent.action == "export_settings_backup")).scalar_one()
         assert event.resource_type == "settings_backup"
+
+
+def test_settings_archive_round_trips_management_ipv6_gateway(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import PhysicalInterface
+    from labfoundry.app.services.settings_archive import export_settings_archive, restore_settings_archive
+
+    with SessionLocal() as db:
+        management = db.scalar(select(PhysicalInterface).where(PhysicalInterface.role == "management"))
+        assert management is not None
+        management.ipv6_enabled = True
+        management.ipv6_cidr = "2001:db8:49::10/64"
+        management.ipv6_gateway = "fe80::1"
+        db.commit()
+        management_name = management.name
+        archive = export_settings_archive(db, actor="test")
+        archived = next(row for row in archive["data"]["physical_interfaces"] if row["name"] == management_name)
+        assert archived["ipv6_gateway"] == "fe80::1"
+
+        restore_settings_archive(db, archive)
+        db.commit()
+        restored = db.scalar(select(PhysicalInterface).where(PhysicalInterface.name == management_name))
+        assert restored is not None
+        assert restored.ipv6_cidr == "2001:db8:49::10/64"
+        assert restored.ipv6_gateway == "fe80::1"
 
 
 def test_esxi_kickstart_api_hides_raw_content_from_read_only_tokens(client):
@@ -4428,7 +4455,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert response.status_code == 200
     assert "Logs" in response.text
     assert 'data-tab-storage-key="labfoundry:logs:active-tab"' in response.text
-    assert "VCFDT" not in response.text
+    assert 'data-log-source-tab="vcfdt"' not in response.text
     assert "LabFoundry App" in response.text
     assert "DNS" in response.text
     assert "DHCP" in response.text
@@ -8408,7 +8435,7 @@ def test_physical_and_vlan_pages_render(client):
     physical = client.get("/physical-interfaces")
     assert physical.status_code == 200
     assert "Physical Interfaces" in physical.text
-    assert "Review observed Photon NICs, then edit desired access, trunk, IPv4, management gateway, IPv6, and admin state" in physical.text
+    assert "Review observed Photon NICs, then edit desired access, trunk, IPv4/IPv6 addressing and management gateways, and admin state" in physical.text
     assert "physical-interfaces-table" in physical.text
     assert "Refresh host inventory" in physical.text
     assert "Observed IPv4" in physical.text
@@ -8417,6 +8444,7 @@ def test_physical_and_vlan_pages_render(client):
     assert "IPv4 Gateway" in physical.text
     assert "Management gateway" in physical.text
     assert "IPv6 CIDR" in physical.text
+    assert "IPv6 Gateway" in physical.text
     assert "network-state-icon up" in physical.text
     assert "eth0" in physical.text
     assert "192.168.49.1/24" in physical.text
@@ -8453,7 +8481,7 @@ def test_physical_and_vlan_pages_render(client):
     assert "physicalRoleFormatter" in app_js
     assert 'editable: (cell) => cell.getRow().getData().mode !== "trunk"' in app_js
     assert app_js.count('editable: (cell) => cell.getRow().getData().mode !== "trunk"') >= 3
-    assert 'role: "unused", ipv4_method: "static", ip_cidr: "", gateway: "", ipv6_enabled: false, ipv6_cidr: ""' in app_js
+    assert 'role: "unused", ipv4_method: "static", ip_cidr: "", gateway: "", ipv6_enabled: false, ipv6_cidr: "", ipv6_gateway: ""' in app_js
     assert "data.requires_activation && !data.is_activated" in app_js
     assert "cidrInputEditor" in app_js
     assert "isValidCidr" in app_js
@@ -8471,7 +8499,7 @@ def test_physical_and_vlan_pages_render(client):
     assert "/var/lib/labfoundry/apply/network/labfoundry-network.conf" in vlans.text
 
 
-def test_management_interface_gateway_is_saved_and_drives_table_100(client):
+def test_management_interface_dual_stack_gateways_are_saved_and_drive_main_and_table_100(client):
     import html
     import json
 
@@ -8494,6 +8522,9 @@ def test_management_interface_gateway_is_saved_and_drives_table_100(client):
             "ipv4_method": "static",
             "ip_cidr": "192.168.49.1/24",
             "gateway": "192.168.49.254",
+            "ipv6_enabled": "on",
+            "ipv6_cidr": "2001:db8:49::10/64",
+            "ipv6_gateway": "fe80::1",
             "mtu": "1500",
             "admin_state": "up",
             "csrf": csrf,
@@ -8504,16 +8535,21 @@ def test_management_interface_gateway_is_saved_and_drives_table_100(client):
     assert saved.status_code == 303
     refreshed = client.get("/physical-interfaces")
     assert '"gateway": "192.168.49.254"' in refreshed.text
+    assert '"ipv6_gateway": "fe80::1"' in refreshed.text
     assert "gateway=192.168.49.254" in refreshed.text
+    assert "ipv6_gateway=fe80::1" in refreshed.text
     assert "Static management gateways install in the main table and management policy table 100." in refreshed.text
     routes_wan = client.get("/routes-wan")
     assert "gateway=192.168.49.254" in routes_wan.text
     assert "ip route replace default via 192.168.49.254 dev eth0\n" in routes_wan.text
     assert "ip route replace default via 192.168.49.254 dev eth0 table 100" in routes_wan.text
+    assert "ip -6 route replace default via fe80::1 dev eth0\n" in routes_wan.text
+    assert "ip -6 route replace default via fe80::1 dev eth0 table 100" in routes_wan.text
     with SessionLocal() as db:
         row = db.scalar(select(PhysicalInterface).where(PhysicalInterface.id == management["id"]))
         assert row is not None
         assert row.gateway == "192.168.49.254"
+        assert row.ipv6_gateway == "fe80::1"
 
     invalid = client.post(
         f"/physical-interfaces/{management['id']}/edit",
@@ -9340,7 +9376,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "ldap-vcf-workflow-20260717-1" in page.text
+    assert "ldap-console-20260718-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

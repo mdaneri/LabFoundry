@@ -195,7 +195,7 @@ build {
 
   provisioner "shell" {
     inline = [
-      "mkdir -p /tmp/labfoundry-src/scripts /tmp/labfoundry-src/image/vmware-workstation /tmp/labfoundry-src/third_party"
+      "mkdir -p /tmp/labfoundry-src/scripts /tmp/labfoundry-src/image/common /tmp/labfoundry-src/image/vmware-workstation /tmp/labfoundry-src/third_party"
     ]
   }
 
@@ -232,6 +232,11 @@ build {
   provisioner "file" {
     source      = "systemd"
     destination = "/tmp/labfoundry-src/image/vmware-workstation/systemd"
+  }
+
+  provisioner "file" {
+    source      = "../common/systemd"
+    destination = "/tmp/labfoundry-src/image/common/systemd"
   }
 
   provisioner "file" {

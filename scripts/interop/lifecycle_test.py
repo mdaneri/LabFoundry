@@ -1843,6 +1843,16 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
     ).decode("ascii")
     checks = {
         **routing_host_check_commands(args),
+        "local_console": (
+            "systemctl is-active labfoundry-console.service && "
+            "systemctl is-enabled labfoundry-console.service && "
+            "test \"$(systemctl is-enabled getty@tty1.service 2>/dev/null)\" = masked && "
+            "test \"$(systemctl show getty@tty2.service -p LoadState --value)\" = loaded && "
+            "test \"$(systemctl show getty@tty2.service -p UnitFileState --value)\" != masked && "
+            "test -x /opt/labfoundry/.venv/bin/labfoundry-console && "
+            "/opt/labfoundry/bin/labfoundry-helper console status --real | "
+            "grep -F '\"maintenance_isolation\": false'"
+        ),
         "vcf_trust_dependencies": (
             f"printf %s {httpx_probe} | base64 -d | /opt/labfoundry/.venv/bin/python -"
         ),

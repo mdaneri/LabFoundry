@@ -5503,7 +5503,9 @@ async function autoSavePhysicalInterface(cell, csrf) {
   if (data.role !== "management" || data.mode === "trunk") data.gateway = "";
   if (!data.ipv6_enabled) {
     data.ipv6_cidr = "";
+    data.ipv6_gateway = "";
   }
+  if (data.role !== "management" || data.mode === "trunk" || !data.ipv6_cidr) data.ipv6_gateway = "";
   try {
     await postNetworkAction(`/physical-interfaces/${data.id}/edit`, data, csrf, { reload: false });
     showTransientGridStatus("Saved");
@@ -5527,7 +5529,9 @@ async function savePhysicalInterfaceRow(row, csrf, successMessage = "Saved") {
   if (data.role !== "management" || data.mode === "trunk") data.gateway = "";
   if (!data.ipv6_enabled) {
     data.ipv6_cidr = "";
+    data.ipv6_gateway = "";
   }
+  if (data.role !== "management" || data.mode === "trunk" || !data.ipv6_cidr) data.ipv6_gateway = "";
   try {
     await postNetworkAction(`/physical-interfaces/${data.id}/edit`, data, csrf, { reload: false });
     showTransientGridStatus(successMessage);
@@ -5587,6 +5591,7 @@ async function convertManagementDhcpInterfaceToStatic(row, csrf) {
     ipv4_method: data.ipv4_method,
     ip_cidr: data.ip_cidr,
     ipv6_cidr: data.ipv6_cidr,
+    ipv6_gateway: data.ipv6_gateway,
     ipv6_enabled: data.ipv6_enabled,
   };
   try {
@@ -5594,6 +5599,7 @@ async function convertManagementDhcpInterfaceToStatic(row, csrf) {
       ipv4_method: "static",
       ip_cidr: observedIpv4 || data.ip_cidr || "",
       ipv6_cidr: observedIpv6 || data.ipv6_cidr || "",
+      ipv6_gateway: "",
       ipv6_enabled: Boolean(observedIpv6 || data.ipv6_enabled),
     });
     await savePhysicalInterfaceRow(row, csrf, "Converted");
@@ -5831,7 +5837,7 @@ function initializePhysicalInterfacesTable() {
           width: 85,
           cellEdited: async (cell) => {
             if (!cell.getValue()) {
-              await cell.getRow().update({ ipv6_cidr: "" });
+              await cell.getRow().update({ ipv6_cidr: "", ipv6_gateway: "" });
             }
             await autoSavePhysicalInterface(cell, csrf);
             cell.getRow().reformat();
@@ -5854,6 +5860,28 @@ function initializePhysicalInterfacesTable() {
             return dnsAddRowHintFormatter(cell, "fd00:50::1/64");
           },
           minWidth: 180,
+          cellEdited: async (cell) => {
+            if (!cell.getValue()) {
+              await cell.getRow().update({ ipv6_gateway: "" });
+            }
+            await autoSavePhysicalInterface(cell, csrf);
+          },
+        },
+        {
+          title: "IPv6 Gateway",
+          field: "ipv6_gateway",
+          editor: "input",
+          editable: (cell) => {
+            const data = cell.getRow().getData();
+            return data.role === "management" && data.mode !== "trunk" && Boolean(data.ipv6_enabled && data.ipv6_cidr);
+          },
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.role !== "management" || data.mode === "trunk" || !data.ipv6_enabled || !data.ipv6_cidr) return "";
+            return dnsAddRowHintFormatter(cell, "fe80::1");
+          },
+          headerTooltip: "Optional static IPv6 gateway for management traffic. It must be link-local or on-link and is installed in the main table plus management route table 100.",
+          minWidth: 170,
           cellEdited: (cell) => autoSavePhysicalInterface(cell, csrf),
         },
         {
@@ -5866,7 +5894,7 @@ function initializePhysicalInterfacesTable() {
           width: 125,
           cellEdited: async (cell) => {
             if (cell.getValue() !== "management") {
-              await cell.getRow().update({ gateway: "" });
+              await cell.getRow().update({ gateway: "", ipv6_gateway: "" });
             }
             await autoSavePhysicalInterface(cell, csrf);
           },
@@ -5891,7 +5919,7 @@ function initializePhysicalInterfacesTable() {
           minWidth: 220,
           cellEdited: async (cell) => {
             if (cell.getValue() === "trunk") {
-              await cell.getRow().update({ role: "unused", ipv4_method: "static", ip_cidr: "", gateway: "", ipv6_enabled: false, ipv6_cidr: "" });
+              await cell.getRow().update({ role: "unused", ipv4_method: "static", ip_cidr: "", gateway: "", ipv6_enabled: false, ipv6_cidr: "", ipv6_gateway: "" });
             }
             await autoSavePhysicalInterface(cell, csrf);
             cell.getRow().reformat();

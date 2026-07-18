@@ -114,6 +114,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
                 ipv4_method="dhcp" if management_uses_dhcp else "static",
                 ipv6_enabled=settings.appliance_management_ipv6_enabled,
                 ipv6_cidr=settings.appliance_management_ipv6_cidr or None,
+                ipv6_gateway=settings.appliance_management_ipv6_gateway or None,
                 mtu=1500,
                 role="management",
                 mode="access",

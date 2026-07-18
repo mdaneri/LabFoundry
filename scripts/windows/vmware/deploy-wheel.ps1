@@ -11,6 +11,7 @@ param(
     [int]$ReadinessPollSeconds = 2,
     [switch]$SkipBuild,
     [switch]$SkipHelperSync,
+    [switch]$SkipConsoleAssetSync,
     [string]$WheelPath = '',
     [string]$SshPassword = $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD,
     [switch]$SkipHostCheck
@@ -227,10 +228,12 @@ function Invoke-PasswordBackedDeploy {
         [Parameter(Mandatory = $true)][string]$Password,
         [Parameter(Mandatory = $true)][string]$LocalWheelPath,
         [string]$LocalHelperPath = '',
+        [string]$LocalConsoleManagerPath = '',
         [Parameter(Mandatory = $true)][string]$LocalScriptPath,
         [Parameter(Mandatory = $true)][string]$RemoteDirectoryPath,
         [Parameter(Mandatory = $true)][string]$RemoteWheel,
         [string]$RemoteHelper = '',
+        [string]$RemoteConsoleManager = '',
         [Parameter(Mandatory = $true)][string]$RemoteScript,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
         [Parameter(Mandatory = $true)][int]$PollSeconds,
@@ -267,10 +270,12 @@ parser.add_argument("--host", required=True)
 parser.add_argument("--user", required=True)
 parser.add_argument("--local-wheel", required=True)
 parser.add_argument("--local-helper", default="")
+parser.add_argument("--local-console-manager", default="")
 parser.add_argument("--local-script", required=True)
 parser.add_argument("--remote-dir", required=True)
 parser.add_argument("--remote-wheel", required=True)
 parser.add_argument("--remote-helper", default="")
+parser.add_argument("--remote-console-manager", default="")
 parser.add_argument("--remote-script", required=True)
 parser.add_argument("--timeout", type=int, required=True)
 parser.add_argument("--poll", type=int, required=True)
@@ -286,6 +291,8 @@ uploads = [
 ]
 if args.local_helper:
     uploads.append((pathlib.Path(args.local_helper), args.remote_helper))
+if args.local_console_manager:
+    uploads.append((pathlib.Path(args.local_console_manager), args.remote_console_manager))
 
 client = paramiko.SSHClient()
 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -309,13 +316,15 @@ try:
         sftp.close()
 
     remote_helper_argument = args.remote_helper if args.local_helper else ""
+    remote_console_manager_argument = args.remote_console_manager if args.local_console_manager else ""
     command = (
         "sudo -S -p '' sh "
         f"{shell_quote(args.remote_script)} "
         f"{shell_quote(args.remote_wheel)} "
         f"{shell_quote(args.timeout)} "
         f"{shell_quote(args.poll)} "
-        f"{shell_quote(remote_helper_argument)}"
+        f"{shell_quote(remote_helper_argument)} "
+        f"{shell_quote(remote_console_manager_argument)}"
     )
     stdin, stdout, stderr = client.exec_command(command, get_pty=True, timeout=args.timeout + 60)
     stdin.write(password + "\n")
@@ -355,10 +364,12 @@ finally:
             '--user', $UserName,
             '--local-wheel', $LocalWheelPath,
             '--local-helper', $LocalHelperPath,
+            '--local-console-manager', $LocalConsoleManagerPath,
             '--local-script', $LocalScriptPath,
             '--remote-dir', $RemoteDirectoryPath,
             '--remote-wheel', $RemoteWheel,
             '--remote-helper', $RemoteHelper,
+            '--remote-console-manager', $RemoteConsoleManager,
             '--remote-script', $RemoteScript,
             '--timeout', "$TimeoutSeconds",
             '--poll', "$PollSeconds"
@@ -388,11 +399,16 @@ if (-not $SkipBuild) {
 $resolvedWheelPath = Get-WheelPath -Path $WheelPath -Root $resolvedRepoRoot
 $wheelName = Split-Path -Leaf $resolvedWheelPath
 $helperPath = Join-Path $resolvedRepoRoot 'scripts\appliance\labfoundry-helper'
+$consoleManagerPath = Join-Path $resolvedRepoRoot 'image\common\systemd\labfoundry-console-manager.conf'
 if (-not $SkipHelperSync -and -not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
     throw "LabFoundry helper script not found: $helperPath"
 }
+if (-not $SkipConsoleAssetSync -and -not (Test-Path -LiteralPath $consoleManagerPath -PathType Leaf)) {
+    throw "LabFoundry console manager config not found: $consoleManagerPath"
+}
 $remoteWheelPath = "$($RemoteDirectory.TrimEnd('/'))/$wheelName"
 $remoteHelperPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-helper"
+$remoteConsoleManagerPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-console-manager.conf"
 $remoteScriptPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-deploy-wheel.sh"
 
 if (-not $IpAddress) {
@@ -417,6 +433,7 @@ wheel="${1:?wheel path required}"
 timeout_seconds="${2:-60}"
 poll_seconds="${3:-2}"
 helper_path="${4:-}"
+console_manager_path="${5:-}"
 venv="/opt/labfoundry/.venv"
 python="$venv/bin/python"
 
@@ -430,9 +447,19 @@ if [ -n "$helper_path" ]; then
     install -o root -g root -m 0755 "$helper_path" /opt/labfoundry/bin/labfoundry-helper
     sed -i 's/\r$//' /opt/labfoundry/bin/labfoundry-helper
 fi
+if [ -n "$console_manager_path" ]; then
+    install -d -o root -g root -m 0755 /etc/systemd/system.conf.d
+    install -o root -g root -m 0644 "$console_manager_path" /etc/systemd/system.conf.d/labfoundry-console.conf
+    sed -i 's/\r$//' /etc/systemd/system.conf.d/labfoundry-console.conf
+    systemctl daemon-reexec
+fi
 find "$venv" -type d -exec chmod 755 {} \;
 find "$venv" -type f -exec chmod 644 {} \;
 find "$venv/bin" -type f -exec chmod 755 {} \;
+if systemctl cat labfoundry-console.service >/dev/null 2>&1; then
+    systemctl restart labfoundry-console.service
+    systemctl is-active labfoundry-console.service
+fi
 systemctl restart labfoundry
 systemctl is-active labfoundry
 deadline=$(( $(date +%s) + timeout_seconds ))
@@ -459,10 +486,15 @@ try {
     if (-not $SkipHelperSync) {
         $uploadPaths += $helperPath
     }
+    if (-not $SkipConsoleAssetSync) {
+        $uploadPaths += $consoleManagerPath
+    }
     $uploadPaths += $tempScript
 
     $remoteHelperArgument = if ($SkipHelperSync) { '' } else { $remoteHelperPath }
     $localHelperArgument = if ($SkipHelperSync) { '' } else { $helperPath }
+    $remoteConsoleManagerArgument = if ($SkipConsoleAssetSync) { '' } else { $remoteConsoleManagerPath }
+    $localConsoleManagerArgument = if ($SkipConsoleAssetSync) { '' } else { $consoleManagerPath }
     if ($SshPassword) {
         Write-Host "Uploading deployment files to $SshUser@$IpAddress`:$RemoteDirectory with password-backed SSH"
         Invoke-PasswordBackedDeploy `
@@ -472,10 +504,12 @@ try {
             -Password $SshPassword `
             -LocalWheelPath $resolvedWheelPath `
             -LocalHelperPath $localHelperArgument `
+            -LocalConsoleManagerPath $localConsoleManagerArgument `
             -LocalScriptPath $tempScript `
             -RemoteDirectoryPath $RemoteDirectory `
             -RemoteWheel $remoteWheelPath `
             -RemoteHelper $remoteHelperArgument `
+            -RemoteConsoleManager $remoteConsoleManagerArgument `
             -RemoteScript $remoteScriptPath `
             -TimeoutSeconds $ReadinessTimeoutSeconds `
             -PollSeconds $ReadinessPollSeconds `
@@ -485,7 +519,7 @@ try {
         Invoke-CheckedCommand -FilePath 'scp' -Arguments @($sshConnectionArguments + $uploadPaths + "${SshUser}@${IpAddress}:$RemoteDirectory/")
 
         Write-Host "Installing wheel and restarting labfoundry.service..."
-        Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument'")
+        Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument' '$remoteConsoleManagerArgument'")
     }
 
     if (-not $SkipHostCheck) {
