@@ -4,7 +4,7 @@ const LABFOUNDRY_ASSETS = [
   "/favicon.ico",
   "/static/offline.html",
   "/static/app.css?v=web-terminal-session-20260715-14",
-  "/static/app.js?v=management-main-route-20260716-1",
+  "/static/app.js?v=appliance-console-20260717-1",
   "/static/terminal.js?v=web-terminal-review-20260716-3",
   "/static/vendor/xterm/xterm.css?v=5.5.0",
   "/static/vendor/xterm/xterm.js?v=5.5.0",

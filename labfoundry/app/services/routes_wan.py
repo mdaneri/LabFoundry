@@ -328,6 +328,7 @@ def render_wan_config(
                 f"  ip_cidr={target.get('ip_cidr', '')}",
                 f"  ipv6_cidr={target.get('ipv6_cidr', '')}",
                 f"  gateway={target.get('gateway', '')}",
+                f"  ipv6_gateway={target.get('ipv6_gateway', '')}",
                 f"  ipv4_method={target.get('ipv4_method', 'static')}",
                 f"  routing_domain={target.get('routing_domain', 'lab')}",
                 f"  route_allowed={_bool_value(bool(target.get('route_allowed', True)))}",
@@ -456,34 +457,38 @@ def render_wan_config(
         management = target.get("routing_domain") == "management"
         table = MANAGEMENT_ROUTE_TABLE_ID if management else LAB_ROUTE_TABLE_ID
         priority = (1000 if management else 2000) + index
-        gateway = str(target.get("gateway", "") or "").strip()
-        try:
-            gateway_version = ip_address(gateway).version if gateway else None
-        except ValueError:
-            gateway_version = None
+        gateways = [
+            str(target.get(key, "") or "").strip()
+            for key in ("gateway", "ipv6_gateway")
+            if str(target.get(key, "") or "").strip()
+        ]
+        gateway_by_version: dict[int, str] = {}
+        for gateway in gateways:
+            try:
+                gateway_by_version[ip_address(gateway).version] = gateway
+            except ValueError:
+                continue
         for network in _target_networks(target):
             owner_index = target_network_owners[str(network)]
             if owner_index != index:
                 owner_name = targets[owner_index]["name"]
                 lines.append(f"# {network} on {target['name']} reuses the subnet owned by {owner_name}; no duplicate policy route generated")
                 continue
-            if management and gateway_version != network.version:
+            if management and network.version not in gateway_by_version:
                 lines.append(f"# {network} on {target['name']} has no management default gateway; the main routing table remains authoritative")
                 continue
             route_family = "-6 " if network.version == 6 else ""
             lines.append(f"ip {route_family}rule add from {network} table {table} priority {priority}")
             lines.append(f"ip {route_family}route replace {network} dev {target['name']} table {table}")
-        if management and gateway:
-            try:
-                gateway_address = ip_address(gateway)
-            except ValueError:
-                pass
-            else:
-                route_family = "-6 " if gateway_address.version == 6 else ""
+        if management and gateways:
+            for version, gateway in sorted(gateway_by_version.items()):
+                route_family = "-6 " if version == 6 else ""
                 lines.append(f"ip {route_family}route replace default via {gateway} dev {target['name']}")
                 lines.append(f"ip {route_family}route replace default via {gateway} dev {target['name']} table {MANAGEMENT_ROUTE_TABLE_ID}")
-        elif management and target.get("ipv4_method", "static") == "static":
-            lines.append(f"ip route del default dev {target['name']}  # no static management gateway configured")
+        if management and target.get("ipv4_method", "static") == "static" and not target.get("gateway"):
+            lines.append(f"ip route del default dev {target['name']}  # no static management IPv4 gateway configured")
+        if management and target.get("ipv6_cidr") and not target.get("ipv6_gateway"):
+            lines.append(f"ip -6 route del default dev {target['name']}  # no static management IPv6 gateway configured")
     if any(rule.enabled for rule in nat_rules):
         lines.append("nft -f /etc/labfoundry/nftables.d/labfoundry-nat.nft")
 

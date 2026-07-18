@@ -70,6 +70,30 @@ def test_render_wan_config_keeps_management_and_lab_route_tables_separate():
     assert "ip route replace 0.0.0.0/0 via 172.20.0.254 dev eth1 metric 100 table 200" in config
 
 
+def test_render_wan_config_emits_dual_stack_management_defaults_in_main_and_table_100():
+    config = render_wan_config(
+        [],
+        targets=[
+            {
+                "name": "eth0",
+                "kind": "physical",
+                "role": "management",
+                "ip_cidr": "192.168.49.10/24",
+                "ipv6_cidr": "2001:db8:49::10/64",
+                "gateway": "192.168.49.254",
+                "ipv6_gateway": "fe80::1",
+                "routing_domain": "management",
+                "route_allowed": False,
+            }
+        ],
+    )
+
+    assert "ip route replace default via 192.168.49.254 dev eth0\n" in config
+    assert "ip route replace default via 192.168.49.254 dev eth0 table 100" in config
+    assert "ip -6 route replace default via fe80::1 dev eth0\n" in config
+    assert "ip -6 route replace default via fe80::1 dev eth0 table 100" in config
+
+
 def test_render_wan_config_gives_management_ownership_of_duplicate_vlan_network():
     config = render_wan_config(
         [],

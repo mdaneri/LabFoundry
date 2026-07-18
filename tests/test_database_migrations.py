@@ -57,15 +57,16 @@ def test_physical_interface_ipv6_enabled_migration_backfills_only_static_ipv6(tm
         database.engine = migrated_engine
         database._ensure_sqlite_network_columns()
         connection = sqlite3.connect(db_path)
-        rows = connection.execute("SELECT id, ipv6_enabled FROM physical_interfaces ORDER BY id").fetchall()
+        rows = connection.execute("SELECT id, ipv6_enabled, ipv6_gateway FROM physical_interfaces ORDER BY id").fetchall()
         columns = {row[1] for row in connection.execute("PRAGMA table_info(physical_interfaces)").fetchall()}
         connection.close()
     finally:
         migrated_engine.dispose()
         database.engine = previous_engine
 
-    assert rows == [(1, 1), (2, 0), (3, 0)]
+    assert rows == [(1, 1, None), (2, 0, None), (3, 0, None)]
     assert "gateway" in columns
+    assert "ipv6_gateway" in columns
 
 
 def test_vcf_trust_target_migration_uses_api_port_uniqueness(tmp_path):

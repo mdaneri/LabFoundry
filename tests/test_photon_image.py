@@ -124,7 +124,7 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'LABFOUNDRY_MGMT_ACCESS_RULE="    iifname \\"$LABFOUNDRY_MGMT_INTERFACE\\" tcp dport { 22, 80, 443 } accept comment \\"LabFoundry management access\\""' in script
     assert "$LABFOUNDRY_MGMT_ACCESS_RULE" in script
     assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
-    assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper' in script
+    assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service /etc/systemd/system/labfoundry-console.service /etc/systemd/system.conf.d/labfoundry-console.conf "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper' in script
     assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
     assert "labfoundry-root-login.conf" in script
     assert "PermitRootLogin no" in script
@@ -881,6 +881,11 @@ def test_lifecycle_runner_covers_ca_vcf_backups_wan_noise_and_console_summary():
     assert "kms_files" in script
     assert "kms_service" in script
     assert "kms_tls" in script
+    assert '"local_console"' in script
+    assert "systemctl is-active labfoundry-console.service" in script
+    assert "systemctl is-enabled getty@tty1.service" in script
+    assert "systemctl show getty@tty2.service" in script
+    assert '\\"maintenance_isolation\\": false' in script
     assert "apply-kms-unit" in script
     assert "Appliance apply task failed" in script
     assert "/etc/labfoundry/kms/clients/certs/vcf-management.crt" in script

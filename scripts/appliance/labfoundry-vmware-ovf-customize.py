@@ -178,16 +178,19 @@ def validate_properties(properties: dict[str, str]) -> dict[str, object]:
     if not ipv6_enabled and (ipv6_cidr_value or ipv6_gateway_value):
         raise OvfCustomizationError("IPv6 CIDR and gateway require labfoundry.ipv6_enabled=true")
     if ipv6_enabled and ipv6_cidr_value:
-        if not ipv6_gateway_value:
-            raise OvfCustomizationError("labfoundry.ipv6_gateway is required when labfoundry.ipv6_cidr is supplied")
         try:
             ipv6_cidr = IPv6Interface(ipv6_cidr_value)
         except ValueError as exc:
             raise OvfCustomizationError("labfoundry.ipv6_cidr must be an IPv6 CIDR such as fd00:10::10/64") from exc
-        try:
-            ipv6_gateway = IPv6Address(ipv6_gateway_value)
-        except ValueError as exc:
-            raise OvfCustomizationError("labfoundry.ipv6_gateway must be an IPv6 address") from exc
+        if ipv6_gateway_value:
+            try:
+                ipv6_gateway = IPv6Address(ipv6_gateway_value)
+            except ValueError as exc:
+                raise OvfCustomizationError("labfoundry.ipv6_gateway must be an IPv6 address") from exc
+            if not ipv6_gateway.is_link_local and ipv6_gateway not in ipv6_cidr.network:
+                raise OvfCustomizationError("labfoundry.ipv6_gateway must be link-local or on-link for labfoundry.ipv6_cidr")
+            if ipv6_gateway == ipv6_cidr.ip:
+                raise OvfCustomizationError("labfoundry.ipv6_gateway cannot equal the management IPv6 address")
     elif ipv6_gateway_value:
         raise OvfCustomizationError("labfoundry.ipv6_gateway cannot be supplied without labfoundry.ipv6_cidr")
 
@@ -294,7 +297,9 @@ def write_networkd_config(config: dict[str, object]) -> None:
     elif config["ipv6_mode"] == "auto":
         lines.extend(["IPv6AcceptRA=yes", "LinkLocalAddressing=ipv6"])
     else:
-        lines.extend(["IPv6AcceptRA=no", "LinkLocalAddressing=ipv6", f"Address={config['ipv6_cidr']}", f"Gateway={config['ipv6_gateway']}"])
+        lines.extend(["IPv6AcceptRA=no", "LinkLocalAddressing=ipv6", f"Address={config['ipv6_cidr']}"])
+        if config["ipv6_gateway"]:
+            lines.append(f"Gateway={config['ipv6_gateway']}")
     lines.extend(f"DNS={server}" for server in config["dns_servers"])
     content = "\n".join(lines).strip() + "\n"
     NETWORKD_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -428,6 +433,7 @@ def apply_customization(config: dict[str, object], *, dry_run: bool = False) -> 
             "LABFOUNDRY_APPLIANCE_MANAGEMENT_CIDR": config["cidr"],
             "LABFOUNDRY_APPLIANCE_MANAGEMENT_IPV6_ENABLED": str(config["ipv6_enabled"]).lower(),
             "LABFOUNDRY_APPLIANCE_MANAGEMENT_IPV6_CIDR": config["ipv6_cidr"],
+            "LABFOUNDRY_APPLIANCE_MANAGEMENT_IPV6_GATEWAY": config["ipv6_gateway"],
             "LABFOUNDRY_APPLIANCE_ROOT_SSH_ENABLED": str(config["root_ssh_enabled"]).lower(),
             "LABFOUNDRY_APPLIANCE_EXTERNAL_DNS_SERVERS": ",".join(config["dns_servers"]),
             "LABFOUNDRY_APPLIANCE_NTP_SERVERS": ",".join(config["ntp_servers"]),

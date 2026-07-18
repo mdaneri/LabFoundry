@@ -253,7 +253,7 @@ def management_dhcp_dns_context(interfaces: list[PhysicalInterface]) -> tuple[di
     return management, servers
 
 
-def management_interface_context(interfaces: list[PhysicalInterface]) -> dict[str, str]:
+def management_interface_context(interfaces: list[PhysicalInterface]) -> dict[str, Any]:
     candidates = [interface for interface in interfaces if interface.role == "management"] + [
         interface for interface in interfaces if interface.name == "eth0"
     ]
@@ -262,20 +262,33 @@ def management_interface_context(interfaces: list[PhysicalInterface]) -> dict[st
         if interface.name in seen:
             continue
         seen.add(interface.name)
-        candidate_cidr = interface.host_ip_cidr if normalize_ipv4_method(interface.ipv4_method) == "dhcp" else interface.ip_cidr
-        if not candidate_cidr:
-            continue
-        try:
-            parsed = ip_interface(candidate_cidr)
-        except ValueError:
+        ipv4_cidr = interface.host_ip_cidr if normalize_ipv4_method(interface.ipv4_method) == "dhcp" else interface.ip_cidr
+        ipv6_cidr = (interface.ipv6_cidr or interface.host_ipv6_cidr) if interface.ipv6_enabled else None
+        addresses: list[str] = []
+        for candidate_cidr in (ipv4_cidr, ipv6_cidr):
+            if not candidate_cidr:
+                continue
+            try:
+                parsed = ip_interface(candidate_cidr)
+            except ValueError:
+                continue
+            if parsed.ip.is_link_local:
+                continue
+            address = str(parsed.ip)
+            if address not in addresses:
+                addresses.append(address)
+        if not addresses:
             continue
         return {
             "name": interface.name,
-            "ip": str(parsed.ip),
-            "ip_cidr": candidate_cidr,
+            "ip": addresses[0],
+            "ip_cidr": ipv4_cidr or ipv6_cidr or "",
+            "ipv4_cidr": ipv4_cidr or "",
+            "ipv6_cidr": ipv6_cidr or "",
+            "addresses": addresses,
             "ipv4_method": normalize_ipv4_method(interface.ipv4_method),
         }
-    return {"name": "", "ip": "", "ip_cidr": "", "ipv4_method": "static"}
+    return {"name": "", "ip": "", "ip_cidr": "", "ipv4_cidr": "", "ipv6_cidr": "", "addresses": [], "ipv4_method": "static"}
 
 
 def validate_appliance_settings(

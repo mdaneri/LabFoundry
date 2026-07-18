@@ -1,6 +1,8 @@
 import json
 import logging
 
+import pytest
+
 from labfoundry.app.models import ApplianceSettings, AuditEvent, CaSettings, DhcpScope, DhcpSettings, DnsSettings, Job, KmsSettings, NatRule, PhysicalInterface, Route, RoutingRule, Setting, VlanInterface
 from labfoundry.app.services.networking import (
     HostPhysicalInterface,
@@ -561,6 +563,26 @@ def test_render_network_config_persists_automatic_ipv6_state():
     assert "  ipv6_cidr=" in config
 
 
+def test_render_network_config_persists_optional_management_ipv6_gateway():
+    config = render_network_config(
+        interfaces=[
+            PhysicalInterface(
+                name="eth0",
+                mac_address="00:15:5d:aa:bb:01",
+                ip_cidr="192.168.49.10/24",
+                ipv6_enabled=True,
+                ipv6_cidr="2001:db8:49::10/64",
+                ipv6_gateway="fe80::1",
+                role="management",
+                mode="access",
+            )
+        ],
+        vlans=[],
+    )
+
+    assert "  ipv6_gateway=fe80::1" in config
+
+
 def test_validate_network_state_rejects_ipv6_cidr_while_disabled():
     errors = validate_network_state(
         interfaces=[
@@ -579,6 +601,58 @@ def test_validate_network_state_rejects_ipv6_cidr_while_disabled():
     )
 
     assert "Interface eth0 cannot set an IPv6 CIDR while IPv6 is disabled." in errors
+
+
+@pytest.mark.parametrize(
+    ("gateway", "message"),
+    [
+        ("192.168.49.1", "wrong IP family"),
+        ("2001:db8:50::1", "not link-local or on-link"),
+        ("2001:db8:49::10", "cannot equal"),
+    ],
+)
+def test_validate_network_state_rejects_invalid_management_ipv6_gateway(gateway, message):
+    errors = validate_network_state(
+        interfaces=[
+            PhysicalInterface(
+                name="eth0",
+                mac_address="00:15:5d:aa:bb:01",
+                ip_cidr="192.168.49.10/24",
+                ipv6_enabled=True,
+                ipv6_cidr="2001:db8:49::10/64",
+                ipv6_gateway=gateway,
+                role="management",
+                mode="access",
+                mtu=1500,
+                admin_state="up",
+            )
+        ],
+        vlans=[],
+    )
+
+    assert any(message in error for error in errors)
+
+
+def test_validate_network_state_accepts_link_local_management_ipv6_gateway():
+    errors = validate_network_state(
+        interfaces=[
+            PhysicalInterface(
+                name="eth0",
+                mac_address="00:15:5d:aa:bb:01",
+                ip_cidr="192.168.49.10/24",
+                ipv6_enabled=True,
+                ipv6_cidr="2001:db8:49::10/64",
+                ipv6_gateway="fe80::1",
+                role="management",
+                mode="access",
+                mtu=1500,
+                admin_state="up",
+            )
+        ],
+        vlans=[],
+    )
+
+    assert errors == []
 
 
 def test_validate_network_state_rejects_static_management_without_ipv4():

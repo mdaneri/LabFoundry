@@ -68,6 +68,7 @@ COMMANDS: dict[str, set[str]] = {
     "public-services": {"validate", "apply"},
     "appliance-update": {"check", "apply", "restart-service"},
     "appliance-power": {"reboot", "shutdown"},
+    "console": {"disable-services", "restore-services", "status"},
     "wan": {"validate", "apply"},
 }
 SYSTEMD_RUN_REAL_ACTIONS = {
@@ -96,12 +97,26 @@ NO_PATH_ACTIONS = {
     ("appliance-power", "reboot"),
     ("appliance-power", "shutdown"),
     ("web-terminal", "status"),
+    ("console", "disable-services"),
+    ("console", "restore-services"),
+    ("console", "status"),
     ("vcf-offline-depot", "generate-software-depot-id"),
     ("vcf-offline-depot", "reset-tool"),
 }
 NON_PATH_ARGUMENT_ACTIONS = {("local-users", "authenticate")}
 LABFOUNDRY_SERVICE_USER = "labfoundry"
 LABFOUNDRY_STATE_DIR = Path("/var/lib/labfoundry")
+CONSOLE_STATE_DIR = LABFOUNDRY_STATE_DIR / "console"
+CONSOLE_SERVICE_STATE_PATH = CONSOLE_STATE_DIR / "services.json"
+CONSOLE_MANAGED_SERVICE_UNITS = (
+    "labfoundry.service",
+    "nginx.service",
+    "sshd.service",
+    "dnsmasq.service",
+    "chronyd.service",
+    "slapd.service",
+    "labfoundry-kms.service",
+)
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
 LABFOUNDRY_APPLY_DIR = LABFOUNDRY_STATE_DIR / "apply"
 FIREWALL_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
@@ -3695,9 +3710,10 @@ def _systemd_networkd_files(path: Path) -> tuple[dict[str, str], list[str], list
             if ipv6_enabled and interface.get("ipv6_cidr"):
                 static_management_cidrs.append(interface["ipv6_cidr"])
             gateway_candidates = []
-            if "gateway" in interface:
-                if interface.get("gateway"):
-                    gateway_candidates.append(interface["gateway"])
+            if "gateway" in interface or "ipv6_gateway" in interface:
+                for key in ("gateway", "ipv6_gateway"):
+                    if interface.get(key):
+                        gateway_candidates.append(interface[key])
             else:
                 gateway_candidates.extend(preserved_management["Gateway"])
                 if shutil.which("ip") is not None:
@@ -3821,6 +3837,29 @@ def _network_config_errors(path: Path) -> list[str]:
             errors.append(f"Interface {name or '<missing>'} IPv6 enabled value {ipv6_enabled_value or '<missing>'} is invalid.")
         if ipv6_enabled_value == "false" and interface.get("ipv6_cidr"):
             errors.append(f"Interface {name or '<missing>'} cannot set an IPv6 CIDR while IPv6 is disabled.")
+        if ipv6_enabled_value == "false" and interface.get("ipv6_gateway"):
+            errors.append(f"Interface {name or '<missing>'} cannot set an IPv6 gateway while IPv6 is disabled.")
+        ipv6_gateway = interface.get("ipv6_gateway", "").strip()
+        if ipv6_gateway:
+            if role != "management" or ipv6_enabled_value != "true" or not interface.get("ipv6_cidr"):
+                errors.append(
+                    f"Interface {name or '<missing>'} can set an IPv6 gateway only when it is management with static IPv6."
+                )
+            else:
+                try:
+                    gateway_address = ip_address(ipv6_gateway)
+                    interface_address = ip_interface(interface["ipv6_cidr"])
+                except ValueError:
+                    errors.append(f"Interface {name or '<missing>'} IPv6 gateway {ipv6_gateway} is invalid.")
+                else:
+                    if gateway_address.version != 6:
+                        errors.append(f"Interface {name or '<missing>'} IPv6 gateway {ipv6_gateway} uses the wrong IP family.")
+                    elif not gateway_address.is_link_local and gateway_address not in interface_address.network:
+                        errors.append(
+                            f"Interface {name or '<missing>'} IPv6 gateway {ipv6_gateway} is not link-local or on-link for {interface['ipv6_cidr']}."
+                        )
+                    elif gateway_address == interface_address.ip:
+                        errors.append(f"Interface {name or '<missing>'} IPv6 gateway cannot equal its interface address.")
         for key, version, label in [("ip_cidr", 4, "IPv4 CIDR"), ("ipv6_cidr", 6, "IPv6 CIDR")]:
             value = interface.get(key, "")
             if not value:
@@ -4505,9 +4544,9 @@ def _runtime_default_gateways_for_interface(interface_name: str) -> list[str]:
 
 def _management_default_gateways_for_target(target: dict[str, str]) -> list[str]:
     target_networks = _target_networks(target)
-    if "gateway" in target:
-        configured = target.get("gateway", "").strip()
-        return _usable_management_default_gateways(target_networks, [configured] if configured else [])
+    if "gateway" in target or "ipv6_gateway" in target:
+        configured = [target.get(key, "").strip() for key in ("gateway", "ipv6_gateway")]
+        return _usable_management_default_gateways(target_networks, [gateway for gateway in configured if gateway])
     candidates: list[str] = []
     interface_name = target.get("name", "")
     preserved = _read_existing_management_network_values()
@@ -4567,6 +4606,10 @@ def _apply_wan_target_routes(parsed: dict[str, list[dict[str, str]]]) -> int:
                 and target.get("ipv4_method", "static").strip().lower() == "static"
             ):
                 result = _run_default_gateway_route_delete(interface_name, None, 4)
+                if result != 0:
+                    return result
+            if "ipv6_gateway" in target and not target.get("ipv6_gateway", "").strip() and target.get("ipv6_cidr", "").strip():
+                result = _run_default_gateway_route_delete(interface_name, None, 6)
                 if result != 0:
                     return result
     return 0
@@ -6031,6 +6074,129 @@ def _restart_labfoundry_service_after_update() -> int:
     return result.returncode
 
 
+def _console_unit_state(unit: str) -> dict[str, object] | None:
+    load_state = _run(["systemctl", "show", "--property=LoadState", "--value", unit])
+    if load_state.returncode != 0 or load_state.stdout.strip() == "not-found":
+        return None
+    enabled = _run(["systemctl", "is-enabled", unit])
+    active = _run(["systemctl", "is-active", unit])
+    return {
+        "unit": unit,
+        "enabled": enabled.returncode == 0,
+        "enabled_state": enabled.stdout.strip() or enabled.stderr.strip(),
+        "active": active.returncode == 0,
+        "active_state": active.stdout.strip() or active.stderr.strip(),
+    }
+
+
+def _write_console_service_state(payload: dict[str, object]) -> None:
+    CONSOLE_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONSOLE_STATE_DIR, 0o700)
+    temporary = CONSOLE_SERVICE_STATE_PATH.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, CONSOLE_SERVICE_STATE_PATH)
+
+
+def _disable_console_managed_services() -> int:
+    if CONSOLE_SERVICE_STATE_PATH.exists():
+        print(json.dumps({"console": "maintenance isolation already enabled", "state_path": str(CONSOLE_SERVICE_STATE_PATH)}, sort_keys=True))
+        return 0
+    units = [state for unit in CONSOLE_MANAGED_SERVICE_UNITS if (state := _console_unit_state(unit)) is not None]
+    _write_console_service_state(
+        {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "preserved": ["labfoundry-console.service", "systemd-networkd.service", "systemd-resolved.service", "labfoundry-firewall.service"],
+            "units": units,
+        }
+    )
+    failures: list[dict[str, object]] = []
+    for state in units:
+        unit = str(state["unit"])
+        result = _run(["systemctl", "disable", "--now", unit])
+        if result.returncode != 0:
+            failures.append({"unit": unit, "returncode": result.returncode, "error": (result.stderr or result.stdout).strip()})
+    payload = {
+        "console": "maintenance isolation enabled" if not failures else "maintenance isolation completed with failures",
+        "disabled_units": [str(state["unit"]) for state in units],
+        "preserved": ["local console", "management networking", "resolver", "firewall"],
+        "failures": failures,
+        "state_path": str(CONSOLE_SERVICE_STATE_PATH),
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 1 if failures else 0
+
+
+def _restore_console_managed_services() -> int:
+    if not CONSOLE_SERVICE_STATE_PATH.exists():
+        print(json.dumps({"console": "maintenance isolation is not enabled"}, sort_keys=True))
+        return 0
+    try:
+        payload = json.loads(CONSOLE_SERVICE_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"unable to read console service state: {exc}", file=sys.stderr)
+        return 1
+    units = payload.get("units") if isinstance(payload, dict) else None
+    if not isinstance(units, list):
+        print("console service state does not contain a units list", file=sys.stderr)
+        return 1
+    failures: list[dict[str, object]] = []
+    restored: list[str] = []
+    for state in units:
+        if not isinstance(state, dict) or str(state.get("unit") or "") not in CONSOLE_MANAGED_SERVICE_UNITS:
+            continue
+        unit = str(state["unit"])
+        commands: list[list[str]] = []
+        if bool(state.get("enabled")):
+            commands.append(["systemctl", "enable", unit])
+        if bool(state.get("active")):
+            commands.append(["systemctl", "start", unit])
+        unit_failed = False
+        for command in commands:
+            result = _run(command)
+            if result.returncode != 0:
+                failures.append({"unit": unit, "returncode": result.returncode, "error": (result.stderr or result.stdout).strip()})
+                unit_failed = True
+                break
+        if not unit_failed:
+            restored.append(unit)
+    if not failures:
+        CONSOLE_SERVICE_STATE_PATH.unlink(missing_ok=True)
+    result_payload = {
+        "console": "maintenance isolation disabled" if not failures else "maintenance isolation restore failed",
+        "restored_units": restored,
+        "failures": failures,
+        "state_path": str(CONSOLE_SERVICE_STATE_PATH),
+    }
+    print(json.dumps(result_payload, sort_keys=True))
+    return 1 if failures else 0
+
+
+def _handle_console(action: str, args: list[str]) -> int:
+    if args:
+        print(f"console {action} does not accept a path", file=sys.stderr)
+        return 2
+    if action == "status":
+        print(
+            json.dumps(
+                {
+                    "maintenance_isolation": CONSOLE_SERVICE_STATE_PATH.exists(),
+                    "state_path": str(CONSOLE_SERVICE_STATE_PATH),
+                    "managed_units": list(CONSOLE_MANAGED_SERVICE_UNITS),
+                    "preserved": ["labfoundry-console.service", "systemd-networkd.service", "systemd-resolved.service", "labfoundry-firewall.service"],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if action == "disable-services":
+        return _disable_console_managed_services()
+    if action == "restore-services":
+        return _restore_console_managed_services()
+    print(f"unsupported console action: {action}", file=sys.stderr)
+    return 2
+
+
 def _schedule_appliance_power(action: str) -> int:
     systemctl = _command_path("systemctl")
     systemd_run = shutil.which("systemd-run")
@@ -6182,6 +6348,8 @@ def main(argv: list[str]) -> int:
         return _handle_appliance_update(action, normalized_args)
     if group == "appliance-power":
         return _handle_appliance_power(action, normalized_args)
+    if group == "console":
+        return _handle_console(action, normalized_args)
 
     print("real helper execution is not implemented for this apply unit", file=sys.stderr)
     return 78

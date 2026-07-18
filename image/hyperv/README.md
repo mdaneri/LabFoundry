@@ -106,6 +106,15 @@ image build. `bootstrap_admin_password` is the initial LabFoundry web login
 password for `admin`. If `bootstrap_admin_password` is omitted, the build falls
 back to `ssh_password` for compatibility with early appliance images.
 
+Provisioned appliances install `python3-curses` and run the root-owned
+`labfoundry-console.service` exclusively on `/dev/tty1`. Provisioning masks only
+`getty@tty1.service`; switching to tty2 or a later virtual terminal starts the
+normal Photon login flow. The recovery console edits only management IPv4/IPv6,
+DNS, ordinary NTP sources, persistent Firewall state, and reversible service
+isolation. F3 temporarily runs `top`; F4 opens a separately authenticated and
+audited root Bash session; and exiting either restores the appliance screen.
+See [Local appliance console](../../docs/appliance-console.md).
+
 If Packer prints `Using SSH communicator to connect: <ip>` and waits even
 though the VM is reachable, test the exact same credentials from the Windows
 host:
