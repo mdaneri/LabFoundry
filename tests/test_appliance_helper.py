@@ -178,6 +178,18 @@ def test_ldap_helper_renders_separate_mdb_acl_overlays_and_configurable_listener
     assert helper._ldap_listener_urls(payload["service"]) == "ldapi:/// ldap://192.168.49.1:1389/"
 
 
+def test_plaintext_only_ldap_validation_does_not_require_tls_files(monkeypatch):
+    helper = load_helper_module()
+    payload = ldap_payload(enabled=True)
+    payload["service"].update({"ldaps_enabled": False, "ldap_enabled": True, "ldap_port": 1389})
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/bin/{command}")
+
+    errors = helper._ldap_config_errors(payload)
+
+    assert not any("LDAP certificate" in error or "LDAP private key" in error or "LDAP root CA" in error for error in errors)
+    assert errors == []
+
+
 def test_ldap_render_can_use_isolated_validation_data_root(tmp_path):
     helper = load_helper_module()
     payload = ldap_payload()

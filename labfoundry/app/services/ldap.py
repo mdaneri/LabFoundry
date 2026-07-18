@@ -171,6 +171,15 @@ def clear_pending_ldap_password(user: LdapUser) -> None:
         LDAP_PENDING_PASSWORDS.pop(user.id, None)
 
 
+def invalidate_ldap_user_password_for_uid_change(user: LdapUser, new_uid: str) -> None:
+    if user.uid == new_uid or has_pending_ldap_password(user):
+        return
+    if user.password_status == "applied" or user.password_applied_at is not None:
+        user.password_status = "not_staged"
+        user.password_applied_at = None
+        user.updated_at = utcnow()
+
+
 def mark_ldap_apply_complete(users: list[LdapUser]) -> None:
     applied_at = utcnow()
     for user in users:

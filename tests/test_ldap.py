@@ -13,6 +13,7 @@ from labfoundry.app.services.ldap import (
     validate_ldap_password,
     validate_ldap_recovery_payload,
     vcf_ldap_settings,
+    mark_ldap_apply_complete,
 )
 
 
@@ -133,6 +134,40 @@ def test_ldap_api_rejects_cross_organization_membership_and_nested_cycle(client)
     )
     assert cycle.status_code == 400
     assert "cycle" in cycle.json()["detail"].lower()
+
+
+def test_ldap_uid_change_marks_applied_password_not_staged(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+
+    token = api_token(client, ["read:ldap", "write:ldap"])
+    headers = {"Authorization": f"Bearer {token}"}
+    organization = client.post("/api/v1/ldap/organizations", headers=headers, json={"name": "Rename Org"}).json()
+    created = client.post(
+        f"/api/v1/ldap/organizations/{organization['id']}/users",
+        headers=headers,
+        json={"uid": "before-rename", "enabled": True, "password": "VeryStrong1!Directory"},
+    )
+    assert created.status_code == 201, created.text
+
+    with SessionLocal() as db:
+        user = db.execute(select(LdapUser).where(LdapUser.id == created.json()["id"])).scalar_one()
+        mark_ldap_apply_complete([user])
+        db.commit()
+
+    renamed = client.put(
+        f"/api/v1/ldap/users/{created.json()['id']}",
+        headers=headers,
+        json={"uid": "after-rename", "enabled": True},
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["uid"] == "after-rename"
+    assert renamed.json()["password_status"] == "not_staged"
+
+    with SessionLocal() as db:
+        user = db.execute(select(LdapUser).where(LdapUser.id == created.json()["id"])).scalar_one()
+        assert user.password_applied_at is None
 
 
 def test_ldap_password_policy_and_renderer_never_expose_unstaged_hashes():

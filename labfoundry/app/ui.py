@@ -356,6 +356,7 @@ from labfoundry.app.services.ldap import (
     ldap_organization_to_dict,
     ldap_settings_to_dict,
     ldap_user_to_dict,
+    invalidate_ldap_user_password_for_uid_change,
     manual_vcf_bundle,
     mark_ldap_apply_complete,
     normalize_dn,
@@ -8141,7 +8142,12 @@ def execute_appliance_apply_unit(unit: dict[str, Any], *, adapter: SystemAdapter
             mark_local_users_failed(users, error)
     if unit_id == "esxi_pxe" and succeeded and not any(result.dry_run for result in results):
         mark_kickstarts_applied(list(context["esxi_kickstarts"]))
-    if unit_id == "ldap" and succeeded and not any(result.dry_run for result in results):
+    if (
+        unit_id == "ldap"
+        and context["ldap_settings"].enabled
+        and succeeded
+        and not any(result.dry_run for result in results)
+    ):
         mark_ldap_apply_complete(
             [user for organization in context["ldap_organizations"] for user in organization.users]
         )
@@ -12690,6 +12696,7 @@ def edit_ldap_user_from_ui(
     normalized_uid = uid.strip().lower()
     if not LDAP_UID_PATTERN.fullmatch(normalized_uid):
         raise HTTPException(status_code=400, detail="LDAP uid contains unsupported characters.")
+    invalidate_ldap_user_password_for_uid_change(user, normalized_uid)
     user.uid = normalized_uid
     user.given_name = given_name.strip()
     user.surname = surname.strip() or normalized_uid

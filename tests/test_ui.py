@@ -8430,6 +8430,51 @@ def test_appliance_apply_unit_separates_secret_staging_from_snapshot_change_mark
     assert _redact_task_value({"payload_b64": "c2xhcGNhdC1wYXNzd29yZC1oYXNoZXM="}) == {"payload_b64": "[redacted]"}
 
 
+def test_disabled_ldap_apply_keeps_staged_user_password_pending(monkeypatch):
+    from types import SimpleNamespace
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.models import LdapSettings, LdapUser
+    from labfoundry.app.services.ldap import clear_pending_ldap_password, has_pending_ldap_password, stage_ldap_user_password
+    from labfoundry.app.ui import execute_appliance_apply_unit
+
+    settings = LdapSettings(enabled=False)
+    user = LdapUser(id=98765, uid="pending-user", surname="User", display_name="Pending User", enabled=True)
+    stage_ldap_user_password(user, "VeryStrong1!Directory", settings)
+
+    class SuccessfulLdapAdapter:
+        dry_run = False
+
+        @staticmethod
+        def validate_ldap_config(path):
+            return AdapterResult(["ldap", "validate", path], False)
+
+        @staticmethod
+        def apply_ldap_config(path):
+            return AdapterResult(["ldap", "apply", path], False)
+
+    monkeypatch.setattr("labfoundry.app.ui.stage_appliance_apply_config", lambda _path, _preview: "disabled-ldap.json")
+    unit = {
+        "id": "ldap",
+        "label": "Managed LDAP",
+        "context": {"ldap_settings": settings, "ldap_organizations": [SimpleNamespace(users=[user])]},
+        "raw_config_preview": "{}",
+        "summary": ["service disabled"],
+        "validation_errors": [],
+        "validation_warnings": [],
+        "config_path": "/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json",
+        "config_preview": "{}",
+        "config_diff": "",
+    }
+    try:
+        result = execute_appliance_apply_unit(unit, adapter=SuccessfulLdapAdapter())
+        assert result["success"] is True
+        assert user.password_status == "pending_apply"
+        assert has_pending_ldap_password(user) is True
+    finally:
+        clear_pending_ldap_password(user)
+
+
 def test_physical_and_vlan_pages_render(client):
     login(client)
     physical = client.get("/physical-interfaces")

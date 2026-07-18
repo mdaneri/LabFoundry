@@ -148,6 +148,7 @@ from labfoundry.app.services.ldap import (
     ldap_organization_to_dict,
     ldap_settings_to_dict,
     ldap_user_to_dict,
+    invalidate_ldap_user_password_for_uid_change,
     manual_vcf_bundle,
     normalize_dn,
     normalize_ldap_slug,
@@ -3289,6 +3290,7 @@ def update_ldap_user(
     user = db.get(LdapUser, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="LDAP user not found")
+    invalidate_ldap_user_password_for_uid_change(user, payload.uid.strip().lower())
     _apply_ldap_user_payload(user, payload)
     try:
         if payload.password:

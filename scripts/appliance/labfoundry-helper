@@ -1755,7 +1755,7 @@ def _ldap_config_errors(payload: dict) -> list[str]:
 
         for group_id in edges:
             visit(group_id)
-    if service.get("enabled"):
+    if service.get("enabled") and service.get("ldaps_enabled"):
         for path_value, label, private_key in [
             (service.get("certificate_path"), "LDAP certificate", False),
             (service.get("key_path"), "LDAP private key", True),
@@ -1774,6 +1774,7 @@ def _ldap_config_errors(payload: dict) -> list[str]:
                 errors.extend(_pem_errors(path.read_text(encoding="utf-8"), label, private_key=private_key))
             except OSError as exc:
                 errors.append(str(exc))
+    if service.get("enabled"):
         for command in ("slapd", "slaptest", "ldapmodify", "ldapsearch", "ldapdelete"):
             if shutil.which(command) is None:
                 errors.append(f"{command} command not found")
