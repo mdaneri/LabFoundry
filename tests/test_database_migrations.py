@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 
 def test_existing_database_startup_adds_job_steps_table(tmp_path):
     from labfoundry.app import database
@@ -96,6 +98,66 @@ def test_ldap_listener_migration_adds_protocol_controls_and_ports(tmp_path):
 
     assert row == (1, 1636, 0, 389)
     assert {"ldaps_enabled", "ldap_enabled", "ldap_port"} <= columns
+
+
+def test_ca_migration_deduplicates_managed_owners_and_enforces_uniqueness(tmp_path):
+    from labfoundry.app import database
+
+    db_path = tmp_path / "legacy-ca.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE ca_certificates (
+            id INTEGER PRIMARY KEY,
+            common_name VARCHAR(180) NOT NULL,
+            status VARCHAR(40) NOT NULL,
+            certificate_pem TEXT DEFAULT '',
+            private_key_encrypted TEXT DEFAULT '',
+            managed_owner VARCHAR(120) DEFAULT ''
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO ca_certificates (
+            id, common_name, status, certificate_pem, private_key_encrypted, managed_owner
+        ) VALUES
+            (1, 'ldap-old.example.test', 'planned', '', '', 'ldap:ldaps'),
+            (2, 'ldap.example.test', 'issued', 'certificate', 'encrypted-key', 'ldap:ldaps'),
+            (3, 'manual-one.example.test', 'planned', '', '', ''),
+            (4, 'manual-two.example.test', 'planned', '', '', '')
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    previous_engine = database.engine
+    migrated_engine = database.create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    try:
+        database.engine = migrated_engine
+        database._ensure_sqlite_ca_columns()
+        connection = sqlite3.connect(db_path)
+        managed_rows = connection.execute(
+            "SELECT id, status FROM ca_certificates WHERE managed_owner = 'ldap:ldaps'"
+        ).fetchall()
+        manual_count = connection.execute(
+            "SELECT COUNT(*) FROM ca_certificates WHERE managed_owner = ''"
+        ).fetchone()[0]
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO ca_certificates (
+                    common_name, status, certificate_pem, private_key_encrypted, managed_owner
+                ) VALUES ('duplicate.example.test', 'planned', '', '', 'ldap:ldaps')
+                """
+            )
+        connection.close()
+    finally:
+        migrated_engine.dispose()
+        database.engine = previous_engine
+
+    assert managed_rows == [(2, "issued")]
+    assert manual_count == 2
 
 
 def test_vcf_trust_target_migration_uses_api_port_uniqueness(tmp_path):

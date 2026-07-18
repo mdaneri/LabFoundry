@@ -288,6 +288,41 @@ def _ensure_sqlite_ca_columns() -> None:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(text(f"ALTER TABLE ca_certificates ADD COLUMN {name} {definition}"))
+            connection.execute(
+                text(
+                    """
+                    DELETE FROM ca_certificates
+                    WHERE id IN (
+                        SELECT id
+                        FROM (
+                            SELECT
+                                id,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY managed_owner
+                                    ORDER BY
+                                        CASE
+                                            WHEN status = 'issued'
+                                                AND COALESCE(certificate_pem, '') <> ''
+                                                AND COALESCE(private_key_encrypted, '') <> '' THEN 0
+                                            WHEN status = 'issued' THEN 1
+                                            ELSE 2
+                                        END,
+                                        id
+                                ) AS duplicate_position
+                            FROM ca_certificates
+                            WHERE COALESCE(managed_owner, '') <> ''
+                        ) ranked_managed_certificates
+                        WHERE duplicate_position > 1
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_ca_certificates_managed_owner "
+                    "ON ca_certificates (managed_owner) WHERE managed_owner <> ''"
+                )
+            )
 
 
 def _ensure_sqlite_vcf_depot_columns() -> None:

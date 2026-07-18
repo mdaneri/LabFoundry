@@ -976,6 +976,10 @@ def ensure_ca_state(db: Session) -> list[str]:
         changed = ensure_ca_issued_state(db, settings=settings, profiles=profiles, certificates=certificates) or changed
         if changed:
             db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if "ca_certificates.managed_owner" not in str(exc):
+            raise
     except ValueError as exc:
         db.rollback()
         errors.append(str(exc))
