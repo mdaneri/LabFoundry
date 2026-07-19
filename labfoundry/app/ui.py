@@ -1,3 +1,4 @@
+import csv
 import difflib
 import hashlib
 import io
@@ -5418,6 +5419,11 @@ SERVICE_ADMIN_CANCELLABLE_JOB_TYPES = {
 }
 TASK_SECRET_KEY_RE = re.compile(r"(password|passwd|secret|token|credential|authorization|activation|private[_-]?key|api[_-]?key|payload[_-]?b64)", re.IGNORECASE)
 TASK_SECRET_VALUE_RE = re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----|sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{12,})", re.IGNORECASE)
+TASK_INLINE_SECRET_RE = re.compile(
+    r"(?P<label>\b[a-z0-9_-]*(?:password|passwd|secret|token|credential|authorization|activation|private[_-]?key|api[_-]?key|payload[_-]?b64)\b)"
+    r"(?P<separator>\s*(?:=|:)\s*)(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
 
 
 def _raise_if_job_cancelled(job: Job, db: Session) -> None:
@@ -5450,8 +5456,36 @@ def _redact_task_value(value: Any, *, key: str = "") -> Any:
     if isinstance(value, str):
         if TASK_SECRET_VALUE_RE.search(value):
             return "[redacted]"
-        return value
+        return TASK_INLINE_SECRET_RE.sub(lambda match: f"{match.group('label')}{match.group('separator')}[redacted]", value)
     return value
+
+
+def _task_failure_messages(value: Any) -> list[str]:
+    messages: list[str] = []
+    message_keys = {"error", "errors", "detail", "message", "reason", "stderr"}
+
+    def add_message(candidate: Any) -> None:
+        if isinstance(candidate, str):
+            message = candidate.strip()
+            if message and message not in messages:
+                messages.append(message[:4000])
+        elif isinstance(candidate, list):
+            for item in candidate:
+                add_message(item)
+
+    def collect(candidate: Any) -> None:
+        if isinstance(candidate, dict):
+            for item_key, item_value in candidate.items():
+                if str(item_key).lower() in message_keys:
+                    add_message(item_value)
+                if isinstance(item_value, (dict, list)):
+                    collect(item_value)
+        elif isinstance(candidate, list):
+            for item in candidate:
+                collect(item)
+
+    collect(value)
+    return messages[:8]
 
 
 def _task_status_pill(status_value: str) -> str:
@@ -5517,6 +5551,9 @@ def _task_row(job: Job, identity: Identity | None = None) -> dict[str, Any]:
     if not summary and isinstance(result.get("vm"), dict):
         summary = str(result["vm"].get("vm_name") or result["vm"].get("guest_ip") or "")
     error = _redact_task_value(job.error or "")
+    error_messages = _task_failure_messages(result)
+    if error and error not in error_messages:
+        error_messages.append(str(error))
     steps = sorted(job.steps, key=lambda step: (step.position, step.id))
     if not summary and steps:
         summary = f"{len(steps)} component{'s' if len(steps) != 1 else ''}"
@@ -5536,6 +5573,7 @@ def _task_row(job: Job, identity: Identity | None = None) -> dict[str, Any]:
         "result": result,
         "result_json": json.dumps(result, indent=2, sort_keys=True),
         "error": error,
+        "error_messages": error_messages,
         "can_cancel": _can_cancel_task(job, identity),
         "_children": [_job_step_row(step) for step in steps],
     }
@@ -5544,6 +5582,9 @@ def _task_row(job: Job, identity: Identity | None = None) -> dict[str, Any]:
 def _job_step_row(step: JobStep) -> dict[str, Any]:
     result = _redact_task_value(_job_step_payload(step))
     error = _redact_task_value(step.error or "")
+    error_messages = _task_failure_messages(result)
+    if error and error not in error_messages:
+        error_messages.append(str(error))
     status_value = str(step.status or JobStatus.PENDING.value)
     return {
         "id": step.id,
@@ -5564,6 +5605,7 @@ def _job_step_row(step: JobStep) -> dict[str, Any]:
         "result": result,
         "result_json": json.dumps(result, indent=2, sort_keys=True),
         "error": error,
+        "error_messages": error_messages,
         "can_cancel": False,
         "is_step": True,
         "position": step.position,
@@ -9011,7 +9053,10 @@ def run_appliance_apply_job(job_id: str, *, force_real: bool = False) -> None:
                 step.status = JobStatus.SUCCEEDED.value if result["success"] else JobStatus.FAILED.value
                 step.finished_at = utcnow()
                 step.progress_percent = 100
-                step.error = None if result["success"] else "The component reported an apply failure."
+                failure_messages = _task_failure_messages(result)
+                step.error = None if result["success"] else (
+                    failure_messages[0] if failure_messages else "The component reported an apply failure."
+                )
                 job.progress_percent = min(99, int((index / total_steps) * 100))
                 job.result = json.dumps({**current_payload, "units": unit_results}, indent=2)
                 persist_vcf_depot_metadata_from_apply(db, [result])
@@ -12608,10 +12653,14 @@ def generate_ldap_directory_from_ui(
         resource_id=str(organization.id),
         detail=f"users={user_count}; groups={group_count}",
     )
-    credential_lines = ["uid\tpassword\tdisplay name\temail\ttelephone"]
-    credential_lines.extend(
-        f"{row['uid']}\t{row['password']}\t{row['display_name']}\t{row['email']}\t{row['telephone']}" for row in credentials
+    credential_buffer = io.StringIO(newline="")
+    credential_writer = csv.DictWriter(
+        credential_buffer,
+        fieldnames=["uid", "password", "display_name", "email", "telephone"],
+        lineterminator="\n",
     )
+    credential_writer.writeheader()
+    credential_writer.writerows(credentials)
     return render(
         request,
         "vcf_helper.html",
@@ -12619,9 +12668,9 @@ def generate_ldap_directory_from_ui(
             db,
             identity,
             selected_ldap_organization_id=organization.id,
-            ldap_vcf_auto_open=True,
+            ldap_generate_auto_open=True,
             extra={
-                "ldap_generated_credentials_text": "\n".join(credential_lines),
+                "ldap_generated_credentials_text": credential_buffer.getvalue(),
                 "ldap_generated_user_count": user_count,
                 "ldap_generated_group_count": group_count,
             },
@@ -13671,6 +13720,7 @@ def vcf_helper_page_context(
     *,
     selected_ldap_organization_id: int | None = None,
     ldap_vcf_auto_open: bool = False,
+    ldap_generate_auto_open: bool = False,
     vcf_trust_auto_open: bool = False,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -13694,6 +13744,7 @@ def vcf_helper_page_context(
         **ldap_context_data,
         "vcf_trust_auto_open": vcf_trust_auto_open,
         "ldap_vcf_auto_open": ldap_vcf_auto_open,
+        "ldap_generate_auto_open": ldap_generate_auto_open,
         "appliance_apply_status": dnsmasq_apply_status(db, dns_context),
         **(extra or {}),
     }

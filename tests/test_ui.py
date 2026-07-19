@@ -501,7 +501,7 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     from pathlib import Path
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Job, JobStatus, utcnow
+    from labfoundry.app.models import Job, JobStatus, JobStep, utcnow
 
     login(client)
     with SessionLocal() as db:
@@ -523,6 +523,29 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
             error="",
         )
         db.add(job)
+        db.add(
+            JobStep(
+                id="job_taskgrid001:ldap",
+                job_id=job.id,
+                component_key="ldap",
+                label="Managed LDAP",
+                position=1,
+                status=JobStatus.FAILED.value,
+                progress_percent=100,
+                result=json.dumps(
+                    {
+                        "success": False,
+                        "commands": [
+                            {
+                                "returncode": 1,
+                                "stderr": "LDAP validation failed without exposing bind_password=DirectorySecret1!",
+                            }
+                        ],
+                    }
+                ),
+                error="The component reported an apply failure.",
+            )
+        )
         db.commit()
 
     page = client.get("/tasks?job_id=job_taskgrid001")
@@ -537,6 +560,8 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert "data-task-detail-log" in page.text
     assert 'class="terminal-note task-result-preview"' in page.text
     assert 'class="language-json" data-task-detail-result' in page.text
+    assert "data-task-detail-errors" in page.text
+    assert "data-task-detail-errors-content" in page.text
     assert 'class="terminal-note task-log-preview"' in page.text
     assert 'class="language-labfoundry-log" data-task-log-content' in page.text
     assert "task-grid-shell" in page.text
@@ -563,6 +588,7 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert ".task-result-preview code," in app_css
     assert "highlightConfigPreviewElement(result);" in app_js
     assert "highlightConfigPreviewElement(content);" in app_js
+    assert 'errorContent.textContent = errorMessages.join("\\n\\n");' in app_js
 
     status_response = client.get("/tasks/status?job_id=job_taskgrid001")
     assert status_response.status_code == 200
@@ -571,6 +597,9 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert selected["id"] == "job_taskgrid001"
     assert selected["can_cancel"] is True
     assert selected["result"]["api_password"] == "[redacted]"
+    failed_step = selected["_children"][0]
+    assert failed_step["error_messages"][0] == "LDAP validation failed without exposing bind_password=[redacted]"
+    assert "DirectorySecret1!" not in json.dumps(failed_step)
     assert payload["active_count"] == 1
 
     log_response = client.get("/tasks/job_taskgrid001/log")
@@ -655,7 +684,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v110" in service_worker.text
+    assert "labfoundry-pwa-v113" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -667,8 +696,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=ldap-console-20260718-1" in service_worker.text
-    assert "/static/app.js?v=ldap-console-20260718-1" in service_worker.text
+    assert "/static/app.css?v=ldap-console-20260718-9" in service_worker.text
+    assert "/static/app.js?v=ldap-console-20260718-9" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -677,7 +706,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=ldap-console-20260718-1" in offline.text
+    assert "/static/app.css?v=ldap-console-20260718-9" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -693,8 +722,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=ldap-console-20260718-1" in page.text
-    assert "/static/app.js?v=ldap-console-20260718-1" in page.text
+    assert "/static/app.css?v=ldap-console-20260718-9" in page.text
+    assert "/static/app.js?v=ldap-console-20260718-9" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -3940,9 +3969,15 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
         data={"name": "Org A", "slug": "org-a", "suffix_dn": "", "enabled": "on", "csrf": csrf},
     )
     assert created.status_code == 201, created.text
-    assert "Copy this VCF bind credential now" in created.text
+    assert "Copy this credential now" in created.text
+    assert 'id="ldap-bind-secret-modal"' in created.text
+    assert "data-ldap-bind-secret-auto-open" in created.text
+    assert "data-ldap-bind-secret-close" in created.text
+    assert "data-copy-value" in created.text
+    assert "data-download-value" in created.text
     assert "ldap-users-table" in created.text
     assert "ldap-groups-table" in created.text
+    assert "data-ldap-organization-tabs" in created.text
     assert ">+ Organization</button>" in created.text
     assert 'id="ldap-organization-new"' in created.text
     assert "<summary>Create organization</summary>" not in created.text
@@ -3951,10 +3986,22 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert "Generate test directory" not in created.text
     assert 'name="user_count"' not in created.text
     assert 'name="group_count"' not in created.text
+    organization_header = created.text.split('<div class="zone-head">', 1)[1].split('</div>\n          </div>', 1)[0]
+    assert 'class="zone-actions"' in organization_header
+    assert 'class="button tiny secondary" type="submit">Rotate bind credential</button>' in organization_header
+    assert 'class="button tiny danger" type="submit">Delete organization</button>' in organization_header
+    assert 'class="tab-buttons tool-tabs ldap-directory-resource-tabs"' in created.text
     assert "uid=vcf-bind,ou=service-accounts,dc=org-a,dc=ldap,dc=labfoundry,dc=internal" in created.text
     assert "serviceAccount → employeeType" not in created.text
 
     organization_id = created.text.split('/ldap/organizations/', 1)[1].split("/", 1)[0]
+    assert f'data-ldap-organization-id="{organization_id}"' in created.text
+    assert 'data-tab-storage-key="labfoundry:ldap:resource-tab"' in created.text
+    app_js = client.get("/static/app.js").text
+    assert 'const LDAP_ORGANIZATION_SELECTION_KEY = "labfoundry:ldap:organization"' in app_js
+    assert "function initializeLdapPageState()" in app_js
+    assert "function attachLdapGridState(" in app_js
+    assert "function redrawLdapDirectoryTables(" in app_js
     disabled_helper = client.get(f"/vcf-helper?ldap_vcf=1&ldap_organization_id={organization_id}")
     ldap_tile = disabled_helper.text.split("data-vcf-ldap-open", 1)[1].split(">", 1)[0]
     assert "disabled" in ldap_tile
@@ -3982,10 +4029,12 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert vcf_ldap_modal.count('name="vcf_organization_id"') == 1
     assert vcf_ldap_modal.count('name="username"') == 1
     assert vcf_ldap_modal.count('name="password"') == 1
-    assert "Generate test directory" in vcf_helper.text
+    assert "Generate LDAP Test Directory" in vcf_helper.text
+    assert "data-ldap-generate-open" in vcf_helper.text
+    assert "Generate test directory" not in vcf_ldap_modal
 
     page = client.get("/ldap")
-    assert "Copy this VCF bind credential now" not in page.text
+    assert "Copy this credential now" not in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     organization_id = page.text.split('/ldap/organizations/', 1)[1].split("/", 1)[0]
     user = client.post(
@@ -4072,11 +4121,21 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
         data={"user_count": "6", "group_count": "3", "csrf": csrf},
     )
     assert generated.status_code == 201, generated.text
-    assert "Copy the generated LDAP credentials now" in generated.text
-    assert "uid\tpassword\tdisplay name\temail\ttelephone" in generated.text
-    assert "These passwords are shown once" in generated.text
-    assert "Managed LDAP for VCF Automation 9.1" in generated.text
-    assert "data-vcf-ldap-auto-open" in generated.text
+    assert "Generated credentials" in generated.text
+    assert "uid,password,display_name,email,telephone" in generated.text
+    assert "Generated passwords are displayed once" in generated.text
+    assert "Generate test directory" in generated.text
+    assert "data-ldap-generate-auto-open" in generated.text
+    generator_modal = generated.text.split('<dialog id="ldap-generate-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert "uid,password,display_name,email,telephone" in generator_modal
+    assert 'class="language-csv" data-ldap-generated-credentials' in generator_modal
+    assert 'data-download-filename="ldap-test-directory-synthetic.csv"' in generator_modal
+    assert 'data-download-mime="text/csv;charset=utf-8"' in generator_modal
+    assert "<textarea" not in generator_modal
+    assert "data-copy-value" in generator_modal
+    assert "data-download-value" in generator_modal
+    managed_ldap_modal = generated.text.split('<dialog id="vcf-ldap-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert "uid,password,display_name,email,telephone" not in managed_ldap_modal
 
     with SessionLocal() as db:
         organization = db.get(LdapOrganization, organization_id)
@@ -4093,7 +4152,7 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
         assert "Aa1!" not in event.detail
 
     refreshed = client.get(f"/ldap?organization_id={organization_id}")
-    assert "Copy the generated LDAP credentials now" not in refreshed.text
+    assert "uid\tpassword\tdisplay name\temail\ttelephone" not in refreshed.text
 
 
 def test_local_user_reset_modal_endpoint_and_remove(client):
@@ -9421,7 +9480,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "ldap-console-20260718-1" in page.text
+    assert "ldap-console-20260718-9" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -11468,7 +11527,10 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     visible_workspace = response.text.split('<section class="split-workspace vcf-helper-workspace"', 1)[1].split("</section>", 1)[0]
     assert "VCF Certificate Trust" in visible_workspace
     assert "Review DNS" not in visible_workspace
-    assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 5
+    assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 6
+    assert 'id="vcf-helper-platform-title">SDDC Manager / VCF Installer</h3>' in visible_workspace
+    assert 'id="vcf-helper-ldap-title">LDAP</h3>' in visible_workspace
+    assert visible_workspace.count('class="vcf-helper-action-bands"') == 2
     assert "vcf-helper-action-arrow" not in visible_workspace
     assert "service-summary-grid" not in visible_workspace
     assert "Generated names" not in visible_workspace
@@ -11477,6 +11539,9 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert "Deploy SDDC Manager" in visible_workspace
     assert "Configure VCF Offline Depot" in visible_workspace
     assert "Managed LDAP for VCF" in visible_workspace
+    assert 'class="vcf-helper-action-wrap" data-help="SDDC Manager deployment becomes available' in visible_workspace
+    assert 'class="vcf-helper-action-wrap" data-help="Enable VCF Offline Depot.' in visible_workspace
+    assert 'class="alert warn"' not in visible_workspace
     assert 'data-vcf-fqdn-modal-open aria-haspopup="dialog" aria-controls="vcf-fqdn-modal"' in visible_workspace
     assert 'aria-controls="vcf-trust-modal"' in visible_workspace
     assert 'data-vcf-ldap-open aria-haspopup="dialog" aria-controls="vcf-ldap-modal"' in visible_workspace

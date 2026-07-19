@@ -174,6 +174,7 @@ LDAP_STATE_DIR = Path("/var/lib/openldap/labfoundry")
 LDAP_RECOVERY_DIR = Path("/var/lib/labfoundry/ldap/recovery")
 LDAP_CONFIG_ROOT = Path("/etc/openldap")
 LDAP_CONFIG_DIR = LDAP_CONFIG_ROOT / "slapd.d"
+LDAP_RUNTIME_DIR = Path("/run/openldap")
 LDAP_SYSTEMD_DROPIN_DIR = Path("/etc/systemd/system/slapd.service.d")
 LDAP_SYSTEMD_DROPIN_PATH = LDAP_SYSTEMD_DROPIN_DIR / "labfoundry.conf"
 LDAP_SYSCONFIG_PATH = Path("/etc/sysconfig/slapd")
@@ -1789,7 +1790,12 @@ def _openldap_schema_path(name: str) -> Path:
     return next((path for path in candidates if path.is_file()), candidates[0])
 
 
-def _render_ldap_slapd_config(payload: dict, *, state_root: Path = LDAP_STATE_DIR) -> str:
+def _render_ldap_slapd_config(
+    payload: dict,
+    *,
+    state_root: Path = LDAP_STATE_DIR,
+    runtime_root: Path = LDAP_RUNTIME_DIR,
+) -> str:
     service = payload["service"]
     policy = service["password_policy"]
     lines = [
@@ -1798,8 +1804,8 @@ def _render_ldap_slapd_config(payload: dict, *, state_root: Path = LDAP_STATE_DI
         f"include {_openldap_schema_path('cosine')}",
         f"include {_openldap_schema_path('inetorgperson')}",
         f"include {_openldap_schema_path('openldap')}",
-        "pidfile /run/openldap/slapd.pid",
-        "argsfile /run/openldap/slapd.args",
+        f"pidfile {runtime_root / 'slapd.pid'}",
+        f"argsfile {runtime_root / 'slapd.args'}",
         "modulepath /usr/lib/openldap",
         "moduleload ppolicy.so",
         "moduleload memberof.so",
@@ -2111,6 +2117,10 @@ def _install_ldap_listener_config(service: dict) -> None:
             [
                 "[Service]",
                 "ExecStart=",
+                (
+                    f"ExecStartPre=/usr/bin/install -d -m 0750 -o {_ldap_account_name()} "
+                    f"-g {_ldap_account_name()} {LDAP_RUNTIME_DIR.as_posix()}"
+                ),
                 f'ExecStart=/usr/sbin/slapd -u {_ldap_account_name()} -F {LDAP_CONFIG_DIR} -h "{listener_urls}"',
                 f'Environment="SLAPD_URLS={listener_urls}"',
                 "",
@@ -2132,6 +2142,14 @@ def _ldap_account_name() -> str:
         except KeyError:
             continue
     return "ldap"
+
+
+def _prepare_ldap_runtime_dir(*, runtime_dir: Path = LDAP_RUNTIME_DIR) -> None:
+    """Prepare slapd's volatile PID/args directory for first apply and restart."""
+    account_name = _ldap_account_name()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    shutil.chown(runtime_dir, user=account_name, group=account_name)
+    os.chmod(runtime_dir, 0o750)
 
 
 def _ldap_config_suffixes(config_ldif: str) -> dict[int, str]:
@@ -2242,6 +2260,11 @@ def _apply_ldap_config(payload: dict) -> int:
         return 0
     LDAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
     account_name = _ldap_account_name()
+    try:
+        _prepare_ldap_runtime_dir()
+    except (LookupError, OSError) as exc:
+        print(f"LDAP runtime directory could not be prepared: {exc}", file=sys.stderr)
+        return 1
     for organization in payload["organizations"]:
         if not organization.get("enabled", True):
             continue
@@ -2431,11 +2454,16 @@ def _handle_ldap(action: str, args: list[str]) -> int:
         with tempfile.TemporaryDirectory(prefix="labfoundry-ldap-validate-") as temp_root_value:
             temp_root = Path(temp_root_value)
             state_root = temp_root / "data"
+            runtime_root = temp_root / "run"
+            runtime_root.mkdir()
             for organization in payload["organizations"]:
                 if organization.get("enabled", True):
                     (state_root / organization["slug"]).mkdir(parents=True, exist_ok=True)
             slapd_conf = temp_root / "slapd.conf"
-            slapd_conf.write_text(_render_ldap_slapd_config(payload, state_root=state_root), encoding="utf-8")
+            slapd_conf.write_text(
+                _render_ldap_slapd_config(payload, state_root=state_root, runtime_root=runtime_root),
+                encoding="utf-8",
+            )
             if payload["service"].get("enabled"):
                 result = _run([shutil.which("slaptest") or "slaptest", "-u", "-f", str(slapd_conf)])
                 if result.returncode != 0:

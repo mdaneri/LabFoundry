@@ -19,6 +19,8 @@ const DNS_ACTIVE_ZONE_STORAGE_KEY = "labfoundry:dns:active-zone";
 const PUBLIC_ADDRESS_MODE_COOKIE = "labfoundry_public_address_mode";
 const LABFOUNDRY_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const labFoundryDnsRecordTables = new WeakMap();
+const labFoundryLdapDirectoryTables = new WeakMap();
+const LDAP_ORGANIZATION_SELECTION_KEY = "labfoundry:ldap:organization";
 let applianceApplySidebarRefreshTimer = 0;
 let applianceApplyGlobalPollTimer = 0;
 let applianceApplyModalTable = null;
@@ -193,6 +195,20 @@ function registerLabFoundryPrismLanguages() {
       punctuation: /[()[\]{}:]/,
     };
   }
+  if (!window.Prism.languages.csv) {
+    window.Prism.languages.csv = {
+      header: {
+        pattern: /^[^\r\n]+/,
+        alias: "property",
+      },
+      string: {
+        pattern: /"(?:[^"]|"")*"/,
+        greedy: true,
+      },
+      number: /(^|,)-?\d+(?:\.\d+)?(?=,|$)/m,
+      punctuation: /,/,
+    };
+  }
 }
 
 function previewLanguageForText(text, element) {
@@ -204,6 +220,9 @@ function previewLanguageForText(text, element) {
   }
   if (element.classList.contains("language-json")) {
     return "json";
+  }
+  if (element.classList.contains("language-csv")) {
+    return "csv";
   }
   const trimmed = String(text ?? "").trim();
   if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length > 1) {
@@ -223,13 +242,13 @@ function highlightConfigPreviewElement(element) {
   }
   registerLabFoundryPrismLanguages();
   const language = previewLanguageForText(element.textContent || "", element);
-  element.classList.remove("language-json", "language-labfoundry-config", "language-labfoundry-log");
+  element.classList.remove("language-json", "language-csv", "language-labfoundry-config", "language-labfoundry-log");
   if (language !== "diff") {
     element.classList.remove("language-diff");
   }
   element.classList.add(`language-${language}`);
   if (element.parentElement instanceof HTMLElement && element.parentElement.tagName === "PRE") {
-    element.parentElement.classList.remove("language-json", "language-labfoundry-config", "language-labfoundry-log");
+    element.parentElement.classList.remove("language-json", "language-csv", "language-labfoundry-config", "language-labfoundry-log");
     if (language !== "diff") {
       element.parentElement.classList.remove("language-diff");
     }
@@ -251,6 +270,7 @@ function highlightConfigPreviews(root = document) {
         ".config-diff code",
         ".terminal-note > code",
         "code.language-json",
+        "code.language-csv",
         "code.language-labfoundry-config",
         "[data-appliance-settings-preview]",
         "[data-firewall-config-preview]",
@@ -1095,6 +1115,34 @@ function initializeCopyValueButtons(root = document) {
     }
     button.dataset.copyInitialized = "1";
     button.addEventListener("click", () => copyValueButtonText(button));
+  });
+}
+
+function downloadValueButtonText(button) {
+  const value = button.dataset.downloadValue || "";
+  const filename = button.dataset.downloadFilename || "labfoundry.txt";
+  const mime = button.dataset.downloadMime || "text/plain;charset=utf-8";
+  const objectUrl = URL.createObjectURL(new Blob([value], { type: mime }));
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+  showTransientGridStatus("Saved");
+}
+
+function initializeDownloadValueButtons(root = document) {
+  if (!(root instanceof Document || root instanceof HTMLElement)) {
+    return;
+  }
+  root.querySelectorAll("[data-download-value]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.downloadInitialized === "1") {
+      return;
+    }
+    button.dataset.downloadInitialized = "1";
+    button.addEventListener("click", () => downloadValueButtonText(button));
   });
 }
 
@@ -3907,6 +3955,75 @@ function newLdapGroupRow(organizationId) {
   return { id: "__new_ldap_group__", organization_id: organizationId, name: "", description: "", enabled: false, members: [], member_count: 0, member_names: "", is_new: true };
 }
 
+function initializeLdapPageState() {
+  const tabList = document.querySelector("[data-ldap-organization-tabs]");
+  if (!(tabList instanceof HTMLElement)) return;
+  const links = Array.from(tabList.querySelectorAll("[data-ldap-organization-id]"));
+  const currentId = new URL(window.location.href).searchParams.get("organization_id") || "";
+  const activeId = tabList.querySelector("[data-ldap-organization-id].active")?.dataset.ldapOrganizationId || "";
+  let storedId = "";
+  try {
+    storedId = window.localStorage.getItem(LDAP_ORGANIZATION_SELECTION_KEY) || "";
+  } catch {
+    // Page state persistence is optional when browser storage is unavailable.
+  }
+  const validStoredLink = links.find((link) => link.dataset.ldapOrganizationId === storedId);
+  if (window.location.pathname === "/ldap" && !currentId && validStoredLink instanceof HTMLAnchorElement && storedId !== activeId) {
+    window.location.replace(validStoredLink.href);
+    return;
+  }
+  const selectedId = currentId || activeId;
+  if (selectedId) {
+    try {
+      window.localStorage.setItem(LDAP_ORGANIZATION_SELECTION_KEY, selectedId);
+    } catch {
+      // Keep the server-selected organization when storage is unavailable.
+    }
+  }
+  links.forEach((link) => {
+    link.addEventListener("click", () => {
+      try {
+        window.localStorage.setItem(LDAP_ORGANIZATION_SELECTION_KEY, link.dataset.ldapOrganizationId || "");
+      } catch {
+        // Navigation still works without persistence.
+      }
+    });
+  });
+}
+
+function attachLdapGridState(tableElement, table, resourceName, organizationId) {
+  labFoundryLdapDirectoryTables.set(tableElement, table);
+  const storageKey = `labfoundry:ldap:grid:${organizationId}:${resourceName}`;
+  window.requestAnimationFrame(() => {
+    const holder = tableElement.querySelector(".tabulator-tableholder");
+    if (!(holder instanceof HTMLElement)) return;
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(storageKey) || "{}");
+      holder.scrollTop = Number.isFinite(stored.top) ? stored.top : 0;
+      holder.scrollLeft = Number.isFinite(stored.left) ? stored.left : 0;
+    } catch {
+      // Keep the default grid position when stored state is unavailable or invalid.
+    }
+    holder.addEventListener("scroll", () => {
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify({ top: holder.scrollTop, left: holder.scrollLeft }));
+      } catch {
+        // Scrolling remains functional when browser storage is unavailable.
+      }
+    }, { passive: true });
+  });
+}
+
+function redrawLdapDirectoryTables(root = document) {
+  if (!(root instanceof Document || root instanceof HTMLElement)) return;
+  window.requestAnimationFrame(() => {
+    root.querySelectorAll("#ldap-users-table, #ldap-groups-table").forEach((tableElement) => {
+      const table = labFoundryLdapDirectoryTables.get(tableElement);
+      if (table && typeof table.redraw === "function") table.redraw(true);
+    });
+  });
+}
+
 async function postLdapDirectoryAction(url, data, csrf, options = {}) {
   const body = new FormData();
   body.set("csrf", csrf);
@@ -4032,7 +4149,7 @@ function initializeLdapDirectoryTables() {
     const organizationId = usersElement.dataset.organizationId || "0";
     try {
       const users = [...JSON.parse(usersElement.dataset.users || "[]"), newLdapUserRow(organizationId)];
-      new Tabulator(usersElement, {
+      const usersTable = new Tabulator(usersElement, {
         data: users, index: "id", layout: "fitColumns", height: "420px", rowHeight: 28, placeholder: "No directory users", reactiveData: false,
         rowContextMenu: [
           { label: "Reset password", action: (_event, row) => openLdapPasswordModal(row.getData()), disabled: (component) => component.getData().is_new },
@@ -4052,6 +4169,7 @@ function initializeLdapDirectoryTables() {
         ], "uid"),
         rowFormatter: (row) => markNewRecordRow(row, "uid"),
       });
+      attachLdapGridState(usersElement, usersTable, "users", organizationId);
       const fallback = document.getElementById(usersElement.dataset.fallbackId || "");
       if (fallback instanceof HTMLElement) fallback.hidden = true;
     } catch (error) { showCaMessage("ldap-user-error", error instanceof Error ? error.message : "LDAP users could not render."); }
@@ -4064,7 +4182,7 @@ function initializeLdapDirectoryTables() {
     try {
       const groups = JSON.parse(groupsElement.dataset.groups || "[]").map((group) => ({ ...group, member_count: Array.isArray(group.members) ? group.members.length : 0, member_names: Array.isArray(group.members) ? group.members.map((member) => `${member.type}: ${member.name}`).join(", ") : "" }));
       groups.push(newLdapGroupRow(organizationId));
-      new Tabulator(groupsElement, {
+      const groupsTable = new Tabulator(groupsElement, {
         data: groups, index: "id", layout: "fitColumns", height: "420px", rowHeight: 28, responsiveLayout: "collapse", placeholder: "No directory groups", reactiveData: false,
         rowContextMenu: [
           { label: "Edit membership", action: (_event, row) => openLdapGroupMembersModal(row.getData()), disabled: (component) => component.getData().is_new },
@@ -4079,6 +4197,7 @@ function initializeLdapDirectoryTables() {
         ], "name"),
         rowFormatter: (row) => markNewRecordRow(row, "name"),
       });
+      attachLdapGridState(groupsElement, groupsTable, "groups", organizationId);
       const fallback = document.getElementById(groupsElement.dataset.fallbackId || "");
       if (fallback instanceof HTMLElement) fallback.hidden = true;
     } catch (error) { showCaMessage("ldap-group-error", error instanceof Error ? error.message : "LDAP groups could not render."); }
@@ -9224,6 +9343,8 @@ function renderTaskDetail(task) {
   const summary = modal.querySelector("[data-task-detail-summary]");
   const facts = modal.querySelector("[data-task-detail-facts]");
   const error = modal.querySelector("[data-task-detail-error]");
+  const errorDetails = modal.querySelector("[data-task-detail-errors]");
+  const errorContent = modal.querySelector("[data-task-detail-errors-content]");
   const result = modal.querySelector("[data-task-detail-result]");
   const cancelButton = modal.querySelector("[data-task-detail-cancel]");
   const logButton = modal.querySelector("[data-task-detail-log]");
@@ -9258,8 +9379,16 @@ function renderTaskDetail(task) {
     });
   }
   if (error instanceof HTMLElement) {
-    error.textContent = task.error || "";
-    error.classList.toggle("hidden", !task.error);
+    const primaryError = Array.isArray(task.error_messages) ? task.error_messages[0] : task.error;
+    error.textContent = primaryError || "";
+    error.classList.toggle("hidden", !primaryError);
+  }
+  if (errorDetails instanceof HTMLDetailsElement && errorContent instanceof HTMLElement) {
+    const errorMessages = Array.isArray(task.error_messages) ? task.error_messages.filter(Boolean) : [];
+    errorDetails.classList.toggle("hidden", errorMessages.length === 0);
+    errorDetails.open = errorMessages.length > 0;
+    errorContent.textContent = errorMessages.join("\n\n");
+    highlightConfigPreviewElement(errorContent);
   }
   if (result instanceof HTMLElement) {
     result.textContent = task.result_json || "{}";
@@ -10897,6 +11026,7 @@ function initializeTabs() {
         }
       });
       redrawDnsRecordTables(panel);
+      redrawLdapDirectoryTables(panel);
     });
   });
   const storedDomain = storedDnsActiveZone();
@@ -10912,15 +11042,21 @@ function initializeTabs() {
     }
     const storageKey = tabList.dataset.tabStorageKey || "";
     let targetId = hashTargetPanel instanceof HTMLElement ? hashTargetPanel.id : hashTargetId;
+    let storedTargetId = "";
     try {
-      targetId = targetId || window.localStorage.getItem(storageKey) || "";
+      storedTargetId = window.localStorage.getItem(storageKey) || "";
+      targetId = targetId || storedTargetId;
     } catch {
       targetId = targetId || "";
     }
     if (!targetId) {
       return;
     }
-    const button = tabList.querySelector(`[data-tab-target="${CSS.escape(targetId)}"]`);
+    let button = tabList.querySelector(`[data-tab-target="${CSS.escape(targetId)}"]`);
+    if (!(button instanceof HTMLButtonElement) && storedTargetId) {
+      targetId = storedTargetId;
+      button = tabList.querySelector(`[data-tab-target="${CSS.escape(targetId)}"]`);
+    }
     if (button instanceof HTMLButtonElement) {
       button.click();
     }
@@ -12950,8 +13086,10 @@ function initializeVcfLdapHelper() {
   const organizationForm = dialog.querySelector("[data-vcf-ldap-organization-form]");
   const organizationSelect = dialog.querySelector("[data-vcf-ldap-organization-select]");
   const generateDialog = document.getElementById("ldap-generate-modal");
-  const generateOpen = dialog.querySelector("[data-ldap-generate-open]");
+  const generateOpen = document.querySelector("[data-ldap-generate-open]");
   const generateCancel = generateDialog?.querySelector("[data-ldap-generate-cancel]");
+  const generateForm = generateDialog?.querySelector("[data-ldap-generate-form]");
+  const generateOrganization = generateDialog?.querySelector("[data-ldap-generate-organization]");
   openButton?.addEventListener("click", () => dialog.showModal());
   closeButton?.addEventListener("click", () => dialog.close());
   if (organizationForm instanceof HTMLFormElement && organizationSelect instanceof HTMLSelectElement) {
@@ -12960,8 +13098,27 @@ function initializeVcfLdapHelper() {
   if (generateDialog instanceof HTMLDialogElement) {
     generateOpen?.addEventListener("click", () => generateDialog.showModal());
     generateCancel?.addEventListener("click", () => generateDialog.close());
+    if (generateForm instanceof HTMLFormElement && generateOrganization instanceof HTMLSelectElement) {
+      const updateGenerateAction = () => {
+        generateForm.action = `/ldap/organizations/${encodeURIComponent(generateOrganization.value)}/generate-directory`;
+      };
+      generateOrganization.addEventListener("change", updateGenerateAction);
+      updateGenerateAction();
+    }
+    if (generateDialog.hasAttribute("data-ldap-generate-auto-open") && !generateDialog.open) {
+      generateDialog.showModal();
+    }
   }
   if (dialog.hasAttribute("data-vcf-ldap-auto-open") && !dialog.open) {
+    dialog.showModal();
+  }
+}
+
+function initializeLdapBindSecretModal() {
+  const dialog = document.getElementById("ldap-bind-secret-modal");
+  if (!(dialog instanceof HTMLDialogElement)) return;
+  dialog.querySelector("[data-ldap-bind-secret-close]")?.addEventListener("click", () => dialog.close());
+  if (dialog.hasAttribute("data-ldap-bind-secret-auto-open") && !dialog.open) {
     dialog.showModal();
   }
 }
@@ -12980,8 +13137,10 @@ document.addEventListener("DOMContentLoaded", initializeCaSettings);
 document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);
 document.addEventListener("DOMContentLoaded", initializeKmsSettings);
+document.addEventListener("DOMContentLoaded", initializeLdapPageState);
 document.addEventListener("DOMContentLoaded", initializeLdapDirectoryTables);
 document.addEventListener("DOMContentLoaded", initializeLdapPasswordModal);
+document.addEventListener("DOMContentLoaded", initializeLdapBindSecretModal);
 document.addEventListener("DOMContentLoaded", initializeChronySettings);
 document.addEventListener("DOMContentLoaded", initializeChronyUpstreamsTable);
 document.addEventListener("DOMContentLoaded", initializeChronySourceHealthModal);
@@ -13011,6 +13170,7 @@ document.addEventListener("DOMContentLoaded", initializeAccountMenu);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
 document.addEventListener("DOMContentLoaded", initializePreviewModalControls);
 document.addEventListener("DOMContentLoaded", initializeCopyValueButtons);
+document.addEventListener("DOMContentLoaded", initializeDownloadValueButtons);
 document.addEventListener("DOMContentLoaded", initializeNonTabbableHelperControls);
 document.addEventListener("DOMContentLoaded", initializeSecretToggles);
 document.addEventListener("DOMContentLoaded", initializeSwitchFields);

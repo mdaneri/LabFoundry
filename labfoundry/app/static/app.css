@@ -2001,6 +2001,111 @@ textarea {
   justify-content: flex-end;
 }
 
+.ldap-directory-resource-tabs {
+  margin-top: 12px;
+}
+
+.secret-value-field {
+  position: relative;
+  display: block;
+}
+
+.secret-value-field > input,
+.secret-value-field > textarea {
+  width: 100%;
+  padding-right: 72px;
+}
+
+.secret-value-field-multiline > textarea,
+.secret-value-field-multiline > .ldap-credential-preview {
+  min-height: 180px;
+}
+
+.secret-value-field-multiline > .ldap-credential-preview {
+  margin-top: 0;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.ldap-credential-preview code {
+  min-height: 180px;
+  box-sizing: border-box;
+  padding-right: 76px;
+  white-space: pre;
+}
+
+.secret-value-actions {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: inline-flex;
+  gap: 4px;
+  z-index: 2;
+}
+
+.secret-value-actions .icon-button {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+}
+
+#ldap-generate-modal .confirm-modal-panel,
+#ldap-bind-secret-modal .confirm-modal-panel {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+#ldap-generate-modal,
+#ldap-bind-secret-modal {
+  overflow-x: hidden;
+}
+
+#ldap-generate-modal .confirm-modal-body,
+#ldap-bind-secret-modal .confirm-modal-body,
+#ldap-generate-modal label,
+#ldap-bind-secret-modal label {
+  min-width: 0;
+}
+
+#ldap-generate-modal .field-label,
+#ldap-bind-secret-modal .field-label {
+  position: relative;
+}
+
+#ldap-generate-modal .help-icon,
+#ldap-bind-secret-modal .help-icon {
+  position: static;
+}
+
+#ldap-generate-modal .help-icon::after,
+#ldap-bind-secret-modal .help-icon::after {
+  right: auto;
+  left: 0;
+  width: min(280px, 100%);
+  transform: none;
+}
+
+#ldap-bind-secret-modal .settings-list > div {
+  grid-template-columns: 96px minmax(0, 1fr);
+  min-width: 0;
+}
+
+#ldap-bind-secret-modal .settings-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+#ldap-bind-secret-modal .secret-value-field,
+#ldap-bind-secret-modal .secret-value-field > input {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
 .zone-create {
   max-width: 520px;
 }
@@ -4682,6 +4787,35 @@ textarea {
   gap: 12px;
 }
 
+.vcf-helper-subjects,
+.vcf-helper-subject-group {
+  display: grid;
+  gap: 14px;
+}
+
+.vcf-helper-subjects {
+  gap: 24px;
+}
+
+.vcf-helper-subject-group + .vcf-helper-subject-group {
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.vcf-helper-subject-head {
+  display: grid;
+  gap: 3px;
+}
+
+.vcf-helper-subject-head h3,
+.vcf-helper-subject-head p {
+  margin: 0;
+}
+
+.vcf-helper-subject-head h3 {
+  font-size: 16px;
+}
+
 .vcf-helper-action-band {
   width: 100%;
   color: var(--text);
@@ -4689,6 +4823,51 @@ textarea {
   text-align: left;
   cursor: pointer;
   transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.vcf-helper-action-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.vcf-helper-action-wrap > .vcf-helper-action-band {
+  height: 100%;
+}
+
+.vcf-helper-action-wrap[data-help] {
+  cursor: help;
+}
+
+.vcf-helper-action-wrap[data-help]::after {
+  position: absolute;
+  z-index: 30;
+  right: 12px;
+  bottom: calc(100% + 8px);
+  width: min(360px, 76vw);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: #0f172a;
+  color: white;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.18);
+  content: attr(data-help);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.vcf-helper-action-wrap[data-help]:hover::after,
+.vcf-helper-action-wrap[data-help]:focus-visible::after {
+  opacity: 1;
+}
+
+.vcf-helper-action-wrap[data-help]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 8px;
 }
 
 .vcf-helper-action-band:hover,

@@ -86,15 +86,6 @@
     </div>
 
     {% if form_error %}<div class="alert error">{{ form_error }}</div>{% endif %}
-    {% if ldap_one_time_bind_secret %}
-      <div class="alert warning">
-        <strong>Copy this VCF bind credential now. It will not be shown again.</strong>
-        <div class="settings-list compact-list">
-          <div><span>Bind DN</span><strong>{{ ldap_one_time_bind_dn }}</strong></div>
-        </div>
-        <textarea readonly rows="3" aria-label="One-time LDAP bind password">{{ ldap_one_time_bind_secret }}</textarea>
-      </div>
-    {% endif %}
     <div class="alert warning">
       This is single-node lab identity infrastructure. Keep local break-glass administrators in every VCF organization.
     </div>
@@ -104,31 +95,37 @@
           <div><h2>Organizations</h2><p class="muted">Each organization receives an isolated suffix, database, users OU, groups OU, and read-only VCF bind identity.</p></div>
           <span class="status-pill muted">{{ ldap_organizations|length }} organizations</span>
         </div>
-        <div class="tab-buttons zone-tabs" role="tablist" aria-label="LDAP organizations">
+        <div class="tab-buttons zone-tabs" role="tablist" aria-label="LDAP organizations" data-ldap-organization-tabs>
           {% for organization in ldap_organizations %}
-            <a class="tab-button {{ 'active' if ldap_selected_organization and organization.id == ldap_selected_organization.id else '' }}" role="tab" aria-selected="{{ 'true' if ldap_selected_organization and organization.id == ldap_selected_organization.id else 'false' }}" href="/ldap?organization_id={{ organization.id }}#ldap-directory-panel">{{ organization.name }}</a>
+            <a class="tab-button {{ 'active' if ldap_selected_organization and organization.id == ldap_selected_organization.id else '' }}" role="tab" aria-selected="{{ 'true' if ldap_selected_organization and organization.id == ldap_selected_organization.id else 'false' }}" href="/ldap?organization_id={{ organization.id }}#ldap-directory-panel" data-ldap-organization-id="{{ organization.id }}">{{ organization.name }}</a>
           {% endfor %}
           <button class="tab-button" type="button" role="tab" data-tab-target="ldap-organization-new" aria-controls="ldap-organization-new" aria-selected="false">+ Organization</button>
         </div>
         <div class="tab-panels">
           <div id="ldap-organization-current" class="tab-panel active" role="tabpanel">
           {% if ldap_selected_organization %}
+          <div class="zone-head">
+            <div>
+              <strong>{{ ldap_selected_organization.name }}</strong>
+              <span class="muted">organization directory and VCF bind identity</span>
+            </div>
+            <div class="zone-actions">
+              <form action="/ldap/organizations/{{ ldap_selected_organization.id }}/bind-credential/rotate" method="post" data-confirm-modal data-confirm-title="Rotate VCF bind credential?" data-confirm-message="The new password is shown once. VCF continues using the old password until LDAP is applied and the VCF organization settings are updated." data-confirm-label="Rotate credential">
+                <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button tiny secondary" type="submit">Rotate bind credential</button>
+              </form>
+              <form action="/ldap/organizations/{{ ldap_selected_organization.id }}/delete" method="post" data-confirm-modal data-confirm-title="Delete {{ ldap_selected_organization.name }}?" data-confirm-message="This removes the organization, users, groups, and bind identity from desired state. The LDAP database is removed from service on the next global apply." data-confirm-label="Delete organization">
+                <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button tiny danger" type="submit">Delete organization</button>
+              </form>
+            </div>
+          </div>
           <div class="settings-list compact-list">
             <div><span>Suffix</span><strong>{{ ldap_selected_organization.suffix_dn }}</strong></div>
             <div><span>Users base</span><strong>ou=users,{{ ldap_selected_organization.suffix_dn }}</strong></div>
             <div><span>Groups base</span><strong>ou=groups,{{ ldap_selected_organization.suffix_dn }}</strong></div>
             <div><span>VCF bind DN</span><strong>{{ ldap_selected_organization.bind_dn }}</strong></div>
           </div>
-          <div class="button-row">
-            <form action="/ldap/organizations/{{ ldap_selected_organization.id }}/bind-credential/rotate" method="post" data-confirm-modal data-confirm-title="Rotate VCF bind credential?" data-confirm-message="The new password is shown once. VCF continues using the old password until LDAP is applied and the VCF organization settings are updated." data-confirm-label="Rotate credential">
-              <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button secondary" type="submit">Rotate bind credential</button>
-            </form>
-            <form action="/ldap/organizations/{{ ldap_selected_organization.id }}/delete" method="post" data-confirm-modal data-confirm-title="Delete {{ ldap_selected_organization.name }}?" data-confirm-message="This removes the organization, users, groups, and bind identity from desired state. The LDAP database is removed from service on the next global apply." data-confirm-label="Delete organization">
-              <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button danger" type="submit">Delete organization</button>
-            </form>
-          </div>
 
-          <div class="tab-buttons tool-tabs" role="tablist" aria-label="Directory resources">
+          <div class="tab-buttons tool-tabs ldap-directory-resource-tabs" role="tablist" aria-label="Directory resources" data-tab-storage-key="labfoundry:ldap:resource-tab">
             <button class="tab-button active" type="button" role="tab" data-tab-target="ldap-users-panel" aria-controls="ldap-users-panel" aria-selected="true">Users</button>
             <button class="tab-button" type="button" role="tab" data-tab-target="ldap-groups-panel" aria-controls="ldap-groups-panel" aria-selected="false">Groups</button>
           </div>
@@ -219,6 +216,36 @@
     </div>
   </aside>
 </section>
+
+{% if ldap_one_time_bind_secret %}
+<dialog id="ldap-bind-secret-modal" class="confirm-modal" aria-labelledby="ldap-bind-secret-modal-title" data-ldap-bind-secret-auto-open>
+  <div class="confirm-modal-panel form-stack">
+    <div class="confirm-modal-body">
+      <p class="kicker">VCF bind identity</p>
+      <h2 id="ldap-bind-secret-modal-title">Copy this credential now</h2>
+      <p class="muted">This password is shown once. VCF continues using the previous password until LDAP is applied and its organization settings are updated.</p>
+      <div class="settings-list compact-list">
+        <div><span>Bind DN</span><strong>{{ ldap_one_time_bind_dn }}</strong></div>
+      </div>
+      <label>
+        <span class="field-label"><span>Bind password</span><button class="help-icon" type="button" data-help="One-time VCF bind password. Copy it or save the credential file before closing this dialog; LabFoundry cannot display it again.">i</button></span>
+        <span class="secret-value-field">
+          <input type="text" readonly value="{{ ldap_one_time_bind_secret }}" aria-label="One-time LDAP bind password">
+          <span class="secret-value-actions">
+            <button class="button secondary icon-button" type="button" data-copy-value="{{ ldap_one_time_bind_secret }}" aria-label="Copy bind password" title="Copy bind password">
+              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+            <button class="button secondary icon-button" type="button" data-download-value="Bind DN: {{ ldap_one_time_bind_dn }}&#10;Password: {{ ldap_one_time_bind_secret }}&#10;" data-download-filename="vcf-bind-credential-{{ ldap_selected_organization.slug }}.txt" aria-label="Save bind credential" title="Save bind credential">
+              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            </button>
+          </span>
+        </span>
+      </label>
+    </div>
+    <div class="confirm-modal-actions"><button class="button primary" type="button" data-ldap-bind-secret-close>Done</button></div>
+  </div>
+</dialog>
+{% endif %}
 
 <dialog id="ldap-password-modal" class="confirm-modal" aria-labelledby="ldap-password-modal-title">
   <form id="ldap-password-form" class="confirm-modal-panel form-stack" action="/ldap/users/0/password" method="post">

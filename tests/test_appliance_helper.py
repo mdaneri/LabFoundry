@@ -199,6 +199,38 @@ def test_ldap_render_can_use_isolated_validation_data_root(tmp_path):
     assert str(helper.LDAP_STATE_DIR / "org-a") not in config
 
 
+def test_ldap_render_can_use_isolated_validation_runtime_root(tmp_path):
+    helper = load_helper_module()
+    payload = ldap_payload()
+    runtime_root = tmp_path / "validation-run"
+
+    config = helper._render_ldap_slapd_config(payload, runtime_root=runtime_root)
+
+    assert f"pidfile {runtime_root / 'slapd.pid'}" in config
+    assert f"argsfile {runtime_root / 'slapd.args'}" in config
+    assert "/run/openldap/slapd.pid" not in config
+
+
+def test_ldap_runtime_directory_is_created_for_first_apply(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    runtime_dir = tmp_path / "run" / "openldap"
+    ownership: list[tuple[Path, str, str]] = []
+    modes: list[tuple[Path, int]] = []
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
+    monkeypatch.setattr(
+        helper.shutil,
+        "chown",
+        lambda path, *, user, group: ownership.append((Path(path), user, group)),
+    )
+    monkeypatch.setattr(helper.os, "chmod", lambda path, mode: modes.append((Path(path), mode)))
+
+    helper._prepare_ldap_runtime_dir(runtime_dir=runtime_dir)
+
+    assert runtime_dir.is_dir()
+    assert ownership == [(runtime_dir, "ldap", "ldap")]
+    assert modes == [(runtime_dir, 0o750)]
+
+
 def test_ldap_reconcile_clears_lock_for_every_enabled_user(monkeypatch):
     helper = load_helper_module()
     payload = ldap_payload(enabled=True)
@@ -282,6 +314,7 @@ def test_ldap_listener_dropin_overrides_photon_hard_coded_plaintext_listener(mon
 
     rendered = dropin_path.read_text(encoding="utf-8")
     assert "ExecStart=" in rendered
+    assert "ExecStartPre=/usr/bin/install -d -m 0750 -o ldap -g ldap /run/openldap" in rendered
     assert 'ExecStart=/usr/sbin/slapd -u ldap -F /etc/openldap/slapd.d -h "ldapi:/// ldaps://192.168.49.1:636/"' in rendered
     assert "ldap:///" not in rendered
 
