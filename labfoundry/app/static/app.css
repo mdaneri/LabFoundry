@@ -2635,6 +2635,22 @@ textarea {
   align-items: center;
 }
 
+.tabulator .tabulator-row.new-record-row .add-row-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent-dark);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.tabulator .tabulator-row.new-record-row .add-row-button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .tabulator .tabulator-row.new-record-row .tabulator-cell[tabulator-field="host_label"] .add-row-hint {
   color: var(--accent-dark);
   font-weight: 800;

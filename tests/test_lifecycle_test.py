@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -151,8 +152,54 @@ def test_full_lifecycle_plan_includes_passwordless_web_terminal_acceptance():
     plan = lifecycle.lifecycle_plan(args)
 
     assert "passwordless admin web terminal on management and one selected extra interface" in plan["checks"]
+    assert any("atomic generated certificate request with explicit SAN verification" in check for check in plan["checks"])
     assert "ldap" in plan["apply_units"]
     assert any("Managed LDAP desired state" in check for check in plan["checks"])
+
+
+def test_apply_units_retries_once_when_desired_state_drifts(monkeypatch):
+    lifecycle = load_lifecycle_module()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.submissions = 0
+
+        def request(self, method, path, **_kwargs):
+            if method == "GET" and path == "/appliance-apply":
+                return 200, '<input type="hidden" name="csrf" value="token">', {}
+            if method == "POST" and path == "/appliance-apply":
+                self.submissions += 1
+                body = json.dumps(
+                    {
+                        "job_id": f"job_{self.submissions}",
+                        "status_url": f"/tasks/job_{self.submissions}/status",
+                    }
+                )
+                return 202, body, {}
+            raise AssertionError(f"unexpected request {method} {path}")
+
+        def json_request(self, method, path, **_kwargs):
+            assert method == "GET"
+            if path == "/tasks/job_1/status":
+                return {
+                    "task": {
+                        "status": "failed",
+                        "error": "Desired state changed after task submission: DNS/DHCP (dnsmasq). Submit the appliance changes again.",
+                    }
+                }
+            if path == "/tasks/job_2/status":
+                return {"task": {"status": "succeeded", "result": {"dry_run": False}, "_children": []}}
+            raise AssertionError(f"unexpected status path {path}")
+
+    monkeypatch.setattr(lifecycle.time, "sleep", lambda _seconds: None)
+    client = FakeClient()
+
+    evidence = lifecycle.apply_units(client, ["dnsmasq", "ca"], argparse.Namespace(allow_dry_run=False))
+
+    assert client.submissions == 2
+    assert evidence["attempts"] == 2
+    assert evidence["job_id"] == "job_2"
+    assert evidence["status"] == "succeeded"
 
 
 def test_routing_probe_commands_cover_block_allow_and_route_role_paths():

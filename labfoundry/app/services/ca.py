@@ -451,7 +451,42 @@ def ca_profile_to_dict(profile: CaProfile) -> dict:
     }
 
 
+def ca_certificate_can_edit(certificate: CaCertificate) -> bool:
+    return not certificate.managed_owner and certificate.status == "planned" and not certificate.certificate_pem
+
+
+def ca_certificate_can_delete(certificate: CaCertificate) -> bool:
+    return not certificate.managed_owner
+
+
+def validate_ca_certificate_request(
+    *,
+    profile: CaProfile | None,
+    common_name: str,
+    subject_alt_names: str,
+    ip_addresses: str,
+) -> list[str]:
+    errors: list[str] = []
+    normalized_common_name = common_name.strip()
+    if not normalized_common_name:
+        errors.append("Certificate common name is required.")
+    if profile is None or not profile.enabled:
+        errors.append("Select an enabled CA profile.")
+
+    dns_names = split_multiline(subject_alt_names)
+    ip_names = split_multiline(ip_addresses)
+    if profile is not None and profile.enabled and profile.san_required and not dns_names and not ip_names:
+        errors.append(f"Certificate {normalized_common_name or 'request'} requires at least one DNS name or IP SAN.")
+    for item in ip_names:
+        try:
+            ip_address(item)
+        except ValueError:
+            errors.append(f"Certificate {normalized_common_name or 'request'} has invalid IP SAN {item}.")
+    return errors
+
+
 def ca_certificate_to_dict(certificate: CaCertificate) -> dict:
+    can_export_certificate = certificate.status == "issued" and bool(certificate.certificate_pem)
     return {
         "id": certificate.id,
         "common_name": certificate.common_name,
@@ -468,6 +503,11 @@ def ca_certificate_to_dict(certificate: CaCertificate) -> dict:
         "description": certificate.description or "",
         "has_certificate": bool(certificate.certificate_pem),
         "has_private_key": bool(certificate.private_key_encrypted),
+        "can_edit": ca_certificate_can_edit(certificate),
+        "can_delete": ca_certificate_can_delete(certificate),
+        "can_export_certificate": can_export_certificate,
+        "can_export_chain": can_export_certificate,
+        "can_export_private_key": can_export_certificate and bool(certificate.private_key_encrypted),
         "revoked_at": certificate.revoked_at.isoformat() if certificate.revoked_at else "",
         "revoked_by": certificate.revoked_by or "",
         "revocation_reason": certificate.revocation_reason or "",

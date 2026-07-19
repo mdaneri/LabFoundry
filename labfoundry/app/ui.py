@@ -180,6 +180,8 @@ from labfoundry.app.services.ca import (
     CA_SERVER_PROFILE_NAME,
     CA_STAGED_CONFIG_PATH,
     ManagedCertificateSpec,
+    ca_certificate_can_delete,
+    ca_certificate_can_edit,
     ca_certificate_to_dict,
     ca_profile_to_dict,
     ca_service_state,
@@ -193,6 +195,7 @@ from labfoundry.app.services.ca import (
     render_ca_config,
     safe_certificate_name,
     split_multiline,
+    validate_ca_certificate_request,
     validate_ca_state,
 )
 from labfoundry.app.services.vcf_trust import (
@@ -3127,7 +3130,16 @@ def ca_context(db: Session, *, reconcile: bool = True) -> dict:
         "ca_profiles": profiles,
         "ca_profile_rows": [ca_profile_to_dict(profile) for profile in profiles],
         "ca_certificate_rows": [ca_certificate_to_dict(certificate) for certificate in certificates],
-        "ca_profile_choices": [{"id": profile.id, "label": profile.name} for profile in profiles if profile.enabled],
+        "ca_profile_choices": [
+            {
+                "id": profile.id,
+                "label": profile.name,
+                "certificate_type": profile.certificate_type,
+                "san_required": profile.san_required,
+            }
+            for profile in profiles
+            if profile.enabled
+        ],
         "available_interfaces": available_interfaces,
         "available_ca_addresses": available_service_listen_addresses(settings.listen_address, available_interfaces),
         "selected_ca_interfaces": selected_interfaces,
@@ -12292,8 +12304,6 @@ def create_ca_certificate_from_ui(
     profile_id: str = Form(""),
     subject_alt_names: str = Form(""),
     ip_addresses: str = Form(""),
-    status: str = Form("planned"),
-    serial_number: str = Form(""),
     description: str = Form(""),
     csr_text: str = Form(""),
     enabled: str | None = Form(None),
@@ -12302,15 +12312,28 @@ def create_ca_certificate_from_ui(
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
     verify_csrf(request, csrf)
+    try:
+        parsed_profile_id = parse_ca_profile_id(profile_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Select an enabled CA profile.") from None
+    profile = db.get(CaProfile, parsed_profile_id) if parsed_profile_id is not None else None
+    validation_errors = validate_ca_certificate_request(
+        profile=profile,
+        common_name=common_name,
+        subject_alt_names=subject_alt_names,
+        ip_addresses=ip_addresses,
+    )
+    if validation_errors:
+        raise HTTPException(status_code=422, detail=" ".join(validation_errors))
+    normalized_csr = csr_text.strip()
     certificate = CaCertificate(
         common_name=common_name.strip(),
-        profile_id=parse_ca_profile_id(profile_id),
+        profile_id=parsed_profile_id,
         subject_alt_names=join_multiline(split_multiline(subject_alt_names)),
         ip_addresses=join_multiline(split_multiline(ip_addresses)),
-        status=status.strip() or "planned",
-        serial_number=serial_number.strip() or None,
+        status="csr-staged" if normalized_csr else "planned",
         description=description or None,
-        csr_text=csr_text.strip() or None,
+        csr_text=normalized_csr or None,
         enabled=enabled == "on",
     )
     db.add(certificate)
@@ -12327,8 +12350,6 @@ def edit_ca_certificate_from_ui(
     profile_id: str = Form(""),
     subject_alt_names: str = Form(""),
     ip_addresses: str = Form(""),
-    status: str = Form("planned"),
-    serial_number: str = Form(""),
     description: str = Form(""),
     enabled: str | None = Form(None),
     csrf: str = Form(...),
@@ -12339,12 +12360,25 @@ def edit_ca_certificate_from_ui(
     certificate = db.get(CaCertificate, certificate_id)
     if not certificate:
         raise HTTPException(status_code=404, detail="CA certificate request not found")
+    if not ca_certificate_can_edit(certificate):
+        raise HTTPException(status_code=409, detail="Only unissued manual certificate requests can be edited.")
+    try:
+        parsed_profile_id = parse_ca_profile_id(profile_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Select an enabled CA profile.") from None
+    profile = db.get(CaProfile, parsed_profile_id) if parsed_profile_id is not None else None
+    validation_errors = validate_ca_certificate_request(
+        profile=profile,
+        common_name=common_name,
+        subject_alt_names=subject_alt_names,
+        ip_addresses=ip_addresses,
+    )
+    if validation_errors:
+        raise HTTPException(status_code=422, detail=" ".join(validation_errors))
     certificate.common_name = common_name.strip()
-    certificate.profile_id = parse_ca_profile_id(profile_id)
+    certificate.profile_id = parsed_profile_id
     certificate.subject_alt_names = join_multiline(split_multiline(subject_alt_names))
     certificate.ip_addresses = join_multiline(split_multiline(ip_addresses))
-    certificate.status = status.strip() or "planned"
-    certificate.serial_number = serial_number.strip() or None
     certificate.description = description or None
     certificate.enabled = enabled == "on"
     db.commit()
@@ -12364,6 +12398,8 @@ def delete_ca_certificate_from_ui(
     certificate = db.get(CaCertificate, certificate_id)
     if not certificate:
         raise HTTPException(status_code=404, detail="CA certificate request not found")
+    if not ca_certificate_can_delete(certificate):
+        raise HTTPException(status_code=409, detail="Service-owned certificates must be managed from their owning service.")
     db.delete(certificate)
     db.commit()
     record_audit(db, actor=identity.username, action="delete_ca_certificate_request", resource_type="ca_certificate", resource_id=str(certificate_id))
