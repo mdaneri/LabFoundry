@@ -139,6 +139,24 @@ class SystemAdapter:
     def validate_kms_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("kms", "validate", config_path, dry_run_message="dry-run: KMS validation command recorded")
 
+    def apply_ldap_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("ldap", "apply", config_path, dry_run_message="dry-run: LDAP apply command recorded")
+
+    def validate_ldap_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("ldap", "validate", config_path, dry_run_message="dry-run: LDAP validation command recorded")
+
+    def ldap_status(self) -> AdapterResult:
+        return self._helper_result(
+            "ldap",
+            "status",
+            dry_run_message=json.dumps({"active": "unknown", "listeners": [], "dry_run": True}),
+            use_sudo=False,
+            timeout_seconds=5,
+        )
+
+    def export_ldap_recovery(self, archive_path: str) -> AdapterResult:
+        return self._helper_result("ldap", "export", archive_path, dry_run_message="dry-run: LDAP recovery export command recorded")
+
     def apply_chronyd_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("chronyd", "apply", config_path, dry_run_message="dry-run: Chrony apply command recorded")
 
@@ -167,6 +185,14 @@ class SystemAdapter:
                 "No host Chrony journal is read in development mode.",
             )
         return self._helper_result("chronyd", "logs", dry_run_message="dry-run: Chrony log read command recorded", timeout_seconds=5)
+
+    def read_ldap_logs(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(
+                ["labfoundry-helper", "ldap", "logs"],
+                "No host LDAP journal is read in development mode.",
+            )
+        return self._helper_result("ldap", "logs", dry_run_message="dry-run: LDAP log read command recorded", timeout_seconds=5)
 
     def read_dnsmasq_logs(self) -> AdapterResult:
         if self.dry_run:

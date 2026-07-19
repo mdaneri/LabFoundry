@@ -42,6 +42,7 @@ def init_db() -> None:
     _ensure_sqlite_vcf_depot_columns()
     _ensure_sqlite_vcf_trust_columns()
     _ensure_sqlite_esxi_pxe_columns()
+    _ensure_sqlite_ldap_columns()
 
 
 def _ensure_sqlite_network_columns() -> None:
@@ -287,6 +288,41 @@ def _ensure_sqlite_ca_columns() -> None:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(text(f"ALTER TABLE ca_certificates ADD COLUMN {name} {definition}"))
+            connection.execute(
+                text(
+                    """
+                    DELETE FROM ca_certificates
+                    WHERE id IN (
+                        SELECT id
+                        FROM (
+                            SELECT
+                                id,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY managed_owner
+                                    ORDER BY
+                                        CASE
+                                            WHEN status = 'issued'
+                                                AND COALESCE(certificate_pem, '') <> ''
+                                                AND COALESCE(private_key_encrypted, '') <> '' THEN 0
+                                            WHEN status = 'issued' THEN 1
+                                            ELSE 2
+                                        END,
+                                        id
+                                ) AS duplicate_position
+                            FROM ca_certificates
+                            WHERE COALESCE(managed_owner, '') <> ''
+                        ) ranked_managed_certificates
+                        WHERE duplicate_position > 1
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_ca_certificates_managed_owner "
+                    "ON ca_certificates (managed_owner) WHERE managed_owner <> ''"
+                )
+            )
 
 
 def _ensure_sqlite_vcf_depot_columns() -> None:
@@ -434,6 +470,41 @@ def _ensure_sqlite_esxi_pxe_columns() -> None:
         for name, definition in columns.items():
             if name not in existing:
                 connection.execute(text(f"ALTER TABLE esxi_pxe_hosts ADD COLUMN {name} {definition}"))
+
+
+def _ensure_sqlite_ldap_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    if "ldap_settings" not in table_names:
+        return
+    existing = {column["name"] for column in inspector.get_columns("ldap_settings")}
+    columns = {
+        "hostname": "VARCHAR(180) DEFAULT 'ldap.labfoundry.internal'",
+        "listen_interface": "VARCHAR(240) DEFAULT ''",
+        "listen_address": "VARCHAR(240) DEFAULT ''",
+        "ldaps_enabled": "BOOLEAN DEFAULT 1",
+        "port": "INTEGER DEFAULT 636",
+        "ldap_enabled": "BOOLEAN DEFAULT 0",
+        "ldap_port": "INTEGER DEFAULT 389",
+        "min_password_length": "INTEGER DEFAULT 14",
+        "require_uppercase": "BOOLEAN DEFAULT 1",
+        "require_lowercase": "BOOLEAN DEFAULT 1",
+        "require_number": "BOOLEAN DEFAULT 1",
+        "require_special": "BOOLEAN DEFAULT 1",
+        "disallow_username": "BOOLEAN DEFAULT 1",
+        "max_failures": "INTEGER DEFAULT 5",
+        "lockout_minutes": "INTEGER DEFAULT 15",
+        "failure_window_minutes": "INTEGER DEFAULT 15",
+        "password_history": "INTEGER DEFAULT 5",
+        "password_max_age_days": "INTEGER DEFAULT 0",
+        "config_path": "VARCHAR(240) DEFAULT '/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json'",
+    }
+    with engine.begin() as connection:
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE ldap_settings ADD COLUMN {name} {definition}"))
 
 
 def get_db() -> Generator[Session, None, None]:

@@ -151,6 +151,8 @@ def test_full_lifecycle_plan_includes_passwordless_web_terminal_acceptance():
     plan = lifecycle.lifecycle_plan(args)
 
     assert "passwordless admin web terminal on management and one selected extra interface" in plan["checks"]
+    assert "ldap" in plan["apply_units"]
+    assert any("Managed LDAP desired state" in check for check in plan["checks"])
 
 
 def test_routing_probe_commands_cover_block_allow_and_route_role_paths():
@@ -198,6 +200,10 @@ def test_host_state_checks_verify_vcf_trust_runtime_dependencies(monkeypatch):
         ).encode("utf-16le")
     ).decode("ascii")
     assert encoded_vcf_sdk_probe in captured["vcf_automation_tooling"]
+    assert "slapd.service" in captured["ldap_service"]
+    assert "636" in captured["ldap_listeners"]
+    assert "389" in captured["ldap_listeners"]
+    assert "-verify_hostname ldap.labfoundry.internal" in captured["ldap_tls"]
     assert encoded_powercli_probe in captured["vcf_automation_tooling"]
 
 

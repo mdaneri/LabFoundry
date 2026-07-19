@@ -9,6 +9,7 @@ time after validation and rollback behavior are reviewed.
 from __future__ import annotations
 
 import json
+import base64
 import ctypes
 import ctypes.util
 import hmac
@@ -59,6 +60,7 @@ COMMANDS: dict[str, set[str]] = {
     "dnsmasq": {"validate", "apply", "reload", "leases", "logs"},
     "ca": {"validate", "apply"},
     "kms": {"validate", "apply"},
+    "ldap": {"validate", "apply", "status", "export", "logs"},
     "chronyd": {"validate", "apply", "status", "logs", "capabilities"},
     "nginx": {"logs", "access-logs", "error-logs"},
     "vcf-backups": {"validate", "apply"},
@@ -81,6 +83,7 @@ SYSTEMD_RUN_REAL_ACTIONS = {
     "apply-https",
     "apply-properties",
     "relocate-bundles",
+    "export",
     "restart-service",
 }
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
@@ -91,6 +94,8 @@ NO_PATH_ACTIONS = {
     ("chronyd", "status"),
     ("chronyd", "logs"),
     ("chronyd", "capabilities"),
+    ("ldap", "status"),
+    ("ldap", "logs"),
     ("nginx", "logs"),
     ("nginx", "access-logs"),
     ("nginx", "error-logs"),
@@ -165,6 +170,19 @@ KMS_CONFIG_DIR = Path("/etc/labfoundry/kms")
 KMS_CONFIG_PATH = KMS_CONFIG_DIR / "pykmip.conf"
 KMS_POLICY_DIR = KMS_CONFIG_DIR / "policies"
 KMS_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-kms.service")
+LDAP_APPLY_DIR = Path("/var/lib/labfoundry/apply/ldap")
+LDAP_STATE_DIR = Path("/var/lib/openldap/labfoundry")
+LDAP_RECOVERY_DIR = Path("/var/lib/labfoundry/ldap/recovery")
+LDAP_CONFIG_ROOT = Path("/etc/openldap")
+LDAP_CONFIG_DIR = LDAP_CONFIG_ROOT / "slapd.d"
+LDAP_RUNTIME_DIR = Path("/run/openldap")
+LDAP_SYSTEMD_DROPIN_DIR = Path("/etc/systemd/system/slapd.service.d")
+LDAP_SYSTEMD_DROPIN_PATH = LDAP_SYSTEMD_DROPIN_DIR / "labfoundry.conf"
+LDAP_SYSCONFIG_PATH = Path("/etc/sysconfig/slapd")
+LDAP_CERT_PATH = Path("/etc/labfoundry/ldap/tls/server.crt")
+LDAP_KEY_PATH = Path("/etc/labfoundry/ldap/tls/server.key")
+LDAP_CHAIN_PATH = Path("/etc/labfoundry/ldap/tls/server-chain.crt")
+LDAP_ROOT_CA_PATH = Path("/etc/labfoundry/ca/root.crt")
 PYKMIP_CONFIG_DIR = Path("/etc/pykmip")
 PYKMIP_CONFIG_PATH = PYKMIP_CONFIG_DIR / "server.conf"
 PYKMIP_SERVER_VENV_PATH = Path("/opt/labfoundry/.venv/bin/pykmip-server")
@@ -464,6 +482,17 @@ def _validate_kms_config_path(path_value: str) -> Path:
         raise ValueError(f"KMS config must be staged under {KMS_APPLY_DIR}")
     if not path.is_file():
         raise ValueError(f"KMS config does not exist: {path}")
+    return path
+
+
+def _validate_ldap_config_path(path_value: str) -> Path:
+    path = Path(_validate_path(path_value)).resolve()
+    if path.suffix != ".json":
+        raise ValueError("LDAP config path must end with .json")
+    if not path.is_relative_to(LDAP_APPLY_DIR.resolve()):
+        raise ValueError(f"LDAP config must be staged under {LDAP_APPLY_DIR}")
+    if not path.is_file():
+        raise ValueError(f"LDAP config does not exist: {path}")
     return path
 
 
@@ -1600,6 +1629,911 @@ def _handle_esxi_pxe(action: str, args: list[str]) -> int:
     if action == "apply":
         return _apply_esxi_pxe_manifest(payload)
     print(f"unsupported esxi-pxe action: {action}", file=sys.stderr)
+    return 2
+
+
+def _load_ldap_config(path: Path) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("LDAP staged config must be a JSON object.")
+    return payload
+
+
+def _ldap_config_errors(payload: dict) -> list[str]:
+    errors: list[str] = []
+    if payload.get("schema_version") != 1:
+        errors.append("LDAP staged config schema_version must be 1.")
+    service = payload.get("service")
+    organizations = payload.get("organizations")
+    if not isinstance(service, dict):
+        return [*errors, "LDAP staged config must include service settings."]
+    if not isinstance(organizations, list):
+        return [*errors, "LDAP staged config must include an organizations list."]
+    ldaps_port = int(service.get("port") or 0)
+    ldap_port = int(service.get("ldap_port") or 0)
+    ldaps_enabled = bool(service.get("ldaps_enabled", True))
+    ldap_enabled = bool(service.get("ldap_enabled", False))
+    if not 1 <= ldaps_port <= 65535:
+        errors.append("LDAPS listener port must be between 1 and 65535.")
+    if not 1 <= ldap_port <= 65535:
+        errors.append("LDAP listener port must be between 1 and 65535.")
+    if ldaps_enabled and ldap_enabled and ldaps_port == ldap_port:
+        errors.append("LDAP and LDAPS listeners must use different TCP ports.")
+    if service.get("enabled") and not ldaps_enabled and not ldap_enabled:
+        errors.append("Enabled LDAP requires at least one LDAP or LDAPS listener.")
+    if service.get("enabled") and (not service.get("listen_interface") or not service.get("listen_address")):
+        errors.append("Enabled LDAP requires at least one listener interface and address.")
+    password_policy = service.get("password_policy")
+    if not isinstance(password_policy, dict):
+        errors.append("LDAP password policy is missing.")
+        password_policy = {}
+    if int(password_policy.get("min_length") or 0) < 8:
+        errors.append("LDAP minimum password length must be at least 8.")
+    seen_suffixes: set[str] = set()
+    seen_slugs: set[str] = set()
+    for organization in organizations:
+        if not isinstance(organization, dict):
+            errors.append("LDAP organization entries must be objects.")
+            continue
+        label = str(organization.get("name") or organization.get("slug") or "LDAP organization")
+        slug = str(organization.get("slug") or "")
+        suffix = str(organization.get("suffix_dn") or "")
+        bind_dn = str(organization.get("bind_dn") or "")
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", slug):
+            errors.append(f"{label}: invalid organization slug.")
+        if slug in seen_slugs:
+            errors.append(f"{label}: duplicate organization slug.")
+        seen_slugs.add(slug)
+        if not suffix or "=" not in suffix or "," not in suffix:
+            errors.append(f"{label}: invalid LDAP suffix.")
+        elif not suffix.lower().startswith("dc="):
+            errors.append(f"{label}: LDAP suffix must start with a dc component.")
+        if suffix.lower() in seen_suffixes:
+            errors.append(f"{label}: duplicate LDAP suffix.")
+        seen_suffixes.add(suffix.lower())
+        if not bind_dn.endswith(suffix):
+            errors.append(f"{label}: VCF bind DN must stay inside its organization suffix.")
+        if not organization.get("bind_password"):
+            errors.append(f"{label}: VCF bind password is missing.")
+        vcf_settings = organization.get("vcf_settings") or {}
+        compatibility = vcf_settings.get("vcf91IdentityBrokerCompatibility") or {}
+        if compatibility.get("requiredInternalAttribute") != "serviceAccount" or compatibility.get("ldapAttribute") != "employeeType":
+            errors.append(f"{label}: mandatory VCF 9.1 serviceAccount mapping is missing.")
+        actual_mapping = ((vcf_settings.get("definedSettings") or {}).get("userAttributes") or {}).get("serviceAccount")
+        if actual_mapping != "employeeType":
+            errors.append(f"{label}: VCF 9.1 userAttributes.serviceAccount must map to employeeType.")
+        users = organization.get("users")
+        groups = organization.get("groups")
+        if not isinstance(users, list) or not isinstance(groups, list):
+            errors.append(f"{label}: users and groups must be lists.")
+            continue
+        user_ids = {int(user.get("id")) for user in users if isinstance(user, dict) and user.get("id") is not None}
+        group_ids = {int(group.get("id")) for group in groups if isinstance(group, dict) and group.get("id") is not None}
+        edges: dict[int, set[int]] = {}
+        for user in users:
+            if not isinstance(user, dict):
+                errors.append(f"{label}: user entries must be objects.")
+                continue
+            uid = str(user.get("uid") or "")
+            if not re.fullmatch(r"[a-z][a-z0-9._-]{0,99}", uid):
+                errors.append(f"{label}: user {uid or user.get('id')} has an invalid uid.")
+            recovery_present = bool((payload.get("recovery_import") or {}).get("payload_b64"))
+            if user.get("enabled") and not recovery_present and not user.get("password") and user.get("password_status") != "applied":
+                errors.append(f"{label}: enabled user {uid} needs an applied or staged password.")
+        for group in groups:
+            if not isinstance(group, dict):
+                errors.append(f"{label}: group entries must be objects.")
+                continue
+            group_id = int(group.get("id") or 0)
+            members = group.get("members") or []
+            if group.get("enabled") and not members:
+                errors.append(f"{label}: enabled group {group.get('name') or group_id} must contain at least one user or nested group.")
+            edges[group_id] = set()
+            for member in members:
+                member_type = member.get("type")
+                member_id = int(member.get("id") or 0)
+                if member_type == "user" and member_id not in user_ids:
+                    errors.append(f"{label}: group {group.get('name')} references an unknown user.")
+                elif member_type == "group":
+                    if member_id not in group_ids:
+                        errors.append(f"{label}: group {group.get('name')} references an unknown nested group.")
+                    edges[group_id].add(member_id)
+                elif member_type not in {"user", "group"}:
+                    errors.append(f"{label}: group {group.get('name')} has an invalid member type.")
+        visiting: set[int] = set()
+        visited: set[int] = set()
+
+        def visit(group_id: int) -> None:
+            if group_id in visiting:
+                errors.append(f"{label}: nested LDAP groups contain a cycle.")
+                return
+            if group_id in visited:
+                return
+            visiting.add(group_id)
+            for child_id in edges.get(group_id, set()):
+                visit(child_id)
+            visiting.remove(group_id)
+            visited.add(group_id)
+
+        for group_id in edges:
+            visit(group_id)
+    if service.get("enabled") and service.get("ldaps_enabled"):
+        for path_value, label, private_key in [
+            (service.get("certificate_path"), "LDAP certificate", False),
+            (service.get("key_path"), "LDAP private key", True),
+            (service.get("chain_path"), "LDAP certificate chain", False),
+            (service.get("root_ca_path"), "LDAP root CA", False),
+        ]:
+            try:
+                path = _ca_managed_path(str(path_value or ""), label)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            if not path.is_file():
+                errors.append(f"{label} does not exist: {path}")
+                continue
+            try:
+                errors.extend(_pem_errors(path.read_text(encoding="utf-8"), label, private_key=private_key))
+            except OSError as exc:
+                errors.append(str(exc))
+    if service.get("enabled"):
+        for command in ("slapd", "slaptest", "ldapmodify", "ldapsearch", "ldapdelete"):
+            if shutil.which(command) is None:
+                errors.append(f"{command} command not found")
+    return list(dict.fromkeys(errors))
+
+
+def _openldap_schema_path(name: str) -> Path:
+    candidates = [
+        LDAP_CONFIG_ROOT / "schema" / f"{name}.schema",
+        Path("/usr/share/openldap/schema") / f"{name}.schema",
+    ]
+    return next((path for path in candidates if path.is_file()), candidates[0])
+
+
+def _render_ldap_slapd_config(
+    payload: dict,
+    *,
+    state_root: Path = LDAP_STATE_DIR,
+    runtime_root: Path = LDAP_RUNTIME_DIR,
+) -> str:
+    service = payload["service"]
+    policy = service["password_policy"]
+    lines = [
+        "# Managed by LabFoundry. Local changes may be overwritten.",
+        f"include {_openldap_schema_path('core')}",
+        f"include {_openldap_schema_path('cosine')}",
+        f"include {_openldap_schema_path('inetorgperson')}",
+        f"include {_openldap_schema_path('openldap')}",
+        f"pidfile {runtime_root / 'slapd.pid'}",
+        f"argsfile {runtime_root / 'slapd.args'}",
+        "modulepath /usr/lib/openldap",
+        "moduleload ppolicy.so",
+        "moduleload memberof.so",
+        "moduleload refint.so",
+    ]
+    if service.get("ldaps_enabled", True):
+        lines.extend(
+            [
+                f"TLSCertificateFile {service['certificate_path']}",
+                f"TLSCertificateKeyFile {service['key_path']}",
+                f"TLSCACertificateFile {service['root_ca_path']}",
+                "TLSProtocolMin 3.3",
+                "TLSCipherSuite HIGH:!aNULL:!MD5:!RC4",
+            ]
+        )
+    lines.extend(
+        [
+            "password-hash {SSHA}",
+            "",
+            "database config",
+            'access to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by * none',
+            "",
+        ]
+    )
+    for index, organization in enumerate(payload["organizations"], start=1):
+        if not organization.get("enabled", True):
+            continue
+        suffix = organization["suffix_dn"]
+        bind_dn = organization["bind_dn"]
+        data_dir = state_root / organization["slug"]
+        policy_dn = f"cn=default-password-policy,ou=system,{suffix}"
+        lines.extend(
+            [
+                "database mdb",
+                f"suffix \"{suffix}\"",
+                f"directory {data_dir}",
+                "maxsize 1073741824",
+                "index objectClass eq",
+                "index uid,cn,mail,employeeType eq,pres,sub",
+                "index member,memberOf eq",
+                "index entryUUID eq",
+                "overlay ppolicy",
+                f"ppolicy_default \"{policy_dn}\"",
+                "ppolicy_hash_cleartext",
+                "ppolicy_use_lockout",
+                "overlay memberof",
+                "memberof-group-oc groupOfNames",
+                "memberof-member-ad member",
+                "memberof-memberof-ad memberOf",
+                "memberof-refint TRUE",
+                "overlay refint",
+                "refint_attributes member memberOf manager",
+                (
+                    'access to attrs=userPassword,pwdHistory,pwdAccountLockedTime '
+                    'by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage '
+                    'by self auth by anonymous auth by * none'
+                ),
+                (
+                    'access to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage '
+                    f'by dn.exact="{bind_dn}" read by self read by * none'
+                ),
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _ldif_line(attribute: str, value: object) -> str:
+    encoded = base64.b64encode(str(value).encode("utf-8")).decode("ascii")
+    return f"{attribute}:: {encoded}"
+
+
+def _ldap_entry_exists(dn: str) -> bool:
+    ldapsearch = shutil.which("ldapsearch") or "ldapsearch"
+    result = _run([ldapsearch, "-LLL", "-o", "ldif-wrap=no", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", dn, "-s", "base", "dn"])
+    return result.returncode == 0 and any(line.lower().startswith("dn:") for line in result.stdout.splitlines())
+
+
+def _ldap_modify(ldif: str) -> int:
+    ldapmodify = shutil.which("ldapmodify") or "ldapmodify"
+    result = _run_with_input([ldapmodify, "-Y", "EXTERNAL", "-H", "ldapi:///"], ldif)
+    if result.returncode != 0:
+        print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def _ldap_upsert_entry(dn: str, attributes: dict[str, list[str] | str], *, secret_attributes: set[str] | None = None) -> int:
+    secret_attributes = secret_attributes or set()
+    normalized = {
+        attribute: values if isinstance(values, list) else [values]
+        for attribute, values in attributes.items()
+        if values != "" and values != []
+    }
+    if not _ldap_entry_exists(dn):
+        lines = [_ldif_line("dn", dn), "changetype: add"]
+        for attribute, values in normalized.items():
+            for value in values:
+                lines.append(_ldif_line(attribute, value))
+        return _ldap_modify("\n".join(lines) + "\n")
+    lines = [_ldif_line("dn", dn), "changetype: modify"]
+    for attribute, values in normalized.items():
+        if attribute in {"objectClass"}:
+            continue
+        lines.append(f"replace: {attribute}")
+        for value in values:
+            lines.append(_ldif_line(attribute, value))
+        lines.append("-")
+    if len(lines) == 2:
+        return 0
+    return _ldap_modify("\n".join(lines) + "\n")
+
+
+def _ldap_delete_attribute(dn: str, attribute: str) -> int:
+    if not _ldap_entry_exists(dn):
+        return 0
+    ldif = "\n".join([_ldif_line("dn", dn), "changetype: modify", f"replace: {attribute}", "-", ""])
+    result = _ldap_modify(ldif)
+    return 0 if result in {0, 16} else result
+
+
+def _ldap_list_dns(base_dn: str) -> list[str]:
+    ldapsearch = shutil.which("ldapsearch") or "ldapsearch"
+    result = _run([ldapsearch, "-LLL", "-o", "ldif-wrap=no", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", base_dn, "-s", "one", "dn"])
+    if result.returncode != 0:
+        return []
+    dns: list[str] = []
+    for line in result.stdout.splitlines():
+        if line.lower().startswith("dn:: "):
+            try:
+                dns.append(base64.b64decode(line.split("::", 1)[1].strip()).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+        elif line.lower().startswith("dn: "):
+            dns.append(line.split(":", 1)[1].strip())
+    return dns
+
+
+def _ldap_delete_entries(dns: list[str]) -> int:
+    ldapdelete = shutil.which("ldapdelete") or "ldapdelete"
+    for dn in dns:
+        result = _run([ldapdelete, "-Y", "EXTERNAL", "-H", "ldapi:///", dn])
+        if result.returncode != 0:
+            print(result.stderr, end="", file=sys.stderr)
+            return result.returncode
+    return 0
+
+
+def _ldap_reconcile_organization(organization: dict, policy: dict) -> int:
+    suffix = organization["suffix_dn"]
+    root_rdn = suffix.split(",", 1)[0]
+    root_attribute, root_value = root_rdn.split("=", 1)
+    entries = [
+        (suffix, {"objectClass": ["top", "domain"], root_attribute: root_value}),
+        (f"ou=users,{suffix}", {"objectClass": ["top", "organizationalUnit"], "ou": "users"}),
+        (f"ou=groups,{suffix}", {"objectClass": ["top", "organizationalUnit"], "ou": "groups"}),
+        (f"ou=service-accounts,{suffix}", {"objectClass": ["top", "organizationalUnit"], "ou": "service-accounts"}),
+        (f"ou=system,{suffix}", {"objectClass": ["top", "organizationalUnit"], "ou": "system"}),
+    ]
+    for dn, attributes in entries:
+        returncode = _ldap_upsert_entry(dn, attributes)
+        if returncode != 0:
+            return returncode
+    policy_dn = f"cn=default-password-policy,ou=system,{suffix}"
+    policy_attributes = {
+        "objectClass": ["top", "device", "pwdPolicy"],
+        "cn": "default-password-policy",
+        "pwdAttribute": "userPassword",
+        "pwdCheckQuality": "2",
+        "pwdMinLength": str(policy.get("min_length") or 14),
+        "pwdInHistory": str(policy.get("history") or 5),
+        "pwdMaxFailure": str(policy.get("max_failures") or 5),
+        "pwdFailureCountInterval": str(int(policy.get("failure_window_minutes") or 15) * 60),
+        "pwdLockout": "TRUE",
+        "pwdLockoutDuration": str(int(policy.get("lockout_minutes") or 15) * 60),
+        "pwdMaxAge": str(int(policy.get("max_age_days") or 0) * 86400),
+        "pwdExpireWarning": "0",
+        "pwdMustChange": "FALSE",
+        "pwdAllowUserChange": "TRUE",
+        "pwdSafeModify": "FALSE",
+    }
+    returncode = _ldap_upsert_entry(policy_dn, policy_attributes)
+    if returncode != 0:
+        return returncode
+    service_policy_dn = f"cn=service-account-password-policy,ou=system,{suffix}"
+    service_policy_attributes = {
+        "objectClass": ["top", "device", "pwdPolicy"],
+        "cn": "service-account-password-policy",
+        "pwdAttribute": "userPassword",
+        "pwdCheckQuality": "0",
+        "pwdInHistory": "0",
+        "pwdMaxFailure": "0",
+        "pwdFailureCountInterval": "0",
+        "pwdLockout": "FALSE",
+        "pwdLockoutDuration": "0",
+        "pwdMaxAge": "0",
+        "pwdExpireWarning": "0",
+        "pwdMustChange": "FALSE",
+        "pwdAllowUserChange": "FALSE",
+        "pwdSafeModify": "FALSE",
+    }
+    returncode = _ldap_upsert_entry(service_policy_dn, service_policy_attributes)
+    if returncode != 0:
+        return returncode
+    bind_dn = organization["bind_dn"]
+    bind_attributes = {
+        "objectClass": ["top", "person", "organizationalPerson", "inetOrgPerson"],
+        "uid": "vcf-bind",
+        "cn": "VCF read-only bind",
+        "sn": "VCF bind",
+        "displayName": "VCF read-only bind",
+        "employeeType": "serviceAccount",
+        "userPassword": organization["bind_password"],
+        "pwdPolicySubentry": service_policy_dn,
+    }
+    returncode = _ldap_upsert_entry(bind_dn, bind_attributes, secret_attributes={"userPassword"})
+    if returncode != 0:
+        return returncode
+    for user in organization.get("users", []):
+        dn = user["dn"]
+        attributes = {
+            "objectClass": ["top", "person", "organizationalPerson", "inetOrgPerson"],
+            "uid": user["uid"],
+            "cn": user.get("display_name") or user["uid"],
+            "sn": user.get("surname") or user["uid"],
+            "givenName": user.get("given_name") or "",
+            "displayName": user.get("display_name") or user["uid"],
+            "mail": user.get("email") or "",
+            "telephoneNumber": user.get("telephone") or "",
+            "employeeType": "person",
+            "pwdPolicySubentry": policy_dn,
+        }
+        if user.get("password"):
+            attributes["userPassword"] = user["password"]
+        if not user.get("enabled"):
+            attributes["pwdAccountLockedTime"] = "000001010000Z"
+        returncode = _ldap_upsert_entry(dn, attributes, secret_attributes={"userPassword"})
+        if returncode != 0:
+            return returncode
+        if user.get("enabled"):
+            returncode = _ldap_delete_attribute(dn, "pwdAccountLockedTime")
+            if returncode != 0:
+                return returncode
+    for group in organization.get("groups", []):
+        if not group.get("enabled"):
+            continue
+        members = [str(member["dn"]) for member in group.get("members", [])]
+        attributes = {
+            "objectClass": ["top", "groupOfNames"],
+            "cn": group["name"],
+            "description": group.get("description") or "",
+            "member": members,
+        }
+        returncode = _ldap_upsert_entry(group["dn"], attributes)
+        if returncode != 0:
+            return returncode
+    desired_group_dns = {
+        str(group["dn"]).lower()
+        for group in organization.get("groups", [])
+        if group.get("enabled")
+    }
+    stale_group_dns = [
+        dn for dn in _ldap_list_dns(f"ou=groups,{suffix}")
+        if dn.lower() not in desired_group_dns
+    ]
+    returncode = _ldap_delete_entries(stale_group_dns)
+    if returncode != 0:
+        return returncode
+    desired_user_dns = {str(user["dn"]).lower() for user in organization.get("users", [])}
+    stale_user_dns = [
+        dn for dn in _ldap_list_dns(f"ou=users,{suffix}")
+        if dn.lower() not in desired_user_dns
+    ]
+    returncode = _ldap_delete_entries(stale_user_dns)
+    if returncode != 0:
+        return returncode
+    stale_service_dns = [
+        dn for dn in _ldap_list_dns(f"ou=service-accounts,{suffix}")
+        if dn.lower() != bind_dn.lower()
+    ]
+    returncode = _ldap_delete_entries(stale_service_dns)
+    if returncode != 0:
+        return returncode
+    return 0
+
+
+def _ldap_listener_urls(service: dict) -> str:
+    urls = ["ldapi:///"]
+    for raw_address in re.split(r"[\s,]+", str(service.get("listen_address") or "")):
+        address = raw_address.strip()
+        if not address:
+            continue
+        try:
+            parsed = ip_address(address)
+        except ValueError:
+            continue
+        host = f"[{parsed}]" if parsed.version == 6 else str(parsed)
+        if service.get("ldaps_enabled", True):
+            urls.append(f"ldaps://{host}:{int(service.get('port') or 636)}/")
+        if service.get("ldap_enabled", False):
+            urls.append(f"ldap://{host}:{int(service.get('ldap_port') or 389)}/")
+    return " ".join(urls)
+
+
+def _install_ldap_listener_config(service: dict) -> None:
+    listener_urls = _ldap_listener_urls(service)
+    LDAP_SYSTEMD_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+    LDAP_SYSTEMD_DROPIN_PATH.write_text(
+        "\n".join(
+            [
+                "[Service]",
+                "ExecStart=",
+                (
+                    f"ExecStartPre=/usr/bin/install -d -m 0750 -o {_ldap_account_name()} "
+                    f"-g {_ldap_account_name()} {LDAP_RUNTIME_DIR.as_posix()}"
+                ),
+                f'ExecStart=/usr/sbin/slapd -u {_ldap_account_name()} -F {LDAP_CONFIG_DIR} -h "{listener_urls}"',
+                f'Environment="SLAPD_URLS={listener_urls}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(LDAP_SYSTEMD_DROPIN_PATH, 0o644)
+    LDAP_SYSCONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LDAP_SYSCONFIG_PATH.write_text(f'SLAPD_URLS="{listener_urls}"\n', encoding="utf-8")
+    os.chmod(LDAP_SYSCONFIG_PATH, 0o644)
+
+
+def _ldap_account_name() -> str:
+    for name in ("ldap", "openldap"):
+        try:
+            pwd.getpwnam(name)
+            return name
+        except KeyError:
+            continue
+    return "ldap"
+
+
+def _prepare_ldap_runtime_dir(*, runtime_dir: Path = LDAP_RUNTIME_DIR) -> None:
+    """Prepare slapd's volatile PID/args directory for first apply and restart."""
+    account_name = _ldap_account_name()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    shutil.chown(runtime_dir, user=account_name, group=account_name)
+    os.chmod(runtime_dir, 0o750)
+
+
+def _ldap_config_suffixes(config_ldif: str) -> dict[int, str]:
+    suffixes: dict[int, str] = {}
+    current_index: int | None = None
+    for raw_line in config_ldif.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"olcDatabase:\s*\{(\d+)\}(?:mdb|hdb|bdb)", line, re.IGNORECASE)
+        if match:
+            current_index = int(match.group(1))
+            continue
+        if current_index is not None and line.lower().startswith("olcsuffix:"):
+            suffixes[current_index] = line.split(":", 1)[1].strip()
+            current_index = None
+    return suffixes
+
+
+def _restore_ldap_recovery(payload: dict, config_dir: Path) -> int:
+    recovery = payload.get("recovery_import")
+    if not isinstance(recovery, dict) or not recovery.get("payload_b64"):
+        return 0
+    try:
+        archive_bytes = base64.b64decode(str(recovery["payload_b64"]), validate=True)
+    except (ValueError, TypeError) as exc:
+        print(f"LDAP recovery payload is invalid: {exc}", file=sys.stderr)
+        return 2
+    expected_archive_sha = str(recovery.get("sha256") or "").lower()
+    if expected_archive_sha and hashlib.sha256(archive_bytes).hexdigest() != expected_archive_sha:
+        print("LDAP recovery payload sha256 does not match the staged manifest.", file=sys.stderr)
+        return 2
+    with tempfile.TemporaryDirectory(prefix="labfoundry-ldap-restore-") as temp_root_value:
+        temp_root = Path(temp_root_value)
+        archive_path = temp_root / "recovery.tar.gz"
+        archive_path.write_bytes(archive_bytes)
+        try:
+            with tarfile.open(archive_path, "r:gz") as archive:
+                members = archive.getmembers()
+                if any(member.name.startswith(("/", "\\")) or ".." in member.name.replace("\\", "/").split("/") for member in members):
+                    print("LDAP recovery archive contains an unsafe path.", file=sys.stderr)
+                    return 2
+                archive.extractall(temp_root / "archive", filter="data")
+        except (tarfile.TarError, OSError) as exc:
+            print(f"LDAP recovery archive could not be extracted: {exc}", file=sys.stderr)
+            return 2
+        extracted = temp_root / "archive"
+        try:
+            manifest = json.loads((extracted / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"LDAP recovery manifest could not be read: {exc}", file=sys.stderr)
+            return 2
+        if manifest.get("format") != "labfoundry-ldap-slapcat-v1":
+            print("Unsupported LDAP recovery manifest format.", file=sys.stderr)
+            return 2
+        desired_indexes = {
+            str(organization["suffix_dn"]).lower(): index
+            for index, organization in enumerate(
+                [row for row in payload["organizations"] if row.get("enabled", True)],
+                start=1,
+            )
+        }
+        slapadd = shutil.which("slapadd") or "slapadd"
+        account_name = _ldap_account_name()
+        for database in manifest.get("databases", []):
+            suffix = str(database.get("suffix") or "").lower()
+            if not suffix or suffix not in desired_indexes:
+                continue
+            filename = Path(str(database.get("filename") or "")).name
+            ldif_path = extracted / filename
+            if not ldif_path.is_file():
+                print(f"LDAP recovery database file is missing: {filename}", file=sys.stderr)
+                return 2
+            expected_sha = str(database.get("sha256") or "").lower()
+            if expected_sha and hashlib.sha256(ldif_path.read_bytes()).hexdigest() != expected_sha:
+                print(f"LDAP recovery database sha256 mismatch: {filename}", file=sys.stderr)
+                return 2
+            desired_index = desired_indexes[suffix]
+            organization = next(
+                row for row in payload["organizations"] if str(row["suffix_dn"]).lower() == suffix
+            )
+            data_dir = LDAP_STATE_DIR / organization["slug"]
+            if data_dir.exists():
+                for child in data_dir.iterdir():
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+            result = _run([slapadd, "-F", str(config_dir), "-n", str(desired_index), "-l", str(ldif_path)])
+            if result.returncode != 0:
+                print(result.stderr, end="", file=sys.stderr)
+                return result.returncode
+            try:
+                shutil.chown(data_dir, user=account_name, group=account_name)
+                for path in data_dir.rglob("*"):
+                    shutil.chown(path, user=account_name, group=account_name)
+            except (LookupError, OSError) as exc:
+                print(f"LDAP recovery data ownership could not be restored for {suffix}: {exc}", file=sys.stderr)
+                return 2
+    return 0
+
+
+def _remove_obsolete_ldap_data_directories(payload: dict) -> None:
+    desired_slugs = {
+        str(organization.get("slug") or "")
+        for organization in payload.get("organizations", [])
+        if organization.get("slug")
+    }
+    if not LDAP_STATE_DIR.is_dir():
+        return
+    for child in LDAP_STATE_DIR.iterdir():
+        if child.name in desired_slugs:
+            continue
+        if child.is_symlink():
+            child.unlink()
+        elif child.is_dir():
+            shutil.rmtree(child)
+
+
+def _apply_ldap_config(payload: dict) -> int:
+    service = payload["service"]
+    if not service.get("enabled"):
+        result = _run(["systemctl", "disable", "--now", "slapd.service"])
+        if result.returncode not in {0, 1, 5}:
+            print(result.stderr, end="", file=sys.stderr)
+            return result.returncode
+        try:
+            _remove_obsolete_ldap_data_directories(payload)
+        except OSError as exc:
+            print(f"Obsolete LDAP data directories could not be removed: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    LDAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    account_name = _ldap_account_name()
+    try:
+        _prepare_ldap_runtime_dir()
+    except (LookupError, OSError) as exc:
+        print(f"LDAP runtime directory could not be prepared: {exc}", file=sys.stderr)
+        return 1
+    for organization in payload["organizations"]:
+        if not organization.get("enabled", True):
+            continue
+        data_dir = LDAP_STATE_DIR / organization["slug"]
+        data_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.chown(data_dir, user=account_name, group=account_name)
+        except (LookupError, OSError):
+            pass
+        os.chmod(data_dir, 0o700)
+    with tempfile.TemporaryDirectory(prefix="labfoundry-ldap-") as temp_root_value:
+        temp_root = Path(temp_root_value)
+        slapd_conf = temp_root / "slapd.conf"
+        generated_config = temp_root / "slapd.d"
+        slapd_conf.write_text(_render_ldap_slapd_config(payload), encoding="utf-8")
+        generated_config.mkdir()
+        slaptest = shutil.which("slaptest") or "slaptest"
+        validation = _run([slaptest, "-u", "-f", str(slapd_conf)])
+        if validation.returncode != 0:
+            print(validation.stderr, end="", file=sys.stderr)
+            return validation.returncode
+        slapadd = shutil.which("slapadd") or "slapadd"
+        for index, organization in enumerate(
+            [row for row in payload["organizations"] if row.get("enabled", True)],
+            start=1,
+        ):
+            data_dir = LDAP_STATE_DIR / organization["slug"]
+            if not (data_dir / "data.mdb").exists():
+                initialization = _run_with_input([slapadd, "-f", str(slapd_conf), "-n", str(index)], "")
+                if initialization.returncode != 0:
+                    print(initialization.stderr, end="", file=sys.stderr)
+                    return initialization.returncode
+                try:
+                    shutil.chown(data_dir, user=account_name, group=account_name)
+                    for path in data_dir.rglob("*"):
+                        shutil.chown(path, user=account_name, group=account_name)
+                except (LookupError, OSError):
+                    pass
+        generation = _run([slaptest, "-f", str(slapd_conf), "-F", str(generated_config)])
+        if generation.returncode != 0:
+            print(generation.stderr, end="", file=sys.stderr)
+            return generation.returncode
+        stop = _run(["systemctl", "stop", "slapd.service"])
+        if stop.returncode not in {0, 5}:
+            print(stop.stderr, end="", file=sys.stderr)
+            return stop.returncode
+        try:
+            _remove_obsolete_ldap_data_directories(payload)
+        except OSError as exc:
+            print(f"Obsolete LDAP data directories could not be removed: {exc}", file=sys.stderr)
+            return 1
+        backup = LDAP_CONFIG_DIR.with_name(f"{LDAP_CONFIG_DIR.name}.labfoundry-backup")
+        if backup.exists():
+            shutil.rmtree(backup)
+        if LDAP_CONFIG_DIR.exists():
+            LDAP_CONFIG_DIR.replace(backup)
+        shutil.copytree(generated_config, LDAP_CONFIG_DIR)
+        try:
+            shutil.chown(LDAP_CONFIG_DIR, user=account_name, group=account_name)
+            for path in LDAP_CONFIG_DIR.rglob("*"):
+                shutil.chown(path, user=account_name, group=account_name)
+        except (LookupError, OSError):
+            pass
+        restore_result = _restore_ldap_recovery(payload, LDAP_CONFIG_DIR)
+        if restore_result != 0:
+            return restore_result
+        if service.get("ldaps_enabled", True):
+            key_path = Path(str(service["key_path"]))
+            try:
+                shutil.chown(key_path, user="root", group=account_name)
+            except (LookupError, OSError) as exc:
+                print(f"Could not assign the LDAP private key to the slapd group: {exc}", file=sys.stderr)
+                return 1
+            os.chmod(key_path, 0o640)
+        _install_ldap_listener_config(service)
+        daemon_reload = _run(["systemctl", "daemon-reload"])
+        if daemon_reload.returncode != 0:
+            print(daemon_reload.stderr, end="", file=sys.stderr)
+            return daemon_reload.returncode
+        start = _run(["systemctl", "enable", "--now", "slapd.service"])
+        if start.returncode != 0:
+            print(start.stderr, end="", file=sys.stderr)
+            return start.returncode
+    for organization in payload["organizations"]:
+        if not organization.get("enabled", True):
+            continue
+        returncode = _ldap_reconcile_organization(organization, service["password_policy"])
+        if returncode != 0:
+            return returncode
+    return 0
+
+
+def _handle_ldap(action: str, args: list[str]) -> int:
+    if action == "logs":
+        if args:
+            print("ldap logs does not accept a path", file=sys.stderr)
+            return 2
+        return _systemd_unit_logs("slapd.service")
+    if action == "status":
+        if args:
+            print("ldap status does not accept a path", file=sys.stderr)
+            return 2
+        result = _run(["systemctl", "is-active", "slapd.service"])
+        listeners = _run(["ss", "-lnt"])
+        configured_urls = LDAP_SYSCONFIG_PATH.read_text(encoding="utf-8") if LDAP_SYSCONFIG_PATH.is_file() else ""
+        ldaps_ports = sorted({int(port) for port in re.findall(r"ldaps://[^\s\"]+:(\d+)/", configured_urls)})
+        ldap_ports = sorted({int(port) for port in re.findall(r"(?<!s)ldap://[^\s\"]+:(\d+)/", configured_urls)})
+        configured_ports = {*ldaps_ports, *ldap_ports}
+        listener_lines = [
+            line.strip()
+            for line in listeners.stdout.splitlines()
+            if any(re.search(rf":{port}\s", line) for port in configured_ports)
+        ]
+        payload = {
+            "active": result.stdout.strip() or "unknown",
+            "ldaps_636": any(":636" in line for line in listeners.stdout.splitlines()),
+            "plaintext_389": any(":389" in line for line in listeners.stdout.splitlines()),
+            "ldaps_ports": ldaps_ports,
+            "ldap_ports": ldap_ports,
+            "listeners": listener_lines,
+        }
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+    if action == "export":
+        if len(args) != 1:
+            print("ldap export requires one recovery archive path", file=sys.stderr)
+            return 2
+        target = Path(args[0]).resolve()
+        if not target.is_relative_to(LDAP_RECOVERY_DIR.resolve()):
+            print(f"LDAP recovery export must stay under {LDAP_RECOVERY_DIR}", file=sys.stderr)
+            return 2
+        target.parent.mkdir(parents=True, exist_ok=True)
+        slapcat = shutil.which("slapcat")
+        if slapcat is None:
+            print("slapcat command not found", file=sys.stderr)
+            return 127
+        with tempfile.TemporaryDirectory(prefix="labfoundry-ldap-export-") as temp_root_value:
+            temp_root = Path(temp_root_value)
+            config_result = _run([slapcat, "-n", "0"])
+            if config_result.returncode != 0:
+                print(config_result.stderr, end="", file=sys.stderr)
+                return config_result.returncode
+            config_path = temp_root / "config.ldif"
+            config_path.write_text(config_result.stdout, encoding="utf-8")
+            suffixes = _ldap_config_suffixes(config_result.stdout)
+            databases: list[dict[str, object]] = []
+            for index, suffix in sorted(suffixes.items()):
+                result = _run([slapcat, "-n", str(index)])
+                if result.returncode != 0:
+                    print(result.stderr, end="", file=sys.stderr)
+                    return result.returncode
+                filename = f"database-{index}.ldif"
+                database_path = temp_root / filename
+                database_path.write_text(result.stdout, encoding="utf-8")
+                databases.append(
+                    {
+                        "index": index,
+                        "suffix": suffix,
+                        "filename": filename,
+                        "sha256": hashlib.sha256(result.stdout.encode("utf-8")).hexdigest(),
+                    }
+                )
+            manifest = {
+                "format": "labfoundry-ldap-slapcat-v1",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "databases": databases,
+            }
+            manifest_path = temp_root / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+            with tarfile.open(target, "w:gz") as archive:
+                archive.add(manifest_path, arcname="manifest.json")
+                archive.add(config_path, arcname="config.ldif")
+                for database in databases:
+                    archive.add(temp_root / str(database["filename"]), arcname=str(database["filename"]))
+        os.chmod(target, 0o600)
+        try:
+            shutil.chown(target, user=LABFOUNDRY_SERVICE_USER, group=LABFOUNDRY_SERVICE_USER)
+        except (LookupError, OSError):
+            pass
+        print(json.dumps({"ldap": "recovery export complete", "path": str(target)}, sort_keys=True))
+        return 0
+    if len(args) != 1:
+        print(f"ldap {action} requires exactly one staged config path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _validate_ldap_config_path(args[0])
+        payload = _load_ldap_config(config_path)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    errors = _ldap_config_errors(payload)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    if action == "validate":
+        with tempfile.TemporaryDirectory(prefix="labfoundry-ldap-validate-") as temp_root_value:
+            temp_root = Path(temp_root_value)
+            state_root = temp_root / "data"
+            runtime_root = temp_root / "run"
+            runtime_root.mkdir()
+            for organization in payload["organizations"]:
+                if organization.get("enabled", True):
+                    (state_root / organization["slug"]).mkdir(parents=True, exist_ok=True)
+            slapd_conf = temp_root / "slapd.conf"
+            slapd_conf.write_text(
+                _render_ldap_slapd_config(payload, state_root=state_root, runtime_root=runtime_root),
+                encoding="utf-8",
+            )
+            if payload["service"].get("enabled"):
+                result = _run([shutil.which("slaptest") or "slaptest", "-u", "-f", str(slapd_conf)])
+                if result.returncode != 0:
+                    print(result.stderr, end="", file=sys.stderr)
+                    return result.returncode
+        print(
+            json.dumps(
+                {
+                    "ldap": "validation ok",
+                    "organizations": len(payload["organizations"]),
+                    "ldaps_only": bool(payload["service"].get("ldaps_enabled", True) and not payload["service"].get("ldap_enabled", False)),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if action == "apply":
+        try:
+            returncode = _apply_ldap_config(payload)
+            if returncode == 0:
+                print(
+                    json.dumps(
+                        {
+                            "ldap": "apply complete",
+                            "organizations": len(payload["organizations"]),
+                            "ldaps_only": bool(payload["service"].get("ldaps_enabled", True) and not payload["service"].get("ldap_enabled", False)),
+                        },
+                        sort_keys=True,
+                    )
+                )
+            return returncode
+        finally:
+            try:
+                config_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    print(f"unsupported ldap action: {action}", file=sys.stderr)
     return 2
 
 
@@ -6021,6 +6955,7 @@ def _apply_appliance_update(payload: dict) -> dict:
     if "photon_os" in selected:
         tdnf = _command_path("tdnf") or "tdnf"
         commands.append(_command_payload([tdnf, "-y", "makecache"]))
+        commands.append(_command_payload([tdnf, "-y", "install", "openldap", "openldap-servers"]))
         commands.append(_command_payload([tdnf, "-y", "update"]))
         attempted["photon_os"] = "Photon OS packages updated from configured repositories."
         reboot_recommended = True
@@ -6334,6 +7269,8 @@ def main(argv: list[str]) -> int:
         return _handle_ca(action, normalized_args)
     if group == "kms":
         return _handle_kms(action, normalized_args)
+    if group == "ldap":
+        return _handle_ldap(action, normalized_args)
     if group == "chronyd":
         return _handle_chronyd(action, normalized_args)
     if group == "nginx":

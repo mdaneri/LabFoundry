@@ -60,6 +60,7 @@ def test_login_and_dashboard_render(client):
         "/dhcp",
         "/authentication",
         "/users",
+        "/ldap",
         "/certificate-authority",
         "/kms",
         "/esxi-pxe",
@@ -500,7 +501,7 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     from pathlib import Path
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import Job, JobStatus, utcnow
+    from labfoundry.app.models import Job, JobStatus, JobStep, utcnow
 
     login(client)
     with SessionLocal() as db:
@@ -522,6 +523,29 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
             error="",
         )
         db.add(job)
+        db.add(
+            JobStep(
+                id="job_taskgrid001:ldap",
+                job_id=job.id,
+                component_key="ldap",
+                label="Managed LDAP",
+                position=1,
+                status=JobStatus.FAILED.value,
+                progress_percent=100,
+                result=json.dumps(
+                    {
+                        "success": False,
+                        "commands": [
+                            {
+                                "returncode": 1,
+                                "stderr": "LDAP validation failed without exposing bind_password=DirectorySecret1!",
+                            }
+                        ],
+                    }
+                ),
+                error="The component reported an apply failure.",
+            )
+        )
         db.commit()
 
     page = client.get("/tasks?job_id=job_taskgrid001")
@@ -536,6 +560,8 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert "data-task-detail-log" in page.text
     assert 'class="terminal-note task-result-preview"' in page.text
     assert 'class="language-json" data-task-detail-result' in page.text
+    assert "data-task-detail-errors" in page.text
+    assert "data-task-detail-errors-content" in page.text
     assert 'class="terminal-note task-log-preview"' in page.text
     assert 'class="language-labfoundry-log" data-task-log-content' in page.text
     assert "task-grid-shell" in page.text
@@ -562,6 +588,7 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert ".task-result-preview code," in app_css
     assert "highlightConfigPreviewElement(result);" in app_js
     assert "highlightConfigPreviewElement(content);" in app_js
+    assert 'errorContent.textContent = errorMessages.join("\\n\\n");' in app_js
 
     status_response = client.get("/tasks/status?job_id=job_taskgrid001")
     assert status_response.status_code == 200
@@ -570,6 +597,9 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert selected["id"] == "job_taskgrid001"
     assert selected["can_cancel"] is True
     assert selected["result"]["api_password"] == "[redacted]"
+    failed_step = selected["_children"][0]
+    assert failed_step["error_messages"][0] == "LDAP validation failed without exposing bind_password=[redacted]"
+    assert "DirectorySecret1!" not in json.dumps(failed_step)
     assert payload["active_count"] == 1
 
     log_response = client.get("/tasks/job_taskgrid001/log")
@@ -654,7 +684,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v104" in service_worker.text
+    assert "labfoundry-pwa-v116" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -666,8 +696,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=web-terminal-session-20260715-14" in service_worker.text
-    assert "/static/app.js?v=appliance-console-20260717-1" in service_worker.text
+    assert "/static/app.css?v=ldap-helper-modal-20260719-14" in service_worker.text
+    assert "/static/app.js?v=ldap-helper-modal-20260719-14" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -676,7 +706,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=web-terminal-session-20260715-14" in offline.text
+    assert "/static/app.css?v=ldap-helper-modal-20260719-14" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -692,8 +722,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=web-terminal-session-20260715-14" in page.text
-    assert "/static/app.js?v=appliance-console-20260717-1" in page.text
+    assert "/static/app.css?v=ldap-helper-modal-20260719-14" in page.text
+    assert "/static/app.js?v=ldap-helper-modal-20260719-14" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -2344,6 +2374,11 @@ def test_backup_restore_page_exports_settings_archive(client):
     assert "Download settings backup" in page.text
     assert "Restore settings backup" in page.text
     assert "Factory reset settings" in page.text
+    assert "LDAP Directory Recovery" in page.text
+    assert "not part of the normal settings backup" in page.text
+    assert 'action="/backup-restore/ldap/export"' in page.text
+    assert 'action="/backup-restore/ldap/import"' in page.text
+    assert 'accept=".lfldap,application/octet-stream"' in page.text
     assert "Audit events, jobs, API tokens, password hashes, uploaded secret bodies; CA private material stays encrypted" in page.text
     assert "data-confirm-modal" in page.text
 
@@ -2393,6 +2428,51 @@ def test_settings_archive_round_trips_management_ipv6_gateway(client):
         assert restored is not None
         assert restored.ipv6_cidr == "2001:db8:49::10/64"
         assert restored.ipv6_gateway == "fe80::1"
+
+
+def test_settings_restore_and_factory_reset_clear_staged_ldap_recovery(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import LdapRecoveryArchive
+    from labfoundry.app.services.ldap import LDAP_PENDING_RECOVERY_PAYLOADS
+    from labfoundry.app.services.settings_archive import export_settings_archive, factory_reset_desired_state, restore_settings_archive
+
+    with SessionLocal() as db:
+        archive = export_settings_archive(db, actor="test")
+        staged = LdapRecoveryArchive(
+            filename="staged-restore.lfldap",
+            path="memory://pending-ldap-recovery",
+            sha256="a" * 64,
+            state="staged",
+            organization_count=1,
+            created_by="test",
+        )
+        db.add(staged)
+        db.commit()
+        staged_id = staged.id
+        LDAP_PENDING_RECOVERY_PAYLOADS[staged_id] = b"restore secret"
+
+        restore_settings_archive(db, archive)
+
+        assert db.get(LdapRecoveryArchive, staged_id) is None
+        assert staged_id not in LDAP_PENDING_RECOVERY_PAYLOADS
+
+        reset_staged = LdapRecoveryArchive(
+            filename="staged-reset.lfldap",
+            path="memory://pending-ldap-recovery",
+            sha256="b" * 64,
+            state="staged",
+            organization_count=1,
+            created_by="test",
+        )
+        db.add(reset_staged)
+        db.commit()
+        reset_staged_id = reset_staged.id
+        LDAP_PENDING_RECOVERY_PAYLOADS[reset_staged_id] = b"reset secret"
+
+        factory_reset_desired_state(db)
+
+        assert db.get(LdapRecoveryArchive, reset_staged_id) is None
+        assert reset_staged_id not in LDAP_PENDING_RECOVERY_PAYLOADS
 
 
 def test_esxi_kickstart_api_hides_raw_content_from_read_only_tokens(client):
@@ -3790,17 +3870,18 @@ def test_local_users_page_separates_ldap_authentication(client):
     login(client)
     authentication = client.get("/authentication")
     assert authentication.status_code == 200
-    assert "LDAP provider" in authentication.text
+    assert "LabFoundry LDAP sign-in" in authentication.text
+    assert "Managed VCF LDAP service" in authentication.text
     assert "managed separately" in authentication.text
 
     legacy = client.get("/ldap-users", follow_redirects=False)
     assert legacy.status_code == 303
-    assert legacy.headers["location"] == "/authentication"
+    assert legacy.headers["location"] == "/ldap"
 
     users = client.get("/users")
     assert users.status_code == 200
     assert "Local Users" in users.text
-    assert "LDAP is an authentication provider" in users.text
+    assert "Managed VCF directory users remain isolated" in users.text
     assert "users-table" in users.text
     assert "user-password-modal" in users.text
     assert "data-password-toggle" in users.text
@@ -3895,6 +3976,303 @@ def test_local_users_page_separates_ldap_authentication(client):
     assert 'field: "web_terminal_access"' in app_js.text
     assert 'title: "Web SSH"' in app_js.text
     assert "Temp Password" not in app_js.text
+
+
+def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
+    login(client)
+    page = client.get("/ldap")
+    assert page.status_code == 200
+    assert "Managed LDAP for VCF Automation" in page.text
+    assert 'class="split-workspace service-settings-workspace"' in page.text
+    assert 'aria-label="Managed LDAP views"' not in page.text
+    assert "LDAP Settings" in page.text
+    main_panel_index = page.text.index('<div class="panel wide-panel">')
+    settings_rail_index = page.text.index('<aside class="side-stack service-settings-column">')
+    assert main_panel_index < settings_rail_index
+    settings_rail = page.text[settings_rail_index:]
+    assert settings_rail.index("LDAP Settings") < settings_rail.index("Validation")
+    assert 'name="ldaps_enabled"' in page.text
+    assert 'name="port"' in page.text
+    assert 'name="ldap_enabled"' in page.text
+    assert 'name="ldap_port"' in page.text
+    assert "Management, unused, down, missing, trunk-only" in page.text
+    assert "LDAPS / TCP 636 only" not in page.text
+    assert "VCF Connections" not in page.text
+    assert 'id="ldap-vcf-panel"' not in page.text
+    assert "Recovery" not in page.text
+    assert "Encrypted LDAP Recovery" not in page.text
+    assert "/ldap/recovery/export" not in page.text
+    assert "/ldap/recovery/import" not in page.text
+    app_css = client.get("/static/app.css").text
+    assert ".service-settings-workspace {\n  grid-template-columns: minmax(0, 1fr) 360px;" in app_css
+    assert '.tabulator-cell[tabulator-field="uid"] .add-row-hint' in app_css
+    assert ".zone-tabs .tab-button" in app_css
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    created = client.post(
+        "/ldap/organizations",
+        data={"name": "Org A", "slug": "org-a", "suffix_dn": "", "enabled": "on", "csrf": csrf},
+    )
+    assert created.status_code == 201, created.text
+    assert "Copy this credential now" in created.text
+    assert 'id="ldap-bind-secret-modal"' in created.text
+    assert "data-ldap-bind-secret-auto-open" in created.text
+    assert "data-ldap-bind-secret-close" in created.text
+    assert "data-copy-value" in created.text
+    assert "data-download-value" in created.text
+    assert "ldap-users-table" in created.text
+    assert "ldap-groups-table" in created.text
+    assert "data-ldap-organization-tabs" in created.text
+    assert ">+ Organization</button>" in created.text
+    assert 'id="ldap-organization-new"' in created.text
+    assert "<summary>Create organization</summary>" not in created.text
+    assert "<summary>Add user</summary>" not in created.text
+    assert "<summary>Add group</summary>" not in created.text
+    assert "Generate test directory" not in created.text
+    assert 'name="user_count"' not in created.text
+    assert 'name="group_count"' not in created.text
+    organization_header = created.text.split('<div class="zone-head">', 1)[1].split('</div>\n          </div>', 1)[0]
+    assert 'class="zone-actions"' in organization_header
+    assert 'class="button tiny secondary" type="submit">Rotate bind credential</button>' in organization_header
+    assert 'class="button tiny danger" type="submit">Delete organization</button>' in organization_header
+    assert 'class="tab-buttons tool-tabs ldap-directory-resource-tabs"' in created.text
+    assert "uid=vcf-bind,ou=service-accounts,dc=org-a,dc=ldap,dc=labfoundry,dc=internal" in created.text
+    assert "serviceAccount → employeeType" not in created.text
+
+    organization_id = created.text.split('/ldap/organizations/', 1)[1].split("/", 1)[0]
+    assert f'data-ldap-organization-id="{organization_id}"' in created.text
+    assert 'data-tab-storage-key="labfoundry:ldap:resource-tab"' in created.text
+    app_js = client.get("/static/app.js").text
+    assert 'const LDAP_ORGANIZATION_SELECTION_KEY = "labfoundry:ldap:organization"' in app_js
+    assert "function initializeLdapPageState()" in app_js
+    ldap_page_state_js = app_js.split("function initializeLdapPageState()", 1)[1].split("function attachLdapGridState(", 1)[0]
+    assert 'await fetch(link.href' in ldap_page_state_js
+    assert 'currentPanel.replaceWith(document.importNode(nextCurrentPanel, true))' in ldap_page_state_js
+    assert 'window.history[historyMethod]' in ldap_page_state_js
+    assert 'window.addEventListener("popstate"' in ldap_page_state_js
+    assert 'window.location.replace(validStoredLink.href)' not in ldap_page_state_js
+    assert 'tabList.querySelectorAll(".tab-button")' in ldap_page_state_js
+    assert 'newOrganizationPanel.setAttribute("hidden", "")' in ldap_page_state_js
+    assert "initializeLdapDirectoryTables()" in ldap_page_state_js
+    assert "initializeTabs()" in ldap_page_state_js
+    assert "function attachLdapGridState(" in app_js
+    assert "function redrawLdapDirectoryTables(" in app_js
+    disabled_helper = client.get(f"/vcf-helper?ldap_vcf=1&ldap_organization_id={organization_id}")
+    ldap_tile = disabled_helper.text.split("data-vcf-ldap-open", 1)[1].split(">", 1)[0]
+    assert "disabled" in ldap_tile
+    assert 'data-help="Enable Managed LDAP and at least one organization before using this helper."' in disabled_helper.text
+    assert "Enable Managed LDAP first" in disabled_helper.text
+
+    enabled = client.post(
+        "/ldap/settings",
+        data={"enabled": "on", "hostname": "ldap.labfoundry.internal", "listen_interfaces_present": "1", "ldaps_enabled": "on", "port": "636", "ldap_port": "389", "csrf": csrf},
+        headers={"X-LabFoundry-Autosave": "1"},
+        follow_redirects=False,
+    )
+    assert enabled.status_code == 200
+    enabled_payload = enabled.json()
+    assert enabled_payload["saved"] is True
+    assert enabled_payload["settings"]["enabled"] is True
+    assert enabled_payload["service_status"]["label"] in {"live", "pending"}
+    assert enabled_payload["appliance_apply_status"]["changed"] is True
+    vcf_helper = client.get(f"/vcf-helper?ldap_vcf=1&ldap_organization_id={organization_id}")
+    assert vcf_helper.status_code == 200
+    assert "Managed LDAP for VCF Automation 9.1" in vcf_helper.text
+    assert 'data-vcf-ldap-auto-open' in vcf_helper.text
+    assert f'/ldap/organizations/{organization_id}/vcf-bundle.zip' in vcf_helper.text
+    assert f'/ldap/organizations/{organization_id}/vcf/inspect' in vcf_helper.text
+    assert f'/ldap/organizations/{organization_id}/vcf/configure' in vcf_helper.text
+    assert "serviceAccount → employeeType" in vcf_helper.text
+    assert "Load organization" not in vcf_helper.text
+    assert "data-vcf-ldap-organization-form" in vcf_helper.text
+    assert "data-vcf-ldap-organization-select" in vcf_helper.text
+    vcf_ldap_modal = vcf_helper.text.split('<dialog id="vcf-ldap-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert vcf_ldap_modal.count('name="target_url"') == 1
+    assert vcf_ldap_modal.count('name="vcf_organization_id"') == 1
+    assert vcf_ldap_modal.count('name="username"') == 1
+    assert vcf_ldap_modal.count('name="password"') == 1
+    assert "Generate LDAP Test Directory" in vcf_helper.text
+    assert "data-ldap-generate-open" in vcf_helper.text
+    assert "Generate test directory" not in vcf_ldap_modal
+
+    page = client.get("/ldap")
+    assert "Copy this credential now" not in page.text
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    organization_id = page.text.split('/ldap/organizations/', 1)[1].split("/", 1)[0]
+    user = client.post(
+        f"/ldap/organizations/{organization_id}/users",
+        data={
+            "uid": "operator",
+            "given_name": "VCF",
+            "surname": "Operator",
+            "display_name": "VCF Operator",
+            "email": "operator@example.invalid",
+            "password": "VeryStrong1!Directory",
+            "enabled": "on",
+            "csrf": csrf,
+        },
+        follow_redirects=False,
+    )
+    assert user.status_code == 303
+    page = client.get(user.headers["location"])
+    assert "operator" in page.text
+    assert "pending apply" in page.text
+
+    from sqlalchemy import select
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import LdapUser
+
+    with SessionLocal() as db:
+        operator_id = db.execute(select(LdapUser.id).where(LdapUser.uid == "operator")).scalar_one()
+    edited = client.post(
+        f"/ldap/users/{operator_id}/edit",
+        data={
+            "uid": "operator",
+            "given_name": "VCF",
+            "surname": "Operator",
+            "display_name": "VCF Directory Operator",
+            "email": "operator@org-a.test",
+            "telephone": "+1-555-010-1000",
+            "enabled": "true",
+            "csrf": csrf,
+        },
+        headers={"Accept": "application/json"},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["display_name"] == "VCF Directory Operator"
+    grid_group = client.post(
+        f"/ldap/organizations/{organization_id}/groups",
+        data={"name": "Operators", "description": "VCF operators", "enabled": "false", "csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    assert grid_group.status_code == 201
+    assert grid_group.json()["enabled"] is False
+
+    app_js = client.get("/static/app.js").text
+    ldap_grid_js = app_js.split("function initializeLdapDirectoryTables()", 1)[1].split("function initializeLdapPasswordModal()", 1)[0]
+    assert "+ Add user here" in ldap_grid_js
+    assert "+ Add group here" in ldap_grid_js
+    assert "rowContextMenu" in ldap_grid_js
+    assert 'label: "Reset password"' in ldap_grid_js
+    assert 'label: "Delete user"' in ldap_grid_js
+    assert 'label: "Edit membership"' in ldap_grid_js
+    assert "function ldapGroupMembershipFormatter(cell)" in app_js
+    assert "formatter: ldapGroupMembershipFormatter" in ldap_grid_js
+    assert '<th>Type</th><th>Member</th>' in app_js
+    assert "function updatePageApplyNotice(status = {})" in app_js
+    assert "if (payload.appliance_apply_status) updatePageApplyNotice(payload.appliance_apply_status);" in app_js
+    assert "function updateLdapSettingsStatus(payload = {})" in app_js
+    assert "if (!tableElement.isConnected || tableElement.offsetParent === null) return;" in app_js
+
+
+def test_managed_ldap_generates_complete_synthetic_directory_once(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import AuditEvent, LdapGroup, LdapOrganization, LdapSettings, LdapUser
+    from labfoundry.app.services.ldap import clear_pending_ldap_password, has_pending_ldap_password
+
+    login(client)
+    page = client.get("/ldap")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    created = client.post(
+        "/ldap/organizations",
+        data={"name": "Synthetic Org", "slug": "synthetic", "suffix_dn": "", "enabled": "on", "csrf": csrf},
+    )
+    organization_id = int(created.text.split('/ldap/organizations/', 1)[1].split("/", 1)[0])
+
+    with SessionLocal() as db:
+        settings = db.execute(select(LdapSettings)).scalar_one()
+        settings.enabled = True
+        db.commit()
+
+    generated = client.post(
+        f"/ldap/organizations/{organization_id}/generate-directory",
+        data={"user_count": "6", "group_count": "3", "csrf": csrf},
+    )
+    assert generated.status_code == 201, generated.text
+    assert "Generated credentials" in generated.text
+    assert "uid,password,display_name,email,telephone" in generated.text
+    assert "Generated passwords are displayed once" in generated.text
+    assert "Created 6 users and 3 groups" in generated.text
+    assert "Save the one-time CSV, then submit the Managed LDAP appliance change" in generated.text
+    assert "Generate test directory" in generated.text
+    assert "data-ldap-generate-auto-open" in generated.text
+    generator_modal = generated.text.split('<dialog id="ldap-generate-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert "uid,password,display_name,email,telephone" in generator_modal
+    assert 'class="language-csv" data-ldap-generated-credentials' in generator_modal
+    assert 'data-download-filename="ldap-test-directory-synthetic.csv"' in generator_modal
+    assert 'data-download-mime="text/csv;charset=utf-8"' in generator_modal
+    assert "<textarea" not in generator_modal
+    assert "data-copy-value" in generator_modal
+    assert "data-download-value" in generator_modal
+    assert generator_modal.count("data-ldap-generated-result") == 2
+    assert "data-ldap-generate-user-count" in generator_modal
+    assert ">Done</button>" in generator_modal
+    assert "data-ldap-generate-close" in generator_modal
+    assert "Generate directory entries" not in generator_modal
+    assert "Recover missing passwords" not in generator_modal
+    managed_ldap_modal = generated.text.split('<dialog id="vcf-ldap-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert "uid,password,display_name,email,telephone" not in managed_ldap_modal
+    app_js = client.get("/static/app.js").text
+    assert 'generateDialog.addEventListener("close", clearGeneratedResult)' in app_js
+    assert 'querySelectorAll("[data-ldap-generate-close]")' in app_js
+    assert 'generateDialog.querySelectorAll("[data-ldap-generated-result]")' in app_js
+    assert 'window.history.replaceState(window.history.state, "", "/vcf-helper")' in app_js
+    assert 'generateDialog.querySelector("[data-ldap-generate-user-count]")' in app_js
+
+    with SessionLocal() as db:
+        organization = db.get(LdapOrganization, organization_id)
+        users = db.execute(select(LdapUser).where(LdapUser.organization_id == organization_id)).scalars().all()
+        groups = db.execute(select(LdapGroup).where(LdapGroup.organization_id == organization_id)).scalars().all()
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "generate_ldap_directory")).scalar_one()
+        assert organization is not None
+        assert len(users) == 6
+        assert len(groups) == 3
+        assert all(user.given_name and user.surname and user.display_name and user.email and user.telephone for user in users)
+        assert all(user.password_status == "pending_apply" for user in users)
+        assert all(group.description and group.members for group in groups)
+        assert event.detail == "users=6; groups=3"
+        assert "Aa1!" not in event.detail
+
+    refreshed = client.get(f"/ldap?organization_id={organization_id}")
+    assert "uid\tpassword\tdisplay name\temail\ttelephone" not in refreshed.text
+
+    with SessionLocal() as db:
+        users = db.execute(select(LdapUser).where(LdapUser.organization_id == organization_id)).scalars().all()
+        for user in users:
+            clear_pending_ldap_password(user)
+        db.commit()
+
+    helper = client.get(f"/vcf-helper?ldap_organization_id={organization_id}")
+    assert "Recover missing passwords (6)" in helper.text
+    assert "Generates replacement passwords for enabled users whose one-time passwords are no longer staged" in helper.text
+    helper_modal = helper.text.split('<dialog id="ldap-generate-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert "Cancel" in helper_modal
+    assert "Generate directory entries" in helper_modal
+    assert "Done" not in helper_modal
+    modal_css = client.get("/static/app.css").text
+    assert "width: min(920px, calc(100vw - 32px));" in modal_css
+    assert "#ldap-generate-modal .confirm-modal-actions {\n  flex-wrap: nowrap;" in modal_css
+    recovered = client.post(
+        f"/ldap/organizations/{organization_id}/generate-directory",
+        data={
+            "user_count": "10",
+            "group_count": "3",
+            "action": "stage_missing",
+            "csrf": csrf,
+        },
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert "Staged replacement passwords for 6 existing enabled users" in recovered.text
+    assert "Recover missing passwords (6)" not in recovered.text
+    assert "uid,password,display_name,email,telephone" in recovered.text
+
+    with SessionLocal() as db:
+        users = db.execute(select(LdapUser).where(LdapUser.organization_id == organization_id)).scalars().all()
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "stage_missing_ldap_passwords")).scalar_one()
+        assert all(has_pending_ldap_password(user) for user in users)
+        assert event.detail == "users=6"
 
 
 def test_local_user_reset_modal_endpoint_and_remove(client):
@@ -4226,6 +4604,14 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
         ),
     )
     monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_ldap_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "ldap", "logs"],
+            dry_run=False,
+            stdout='slapd[30]: conn=1000 op=0 BIND dn="uid=operator,ou=users,dc=org1" method=128\nbind_password=do-not-render\n',
+        ),
+    )
+    monkeypatch.setattr(
         "labfoundry.app.ui.SystemAdapter.read_nginx_logs",
         lambda _self: AdapterResult(
             command=["labfoundry-helper", "nginx", "logs"],
@@ -4261,6 +4647,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "DNS" in response.text
     assert "DHCP" in response.text
     assert "TFTP" in response.text
+    assert "LDAP / LDAPS" in response.text
     assert "KMS" in response.text
     assert "Chrony" in response.text
     assert "Nginx" in response.text
@@ -4273,6 +4660,8 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert 'title="dnsmasq.service journal: DHCP messages"' in response.text
     assert 'data-log-source-tab="dnsmasq-tftp"' in response.text
     assert 'title="dnsmasq.service journal: TFTP messages"' in response.text
+    assert 'data-log-source-tab="ldap"' in response.text
+    assert 'title="slapd.service journal: LDAP and LDAPS directory events"' in response.text
     assert 'data-log-source-tab="nginx"' in response.text
     assert 'title="systemd journal: nginx.service"' in response.text
     assert 'data-log-source-tab="nginx-access"' in response.text
@@ -4290,7 +4679,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert '<option value="500" >500</option>' in response.text
     assert "Refresh 5s" in response.text
     assert 'class="language-labfoundry-log" data-log-lines-output' in response.text
-    assert response.text.count('data-terminal-note-open="false"') == 9
+    assert response.text.count('data-terminal-note-open="false"') == 10
     toolbar = response.text.split('<div class="logs-toolbar">', 1)[1].split("</div>", 1)[0]
     assert toolbar.index("data-log-refresh-status") < toolbar.index("data-log-lines")
     assert "logs-refresh-status" in toolbar
@@ -4302,6 +4691,9 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "query[A] example.test" in response.text
     assert "DHCPACK(eth1)" in response.text
     assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in response.text
+    assert "slapd[30]: conn=1000 op=0 BIND" in response.text
+    assert "uid=operator,ou=users,dc=org1" in response.text
+    assert "bind_password= [redacted]" in response.text
     assert "private_key= [redacted]" in response.text
     assert "management request completed" in response.text
     assert "GET /dashboard HTTP/1.1" in response.text
@@ -4321,6 +4713,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
         "dnsmasq-dns",
         "dnsmasq-dhcp",
         "dnsmasq-tftp",
+        "ldap",
         "chrony",
         "nginx",
         "nginx-access",
@@ -4331,6 +4724,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "DHCPACK(eth1)" not in "\n".join(payload["sources"][1]["lines"])
     assert "DHCPACK(eth1)" in "\n".join(payload["sources"][2]["lines"])
     assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in "\n".join(payload["sources"][3]["lines"])
+    assert 'BIND dn="uid=operator,ou=users,dc=org1"' in "\n".join(payload["sources"][4]["lines"])
     assert len(payload["sources"][0]["lines"]) == 122
     assert "secret-download-token" not in "\n".join(payload["sources"][0]["lines"])
 
@@ -4446,6 +4840,12 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
         ),
     )
     monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_ldap_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "ldap", "logs"], dry_run=True, stdout="No host LDAP journal is read in development mode."
+        ),
+    )
+    monkeypatch.setattr(
         "labfoundry.app.ui.SystemAdapter.read_nginx_logs",
         lambda _self: AdapterResult(
             command=["labfoundry-helper", "nginx", "logs"], dry_run=True, stdout="No host Nginx journal is read in development mode."
@@ -4461,6 +4861,7 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
     assert "DNS" in response.text
     assert "DHCP" in response.text
     assert "TFTP" in response.text
+    assert "LDAP / LDAPS" in response.text
     assert "logs-audit-panel" not in response.text
     assert "Chrony" in response.text
     assert "Nginx" in response.text
@@ -8191,6 +8592,91 @@ def test_appliance_apply_unit_keeps_raw_config_for_helper_staging():
     assert "PasswordAuthentication yes" not in unit["config_preview"]
 
 
+def test_appliance_apply_unit_separates_secret_staging_from_snapshot_change_marker():
+    from labfoundry.app.ui import _redact_task_value, make_appliance_apply_unit
+
+    current = make_appliance_apply_unit(
+        unit_id="ldap",
+        label="Managed LDAP",
+        page_url="/ldap",
+        context={},
+        summary=["1 user"],
+        validation_errors=[],
+        config_path="/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json",
+        config_preview='{"payload_b64":"[pending]","password":"[pending]"}',
+        raw_config_preview='{"payload_b64":"c2xhcGNhdC1wYXNzd29yZC1oYXNoZXM=","password":"VeryStrong1!Directory"}',
+        snapshot_marker={"pending_password_user_ids": [7], "recovery_sha256": "archive-sha"},
+        baseline=None,
+    )
+    baseline = {"snapshot_hash": current["snapshot_hash"], "config_preview": current["config_preview"]}
+    rotated = make_appliance_apply_unit(
+        unit_id="ldap",
+        label="Managed LDAP",
+        page_url="/ldap",
+        context={},
+        summary=["1 user"],
+        validation_errors=[],
+        config_path="/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json",
+        config_preview='{"payload_b64":"[pending]","password":"[pending]"}',
+        raw_config_preview='{"payload_b64":"bmV3LXNsYXBjYXQtYXJjaGl2ZQ==","password":"AnotherStrong1!Directory"}',
+        snapshot_marker={"pending_password_user_ids": [7], "recovery_sha256": "new-archive-sha"},
+        baseline=baseline,
+    )
+
+    assert current["raw_config_preview"] != current["config_preview"]
+    assert "c2xhcGNhdC" not in current["config_preview"]
+    assert "VeryStrong1!Directory" not in current["config_preview"]
+    assert "payload_b64" in current["config_preview"]
+    assert "[redacted]" in current["config_preview"]
+    assert rotated["changed"] is True
+    assert _redact_task_value({"payload_b64": "c2xhcGNhdC1wYXNzd29yZC1oYXNoZXM="}) == {"payload_b64": "[redacted]"}
+
+
+def test_disabled_ldap_apply_keeps_staged_user_password_pending(monkeypatch):
+    from types import SimpleNamespace
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.models import LdapSettings, LdapUser
+    from labfoundry.app.services.ldap import clear_pending_ldap_password, has_pending_ldap_password, stage_ldap_user_password
+    from labfoundry.app.ui import execute_appliance_apply_unit
+
+    settings = LdapSettings(enabled=False)
+    user = LdapUser(id=98765, uid="pending-user", surname="User", display_name="Pending User", enabled=True)
+    stage_ldap_user_password(user, "VeryStrong1!Directory", settings)
+
+    class SuccessfulLdapAdapter:
+        dry_run = False
+
+        @staticmethod
+        def validate_ldap_config(path):
+            return AdapterResult(["ldap", "validate", path], False)
+
+        @staticmethod
+        def apply_ldap_config(path):
+            return AdapterResult(["ldap", "apply", path], False)
+
+    monkeypatch.setattr("labfoundry.app.ui.stage_appliance_apply_config", lambda _path, _preview: "disabled-ldap.json")
+    unit = {
+        "id": "ldap",
+        "label": "Managed LDAP",
+        "context": {"ldap_settings": settings, "ldap_organizations": [SimpleNamespace(users=[user])]},
+        "raw_config_preview": "{}",
+        "summary": ["service disabled"],
+        "validation_errors": [],
+        "validation_warnings": [],
+        "config_path": "/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json",
+        "config_preview": "{}",
+        "config_diff": "",
+    }
+    try:
+        result = execute_appliance_apply_unit(unit, adapter=SuccessfulLdapAdapter())
+        assert result["success"] is True
+        assert user.password_status == "pending_apply"
+        assert has_pending_ldap_password(user) is True
+    finally:
+        clear_pending_ldap_password(user)
+
+
 def test_physical_and_vlan_pages_render(client):
     login(client)
     physical = client.get("/physical-interfaces")
@@ -9137,7 +9623,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "appliance-console-20260717-1" in page.text
+    assert "ldap-helper-modal-20260719-14" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -9572,7 +10058,7 @@ def test_appliance_apply_master_steps_fail_fast_and_keep_successful_baselines(cl
 
     executed = []
 
-    def execute(unit):
+    def execute(unit, *, adapter=None):
         executed.append(unit["id"])
         success = unit["id"] == "network"
         return {
@@ -9590,7 +10076,7 @@ def test_appliance_apply_master_steps_fail_fast_and_keep_successful_baselines(cl
             "config_diff": "",
         }
 
-    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db: units)
+    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db, **_kwargs: units)
     monkeypatch.setattr(ui, "execute_appliance_apply_unit", execute)
     monkeypatch.setattr(ui, "persist_vcf_depot_metadata_from_apply", lambda _db, _results: None)
     monkeypatch.setattr(ui, "log_appliance_apply_failures", lambda _job_id, _results: None)
@@ -9677,10 +10163,10 @@ def test_successful_appliance_apply_baseline_uses_post_apply_snapshot(client, mo
 
     apply_completed = False
 
-    def units(_db):
+    def units(_db, **_kwargs):
         return [after if apply_completed else before]
 
-    def execute(unit):
+    def execute(unit, *, adapter=None):
         nonlocal apply_completed
         apply_completed = True
         return {
@@ -9764,7 +10250,7 @@ def test_appliance_apply_parent_cancel_finishes_current_step_and_skips_remaining
         )
         db.commit()
 
-    def execute(unit):
+    def execute(unit, *, adapter=None):
         with SessionLocal() as other_db:
             parent = other_db.get(Job, "job_cancel_apply")
             current = json.loads(parent.result or "{}")
@@ -9787,7 +10273,7 @@ def test_appliance_apply_parent_cancel_finishes_current_step_and_skips_remaining
             "config_diff": "",
         }
 
-    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db: units)
+    monkeypatch.setattr(ui, "appliance_apply_units", lambda _db, **_kwargs: units)
     monkeypatch.setattr(ui, "execute_appliance_apply_unit", execute)
     monkeypatch.setattr(ui, "persist_vcf_depot_metadata_from_apply", lambda _db, _results: None)
     monkeypatch.setattr(ui, "log_appliance_apply_submission", lambda *_args, **_kwargs: None)
@@ -11184,7 +11670,10 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     visible_workspace = response.text.split('<section class="split-workspace vcf-helper-workspace"', 1)[1].split("</section>", 1)[0]
     assert "VCF Certificate Trust" in visible_workspace
     assert "Review DNS" not in visible_workspace
-    assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 4
+    assert visible_workspace.count('class="info-band vcf-helper-action-band"') == 6
+    assert 'id="vcf-helper-platform-title">SDDC Manager / VCF Installer</h3>' in visible_workspace
+    assert 'id="vcf-helper-ldap-title">LDAP</h3>' in visible_workspace
+    assert visible_workspace.count('class="vcf-helper-action-bands"') == 2
     assert "vcf-helper-action-arrow" not in visible_workspace
     assert "service-summary-grid" not in visible_workspace
     assert "Generated names" not in visible_workspace
@@ -11192,8 +11681,13 @@ def test_vcf_helper_page_renders_domain_dropdown(client):
     assert "<aside" not in visible_workspace
     assert "Deploy SDDC Manager" in visible_workspace
     assert "Configure VCF Offline Depot" in visible_workspace
+    assert "Managed LDAP for VCF" in visible_workspace
+    assert 'class="vcf-helper-action-wrap" data-help="SDDC Manager deployment becomes available' in visible_workspace
+    assert 'class="vcf-helper-action-wrap" data-help="Enable VCF Offline Depot.' in visible_workspace
+    assert 'class="alert warn"' not in visible_workspace
     assert 'data-vcf-fqdn-modal-open aria-haspopup="dialog" aria-controls="vcf-fqdn-modal"' in visible_workspace
     assert 'aria-controls="vcf-trust-modal"' in visible_workspace
+    assert 'data-vcf-ldap-open aria-haspopup="dialog" aria-controls="vcf-ldap-modal"' in visible_workspace
     assert "Root CA subject" not in visible_workspace
     assert '<option value="labfoundry.internal"' in response.text
     assert '<option value="vcf.internal"' in response.text

@@ -589,6 +589,165 @@ class KmsKey(Base):
     owner_client: Mapped[KmsClient | None] = relationship(back_populates="keys")
 
 
+class LdapSettings(Base):
+    __tablename__ = "ldap_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    hostname: Mapped[str] = mapped_column(String(180), default="ldap.labfoundry.internal")
+    listen_interface: Mapped[str] = mapped_column(String(240), default="")
+    listen_address: Mapped[str] = mapped_column(String(240), default="")
+    ldaps_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    port: Mapped[int] = mapped_column(Integer, default=636)
+    ldap_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    ldap_port: Mapped[int] = mapped_column(Integer, default=389)
+    min_password_length: Mapped[int] = mapped_column(Integer, default=14)
+    require_uppercase: Mapped[bool] = mapped_column(Boolean, default=True)
+    require_lowercase: Mapped[bool] = mapped_column(Boolean, default=True)
+    require_number: Mapped[bool] = mapped_column(Boolean, default=True)
+    require_special: Mapped[bool] = mapped_column(Boolean, default=True)
+    disallow_username: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_failures: Mapped[int] = mapped_column(Integer, default=5)
+    lockout_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    failure_window_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    password_history: Mapped[int] = mapped_column(Integer, default=5)
+    password_max_age_days: Mapped[int] = mapped_column(Integer, default=0)
+    config_path: Mapped[str] = mapped_column(
+        String(240),
+        default="/var/lib/labfoundry/apply/ldap/labfoundry-ldap.json",
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class LdapOrganization(Base):
+    __tablename__ = "ldap_organizations"
+    __table_args__ = (
+        UniqueConstraint("slug", name="uq_ldap_organization_slug"),
+        UniqueConstraint("suffix_dn", name="uq_ldap_organization_suffix"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    slug: Mapped[str] = mapped_column(String(80), index=True)
+    suffix_dn: Mapped[str] = mapped_column(String(500), index=True)
+    bind_dn: Mapped[str] = mapped_column(String(500), default="")
+    bind_password_encrypted: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    vcf_target_url: Mapped[str] = mapped_column(String(500), default="")
+    vcf_org_id: Mapped[str] = mapped_column(String(240), default="")
+    vcf_org_name: Mapped[str] = mapped_column(String(128), default="")
+    vcf_tls_fingerprint: Mapped[str] = mapped_column(String(160), default="")
+    vcf_last_status: Mapped[str] = mapped_column(String(80), default="")
+    vcf_last_message: Mapped[str] = mapped_column(Text, default="")
+    vcf_last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    users: Mapped[list["LdapUser"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+        order_by="LdapUser.uid",
+    )
+    groups: Mapped[list["LdapGroup"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+        order_by="LdapGroup.name",
+    )
+
+
+class LdapUser(Base):
+    __tablename__ = "ldap_users"
+    __table_args__ = (UniqueConstraint("organization_id", "uid", name="uq_ldap_user_org_uid"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("ldap_organizations.id"), index=True)
+    uid: Mapped[str] = mapped_column(String(100), index=True)
+    given_name: Mapped[str] = mapped_column(String(120), default="")
+    surname: Mapped[str] = mapped_column(String(120), default="")
+    display_name: Mapped[str] = mapped_column(String(180), default="")
+    email: Mapped[str] = mapped_column(String(240), default="")
+    telephone: Mapped[str] = mapped_column(String(80), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    password_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    password_status: Mapped[str] = mapped_column(String(40), default="not_staged")
+    unlock_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    organization: Mapped[LdapOrganization] = relationship(back_populates="users")
+    memberships: Mapped[list["LdapGroupMembership"]] = relationship(
+        back_populates="member_user",
+        cascade="all, delete-orphan",
+        foreign_keys="LdapGroupMembership.member_user_id",
+    )
+
+
+class LdapGroup(Base):
+    __tablename__ = "ldap_groups"
+    __table_args__ = (UniqueConstraint("organization_id", "name", name="uq_ldap_group_org_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("ldap_organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    organization: Mapped[LdapOrganization] = relationship(back_populates="groups")
+    members: Mapped[list["LdapGroupMembership"]] = relationship(
+        back_populates="group",
+        cascade="all, delete-orphan",
+        foreign_keys="LdapGroupMembership.group_id",
+    )
+    parent_memberships: Mapped[list["LdapGroupMembership"]] = relationship(
+        back_populates="member_group",
+        cascade="all, delete-orphan",
+        foreign_keys="LdapGroupMembership.member_group_id",
+    )
+
+
+class LdapGroupMembership(Base):
+    __tablename__ = "ldap_group_memberships"
+    __table_args__ = (
+        UniqueConstraint("group_id", "member_user_id", name="uq_ldap_group_member_user"),
+        UniqueConstraint("group_id", "member_group_id", name="uq_ldap_group_member_group"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("ldap_groups.id"), index=True)
+    member_user_id: Mapped[int | None] = mapped_column(ForeignKey("ldap_users.id"), nullable=True, index=True)
+    member_group_id: Mapped[int | None] = mapped_column(ForeignKey("ldap_groups.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    group: Mapped[LdapGroup] = relationship(
+        back_populates="members",
+        foreign_keys=[group_id],
+    )
+    member_user: Mapped[LdapUser | None] = relationship(
+        back_populates="memberships",
+        foreign_keys=[member_user_id],
+    )
+    member_group: Mapped[LdapGroup | None] = relationship(
+        back_populates="parent_memberships",
+        foreign_keys=[member_group_id],
+    )
+
+
+class LdapRecoveryArchive(Base):
+    __tablename__ = "ldap_recovery_archives"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    filename: Mapped[str] = mapped_column(String(240))
+    path: Mapped[str] = mapped_column(String(500))
+    sha256: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(40), default="staged")
+    organization_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class VcfBackupSettings(Base):
     __tablename__ = "vcf_backup_settings"
 

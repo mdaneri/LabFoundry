@@ -57,3 +57,26 @@ No actionable P0, P1, or P2 visual differences remain.
 No P3 polish item is required for handoff.
 
 final result: passed
+
+## Managed LDAP web follow-up
+
+Reference and implementation evidence:
+
+- `test-results/design-qa/vcf-helper-generator-live.png` shows the generator modal before overflow correction.
+- `test-results/design-qa/vcf-helper-generator-no-scroll.png` shows the same appliance and modal state after correction.
+- `test-results/design-qa/ldap-directory-live.png` shows organization actions, directory tabs, and the settings rail.
+- `test-results/design-qa/task-errors-live.png` shows the deployed redacted task failure summary.
+
+Findings:
+
+- The test-directory workflow has its own VCF Helper tile and opens independently from Managed LDAP VCF configuration.
+- The generator modal has no horizontal scrollbar and preserves the existing compact LabFoundry modal pattern.
+- Organization actions align to the right of the organization header, with additional space between the VCF bind DN row and Users/Groups tabs.
+- The one-time bind credential dialog contains copy, download, and close actions. Its bind DN wraps, its password control stays within the dialog, and help text is anchored to the field-label bounds.
+- Failed task details show the redacted component reason immediately and an expanded log-style error section above the complete redacted result payload.
+- VCF Helper actions are grouped by subject: platform deployment, naming, trust, and depot workflows under `SDDC Manager / VCF Installer`, with directory configuration and synthetic identities under `LDAP`.
+- Generated LDAP credentials use one CSV representation for the Prism-highlighted preview, clipboard copy, and `.csv` download; the compact copy/download icons remain overlaid inside the preview.
+- Disabled SDDC Manager and Offline Depot tiles expose their availability reason on tile hover/focus; persistent warning rows no longer interrupt the subject layout.
+- Managed LDAP preserves organization, Users/Groups mode, and per-organization grid offsets across reloads using browser-local page state.
+
+Managed LDAP web follow-up final result: passed

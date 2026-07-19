@@ -26,6 +26,12 @@ from labfoundry.app.models import (
     KmsClient,
     KmsKey,
     KmsSettings,
+    LdapGroup,
+    LdapGroupMembership,
+    LdapOrganization,
+    LdapRecoveryArchive,
+    LdapSettings,
+    LdapUser,
     NatRule,
     ChronySettings,
     PhysicalInterface,
@@ -47,6 +53,7 @@ from labfoundry.app.services.dnsmasq import DNS_CONDITIONAL_FORWARDERS_SETTING_K
 from labfoundry.app.services.esxi_pxe import host_variables_json, normalize_host_mac, normalize_host_variables
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY
 from labfoundry.app.services.local_users import LOCAL_USERS_PASSWORD_POLICY_KEY
+from labfoundry.app.services.ldap import clear_ldap_recovery_payload, ensure_organization_bind_secret
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
 
 ARCHIVE_SCHEMA_VERSION = 1
@@ -77,6 +84,7 @@ SCALAR_TABLES = {
     "ca_profiles": CaProfile,
     "kms_settings": KmsSettings,
     "kms_clients": KmsClient,
+    "ldap_settings": LdapSettings,
     "vcf_private_registry_settings": VcfPrivateRegistrySettings,
     "vcf_registry_bundles": VcfRegistryBundle,
     "vcf_offline_depot_settings": VcfOfflineDepotSettings,
@@ -85,6 +93,7 @@ SCALAR_TABLES = {
 }
 
 RESTORE_DELETE_MODELS = [
+    LdapRecoveryArchive,
     EsxiPxeHost,
     EsxiKickstart,
     VcfRegistryBundle,
@@ -95,6 +104,11 @@ RESTORE_DELETE_MODELS = [
     KmsKey,
     KmsClient,
     KmsSettings,
+    LdapGroupMembership,
+    LdapGroup,
+    LdapUser,
+    LdapOrganization,
+    LdapSettings,
     CaCertificate,
     CaProfile,
     CaSettings,
@@ -148,6 +162,7 @@ def export_settings_archive(db: Session, *, actor: str) -> dict[str, Any]:
         "notes": [
             "Contains LabFoundry desired-state configuration only.",
             "Audit events, jobs, API tokens, password hashes, and uploaded secret bodies are not included; encrypted CA private-key material is included for trust portability.",
+            "Managed LDAP metadata is included, but LDAP password hashes and VCF bind secrets require the separate encrypted LDAP recovery archive or credential resets.",
             "Restoring usable CA private-key material requires the same LABFOUNDRY_SECRETS_KEY.",
             "Restore updates the control-plane database; host services change only after global appliance apply.",
         ],
@@ -162,6 +177,10 @@ def export_settings_archive(db: Session, *, actor: str) -> dict[str, Any]:
     data["dhcp_options"] = _dhcp_options_to_archive(db)
     data["ca_certificates"] = _ca_certificates_to_archive(db)
     data["kms_keys"] = _kms_keys_to_archive(db)
+    data["ldap_organizations"] = _ldap_organizations_to_archive(db)
+    data["ldap_users"] = _ldap_users_to_archive(db)
+    data["ldap_groups"] = _ldap_groups_to_archive(db)
+    data["ldap_group_memberships"] = _ldap_group_memberships_to_archive(db)
     data["vcf_backup_settings"] = _vcf_backup_settings_to_archive(db)
     data["vcf_offline_depot_settings"] = _vcf_offline_depot_settings_to_archive(db)
     data["esxi_pxe_hosts"] = _esxi_pxe_hosts_to_archive(db)
@@ -206,6 +225,54 @@ def _kms_keys_to_archive(db: Session) -> list[dict[str, Any]]:
         payload = _row_to_dict(key, exclude={"owner_client_id"})
         payload["owner_client_name"] = clients.get(key.owner_client_id) if key.owner_client_id else ""
         rows.append(payload)
+    return rows
+
+
+def _ldap_organizations_to_archive(db: Session) -> list[dict[str, Any]]:
+    return [
+        _row_to_dict(row, exclude={"bind_password_encrypted"})
+        for row in db.execute(select(LdapOrganization).order_by(LdapOrganization.name)).scalars().all()
+    ]
+
+
+def _ldap_users_to_archive(db: Session) -> list[dict[str, Any]]:
+    organizations = {row.id: row.slug for row in db.execute(select(LdapOrganization)).scalars().all()}
+    rows: list[dict[str, Any]] = []
+    for user in db.execute(select(LdapUser).order_by(LdapUser.uid)).scalars().all():
+        payload = _row_to_dict(user, exclude={"organization_id", "unlock_requested_at"})
+        payload["organization_slug"] = organizations.get(user.organization_id, "")
+        payload["password_status"] = "not_staged"
+        rows.append(payload)
+    return rows
+
+
+def _ldap_groups_to_archive(db: Session) -> list[dict[str, Any]]:
+    organizations = {row.id: row.slug for row in db.execute(select(LdapOrganization)).scalars().all()}
+    rows: list[dict[str, Any]] = []
+    for group in db.execute(select(LdapGroup).order_by(LdapGroup.name)).scalars().all():
+        payload = _row_to_dict(group, exclude={"organization_id"})
+        payload["organization_slug"] = organizations.get(group.organization_id, "")
+        rows.append(payload)
+    return rows
+
+
+def _ldap_group_memberships_to_archive(db: Session) -> list[dict[str, Any]]:
+    users = {row.id: row.uid for row in db.execute(select(LdapUser)).scalars().all()}
+    groups = {row.id: row for row in db.execute(select(LdapGroup)).scalars().all()}
+    organizations = {row.id: row.slug for row in db.execute(select(LdapOrganization)).scalars().all()}
+    rows: list[dict[str, Any]] = []
+    for membership in db.execute(select(LdapGroupMembership)).scalars().all():
+        group = groups.get(membership.group_id)
+        if group is None:
+            continue
+        rows.append(
+            {
+                "organization_slug": organizations.get(group.organization_id, ""),
+                "group_name": group.name,
+                "member_type": "user" if membership.member_user_id is not None else "group",
+                "member_name": users.get(membership.member_user_id, "") if membership.member_user_id is not None else (groups.get(membership.member_group_id).name if groups.get(membership.member_group_id) else ""),
+            }
+        )
     return rows
 
 
@@ -280,6 +347,11 @@ def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, 
     counts["kms_clients"] = _insert_rows(db, KmsClient, data.get("kms_clients", []))
     db.flush()
     counts["kms_keys"] = _restore_kms_keys(db, data.get("kms_keys", []))
+    counts["ldap_settings"] = _insert_rows(db, LdapSettings, data.get("ldap_settings", []))
+    counts["ldap_organizations"] = _restore_ldap_organizations(db, data.get("ldap_organizations", []))
+    counts["ldap_users"] = _restore_ldap_users(db, data.get("ldap_users", []))
+    counts["ldap_groups"] = _restore_ldap_groups(db, data.get("ldap_groups", []))
+    counts["ldap_group_memberships"] = _restore_ldap_group_memberships(db, data.get("ldap_group_memberships", []))
     counts["vcf_backup_settings"] = _restore_vcf_backup_settings(db, data.get("vcf_backup_settings", []))
     counts["vcf_offline_depot_settings"] = _restore_vcf_offline_depot_settings(db, data.get("vcf_offline_depot_settings", []))
     for key in [
@@ -313,6 +385,10 @@ def desired_state_counts(db: Session) -> dict[str, int]:
     counts["dhcp_options"] = len(db.execute(select(DhcpOption)).scalars().all())
     counts["ca_certificates"] = len(db.execute(select(CaCertificate)).scalars().all())
     counts["kms_keys"] = len(db.execute(select(KmsKey)).scalars().all())
+    counts["ldap_organizations"] = len(db.execute(select(LdapOrganization)).scalars().all())
+    counts["ldap_users"] = len(db.execute(select(LdapUser)).scalars().all())
+    counts["ldap_groups"] = len(db.execute(select(LdapGroup)).scalars().all())
+    counts["ldap_group_memberships"] = len(db.execute(select(LdapGroupMembership)).scalars().all())
     counts["vcf_backup_settings"] = len(db.execute(select(VcfBackupSettings)).scalars().all())
     counts["esxi_pxe_hosts"] = len(db.execute(select(EsxiPxeHost)).scalars().all())
     counts["settings"] = len(db.execute(select(Setting).where(Setting.key.in_(SAFE_SETTING_KEYS))).scalars().all())
@@ -333,6 +409,9 @@ def archive_summary(archive: dict[str, Any]) -> dict[str, Any]:
 
 
 def _clear_desired_state(db: Session) -> None:
+    recovery_archives = db.execute(select(LdapRecoveryArchive)).scalars().all()
+    for recovery_archive in recovery_archives:
+        clear_ldap_recovery_payload(recovery_archive)
     for model in RESTORE_DELETE_MODELS:
         db.execute(delete(model))
     db.flush()
@@ -422,6 +501,65 @@ def _restore_kms_keys(db: Session, rows: list[dict[str, Any]]) -> int:
         db.add(KmsKey(**payload))
     db.flush()
     return len(rows)
+
+
+def _restore_ldap_organizations(db: Session, rows: list[dict[str, Any]]) -> int:
+    for row in rows:
+        payload = _model_kwargs(LdapOrganization, row, exclude={"bind_password_encrypted"})
+        organization = LdapOrganization(**payload)
+        ensure_organization_bind_secret(organization)
+        db.add(organization)
+    db.flush()
+    return len(rows)
+
+
+def _restore_ldap_users(db: Session, rows: list[dict[str, Any]]) -> int:
+    organizations = {row.slug: row.id for row in db.execute(select(LdapOrganization)).scalars().all()}
+    for row in rows:
+        payload = _model_kwargs(LdapUser, row, exclude={"organization_id", "unlock_requested_at"})
+        payload["organization_id"] = organizations.get(str(row.get("organization_slug") or ""))
+        payload["password_status"] = "not_staged"
+        if payload["organization_id"] is not None:
+            db.add(LdapUser(**payload))
+    db.flush()
+    return len(rows)
+
+
+def _restore_ldap_groups(db: Session, rows: list[dict[str, Any]]) -> int:
+    organizations = {row.slug: row.id for row in db.execute(select(LdapOrganization)).scalars().all()}
+    for row in rows:
+        payload = _model_kwargs(LdapGroup, row, exclude={"organization_id"})
+        payload["organization_id"] = organizations.get(str(row.get("organization_slug") or ""))
+        if payload["organization_id"] is not None:
+            db.add(LdapGroup(**payload))
+    db.flush()
+    return len(rows)
+
+
+def _restore_ldap_group_memberships(db: Session, rows: list[dict[str, Any]]) -> int:
+    organizations = {row.slug: row.id for row in db.execute(select(LdapOrganization)).scalars().all()}
+    users = {(row.organization_id, row.uid): row.id for row in db.execute(select(LdapUser)).scalars().all()}
+    groups = {(row.organization_id, row.name): row.id for row in db.execute(select(LdapGroup)).scalars().all()}
+    restored = 0
+    for row in rows:
+        organization_id = organizations.get(str(row.get("organization_slug") or ""))
+        group_id = groups.get((organization_id, str(row.get("group_name") or "")))
+        if organization_id is None or group_id is None:
+            continue
+        member_name = str(row.get("member_name") or "")
+        if row.get("member_type") == "user":
+            member_user_id = users.get((organization_id, member_name))
+            if member_user_id is None:
+                continue
+            db.add(LdapGroupMembership(group_id=group_id, member_user_id=member_user_id))
+        else:
+            member_group_id = groups.get((organization_id, member_name))
+            if member_group_id is None:
+                continue
+            db.add(LdapGroupMembership(group_id=group_id, member_group_id=member_group_id))
+        restored += 1
+    db.flush()
+    return restored
 
 
 def _restore_vcf_backup_settings(db: Session, rows: list[dict[str, Any]]) -> int:

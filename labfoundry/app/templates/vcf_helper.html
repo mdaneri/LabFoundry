@@ -27,35 +27,69 @@
         Deleted {{ vcf_helper_delete_result.deleted|length }} VCF Helper DNS records{% if vcf_helper_delete_result.preserved %}; preserved {{ vcf_helper_delete_result.preserved|length }} unrelated records{% endif %}.
       </div>
     {% endif %}
-    <div class="vcf-helper-action-bands">
-      <button class="info-band vcf-helper-action-band" type="button" data-vcf-fqdn-modal-open aria-haspopup="dialog" aria-controls="vcf-fqdn-modal">
+    <div class="vcf-helper-subjects">
+      <div class="vcf-helper-subject-group" aria-labelledby="vcf-helper-platform-title">
+        <div class="vcf-helper-subject-head">
+          <h3 id="vcf-helper-platform-title">SDDC Manager / VCF Installer</h3>
+          <p class="muted">Deployment, naming, certificate trust, and software-depot helpers for the VCF platform appliances.</p>
+        </div>
+        <div class="vcf-helper-action-bands">
+          <button class="info-band vcf-helper-action-band" type="button" data-vcf-fqdn-modal-open aria-haspopup="dialog" aria-controls="vcf-fqdn-modal">
         <span class="vcf-helper-action-copy">
           <span class="vcf-helper-action-title">Generated VCF FQDNs</span>
           <span class="muted">Choose a DNS zone and starting IP/prefix. Existing FQDNs stay untouched; new records are applied later through global Appliance Apply.</span>
         </span>
-      </button>
-      <button class="info-band vcf-helper-action-band" type="button" onclick="document.getElementById('vcf-trust-modal').showModal()" aria-haspopup="dialog" aria-controls="vcf-trust-modal" {% if vcf_trust_ca_error %}disabled{% endif %}>
+          </button>
+          <button class="info-band vcf-helper-action-band" type="button" onclick="document.getElementById('vcf-trust-modal').showModal()" aria-haspopup="dialog" aria-controls="vcf-trust-modal" {% if vcf_trust_ca_error %}disabled{% endif %}>
         <span class="vcf-helper-action-copy">
           <span class="vcf-helper-action-title">VCF Certificate Trust</span>
           <span class="muted">Import the active LabFoundry root CA into a VCF 9 Installer or SDDC Manager appliance, then verify trust and service recovery.</span>
         </span>
-      </button>
-      <button class="info-band vcf-helper-action-band" type="button" data-vcf-sddc-deploy-open aria-haspopup="dialog" aria-controls="vcf-sddc-deploy-modal" {% if not vcf_sddc_ovas or not (identity.has_role('admin') or identity.has_role('service-admin')) %}disabled{% endif %}>
-        <span class="vcf-helper-action-copy">
-          <span class="vcf-helper-action-title">Deploy SDDC Manager</span>
-          <span class="muted">Deploy an OVA from {{ vcf_sddc_ova_root }} to vCenter or standalone ESXi and monitor VCF API readiness.</span>
-        </span>
-      </button>
-      <button class="info-band vcf-helper-action-band" type="button" data-vcf-target-depot-open aria-haspopup="dialog" aria-controls="vcf-target-depot-modal" {% if not vcf_target_depot.available or not (identity.has_role('admin') or identity.has_role('service-admin')) %}disabled{% endif %}>
-        <span class="vcf-helper-action-copy">
-          <span class="vcf-helper-action-title">Configure VCF Offline Depot</span>
-          <span class="muted">Point a VCF Installer or SDDC Manager at {{ vcf_target_depot.url }} and monitor metadata synchronization.</span>
-        </span>
-      </button>
-    </div>
+          </button>
+          <div class="vcf-helper-action-wrap" {% if not vcf_sddc_ovas %}data-help="SDDC Manager deployment becomes available when a valid OVA is present under {{ vcf_sddc_ova_root }}." tabindex="0" aria-label="Deploy SDDC Manager unavailable. Add a valid OVA under {{ vcf_sddc_ova_root }}."{% endif %}>
+            <button class="info-band vcf-helper-action-band" type="button" data-vcf-sddc-deploy-open aria-haspopup="dialog" aria-controls="vcf-sddc-deploy-modal" {% if not vcf_sddc_ovas or not (identity.has_role('admin') or identity.has_role('service-admin')) %}disabled{% endif %}>
+              <span class="vcf-helper-action-copy">
+                <span class="vcf-helper-action-title">Deploy SDDC Manager</span>
+                <span class="muted">Deploy an OVA from {{ vcf_sddc_ova_root }} to vCenter or standalone ESXi and monitor VCF API readiness.</span>
+              </span>
+            </button>
+          </div>
+          <div class="vcf-helper-action-wrap" {% if not vcf_target_depot.available %}data-help="{{ vcf_target_depot.reasons|join(' ') }}" tabindex="0" aria-label="Configure VCF Offline Depot unavailable. {{ vcf_target_depot.reasons|join(' ') }}"{% endif %}>
+            <button class="info-band vcf-helper-action-band" type="button" data-vcf-target-depot-open aria-haspopup="dialog" aria-controls="vcf-target-depot-modal" {% if not vcf_target_depot.available or not (identity.has_role('admin') or identity.has_role('service-admin')) %}disabled{% endif %}>
+              <span class="vcf-helper-action-copy">
+                <span class="vcf-helper-action-title">Configure VCF Offline Depot</span>
+                <span class="muted">Point a VCF Installer or SDDC Manager at {{ vcf_target_depot.url }} and monitor metadata synchronization.</span>
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
 
-    {% if not vcf_sddc_ovas %}<div class="alert warn">SDDC Manager deployment becomes available when a valid OVA is present under <span class="mono-text">{{ vcf_sddc_ova_root }}</span>.</div>{% endif %}
-    {% if not vcf_target_depot.available %}<div class="alert warn">Offline-depot target configuration is unavailable: {{ vcf_target_depot.reasons|join(' ') }}</div>{% endif %}
+      <div class="vcf-helper-subject-group" aria-labelledby="vcf-helper-ldap-title">
+        <div class="vcf-helper-subject-head">
+          <h3 id="vcf-helper-ldap-title">LDAP</h3>
+          <p class="muted">VCF Automation directory configuration and synthetic identity data for lab validation.</p>
+        </div>
+        <div class="vcf-helper-action-bands">
+          <div class="vcf-helper-action-wrap" {% if not vcf_ldap_authorized or not vcf_ldap_available %}data-help="{% if not vcf_ldap_authorized %}Administrator access is required for Managed LDAP helpers.{% else %}Enable Managed LDAP and at least one organization before using this helper.{% endif %}" tabindex="0" aria-label="Managed LDAP for VCF unavailable. {% if not vcf_ldap_authorized %}Administrator access is required.{% else %}Enable Managed LDAP and at least one organization.{% endif %}"{% endif %}>
+            <button class="info-band vcf-helper-action-band" type="button" data-vcf-ldap-open aria-haspopup="dialog" aria-controls="vcf-ldap-modal" {% if not vcf_ldap_authorized or not vcf_ldap_available %}disabled{% endif %}>
+              <span class="vcf-helper-action-copy">
+                <span class="vcf-helper-action-title">Managed LDAP for VCF</span>
+                <span class="muted">Download the organization bundle or inspect, configure, and verify VCF Automation 9.1 LDAP settings.</span>
+              </span>
+            </button>
+          </div>
+          <div class="vcf-helper-action-wrap" {% if not vcf_ldap_authorized or not vcf_ldap_available %}data-help="{% if not vcf_ldap_authorized %}Administrator access is required for Managed LDAP helpers.{% else %}Enable Managed LDAP and at least one organization before generating test entries.{% endif %}" tabindex="0" aria-label="Generate LDAP Test Directory unavailable. {% if not vcf_ldap_authorized %}Administrator access is required.{% else %}Enable Managed LDAP and at least one organization.{% endif %}"{% endif %}>
+            <button class="info-band vcf-helper-action-band" type="button" data-ldap-generate-open aria-haspopup="dialog" aria-controls="ldap-generate-modal" {% if not vcf_ldap_authorized or not vcf_ldap_available %}disabled{% endif %}>
+              <span class="vcf-helper-action-copy">
+                <span class="vcf-helper-action-title">Generate LDAP Test Directory</span>
+                <span class="muted">Create synthetic users, compliant one-time passwords, groups, and memberships for VCF lab validation.</span>
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
 
   </div>
 </section>
@@ -63,6 +97,7 @@
 {% include "partials/vcf_trust_modal.html" %}
 {% include "partials/vcf_sddc_deploy_modal.html" %}
 {% include "partials/vcf_target_depot_modal.html" %}
+{% include "partials/vcf_ldap_modal.html" %}
 
 <dialog id="vcf-fqdn-modal" class="confirm-modal wide-modal vcf-fqdn-modal" aria-labelledby="vcf-fqdn-modal-title">
   <form class="confirm-modal-panel form-stack" action="/vcf-helper/generated-fqdns" method="post" data-vcf-fqdn-form>

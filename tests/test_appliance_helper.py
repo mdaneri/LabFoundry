@@ -1,3 +1,4 @@
+import base64
 import importlib.machinery
 import importlib.util
 import io
@@ -70,6 +71,352 @@ def test_appliance_power_helper_fails_closed_without_systemd_run(monkeypatch, ca
     assert helper._handle_appliance_power("shutdown", []) == 127
     assert commands == []
     assert "refusing an immediate appliance power action" in capsys.readouterr().err
+
+
+def ldap_payload(*, enabled: bool = False) -> dict:
+    suffix = "dc=org-a,dc=ldap,dc=labfoundry,dc=internal"
+    user_dn = f"uid=operator,ou=users,{suffix}"
+    return {
+        "schema_version": 1,
+        "service": {
+            "enabled": enabled,
+            "hostname": "ldap.labfoundry.internal",
+            "listen_interface": "eth0",
+            "listen_address": "192.168.49.1",
+            "ldaps_enabled": True,
+            "port": 636,
+            "ldap_enabled": False,
+            "ldap_port": 389,
+            "certificate_path": "/etc/labfoundry/ldap/tls/server.crt",
+            "key_path": "/etc/labfoundry/ldap/tls/server.key",
+            "chain_path": "/etc/labfoundry/ldap/tls/server-chain.crt",
+            "root_ca_path": "/etc/labfoundry/ca/root.crt",
+            "password_policy": {
+                "min_length": 14,
+                "history": 5,
+                "max_failures": 5,
+                "failure_window_minutes": 15,
+                "lockout_minutes": 15,
+                "max_age_days": 0,
+            },
+        },
+        "organizations": [
+            {
+                "id": 1,
+                "name": "Org A",
+                "slug": "org-a",
+                "suffix_dn": suffix,
+                "bind_dn": f"uid=vcf-bind,ou=service-accounts,{suffix}",
+                "bind_password": "SecretBind1!",
+                "enabled": True,
+                "vcf_settings": {
+                    "definedSettings": {"userAttributes": {"serviceAccount": "employeeType"}},
+                    "vcf91IdentityBrokerCompatibility": {
+                        "requiredInternalAttribute": "serviceAccount",
+                        "ldapAttribute": "employeeType",
+                    },
+                },
+                "users": [
+                    {
+                        "id": 1,
+                        "uid": "operator",
+                        "dn": user_dn,
+                        "surname": "Operator",
+                        "display_name": "Operator",
+                        "email": "",
+                        "telephone": "",
+                        "enabled": True,
+                        "password": "VeryStrong1!Directory",
+                        "password_status": "pending_apply",
+                    }
+                ],
+                "groups": [
+                    {
+                        "id": 1,
+                        "name": "VCF Administrators",
+                        "dn": f"cn=VCF Administrators,ou=groups,{suffix}",
+                        "description": "",
+                        "enabled": True,
+                        "members": [{"type": "user", "id": 1, "dn": user_dn}],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_ldap_helper_renders_separate_mdb_acl_overlays_and_configurable_listeners():
+    helper = load_helper_module()
+    payload = ldap_payload()
+
+    assert helper._ldap_config_errors(payload) == []
+    config = helper._render_ldap_slapd_config(payload)
+    assert "database mdb" in config
+    assert 'suffix "dc=org-a,dc=ldap,dc=labfoundry,dc=internal"' in config
+    assert "overlay ppolicy" in config
+    assert "overlay memberof" in config
+    assert "overlay refint" in config
+    assert "modulepath /usr/lib/openldap" in config
+    assert "moduleload ppolicy.so" in config
+    assert "ppolicy.schema" not in config
+    assert 'by dn.exact="uid=vcf-bind,ou=service-accounts,dc=org-a,dc=ldap,dc=labfoundry,dc=internal" read' in config
+    assert helper._ldap_listener_urls(payload["service"]) == "ldapi:/// ldaps://192.168.49.1:636/"
+    assert "ldap:///" not in helper._ldap_listener_urls(payload["service"])
+
+    payload["service"].update({"port": 1636, "ldap_enabled": True, "ldap_port": 1389})
+    assert helper._ldap_config_errors(payload) == []
+    assert helper._ldap_listener_urls(payload["service"]) == (
+        "ldapi:/// ldaps://192.168.49.1:1636/ ldap://192.168.49.1:1389/"
+    )
+
+    payload["service"]["ldap_port"] = 1636
+    assert "different TCP ports" in " ".join(helper._ldap_config_errors(payload))
+
+    payload["service"].update({"ldaps_enabled": False, "port": 636, "ldap_enabled": True, "ldap_port": 1389})
+    plaintext_config = helper._render_ldap_slapd_config(payload)
+    assert "TLSCertificateFile" not in plaintext_config
+    assert helper._ldap_listener_urls(payload["service"]) == "ldapi:/// ldap://192.168.49.1:1389/"
+
+
+def test_plaintext_only_ldap_validation_does_not_require_tls_files(monkeypatch):
+    helper = load_helper_module()
+    payload = ldap_payload(enabled=True)
+    payload["service"].update({"ldaps_enabled": False, "ldap_enabled": True, "ldap_port": 1389})
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/bin/{command}")
+
+    errors = helper._ldap_config_errors(payload)
+
+    assert not any("LDAP certificate" in error or "LDAP private key" in error or "LDAP root CA" in error for error in errors)
+    assert errors == []
+
+
+def test_ldap_render_can_use_isolated_validation_data_root(tmp_path):
+    helper = load_helper_module()
+    payload = ldap_payload()
+    config = helper._render_ldap_slapd_config(payload, state_root=tmp_path / "validation-data")
+
+    assert f"directory {tmp_path / 'validation-data' / 'org-a'}" in config
+    assert str(helper.LDAP_STATE_DIR / "org-a") not in config
+
+
+def test_ldap_render_can_use_isolated_validation_runtime_root(tmp_path):
+    helper = load_helper_module()
+    payload = ldap_payload()
+    runtime_root = tmp_path / "validation-run"
+
+    config = helper._render_ldap_slapd_config(payload, runtime_root=runtime_root)
+
+    assert f"pidfile {runtime_root / 'slapd.pid'}" in config
+    assert f"argsfile {runtime_root / 'slapd.args'}" in config
+    assert "/run/openldap/slapd.pid" not in config
+
+
+def test_ldap_runtime_directory_is_created_for_first_apply(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    runtime_dir = tmp_path / "run" / "openldap"
+    ownership: list[tuple[Path, str, str]] = []
+    modes: list[tuple[Path, int]] = []
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
+    monkeypatch.setattr(
+        helper.shutil,
+        "chown",
+        lambda path, *, user, group: ownership.append((Path(path), user, group)),
+    )
+    monkeypatch.setattr(helper.os, "chmod", lambda path, mode: modes.append((Path(path), mode)))
+
+    helper._prepare_ldap_runtime_dir(runtime_dir=runtime_dir)
+
+    assert runtime_dir.is_dir()
+    assert ownership == [(runtime_dir, "ldap", "ldap")]
+    assert modes == [(runtime_dir, 0o750)]
+
+
+def test_ldap_reconcile_clears_lock_for_every_enabled_user(monkeypatch):
+    helper = load_helper_module()
+    payload = ldap_payload(enabled=True)
+    organization = payload["organizations"][0]
+    user = organization["users"][0]
+    user.update({"password": "", "unlock_requested": False, "enabled": True})
+    deleted_attributes: list[tuple[str, str]] = []
+    monkeypatch.setattr(helper, "_ldap_upsert_entry", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(helper, "_ldap_delete_attribute", lambda dn, attribute: deleted_attributes.append((dn, attribute)) or 0)
+    monkeypatch.setattr(helper, "_ldap_list_dns", lambda _base_dn: [])
+    monkeypatch.setattr(helper, "_ldap_delete_entries", lambda _dns: 0)
+
+    assert helper._ldap_reconcile_organization(organization, payload["service"]["password_policy"]) == 0
+    assert (user["dn"], "pwdAccountLockedTime") in deleted_attributes
+
+
+def test_ldap_recovery_restores_slapd_ownership(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    payload = ldap_payload(enabled=True)
+    suffix = payload["organizations"][0]["suffix_dn"]
+    ldif_path = tmp_path / "org-a.ldif"
+    ldif_path.write_text(f"dn: {suffix}\nobjectClass: domain\ndc: org-a\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "format": "labfoundry-ldap-slapcat-v1",
+                "databases": [
+                    {
+                        "suffix": suffix,
+                        "filename": ldif_path.name,
+                        "sha256": hashlib.sha256(ldif_path.read_bytes()).hexdigest(),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+        archive.add(manifest_path, arcname="manifest.json")
+        archive.add(ldif_path, arcname=ldif_path.name)
+    archive_bytes = archive_buffer.getvalue()
+    payload["recovery_import"] = {
+        "payload_b64": base64.b64encode(archive_bytes).decode("ascii"),
+        "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+    }
+    state_dir = tmp_path / "ldap-state"
+    data_dir = state_dir / "org-a"
+    data_dir.mkdir(parents=True)
+    ownership: list[tuple[Path, str, str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if Path(command[0]).name == "slapadd":
+            (data_dir / "data.mdb").write_text("restored", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper, "LDAP_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: command)
+    monkeypatch.setattr(helper.shutil, "chown", lambda path, *, user, group: ownership.append((Path(path), user, group)))
+
+    assert helper._restore_ldap_recovery(payload, tmp_path / "slapd.d") == 0
+    assert (data_dir, "ldap", "ldap") in ownership
+    assert (data_dir / "data.mdb", "ldap", "ldap") in ownership
+
+
+def test_ldap_apply_removes_only_obsolete_managed_data_directories(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    state_dir = tmp_path / "ldap-state"
+    desired_dir = state_dir / "org-a"
+    obsolete_dir = state_dir / "deleted-org"
+    desired_dir.mkdir(parents=True)
+    obsolete_dir.mkdir()
+    (desired_dir / "data.mdb").write_text("keep", encoding="utf-8")
+    (obsolete_dir / "data.mdb").write_text("remove", encoding="utf-8")
+    unrelated_file = state_dir / "README"
+    unrelated_file.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(helper, "LDAP_STATE_DIR", state_dir)
+
+    helper._remove_obsolete_ldap_data_directories(ldap_payload(enabled=True))
+
+    assert desired_dir.is_dir()
+    assert (desired_dir / "data.mdb").read_text(encoding="utf-8") == "keep"
+    assert not obsolete_dir.exists()
+    assert unrelated_file.read_text(encoding="utf-8") == "keep"
+
+
+def test_ldap_listener_dropin_overrides_photon_hard_coded_plaintext_listener(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    dropin_dir = tmp_path / "slapd.service.d"
+    dropin_path = dropin_dir / "labfoundry.conf"
+    sysconfig_path = tmp_path / "slapd"
+    monkeypatch.setattr(helper, "LDAP_SYSTEMD_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "LDAP_SYSTEMD_DROPIN_PATH", dropin_path)
+    monkeypatch.setattr(helper, "LDAP_SYSCONFIG_PATH", sysconfig_path)
+    monkeypatch.setattr(helper, "LDAP_CONFIG_DIR", "/etc/openldap/slapd.d")
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
+
+    helper._install_ldap_listener_config(ldap_payload(enabled=True)["service"])
+
+    rendered = dropin_path.read_text(encoding="utf-8")
+    assert "ExecStart=" in rendered
+    assert "ExecStartPre=/usr/bin/install -d -m 0750 -o ldap -g ldap /run/openldap" in rendered
+    assert 'ExecStart=/usr/sbin/slapd -u ldap -F /etc/openldap/slapd.d -h "ldapi:/// ldaps://192.168.49.1:636/"' in rendered
+    assert "ldap:///" not in rendered
+
+
+def test_ldap_listener_dropin_supports_custom_ldaps_and_opt_in_plaintext_ports(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    dropin_dir = tmp_path / "slapd.service.d"
+    dropin_path = dropin_dir / "labfoundry.conf"
+    sysconfig_path = tmp_path / "slapd"
+    monkeypatch.setattr(helper, "LDAP_SYSTEMD_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(helper, "LDAP_SYSTEMD_DROPIN_PATH", dropin_path)
+    monkeypatch.setattr(helper, "LDAP_SYSCONFIG_PATH", sysconfig_path)
+    monkeypatch.setattr(helper, "LDAP_CONFIG_DIR", "/etc/openldap/slapd.d")
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
+    service = ldap_payload(enabled=True)["service"]
+    service.update({"port": 1636, "ldap_enabled": True, "ldap_port": 1389})
+
+    helper._install_ldap_listener_config(service)
+
+    rendered = dropin_path.read_text(encoding="utf-8")
+    assert "ldaps://192.168.49.1:1636/" in rendered
+    assert "ldap://192.168.49.1:1389/" in rendered
+
+
+def test_ldap_private_key_is_group_readable_only_for_slapd(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    key_path = tmp_path / "server.key"
+    key_path.write_text("private", encoding="utf-8")
+    ownership: list[tuple[Path, str, str]] = []
+    modes: list[tuple[Path, int]] = []
+    monkeypatch.setattr(helper.shutil, "chown", lambda path, *, user, group: ownership.append((Path(path), user, group)))
+    monkeypatch.setattr(helper.os, "chmod", lambda path, mode: modes.append((Path(path), mode)))
+
+    helper.shutil.chown(key_path, user="root", group="ldap")
+    helper.os.chmod(key_path, 0o640)
+
+    assert ownership == [(key_path, "root", "ldap")]
+    assert modes == [(key_path, 0o640)]
+
+
+def test_ldap_directory_queries_disable_ldif_wrapping(monkeypatch):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(helper.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    helper._ldap_entry_exists("uid=operator,ou=users,dc=org-a,dc=ldap,dc=labfoundry,dc=internal")
+    helper._ldap_list_dns("ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal")
+
+    assert all(["-o", "ldif-wrap=no"] == command[2:4] for command in commands)
+
+
+def test_ldap_helper_rejects_missing_service_account_mapping_and_group_cycle():
+    helper = load_helper_module()
+    payload = ldap_payload()
+    payload["organizations"][0]["vcf_settings"]["definedSettings"]["userAttributes"].pop("serviceAccount")
+    payload["organizations"][0]["groups"] = [
+        {
+            "id": 1,
+            "name": "First",
+            "dn": "cn=First,ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal",
+            "enabled": True,
+            "members": [{"type": "group", "id": 2, "dn": "cn=Second,ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal"}],
+        },
+        {
+            "id": 2,
+            "name": "Second",
+            "dn": "cn=Second,ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal",
+            "enabled": True,
+            "members": [{"type": "group", "id": 1, "dn": "cn=First,ou=groups,dc=org-a,dc=ldap,dc=labfoundry,dc=internal"}],
+        },
+    ]
+
+    errors = helper._ldap_config_errors(payload)
+    assert any("serviceAccount" in error for error in errors)
+    assert any("cycle" in error for error in errors)
 
 
 def kms_config_text(managed_root: Path, *, enabled: bool = True, database_path: Path | None = None) -> str:
@@ -4212,6 +4559,23 @@ def test_chronyd_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
     assert helper._handle_chronyd("logs", []) == 0
     assert "chronyd ready" in capsys.readouterr().out
     assert commands == [["/usr/bin/journalctl", "-u", "chronyd.service", "-n", "500", "--no-pager", "--output=short-iso"]]
+
+
+def test_ldap_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/journalctl" if command == "journalctl" else None)
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda command: commands.append(command) or subprocess.CompletedProcess(command, 0, "slapd ready\n", ""),
+    )
+
+    assert helper._handle_ldap("logs", []) == 0
+    assert "slapd ready" in capsys.readouterr().out
+    assert commands == [["/usr/bin/journalctl", "-u", "slapd.service", "-n", "500", "--no-pager", "--output=short-iso"]]
+    assert helper._handle_ldap("logs", ["/tmp/other.log"]) == 2
+    assert "does not accept a path" in capsys.readouterr().err
 
 
 def test_dnsmasq_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):

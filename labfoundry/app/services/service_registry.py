@@ -52,7 +52,14 @@ SERVICE_STATE_DEFAULTS = [
         "detail": "/mnt/labfoundry-vcf-backups",
     },
     {"service": "ca", "display_name": "Certificate Authority", "running": False, "enabled": False, "health": "planned"},
-    {"service": "ldap", "display_name": "LDAP", "running": False, "enabled": False, "health": "planned"},
+    {
+        "service": "ldap",
+        "display_name": "Managed LDAP",
+        "running": False,
+        "enabled": False,
+        "health": "disabled",
+        "detail": "OpenLDAP / configurable LDAP and LDAPS listeners",
+    },
     {"service": "auth", "display_name": "Authentication", "running": True, "enabled": True, "health": "healthy"},
 ]
 
@@ -61,4 +68,5 @@ RETIRED_SERVICE_IDS = frozenset({"ntpd"})
 SERVICE_SYSTEMD_UNITS = {
     "chronyd": "chronyd.service",
     "kms": "labfoundry-kms.service",
+    "ldap": "slapd.service",
 }

@@ -6,6 +6,7 @@ from labfoundry.app.models import (
     FirewallRule,
     FirewallSettings,
     KmsSettings,
+    LdapSettings,
     ChronySettings,
     PhysicalInterface,
     VcfBackupSettings,
@@ -189,6 +190,14 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
         ],
         ca_settings=CaSettings(enabled=True, listen_interface="eth2.50"),
         kms_settings=KmsSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=5696),
+        ldap_settings=LdapSettings(
+            enabled=True,
+            listen_interface="eth0\neth2.50",
+            ldaps_enabled=True,
+            port=1636,
+            ldap_enabled=True,
+            ldap_port=1389,
+        ),
         chrony_settings=ChronySettings(enabled=True, listen_interface="eth2.50\neth3.60", port=123, nts_server_enabled=True),
         vcf_backup_settings=VcfBackupSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=22),
         vcf_depot_settings=VcfOfflineDepotSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=8443),
@@ -210,6 +219,10 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     assert by_name["vcf-backups-sftp-eth2.50"].source == "any"
     assert by_name["kms-kmip-eth2.50"].destination_port == "5696"
     assert by_name["kms-kmip-eth3.60"].interface_name == "eth3.60"
+    assert by_name["ldap-ldaps-eth0"].destination_port == "1636"
+    assert by_name["ldap-ldaps-eth2.50"].protocol == "tcp"
+    assert by_name["ldap-plaintext-eth0"].destination_port == "1389"
+    assert by_name["ldap-plaintext-eth2.50"].protocol == "tcp"
     assert by_name["chronyd-eth2.50"].protocol == "udp"
     assert by_name["chronyd-eth2.50"].destination_port == "123"
     assert by_name["chronyd-eth3.60"].interface_name == "eth3.60"
