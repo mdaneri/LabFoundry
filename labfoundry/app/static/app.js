@@ -2406,6 +2406,18 @@ function downloadCaCertificateArtifact(row, artifact) {
   window.location.assign(`/certificate-authority/certificates/${data.id}/downloads/${artifact}`);
 }
 
+async function copyCaCertificateFingerprint(row) {
+  const fingerprint = row.getData().fingerprint || "";
+  if (!fingerprint) {
+    return;
+  }
+  try {
+    await copyTextToClipboard(fingerprint, "Fingerprint copied");
+  } catch {
+    showTransientGridStatus("Copy failed");
+  }
+}
+
 function initializeCaProfilesTable() {
   const tableElement = document.getElementById("ca-profiles-table");
   if (!(tableElement instanceof HTMLElement)) {
@@ -2551,19 +2563,33 @@ function initializeCaCertificatesTable() {
           action: (_event, row) => openCaCertificateModal(row.getData()),
         },
         {
-          label: "Export certificate",
-          disabled: (component) => !component.getData().can_export_certificate,
-          action: (_event, row) => downloadCaCertificateArtifact(row, "certificate.pem"),
+          label: "Copy fingerprint",
+          disabled: (component) => !component.getData().fingerprint,
+          action: (_event, row) => copyCaCertificateFingerprint(row),
         },
         {
-          label: "Export certificate chain",
-          disabled: (component) => !component.getData().can_export_chain,
-          action: (_event, row) => downloadCaCertificateArtifact(row, "chain.pem"),
-        },
-        {
-          label: "Export private key",
-          disabled: (component) => !component.getData().can_export_private_key,
-          action: (_event, row) => downloadCaCertificateArtifact(row, "private-key.pem"),
+          label: "Export",
+          disabled: (component) => {
+            const data = component.getData();
+            return !data.can_export_certificate && !data.can_export_chain && !data.can_export_private_key;
+          },
+          menu: [
+            {
+              label: "Certificate",
+              disabled: (component) => !component.getData().can_export_certificate,
+              action: (_event, row) => downloadCaCertificateArtifact(row, "certificate.pem"),
+            },
+            {
+              label: "Certificate chain",
+              disabled: (component) => !component.getData().can_export_chain,
+              action: (_event, row) => downloadCaCertificateArtifact(row, "chain.pem"),
+            },
+            {
+              label: "Private key",
+              disabled: (component) => !component.getData().can_export_private_key,
+              action: (_event, row) => downloadCaCertificateArtifact(row, "private-key.pem"),
+            },
+          ],
         },
         {
           label: "Delete request",
