@@ -2623,7 +2623,7 @@ function initializeCaCertificatesTable() {
           title: "Status",
           field: "status",
           editable: false,
-          width: 120,
+          width: 80,
         },
         {
           title: "Enabled",
@@ -2638,11 +2638,9 @@ function initializeCaCertificatesTable() {
           title: "Fingerprint",
           field: "fingerprint",
           editable: false,
-          formatter: (cell) => {
-            const value = cell.getValue() || "";
-            return value ? `${value.slice(0, 12)}...` : "";
-          },
-          width: 120,
+          formatter: (cell) => escapeHtml(cell.getValue() || ""),
+          cssClass: "mono-text",
+          width: 480,
           headerSort: false,
         },
         {
