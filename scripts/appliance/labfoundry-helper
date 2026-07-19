@@ -2250,6 +2250,23 @@ def _restore_ldap_recovery(payload: dict, config_dir: Path) -> int:
     return 0
 
 
+def _remove_obsolete_ldap_data_directories(payload: dict) -> None:
+    desired_slugs = {
+        str(organization.get("slug") or "")
+        for organization in payload.get("organizations", [])
+        if organization.get("slug")
+    }
+    if not LDAP_STATE_DIR.is_dir():
+        return
+    for child in LDAP_STATE_DIR.iterdir():
+        if child.name in desired_slugs:
+            continue
+        if child.is_symlink():
+            child.unlink()
+        elif child.is_dir():
+            shutil.rmtree(child)
+
+
 def _apply_ldap_config(payload: dict) -> int:
     service = payload["service"]
     if not service.get("enabled"):
@@ -2257,6 +2274,11 @@ def _apply_ldap_config(payload: dict) -> int:
         if result.returncode not in {0, 1, 5}:
             print(result.stderr, end="", file=sys.stderr)
             return result.returncode
+        try:
+            _remove_obsolete_ldap_data_directories(payload)
+        except OSError as exc:
+            print(f"Obsolete LDAP data directories could not be removed: {exc}", file=sys.stderr)
+            return 1
         return 0
     LDAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
     account_name = _ldap_account_name()
@@ -2311,6 +2333,11 @@ def _apply_ldap_config(payload: dict) -> int:
         if stop.returncode not in {0, 5}:
             print(stop.stderr, end="", file=sys.stderr)
             return stop.returncode
+        try:
+            _remove_obsolete_ldap_data_directories(payload)
+        except OSError as exc:
+            print(f"Obsolete LDAP data directories could not be removed: {exc}", file=sys.stderr)
+            return 1
         backup = LDAP_CONFIG_DIR.with_name(f"{LDAP_CONFIG_DIR.name}.labfoundry-backup")
         if backup.exists():
             shutil.rmtree(backup)

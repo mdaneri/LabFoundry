@@ -29,6 +29,7 @@ from labfoundry.app.models import (
     LdapGroup,
     LdapGroupMembership,
     LdapOrganization,
+    LdapRecoveryArchive,
     LdapSettings,
     LdapUser,
     NatRule,
@@ -52,7 +53,7 @@ from labfoundry.app.services.dnsmasq import DNS_CONDITIONAL_FORWARDERS_SETTING_K
 from labfoundry.app.services.esxi_pxe import host_variables_json, normalize_host_mac, normalize_host_variables
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY
 from labfoundry.app.services.local_users import LOCAL_USERS_PASSWORD_POLICY_KEY
-from labfoundry.app.services.ldap import ensure_organization_bind_secret
+from labfoundry.app.services.ldap import clear_ldap_recovery_payload, ensure_organization_bind_secret
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
 
 ARCHIVE_SCHEMA_VERSION = 1
@@ -92,6 +93,7 @@ SCALAR_TABLES = {
 }
 
 RESTORE_DELETE_MODELS = [
+    LdapRecoveryArchive,
     EsxiPxeHost,
     EsxiKickstart,
     VcfRegistryBundle,
@@ -407,6 +409,9 @@ def archive_summary(archive: dict[str, Any]) -> dict[str, Any]:
 
 
 def _clear_desired_state(db: Session) -> None:
+    recovery_archives = db.execute(select(LdapRecoveryArchive)).scalars().all()
+    for recovery_archive in recovery_archives:
+        clear_ldap_recovery_payload(recovery_archive)
     for model in RESTORE_DELETE_MODELS:
         db.execute(delete(model))
     db.flush()

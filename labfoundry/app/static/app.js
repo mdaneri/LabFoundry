@@ -3968,27 +3968,93 @@ function initializeLdapPageState() {
     // Page state persistence is optional when browser storage is unavailable.
   }
   const validStoredLink = links.find((link) => link.dataset.ldapOrganizationId === storedId);
-  if (window.location.pathname === "/ldap" && !currentId && validStoredLink instanceof HTMLAnchorElement && storedId !== activeId) {
-    window.location.replace(validStoredLink.href);
-    return;
-  }
-  const selectedId = currentId || activeId;
-  if (selectedId) {
+  let loading = false;
+
+  const rememberOrganization = (organizationId) => {
+    if (!organizationId) return;
     try {
-      window.localStorage.setItem(LDAP_ORGANIZATION_SELECTION_KEY, selectedId);
+      window.localStorage.setItem(LDAP_ORGANIZATION_SELECTION_KEY, organizationId);
     } catch {
       // Keep the server-selected organization when storage is unavailable.
     }
-  }
-  links.forEach((link) => {
-    link.addEventListener("click", () => {
-      try {
-        window.localStorage.setItem(LDAP_ORGANIZATION_SELECTION_KEY, link.dataset.ldapOrganizationId || "");
-      } catch {
-        // Navigation still works without persistence.
+  };
+
+  const loadOrganization = async (link, options = {}) => {
+    if (!(link instanceof HTMLAnchorElement) || loading) return;
+    const organizationId = link.dataset.ldapOrganizationId || "";
+    if (!organizationId) return;
+    const directoryPanel = document.getElementById("ldap-directory-panel");
+    const currentPanel = document.getElementById("ldap-organization-current");
+    if (!(directoryPanel instanceof HTMLElement) || !(currentPanel instanceof HTMLElement)) {
+      window.location.assign(link.href);
+      return;
+    }
+    loading = true;
+    directoryPanel.setAttribute("aria-busy", "true");
+    try {
+      const response = await fetch(link.href, {
+        credentials: "same-origin",
+        headers: { Accept: "text/html", "X-Requested-With": "LabFoundry" },
+      });
+      if (!response.ok) throw new Error(`LDAP organization load failed (${response.status})`);
+      const nextDocument = new DOMParser().parseFromString(await response.text(), "text/html");
+      const nextCurrentPanel = nextDocument.getElementById("ldap-organization-current");
+      if (!(nextCurrentPanel instanceof HTMLElement)) throw new Error("LDAP organization response is incomplete.");
+      currentPanel.replaceWith(document.importNode(nextCurrentPanel, true));
+
+      const currentMembersDialog = document.getElementById("ldap-group-members-modal");
+      const nextMembersDialog = nextDocument.getElementById("ldap-group-members-modal");
+      if (currentMembersDialog instanceof HTMLDialogElement && nextMembersDialog instanceof HTMLDialogElement) {
+        currentMembersDialog.replaceWith(document.importNode(nextMembersDialog, true));
       }
+
+      tabList.querySelectorAll(".tab-button").forEach((item) => {
+        const active = item === link;
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      const newOrganizationPanel = document.getElementById("ldap-organization-new");
+      if (newOrganizationPanel instanceof HTMLElement) {
+        newOrganizationPanel.classList.remove("active");
+        newOrganizationPanel.setAttribute("hidden", "");
+      }
+      rememberOrganization(organizationId);
+      const targetUrl = new URL(link.href, window.location.href);
+      if (options.history !== false) {
+        const historyMethod = options.replaceHistory ? "replaceState" : "pushState";
+        window.history[historyMethod]({ ldapOrganizationId: organizationId }, "", `${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`);
+      }
+      initializeTabs();
+      initializeLdapDirectoryTables();
+      initializeLdapPasswordModal();
+      initializeConfirmationModals();
+    } catch (_error) {
+      window.location.assign(link.href);
+    } finally {
+      loading = false;
+      directoryPanel.removeAttribute("aria-busy");
+    }
+  };
+
+  const selectedId = currentId || activeId;
+  rememberOrganization(selectedId);
+  links.forEach((link) => {
+    link.addEventListener("click", (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      if (link.classList.contains("active")) return;
+      loadOrganization(link);
     });
   });
+  window.addEventListener("popstate", () => {
+    if (window.location.pathname !== "/ldap") return;
+    const organizationId = new URL(window.location.href).searchParams.get("organization_id") || "";
+    const targetLink = links.find((link) => link.dataset.ldapOrganizationId === organizationId);
+    if (targetLink instanceof HTMLAnchorElement) loadOrganization(targetLink, { history: false });
+  });
+  if (window.location.pathname === "/ldap" && !currentId && validStoredLink instanceof HTMLAnchorElement && storedId !== activeId) {
+    loadOrganization(validStoredLink, { replaceHistory: true });
+  }
 }
 
 function attachLdapGridState(tableElement, table, resourceName, organizationId) {
@@ -4211,16 +4277,24 @@ function initializeLdapPasswordModal() {
   const cancel = dialog?.querySelector("[data-ldap-password-cancel]");
   if (!(dialog instanceof HTMLDialogElement) || !(form instanceof HTMLFormElement)) return;
   document.querySelectorAll("[data-ldap-password-button]").forEach((button) => {
+    if (button.dataset.ldapPasswordInitialized === "true") return;
+    button.dataset.ldapPasswordInitialized = "true";
     button.addEventListener("click", () => openLdapPasswordModal({ id: button.dataset.userId || "0", uid: button.dataset.userUid || "directory user" }));
   });
-  cancel?.addEventListener("click", () => dialog.close());
-  dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) dialog.close();
-  });
+  if (dialog.dataset.ldapPasswordInitialized !== "true") {
+    dialog.dataset.ldapPasswordInitialized = "true";
+    cancel?.addEventListener("click", () => dialog.close());
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) dialog.close();
+    });
+  }
 
   const membersDialog = document.getElementById("ldap-group-members-modal");
   const membersCancel = membersDialog?.querySelector("[data-ldap-group-members-cancel]");
-  if (membersDialog instanceof HTMLDialogElement) membersCancel?.addEventListener("click", () => membersDialog.close());
+  if (membersDialog instanceof HTMLDialogElement && membersDialog.dataset.ldapMembersInitialized !== "true") {
+    membersDialog.dataset.ldapMembersInitialized = "true";
+    membersCancel?.addEventListener("click", () => membersDialog.close());
+  }
 }
 
 function chronyBlankUpstreamRow() {
@@ -7044,6 +7118,10 @@ function initializeConfirmationModals() {
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
+    if (form.dataset.confirmModalInitialized === "true") {
+      return;
+    }
+    form.dataset.confirmModalInitialized = "true";
     form.addEventListener("submit", async (event) => {
       if (form.dataset.confirmed === "1") {
         delete form.dataset.confirmed;
@@ -10995,6 +11073,10 @@ function initializeTabs() {
     if (!(button instanceof HTMLButtonElement)) {
       return;
     }
+    if (button.dataset.tabInitialized === "true") {
+      return;
+    }
+    button.dataset.tabInitialized = "true";
     button.addEventListener("click", () => {
       const targetId = button.dataset.tabTarget;
       if (!targetId) {
@@ -13096,8 +13178,27 @@ function initializeVcfLdapHelper() {
     organizationSelect.addEventListener("change", () => organizationForm.requestSubmit());
   }
   if (generateDialog instanceof HTMLDialogElement) {
-    generateOpen?.addEventListener("click", () => generateDialog.showModal());
+    const focusGenerateDialog = () => {
+      window.requestAnimationFrame(() => {
+        const target = generateDialog.querySelector('[aria-label="Save generated credentials"]')
+          || generateDialog.querySelector("[data-ldap-generate-user-count]");
+        if (target instanceof HTMLElement) {
+          target.focus({ preventScroll: true });
+          if (target instanceof HTMLInputElement) target.select();
+        }
+      });
+    };
+    const openGenerateDialog = () => {
+      generateDialog.showModal();
+      focusGenerateDialog();
+    };
+    const clearGeneratedResult = () => {
+      generateDialog.querySelectorAll("[data-ldap-generated-result]").forEach((element) => element.remove());
+      generateDialog.removeAttribute("data-ldap-generate-auto-open");
+    };
+    generateOpen?.addEventListener("click", openGenerateDialog);
     generateCancel?.addEventListener("click", () => generateDialog.close());
+    generateDialog.addEventListener("close", clearGeneratedResult);
     if (generateForm instanceof HTMLFormElement && generateOrganization instanceof HTMLSelectElement) {
       const updateGenerateAction = () => {
         generateForm.action = `/ldap/organizations/${encodeURIComponent(generateOrganization.value)}/generate-directory`;
@@ -13106,7 +13207,8 @@ function initializeVcfLdapHelper() {
       updateGenerateAction();
     }
     if (generateDialog.hasAttribute("data-ldap-generate-auto-open") && !generateDialog.open) {
-      generateDialog.showModal();
+      window.history.replaceState(window.history.state, "", "/vcf-helper");
+      openGenerateDialog();
     }
   }
   if (dialog.hasAttribute("data-vcf-ldap-auto-open") && !dialog.open) {

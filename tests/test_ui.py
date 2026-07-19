@@ -684,7 +684,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v114" in service_worker.text
+    assert "labfoundry-pwa-v116" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -696,8 +696,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=ldap-console-20260718-10" in service_worker.text
-    assert "/static/app.js?v=ldap-console-20260718-10" in service_worker.text
+    assert "/static/app.css?v=ldap-console-20260718-12" in service_worker.text
+    assert "/static/app.js?v=ldap-console-20260718-12" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -706,7 +706,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=ldap-console-20260718-10" in offline.text
+    assert "/static/app.css?v=ldap-console-20260718-12" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -722,8 +722,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=ldap-console-20260718-10" in page.text
-    assert "/static/app.js?v=ldap-console-20260718-10" in page.text
+    assert "/static/app.css?v=ldap-console-20260718-12" in page.text
+    assert "/static/app.js?v=ldap-console-20260718-12" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -2430,6 +2430,51 @@ def test_settings_archive_round_trips_management_ipv6_gateway(client):
         assert restored.ipv6_gateway == "fe80::1"
 
 
+def test_settings_restore_and_factory_reset_clear_staged_ldap_recovery(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import LdapRecoveryArchive
+    from labfoundry.app.services.ldap import LDAP_PENDING_RECOVERY_PAYLOADS
+    from labfoundry.app.services.settings_archive import export_settings_archive, factory_reset_desired_state, restore_settings_archive
+
+    with SessionLocal() as db:
+        archive = export_settings_archive(db, actor="test")
+        staged = LdapRecoveryArchive(
+            filename="staged-restore.lfldap",
+            path="memory://pending-ldap-recovery",
+            sha256="a" * 64,
+            state="staged",
+            organization_count=1,
+            created_by="test",
+        )
+        db.add(staged)
+        db.commit()
+        staged_id = staged.id
+        LDAP_PENDING_RECOVERY_PAYLOADS[staged_id] = b"restore secret"
+
+        restore_settings_archive(db, archive)
+
+        assert db.get(LdapRecoveryArchive, staged_id) is None
+        assert staged_id not in LDAP_PENDING_RECOVERY_PAYLOADS
+
+        reset_staged = LdapRecoveryArchive(
+            filename="staged-reset.lfldap",
+            path="memory://pending-ldap-recovery",
+            sha256="b" * 64,
+            state="staged",
+            organization_count=1,
+            created_by="test",
+        )
+        db.add(reset_staged)
+        db.commit()
+        reset_staged_id = reset_staged.id
+        LDAP_PENDING_RECOVERY_PAYLOADS[reset_staged_id] = b"reset secret"
+
+        factory_reset_desired_state(db)
+
+        assert db.get(LdapRecoveryArchive, reset_staged_id) is None
+        assert reset_staged_id not in LDAP_PENDING_RECOVERY_PAYLOADS
+
+
 def test_esxi_kickstart_api_hides_raw_content_from_read_only_tokens(client):
     from sqlalchemy import select
 
@@ -4000,6 +4045,16 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     app_js = client.get("/static/app.js").text
     assert 'const LDAP_ORGANIZATION_SELECTION_KEY = "labfoundry:ldap:organization"' in app_js
     assert "function initializeLdapPageState()" in app_js
+    ldap_page_state_js = app_js.split("function initializeLdapPageState()", 1)[1].split("function attachLdapGridState(", 1)[0]
+    assert 'await fetch(link.href' in ldap_page_state_js
+    assert 'currentPanel.replaceWith(document.importNode(nextCurrentPanel, true))' in ldap_page_state_js
+    assert 'window.history[historyMethod]' in ldap_page_state_js
+    assert 'window.addEventListener("popstate"' in ldap_page_state_js
+    assert 'window.location.replace(validStoredLink.href)' not in ldap_page_state_js
+    assert 'tabList.querySelectorAll(".tab-button")' in ldap_page_state_js
+    assert 'newOrganizationPanel.setAttribute("hidden", "")' in ldap_page_state_js
+    assert "initializeLdapDirectoryTables()" in ldap_page_state_js
+    assert "initializeTabs()" in ldap_page_state_js
     assert "function attachLdapGridState(" in app_js
     assert "function redrawLdapDirectoryTables(" in app_js
     disabled_helper = client.get(f"/vcf-helper?ldap_vcf=1&ldap_organization_id={organization_id}")
@@ -4125,6 +4180,8 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
     assert "Generated credentials" in generated.text
     assert "uid,password,display_name,email,telephone" in generated.text
     assert "Generated passwords are displayed once" in generated.text
+    assert "Created 6 users and 3 groups" in generated.text
+    assert "Save the one-time CSV, then submit the Managed LDAP appliance change" in generated.text
     assert "Generate test directory" in generated.text
     assert "data-ldap-generate-auto-open" in generated.text
     generator_modal = generated.text.split('<dialog id="ldap-generate-modal"', 1)[1].split("</dialog>", 1)[0]
@@ -4135,8 +4192,15 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
     assert "<textarea" not in generator_modal
     assert "data-copy-value" in generator_modal
     assert "data-download-value" in generator_modal
+    assert generator_modal.count("data-ldap-generated-result") == 2
+    assert "data-ldap-generate-user-count" in generator_modal
     managed_ldap_modal = generated.text.split('<dialog id="vcf-ldap-modal"', 1)[1].split("</dialog>", 1)[0]
     assert "uid,password,display_name,email,telephone" not in managed_ldap_modal
+    app_js = client.get("/static/app.js").text
+    assert 'generateDialog.addEventListener("close", clearGeneratedResult)' in app_js
+    assert 'generateDialog.querySelectorAll("[data-ldap-generated-result]")' in app_js
+    assert 'window.history.replaceState(window.history.state, "", "/vcf-helper")' in app_js
+    assert 'generateDialog.querySelector("[data-ldap-generate-user-count]")' in app_js
 
     with SessionLocal() as db:
         organization = db.get(LdapOrganization, organization_id)
@@ -9509,7 +9573,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "ldap-console-20260718-10" in page.text
+    assert "ldap-console-20260718-12" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

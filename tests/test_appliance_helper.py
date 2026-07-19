@@ -299,6 +299,27 @@ def test_ldap_recovery_restores_slapd_ownership(monkeypatch, tmp_path):
     assert (data_dir / "data.mdb", "ldap", "ldap") in ownership
 
 
+def test_ldap_apply_removes_only_obsolete_managed_data_directories(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    state_dir = tmp_path / "ldap-state"
+    desired_dir = state_dir / "org-a"
+    obsolete_dir = state_dir / "deleted-org"
+    desired_dir.mkdir(parents=True)
+    obsolete_dir.mkdir()
+    (desired_dir / "data.mdb").write_text("keep", encoding="utf-8")
+    (obsolete_dir / "data.mdb").write_text("remove", encoding="utf-8")
+    unrelated_file = state_dir / "README"
+    unrelated_file.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(helper, "LDAP_STATE_DIR", state_dir)
+
+    helper._remove_obsolete_ldap_data_directories(ldap_payload(enabled=True))
+
+    assert desired_dir.is_dir()
+    assert (desired_dir / "data.mdb").read_text(encoding="utf-8") == "keep"
+    assert not obsolete_dir.exists()
+    assert unrelated_file.read_text(encoding="utf-8") == "keep"
+
+
 def test_ldap_listener_dropin_overrides_photon_hard_coded_plaintext_listener(monkeypatch, tmp_path):
     helper = load_helper_module()
     dropin_dir = tmp_path / "slapd.service.d"
