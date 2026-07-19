@@ -4,7 +4,7 @@
     <div class="panel detail-panel">
       <div class="panel-head">
         <h2>LDAP Settings</h2>
-        <span class="status-pill {{ ldap_service_status.pill }}">{{ ldap_service_status.label }}</span>
+        <span class="status-pill {{ ldap_service_status.pill }}" data-ldap-runtime-status>{{ ldap_service_status.label }}</span>
       </div>
       <form class="form-stack" action="/ldap/settings" method="post" data-autosave-form data-autosave-status-id="ldap-settings-autosave-status">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -82,7 +82,7 @@
         <h2>Managed LDAP for VCF Automation</h2>
         <p class="muted">LabFoundry owns one LDAP service and keeps every VCF organization in a separate LDAP suffix and LMDB database.</p>
       </div>
-      <span class="status-pill {{ 'good' if ldap_settings.enabled else 'muted' }}">{{ "enabled" if ldap_settings.enabled else "disabled" }}</span>
+      <span class="status-pill {{ 'good' if ldap_settings.enabled else 'muted' }}" data-ldap-desired-status>{{ "enabled" if ldap_settings.enabled else "disabled" }}</span>
     </div>
 
     {% if form_error %}<div class="alert error">{{ form_error }}</div>{% endif %}

@@ -696,8 +696,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=ldap-console-20260718-12" in service_worker.text
-    assert "/static/app.js?v=ldap-console-20260718-12" in service_worker.text
+    assert "/static/app.css?v=ldap-helper-modal-20260719-14" in service_worker.text
+    assert "/static/app.js?v=ldap-helper-modal-20260719-14" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -706,7 +706,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=ldap-console-20260718-12" in offline.text
+    assert "/static/app.css?v=ldap-helper-modal-20260719-14" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -722,8 +722,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=ldap-console-20260718-12" in page.text
-    assert "/static/app.js?v=ldap-console-20260718-12" in page.text
+    assert "/static/app.css?v=ldap-helper-modal-20260719-14" in page.text
+    assert "/static/app.js?v=ldap-helper-modal-20260719-14" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -4060,14 +4060,21 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     disabled_helper = client.get(f"/vcf-helper?ldap_vcf=1&ldap_organization_id={organization_id}")
     ldap_tile = disabled_helper.text.split("data-vcf-ldap-open", 1)[1].split(">", 1)[0]
     assert "disabled" in ldap_tile
+    assert 'data-help="Enable Managed LDAP and at least one organization before using this helper."' in disabled_helper.text
     assert "Enable Managed LDAP first" in disabled_helper.text
 
     enabled = client.post(
         "/ldap/settings",
         data={"enabled": "on", "hostname": "ldap.labfoundry.internal", "listen_interfaces_present": "1", "ldaps_enabled": "on", "port": "636", "ldap_port": "389", "csrf": csrf},
+        headers={"X-LabFoundry-Autosave": "1"},
         follow_redirects=False,
     )
-    assert enabled.status_code == 303
+    assert enabled.status_code == 200
+    enabled_payload = enabled.json()
+    assert enabled_payload["saved"] is True
+    assert enabled_payload["settings"]["enabled"] is True
+    assert enabled_payload["service_status"]["label"] in {"live", "pending"}
+    assert enabled_payload["appliance_apply_status"]["changed"] is True
     vcf_helper = client.get(f"/vcf-helper?ldap_vcf=1&ldap_organization_id={organization_id}")
     assert vcf_helper.status_code == 200
     assert "Managed LDAP for VCF Automation 9.1" in vcf_helper.text
@@ -4149,6 +4156,13 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert 'label: "Reset password"' in ldap_grid_js
     assert 'label: "Delete user"' in ldap_grid_js
     assert 'label: "Edit membership"' in ldap_grid_js
+    assert "function ldapGroupMembershipFormatter(cell)" in app_js
+    assert "formatter: ldapGroupMembershipFormatter" in ldap_grid_js
+    assert '<th>Type</th><th>Member</th>' in app_js
+    assert "function updatePageApplyNotice(status = {})" in app_js
+    assert "if (payload.appliance_apply_status) updatePageApplyNotice(payload.appliance_apply_status);" in app_js
+    assert "function updateLdapSettingsStatus(payload = {})" in app_js
+    assert "if (!tableElement.isConnected || tableElement.offsetParent === null) return;" in app_js
 
 
 def test_managed_ldap_generates_complete_synthetic_directory_once(client):
@@ -4194,10 +4208,15 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
     assert "data-download-value" in generator_modal
     assert generator_modal.count("data-ldap-generated-result") == 2
     assert "data-ldap-generate-user-count" in generator_modal
+    assert ">Done</button>" in generator_modal
+    assert "data-ldap-generate-close" in generator_modal
+    assert "Generate directory entries" not in generator_modal
+    assert "Recover missing passwords" not in generator_modal
     managed_ldap_modal = generated.text.split('<dialog id="vcf-ldap-modal"', 1)[1].split("</dialog>", 1)[0]
     assert "uid,password,display_name,email,telephone" not in managed_ldap_modal
     app_js = client.get("/static/app.js").text
     assert 'generateDialog.addEventListener("close", clearGeneratedResult)' in app_js
+    assert 'querySelectorAll("[data-ldap-generate-close]")' in app_js
     assert 'generateDialog.querySelectorAll("[data-ldap-generated-result]")' in app_js
     assert 'window.history.replaceState(window.history.state, "", "/vcf-helper")' in app_js
     assert 'generateDialog.querySelector("[data-ldap-generate-user-count]")' in app_js
@@ -4226,7 +4245,15 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
         db.commit()
 
     helper = client.get(f"/vcf-helper?ldap_organization_id={organization_id}")
-    assert "Stage missing passwords (6)" in helper.text
+    assert "Recover missing passwords (6)" in helper.text
+    assert "Generates replacement passwords for enabled users whose one-time passwords are no longer staged" in helper.text
+    helper_modal = helper.text.split('<dialog id="ldap-generate-modal"', 1)[1].split("</dialog>", 1)[0]
+    assert "Cancel" in helper_modal
+    assert "Generate directory entries" in helper_modal
+    assert "Done" not in helper_modal
+    modal_css = client.get("/static/app.css").text
+    assert "width: min(920px, calc(100vw - 32px));" in modal_css
+    assert "#ldap-generate-modal .confirm-modal-actions {\n  flex-wrap: nowrap;" in modal_css
     recovered = client.post(
         f"/ldap/organizations/{organization_id}/generate-directory",
         data={
@@ -4238,7 +4265,7 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
     )
     assert recovered.status_code == 200, recovered.text
     assert "Staged replacement passwords for 6 existing enabled users" in recovered.text
-    assert "Stage missing passwords (6)" not in recovered.text
+    assert "Recover missing passwords (6)" not in recovered.text
     assert "uid,password,display_name,email,telephone" in recovered.text
 
     with SessionLocal() as db:
@@ -9596,7 +9623,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "ldap-console-20260718-12" in page.text
+    assert "ldap-helper-modal-20260719-14" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

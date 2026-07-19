@@ -472,7 +472,7 @@ def validate_ldap_state(
             errors.append(
                 f"{organization.name}: {len(missing_password_uids)} enabled "
                 f"{'user needs' if len(missing_password_uids) == 1 else 'users need'} staged passwords "
-                f"({examples}). Use VCF Helper > Generate LDAP Test Directory > Stage missing passwords."
+                f"({examples}). Use VCF Helper > Generate LDAP Test Directory > Recover missing passwords."
             )
         for group in organization.groups:
             if not LDAP_GROUP_PATTERN.fullmatch(group.name):

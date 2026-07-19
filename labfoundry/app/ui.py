@@ -7135,6 +7135,19 @@ def appliance_apply_status_from_unit(unit: dict[str, Any], *, sidebar_pending_ap
     return {"state": state, "pill": pill, "sidebar_pending_apply_count": sidebar_count, **unit}
 
 
+def appliance_apply_client_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Return only the JSON-safe apply metadata needed by autosave clients."""
+    return {
+        "id": status.get("id", ""),
+        "label": status.get("label", "Appliance component"),
+        "state": status.get("state", "unknown"),
+        "pill": status.get("pill", "muted"),
+        "changed": bool(status.get("changed")),
+        "validation_errors": list(status.get("validation_errors") or []),
+        "sidebar_pending_apply_count": int(status.get("sidebar_pending_apply_count") or 0),
+    }
+
+
 def dnsmasq_apply_status(db: Session, dnsmasq: dict[str, Any]) -> dict[str, Any]:
     baselines = load_appliance_apply_baselines(db)
     unit = make_appliance_apply_unit(
@@ -12435,15 +12448,16 @@ def update_ldap_settings_from_ui(
     db.commit()
     record_audit(db, actor=identity.username, action="update_ldap_settings", resource_type="ldap", resource_id=str(settings.id))
     context = ldap_context(db)
-    if "application/json" in request.headers.get("accept", ""):
+    if request.headers.get("X-LabFoundry-Autosave") == "1" or "application/json" in request.headers.get("accept", ""):
         return JSONResponse(
             {
                 "saved": True,
                 "settings": context["ldap_settings_json"],
+                "service_status": context["ldap_service_status"],
                 "validation_errors": context["ldap_validation_errors"],
                 "validation_warnings": context["ldap_validation_warnings"],
                 "config_preview": context["ldap_config_preview"],
-                "appliance_apply_status": appliance_apply_status(db, "ldap"),
+                "appliance_apply_status": appliance_apply_client_status(appliance_apply_status(db, "ldap")),
             }
         )
     return RedirectResponse("/ldap", status_code=303)

@@ -20,6 +20,7 @@ const PUBLIC_ADDRESS_MODE_COOKIE = "labfoundry_public_address_mode";
 const LABFOUNDRY_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const labFoundryDnsRecordTables = new WeakMap();
 const labFoundryLdapDirectoryTables = new WeakMap();
+let ldapMembershipTooltip = null;
 const LDAP_ORGANIZATION_SELECTION_KEY = "labfoundry:ldap:organization";
 let applianceApplySidebarRefreshTimer = 0;
 let applianceApplyGlobalPollTimer = 0;
@@ -3955,7 +3956,26 @@ function newLdapGroupRow(organizationId) {
   return { id: "__new_ldap_group__", organization_id: organizationId, name: "", description: "", enabled: false, members: [], member_count: 0, member_names: "", is_new: true };
 }
 
+function updateLdapSettingsStatus(payload = {}) {
+  const enabled = Boolean(payload.settings?.enabled);
+  const desired = document.querySelector("[data-ldap-desired-status]");
+  if (desired instanceof HTMLElement) {
+    desired.textContent = enabled ? "enabled" : "disabled";
+    desired.className = `status-pill ${enabled ? "good" : "muted"}`;
+  }
+  const runtime = document.querySelector("[data-ldap-runtime-status]");
+  const runtimeStatus = payload.service_status || {};
+  if (runtime instanceof HTMLElement && runtimeStatus.label) {
+    runtime.textContent = runtimeStatus.label;
+    runtime.className = `status-pill ${runtimeStatus.pill || "muted"}`;
+  }
+}
+
 function initializeLdapPageState() {
+  const settingsForm = document.querySelector('form[action="/ldap/settings"]');
+  if (settingsForm instanceof HTMLFormElement) {
+    settingsForm.addEventListener("labfoundry:autosave-success", (event) => updateLdapSettingsStatus(event.detail || {}));
+  }
   const tabList = document.querySelector("[data-ldap-organization-tabs]");
   if (!(tabList instanceof HTMLElement)) return;
   const links = Array.from(tabList.querySelectorAll("[data-ldap-organization-id]"));
@@ -4085,6 +4105,8 @@ function redrawLdapDirectoryTables(root = document) {
   window.requestAnimationFrame(() => {
     root.querySelectorAll("#ldap-users-table, #ldap-groups-table").forEach((tableElement) => {
       const table = labFoundryLdapDirectoryTables.get(tableElement);
+      if (!tableElement.isConnected || tableElement.offsetParent === null) return;
+      if (!tableElement.querySelector(".tabulator-tableholder")) return;
       if (table && typeof table.redraw === "function") table.redraw(true);
     });
   });
@@ -4208,7 +4230,58 @@ async function deleteLdapGroupFromMenu(row, csrf) {
   catch (error) { showCaMessage("ldap-group-error", error instanceof Error ? error.message : "The LDAP group could not be deleted."); }
 }
 
+function ensureLdapMembershipTooltip() {
+  if (!ldapMembershipTooltip) {
+    ldapMembershipTooltip = document.createElement("div");
+    ldapMembershipTooltip.className = "dhcp-range-tooltip ldap-membership-tooltip hidden";
+    document.body.appendChild(ldapMembershipTooltip);
+  }
+  return ldapMembershipTooltip;
+}
+
+function moveLdapMembershipTooltip(event) {
+  if (!ldapMembershipTooltip || ldapMembershipTooltip.classList.contains("hidden")) return;
+  const offset = 12;
+  const width = ldapMembershipTooltip.offsetWidth || 280;
+  const height = ldapMembershipTooltip.offsetHeight || 160;
+  const x = Math.min(event.clientX + offset, window.innerWidth - width - offset);
+  const y = Math.min(event.clientY + offset, window.innerHeight - height - offset);
+  ldapMembershipTooltip.style.left = `${Math.max(offset, x)}px`;
+  ldapMembershipTooltip.style.top = `${Math.max(offset, y)}px`;
+}
+
+function showLdapMembershipTooltip(event, members = []) {
+  if (!Array.isArray(members) || !members.length) return;
+  const tooltip = ensureLdapMembershipTooltip();
+  tooltip.innerHTML = `
+    <table aria-label="Group membership">
+      <thead><tr><th>Type</th><th>Member</th></tr></thead>
+      <tbody>${members.map((member) => `<tr><td>${escapeHtml(member.type === "group" ? "Group" : "User")}</td><td>${escapeHtml(member.name || "")}</td></tr>`).join("")}</tbody>
+    </table>
+  `;
+  tooltip.classList.remove("hidden");
+  moveLdapMembershipTooltip(event);
+}
+
+function hideLdapMembershipTooltip() {
+  ldapMembershipTooltip?.classList.add("hidden");
+}
+
+function ldapGroupMembershipFormatter(cell) {
+  const data = cell.getRow().getData();
+  const element = document.createElement("span");
+  element.className = "ldap-membership-value";
+  element.textContent = String(cell.getValue() || "");
+  if (Array.isArray(data.members) && data.members.length) {
+    element.addEventListener("mouseenter", (event) => showLdapMembershipTooltip(event, data.members));
+    element.addEventListener("mousemove", moveLdapMembershipTooltip);
+    element.addEventListener("mouseleave", hideLdapMembershipTooltip);
+  }
+  return element;
+}
+
 function initializeLdapDirectoryTables() {
+  hideLdapMembershipTooltip();
   const usersElement = document.getElementById("ldap-users-table");
   if (usersElement instanceof HTMLElement && typeof Tabulator !== "undefined") {
     const csrf = usersElement.dataset.csrf || "";
@@ -4258,7 +4331,7 @@ function initializeLdapDirectoryTables() {
           { title: "Name", field: "name", editor: "input", formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add group here"), minWidth: 170, cellEdited: (cell) => autoSaveLdapGroup(cell, csrf, organizationId) },
           { title: "Description", field: "description", editor: "input", minWidth: 240, cellEdited: (cell) => autoSaveLdapGroup(cell, csrf, organizationId) },
           { title: "Members", field: "member_count", width: 105, hozAlign: "right", editable: false },
-          { title: "Membership", field: "member_names", minWidth: 260, editable: false },
+          { title: "Membership", field: "member_names", formatter: ldapGroupMembershipFormatter, minWidth: 260, editable: false },
           { title: "Enabled", field: "enabled", formatter: labFoundryBooleanFormatter, editor: "tickCross", hozAlign: "center", width: 95, cellEdited: (cell) => autoSaveLdapGroup(cell, csrf, organizationId) },
         ], "name"),
         rowFormatter: (row) => markNewRecordRow(row, "name"),
@@ -7175,6 +7248,46 @@ function updateApplianceApplySidebar(payload = {}) {
   }
 }
 
+function updatePageApplyNotice(status = {}) {
+  let notice = document.querySelector(".page-apply-notice");
+  if (!status.changed) {
+    notice?.remove();
+    return;
+  }
+  const mainPane = document.querySelector("main.main-pane");
+  const header = mainPane?.querySelector("header.topbar");
+  if (!(mainPane instanceof HTMLElement) || !(header instanceof HTMLElement)) return;
+  if (!(notice instanceof HTMLElement)) {
+    notice = document.createElement("div");
+    notice.className = "page-apply-notice";
+    const main = document.createElement("div");
+    main.className = "page-apply-notice-main";
+    const pill = document.createElement("span");
+    pill.className = "status-pill";
+    const title = document.createElement("strong");
+    const detail = document.createElement("span");
+    detail.textContent = "Review and submit them from the global apply workflow.";
+    main.append(pill, title, detail);
+    const review = document.createElement("a");
+    review.className = "button secondary compact-button";
+    review.href = "/dashboard#appliance-apply-review";
+    review.dataset.applianceApplyOpen = "";
+    review.textContent = "Review appliance changes";
+    notice.append(main, review);
+    header.insertAdjacentElement("afterend", notice);
+  }
+  const hasErrors = Array.isArray(status.validation_errors) && status.validation_errors.length > 0;
+  notice.classList.toggle("needs-attention", hasErrors);
+  notice.classList.toggle("pending", !hasErrors);
+  const pill = notice.querySelector(".status-pill");
+  if (pill instanceof HTMLElement) {
+    pill.className = `status-pill ${status.pill || "warn"}`;
+    pill.textContent = status.state || (hasErrors ? "needs attention" : "pending");
+  }
+  const title = notice.querySelector("strong");
+  if (title instanceof HTMLElement) title.textContent = `${status.label || "Appliance component"} has pending appliance changes`;
+}
+
 async function refreshApplianceApplySidebar() {
   if (!document.querySelector("[data-appliance-apply-sidebar]")) {
     return;
@@ -7314,6 +7427,7 @@ function initializeAutosaveForms() {
         const { payload, request } = hasFiles
           ? await postWithUploadProgress(actionUrl, formData, files)
           : await postWithFetch(actionUrl, formData);
+        if (payload.appliance_apply_status) updatePageApplyNotice(payload.appliance_apply_status);
         form.dispatchEvent(new CustomEvent("labfoundry:autosave-success", { detail: payload }));
         if (hasFiles) {
           clearSelectedFileInputs();
@@ -13169,7 +13283,7 @@ function initializeVcfLdapHelper() {
   const organizationSelect = dialog.querySelector("[data-vcf-ldap-organization-select]");
   const generateDialog = document.getElementById("ldap-generate-modal");
   const generateOpen = document.querySelector("[data-ldap-generate-open]");
-  const generateCancel = generateDialog?.querySelector("[data-ldap-generate-cancel]");
+  const generateCloseButtons = generateDialog?.querySelectorAll("[data-ldap-generate-close]");
   const generateForm = generateDialog?.querySelector("[data-ldap-generate-form]");
   const generateOrganization = generateDialog?.querySelector("[data-ldap-generate-organization]");
   openButton?.addEventListener("click", () => dialog.showModal());
@@ -13197,7 +13311,7 @@ function initializeVcfLdapHelper() {
       generateDialog.removeAttribute("data-ldap-generate-auto-open");
     };
     generateOpen?.addEventListener("click", openGenerateDialog);
-    generateCancel?.addEventListener("click", () => generateDialog.close());
+    generateCloseButtons?.forEach((button) => button.addEventListener("click", () => generateDialog.close()));
     generateDialog.addEventListener("close", clearGeneratedResult);
     if (generateForm instanceof HTMLFormElement && generateOrganization instanceof HTMLSelectElement) {
       const updateGenerateAction = () => {

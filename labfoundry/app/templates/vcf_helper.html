@@ -71,18 +71,22 @@
           <p class="muted">VCF Automation directory configuration and synthetic identity data for lab validation.</p>
         </div>
         <div class="vcf-helper-action-bands">
-          <button class="info-band vcf-helper-action-band" type="button" data-vcf-ldap-open aria-haspopup="dialog" aria-controls="vcf-ldap-modal" {% if not vcf_ldap_authorized or not vcf_ldap_available %}disabled{% endif %} {% if not vcf_ldap_available %}title="Enable Managed LDAP and at least one organization before using this helper."{% endif %}>
-            <span class="vcf-helper-action-copy">
-              <span class="vcf-helper-action-title">Managed LDAP for VCF</span>
-              <span class="muted">Download the organization bundle or inspect, configure, and verify VCF Automation 9.1 LDAP settings.</span>
-            </span>
-          </button>
-          <button class="info-band vcf-helper-action-band" type="button" data-ldap-generate-open aria-haspopup="dialog" aria-controls="ldap-generate-modal" {% if not vcf_ldap_authorized or not vcf_ldap_available %}disabled{% endif %} {% if not vcf_ldap_available %}title="Enable Managed LDAP and at least one organization before generating test entries."{% endif %}>
-            <span class="vcf-helper-action-copy">
-              <span class="vcf-helper-action-title">Generate LDAP Test Directory</span>
-              <span class="muted">Create synthetic users, compliant one-time passwords, groups, and memberships for VCF lab validation.</span>
-            </span>
-          </button>
+          <div class="vcf-helper-action-wrap" {% if not vcf_ldap_authorized or not vcf_ldap_available %}data-help="{% if not vcf_ldap_authorized %}Administrator access is required for Managed LDAP helpers.{% else %}Enable Managed LDAP and at least one organization before using this helper.{% endif %}" tabindex="0" aria-label="Managed LDAP for VCF unavailable. {% if not vcf_ldap_authorized %}Administrator access is required.{% else %}Enable Managed LDAP and at least one organization.{% endif %}"{% endif %}>
+            <button class="info-band vcf-helper-action-band" type="button" data-vcf-ldap-open aria-haspopup="dialog" aria-controls="vcf-ldap-modal" {% if not vcf_ldap_authorized or not vcf_ldap_available %}disabled{% endif %}>
+              <span class="vcf-helper-action-copy">
+                <span class="vcf-helper-action-title">Managed LDAP for VCF</span>
+                <span class="muted">Download the organization bundle or inspect, configure, and verify VCF Automation 9.1 LDAP settings.</span>
+              </span>
+            </button>
+          </div>
+          <div class="vcf-helper-action-wrap" {% if not vcf_ldap_authorized or not vcf_ldap_available %}data-help="{% if not vcf_ldap_authorized %}Administrator access is required for Managed LDAP helpers.{% else %}Enable Managed LDAP and at least one organization before generating test entries.{% endif %}" tabindex="0" aria-label="Generate LDAP Test Directory unavailable. {% if not vcf_ldap_authorized %}Administrator access is required.{% else %}Enable Managed LDAP and at least one organization.{% endif %}"{% endif %}>
+            <button class="info-band vcf-helper-action-band" type="button" data-ldap-generate-open aria-haspopup="dialog" aria-controls="ldap-generate-modal" {% if not vcf_ldap_authorized or not vcf_ldap_available %}disabled{% endif %}>
+              <span class="vcf-helper-action-copy">
+                <span class="vcf-helper-action-title">Generate LDAP Test Directory</span>
+                <span class="muted">Create synthetic users, compliant one-time passwords, groups, and memberships for VCF lab validation.</span>
+              </span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -118,11 +118,17 @@
       {% endif %}
     </div>
     <div class="confirm-modal-actions">
-      <button class="button secondary" type="button" data-ldap-generate-cancel>Cancel</button>
-      <button class="button secondary" type="submit" name="action" value="stage_missing" {% if not vcf_ldap_missing_password_count %}disabled{% endif %}>
-        Stage missing passwords{% if vcf_ldap_missing_password_count %} ({{ vcf_ldap_missing_password_count }}){% endif %}
-      </button>
-      <button class="button primary" type="submit" name="action" value="generate">Generate directory entries</button>
+      {% if not ldap_generated_credentials_text %}
+        <button class="button secondary" type="button" data-ldap-generate-close>Cancel</button>
+      {% endif %}
+      {% if ldap_generated_credentials_text %}
+        <button class="button primary" type="button" data-ldap-generate-close>Done</button>
+      {% else %}
+        <button class="button secondary" type="submit" name="action" value="stage_missing" title="Generates replacement passwords for enabled users whose one-time passwords are no longer staged, such as after restarting LabFoundry before appliance apply." {% if not vcf_ldap_missing_password_count %}disabled{% endif %}>
+          Recover missing passwords{% if vcf_ldap_missing_password_count %} ({{ vcf_ldap_missing_password_count }}){% endif %}
+        </button>
+        <button class="button primary" type="submit" name="action" value="generate">Generate directory entries</button>
+      {% endif %}
     </div>
   </form>
 </dialog>

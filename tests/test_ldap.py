@@ -304,7 +304,7 @@ def test_ldap_validation_aggregates_users_with_missing_staged_passwords():
     assert len(password_errors) == 1
     assert "5 enabled users need staged passwords" in password_errors[0]
     assert "test.user-1, test.user-2, test.user-3, and 2 more" in password_errors[0]
-    assert "Stage missing passwords" in password_errors[0]
+    assert "Recover missing passwords" in password_errors[0]
 
 
 def test_ldap_recovery_envelope_and_manifest_validation():

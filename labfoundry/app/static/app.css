@@ -160,6 +160,19 @@ textarea {
   border-bottom: 0;
 }
 
+.ldap-membership-tooltip {
+  max-width: min(440px, calc(100vw - 24px));
+  max-height: min(420px, calc(100vh - 24px));
+  overflow: hidden auto;
+}
+
+.ldap-membership-value {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sidebar-apply {
   margin-top: auto;
   padding-top: 14px;
@@ -2058,6 +2071,17 @@ textarea {
   min-width: 0;
 }
 
+#ldap-generate-modal {
+  width: min(920px, calc(100vw - 32px));
+  max-width: none;
+}
+
+#ldap-generate-modal .confirm-modal-panel {
+  max-height: calc(100vh - 32px);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 #ldap-generate-modal,
 #ldap-bind-secret-modal {
   overflow-x: hidden;
@@ -2071,7 +2095,11 @@ textarea {
 }
 
 #ldap-generate-modal .confirm-modal-actions {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+#ldap-generate-modal .confirm-modal-actions .button {
+  white-space: nowrap;
 }
 
 #ldap-generate-modal .field-label,
