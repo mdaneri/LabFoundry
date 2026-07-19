@@ -4561,6 +4561,23 @@ def test_chronyd_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
     assert commands == [["/usr/bin/journalctl", "-u", "chronyd.service", "-n", "500", "--no-pager", "--output=short-iso"]]
 
 
+def test_ldap_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
+    helper = load_helper_module()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/journalctl" if command == "journalctl" else None)
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda command: commands.append(command) or subprocess.CompletedProcess(command, 0, "slapd ready\n", ""),
+    )
+
+    assert helper._handle_ldap("logs", []) == 0
+    assert "slapd ready" in capsys.readouterr().out
+    assert commands == [["/usr/bin/journalctl", "-u", "slapd.service", "-n", "500", "--no-pager", "--output=short-iso"]]
+    assert helper._handle_ldap("logs", ["/tmp/other.log"]) == 2
+    assert "does not accept a path" in capsys.readouterr().err
+
+
 def test_dnsmasq_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
     helper = load_helper_module()
     commands: list[list[str]] = []

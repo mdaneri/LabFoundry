@@ -2265,12 +2265,12 @@ def get_service_logs(service: str, identity: Annotated[Identity, Depends(require
 
 @router.get("/logs", response_model=list[str], tags=["Logs"], operation_id="listLogs")
 def list_logs(identity: Annotated[Identity, Depends(require_scope("read:logs"))]) -> list[str]:
-    return ["system", "labfoundry", "dnsmasq", "chrony", "nginx", "openssh", "nftables"]
+    return ["system", "labfoundry", "dnsmasq", "ldap", "chrony", "nginx", "openssh", "nftables"]
 
 
 @router.get("/logs/{source}", response_model=list[str], tags=["Logs"], operation_id="getLogSource")
 def get_log_source(source: str, identity: Annotated[Identity, Depends(require_scope("read:logs"))]) -> list[str]:
-    if source not in {"system", "labfoundry", "dnsmasq", "chrony", "nginx", "openssh", "nftables"}:
+    if source not in {"system", "labfoundry", "dnsmasq", "ldap", "chrony", "nginx", "openssh", "nftables"}:
         raise HTTPException(status_code=404, detail="Log source is not approved")
     return [f"dry-run log source for {source}", "Host log streaming is not enabled in the MVP scaffold."]
 

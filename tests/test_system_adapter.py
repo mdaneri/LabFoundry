@@ -79,6 +79,25 @@ def test_real_chronyd_logs_use_privileged_fixed_helper_action(monkeypatch):
     assert result.stdout == "chronyd ready\n"
 
 
+def test_real_ldap_logs_use_privileged_fixed_helper_action(monkeypatch):
+    import labfoundry.app.adapters.system as system_adapter
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "slapd ready\n", "")
+
+    monkeypatch.setattr(system_adapter.subprocess, "run", fake_run)
+
+    result = SystemAdapter(dry_run=False).read_ldap_logs()
+
+    assert result.returncode == 0
+    assert result.command == ["sudo", "-n", SystemAdapter.HELPER_PATH, "ldap", "logs", "--real"]
+    assert commands == [result.command]
+    assert result.stdout == "slapd ready\n"
+
+
 def test_real_dnsmasq_logs_use_privileged_fixed_helper_action(monkeypatch):
     import labfoundry.app.adapters.system as system_adapter
 

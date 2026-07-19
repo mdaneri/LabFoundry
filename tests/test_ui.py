@@ -4577,6 +4577,14 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
         ),
     )
     monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_ldap_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "ldap", "logs"],
+            dry_run=False,
+            stdout='slapd[30]: conn=1000 op=0 BIND dn="uid=operator,ou=users,dc=org1" method=128\nbind_password=do-not-render\n',
+        ),
+    )
+    monkeypatch.setattr(
         "labfoundry.app.ui.SystemAdapter.read_nginx_logs",
         lambda _self: AdapterResult(
             command=["labfoundry-helper", "nginx", "logs"],
@@ -4612,6 +4620,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "DNS" in response.text
     assert "DHCP" in response.text
     assert "TFTP" in response.text
+    assert "LDAP / LDAPS" in response.text
     assert "KMS" in response.text
     assert "Chrony" in response.text
     assert "Nginx" in response.text
@@ -4624,6 +4633,8 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert 'title="dnsmasq.service journal: DHCP messages"' in response.text
     assert 'data-log-source-tab="dnsmasq-tftp"' in response.text
     assert 'title="dnsmasq.service journal: TFTP messages"' in response.text
+    assert 'data-log-source-tab="ldap"' in response.text
+    assert 'title="slapd.service journal: LDAP and LDAPS directory events"' in response.text
     assert 'data-log-source-tab="nginx"' in response.text
     assert 'title="systemd journal: nginx.service"' in response.text
     assert 'data-log-source-tab="nginx-access"' in response.text
@@ -4641,7 +4652,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert '<option value="500" >500</option>' in response.text
     assert "Refresh 5s" in response.text
     assert 'class="language-labfoundry-log" data-log-lines-output' in response.text
-    assert response.text.count('data-terminal-note-open="false"') == 9
+    assert response.text.count('data-terminal-note-open="false"') == 10
     toolbar = response.text.split('<div class="logs-toolbar">', 1)[1].split("</div>", 1)[0]
     assert toolbar.index("data-log-refresh-status") < toolbar.index("data-log-lines")
     assert "logs-refresh-status" in toolbar
@@ -4653,6 +4664,9 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "query[A] example.test" in response.text
     assert "DHCPACK(eth1)" in response.text
     assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in response.text
+    assert "slapd[30]: conn=1000 op=0 BIND" in response.text
+    assert "uid=operator,ou=users,dc=org1" in response.text
+    assert "bind_password= [redacted]" in response.text
     assert "private_key= [redacted]" in response.text
     assert "management request completed" in response.text
     assert "GET /dashboard HTTP/1.1" in response.text
@@ -4672,6 +4686,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
         "dnsmasq-dns",
         "dnsmasq-dhcp",
         "dnsmasq-tftp",
+        "ldap",
         "chrony",
         "nginx",
         "nginx-access",
@@ -4682,6 +4697,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "DHCPACK(eth1)" not in "\n".join(payload["sources"][1]["lines"])
     assert "DHCPACK(eth1)" in "\n".join(payload["sources"][2]["lines"])
     assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in "\n".join(payload["sources"][3]["lines"])
+    assert 'BIND dn="uid=operator,ou=users,dc=org1"' in "\n".join(payload["sources"][4]["lines"])
     assert len(payload["sources"][0]["lines"]) == 122
     assert "secret-download-token" not in "\n".join(payload["sources"][0]["lines"])
 
@@ -4797,6 +4813,12 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
         ),
     )
     monkeypatch.setattr(
+        "labfoundry.app.ui.SystemAdapter.read_ldap_logs",
+        lambda _self: AdapterResult(
+            command=["labfoundry-helper", "ldap", "logs"], dry_run=True, stdout="No host LDAP journal is read in development mode."
+        ),
+    )
+    monkeypatch.setattr(
         "labfoundry.app.ui.SystemAdapter.read_nginx_logs",
         lambda _self: AdapterResult(
             command=["labfoundry-helper", "nginx", "logs"], dry_run=True, stdout="No host Nginx journal is read in development mode."
@@ -4812,6 +4834,7 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
     assert "DNS" in response.text
     assert "DHCP" in response.text
     assert "TFTP" in response.text
+    assert "LDAP / LDAPS" in response.text
     assert "logs-audit-panel" not in response.text
     assert "Chrony" in response.text
     assert "Nginx" in response.text

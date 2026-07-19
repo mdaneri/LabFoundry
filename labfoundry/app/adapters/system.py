@@ -186,6 +186,14 @@ class SystemAdapter:
             )
         return self._helper_result("chronyd", "logs", dry_run_message="dry-run: Chrony log read command recorded", timeout_seconds=5)
 
+    def read_ldap_logs(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(
+                ["labfoundry-helper", "ldap", "logs"],
+                "No host LDAP journal is read in development mode.",
+            )
+        return self._helper_result("ldap", "logs", dry_run_message="dry-run: LDAP log read command recorded", timeout_seconds=5)
+
     def read_dnsmasq_logs(self) -> AdapterResult:
         if self.dry_run:
             return self._record_only_result(

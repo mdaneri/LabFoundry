@@ -60,7 +60,7 @@ COMMANDS: dict[str, set[str]] = {
     "dnsmasq": {"validate", "apply", "reload", "leases", "logs"},
     "ca": {"validate", "apply"},
     "kms": {"validate", "apply"},
-    "ldap": {"validate", "apply", "status", "export"},
+    "ldap": {"validate", "apply", "status", "export", "logs"},
     "chronyd": {"validate", "apply", "status", "logs", "capabilities"},
     "nginx": {"logs", "access-logs", "error-logs"},
     "vcf-backups": {"validate", "apply"},
@@ -95,6 +95,7 @@ NO_PATH_ACTIONS = {
     ("chronyd", "logs"),
     ("chronyd", "capabilities"),
     ("ldap", "status"),
+    ("ldap", "logs"),
     ("nginx", "logs"),
     ("nginx", "access-logs"),
     ("nginx", "error-logs"),
@@ -2380,6 +2381,11 @@ def _apply_ldap_config(payload: dict) -> int:
 
 
 def _handle_ldap(action: str, args: list[str]) -> int:
+    if action == "logs":
+        if args:
+            print("ldap logs does not accept a path", file=sys.stderr)
+            return 2
+        return _systemd_unit_logs("slapd.service")
     if action == "status":
         if args:
             print("ldap status does not accept a path", file=sys.stderr)
