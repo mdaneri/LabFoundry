@@ -684,7 +684,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v116" in service_worker.text
+    assert "labfoundry-pwa-v117" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -696,8 +696,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=ldap-helper-modal-20260719-14" in service_worker.text
-    assert "/static/app.js?v=ldap-helper-modal-20260719-14" in service_worker.text
+    assert "/static/app.css?v=ca-request-modal-20260719-15" in service_worker.text
+    assert "/static/app.js?v=ca-request-modal-20260719-15" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -706,7 +706,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=ldap-helper-modal-20260719-14" in offline.text
+    assert "/static/app.css?v=ca-request-modal-20260719-15" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -722,8 +722,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=ldap-helper-modal-20260719-14" in page.text
-    assert "/static/app.js?v=ldap-helper-modal-20260719-14" in page.text
+    assert "/static/app.css?v=ca-request-modal-20260719-15" in page.text
+    assert "/static/app.js?v=ca-request-modal-20260719-15" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -5155,7 +5155,6 @@ def test_new_record_rows_lock_defaults_until_required_field(client):
 
     expected_blocks = [
         ("initializeFirewallRulesTable", "managedFirewallStatusFormatter", "name"),
-        ("initializeCaCertificatesTable", "initializeFirewallRulesTable", "common_name"),
         ("initializeKmsKeysTable", "initializeCaSettings", "name"),
         ("initializeEsxiPxeHostsTable", "initializeHostsFileEditor", "hostname"),
         ("initializeVcfDepotProfilesTable", "initializeVcfDepotSettings", "name"),
@@ -5170,6 +5169,11 @@ def test_new_record_rows_lock_defaults_until_required_field(client):
         assert "columns: lockNewRecordColumns([" in block, name
         assert f'], "{required_field}"),' in block, name
         assert f'markNewRecordRow(row, "{required_field}")' in block, name
+
+    ca_certificates_block = function_block("initializeCaCertificatesTable", "initializeFirewallRulesTable")
+    assert "columns: lockNewRecordColumns([" not in ca_certificates_block
+    assert "+ Add certificate here" in ca_certificates_block
+    assert "openCaCertificateModal" in ca_certificates_block
 
     dns_block = app_js.text[
         app_js.text.index("function initializeDnsRecordsTableElement"):
@@ -5662,6 +5666,17 @@ def test_certificate_authority_page_renders(client):
     assert "ca-certificates-table" in ca.text
     assert "ca-profiles-table" in ca.text
     assert "+ Add certificate here" in client.get("/static/app.js").text
+    assert 'id="ca-certificate-modal"' in ca.text
+    assert 'data-ca-certificate-modal-form' in ca.text
+    assert "Complete certificate details before creating a request." in ca.text
+    assert "Issued, CSR-based, and service-owned certificates are read-only." in ca.text
+    assert "<th>Exports</th>" not in ca.text
+    certificate_table_js = client.get("/static/app.js").text.split("function initializeCaCertificatesTable()", 1)[1].split("async function postKmsAction", 1)[0]
+    assert 'label: "Edit request"' in certificate_table_js
+    assert 'label: "Export certificate"' in certificate_table_js
+    assert 'label: "Export certificate chain"' in certificate_table_js
+    assert 'label: "Export private key"' in certificate_table_js
+    assert 'title: "Exports"' not in certificate_table_js
     assert "+ Add profile here" in client.get("/static/app.js").text
     assert "LabFoundry Internal Root CA" in ca.text
     assert "VCF service TLS" in ca.text
@@ -5702,6 +5717,225 @@ def test_certificate_authority_page_renders(client):
     assert 'data-secret-toggle aria-label="Show secrets key source"' in ca.text
     assert "/certificate-authority/downloads/root-ca.pem" in ca.text
     assert "/certificate-authority/downloads/ca-bundle.pem" in ca.text
+
+
+def test_certificate_request_creation_is_atomic_and_issues_submitted_sans(client):
+    from cryptography import x509
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaCertificate, CaProfile, CaSettings
+
+    login(client)
+    page = client.get("/certificate-authority")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    with SessionLocal() as db:
+        settings = db.execute(select(CaSettings)).scalar_one()
+        settings.enabled = True
+        profile = db.execute(select(CaProfile).where(CaProfile.name == "VCF service TLS")).scalar_one()
+        profile_id = profile.id
+        db.commit()
+
+    submitted = client.post(
+        "/certificate-authority/certificates",
+        data={
+            "csrf": csrf,
+            "common_name": "atomic.labfoundry.internal",
+            "profile_id": str(profile_id),
+            "subject_alt_names": "atomic.labfoundry.internal\nalias.labfoundry.internal",
+            "ip_addresses": "192.168.50.25",
+            "description": "Atomic certificate request",
+            "enabled": "on",
+            "status": "issued",
+            "serial_number": "client-controlled",
+        },
+        follow_redirects=False,
+    )
+
+    assert submitted.status_code == 303
+    with SessionLocal() as db:
+        staged = db.execute(select(CaCertificate).where(CaCertificate.common_name == "atomic.labfoundry.internal")).scalar_one()
+        assert staged.status == "planned"
+        assert staged.serial_number is None
+        assert staged.profile_id == profile_id
+        assert staged.subject_alt_names == "atomic.labfoundry.internal\nalias.labfoundry.internal"
+        assert staged.ip_addresses == "192.168.50.25"
+        assert staged.certificate_pem == ""
+
+    issued_page = client.get("/certificate-authority")
+    assert issued_page.status_code == 200
+    with SessionLocal() as db:
+        issued = db.execute(select(CaCertificate).where(CaCertificate.common_name == "atomic.labfoundry.internal")).scalar_one()
+        assert issued.status == "issued"
+        parsed = x509.load_pem_x509_certificate(issued.certificate_pem.encode("utf-8"))
+        assert parsed.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "atomic.labfoundry.internal"
+        sans = parsed.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        assert sans.get_values_for_type(x509.DNSName) == ["atomic.labfoundry.internal", "alias.labfoundry.internal"]
+        assert [str(value) for value in sans.get_values_for_type(x509.IPAddress)] == ["192.168.50.25"]
+        eku = parsed.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        assert ExtendedKeyUsageOID.SERVER_AUTH in eku
+
+
+def test_certificate_request_creation_validates_profile_and_sans(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaCertificate, CaProfile
+
+    login(client)
+    page = client.get("/certificate-authority")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    with SessionLocal() as db:
+        profile = db.execute(select(CaProfile).where(CaProfile.name == "VCF service TLS")).scalar_one()
+        profile_id = profile.id
+
+    missing_profile = client.post(
+        "/certificate-authority/certificates",
+        data={"csrf": csrf, "common_name": "missing-profile.labfoundry.internal", "profile_id": "", "enabled": "on"},
+    )
+    assert missing_profile.status_code == 422
+    assert missing_profile.json()["detail"] == "Select an enabled CA profile."
+
+    missing_san = client.post(
+        "/certificate-authority/certificates",
+        data={"csrf": csrf, "common_name": "missing-san.labfoundry.internal", "profile_id": str(profile_id), "enabled": "on"},
+    )
+    assert missing_san.status_code == 422
+    assert "requires at least one DNS name or IP SAN" in missing_san.json()["detail"]
+
+    invalid_ip = client.post(
+        "/certificate-authority/certificates",
+        data={
+            "csrf": csrf,
+            "common_name": "invalid-ip.labfoundry.internal",
+            "profile_id": str(profile_id),
+            "subject_alt_names": "invalid-ip.labfoundry.internal",
+            "ip_addresses": "999.1.1.1",
+            "enabled": "on",
+        },
+    )
+    assert invalid_ip.status_code == 422
+    assert "invalid IP SAN 999.1.1.1" in invalid_ip.json()["detail"]
+
+    with SessionLocal() as db:
+        profile = db.get(CaProfile, profile_id)
+        profile.enabled = False
+        db.commit()
+    disabled_profile = client.post(
+        "/certificate-authority/certificates",
+        data={
+            "csrf": csrf,
+            "common_name": "disabled-profile.labfoundry.internal",
+            "profile_id": str(profile_id),
+            "subject_alt_names": "disabled-profile.labfoundry.internal",
+            "enabled": "on",
+        },
+    )
+    assert disabled_profile.status_code == 422
+    assert disabled_profile.json()["detail"] == "Select an enabled CA profile."
+
+    with SessionLocal() as db:
+        names = set(db.execute(select(CaCertificate.common_name)).scalars().all())
+    assert "missing-profile.labfoundry.internal" not in names
+    assert "missing-san.labfoundry.internal" not in names
+    assert "invalid-ip.labfoundry.internal" not in names
+    assert "disabled-profile.labfoundry.internal" not in names
+
+
+def test_certificate_request_editing_enforces_immutable_and_managed_boundaries(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import CaCertificate, CaProfile
+
+    login(client)
+    page = client.get("/certificate-authority")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    with SessionLocal() as db:
+        profile = db.execute(select(CaProfile).where(CaProfile.name == "VCF service TLS")).scalar_one()
+        planned = CaCertificate(
+            common_name="planned.labfoundry.internal",
+            profile_id=profile.id,
+            subject_alt_names="planned.labfoundry.internal",
+            status="planned",
+            serial_number="preserved",
+            enabled=True,
+        )
+        issued = CaCertificate(
+            common_name="issued-immutable.labfoundry.internal",
+            profile_id=profile.id,
+            subject_alt_names="issued-immutable.labfoundry.internal",
+            status="issued",
+            serial_number="10",
+            certificate_pem="-----BEGIN CERTIFICATE-----\nimmutable\n-----END CERTIFICATE-----\n",
+            fingerprint="original-fingerprint",
+            enabled=True,
+        )
+        managed = CaCertificate(
+            common_name="managed-immutable.labfoundry.internal",
+            profile_id=profile.id,
+            subject_alt_names="managed-immutable.labfoundry.internal",
+            status="planned",
+            managed_owner="test:https",
+            enabled=True,
+        )
+        db.add_all([planned, issued, managed])
+        db.commit()
+        planned_id = planned.id
+        issued_id = issued.id
+        managed_id = managed.id
+        profile_id = profile.id
+
+    edited = client.post(
+        f"/certificate-authority/certificates/{planned_id}/edit",
+        data={
+            "csrf": csrf,
+            "common_name": "planned-updated.labfoundry.internal",
+            "profile_id": str(profile_id),
+            "subject_alt_names": "planned-updated.labfoundry.internal",
+            "ip_addresses": "192.168.50.30",
+            "description": "Updated before issue",
+            "enabled": "on",
+            "status": "issued",
+            "serial_number": "overwritten",
+        },
+        follow_redirects=False,
+    )
+    assert edited.status_code == 303
+
+    immutable = client.post(
+        f"/certificate-authority/certificates/{issued_id}/edit",
+        data={
+            "csrf": csrf,
+            "common_name": "changed.labfoundry.internal",
+            "profile_id": str(profile_id),
+            "subject_alt_names": "changed.labfoundry.internal",
+            "enabled": "on",
+        },
+    )
+    assert immutable.status_code == 409
+    assert immutable.json()["detail"] == "Only unissued manual certificate requests can be edited."
+
+    managed_delete = client.post(
+        f"/certificate-authority/certificates/{managed_id}/delete",
+        data={"csrf": csrf},
+    )
+    assert managed_delete.status_code == 409
+    assert managed_delete.json()["detail"] == "Service-owned certificates must be managed from their owning service."
+
+    with SessionLocal() as db:
+        planned = db.get(CaCertificate, planned_id)
+        issued = db.get(CaCertificate, issued_id)
+        managed = db.get(CaCertificate, managed_id)
+        assert planned.common_name == "planned-updated.labfoundry.internal"
+        assert planned.status == "planned"
+        assert planned.serial_number == "preserved"
+        assert planned.ip_addresses == "192.168.50.30"
+        assert issued.common_name == "issued-immutable.labfoundry.internal"
+        assert issued.subject_alt_names == "issued-immutable.labfoundry.internal"
+        assert issued.fingerprint == "original-fingerprint"
+        assert managed is not None
 
 
 def test_certificate_authority_downloads_public_pems(client):
@@ -9623,7 +9857,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "ldap-helper-modal-20260719-14" in page.text
+    assert "ca-request-modal-20260719-15" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

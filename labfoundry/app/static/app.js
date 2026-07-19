@@ -2108,7 +2108,18 @@ async function postCaAction(url, data, csrf, options = {}) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text.match(/CA .* already exists[^<]*/)?.[0] || "The CA desired state could not be saved.");
+    let message = text.match(/CA .* already exists[^<]*/)?.[0] || "The CA desired state could not be saved.";
+    try {
+      const payload = JSON.parse(text);
+      if (Array.isArray(payload.detail)) {
+        message = payload.detail.join(" ");
+      } else if (typeof payload.detail === "string" && payload.detail.trim()) {
+        message = payload.detail.trim();
+      }
+    } catch {
+      // Non-JSON error responses keep the safe fallback above.
+    }
+    throw new Error(message);
   }
   if (reload) {
     window.location.reload();
@@ -2147,6 +2158,11 @@ function newCaCertificateRow(defaultProfileId = "") {
     cert_path: "",
     has_certificate: false,
     has_private_key: false,
+    can_edit: false,
+    can_delete: false,
+    can_export_certificate: false,
+    can_export_chain: false,
+    can_export_private_key: false,
     enabled: true,
     description: "",
     is_new: true,
@@ -2155,10 +2171,6 @@ function newCaCertificateRow(defaultProfileId = "") {
 
 function hasRequiredCaProfileFields(data) {
   return Boolean((data.name || "").trim() && (data.certificate_type || "").trim());
-}
-
-function hasRequiredCaCertificateFields(data) {
-  return Boolean((data.common_name || "").trim());
 }
 
 async function autoSaveCaProfile(cell, csrf) {
@@ -2214,42 +2226,10 @@ async function deleteCaProfileFromMenu(row, csrf) {
   }
 }
 
-async function autoSaveCaCertificate(cell, csrf) {
-  clearCaMessage("ca-certificate-error");
-  const row = cell.getRow();
-  const data = row.getData();
-  if (data.is_new) {
-    if (!hasRequiredCaCertificateFields(data)) {
-      reformatPendingNewRecord(cell);
-      return;
-    }
-    try {
-      await postCaAction("/certificate-authority/certificates", data, csrf, { reload: false });
-      showTransientGridStatus("Added");
-      window.location.reload();
-    } catch (error) {
-      showCaMessage("ca-certificate-error", error instanceof Error ? error.message : "The certificate request could not be added.");
-      if (typeof cell.restoreOldValue === "function") {
-        cell.restoreOldValue();
-      }
-    }
-    return;
-  }
-  try {
-    await postCaAction(`/certificate-authority/certificates/${data.id}/edit`, data, csrf, { reload: false });
-    showTransientGridStatus("Saved");
-  } catch (error) {
-    showCaMessage("ca-certificate-error", error instanceof Error ? error.message : "The certificate request could not be saved.");
-    if (typeof cell.restoreOldValue === "function") {
-      cell.restoreOldValue();
-    }
-  }
-}
-
 async function deleteCaCertificateFromMenu(row, csrf) {
   clearCaMessage("ca-certificate-error");
   const data = row.getData();
-  if (data.is_new) {
+  if (data.is_new || !data.can_delete) {
     return;
   }
   const confirmed = await requestConfirmation({
@@ -2265,6 +2245,165 @@ async function deleteCaCertificateFromMenu(row, csrf) {
   } catch (error) {
     showCaMessage("ca-certificate-error", error instanceof Error ? error.message : "The certificate request could not be deleted.");
   }
+}
+
+function caCertificateModalElements() {
+  const modal = document.getElementById("ca-certificate-modal");
+  const form = document.getElementById("ca-certificate-modal-form");
+  if (!(modal instanceof HTMLDialogElement) || !(form instanceof HTMLFormElement)) {
+    return null;
+  }
+  return {
+    modal,
+    form,
+    title: modal.querySelector("[data-ca-certificate-modal-title]"),
+    message: modal.querySelector("[data-ca-certificate-modal-message]"),
+    error: modal.querySelector("#ca-certificate-modal-error"),
+    commonName: form.querySelector("[data-ca-certificate-common-name]"),
+    profile: form.querySelector("[data-ca-certificate-profile]"),
+    dnsSans: form.querySelector("[data-ca-certificate-dns-sans]"),
+    ipSans: form.querySelector("[data-ca-certificate-ip-sans]"),
+    description: form.querySelector("[data-ca-certificate-description]"),
+    submit: form.querySelector("[data-ca-certificate-modal-submit]"),
+  };
+}
+
+function selectedCaProfileRequiresSan(profileSelect) {
+  if (!(profileSelect instanceof HTMLSelectElement)) {
+    return false;
+  }
+  return profileSelect.selectedOptions[0]?.dataset.sanRequired === "true";
+}
+
+function validateCaCertificateModal(elements) {
+  if (!elements) {
+    return false;
+  }
+  if (elements.dnsSans instanceof HTMLTextAreaElement) {
+    elements.dnsSans.setCustomValidity("");
+  }
+  const hasDnsSans = Boolean(elements.dnsSans instanceof HTMLTextAreaElement && elements.dnsSans.value.trim());
+  const hasIpSans = Boolean(elements.ipSans instanceof HTMLTextAreaElement && elements.ipSans.value.trim());
+  if (selectedCaProfileRequiresSan(elements.profile) && !hasDnsSans && !hasIpSans) {
+    if (elements.dnsSans instanceof HTMLTextAreaElement) {
+      elements.dnsSans.setCustomValidity("The selected profile requires at least one DNS name or IP SAN.");
+      elements.dnsSans.reportValidity();
+    }
+    return false;
+  }
+  return elements.form.reportValidity();
+}
+
+function openCaCertificateModal(data = null) {
+  const elements = caCertificateModalElements();
+  if (!elements) {
+    return;
+  }
+  const isEdit = Boolean(data && data.can_edit && !data.is_new);
+  elements.form.reset();
+  elements.form.action = isEdit ? `/certificate-authority/certificates/${data.id}/edit` : "/certificate-authority/certificates";
+  elements.form.dataset.certificateId = isEdit ? String(data.id) : "";
+  if (elements.title instanceof HTMLElement) {
+    elements.title.textContent = isEdit ? "Edit certificate request" : "Create certificate request";
+  }
+  if (elements.message instanceof HTMLElement) {
+    elements.message.textContent = isEdit
+      ? "Update the complete unissued request before LabFoundry signs it."
+      : "Complete the certificate identity before LabFoundry creates and issues it.";
+  }
+  if (elements.submit instanceof HTMLButtonElement) {
+    elements.submit.textContent = isEdit ? "Save certificate request" : "Create certificate request";
+    elements.submit.disabled = false;
+  }
+  if (elements.error instanceof HTMLElement) {
+    elements.error.textContent = "";
+    elements.error.classList.add("hidden");
+  }
+  if (elements.commonName instanceof HTMLInputElement) {
+    elements.commonName.value = isEdit ? data.common_name || "" : "";
+  }
+  if (elements.profile instanceof HTMLSelectElement && isEdit) {
+    elements.profile.value = String(data.profile_id || "");
+  }
+  if (elements.dnsSans instanceof HTMLTextAreaElement) {
+    elements.dnsSans.value = isEdit ? data.subject_alt_names || "" : "";
+    elements.dnsSans.setCustomValidity("");
+  }
+  if (elements.ipSans instanceof HTMLTextAreaElement) {
+    elements.ipSans.value = isEdit ? data.ip_addresses || "" : "";
+  }
+  if (elements.description instanceof HTMLInputElement) {
+    elements.description.value = isEdit ? data.description || "" : "";
+  }
+  if (typeof elements.modal.showModal === "function") {
+    elements.modal.showModal();
+  } else {
+    elements.modal.setAttribute("open", "");
+  }
+  if (elements.commonName instanceof HTMLInputElement) {
+    elements.commonName.focus();
+    elements.commonName.select();
+  }
+}
+
+function initializeCaCertificateModal() {
+  const elements = caCertificateModalElements();
+  if (!elements || elements.form.dataset.caCertificateModalInitialized === "1") {
+    return;
+  }
+  elements.form.dataset.caCertificateModalInitialized = "1";
+  const cancelButton = elements.modal.querySelector("[data-ca-certificate-modal-cancel]");
+  cancelButton?.addEventListener("click", () => elements.modal.close());
+  elements.profile?.addEventListener("change", () => {
+    if (elements.dnsSans instanceof HTMLTextAreaElement) {
+      elements.dnsSans.setCustomValidity("");
+    }
+  });
+  elements.form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!validateCaCertificateModal(elements)) {
+      return;
+    }
+    if (elements.submit instanceof HTMLButtonElement) {
+      elements.submit.disabled = true;
+    }
+    if (elements.error instanceof HTMLElement) {
+      elements.error.textContent = "";
+      elements.error.classList.add("hidden");
+    }
+    const formData = new FormData(elements.form);
+    const data = Object.fromEntries(formData.entries());
+    const csrf = String(formData.get("csrf") || "");
+    try {
+      await postCaAction(elements.form.action, data, csrf, { reload: false });
+      showTransientGridStatus(elements.form.dataset.certificateId ? "Saved" : "Added");
+      window.location.reload();
+    } catch (error) {
+      if (elements.error instanceof HTMLElement) {
+        elements.error.textContent = error instanceof Error ? error.message : "The certificate request could not be saved.";
+        elements.error.classList.remove("hidden");
+      }
+      if (elements.submit instanceof HTMLButtonElement) {
+        elements.submit.disabled = false;
+      }
+    }
+  });
+}
+
+function downloadCaCertificateArtifact(row, artifact) {
+  const data = row.getData();
+  if (data.is_new) {
+    return;
+  }
+  const capability = {
+    "certificate.pem": "can_export_certificate",
+    "chain.pem": "can_export_chain",
+    "private-key.pem": "can_export_private_key",
+  }[artifact];
+  if (!capability || !data[capability]) {
+    return;
+  }
+  window.location.assign(`/certificate-authority/certificates/${data.id}/downloads/${artifact}`);
 }
 
 function initializeCaProfilesTable() {
@@ -2407,22 +2546,54 @@ function initializeCaCertificatesTable() {
       reactiveData: false,
       rowContextMenu: [
         {
+          label: "Edit request",
+          disabled: (component) => !component.getData().can_edit,
+          action: (_event, row) => openCaCertificateModal(row.getData()),
+        },
+        {
+          label: "Export certificate",
+          disabled: (component) => !component.getData().can_export_certificate,
+          action: (_event, row) => downloadCaCertificateArtifact(row, "certificate.pem"),
+        },
+        {
+          label: "Export certificate chain",
+          disabled: (component) => !component.getData().can_export_chain,
+          action: (_event, row) => downloadCaCertificateArtifact(row, "chain.pem"),
+        },
+        {
+          label: "Export private key",
+          disabled: (component) => !component.getData().can_export_private_key,
+          action: (_event, row) => downloadCaCertificateArtifact(row, "private-key.pem"),
+        },
+        {
           label: "Delete request",
+          disabled: (component) => !component.getData().can_delete,
           action: (event, row) => deleteCaCertificateFromMenu(row, csrf),
         },
       ],
-      columns: lockNewRecordColumns([
+      columns: [
         {
           title: "Common name",
           field: "common_name",
-          editor: "input",
-          formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add certificate here"),
+          editable: false,
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.is_new) {
+              return '<button class="add-row-button" type="button">+ Add certificate here</button>';
+            }
+            return escapeHtml(cell.getValue());
+          },
+          cellClick: (_event, cell) => {
+            if (cell.getRow().getData().is_new) {
+              openCaCertificateModal();
+            }
+          },
           minWidth: 210,
-          cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
         },
         {
           title: "Owner",
           field: "managed_owner",
+          editable: false,
           formatter: (cell) => cell.getValue() || "manual",
           minWidth: 150,
           headerSort: true,
@@ -2430,49 +2601,43 @@ function initializeCaCertificatesTable() {
         {
           title: "Profile",
           field: "profile_id",
-          editor: "list",
-          editorParams: { values: profileValues },
+          editable: false,
           formatter: (cell) => profileValues[cell.getValue()] || "Unassigned",
           minWidth: 160,
-          cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
         },
         {
           title: "DNS SANs",
           field: "subject_alt_names",
-          editor: "textarea",
+          editable: false,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "DNS names..."),
           minWidth: 220,
-          cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
         },
         {
           title: "IP SANs",
           field: "ip_addresses",
-          editor: "textarea",
+          editable: false,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "IP addresses..."),
           minWidth: 170,
-          cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
         },
         {
           title: "Status",
           field: "status",
-          editor: "list",
-          editorParams: { values: { planned: "planned", "csr-staged": "csr-staged", issued: "issued", revoked: "revoked" } },
+          editable: false,
           width: 120,
-          cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
         },
         {
           title: "Enabled",
           field: "enabled",
           formatter: labFoundryBooleanFormatter,
-          editor: "tickCross",
+          editable: false,
           hozAlign: "center",
           width: 100,
           headerSort: false,
-          cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
         },
         {
           title: "Fingerprint",
           field: "fingerprint",
+          editable: false,
           formatter: (cell) => {
             const value = cell.getValue() || "";
             return value ? `${value.slice(0, 12)}...` : "";
@@ -2481,29 +2646,13 @@ function initializeCaCertificatesTable() {
           headerSort: false,
         },
         {
-          title: "Exports",
-          field: "has_certificate",
-          formatter: (cell) => {
-            const data = cell.getRow().getData();
-            if (data.is_new || !data.has_certificate) {
-              return '<span class="muted">pending</span>';
-            }
-            const base = `/certificate-authority/certificates/${data.id}/downloads`;
-            const privateLink = data.has_private_key ? ` <a class="button tiny ghost" href="${base}/private-key.pem">Key</a>` : "";
-            return `<a class="button tiny secondary" href="${base}/certificate.pem">Cert</a> <a class="button tiny secondary" href="${base}/chain.pem">Chain</a>${privateLink}`;
-          },
-          minWidth: 190,
-          headerSort: false,
-        },
-        {
           title: "Description",
           field: "description",
-          editor: "input",
+          editable: false,
           formatter: (cell) => dnsAddRowHintFormatter(cell, "optional note..."),
           minWidth: 220,
-          cellEdited: (cell) => autoSaveCaCertificate(cell, csrf),
         },
-      ], "common_name"),
+      ],
       rowFormatter: (row) => {
         markNewRecordRow(row, "common_name");
       },
@@ -13349,6 +13498,7 @@ document.addEventListener("DOMContentLoaded", initializeDhcpLeaseReservationActi
 document.addEventListener("DOMContentLoaded", initializeEsxiPxeHostsTable);
 document.addEventListener("DOMContentLoaded", initializeCaProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeCaCertificatesTable);
+document.addEventListener("DOMContentLoaded", initializeCaCertificateModal);
 document.addEventListener("DOMContentLoaded", initializeCaSettings);
 document.addEventListener("DOMContentLoaded", initializeKmsClientsTable);
 document.addEventListener("DOMContentLoaded", initializeKmsKeysTable);

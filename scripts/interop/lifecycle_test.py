@@ -32,7 +32,7 @@ try:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding
     from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 except ImportError:  # pragma: no cover - Photon image should include cryptography
     x509 = None  # type: ignore[assignment]
 
@@ -487,7 +487,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "interface and VLAN desired state",
             "DNS and DHCP desired state",
             "firewall, routing, NAT, and WAN desired state",
-            "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification",
+            "CA desired state, root certificate download, atomic generated certificate request with explicit SAN verification, client CSR request, issued certificate download, and client-side verification",
             "KMS desired state, DNS/firewall apply, PyKMIP service, and TLS client-certificate probe",
             "Managed LDAP desired state, two isolated organization suffixes, duplicate uid support, nested groups, configurable LDAP/LDAPS listeners, management-interface exclusion, and CA hostname verification",
             "VCF Backup desired state, local user sync, SFTP listener, and client probe",
@@ -1233,6 +1233,69 @@ def ca_client_certificate_request(client: HttpClient, args: argparse.Namespace) 
     }
 
 
+def ca_generated_certificate_request_check(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    if x509 is None:
+        raise LifecycleError("cryptography is required to verify the generated lifecycle certificate.")
+    common_name = f"generated-client-a.{args.domain}"
+    alternate_name = f"generated-alias.{args.domain}"
+    ip_san = str(ip_interface(args.client_ca_request_cidr).ip)
+    status, body, _headers = client.request("GET", "/certificate-authority")
+    if status >= 400:
+        raise LifecycleError(f"GET /certificate-authority failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    profile_id = extract_ca_profile_id(body, "VCF service TLS")
+    form = {
+        "csrf": csrf,
+        "common_name": common_name,
+        "profile_id": profile_id,
+        "subject_alt_names": f"{common_name}\n{alternate_name}",
+        "ip_addresses": ip_san,
+        "description": "Hyper-V lifecycle generated certificate request",
+        "enabled": "on",
+    }
+    status, response_body, _headers = client.request(
+        "POST",
+        "/certificate-authority/certificates",
+        form=form,
+        follow_redirects=False,
+    )
+    if status not in {302, 303}:
+        raise LifecycleError(f"Generated CA certificate request failed with HTTP {status}: {response_body[:500]}")
+    status, body, _headers = client.request("GET", "/certificate-authority")
+    if status >= 400:
+        raise LifecycleError(f"GET /certificate-authority after generated request failed with HTTP {status}")
+    certificate_id = extract_ca_certificate_id(body, common_name)
+    status, certificate_pem, _headers = client.request(
+        "GET",
+        f"/certificate-authority/certificates/{certificate_id}/downloads/certificate.pem",
+    )
+    if status >= 400 or "BEGIN CERTIFICATE" not in certificate_pem:
+        raise LifecycleError(f"Generated CA certificate download failed with HTTP {status}")
+    certificate = x509.load_pem_x509_certificate(certificate_pem.encode("utf-8"))
+    subject_names = certificate.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    subject_cn = subject_names[0].value if subject_names else ""
+    if subject_cn != common_name:
+        raise LifecycleError(f"Generated certificate CN {subject_cn!r} does not match {common_name!r}.")
+    sans = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    dns_sans = sans.get_values_for_type(x509.DNSName)
+    ip_sans = [str(value) for value in sans.get_values_for_type(x509.IPAddress)]
+    if dns_sans != [common_name, alternate_name]:
+        raise LifecycleError(f"Generated certificate DNS SANs {dns_sans!r} do not match the submitted request.")
+    if ip_sans != [ip_san]:
+        raise LifecycleError(f"Generated certificate IP SANs {ip_sans!r} do not match the submitted request.")
+    eku = certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    if ExtendedKeyUsageOID.SERVER_AUTH not in eku:
+        raise LifecycleError("Generated certificate is missing the serverAuth extended key usage.")
+    return {
+        "common_name": common_name,
+        "certificate_id": certificate_id,
+        "dns_sans": dns_sans,
+        "ip_sans": ip_sans,
+        "profile": "VCF service TLS",
+        "certificate": certificate_summary(certificate_pem),
+    }
+
+
 def extract_vcf_backup_user_id(body: str) -> str:
     for match in re.finditer(r'<option value="(\d+)"[^>]*>(.*?)</option>', body, flags=re.DOTALL):
         label = re.sub(r"\s+", " ", html.unescape(match.group(2))).strip()
@@ -1658,57 +1721,69 @@ def configure_ldap(client: HttpClient, args: argparse.Namespace) -> dict[str, An
 
 
 def apply_units(client: HttpClient, units: list[str], args: argparse.Namespace) -> dict[str, Any]:
-    status, body, _headers = client.request("GET", "/appliance-apply")
-    if status >= 400:
-        raise LifecycleError(f"GET /appliance-apply failed with HTTP {status}")
-    csrf = extract_csrf(body)
-    form: list[tuple[str, Any]] = [("csrf", csrf)]
-    form.extend(("selected_units", unit) for unit in units)
-    status, response_body, _headers = client.request(
-        "POST",
-        "/appliance-apply",
-        form=form,
-        headers={"Accept": "application/json"},
-        follow_redirects=False,
-        timeout=30,
-    )
-    if status != 202:
-        raise LifecycleError(f"Appliance apply submission failed with HTTP {status}: {summarize_html_response(response_body)}")
-    try:
-        submission = json.loads(response_body)
-    except json.JSONDecodeError as exc:
-        raise LifecycleError("Appliance apply submission did not return a JSON master task.") from exc
-    job_id = str(submission.get("job_id") or "")
-    status_url = str(submission.get("status_url") or (f"/tasks/{job_id}/status" if job_id else ""))
-    if not job_id or not status_url:
-        raise LifecycleError("Appliance apply submission did not identify the master task.")
-
-    deadline = time.monotonic() + 180
     task: dict[str, Any] = {}
-    while time.monotonic() < deadline:
-        task_payload = client.json_request("GET", status_url)
-        task = dict(task_payload.get("task") or {})
-        if str(task.get("status") or "") not in {"pending", "running"}:
-            break
-        time.sleep(1)
-    else:
-        raise LifecycleError(f"Appliance apply task {job_id} did not finish within 180 seconds.")
+    status = 0
+    job_id = ""
+    attempts = 0
+    for attempt in range(2):
+        attempts = attempt + 1
+        status, body, _headers = client.request("GET", "/appliance-apply")
+        if status >= 400:
+            raise LifecycleError(f"GET /appliance-apply failed with HTTP {status}")
+        csrf = extract_csrf(body)
+        form: list[tuple[str, Any]] = [("csrf", csrf)]
+        form.extend(("selected_units", unit) for unit in units)
+        status, response_body, _headers = client.request(
+            "POST",
+            "/appliance-apply",
+            form=form,
+            headers={"Accept": "application/json"},
+            follow_redirects=False,
+            timeout=30,
+        )
+        if status != 202:
+            raise LifecycleError(f"Appliance apply submission failed with HTTP {status}: {summarize_html_response(response_body)}")
+        try:
+            submission = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise LifecycleError("Appliance apply submission did not return a JSON master task.") from exc
+        job_id = str(submission.get("job_id") or "")
+        status_url = str(submission.get("status_url") or (f"/tasks/{job_id}/status" if job_id else ""))
+        if not job_id or not status_url:
+            raise LifecycleError("Appliance apply submission did not identify the master task.")
 
-    if task.get("status") != "succeeded":
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            task_payload = client.json_request("GET", status_url)
+            task = dict(task_payload.get("task") or {})
+            if str(task.get("status") or "") not in {"pending", "running"}:
+                break
+            time.sleep(1)
+        else:
+            raise LifecycleError(f"Appliance apply task {job_id} did not finish within 180 seconds.")
+
+        if task.get("status") == "succeeded":
+            break
+        task_error = str(task.get("error") or "")
+        if attempt == 0 and task_error.startswith("Desired state changed after task submission:"):
+            time.sleep(1)
+            continue
         failed_steps = [
             f"{step.get('label')}: {step.get('status')} {step.get('error') or ''}".strip()
             for step in task.get("_children", [])
             if step.get("status") in {"failed", "skipped"}
         ]
-        raise LifecycleError(
-            f"Appliance apply task {job_id} ended {task.get('status')}: "
-            + ("; ".join(failed_steps) or str(task.get("error") or "unknown failure"))
-        )
+        detail = task_error or "; ".join(failed_steps) or "unknown failure"
+        raise LifecycleError(f"Appliance apply task {job_id} ended {task.get('status')}: {detail}")
+
+    if task.get("status") != "succeeded":
+        raise LifecycleError(f"Appliance apply task {job_id} did not succeed after {attempts} attempts.")
     if not args.allow_dry_run and bool((task.get("result") or {}).get("dry_run")):
         raise LifecycleError("Appliance apply reported dry-run; rerun with --allow-dry-run or enable real adapters for lifecycle validation.")
     return {
         "http_status": status,
         "job_id": job_id,
+        "attempts": attempts,
         "selected_units": units,
         "status": task.get("status"),
         "components": [
@@ -2537,6 +2612,7 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
         args,
     )
     run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
+    run_step(results, "ca-generated-certificate-request-check", ca_generated_certificate_request_check, client, args)
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
     run_step(results, "apply-vcf-offline-depot-unit", apply_units, client, ["dnsmasq", "firewall", "vcf_offline_depot", "public_services"], args)
     run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "wan", "kms"], args)

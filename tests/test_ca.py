@@ -3,7 +3,7 @@ import pytest
 from labfoundry.app.config import Settings
 from labfoundry.app.models import CaCertificate, CaSettings, utcnow
 from labfoundry.app.secrets import decrypt_secret, encrypt_secret
-from labfoundry.app.services.ca import ensure_root_ca_material, render_ca_apply_payload
+from labfoundry.app.services.ca import ca_certificate_to_dict, ensure_root_ca_material, render_ca_apply_payload
 
 
 def test_encrypted_secret_round_trip_and_wrong_key_failure():
@@ -74,6 +74,38 @@ def test_existing_root_ca_material_is_not_rotated_by_identity_edits():
     assert settings.root_certificate_pem == original_certificate
     assert settings.root_private_key_encrypted == original_private_key
     assert settings.root_fingerprint == original_fingerprint
+
+
+def test_ca_certificate_row_capabilities_follow_lifecycle_and_ownership():
+    planned = ca_certificate_to_dict(CaCertificate(common_name="planned.example.test", status="planned"))
+    csr_issued = ca_certificate_to_dict(
+        CaCertificate(
+            common_name="csr.example.test",
+            status="issued",
+            csr_text="-----BEGIN CERTIFICATE REQUEST-----\ncsr\n-----END CERTIFICATE REQUEST-----\n",
+            certificate_pem="-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n",
+        )
+    )
+    managed = ca_certificate_to_dict(
+        CaCertificate(
+            common_name="managed.example.test",
+            status="issued",
+            managed_owner="service:https",
+            certificate_pem="-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n",
+            private_key_encrypted="fernet:v1:key",
+        )
+    )
+
+    assert planned["can_edit"] is True
+    assert planned["can_delete"] is True
+    assert planned["can_export_certificate"] is False
+    assert csr_issued["can_edit"] is False
+    assert csr_issued["can_export_certificate"] is True
+    assert csr_issued["can_export_chain"] is True
+    assert csr_issued["can_export_private_key"] is False
+    assert managed["can_edit"] is False
+    assert managed["can_delete"] is False
+    assert managed["can_export_private_key"] is True
 
 
 def test_managed_ca_specs_include_portal_https_certificate(client):

@@ -33,7 +33,7 @@
         <div class="section-head">
           <div>
             <h2>Certificate Requests</h2>
-            <p class="muted">Edit requests directly in the grid. The bottom row stages a new certificate request once required fields are filled.</p>
+            <p class="muted">Complete certificate details before creating a request. Issued, CSR-based, and service-owned certificates are read-only.</p>
           </div>
           <span class="status-pill muted">{{ ca_certificates|length }} requests</span>
         </div>
@@ -48,7 +48,7 @@
         ></div>
         <table id="ca-certificates-fallback" class="data-table dns-fallback-table">
           <thead>
-            <tr><th>Common name</th><th>Owner</th><th>Profile</th><th>DNS SANs</th><th>IP SANs</th><th>Status</th><th>Enabled</th><th>Exports</th><th>Actions</th></tr>
+            <tr><th>Common name</th><th>Owner</th><th>Profile</th><th>DNS SANs</th><th>IP SANs</th><th>Status</th><th>Enabled</th><th>Actions</th></tr>
           </thead>
           <tbody>
             {% for certificate in ca_certificates %}
@@ -67,27 +67,70 @@
                     {% if certificate.private_key_encrypted %}
                       <a class="button tiny ghost" href="/certificate-authority/certificates/{{ certificate.id }}/downloads/private-key.pem">Private key</a>
                     {% endif %}
-                  {% else %}
-                    <span class="muted">pending</span>
                   {% endif %}
-                </td>
-                <td>
-                  <form
-                    action="/certificate-authority/certificates/{{ certificate.id }}/delete"
-                    method="post"
-                    data-confirm-modal
-                    data-confirm-title="Delete {{ certificate.common_name }} certificate request?"
-                    data-confirm-message="This removes the certificate request from LabFoundry desired state. It will not touch the appliance until global appliance apply runs."
-                    data-confirm-label="Delete request"
-                  >
-                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
-                    <button class="button tiny danger" type="submit">Delete</button>
-                  </form>
+                  {% if not certificate.managed_owner %}
+                    <form
+                      action="/certificate-authority/certificates/{{ certificate.id }}/delete"
+                      method="post"
+                      data-confirm-modal
+                      data-confirm-title="Delete {{ certificate.common_name }} certificate request?"
+                      data-confirm-message="This removes the certificate request from LabFoundry desired state. It will not touch the appliance until global appliance apply runs."
+                      data-confirm-label="Delete request"
+                    >
+                      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                      <button class="button tiny danger" type="submit">Delete</button>
+                    </form>
+                  {% elif certificate.status != "issued" or not certificate.certificate_pem %}
+                    <span class="muted">managed</span>
+                  {% endif %}
                 </td>
               </tr>
             {% endfor %}
           </tbody>
         </table>
+
+        <dialog id="ca-certificate-modal" class="confirm-modal wide-modal" aria-labelledby="ca-certificate-modal-title">
+          <form id="ca-certificate-modal-form" class="confirm-modal-panel form-stack" action="/certificate-authority/certificates" method="post" data-ca-certificate-modal-form>
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="enabled" value="on">
+            <div class="confirm-modal-body">
+              <p class="kicker">Certificate request</p>
+              <h2 id="ca-certificate-modal-title" data-ca-certificate-modal-title>Create certificate request</h2>
+              <p class="muted" data-ca-certificate-modal-message>Complete the certificate identity before LabFoundry creates and issues it.</p>
+              <div id="ca-certificate-modal-error" class="alert error hidden" role="alert"></div>
+              <div class="form-grid">
+                <label>
+                  <span class="field-label"><span>Common name</span><button class="help-icon" type="button" data-help="Primary subject name for the certificate request. Use the service FQDN for server certificates.">i</button></span>
+                  <input name="common_name" data-ca-certificate-common-name placeholder="vcsa.labfoundry.internal" required>
+                </label>
+                <label>
+                  <span class="field-label"><span>Profile</span><button class="help-icon" type="button" data-help="Controls the certificate type, validity, key algorithm, key usage, extended key usage, and SAN requirements.">i</button></span>
+                  <select name="profile_id" data-ca-certificate-profile required>
+                    {% for profile in ca_profiles if profile.enabled %}
+                      <option value="{{ profile.id }}" data-san-required="{{ 'true' if profile.san_required else 'false' }}">{{ profile.name }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label>
+                  <span class="field-label"><span>DNS SANs</span><button class="help-icon" type="button" data-help="One DNS name per line. Include every hostname clients will use when the selected profile requires subject alternative names.">i</button></span>
+                  <textarea name="subject_alt_names" data-ca-certificate-dns-sans rows="4" placeholder="vcsa.labfoundry.internal"></textarea>
+                </label>
+                <label>
+                  <span class="field-label"><span>IP SANs</span><button class="help-icon" type="button" data-help="Optional IP subject alternative names, one per line, for clients that connect by IP address.">i</button></span>
+                  <textarea name="ip_addresses" data-ca-certificate-ip-sans rows="4" placeholder="192.168.50.20"></textarea>
+                </label>
+              </div>
+              <label>
+                <span class="field-label"><span>Description</span><button class="help-icon" type="button" data-help="Optional operator note describing the certificate purpose. This note is not written into the certificate.">i</button></span>
+                <input name="description" data-ca-certificate-description placeholder="VCF management appliance certificate">
+              </label>
+            </div>
+            <div class="confirm-modal-actions">
+              <button class="button secondary" type="button" data-ca-certificate-modal-cancel>Cancel</button>
+              <button class="button primary" type="submit" data-ca-certificate-modal-submit>Create certificate request</button>
+            </div>
+          </form>
+        </dialog>
       </div>
 
       <div id="ca-profiles-panel" class="tab-panel" role="tabpanel" hidden>
@@ -149,7 +192,6 @@
         <form class="form-stack zone-editor-form" action="/certificate-authority/certificates" method="post">
           <input type="hidden" name="csrf" value="{{ csrf_token }}">
           <input class="zone-file-input" type="hidden" name="csr_text" value="">
-          <input type="hidden" name="status" value="csr-staged">
           <input type="hidden" name="enabled" value="on">
           <div class="form-grid">
             <label>
