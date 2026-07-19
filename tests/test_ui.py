@@ -684,7 +684,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v113" in service_worker.text
+    assert "labfoundry-pwa-v114" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -696,8 +696,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=ldap-console-20260718-9" in service_worker.text
-    assert "/static/app.js?v=ldap-console-20260718-9" in service_worker.text
+    assert "/static/app.css?v=ldap-console-20260718-10" in service_worker.text
+    assert "/static/app.js?v=ldap-console-20260718-10" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -706,7 +706,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=ldap-console-20260718-9" in offline.text
+    assert "/static/app.css?v=ldap-console-20260718-10" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -722,8 +722,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=ldap-console-20260718-9" in page.text
-    assert "/static/app.js?v=ldap-console-20260718-9" in page.text
+    assert "/static/app.css?v=ldap-console-20260718-10" in page.text
+    assert "/static/app.js?v=ldap-console-20260718-10" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -4101,6 +4101,7 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import AuditEvent, LdapGroup, LdapOrganization, LdapSettings, LdapUser
+    from labfoundry.app.services.ldap import clear_pending_ldap_password, has_pending_ldap_password
 
     login(client)
     page = client.get("/ldap")
@@ -4153,6 +4154,34 @@ def test_managed_ldap_generates_complete_synthetic_directory_once(client):
 
     refreshed = client.get(f"/ldap?organization_id={organization_id}")
     assert "uid\tpassword\tdisplay name\temail\ttelephone" not in refreshed.text
+
+    with SessionLocal() as db:
+        users = db.execute(select(LdapUser).where(LdapUser.organization_id == organization_id)).scalars().all()
+        for user in users:
+            clear_pending_ldap_password(user)
+        db.commit()
+
+    helper = client.get(f"/vcf-helper?ldap_organization_id={organization_id}")
+    assert "Stage missing passwords (6)" in helper.text
+    recovered = client.post(
+        f"/ldap/organizations/{organization_id}/generate-directory",
+        data={
+            "user_count": "10",
+            "group_count": "3",
+            "action": "stage_missing",
+            "csrf": csrf,
+        },
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert "Staged replacement passwords for 6 existing enabled users" in recovered.text
+    assert "Stage missing passwords (6)" not in recovered.text
+    assert "uid,password,display_name,email,telephone" in recovered.text
+
+    with SessionLocal() as db:
+        users = db.execute(select(LdapUser).where(LdapUser.organization_id == organization_id)).scalars().all()
+        event = db.execute(select(AuditEvent).where(AuditEvent.action == "stage_missing_ldap_passwords")).scalar_one()
+        assert all(has_pending_ldap_password(user) for user in users)
+        assert event.detail == "users=6"
 
 
 def test_local_user_reset_modal_endpoint_and_remove(client):
@@ -9480,7 +9509,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "ldap-console-20260718-9" in page.text
+    assert "ldap-console-20260718-10" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

@@ -4,6 +4,7 @@ import tarfile
 
 from labfoundry.app.models import LdapGroup, LdapGroupMembership, LdapOrganization, LdapSettings, LdapUser
 from labfoundry.app.services.ldap import (
+    clear_pending_ldap_password,
     decrypt_recovery_payload,
     encrypt_recovery_payload,
     ldap_apply_payload,
@@ -263,6 +264,47 @@ def test_plaintext_only_ldap_does_not_require_ca_but_requires_one_external_proto
         ca_ready=False,
     )
     assert "Enable at least one LDAP or LDAPS listener before enabling the service." in errors
+
+
+def test_ldap_validation_aggregates_users_with_missing_staged_passwords():
+    settings = LdapSettings(
+        enabled=False,
+        hostname="ldap.labfoundry.internal",
+        listen_interface="",
+        listen_address="",
+        ldaps_enabled=True,
+        port=636,
+        ldap_enabled=False,
+        ldap_port=389,
+        min_password_length=14,
+        max_failures=5,
+        lockout_minutes=15,
+        password_history=5,
+        password_max_age_days=0,
+    )
+    organization = LdapOrganization(
+        id=1,
+        name="Synthetic Org",
+        slug="synthetic",
+        suffix_dn="dc=synthetic,dc=ldap,dc=labfoundry,dc=internal",
+        bind_dn="uid=vcf-bind,ou=service-accounts,dc=synthetic,dc=ldap,dc=labfoundry,dc=internal",
+        bind_password_encrypted="encrypted",
+    )
+    organization.users = [
+        LdapUser(id=index, organization_id=1, uid=f"test.user-{index}", enabled=True)
+        for index in range(1, 6)
+    ]
+    organization.groups = []
+    for user in organization.users:
+        clear_pending_ldap_password(user)
+
+    errors, _warnings = validate_ldap_state(settings, [organization])
+
+    password_errors = [error for error in errors if "staged password" in error]
+    assert len(password_errors) == 1
+    assert "5 enabled users need staged passwords" in password_errors[0]
+    assert "test.user-1, test.user-2, test.user-3, and 2 more" in password_errors[0]
+    assert "Stage missing passwords" in password_errors[0]
 
 
 def test_ldap_recovery_envelope_and_manifest_validation():

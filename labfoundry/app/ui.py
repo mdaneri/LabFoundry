@@ -5329,10 +5329,16 @@ def vcf_ldap_helper_context(db: Session, *, selected_organization_id: int | None
     if selected_organization is None and organizations:
         selected_organization = organizations[0]
     settings = get_ldap_settings_row(db)
+    missing_password_count = sum(
+        1
+        for user in (selected_organization.users if selected_organization else [])
+        if user.enabled and not user.password_applied_at and not has_pending_ldap_password(user)
+    )
     return {
         "vcf_ldap_organizations": organizations,
         "vcf_ldap_selected_organization": selected_organization,
         "vcf_ldap_available": settings.enabled and any(organization.enabled for organization in organizations),
+        "vcf_ldap_missing_password_count": missing_password_count,
         "vcf_ldap_mapping": (
             vcf_ldap_settings(settings, selected_organization, include_password=False)
             if selected_organization
@@ -12568,12 +12574,25 @@ def _synthetic_ldap_password(settings: LdapSettings) -> str:
     return ("Aa1!" + (uuid4().hex * 8))[:length]
 
 
+def _ldap_credentials_csv(credentials: list[dict[str, str]]) -> str:
+    credential_buffer = io.StringIO(newline="")
+    credential_writer = csv.DictWriter(
+        credential_buffer,
+        fieldnames=["uid", "password", "display_name", "email", "telephone"],
+        lineterminator="\n",
+    )
+    credential_writer.writeheader()
+    credential_writer.writerows(credentials)
+    return credential_buffer.getvalue()
+
+
 @router.post("/ldap/organizations/{organization_id}/generate-directory", response_model=None)
 def generate_ldap_directory_from_ui(
     request: Request,
     organization_id: int,
     user_count: int = Form(...),
     group_count: int = Form(...),
+    action: str = Form("generate"),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -12582,11 +12601,63 @@ def generate_ldap_directory_from_ui(
     organization = db.get(LdapOrganization, organization_id)
     if organization is None:
         raise HTTPException(status_code=404, detail="LDAP organization not found")
-    if not 0 <= user_count <= 500 or not 0 <= group_count <= 100 or user_count + group_count == 0:
-        raise HTTPException(status_code=400, detail="Generate between 0 and 500 users and 0 and 100 groups, with at least one entry.")
     settings = get_ldap_settings_row(db)
     if not settings.enabled or not organization.enabled:
         raise HTTPException(status_code=400, detail="Enable Managed LDAP and this organization before generating test entries.")
+    if action == "stage_missing":
+        missing_users = [
+            user
+            for user in organization.users
+            if user.enabled and not user.password_applied_at and not has_pending_ldap_password(user)
+        ]
+        if not missing_users:
+            raise HTTPException(status_code=400, detail="This organization has no enabled users that need staged passwords.")
+        credentials: list[dict[str, str]] = []
+        try:
+            for user in missing_users:
+                password = _synthetic_ldap_password(settings)
+                stage_ldap_user_password(user, password, settings)
+                credentials.append(
+                    {
+                        "uid": user.uid,
+                        "password": password,
+                        "display_name": user.display_name,
+                        "email": user.email,
+                        "telephone": user.telephone,
+                    }
+                )
+            db.commit()
+        except ValueError as exc:
+            for user in missing_users:
+                clear_pending_ldap_password(user)
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        record_audit(
+            db,
+            actor=identity.username,
+            action="stage_missing_ldap_passwords",
+            resource_type="ldap_organization",
+            resource_id=str(organization.id),
+            detail=f"users={len(missing_users)}",
+        )
+        return render(
+            request,
+            "vcf_helper.html",
+            vcf_helper_page_context(
+                db,
+                identity,
+                selected_ldap_organization_id=organization.id,
+                ldap_generate_auto_open=True,
+                extra={
+                    "ldap_generated_credentials_text": _ldap_credentials_csv(credentials),
+                    "ldap_staged_missing_password_count": len(missing_users),
+                },
+            ),
+        )
+    if action != "generate":
+        raise HTTPException(status_code=400, detail="Unsupported LDAP test-directory action.")
+    if not 0 <= user_count <= 500 or not 0 <= group_count <= 100 or user_count + group_count == 0:
+        raise HTTPException(status_code=400, detail="Generate between 0 and 500 users and 0 and 100 groups, with at least one entry.")
     existing_uids = {row.uid.lower() for row in organization.users}
     existing_group_names = {row.name.lower() for row in organization.groups}
     generated_users: list[LdapUser] = []
@@ -12653,14 +12724,6 @@ def generate_ldap_directory_from_ui(
         resource_id=str(organization.id),
         detail=f"users={user_count}; groups={group_count}",
     )
-    credential_buffer = io.StringIO(newline="")
-    credential_writer = csv.DictWriter(
-        credential_buffer,
-        fieldnames=["uid", "password", "display_name", "email", "telephone"],
-        lineterminator="\n",
-    )
-    credential_writer.writeheader()
-    credential_writer.writerows(credentials)
     return render(
         request,
         "vcf_helper.html",
@@ -12670,7 +12733,7 @@ def generate_ldap_directory_from_ui(
             selected_ldap_organization_id=organization.id,
             ldap_generate_auto_open=True,
             extra={
-                "ldap_generated_credentials_text": credential_buffer.getvalue(),
+                "ldap_generated_credentials_text": _ldap_credentials_csv(credentials),
                 "ldap_generated_user_count": user_count,
                 "ldap_generated_group_count": group_count,
             },
@@ -13731,6 +13794,7 @@ def vcf_helper_page_context(
         "vcf_ldap_organizations": [],
         "vcf_ldap_selected_organization": None,
         "vcf_ldap_mapping": {},
+        "vcf_ldap_missing_password_count": 0,
     }
     if identity.has_role("admin"):
         ldap_context_data = {

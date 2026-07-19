@@ -2070,6 +2070,10 @@ textarea {
   min-width: 0;
 }
 
+#ldap-generate-modal .confirm-modal-actions {
+  flex-wrap: wrap;
+}
+
 #ldap-generate-modal .field-label,
 #ldap-bind-secret-modal .field-label {
   position: relative;

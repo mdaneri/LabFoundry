@@ -459,11 +459,21 @@ def validate_ldap_state(
         suffixes.add(suffix.lower())
         if not organization.bind_password_encrypted:
             errors.append(f"{organization.name}: generate a VCF bind credential before applying LDAP.")
+        missing_password_uids: list[str] = []
         for user in organization.users:
             if not LDAP_UID_PATTERN.fullmatch(user.uid):
                 errors.append(f"{organization.name}: user {user.uid or user.id} has an invalid uid.")
             if user.enabled and not recovery_staged and not user.password_applied_at and not has_pending_ldap_password(user):
-                errors.append(f"{organization.name}: enabled user {user.uid} needs a staged password.")
+                missing_password_uids.append(user.uid)
+        if missing_password_uids:
+            examples = ", ".join(missing_password_uids[:3])
+            if len(missing_password_uids) > 3:
+                examples = f"{examples}, and {len(missing_password_uids) - 3} more"
+            errors.append(
+                f"{organization.name}: {len(missing_password_uids)} enabled "
+                f"{'user needs' if len(missing_password_uids) == 1 else 'users need'} staged passwords "
+                f"({examples}). Use VCF Helper > Generate LDAP Test Directory > Stage missing passwords."
+            )
         for group in organization.groups:
             if not LDAP_GROUP_PATTERN.fullmatch(group.name):
                 errors.append(f"{organization.name}: group {group.name or group.id} has an invalid name.")
