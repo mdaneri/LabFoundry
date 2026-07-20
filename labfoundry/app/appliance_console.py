@@ -50,6 +50,105 @@ MAINTENANCE_STATE_PATH = Path("/var/lib/labfoundry/console/services.json")
 CONSOLE_ACTOR = "console:root"
 CONSOLE_REFRESH_ENV = "LABFOUNDRY_CONSOLE_REFRESH_SECONDS"
 BASH_PATH = "/usr/bin/bash"
+SERVICE_CATALOG = (
+    ("Authentication", "auth", None),
+    ("Certificate Authority", "ca", None),
+    ("DHCP", "dhcp", None),
+    ("DNS", "dns", None),
+    ("ESXi PXE", "esxi-pxe", None),
+    ("Firewall", "firewall", "labfoundry-firewall.service"),
+    ("KMS / KMIP", "kms", "labfoundry-kms.service"),
+    ("Managed LDAP", "ldap", "slapd.service"),
+    ("NTP / NTS", "ntpd", "ntpd.service"),
+    ("Routing", "routing", None),
+    ("VCF Backup SFTP", "vcf-backups", None),
+    ("VCF Offline Depot", "repository", None),
+    ("VCF Private Registry", "vcf-private-registry", None),
+)
+ENABLED_UNIT_FILE_STATES = {"enabled", "enabled-runtime", "linked", "linked-runtime", "alias"}
+HELP_PAGES = (
+    (
+        "Screen overview",
+        (
+            "System identity:",
+            "  Appliance version, Photon release, kernel, CPU, memory, and load.",
+            "  Load turns amber at 75% and red at 100% of logical CPU count.",
+            "",
+            "Management access:",
+            "  URLs show where the LabFoundry web interface can be reached.",
+            "",
+            "Management network:",
+            "  Interface, IPv4/IPv6 address, gateway, mode, and DNS state.",
+            "",
+            "Appliance services:",
+            "  Desired enablement and current runtime state for every service.",
+        ),
+    ),
+    (
+        "Service states",
+        (
+            "The symbol reports runtime; on/off reports desired enablement.",
+            "",
+            "  ▶ on    Running and enabled",
+            "  ▶ off   Running while disabled",
+            "  ■ on    Stopped while enabled",
+            "  ■ off   Stopped and disabled",
+            "  ! crashed  Runtime failed",
+            "  ? on    Enabled but its runtime is unavailable",
+            "",
+            "Blue is healthy, amber needs attention, red is failed,",
+            "and gray is unavailable.",
+            "Firewall '▶ off' means persistence is ready while rules are off.",
+        ),
+    ),
+    (
+        "Function keys",
+        (
+            "F1 Help:",
+            "  Opens this guide. No authentication is required.",
+            "F2 Customize:",
+            "  Root-authenticated management network, Firewall, and isolation.",
+            "F3 Top:",
+            "  Root-authenticated process viewer. Press q to return.",
+            "F4 Console:",
+            "  Root-authenticated, audited Bash session. Use exit to return.",
+            "F12 Shut down / Restart:",
+            "  Root-authenticated, confirmed, delayed, and audited power action.",
+            "",
+            "Authentication is single-use and is never shared between actions.",
+        ),
+    ),
+    (
+        "Dialogs and navigation",
+        (
+            "Tab or Up/Down moves between fields and buttons.",
+            "Left/Right changes selectors or moves within editable text.",
+            "Enter activates Apply or the selected action; Esc cancels.",
+            "Home/End, Backspace, and Delete work in editable fields.",
+            "",
+            "In Help, use Left/Right, PageUp/PageDown, Previous/Next,",
+            "or n/p to change pages. Esc or F1 closes Help.",
+            "",
+            "Dialogs put their title on the frame. Destructive actions require",
+            "confirmation and return to a freshly redrawn main screen.",
+        ),
+    ),
+    (
+        "Recovery and safety",
+        (
+            "This is a bounded recovery console, not the complete web UI.",
+            "F2 changes desired state through validated appliance-apply tasks.",
+            "Maintenance isolation preserves networking, Firewall persistence,",
+            "and this console while stopping application services.",
+            "",
+            "Ctrl+Alt+Del is blocked. Use authenticated F12 for power actions.",
+            "Other virtual terminals retain Photon login prompts (Alt+F2+).",
+            "",
+            "The screen refreshes automatically and after completed actions.",
+            "Normal layout is 80x30; the minimum supported size is 72x22.",
+        ),
+    ),
+)
 
 
 def _console_refresh_seconds() -> int:
@@ -68,14 +167,53 @@ class ConsoleOperationError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ServiceStatus:
+    label: str
+    unit: str
+    load_state: str
+    unit_file_state: str
+    active_state: str
+    desired_enabled: bool | None = None
+
+    @property
+    def runtime_label(self) -> str:
+        if self.load_state != "loaded":
+            return "unavailable"
+        if self.active_state in {"active", "reloading", "activating"}:
+            return "running"
+        if self.active_state == "failed":
+            return "failed"
+        return "stopped"
+
+    @property
+    def enabled_label(self) -> str:
+        if self.desired_enabled is not None:
+            return "enabled" if self.desired_enabled else "disabled"
+        return "enabled" if self.unit_file_state in ENABLED_UNIT_FILE_STATES else "disabled"
+
+    @property
+    def display_label(self) -> str:
+        runtime = self.runtime_label
+        if self.label == "Firewall" and runtime == "running":
+            runtime = "ready"
+        if runtime == "failed":
+            return "! crashed"
+        runtime_symbol = {"running": "▶", "ready": "▶", "stopped": "■", "unavailable": "?"}[runtime]
+        enablement = "on" if self.enabled_label == "enabled" else "off"
+        return f"{runtime_symbol} {enablement}"
+
+
+@dataclass(frozen=True)
 class ConsoleStatus:
     hostname: str
     release: str
+    architecture: str
     version: str
     kernel: str
     cpu: str
     memory: str
     load: str
+    load_severity: str
     interface: str
     ipv4_method: str
     ipv4_cidr: str
@@ -84,9 +222,9 @@ class ConsoleStatus:
     ipv6_cidr: str
     ipv6_gateway: str
     dns_servers: tuple[str, ...]
-    app_active: bool
     firewall_enabled: bool
     maintenance_isolation: bool
+    services: tuple[ServiceStatus, ...]
     urls: tuple[str, ...]
 
 
@@ -122,11 +260,69 @@ def _first_display_line(value: str, fallback: str = "") -> str:
     return next((line.strip() for line in value.splitlines() if line.strip()), fallback)
 
 
-def _service_active(unit: str) -> bool:
+def _systemd_unit_states(units: list[str]) -> dict[str, dict[str, str]]:
     try:
-        return _run(["systemctl", "is-active", "--quiet", unit], timeout=2).returncode == 0
+        result = _run(
+            [
+                "systemctl",
+                "show",
+                "--no-pager",
+                "--property=Id,LoadState,UnitFileState,ActiveState",
+                *units,
+            ],
+            timeout=3,
+        )
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        result = subprocess.CompletedProcess([], 1, "", "")
+
+    by_unit: dict[str, dict[str, str]] = {}
+    for block in re.split(r"\r?\n\r?\n", result.stdout.strip()):
+        values = {}
+        for line in block.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                values[key] = value
+        if values.get("Id"):
+            by_unit[values["Id"]] = values
+
+    return by_unit
+
+
+def _appliance_service_statuses(db: Any, *, firewall_enabled: bool) -> tuple[ServiceStatus, ...]:
+    # Reuse the Services page projections so the web UI and tty describe the
+    # same desired state. Systemd is only an additional runtime truth source.
+    from labfoundry.app.ui import services_template_context
+
+    rows = {str(row["service"]): row for row in services_template_context(db)["service_rows"]}
+    units = list(dict.fromkeys(unit for _label, _service_id, unit in SERVICE_CATALOG if unit))
+    unit_states = _systemd_unit_states(units)
+    statuses: list[ServiceStatus] = []
+    for label, service_id, unit in SERVICE_CATALOG:
+        row = rows.get(service_id, {})
+        desired_enabled = firewall_enabled if service_id == "firewall" else bool(row.get("enabled", False))
+        logical_running = bool(row.get("running", False))
+        values = unit_states.get(unit, {}) if unit else {}
+        load_state = values.get("LoadState", "loaded" if not unit else "not-found")
+        active_state = values.get("ActiveState", "active" if logical_running else "inactive")
+        unit_file_state = values.get("UnitFileState", "enabled" if desired_enabled else "disabled")
+
+        # An absent optional unit is a normal stopped state while its desired
+        # state is disabled. It becomes unavailable only if the operator has
+        # enabled the service and its runtime cannot be provided.
+        if unit and load_state != "loaded" and not desired_enabled:
+            load_state = "loaded"
+            active_state = "inactive"
+        statuses.append(
+            ServiceStatus(
+                label=label,
+                unit=unit or service_id,
+                load_state=load_state,
+                unit_file_state=unit_file_state,
+                active_state=active_state,
+                desired_enabled=desired_enabled,
+            )
+        )
+    return tuple(statuses)
 
 
 def _cpu_summary() -> str:
@@ -160,11 +356,21 @@ def _memory_summary() -> str:
 
 
 def _load_summary() -> str:
+    return _load_status()[0]
+
+
+def _load_status(
+    values: tuple[float, float, float] | None = None,
+    cpu_count: int | None = None,
+) -> tuple[str, str]:
     try:
-        one, five, fifteen = os.getloadavg()
+        one, five, fifteen = values if values is not None else os.getloadavg()
     except (AttributeError, OSError):
-        return "Unavailable"
-    return f"1 min {one:.2f} | 5 min {five:.2f} | 15 min {fifteen:.2f}"
+        return "Unavailable", "normal"
+    logical_cpus = max(cpu_count if cpu_count is not None else (os.cpu_count() or 1), 1)
+    peak_ratio = max(one, five, fifteen) / logical_cpus
+    severity = "critical" if peak_ratio >= 1.0 else "warning" if peak_ratio >= 0.75 else "normal"
+    return f"1 min {one:.2f} | 5 min {five:.2f} | 15 min {fifteen:.2f}", severity
 
 
 def _package_version() -> str:
@@ -172,6 +378,24 @@ def _package_version() -> str:
         return version("labfoundry")
     except PackageNotFoundError:
         return "development"
+
+
+def _architecture_label(machine: str | None = None) -> str:
+    reported = (machine if machine is not None else platform.machine()).strip().lower()
+    aliases = {
+        "x86_64": "amd64",
+        "amd64": "amd64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "armv7l": "armv7",
+        "armv7": "armv7",
+        "armv6l": "armv6",
+        "i386": "x86",
+        "i486": "x86",
+        "i586": "x86",
+        "i686": "x86",
+    }
+    return aliases.get(reported, reported or "unknown")
 
 
 def _management_interface(db: Any) -> PhysicalInterface:
@@ -277,20 +501,26 @@ def load_console_status() -> ConsoleStatus:
         dns_servers = tuple(split_servers(settings.external_dns_servers if settings else "")) or _fallback_dns_servers(interface.name)
         fqdn = settings.fqdn if settings and settings.fqdn else socket.getfqdn()
 
+        firewall_enabled = bool(firewall and firewall.enabled)
+        services = _appliance_service_statuses(db, firewall_enabled=firewall_enabled)
+
     urls = management_urls(
         fqdn,
         cidr,
         ipv6_cidr,
         https_enabled=bool(settings and settings.management_https_enabled),
     )
+    load_summary, load_severity = _load_status()
     return ConsoleStatus(
         hostname=fqdn or socket.gethostname(),
         release=_first_display_line(_read_text(PHOTON_RELEASE_PATH), platform.system()),
+        architecture=_architecture_label(),
         version=_package_version(),
         kernel=platform.release(),
         cpu=_cpu_summary(),
         memory=_memory_summary(),
-        load=_load_summary(),
+        load=load_summary,
+        load_severity=load_severity,
         interface=interface.name,
         ipv4_method=method,
         ipv4_cidr=cidr,
@@ -299,9 +529,9 @@ def load_console_status() -> ConsoleStatus:
         ipv6_cidr=ipv6_cidr,
         ipv6_gateway=ipv6_gateway,
         dns_servers=dns_servers,
-        app_active=_service_active("labfoundry.service"),
-        firewall_enabled=bool(firewall and firewall.enabled),
+        firewall_enabled=firewall_enabled,
         maintenance_isolation=MAINTENANCE_STATE_PATH.exists(),
+        services=services,
         urls=urls,
     )
 
@@ -754,6 +984,7 @@ class CursesConsole:
         curses.init_pair(7, bad, soft)
         curses.init_pair(8, curses.COLOR_WHITE, slate)
         curses.init_pair(9, slate, pale_blue)
+        curses.init_pair(10, blue, soft)
 
     @staticmethod
     def _recovery_redraws(now: float) -> list[float]:
@@ -809,11 +1040,12 @@ class CursesConsole:
             return
 
         self._safe_add(1, 4, f"LabFoundry Appliance {status.version}", curses.color_pair(1) | curses.A_BOLD)
-        self._safe_add(3, 4, status.release, curses.color_pair(1))
+        self._safe_add(3, 4, f"{status.release} ({status.architecture})", curses.color_pair(1))
         self._safe_add(4, 4, f"Kernel: {status.kernel}", curses.color_pair(1))
         self._safe_add(5, 4, f"CPU: {status.cpu}", curses.color_pair(1))
         self._safe_add(6, 4, f"Memory: {status.memory}", curses.color_pair(1))
-        self._safe_add(7, 4, f"Load: {status.load}", curses.color_pair(1))
+        self._safe_add(7, 4, "Load:", curses.color_pair(1))
+        self._safe_add(7, 10, status.load, self._load_attr(status.load_severity))
 
         self._safe_add(10, 4, "Manage this appliance at:", curses.color_pair(2) | curses.A_BOLD)
         row = 11
@@ -846,23 +1078,77 @@ class CursesConsole:
             self._network_table_row("DNS", ", ".join(status.dns_servers) or "Not configured", width),
             curses.color_pair(2),
         )
-        auxiliary: tuple[str, str] | None = None
+        services_heading = "Appliance services"
         if status.maintenance_isolation:
-            auxiliary = ("Isolation", "enabled")
-        elif not status.app_active:
-            auxiliary = ("Control plane", "unavailable")
-        firewall = self._network_table_row(
-            "Firewall",
-            "enabled" if status.firewall_enabled else "disabled",
-            width,
-            auxiliary=auxiliary,
-        )
-        self._safe_add(19, 6, firewall, curses.color_pair(5 if status.firewall_enabled else 6) | curses.A_BOLD)
+            services_heading += " | Maintenance isolation enabled"
+        # The normal 80x30 tty has room to visually separate networking from
+        # service health. Preserve the denser arrangement on compact terminals.
+        full_service_grid = self._service_grid_fits(height, len(status.services))
+        services_row = 20 if full_service_grid else 19
+        self._safe_add(services_row, 4, services_heading, curses.color_pair(2) | curses.A_BOLD)
+        if full_service_grid:
+            column_width = max((width - 4) // 2, 1)
+            split_at = (len(status.services) + 1) // 2
+            columns = (status.services[:split_at], status.services[split_at:])
+            for column_index, services in enumerate(columns):
+                x = 4 + column_index * column_width
+                for service_index, service in enumerate(services):
+                    self._safe_add(
+                        services_row + 1 + service_index,
+                        x,
+                        self._service_cell(service, column_width),
+                        self._service_attr(service),
+                        column_width,
+                    )
+        else:
+            self._safe_add(services_row + 1, 6, self._service_summary(status.services), curses.color_pair(2), width - 10)
         if self.message:
             message_row = height - 2 if height > 22 else 19
             self._safe_add(message_row, 4, self.message, curses.color_pair(7 if self.message_error else 5) | curses.A_BOLD)
         self._draw_footer(height, width)
         self._refresh_screen()
+
+    @staticmethod
+    def _service_grid_fits(height: int, service_count: int) -> bool:
+        """Keep the full grid above the message and footer rows."""
+        grid_last_row = 20 + ((service_count + 1) // 2)
+        message_row = height - 2
+        return grid_last_row < message_row
+
+    def _service_attr(self, service: ServiceStatus) -> int:
+        curses = self.curses
+        if service.runtime_label == "failed":
+            return curses.color_pair(7) | curses.A_BOLD
+        if service.runtime_label == "unavailable":
+            return curses.color_pair(4)
+        if service.runtime_label == "running":
+            if service.label == "Firewall" or service.enabled_label == "enabled":
+                # Brand blue retains strong contrast on the Linux console's
+                # gray representation of white without the glare of bright green.
+                return curses.color_pair(10)
+            return curses.color_pair(6) | curses.A_BOLD
+        return curses.color_pair(6)
+
+    def _load_attr(self, severity: str) -> int:
+        curses = self.curses
+        return {
+            "warning": curses.color_pair(6) | curses.A_BOLD,
+            "critical": curses.color_pair(7) | curses.A_BOLD,
+        }.get(severity, curses.color_pair(1))
+
+    @staticmethod
+    def _service_cell(service: ServiceStatus, width: int) -> str:
+        label_width = min(21, max(width - 3, 1))
+        return f"{service.label:<{label_width}} {service.display_label}"[: max(width - 1, 1)].rstrip()
+
+    @staticmethod
+    def _service_summary(services: tuple[ServiceStatus, ...]) -> str:
+        counts = {label: sum(service.runtime_label == label for service in services) for label in ("running", "failed", "stopped", "unavailable")}
+        firewall = next((service.enabled_label for service in services if service.label == "Firewall"), "unavailable")
+        return (
+            f"{counts['running']} running | {counts['failed']} failed | {counts['stopped']} stopped | "
+            f"{counts['unavailable']} unavailable | Firewall {firewall}"
+        )
 
     @staticmethod
     def _network_table_row(
@@ -902,11 +1188,89 @@ class CursesConsole:
     def _draw_footer(self, height: int, width: int) -> None:
         curses = self.curses
         self._fill_line(height - 1, curses.color_pair(3))
-        self._safe_add(height - 1, 2, "<F2> Customize", curses.color_pair(3) | curses.A_BOLD)
-        self._safe_add(height - 1, 21, "<F3> Top", curses.color_pair(3) | curses.A_BOLD)
-        self._safe_add(height - 1, 32, "<F4> Console", curses.color_pair(3) | curses.A_BOLD)
-        label = "<F12> Shut down / Restart" if width >= 80 else "<F12> Power"
-        self._safe_add(height - 1, max(width - len(label) - 3, 24), label, curses.color_pair(3) | curses.A_BOLD)
+        self._safe_add(height - 1, 1, "<F1> Help", curses.color_pair(3) | curses.A_BOLD)
+        self._safe_add(height - 1, 12, "<F2> Customize", curses.color_pair(3) | curses.A_BOLD)
+        self._safe_add(height - 1, 29, "<F3> Top", curses.color_pair(3) | curses.A_BOLD)
+        self._safe_add(height - 1, 40, "<F4> Console", curses.color_pair(3) | curses.A_BOLD)
+        label = "<F12> Power"
+        self._safe_add(height - 1, max(width - len(label) - 2, 54), label, curses.color_pair(3) | curses.A_BOLD)
+
+    def show_help(self) -> None:
+        curses = self.curses
+        height, width = self.stdscr.getmaxyx()
+        box_width = min(74, width - 4)
+        box_height = min(24, height - 4)
+        top = max((height - box_height) // 2, 1)
+        left = max((width - box_width) // 2, 1)
+        window = curses.newwin(box_height, box_width, top, left)
+        window.keypad(True)
+        page = 0
+        selected = 1
+        buttons = ("Previous", "Next", "Close")
+        button_width = 14
+        button_start = max((box_width - button_width * len(buttons)) // 2, 2)
+
+        while True:
+            page_title, lines = HELP_PAGES[page]
+            window.erase()
+            window.bkgd(" ", curses.color_pair(2))
+            window.box()
+            self._draw_dialog_title(window, f"Console help {page + 1}/{len(HELP_PAGES)} - {page_title}", box_width)
+            for row, line in enumerate(lines[: box_height - 6], start=2):
+                attr = curses.color_pair(2) | curses.A_BOLD if line.endswith(":") else curses.color_pair(4)
+                window.addnstr(row, 3, line, box_width - 6, attr)
+
+            for index, button in enumerate(buttons):
+                available = index == 2 or (index == 0 and page > 0) or (index == 1 and page < len(HELP_PAGES) - 1)
+                if index == selected and available:
+                    attr = curses.color_pair(3) | curses.A_BOLD
+                else:
+                    attr = curses.color_pair(9 if available else 4)
+                window.addnstr(box_height - 3, button_start + index * button_width, f"< {button} >", button_width - 1, attr)
+            window.addnstr(
+                box_height - 2,
+                3,
+                "Left/Right/PgUp/PgDn: page  Enter: select  Esc/F1: close",
+                box_width - 6,
+                curses.color_pair(4),
+            )
+            window.refresh()
+            key = window.getch()
+            if key in {27, curses.KEY_F1, curses.KEY_RESIZE}:
+                return
+            if key in {curses.KEY_LEFT, curses.KEY_PPAGE, ord("p")}:
+                page = max(page - 1, 0)
+                selected = 0 if page > 0 else 1
+                continue
+            if key in {curses.KEY_RIGHT, curses.KEY_NPAGE, ord("n"), ord(" ")}:
+                page = min(page + 1, len(HELP_PAGES) - 1)
+                selected = 1 if page < len(HELP_PAGES) - 1 else 2
+                continue
+            if key in {9, curses.KEY_DOWN}:
+                selected = (selected + 1) % len(buttons)
+                continue
+            if key in {curses.KEY_BTAB, curses.KEY_UP}:
+                selected = (selected - 1) % len(buttons)
+                continue
+            if key in {10, 13, curses.KEY_ENTER}:
+                if selected == 0 and page > 0:
+                    page -= 1
+                elif selected == 1 and page < len(HELP_PAGES) - 1:
+                    page += 1
+                    if page == len(HELP_PAGES) - 1:
+                        selected = 2
+                elif selected == 2:
+                    return
+
+    def _draw_dialog_title(self, window: Any, title: str, box_width: int) -> None:
+        framed_title = f" {title} "
+        window.addnstr(
+            0,
+            max((box_width - len(framed_title)) // 2, 2),
+            framed_title,
+            box_width - 4,
+            self.curses.color_pair(2) | self.curses.A_BOLD,
+        )
 
     def _dialog(self, title: str, lines: list[str], options: list[str]) -> int:
         curses = self.curses
@@ -922,14 +1286,21 @@ class CursesConsole:
             window.erase()
             window.bkgd(" ", curses.color_pair(2))
             window.box()
-            window.addnstr(1, 3, title, box_width - 6, curses.color_pair(2) | curses.A_BOLD)
+            self._draw_dialog_title(window, title, box_width)
             row = 3
             for line in lines:
                 window.addnstr(row, 3, line, box_width - 6, curses.color_pair(4))
                 row += 1
             for index, option in enumerate(options):
-                attr = curses.color_pair(3) | curses.A_BOLD if index == selected else curses.color_pair(2)
-                window.addnstr(row + index, 3, f" {option} ", box_width - 6, attr)
+                attr = curses.color_pair(3) | curses.A_BOLD if index == selected else curses.color_pair(9)
+                window.addnstr(row + index, 3, f" < {option} > ", box_width - 6, attr)
+            window.addnstr(
+                box_height - 2,
+                3,
+                "Up/Down: move   Enter: select   Esc: cancel",
+                box_width - 6,
+                curses.color_pair(4),
+            )
             window.refresh()
             key = window.getch()
             if key in {curses.KEY_UP, ord("k")}:
@@ -945,31 +1316,70 @@ class CursesConsole:
         curses = self.curses
         height, width = self.stdscr.getmaxyx()
         box_width = min(max(len(label) + 8, 64), width - 4)
-        window = curses.newwin(8, box_width, max((height - 8) // 2, 1), max((width - box_width) // 2, 1))
+        box_height = 10
+        window = curses.newwin(box_height, box_width, max((height - box_height) // 2, 1), max((width - box_width) // 2, 1))
+        window.keypad(True)
         window.bkgd(" ", curses.color_pair(2))
         window.box()
-        window.addnstr(1, 3, title, box_width - 6, curses.color_pair(2) | curses.A_BOLD)
-        window.addnstr(3, 3, label, box_width - 6, curses.color_pair(4))
+        self._draw_dialog_title(window, title, box_width)
+        window.addnstr(2, 3, label, box_width - 6, curses.color_pair(4) | curses.A_BOLD)
         value = initial
         cursor = len(value)
+        focus = "field"
         while True:
             field_width = box_width - 7
             start = max(min(cursor - field_width + 1, max(len(value) - field_width, 0)), 0)
             visible_value = value[start : start + field_width]
             shown = "*" * len(visible_value) if secret else visible_value
-            window.addnstr(4, 3, " " * (box_width - 6), box_width - 6, curses.color_pair(8))
-            window.addnstr(4, 3, shown, box_width - 6, curses.color_pair(8))
-            window.move(4, min(3 + cursor - start, box_width - 4))
-            curses.curs_set(1)
-            window.refresh()
-            key = window.getch()
-            if key in {10, 13, curses.KEY_ENTER}:
+            # Match the light editable fields in Network customization. The old
+            # inverse pair rendered the password entry as a black bar on tty1.
+            window.addnstr(3, 3, " " * (box_width - 6), box_width - 6, curses.color_pair(9))
+            window.addnstr(3, 3, shown, box_width - 6, curses.color_pair(9))
+            apply_attr = curses.color_pair(3 if focus == "apply" else 9) | (curses.A_BOLD if focus == "apply" else 0)
+            cancel_attr = curses.color_pair(3 if focus == "cancel" else 9) | (curses.A_BOLD if focus == "cancel" else 0)
+            window.addnstr(5, box_width // 2 - 12, " < Apply > ", 11, apply_attr)
+            window.addnstr(5, box_width // 2 + 2, " < Cancel > ", 12, cancel_attr)
+            window.addnstr(
+                7,
+                3,
+                "Tab/Up/Down: move   Enter: apply   Esc: cancel",
+                box_width - 6,
+                curses.color_pair(4),
+            )
+            if focus == "field":
+                window.move(3, min(3 + cursor - start, box_width - 4))
+                curses.curs_set(1)
+            else:
                 curses.curs_set(0)
-                return value
-            if key == 27:
+            window.refresh()
+            key = window.get_wch()
+            if key in {27, "\x1b"}:
                 curses.curs_set(0)
                 return None
-            value, cursor = self._edit_text(value, cursor, key)
+            if key in {9, "\t", curses.KEY_DOWN}:
+                focus = {"field": "apply", "apply": "cancel", "cancel": "field"}[focus]
+                continue
+            if key in {curses.KEY_BTAB, curses.KEY_UP}:
+                focus = {"field": "cancel", "cancel": "apply", "apply": "field"}[focus]
+                continue
+            if focus != "field" and key in {curses.KEY_LEFT, curses.KEY_RIGHT}:
+                focus = "cancel" if focus == "apply" else "apply"
+                continue
+            if key in {10, 13, "\n", "\r", curses.KEY_ENTER} or (focus != "field" and key in {" ", ord(" ")}):
+                curses.curs_set(0)
+                return None if focus == "cancel" else value
+            if focus == "field":
+                value, cursor = self._edit_prompt_text(value, cursor, key)
+
+    def _edit_prompt_text(self, value: str, cursor: int, key: str | int, *, limit: int = 500) -> tuple[str, int]:
+        """Edit password text using decoded characters from curses.get_wch()."""
+        if isinstance(key, str):
+            if key in {"\b", "\x7f"} and cursor > 0:
+                return value[: cursor - 1] + value[cursor:], cursor - 1
+            if key.isprintable() and len(value) < limit:
+                return value[:cursor] + key + value[cursor:], cursor + len(key)
+            return value, cursor
+        return self._edit_text(value, cursor, key, limit=limit)
 
     def _edit_text(self, value: str, cursor: int, key: int, *, limit: int = 500) -> tuple[str, int]:
         curses = self.curses
@@ -1136,14 +1546,21 @@ class CursesConsole:
                 )
 
     def _require_authentication(self) -> bool:
-        password = self._prompt("Administrator authentication", "Root password:", secret=True)
+        password = self._prompt("Photon OS root authentication", "Root password:", secret=True)
         if password is None:
             return False
         authenticated = authenticate_root(password)
         password = ""
         if not authenticated:
-            self.message = "Authentication failed."
-            self.message_error = True
+            self._dialog(
+                "Root authentication failed",
+                ["The Photon OS root password was incorrect."],
+                ["OK"],
+            )
+            # Authentication errors are modal and must not linger in the main
+            # console message row after the operator dismisses the dialog.
+            self.message = ""
+            self.message_error = False
         return authenticated
 
     def _apply_action(self, operation: Callable[[], str | dict[str, Any] | None], success: str) -> None:
@@ -1211,6 +1628,11 @@ class CursesConsole:
     def show_top(self) -> None:
         """Temporarily hand tty1 to top, then restore the curses console."""
         self._run_interactive(["top"], "top")
+
+    def show_authenticated_top(self) -> None:
+        """Open top only after a fresh Photon root-password check."""
+        if self._require_authentication():
+            self.show_top()
 
     def show_shell(self) -> None:
         """Open an authenticated, auditable root login shell on tty1."""
@@ -1326,13 +1748,18 @@ class CursesConsole:
         recovery_redraws = self._recovery_redraws(last_refresh)
         while True:
             key = self.stdscr.getch()
-            if key == curses.KEY_F2:
+            if key == curses.KEY_F1:
+                self.show_help()
+                self.draw_main()
+                last_refresh = time.monotonic()
+                recovery_redraws = self._recovery_redraws(last_refresh)
+            elif key == curses.KEY_F2:
                 self.customize()
                 self.draw_main()
                 last_refresh = time.monotonic()
                 recovery_redraws = self._recovery_redraws(last_refresh)
             elif key == curses.KEY_F3:
-                self.show_top()
+                self.show_authenticated_top()
                 self.draw_main()
                 last_refresh = time.monotonic()
                 recovery_redraws = self._recovery_redraws(last_refresh)

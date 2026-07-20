@@ -12,6 +12,7 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipHelperSync,
     [switch]$SkipConsoleAssetSync,
+    [switch]$SkipBootBrandingSync,
     [string]$WheelPath = '',
     [string]$SshPassword = $env:LABFOUNDRY_DEPLOY_SSH_PASSWORD,
     [switch]$SkipHostCheck
@@ -229,11 +230,17 @@ function Invoke-PasswordBackedDeploy {
         [Parameter(Mandatory = $true)][string]$LocalWheelPath,
         [string]$LocalHelperPath = '',
         [string]$LocalConsoleManagerPath = '',
+        [string]$LocalBootInstallerPath = '',
+        [string]$LocalBootThemePath = '',
+        [string]$LocalBootBackgroundPath = '',
         [Parameter(Mandatory = $true)][string]$LocalScriptPath,
         [Parameter(Mandatory = $true)][string]$RemoteDirectoryPath,
         [Parameter(Mandatory = $true)][string]$RemoteWheel,
         [string]$RemoteHelper = '',
         [string]$RemoteConsoleManager = '',
+        [string]$RemoteBootInstaller = '',
+        [string]$RemoteBootTheme = '',
+        [string]$RemoteBootBackground = '',
         [Parameter(Mandatory = $true)][string]$RemoteScript,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
         [Parameter(Mandatory = $true)][int]$PollSeconds,
@@ -247,6 +254,11 @@ import os
 import pathlib
 import shlex
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(errors="replace")
 
 try:
     import paramiko
@@ -271,11 +283,17 @@ parser.add_argument("--user", required=True)
 parser.add_argument("--local-wheel", required=True)
 parser.add_argument("--local-helper", default="")
 parser.add_argument("--local-console-manager", default="")
+parser.add_argument("--local-boot-installer", default="")
+parser.add_argument("--local-boot-theme", default="")
+parser.add_argument("--local-boot-background", default="")
 parser.add_argument("--local-script", required=True)
 parser.add_argument("--remote-dir", required=True)
 parser.add_argument("--remote-wheel", required=True)
 parser.add_argument("--remote-helper", default="")
 parser.add_argument("--remote-console-manager", default="")
+parser.add_argument("--remote-boot-installer", default="")
+parser.add_argument("--remote-boot-theme", default="")
+parser.add_argument("--remote-boot-background", default="")
 parser.add_argument("--remote-script", required=True)
 parser.add_argument("--timeout", type=int, required=True)
 parser.add_argument("--poll", type=int, required=True)
@@ -293,6 +311,14 @@ if args.local_helper:
     uploads.append((pathlib.Path(args.local_helper), args.remote_helper))
 if args.local_console_manager:
     uploads.append((pathlib.Path(args.local_console_manager), args.remote_console_manager))
+if args.local_boot_installer:
+    uploads.extend(
+        [
+            (pathlib.Path(args.local_boot_installer), args.remote_boot_installer),
+            (pathlib.Path(args.local_boot_theme), args.remote_boot_theme),
+            (pathlib.Path(args.local_boot_background), args.remote_boot_background),
+        ]
+    )
 
 client = paramiko.SSHClient()
 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -312,11 +338,16 @@ try:
                 raise SystemExit(f"Local deploy input is missing: {local_path}")
             sftp.put(str(local_path), remote_path)
         sftp.chmod(args.remote_script, 0o755)
+        if args.local_boot_installer:
+            sftp.chmod(args.remote_boot_installer, 0o755)
     finally:
         sftp.close()
 
     remote_helper_argument = args.remote_helper if args.local_helper else ""
     remote_console_manager_argument = args.remote_console_manager if args.local_console_manager else ""
+    remote_boot_installer_argument = args.remote_boot_installer if args.local_boot_installer else ""
+    remote_boot_theme_argument = args.remote_boot_theme if args.local_boot_installer else ""
+    remote_boot_background_argument = args.remote_boot_background if args.local_boot_installer else ""
     command = (
         "sudo -S -p '' sh "
         f"{shell_quote(args.remote_script)} "
@@ -324,7 +355,10 @@ try:
         f"{shell_quote(args.timeout)} "
         f"{shell_quote(args.poll)} "
         f"{shell_quote(remote_helper_argument)} "
-        f"{shell_quote(remote_console_manager_argument)}"
+        f"{shell_quote(remote_console_manager_argument)} "
+        f"{shell_quote(remote_boot_installer_argument)} "
+        f"{shell_quote(remote_boot_theme_argument)} "
+        f"{shell_quote(remote_boot_background_argument)}"
     )
     stdin, stdout, stderr = client.exec_command(command, get_pty=True, timeout=args.timeout + 60)
     stdin.write(password + "\n")
@@ -365,11 +399,17 @@ finally:
             '--local-wheel', $LocalWheelPath,
             '--local-helper', $LocalHelperPath,
             '--local-console-manager', $LocalConsoleManagerPath,
+            '--local-boot-installer', $LocalBootInstallerPath,
+            '--local-boot-theme', $LocalBootThemePath,
+            '--local-boot-background', $LocalBootBackgroundPath,
             '--local-script', $LocalScriptPath,
             '--remote-dir', $RemoteDirectoryPath,
             '--remote-wheel', $RemoteWheel,
             '--remote-helper', $RemoteHelper,
             '--remote-console-manager', $RemoteConsoleManager,
+            '--remote-boot-installer', $RemoteBootInstaller,
+            '--remote-boot-theme', $RemoteBootTheme,
+            '--remote-boot-background', $RemoteBootBackground,
             '--remote-script', $RemoteScript,
             '--timeout', "$TimeoutSeconds",
             '--poll', "$PollSeconds"
@@ -400,15 +440,28 @@ $resolvedWheelPath = Get-WheelPath -Path $WheelPath -Root $resolvedRepoRoot
 $wheelName = Split-Path -Leaf $resolvedWheelPath
 $helperPath = Join-Path $resolvedRepoRoot 'scripts\appliance\labfoundry-helper'
 $consoleManagerPath = Join-Path $resolvedRepoRoot 'image\common\systemd\labfoundry-console-manager.conf'
+$bootInstallerPath = Join-Path $resolvedRepoRoot 'scripts\appliance\labfoundry-install-boot-branding'
+$bootThemePath = Join-Path $resolvedRepoRoot 'image\common\boot\grub\theme.txt'
+$bootBackgroundPath = Join-Path $resolvedRepoRoot 'image\common\boot\grub\labfoundry.png'
 if (-not $SkipHelperSync -and -not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
     throw "LabFoundry helper script not found: $helperPath"
 }
 if (-not $SkipConsoleAssetSync -and -not (Test-Path -LiteralPath $consoleManagerPath -PathType Leaf)) {
     throw "LabFoundry console manager config not found: $consoleManagerPath"
 }
+if (-not $SkipBootBrandingSync) {
+    foreach ($bootAsset in @($bootInstallerPath, $bootThemePath, $bootBackgroundPath)) {
+        if (-not (Test-Path -LiteralPath $bootAsset -PathType Leaf)) {
+            throw "LabFoundry boot branding asset not found: $bootAsset"
+        }
+    }
+}
 $remoteWheelPath = "$($RemoteDirectory.TrimEnd('/'))/$wheelName"
 $remoteHelperPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-helper"
 $remoteConsoleManagerPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-console-manager.conf"
+$remoteBootInstallerPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-install-boot-branding"
+$remoteBootThemePath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-grub-theme.txt"
+$remoteBootBackgroundPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-grub.png"
 $remoteScriptPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-deploy-wheel.sh"
 
 if (-not $IpAddress) {
@@ -434,6 +487,9 @@ timeout_seconds="${2:-60}"
 poll_seconds="${3:-2}"
 helper_path="${4:-}"
 console_manager_path="${5:-}"
+boot_installer_path="${6:-}"
+boot_theme_path="${7:-}"
+boot_background_path="${8:-}"
 venv="/opt/labfoundry/.venv"
 python="$venv/bin/python"
 
@@ -451,7 +507,13 @@ if [ -n "$console_manager_path" ]; then
     install -d -o root -g root -m 0755 /etc/systemd/system.conf.d
     install -o root -g root -m 0644 "$console_manager_path" /etc/systemd/system.conf.d/labfoundry-console.conf
     sed -i 's/\r$//' /etc/systemd/system.conf.d/labfoundry-console.conf
+    systemctl mask --force ctrl-alt-del.target
     systemctl daemon-reexec
+fi
+if [ -n "$boot_installer_path" ]; then
+    install -o root -g root -m 0755 "$boot_installer_path" /opt/labfoundry/bin/labfoundry-install-boot-branding
+    sed -i 's/\r$//' /opt/labfoundry/bin/labfoundry-install-boot-branding
+    /opt/labfoundry/bin/labfoundry-install-boot-branding "$boot_theme_path" "$boot_background_path"
 fi
 find "$venv" -type d -exec chmod 755 {} \;
 find "$venv" -type f -exec chmod 644 {} \;
@@ -489,12 +551,21 @@ try {
     if (-not $SkipConsoleAssetSync) {
         $uploadPaths += $consoleManagerPath
     }
+    if (-not $SkipBootBrandingSync) {
+        $uploadPaths += $bootInstallerPath
+    }
     $uploadPaths += $tempScript
 
     $remoteHelperArgument = if ($SkipHelperSync) { '' } else { $remoteHelperPath }
     $localHelperArgument = if ($SkipHelperSync) { '' } else { $helperPath }
     $remoteConsoleManagerArgument = if ($SkipConsoleAssetSync) { '' } else { $remoteConsoleManagerPath }
     $localConsoleManagerArgument = if ($SkipConsoleAssetSync) { '' } else { $consoleManagerPath }
+    $remoteBootInstallerArgument = if ($SkipBootBrandingSync) { '' } else { $remoteBootInstallerPath }
+    $remoteBootThemeArgument = if ($SkipBootBrandingSync) { '' } else { $remoteBootThemePath }
+    $remoteBootBackgroundArgument = if ($SkipBootBrandingSync) { '' } else { $remoteBootBackgroundPath }
+    $localBootInstallerArgument = if ($SkipBootBrandingSync) { '' } else { $bootInstallerPath }
+    $localBootThemeArgument = if ($SkipBootBrandingSync) { '' } else { $bootThemePath }
+    $localBootBackgroundArgument = if ($SkipBootBrandingSync) { '' } else { $bootBackgroundPath }
     if ($SshPassword) {
         Write-Host "Uploading deployment files to $SshUser@$IpAddress`:$RemoteDirectory with password-backed SSH"
         Invoke-PasswordBackedDeploy `
@@ -505,11 +576,17 @@ try {
             -LocalWheelPath $resolvedWheelPath `
             -LocalHelperPath $localHelperArgument `
             -LocalConsoleManagerPath $localConsoleManagerArgument `
+            -LocalBootInstallerPath $localBootInstallerArgument `
+            -LocalBootThemePath $localBootThemeArgument `
+            -LocalBootBackgroundPath $localBootBackgroundArgument `
             -LocalScriptPath $tempScript `
             -RemoteDirectoryPath $RemoteDirectory `
             -RemoteWheel $remoteWheelPath `
             -RemoteHelper $remoteHelperArgument `
             -RemoteConsoleManager $remoteConsoleManagerArgument `
+            -RemoteBootInstaller $remoteBootInstallerArgument `
+            -RemoteBootTheme $remoteBootThemeArgument `
+            -RemoteBootBackground $remoteBootBackgroundArgument `
             -RemoteScript $remoteScriptPath `
             -TimeoutSeconds $ReadinessTimeoutSeconds `
             -PollSeconds $ReadinessPollSeconds `
@@ -517,9 +594,13 @@ try {
     } else {
         Write-Host "Uploading deployment files to $SshUser@$IpAddress`:$RemoteDirectory"
         Invoke-CheckedCommand -FilePath 'scp' -Arguments @($sshConnectionArguments + $uploadPaths + "${SshUser}@${IpAddress}:$RemoteDirectory/")
+        if (-not $SkipBootBrandingSync) {
+            Invoke-CheckedCommand -FilePath 'scp' -Arguments @($sshConnectionArguments + $bootThemePath + "${SshUser}@${IpAddress}:$remoteBootThemePath")
+            Invoke-CheckedCommand -FilePath 'scp' -Arguments @($sshConnectionArguments + $bootBackgroundPath + "${SshUser}@${IpAddress}:$remoteBootBackgroundPath")
+        }
 
         Write-Host "Installing wheel and restarting labfoundry.service..."
-        Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument' '$remoteConsoleManagerArgument'")
+        Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument' '$remoteConsoleManagerArgument' '$remoteBootInstallerArgument' '$remoteBootThemeArgument' '$remoteBootBackgroundArgument'")
     }
 
     if (-not $SkipHostCheck) {
