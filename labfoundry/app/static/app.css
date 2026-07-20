@@ -2519,11 +2519,11 @@ textarea {
   overflow: hidden;
 }
 
-.chrony-upstreams-table {
+.ntp-upstreams-table {
   min-height: 190px;
 }
 
-.chrony-upstreams-section {
+.ntp-upstreams-section {
   margin-top: 14px;
 }
 
@@ -3082,7 +3082,7 @@ label > span,
   margin-bottom: 2px;
 }
 
-.chrony-port-grid {
+.ntp-port-grid {
   align-items: end;
 }
 

@@ -112,7 +112,7 @@ def test_managed_ca_specs_include_portal_https_certificate(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ChronySettings
+    from labfoundry.app.models import NtpSettings
     from labfoundry.app.ui import get_ca_settings_row, managed_ca_certificate_specs
 
     with SessionLocal() as db:
@@ -121,13 +121,13 @@ def test_managed_ca_specs_include_portal_https_certificate(client):
         settings.portal_hostname = "ca.labfoundry.internal"
         settings.listen_interface = "eth2"
         settings.listen_address = "192.168.87.32"
-        chrony = db.execute(select(ChronySettings)).scalar_one_or_none()
-        if chrony is None:
-            chrony = ChronySettings()
-            db.add(chrony)
-        chrony.nts_server_enabled = True
-        chrony.hostname = "ntp.labfoundry.internal"
-        chrony.listen_address = "192.168.87.33"
+        ntp = db.execute(select(NtpSettings)).scalar_one_or_none()
+        if ntp is None:
+            ntp = NtpSettings()
+            db.add(ntp)
+        ntp.nts_server_enabled = True
+        ntp.hostname = "ntp.labfoundry.internal"
+        ntp.listen_address = "192.168.87.33"
         db.commit()
 
         specs = {spec.owner: spec for spec in managed_ca_certificate_specs(db)}
@@ -139,9 +139,9 @@ def test_managed_ca_specs_include_portal_https_certificate(client):
     assert ca_portal.cert_path == "/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.crt"
     assert ca_portal.key_path == "/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.key"
     assert ca_portal.chain_path == "/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal-chain.pem"
-    chrony_nts = specs["chrony:nts"]
-    assert chrony_nts.common_name == "ntp.labfoundry.internal"
-    assert chrony_nts.dns_names == ["ntp.labfoundry.internal"]
-    assert chrony_nts.ip_addresses == ["192.168.87.33"]
-    assert chrony_nts.cert_path == "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt"
-    assert chrony_nts.key_path == "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.key"
+    ntp_nts = specs["ntp:nts"]
+    assert ntp_nts.common_name == "ntp.labfoundry.internal"
+    assert ntp_nts.dns_names == ["ntp.labfoundry.internal"]
+    assert ntp_nts.ip_addresses == ["192.168.87.33"]
+    assert ntp_nts.cert_path == "/etc/labfoundry/ntp/certs/ntp.labfoundry.internal.crt"
+    assert ntp_nts.key_path == "/etc/labfoundry/ntp/certs/ntp.labfoundry.internal.key"

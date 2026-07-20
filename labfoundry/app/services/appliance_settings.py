@@ -299,7 +299,6 @@ def validate_appliance_settings(
     dns_record_conflict: bool = False,
     ca_enabled: bool = False,
     management_https_cert_available: bool = False,
-    chrony_enabled: bool = True,
     web_terminal_options: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []

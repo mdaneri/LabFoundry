@@ -25,7 +25,6 @@ OVF_ENV = """<?xml version="1.0" encoding="UTF-8"?>
     <Property oe:key="labfoundry.gateway" oe:value="192.168.10.1" />
     <Property oe:key="labfoundry.fqdn" oe:value="appliance.labfoundry.internal" />
     <Property oe:key="labfoundry.dns_servers" oe:value="192.168.10.2,192.168.10.3" />
-    <Property oe:key="labfoundry.ntp_servers" oe:value="ntp.labfoundry.internal time1.google.com" />
     <Property oe:key="labfoundry.admin_password" oe:value="admin-secret" />
     <Property oe:key="labfoundry.root_password" oe:value="root-secret1" />
   </PropertySection>
@@ -45,7 +44,6 @@ def test_vmware_ovf_customizer_parses_and_validates_properties_without_logging_s
     assert config["gateway"] == "192.168.10.1"
     assert config["fqdn"] == "appliance.labfoundry.internal"
     assert config["dns_servers"] == ["192.168.10.2", "192.168.10.3"]
-    assert config["ntp_servers"] == ["ntp.labfoundry.internal", "time1.google.com"]
     assert config["management_source_cidr"] == "192.168.10.0/24"
     assert summary["admin_password_set"] is True
     assert summary["root_password_set"] is True
@@ -221,11 +219,6 @@ def test_vmware_ovf_customizer_configures_and_validates_root_ssh(tmp_path, monke
 def test_vmware_ovf_customizer_requires_static_network_properties_only_for_static_mode():
     customizer = load_customizer()
     properties = customizer.parse_ovf_environment(OVF_ENV)
-    properties.pop("labfoundry.ntp_servers")
-
-    config = customizer.validate_properties(properties)
-
-    assert config["ntp_servers"] == []
 
     properties.pop("labfoundry.cidr")
     try:
@@ -332,7 +325,6 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
         "ipv6_gateway",
         "fqdn",
         "dns_servers",
-        "ntp_servers",
         "admin_password",
         "root_password",
         "root_ssh_enabled",
@@ -371,7 +363,7 @@ def test_vmware_ovf_export_and_image_plumbing_are_present():
     assert "VirtualSystem.InsertBefore($networkSection, $HardwareSection)" not in export_script
     assert "Add-LabFoundryOvfCategory" in export_script
     assert "Management network" in export_script
-    assert "Appliance identity and time" in export_script
+    assert "Appliance identity" in export_script
     assert "Initial credentials" in export_script
     assert "Leave blank to use DHCPv4" in export_script
     assert "-Name 'class' -Value 'labfoundry'" in export_script

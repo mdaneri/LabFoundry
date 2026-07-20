@@ -4,12 +4,12 @@ SERVICE_STATE_DEFAULTS = [
     {"service": "dns", "display_name": "DNS", "running": False, "enabled": False, "health": "disabled"},
     {"service": "dhcp", "display_name": "DHCP", "running": False, "enabled": False, "health": "disabled"},
     {
-        "service": "chronyd",
-        "display_name": "Chrony",
+        "service": "ntpd",
+        "display_name": "NTP / NTS",
         "running": False,
         "enabled": False,
         "health": "disabled",
-        "detail": "chronyd.service / UDP 123",
+        "detail": "ntpd.service / UDP 123",
     },
     {
         "service": "kms",
@@ -64,9 +64,9 @@ SERVICE_STATE_DEFAULTS = [
 ]
 
 SERVICE_STATE_IDS = frozenset(row["service"] for row in SERVICE_STATE_DEFAULTS)
-RETIRED_SERVICE_IDS = frozenset({"ntpd"})
+RETIRED_SERVICE_IDS = frozenset({"chronyd"})
 SERVICE_SYSTEMD_UNITS = {
-    "chronyd": "chronyd.service",
+    "ntpd": "ntpd.service",
     "kms": "labfoundry-kms.service",
     "ldap": "slapd.service",
 }

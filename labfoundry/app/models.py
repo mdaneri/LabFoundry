@@ -287,13 +287,12 @@ class ApplianceSettings(Base):
     root_ssh_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     service_dns_target_naming: Mapped[str] = mapped_column(String(20), default="ip")
     external_dns_servers: Mapped[str] = mapped_column(Text, default="1.1.1.1\n9.9.9.9")
-    ntp_servers: Mapped[str] = mapped_column(Text, default="time.cloudflare.com\nnts.netnod.se")
     config_path: Mapped[str] = mapped_column(String(240), default="/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
-class ChronySettings(Base):
-    __tablename__ = "chrony_settings"
+class NtpSettings(Base):
+    __tablename__ = "ntp_settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -304,18 +303,15 @@ class ChronySettings(Base):
     upstream_servers: Mapped[str] = mapped_column(Text, default="time.cloudflare.com\nnts.netnod.se")
     upstream_sources_json: Mapped[str] = mapped_column(
         Text,
-        default='[{"description":"Cloudflare public NTS","enabled":true,"id":"cloudflare-nts","maxdelay":"","source":"time.cloudflare.com","use_nts":true},{"description":"Netnod public NTS","enabled":true,"id":"netnod-nts","maxdelay":"","source":"nts.netnod.se","use_nts":true}]',
+        default='[{"description":"Cloudflare public NTS","enabled":true,"id":"cloudflare-nts","source":"time.cloudflare.com","use_nts":true},{"description":"Netnod public NTS","enabled":true,"id":"netnod-nts","source":"nts.netnod.se","use_nts":true}]',
     )
     allow_clients: Mapped[str] = mapped_column(Text, default="any")
     nts_server_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     nts_server_cert_path: Mapped[str] = mapped_column(String(300), default="")
     nts_server_key_path: Mapped[str] = mapped_column(String(300), default="")
     nts_ke_port: Mapped[int] = mapped_column(Integer, default=4460)
-    command_port_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
     minsources: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    maxchange_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    authselectmode: Mapped[str] = mapped_column(String(20), default="")
-    config_path: Mapped[str] = mapped_column(String(240), default="/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf")
+    config_path: Mapped[str] = mapped_column(String(240), default="/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

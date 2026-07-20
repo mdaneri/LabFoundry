@@ -45,7 +45,12 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     root_docs = Path("README.md").read_text(encoding="utf-8")
 
     assert "tdnf -y install" in script and "nginx" in script
-    assert "tdnf -y install" in script and "chrony" in script
+    assert "tdnf -y install" in script and "ntpsec" in script
+    assert "tdnf -y install" in script and "python3-ntp" in script
+    assert "systemctl disable --now ntpd.service" in script
+    assert "systemctl disable --now systemd-timesyncd.service" in script
+    assert "systemctl disable --now chronyd.service" in script
+    assert '"$LABFOUNDRY_STATE/apply/ntpd"' in script
     assert "tdnf -y install" in script and "openldap-servers" in script
     assert "tdnf -y install" in script and "powershell" in script
     assert "VCF.PowerCLI" in script
@@ -789,6 +794,7 @@ def test_nocloud_seed_helper_writes_client_cloud_init_contract():
     assert "Either --public-key or --password is required" in script
     assert "openssl" in script
     assert "sshpass" in script
+    assert "chrony-nts" in script
     assert "labfoundry-refresh-test-dhcp" in script
     assert "joliet_path=f\"/{name}\"" in script
 
@@ -823,6 +829,7 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
         "dnsmasq",
         "esxi_pxe",
         "ca",
+        "ntpd",
         "kms",
         "ldap",
         "appliance_settings",
@@ -833,7 +840,8 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
     assert plan["interfaces"]["vlan"]["name"] == "eth2.50"
     assert plan["interfaces"]["client_ca_request"]["name"] == "eth3"
     assert plan["interfaces"]["client_ca_request"]["ip_cidr"] == "192.168.49.20/24"
-    assert "CA desired state, root certificate download, client CSR request, issued certificate download, and client-side verification" in plan["checks"]
+    assert any("CA desired state" in check and "client-side verification" in check for check in plan["checks"])
+    assert any("Alpine chrony-nts authenticated synchronization" in check for check in plan["checks"])
     assert "VCF Backup desired state, local user sync, SFTP listener, and client probe" in plan["checks"]
     assert "VCF Offline Depot browser login, curl/wget Basic auth, and Local Users password rotation" in plan["checks"]
     assert any("Managed LDAP desired state" in check for check in plan["checks"])
@@ -918,6 +926,10 @@ def test_lifecycle_runner_covers_ca_vcf_backups_wan_noise_and_console_summary():
     assert "-o /dev/null -w '%{http_code}'" in script
     assert "apply-connectivity-units" in script
     assert "apply-ca-unit" in script
+    assert "configure-ntp" in script
+    assert "apply-ntp-unit" in script
+    assert "ntp-client-checks" in script
+    assert '"ntp_settings" not in data or "chrony_settings" in data' in script
     assert "tc qdisc show dev {args.wan_interface} | grep netem | grep delay | grep 25ms" in script
     assert "Lifecycle summary" in script
     assert "Result JSON:" in script

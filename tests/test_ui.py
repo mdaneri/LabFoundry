@@ -56,7 +56,7 @@ def test_login_and_dashboard_render(client):
         "/routes-wan",
         "/firewall",
         "/dns",
-        "/chrony",
+        "/ntp",
         "/dhcp",
         "/authentication",
         "/users",
@@ -1166,75 +1166,6 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
     assert apply_page.headers["location"] == "/dashboard#appliance-apply-review"
 
 
-def test_legacy_appliance_settings_ntp_baseline_does_not_create_pending_change(client):
-    import json
-
-    from sqlalchemy import select
-
-    from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ChronySettings, Setting
-    from labfoundry.app.ui import APPLIANCE_APPLY_BASELINES_KEY
-
-    login(client)
-    legacy_preview = json.dumps(
-        {
-            "fqdn": "labfoundry.labfoundry.internal",
-            "resolver_mode": "local_dns",
-            "resolver_servers": ["127.0.0.1"],
-            "local_dns_enabled": True,
-            "management_interface": "eth0",
-            "management_ip": "192.168.49.1",
-            "management_ip_cidr": "192.168.49.1/24",
-            "management_https_enabled": False,
-            "root_ssh_enabled": False,
-            "management_http_port": 8000,
-            "management_public_http_port": 80,
-            "management_public_https_port": 443,
-            "management_upstream_host": "127.0.0.1",
-            "management_upstream_port": 8000,
-            "management_https_cert_path": "",
-            "management_https_key_path": "",
-            "time_sync_mode": "systemd-timesyncd",
-            "ntp_servers": ["time1.google.com", "time2.google.com"],
-        },
-        indent=2,
-        sort_keys=True,
-    )
-    with SessionLocal() as db:
-        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
-        chrony_settings.enabled = True
-        db.add(chrony_settings)
-        db.merge(
-            Setting(
-                key=APPLIANCE_APPLY_BASELINES_KEY,
-                value=json.dumps(
-                    {
-                        "appliance_settings": {
-                            "snapshot_hash": "legacy-hash",
-                            "summary": [
-                                "FQDN labfoundry.labfoundry.internal",
-                                "resolver local DNS",
-                                "root SSH disabled",
-                                "2 NTP servers",
-                            ],
-                            "config_path": "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json",
-                            "config_preview": legacy_preview,
-                            "applied_at": "2026-07-01T00:00:00+00:00",
-                        }
-                    }
-                ),
-            )
-        )
-        db.commit()
-
-    page = client.get("/appliance-apply")
-
-    assert page.status_code == 200
-    assert "2 NTP servers" not in page.text
-    assert "ntp_servers" not in page.text
-    assert "time_sync_mode" not in page.text
-
-
 def test_settings_page_renders_autosave_validation_and_preview(client, monkeypatch):
     from sqlalchemy import select
 
@@ -1348,7 +1279,7 @@ def test_validation_rails_use_modal_config_previews(client):
         "/firewall": ["data-firewall-config-preview"],
         "/dns": ["data-dns-config-preview"],
         "/dhcp": [],
-        "/chrony": ["data-ntp-config-preview"],
+        "/ntp": ["data-ntp-config-preview"],
         "/certificate-authority": ["data-ca-config-preview"],
         "/kms": ["data-kms-config-preview"],
         "/esxi-pxe": ["data-esxi-pxe-preview"],
@@ -1473,17 +1404,17 @@ def test_settings_page_shows_external_dns_editor_when_local_dns_is_disabled(clie
     assert "Local DNS is disabled. External DNS servers are required" in response.text
 
 
-def test_settings_page_hides_ntp_editor_when_chrony_is_enabled(client):
+def test_settings_page_hides_ntp_editor_when_ntp_is_enabled(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ChronySettings
+    from labfoundry.app.models import NtpSettings
 
     login(client)
     with SessionLocal() as db:
-        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
-        chrony_settings.enabled = True
-        db.add(chrony_settings)
+        ntp_settings = db.execute(select(NtpSettings)).scalar_one()
+        ntp_settings.enabled = True
+        db.add(ntp_settings)
         db.commit()
 
     response = client.get("/settings")
@@ -1499,14 +1430,14 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ApplianceSettings, ChronySettings, DnsRecord, DnsSettings
+    from labfoundry.app.models import ApplianceSettings, NtpSettings, DnsRecord, DnsSettings
 
     login(client)
     with SessionLocal() as db:
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.enabled = True
-        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
-        chrony_settings.enabled = True
+        ntp_settings = db.execute(select(NtpSettings)).scalar_one()
+        ntp_settings.enabled = True
         db.commit()
 
     page = client.get("/settings")
@@ -1552,20 +1483,20 @@ def test_settings_autosave_updates_appliance_identity_dns_without_ntp(client):
     assert "app-owned appliance FQDN" in (record.description or "")
 
 
-def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(client):
+def test_settings_autosave_does_not_update_ntp_servers_when_ntp_is_disabled(client):
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ApplianceSettings, ChronySettings, DnsSettings
+    from labfoundry.app.models import ApplianceSettings, NtpSettings, DnsSettings
     from labfoundry.app.ui import appliance_apply_status
 
     login(client)
     with SessionLocal() as db:
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         dns_settings.enabled = True
-        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
-        chrony_settings.enabled = False
-        db.add_all([dns_settings, chrony_settings])
+        ntp_settings = db.execute(select(NtpSettings)).scalar_one()
+        ntp_settings.enabled = False
+        db.add_all([dns_settings, ntp_settings])
         db.commit()
 
     page = client.get("/settings")
@@ -1585,7 +1516,6 @@ def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(c
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["chrony_enabled"] is False
     assert "ntp_servers" not in payload
     assert '"time_sync_mode": "systemd-timesyncd"' not in payload["config_preview"]
     assert '"ntp_servers": [' not in payload["config_preview"]
@@ -1593,7 +1523,7 @@ def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(c
 
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
-        assert settings.ntp_servers != "time.cloudflare.com\n192.0.2.10"
+        assert not hasattr(settings, "ntp_servers")
 
     apply_response = client.post("/appliance-apply", data={"csrf": csrf, "selected_units": "appliance_settings"})
     assert_apply_redirect(apply_response)
@@ -1604,24 +1534,24 @@ def test_settings_autosave_does_not_update_ntp_servers_when_chrony_is_disabled(c
         assert "ntp_servers" not in status["config_preview"]
 
 
-def test_chrony_page_autosave_updates_desired_state_and_preview(client, monkeypatch):
+def test_ntp_page_autosave_updates_desired_state_and_preview(client, monkeypatch):
     import json
 
     from sqlalchemy import select
 
     from labfoundry.app.adapters.system import AdapterResult
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import CaCertificate, CaSettings, ChronySettings
+    from labfoundry.app.models import CaCertificate, CaSettings, NtpSettings
 
     supported = AdapterResult(
-        command=["labfoundry-helper", "chronyd", "capabilities"],
+        command=["labfoundry-helper", "ntpd", "capabilities"],
         dry_run=False,
         stdout=(
             json.dumps(
                 {
                     "timestamp": "2026-07-13T18:00:00+00:00",
                     "helper": "labfoundry-helper",
-                    "group": "chronyd",
+                    "group": "ntpd",
                     "action": "capabilities",
                     "args": [],
                     "dry_run": False,
@@ -1629,12 +1559,12 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client, monkeypa
                 sort_keys=True,
             )
             + "\n"
-            + json.dumps({"nts": True, "version": "chronyd version 4.6 (+NTS)"}, sort_keys=True)
+            + json.dumps({"nts": True, "version": "ntpd version 4.6 (+NTS)"}, sort_keys=True)
             + "\n"
         ),
     )
     monkeypatch.setattr(
-        "labfoundry.app.ui.SystemAdapter.read_chronyd_capabilities",
+        "labfoundry.app.ui.SystemAdapter.read_ntpd_capabilities",
         lambda _self: supported,
     )
     login(client)
@@ -1645,29 +1575,29 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client, monkeypa
             db.add(ca_settings)
         ca_settings.enabled = True
         db.commit()
-    page = client.get("/chrony")
+    page = client.get("/ntp")
     assert page.status_code == 200
-    assert "Chrony Settings" in page.text
-    assert "chrony-source-health-modal" in page.text
+    assert "NTP / NTS Settings" in page.text
+    assert "ntp-source-health-modal" in page.text
     assert "Check source health" not in page.text
-    assert "chrony-upstreams-table" in page.text
-    assert page.text.index('id="chrony-upstreams-table"') < page.text.index('<aside class="side-stack">')
+    assert "ntp-upstreams-table" in page.text
+    assert page.text.index('id="ntp-upstreams-table"') < page.text.index('<aside class="side-stack">')
     assert "NTS-KE port" in page.text
     assert 'type="number" value="4460" min="4460" max="4460" readonly aria-label="NTS-KE port"' in page.text
     assert "4460/tcp" not in page.text
     assert "NTP port" in page.text
     assert "NTS key" not in page.text
-    assert "/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf" in page.text
+    assert "/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf" in page.text
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     upstream_sources = json.dumps(
         [
-            {"source": "time.cloudflare.com", "enabled": True, "use_nts": True, "description": "secure", "maxdelay": "0.5"},
+            {"source": "time.cloudflare.com", "enabled": True, "use_nts": True, "description": "secure"},
             {"source": "time.google.com", "enabled": True, "use_nts": False, "description": "plain"},
             {"source": "disabled.example.com", "enabled": False, "use_nts": True, "description": "kept disabled"},
         ]
     )
     response = client.post(
-        "/chrony/settings",
+        "/ntp/settings",
         data={
             "enabled": "on",
             "hostname": "ntp.labfoundry.internal",
@@ -1697,30 +1627,31 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client, monkeypa
     assert payload["upstream_sources"][2]["enabled"] is False
     assert payload["allow_clients"] == "192.168.50.0/24"
     assert payload["nts_server_enabled"] is True
-    assert payload["nts_server_cert_path"] == "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt"
-    assert payload["nts_server_key_path"] == "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.key"
+    assert payload["nts_server_cert_path"] == "/etc/labfoundry/ntp/certs/ntp.labfoundry.internal-chain.pem"
+    assert payload["nts_server_key_path"] == "/etc/labfoundry/ntp/certs/ntp.labfoundry.internal.key"
     assert payload["nts_ke_port"] == 4460
     assert payload["valid"] is True
-    assert "ntsdumpdir /var/lib/chrony" in payload["config_preview"]
-    assert "server time.cloudflare.com iburst nts maxdelay 0.5" in payload["config_preview"]
-    assert "bindaddress 192.168.50.1" in payload["config_preview"]
-    assert "allow 192.168.50.0/24" in payload["config_preview"]
-    assert "ntsservercert /etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt" in payload["config_preview"]
+    assert "nts cookie /var/lib/ntp/nts-keys" in payload["config_preview"]
+    assert "server time.cloudflare.com iburst nts" in payload["config_preview"]
+    assert "interface ignore wildcard" in payload["config_preview"]
+    assert "interface listen 192.168.50.1" in payload["config_preview"]
+    assert "restrict 192.168.50.0 mask 255.255.255.0 kod limited nomodify noquery" in payload["config_preview"]
+    assert "nts cert /etc/labfoundry/ntp/certs/ntp.labfoundry.internal-chain.pem" in payload["config_preview"]
     assert "/tmp/operator-input" not in payload["config_preview"]
     js = client.get("/static/app.js")
     assert js.status_code == 200
-    assert "initializeChronySettings" in js.text
-    assert "initializeChronyUpstreamsTable" in js.text
-    assert "chronyUpstreamRowHasSource" in js.text
-    assert "editable: chronyUpstreamRowHasSource" in js.text
+    assert "initializeNtpSettings" in js.text
+    assert "initializeNTPsecUpstreamsTable" in js.text
+    assert "ntpUpstreamRowHasSource" in js.text
+    assert "editable: ntpUpstreamRowHasSource" in js.text
     assert "function labFoundryBooleanFormatter" in js.text
     assert "formatter: labFoundryBooleanFormatter" in js.text
     assert "const tone = enabled ? \"good\" : \"bad\"" in js.text
     assert "boolean-glyph ${tone}" in js.text
-    assert "initializeChronySourceHealthModal" in js.text
-    assert "Check Chrony source health" in js.text
-    assert "openChronySourceHealthModal" in js.text
-    assert "/chrony/source-health" in js.text
+    assert "initializeNTPsecSourceHealthModal" in js.text
+    assert "Check NTPsec source health" in js.text
+    assert "openNTPsecSourceHealthModal" in js.text
+    assert "/ntp/source-health" in js.text
     assert "updateNtpValidation" in js.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
@@ -1728,47 +1659,47 @@ def test_chrony_page_autosave_updates_desired_state_and_preview(client, monkeypa
     assert ".side-stack .help-icon::after" in app_css.text
     assert "right: 0;" in app_css.text
 
-    health = client.get("/chrony/source-health")
+    health = client.get("/ntp/source-health")
     assert health.status_code == 200
     assert "status" in health.json()
 
     assert "External NTP servers" not in client.get("/settings").text
 
     with SessionLocal() as db:
-        settings = db.execute(select(ChronySettings)).scalar_one()
-        managed_certificate = db.execute(select(CaCertificate).where(CaCertificate.managed_owner == "chrony:nts")).scalar_one()
+        settings = db.execute(select(NtpSettings)).scalar_one()
+        managed_certificate = db.execute(select(CaCertificate).where(CaCertificate.managed_owner == "ntp:nts")).scalar_one()
         assert settings.enabled is True
         assert settings.listen_interface == "eth2"
         assert settings.listen_address == "192.168.50.1"
-        assert settings.nts_server_cert_path == "/etc/labfoundry/chrony/certs/ntp.labfoundry.internal.crt"
+        assert settings.nts_server_cert_path == "/etc/labfoundry/ntp/certs/ntp.labfoundry.internal-chain.pem"
         assert managed_certificate.status == "issued"
-        assert managed_certificate.cert_path == settings.nts_server_cert_path
+        assert managed_certificate.chain_path == settings.nts_server_cert_path
 
 
-def test_chrony_disables_and_rejects_nts_when_runtime_does_not_support_it(client, monkeypatch):
+def test_ntp_disables_and_rejects_nts_when_runtime_does_not_support_it(client, monkeypatch):
     import json
 
     from sqlalchemy import select
 
     from labfoundry.app.adapters.system import AdapterResult
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import AuditEvent, ChronySettings
-    from labfoundry.app.services.chrony import chrony_upstream_sources, dump_chrony_upstream_sources
+    from labfoundry.app.models import AuditEvent, NtpSettings
+    from labfoundry.app.services.ntp import ntp_upstream_sources, dump_ntp_upstream_sources
 
     unsupported = AdapterResult(
-        command=["labfoundry-helper", "chronyd", "capabilities"],
+        command=["labfoundry-helper", "ntpd", "capabilities"],
         dry_run=False,
-        stdout=json.dumps({"nts": False, "version": "chronyd version 4.3 (-NTS)"}),
+        stdout=json.dumps({"nts": False, "version": "ntpd version 4.3 (-NTS)"}),
     )
     monkeypatch.setattr(
-        "labfoundry.app.ui.SystemAdapter.read_chronyd_capabilities",
+        "labfoundry.app.ui.SystemAdapter.read_ntpd_capabilities",
         lambda _self: unsupported,
     )
     login(client)
     with SessionLocal() as db:
-        settings = db.execute(select(ChronySettings)).scalar_one()
+        settings = db.execute(select(NtpSettings)).scalar_one()
         settings.nts_server_enabled = True
-        settings.upstream_sources_json = dump_chrony_upstream_sources(
+        settings.upstream_sources_json = dump_ntp_upstream_sources(
             [
                 {
                     "id": "cloudflare-nts",
@@ -1781,11 +1712,11 @@ def test_chrony_disables_and_rejects_nts_when_runtime_does_not_support_it(client
         )
         db.commit()
 
-    page = client.get("/chrony")
+    page = client.get("/ntp")
 
     assert page.status_code == 200
-    assert 'data-chrony-nts-supported="false"' in page.text
-    assert "Installed chronyd has no NTS support." in page.text
+    assert 'data-ntp-nts-supported="false"' in page.text
+    assert "Installed ntpd has no NTS support." in page.text
     assert "NTS unavailable" in page.text
     assert "NTS server (disabled)" in page.text
     assert 'class="switch-field disabled-field" aria-disabled="true"' in page.text
@@ -1795,7 +1726,7 @@ def test_chrony_disables_and_rejects_nts_when_runtime_does_not_support_it(client
 
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
-        "/chrony/settings",
+        "/ntp/settings",
         data={
             "enabled": "on",
             "hostname": "ntp.labfoundry.internal",
@@ -1824,25 +1755,25 @@ def test_chrony_disables_and_rejects_nts_when_runtime_does_not_support_it(client
     assert payload["nts_supported"] is False
     assert payload["nts_server_enabled"] is False
     assert payload["upstream_sources"][0]["use_nts"] is False
-    assert "ntsdumpdir" not in payload["config_preview"]
+    assert "nts cookie" not in payload["config_preview"]
     assert "server time.cloudflare.com iburst nts" not in payload["config_preview"]
 
     with SessionLocal() as db:
-        settings = db.execute(select(ChronySettings)).scalar_one()
+        settings = db.execute(select(NtpSettings)).scalar_one()
         assert settings.nts_server_enabled is False
-        assert all(source["use_nts"] is False for source in chrony_upstream_sources(settings))
+        assert all(source["use_nts"] is False for source in ntp_upstream_sources(settings))
         audit = db.execute(
-            select(AuditEvent).where(AuditEvent.action == "disable_unsupported_chrony_nts")
+            select(AuditEvent).where(AuditEvent.action == "disable_unsupported_ntp_nts")
         ).scalar_one()
         assert audit.actor == "system"
 
 
-def test_chrony_validation_rejects_enabled_service_without_bind_or_upstreams(client):
+def test_ntp_validation_rejects_enabled_service_without_bind_or_upstreams(client):
     login(client)
-    page = client.get("/chrony")
+    page = client.get("/ntp")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
-        "/chrony/settings",
+        "/ntp/settings",
         data={
             "enabled": "on",
             "hostname": "ntp.labfoundry.internal",
@@ -1858,16 +1789,16 @@ def test_chrony_validation_rejects_enabled_service_without_bind_or_upstreams(cli
     assert response.status_code == 200
     payload = response.json()
     assert payload["valid"] is False
-    assert "Chrony listen interface is required when the service is enabled." in payload["validation_errors"]
-    assert "At least one Chrony upstream server is required." in payload["validation_errors"]
+    assert "NTP listen interface is required when the service is enabled." in payload["validation_errors"]
+    assert "At least one NTP upstream server is required." in payload["validation_errors"]
 
 
-def test_chrony_validation_allows_disabled_service_without_upstreams(client):
+def test_ntp_validation_allows_disabled_service_without_upstreams(client):
     login(client)
-    page = client.get("/chrony")
+    page = client.get("/ntp")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     response = client.post(
-        "/chrony/settings",
+        "/ntp/settings",
         data={
             "hostname": "ntp.labfoundry.internal",
             "listen_interfaces_present": "1",
@@ -1886,7 +1817,7 @@ def test_chrony_validation_allows_disabled_service_without_upstreams(client):
     assert payload["enabled"] is False
     assert payload["valid"] is True
     assert payload["upstream_servers"] == []
-    assert "At least one Chrony upstream server is required." not in payload["validation_errors"]
+    assert "At least one NTP upstream server is required." not in payload["validation_errors"]
     assert "server " not in payload["config_preview"]
 
 
@@ -4596,11 +4527,11 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
         ),
     )
     monkeypatch.setattr(
-        "labfoundry.app.ui.SystemAdapter.read_chronyd_logs",
+        "labfoundry.app.ui.SystemAdapter.read_ntpd_logs",
         lambda _self: AdapterResult(
-            command=["labfoundry-helper", "chronyd", "logs"],
+            command=["labfoundry-helper", "ntpd", "logs"],
             dry_run=False,
-            stdout="chronyd ready\nprivate_key=do-not-render\n",
+            stdout="ntpd ready\nprivate_key=do-not-render\n",
         ),
     )
     monkeypatch.setattr(
@@ -4649,7 +4580,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "TFTP" in response.text
     assert "LDAP / LDAPS" in response.text
     assert "KMS" in response.text
-    assert "Chrony" in response.text
+    assert "NTP / NTS" in response.text
     assert "Nginx" in response.text
     assert "HTTP Access" in response.text
     assert "HTTP Errors" in response.text
@@ -4687,7 +4618,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "https://dl.broadcom.com/[redacted-token]/PROD/file.json" in response.text
     assert "secret-download-token" not in response.text
     assert jwt_segment not in response.text
-    assert "chronyd ready" in response.text
+    assert "ntpd ready" in response.text
     assert "query[A] example.test" in response.text
     assert "DHCPACK(eth1)" in response.text
     assert "sent /var/lib/labfoundry/pxe/tftp/snponly.efi" in response.text
@@ -4714,7 +4645,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
         "dnsmasq-dhcp",
         "dnsmasq-tftp",
         "ldap",
-        "chrony",
+        "ntp",
         "nginx",
         "nginx-access",
         "nginx-error",
@@ -4834,9 +4765,9 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "labfoundry.app.ui.SystemAdapter.read_chronyd_logs",
+        "labfoundry.app.ui.SystemAdapter.read_ntpd_logs",
         lambda _self: AdapterResult(
-            command=["labfoundry-helper", "chronyd", "logs"], dry_run=True, stdout="No host Chrony journal is read in development mode."
+            command=["labfoundry-helper", "ntpd", "logs"], dry_run=True, stdout="No host NTPsec journal is read in development mode."
         ),
     )
     monkeypatch.setattr(
@@ -4863,7 +4794,7 @@ def test_logs_page_handles_default_pure_posix_log_path(client, monkeypatch):
     assert "TFTP" in response.text
     assert "LDAP / LDAPS" in response.text
     assert "logs-audit-panel" not in response.text
-    assert "Chrony" in response.text
+    assert "NTPsec" in response.text
     assert "Nginx" in response.text
     assert "Log file has not been written yet." in response.text
 
@@ -5182,14 +5113,14 @@ def test_new_record_rows_lock_defaults_until_required_field(client):
     assert 'markNewRecordRow(row, "host_label")' in dns_block
 
 
-def test_dhcp_zone_defaults_follow_vlan_dns_and_interface_chrony_bindings(client):
+def test_dhcp_zone_defaults_follow_vlan_dns_and_interface_ntp_bindings(client):
     import html
     import json
 
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ChronySettings, DnsSettings, PhysicalInterface
+    from labfoundry.app.models import NtpSettings, DnsSettings, PhysicalInterface
 
     with SessionLocal() as db:
         eth2_interface = db.execute(select(PhysicalInterface).where(PhysicalInterface.name == "eth2")).scalar_one()
@@ -5198,11 +5129,11 @@ def test_dhcp_zone_defaults_follow_vlan_dns_and_interface_chrony_bindings(client
         dns_settings.enabled = True
         dns_settings.listen_interface = "eth2\neth1.20"
         dns_settings.listen_address = "192.168.50.1\nfd00:50::1\n192.168.20.1"
-        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
-        chrony_settings.enabled = True
-        chrony_settings.listen_interface = "eth2"
-        chrony_settings.listen_address = "192.168.50.1\nfd00:50::1"
-        db.add_all([eth2_interface, dns_settings, chrony_settings])
+        ntp_settings = db.execute(select(NtpSettings)).scalar_one()
+        ntp_settings.enabled = True
+        ntp_settings.listen_interface = "eth2"
+        ntp_settings.listen_address = "192.168.50.1\nfd00:50::1"
+        db.add_all([eth2_interface, dns_settings, ntp_settings])
         db.commit()
 
     login(client)
@@ -9114,7 +9045,7 @@ def test_physical_interface_edit_updates_desired_state(client):
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import (
         CaSettings,
-        ChronySettings,
+        NtpSettings,
         DhcpScope,
         DnsRecord,
         DnsSettings,
@@ -9136,7 +9067,7 @@ def test_physical_interface_edit_updates_desired_state(client):
     with SessionLocal() as db:
         for model in (
             DnsSettings,
-            ChronySettings,
+            NtpSettings,
             CaSettings,
             KmsSettings,
             VcfBackupSettings,
@@ -9211,7 +9142,7 @@ def test_physical_interface_edit_updates_desired_state(client):
     with SessionLocal() as db:
         for model in (
             DnsSettings,
-            ChronySettings,
+            NtpSettings,
             CaSettings,
             KmsSettings,
             VcfBackupSettings,
@@ -9249,7 +9180,7 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ChronySettings, DhcpScope, DnsRecord, DnsSettings, Setting
+    from labfoundry.app.models import NtpSettings, DhcpScope, DnsRecord, DnsSettings, Setting
     from labfoundry.app.services.esxi_pxe import ESXI_PXE_DEFAULT_HOSTNAME, ESXI_PXE_DNS_RECORD_DESCRIPTION, ESXI_PXE_HTTP_PORT, ESXI_PXE_LISTEN_ADDRESS_KEY, ESXI_TFTP_ROOT, save_esxi_pxe_boot_settings
 
     login(client)
@@ -9258,10 +9189,10 @@ def test_physical_interface_edit_repairs_stale_scope_after_host_inventory_refres
         dns_settings.enabled = True
         dns_settings.listen_interface = "eth2"
         dns_settings.listen_address = "192.168.1.1"
-        chrony_settings = db.execute(select(ChronySettings)).scalar_one()
-        chrony_settings.enabled = True
-        chrony_settings.listen_interface = "eth2"
-        chrony_settings.listen_address = "192.168.1.1"
+        ntp_settings = db.execute(select(NtpSettings)).scalar_one()
+        ntp_settings.enabled = True
+        ntp_settings.listen_interface = "eth2"
+        ntp_settings.listen_address = "192.168.1.1"
         scope = db.execute(select(DhcpScope).where(DhcpScope.name == "SiteA")).scalar_one()
         scope.interface_name = "eth2"
         scope.site_address = "192.168.1.1"
@@ -10828,11 +10759,11 @@ def test_services_ui_records_dry_run_action(client):
     assert "Command shape" in page.text
     assert "systemctl restart dns" in page.text
     service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
-    assert all(row["service"] != "ntpd" for row in service_rows)
+    assert all(row["service"] != "chronyd" for row in service_rows)
     assert "NTPD" not in page.text
-    chrony_row = next(row for row in service_rows if row["service"] == "chronyd")
-    assert chrony_row["display_name"] == "Chrony"
-    assert chrony_row["detail"] == "chronyd.service / UDP 123"
+    ntp_row = next(row for row in service_rows if row["service"] == "ntpd")
+    assert ntp_row["display_name"] == "NTP / NTS"
+    assert ntp_row["detail"] == "ntpd.service / UDP 123"
     ca_row = next(row for row in service_rows if row["service"] == "ca")
     assert ca_row["running"] is False
     assert ca_row["enabled"] is False
@@ -10854,8 +10785,8 @@ def test_services_ui_records_dry_run_action(client):
     assert js.status_code == 200
     assert "initializeServicesTable" in js.text
     assert "submitServiceAction" in js.text
-    assert "Check Chrony source health" in js.text
-    assert "openChronySourceHealthModal" in js.text
+    assert "Check NTPsec source health" in js.text
+    assert "openNTPsecSourceHealthModal" in js.text
     assert 'height: "100%"' in js.text
     assert 'height: "520px"' not in js.text
     assert 'title: "Health"' not in js.text
@@ -10870,36 +10801,6 @@ def test_services_ui_records_dry_run_action(client):
     assert ".service-name-cell" in css.text
     assert ".services-workspace" in css.text
     assert ".services-table" in css.text
-
-
-def test_services_prunes_and_hides_retired_ntpd_row(client):
-    import html
-    import json
-
-    from sqlalchemy import select
-
-    from labfoundry.app.database import SessionLocal
-    from labfoundry.app.models import ServiceState
-    from labfoundry.app.seed import seed_initial_data
-
-    with SessionLocal() as db:
-        db.add(ServiceState(service="ntpd", display_name="NTPD", running=False, enabled=False, health="disabled", detail="ntpd.service / UDP 123"))
-        db.commit()
-        seed_initial_data(db, include_examples=False)
-        assert db.execute(select(ServiceState).where(ServiceState.service == "ntpd")).scalar_one_or_none() is None
-
-    login(client)
-    page = client.get("/services")
-    assert page.status_code == 200
-    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
-    assert all(row["service"] != "ntpd" for row in service_rows)
-    assert "NTPD" not in page.text
-
-    token = create_api_token(client, ["read:services"])
-    api_response = client.get("/api/v1/services", headers={"Authorization": f"Bearer {token}"})
-    assert api_response.status_code == 200
-    assert all(row["service"] != "ntpd" for row in api_response.json())
-    assert client.get("/api/v1/services/ntpd", headers={"Authorization": f"Bearer {token}"}).status_code == 404
 
 
 def test_services_and_esxi_page_show_enabled_esxi_pxe_boot_state(client):
@@ -11158,7 +11059,7 @@ def test_services_live_dns_dhcp_runtime_uses_dnsmasq_systemd(client, monkeypatch
     assert client.get("/api/v1/services/dhcp", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
 
 
-def test_services_live_chrony_status_uses_systemd(client, monkeypatch):
+def test_services_live_ntp_status_uses_systemd(client, monkeypatch):
     import html
     import json
 
@@ -11166,8 +11067,8 @@ def test_services_live_chrony_status_uses_systemd(client, monkeypatch):
     from labfoundry.app.config import get_settings
 
     def fake_service_status(self, unit: str):
-        active = "active" if unit == "chronyd.service" else "inactive"
-        enabled = "enabled" if unit == "chronyd.service" else "disabled"
+        active = "active" if unit == "ntpd.service" else "inactive"
+        enabled = "enabled" if unit == "ntpd.service" else "disabled"
         return AdapterResult(
             command=["systemctl", "is-active", unit, "&&", "systemctl", "is-enabled", unit],
             dry_run=False,
@@ -11183,13 +11084,13 @@ def test_services_live_chrony_status_uses_systemd(client, monkeypatch):
     page = client.get("/services")
     assert page.status_code == 200
     service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
-    chrony_row = next(row for row in service_rows if row["service"] == "chronyd")
-    assert chrony_row["running"] is True
-    assert chrony_row["enabled"] is True
-    assert "health" not in chrony_row
+    ntp_row = next(row for row in service_rows if row["service"] == "ntpd")
+    assert ntp_row["running"] is True
+    assert ntp_row["enabled"] is True
+    assert "health" not in ntp_row
 
     token = create_api_token(client, ["read:services"])
-    api_response = client.get("/api/v1/services/chronyd", headers={"Authorization": f"Bearer {token}"})
+    api_response = client.get("/api/v1/services/ntpd", headers={"Authorization": f"Bearer {token}"})
     assert api_response.status_code == 200
     assert api_response.json()["running"] is True
     assert api_response.json()["enabled"] is True

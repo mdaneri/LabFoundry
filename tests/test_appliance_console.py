@@ -17,7 +17,6 @@ from labfoundry.app.appliance_console import (
     validate_dns_servers,
     validate_ipv6_management_values,
     validate_management_values,
-    validate_ntp_servers,
 )
 
 
@@ -46,13 +45,10 @@ def test_console_management_validation_limits_dhcp_and_static_values():
         validate_management_values("dhcp", "192.168.49.1/24", "")
 
 
-def test_console_dns_and_ntp_validation_accept_compact_lists():
+def test_console_dns_validation_accepts_compact_lists():
     assert validate_dns_servers("1.1.1.1, 9.9.9.9") == ["1.1.1.1", "9.9.9.9"]
-    assert validate_ntp_servers("time.cloudflare.com nts.netnod.se") == ["time.cloudflare.com", "nts.netnod.se"]
     with pytest.raises(ConsoleOperationError, match="DNS server"):
         validate_dns_servers("resolver.example.com")
-    with pytest.raises(ConsoleOperationError, match="NTP server"):
-        validate_ntp_servers("bad_name")
 
 
 def test_console_ipv6_management_validation_supports_independent_modes_and_gateways():
@@ -294,16 +290,23 @@ def test_console_management_rows_use_stable_table_columns():
     ipv6 = CursesConsole._network_table_row(
         "IPv6", "Awaiting RA/SLAAC", 128, gateway="none", mode="automatic"
     )
-    ntp = CursesConsole._network_table_row(
-        "NTP", "time.cloudflare.com, nts.netnod.se", 128, auxiliary=("Chrony", "enabled")
+    firewall = CursesConsole._network_table_row(
+        "Firewall", "enabled", 128, auxiliary=("Isolation", "enabled")
     )
 
     assert ipv4.index("GW ") == ipv6.index("GW ")
     assert ipv4.index("Mode ") == ipv6.index("Mode ")
     assert ipv4.startswith("IPv4      192.168.167.219/24")
     assert ipv6.startswith("IPv6      Awaiting RA/SLAAC")
-    assert ntp.startswith("NTP       time.cloudflare.com, nts.netnod.se")
-    assert ntp.endswith("Chrony: enabled")
+    assert firewall.startswith("Firewall  enabled")
+    assert firewall.endswith("Isolation: enabled")
+
+
+def test_console_has_no_dedicated_time_service_surface():
+    source = Path(appliance_console.__file__).read_text(encoding="utf-8")
+    for forbidden in ("NtpSettings", "validate_ntp_servers", "configure_ntp", '"NTP servers"', '"NTPsec"'):
+        assert forbidden not in source
+    assert '{"ntpd"}' not in source
 
 
 def test_console_restores_main_surface_before_reopening_parent_menu():
@@ -435,7 +438,7 @@ def test_console_service_isolation_preserves_console_network_and_firewall(monkey
     monkeypatch.setattr(
         helper,
         "_console_unit_state",
-        lambda unit: {"unit": unit, "enabled": True, "active": unit != "chronyd.service"},
+        lambda unit: {"unit": unit, "enabled": True, "active": unit != "ntpd.service"},
     )
     commands: list[list[str]] = []
 
@@ -466,7 +469,7 @@ def test_console_service_restore_uses_saved_enable_and_active_state(monkeypatch,
             {
                 "units": [
                     {"unit": "nginx.service", "enabled": True, "active": True},
-                    {"unit": "chronyd.service", "enabled": False, "active": False},
+                    {"unit": "ntpd.service", "enabled": False, "active": False},
                 ]
             }
         ),

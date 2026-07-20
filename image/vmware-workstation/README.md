@@ -178,8 +178,7 @@ intended for vSphere/ESXi import:
 | Management network | `labfoundry.ipv6_cidr` | no | Blank while IPv6 is enabled uses RA/SLAAC; a value selects static IPv6. |
 | Management network | `labfoundry.ipv6_gateway` | no | Optional with a static IPv6 CIDR; accepts an on-link global address or link-local address. |
 | Management network | `labfoundry.dns_servers` | no | Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS. |
-| Appliance identity and time | `labfoundry.fqdn` | yes | Appliance FQDN applied to Photon OS and LabFoundry desired state. |
-| Appliance identity and time | `labfoundry.ntp_servers` | no | Optional NTP names or IPs. Blank keeps the image defaults. |
+| Appliance identity | `labfoundry.fqdn` | yes | Appliance FQDN applied to Photon OS and LabFoundry desired state. |
 | Initial credentials | `labfoundry.admin_password` | yes | Initial LabFoundry web `admin` password. |
 | Initial credentials | `labfoundry.root_password` | yes | Photon root console password. Root SSH remains disabled by default. |
 | Initial credentials | `labfoundry.root_ssh_enabled` | no | Boolean, default `false`. Enables root password SSH immediately on first boot. |

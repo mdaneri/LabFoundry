@@ -62,7 +62,7 @@ from labfoundry.app.models import (
     LdapSettings,
     LdapUser,
     NatRule,
-    ChronySettings,
+    NtpSettings,
     PhysicalInterface,
     Role,
     Route,
@@ -379,17 +379,17 @@ from labfoundry.app.services.ldap import (
     validate_ldap_state,
     vcf_ldap_settings,
 )
-from labfoundry.app.services.chrony import (
-    CHRONY_DEFAULT_HOSTNAME,
-    CHRONY_STAGED_CONFIG_PATH,
-    default_chrony_upstream_fields,
-    dump_chrony_upstream_sources,
+from labfoundry.app.services.ntp import (
+    NTP_DEFAULT_HOSTNAME,
+    NTP_STAGED_CONFIG_PATH,
+    default_ntp_upstream_fields,
+    dump_ntp_upstream_sources,
     join_allow_clients,
-    chrony_settings_to_dict,
-    chrony_upstream_sources,
-    render_chrony_config,
+    ntp_settings_to_dict,
+    ntp_upstream_sources,
+    render_ntp_config,
     split_allow_clients,
-    validate_chrony_state,
+    validate_ntp_state,
 )
 from labfoundry.app.services.vcf_backups import (
     VCF_BACKUP_DEFAULT_VOLUME_MOUNT,
@@ -787,9 +787,9 @@ def ca_service_cert_paths(service_dir: str, certificate_name: str) -> tuple[str,
     return f"{base}.crt", f"{base}.key", f"{base}-chain.pem"
 
 
-def chrony_nts_certificate_paths(settings: ChronySettings) -> tuple[str, str, str]:
-    hostname = normalize_dns_hostname(settings.hostname or CHRONY_DEFAULT_HOSTNAME)
-    return ca_service_cert_paths("chrony", hostname)
+def ntp_nts_certificate_paths(settings: NtpSettings) -> tuple[str, str, str]:
+    hostname = normalize_dns_hostname(settings.hostname or NTP_DEFAULT_HOSTNAME)
+    return ca_service_cert_paths("ntp", hostname)
 
 
 def kms_client_common_name(client: KmsClient) -> str:
@@ -895,17 +895,17 @@ def managed_ca_certificate_specs(db: Session) -> list[ManagedCertificateSpec]:
             )
         )
 
-    chrony_settings = get_chrony_settings_row(db)
-    if chrony_settings.nts_server_enabled:
-        cert_path, key_path, chain_path = chrony_nts_certificate_paths(chrony_settings)
+    ntp_settings = get_ntp_settings_row(db)
+    if ntp_settings.nts_server_enabled:
+        cert_path, key_path, chain_path = ntp_nts_certificate_paths(ntp_settings)
         specs.append(
             ManagedCertificateSpec(
-                owner="chrony:nts",
-                common_name=normalize_dns_hostname(chrony_settings.hostname or CHRONY_DEFAULT_HOSTNAME),
-                dns_names=[normalize_dns_hostname(chrony_settings.hostname or CHRONY_DEFAULT_HOSTNAME)],
-                ip_addresses=split_addresses(chrony_settings.listen_address),
+                owner="ntp:nts",
+                common_name=normalize_dns_hostname(ntp_settings.hostname or NTP_DEFAULT_HOSTNAME),
+                dns_names=[normalize_dns_hostname(ntp_settings.hostname or NTP_DEFAULT_HOSTNAME)],
+                ip_addresses=split_addresses(ntp_settings.listen_address),
                 profile_name=CA_SERVER_PROFILE_NAME,
-                description="Managed Chrony NTS server certificate.",
+                description="Managed NTPsec NTS server certificate.",
                 cert_path=cert_path,
                 key_path=key_path,
                 chain_path=chain_path,
@@ -1014,16 +1014,15 @@ def get_ldap_settings_row(db: Session) -> LdapSettings:
     return settings
 
 
-def get_chrony_settings_row(db: Session) -> ChronySettings:
-    settings = db.execute(select(ChronySettings)).scalar_one_or_none()
+def get_ntp_settings_row(db: Session) -> NtpSettings:
+    settings = db.execute(select(NtpSettings)).scalar_one_or_none()
     if settings is None:
-        appliance_settings = get_appliance_settings_row(db)
-        chrony_upstreams = default_chrony_upstream_fields(appliance_settings.ntp_servers)
-        settings = ChronySettings(
-            hostname=CHRONY_DEFAULT_HOSTNAME,
-            upstream_servers=chrony_upstreams["upstream_servers"],
-            upstream_sources_json=chrony_upstreams["upstream_sources_json"],
-            config_path=CHRONY_STAGED_CONFIG_PATH,
+        ntp_upstreams = default_ntp_upstream_fields()
+        settings = NtpSettings(
+            hostname=NTP_DEFAULT_HOSTNAME,
+            upstream_servers=ntp_upstreams["upstream_servers"],
+            upstream_sources_json=ntp_upstreams["upstream_sources_json"],
+            config_path=NTP_STAGED_CONFIG_PATH,
         )
         db.add(settings)
         db.commit()
@@ -1403,7 +1402,7 @@ def refresh_interface_dependent_addresses(
 
     for model, label in [
         (DnsSettings, "DNS"),
-        (ChronySettings, "Chrony"),
+        (NtpSettings, "NTP / NTS"),
         (CaSettings, "Certificate Authority"),
         (KmsSettings, "KMS"),
         (LdapSettings, "LDAP"),
@@ -1414,9 +1413,9 @@ def refresh_interface_dependent_addresses(
         update_listener_rows(model, label)
 
     dns_settings = db.execute(select(DnsSettings)).scalar_one_or_none()
-    chrony_settings = db.execute(select(ChronySettings)).scalar_one_or_none()
+    ntp_settings = db.execute(select(NtpSettings)).scalar_one_or_none()
     dns_bound = bool(dns_settings and dns_settings.enabled and new_name in split_interfaces(dns_settings.listen_interface))
-    chrony_bound = bool(chrony_settings and chrony_settings.enabled and new_name in split_interfaces(chrony_settings.listen_interface))
+    ntp_bound = bool(ntp_settings and ntp_settings.enabled and new_name in split_interfaces(ntp_settings.listen_interface))
 
     def update_dhcp_scope(scope: DhcpScope | DhcpSettings, label: str) -> None:
         if getattr(scope, "interface_name", "") != old_name:
@@ -1458,8 +1457,8 @@ def refresh_interface_dependent_addresses(
             scope.range_expression = compact_dhcp_range_expression(scope)
         if not getattr(scope, "dns_server", "") or getattr(scope, "dns_server", "") in stale_addresses or dns_bound:
             scope.dns_server = new_address if dns_bound or getattr(scope, "dns_server", "") in stale_addresses else getattr(scope, "dns_server", "")
-        if isinstance(scope, DhcpScope) and (not scope.ntp_server or scope.ntp_server in stale_addresses or chrony_bound):
-            scope.ntp_server = new_address if chrony_bound or scope.ntp_server in stale_addresses else scope.ntp_server
+        if isinstance(scope, DhcpScope) and (not scope.ntp_server or scope.ntp_server in stale_addresses or ntp_bound):
+            scope.ntp_server = new_address if ntp_bound or scope.ntp_server in stale_addresses else scope.ntp_server
         if hasattr(scope, "updated_at"):
             scope.updated_at = utcnow()
         after = (
@@ -1668,7 +1667,7 @@ def vcf_backup_context(db: Session, *, reconcile: bool = True) -> dict:
     }
 
 
-def chronyd_capabilities_payload(result: AdapterResult) -> dict[str, Any]:
+def ntpd_capabilities_payload(result: AdapterResult) -> dict[str, Any]:
     if result.returncode != 0:
         return {}
     text = result.stdout or ""
@@ -1690,21 +1689,21 @@ def chronyd_capabilities_payload(result: AdapterResult) -> dict[str, Any]:
 
 
 def ntp_context(db: Session, *, include_runtime_health: bool = False, reconcile: bool = True) -> dict:
-    settings = get_chrony_settings_row(db)
+    settings = get_ntp_settings_row(db)
     if reconcile and normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
-    capability_result = SystemAdapter().read_chronyd_capabilities()
-    chrony_capabilities = chronyd_capabilities_payload(capability_result)
-    chrony_nts_supported = bool(chrony_capabilities.get("nts"))
-    if not chrony_nts_supported:
-        upstream_sources = chrony_upstream_sources(settings)
+    capability_result = SystemAdapter().read_ntpd_capabilities()
+    ntp_capabilities = ntpd_capabilities_payload(capability_result)
+    ntp_nts_supported = bool(ntp_capabilities.get("nts"))
+    if not ntp_nts_supported:
+        upstream_sources = ntp_upstream_sources(settings)
         nts_state_changed = settings.nts_server_enabled or any(bool(source.get("use_nts")) for source in upstream_sources)
         if reconcile and nts_state_changed:
             for source in upstream_sources:
                 source["use_nts"] = False
             settings.nts_server_enabled = False
-            settings.upstream_sources_json = dump_chrony_upstream_sources(upstream_sources)
+            settings.upstream_sources_json = dump_ntp_upstream_sources(upstream_sources)
             settings.upstream_servers = join_servers([str(source["source"]) for source in upstream_sources if source.get("enabled")])
             settings.updated_at = utcnow()
             db.add(settings)
@@ -1713,34 +1712,34 @@ def ntp_context(db: Session, *, include_runtime_health: bool = False, reconcile:
             record_audit(
                 db,
                 actor="system",
-                action="disable_unsupported_chrony_nts",
-                resource_type="chronyd",
+                action="disable_unsupported_ntp_nts",
+                resource_type="ntpd",
                 resource_id=str(settings.id),
-                detail="Installed chronyd does not include NTS support; NTS server and upstream flags were disabled.",
+                detail="Installed ntpd does not include NTS support; NTS server and upstream flags were disabled.",
             )
     available_interfaces = service_bind_options(db)
-    chrony_nts_cert_path, chrony_nts_key_path, chrony_nts_chain_path = chrony_nts_certificate_paths(settings)
+    ntp_nts_cert_path, ntp_nts_key_path, ntp_nts_chain_path = ntp_nts_certificate_paths(settings)
     if reconcile and settings.nts_server_enabled:
-        settings.nts_server_cert_path = chrony_nts_cert_path
-        settings.nts_server_key_path = chrony_nts_key_path
+        settings.nts_server_cert_path = ntp_nts_chain_path
+        settings.nts_server_key_path = ntp_nts_key_path
         settings.nts_ke_port = 4460
-    config_preview = render_chrony_config(settings)
+    config_preview = render_ntp_config(settings)
     ca_state_errors = ensure_ca_state(db) if reconcile and settings.nts_server_enabled else []
-    validation_errors = [*ca_state_errors, *validate_chrony_state(settings, {interface["name"] for interface in available_interfaces})]
+    validation_errors = [*ca_state_errors, *validate_ntp_state(settings, {interface["name"] for interface in available_interfaces})]
     if settings.nts_server_enabled:
         ca_settings = get_ca_settings_row(db)
         if not ca_settings.enabled:
-            validation_errors.append("Chrony NTS server mode requires Certificate Authority to be enabled.")
+            validation_errors.append("NTPsec NTS server mode requires Certificate Authority to be enabled.")
         elif ca_state_errors:
-            validation_errors.append("Chrony NTS server mode requires healthy Certificate Authority state.")
-        elif not ca_certificate_available(db, "chrony:nts"):
-            validation_errors.append("Chrony NTS server mode requires an issued CA-managed server certificate before apply.")
-        if not chrony_nts_supported:
-            validation_errors.append("Chrony NTS server mode is unavailable because the installed chronyd binary does not include NTS support.")
-    status_result = SystemAdapter().read_chronyd_status() if include_runtime_health else None
+            validation_errors.append("NTPsec NTS server mode requires healthy Certificate Authority state.")
+        elif not ca_certificate_available(db, "ntp:nts"):
+            validation_errors.append("NTPsec NTS server mode requires an issued CA-managed server certificate before apply.")
+        if not ntp_nts_supported:
+            validation_errors.append("NTPsec NTS server mode is unavailable because the installed ntpd binary does not include NTS support.")
+    status_result = SystemAdapter().read_ntpd_status() if include_runtime_health else None
     return {
-        "chrony_settings": settings,
-        "chrony_settings_json": chrony_settings_to_dict(settings),
+        "ntp_settings": settings,
+        "ntp_settings_json": ntp_settings_to_dict(settings),
         "available_interfaces": available_interfaces,
         "selected_ntp_interfaces": split_interfaces(settings.listen_interface),
         "selected_ntp_addresses": split_addresses(settings.listen_address),
@@ -1749,15 +1748,15 @@ def ntp_context(db: Session, *, include_runtime_health: bool = False, reconcile:
         "ntp_bind_label": service_bind_label(settings.listen_interface, settings.listen_address),
         "ntp_config_preview": config_preview,
         "ntp_validation_errors": validation_errors,
-        "ntp_service_status": service_runtime_status(db, "chronyd"),
-        "ntp_chronyc_status": status_result.stdout if status_result else "Chrony source health is not loaded during page render.",
-        "ntp_chronyc_status_error": status_result.stderr if status_result and status_result.returncode != 0 else "",
-        "ntp_chronyc_status_dry_run": status_result.dry_run if status_result else False,
-        "chrony_nts_cert_path": chrony_nts_cert_path,
-        "chrony_nts_key_path": chrony_nts_key_path,
-        "chrony_nts_chain_path": chrony_nts_chain_path,
-        "chrony_nts_supported": chrony_nts_supported,
-        "chrony_nts_capabilities": chrony_capabilities,
+        "ntp_service_status": service_runtime_status(db, "ntpd"),
+        "ntp_ntpq_status": status_result.stdout if status_result else "NTPsec source health is not loaded during page render.",
+        "ntp_ntpq_status_error": status_result.stderr if status_result and status_result.returncode != 0 else "",
+        "ntp_ntpq_status_dry_run": status_result.dry_run if status_result else False,
+        "ntp_nts_cert_path": ntp_nts_chain_path,
+        "ntp_nts_key_path": ntp_nts_key_path,
+        "ntp_nts_chain_path": ntp_nts_chain_path,
+        "ntp_nts_supported": ntp_nts_supported,
+        "ntp_nts_capabilities": ntp_capabilities,
     }
 
 
@@ -1957,8 +1956,6 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         db.refresh(settings)
         db.refresh(dns_settings)
     local_dns_enabled = bool(dns_settings.enabled)
-    chrony_settings = get_chrony_settings_row(db)
-    chrony_enabled = bool(chrony_settings.enabled)
     interfaces = db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all()
     vlans = db.execute(select(VlanInterface).order_by(VlanInterface.parent_interface, VlanInterface.vlan_id)).scalars().all()
     management, observed_dhcp_dns_servers = management_dhcp_dns_context(interfaces)
@@ -1973,7 +1970,6 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         dns_record_conflict=local_dns_enabled and appliance_dns_record_conflict(db, settings.fqdn),
         ca_enabled=bool(ca_settings.enabled),
         management_https_cert_available=management_https_cert_available,
-        chrony_enabled=chrony_enabled,
         web_terminal_options=terminal_options,
     )
     if settings.root_ssh_enabled and get_settings().dry_run_system_adapters:
@@ -1995,7 +1991,6 @@ def appliance_settings_context(db: Session, *, reconcile_dns: bool = True) -> di
         "appliance_settings_json": appliance_settings_to_dict(settings),
         "service_dns_target_naming_choices": SERVICE_DNS_TARGET_NAMING_CHOICES,
         "local_dns_enabled": local_dns_enabled,
-        "chrony_enabled": chrony_enabled,
         "ca_enabled": bool(ca_settings.enabled),
         "management_https_cert_available": management_https_cert_available,
         "management_https_cert_path": management_https_cert_path,
@@ -2974,7 +2969,7 @@ def firewall_context(db: Session, *, reconcile: bool = True) -> dict:
         ca_settings=get_ca_settings_row(db),
         ca_portal_interfaces=ca_portal_firewall_interfaces(physical_interfaces, vlan_interfaces, interface_networks),
         kms_settings=get_kms_settings_row(db),
-        chrony_settings=get_chrony_settings_row(db),
+        ntp_settings=get_ntp_settings_row(db),
         vcf_backup_settings=get_vcf_backup_settings_row(db, reconcile_default_user=reconcile),
         vcf_depot_settings=get_vcf_offline_depot_settings_row(
             db,
@@ -3935,7 +3930,7 @@ def dnsmasq_context(db: Session, *, reconcile: bool = True) -> dict:
         "dhcp_scope_grid_defaults": dhcp_scope_grid_defaults(
             available_interfaces=available_interfaces,
             dns_settings=dns_settings,
-            chrony_settings=get_chrony_settings_row(db),
+            ntp_settings=get_ntp_settings_row(db),
             dhcp_scopes=dhcp_scopes,
             dns_domains=dns_domains,
         ),
@@ -3974,14 +3969,14 @@ def dhcp_scope_grid_defaults(
     *,
     available_interfaces: list[dict[str, Any]],
     dns_settings: DnsSettings,
-    chrony_settings: ChronySettings,
+    ntp_settings: NtpSettings,
     dhcp_scopes: list[DhcpScope],
     dns_domains: list[str],
 ) -> dict[str, Any]:
     dns_interfaces = set(split_interfaces(dns_settings.listen_interface)) if dns_settings.enabled else set()
-    chrony_interfaces = set(split_interfaces(chrony_settings.listen_interface)) if chrony_settings.enabled else set()
+    ntp_interfaces = set(split_interfaces(ntp_settings.listen_interface)) if ntp_settings.enabled else set()
     dns_addresses = set(split_addresses(dns_settings.listen_address)) if dns_settings.enabled else set()
-    chrony_addresses = set(split_addresses(chrony_settings.listen_address)) if chrony_settings.enabled else set()
+    ntp_addresses = set(split_addresses(ntp_settings.listen_address)) if ntp_settings.enabled else set()
     defaults: list[dict[str, Any]] = []
     for interface in available_interfaces:
         ipv4_address = str(interface.get("ipv4_address") or "")
@@ -3989,11 +3984,11 @@ def dhcp_scope_grid_defaults(
         primary_address = ipv4_address or ipv6_address or str(interface.get("address") or "")
         interface_name = str(interface.get("name") or "")
         dns_enabled = interface_name in dns_interfaces
-        chrony_enabled = interface_name in chrony_interfaces
+        ntp_enabled = interface_name in ntp_interfaces
         ipv4_dns_default = ipv4_address if dns_enabled and ipv4_address and (not dns_addresses or ipv4_address in dns_addresses) else ""
         ipv6_dns_default = ipv6_address if dns_enabled and ipv6_address and (not dns_addresses or ipv6_address in dns_addresses) else ""
-        ipv4_ntp_default = ipv4_address if chrony_enabled and ipv4_address and (not chrony_addresses or ipv4_address in chrony_addresses) else ""
-        ipv6_ntp_default = ipv6_address if chrony_enabled and ipv6_address and (not chrony_addresses or ipv6_address in chrony_addresses) else ""
+        ipv4_ntp_default = ipv4_address if ntp_enabled and ipv4_address and (not ntp_addresses or ipv4_address in ntp_addresses) else ""
+        ipv6_ntp_default = ipv6_address if ntp_enabled and ipv6_address and (not ntp_addresses or ipv6_address in ntp_addresses) else ""
         defaults.append(
             {
                 "name": interface_name,
@@ -6206,7 +6201,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "ca",
     "kms",
     "ldap",
-    "chronyd",
+    "ntpd",
     "vcf_backups",
     "vcf_offline_depot",
     "vcf_private_registry",
@@ -6261,41 +6256,7 @@ def load_appliance_apply_baselines(db: Session) -> dict[str, dict[str, Any]]:
     if not isinstance(payload, dict):
         return {}
     baselines = {str(key): value for key, value in payload.items() if isinstance(value, dict)}
-    normalize_legacy_appliance_settings_baseline(baselines)
     return baselines
-
-
-def normalize_legacy_appliance_settings_baseline(baselines: dict[str, dict[str, Any]]) -> None:
-    baseline = baselines.get("appliance_settings")
-    if not isinstance(baseline, dict):
-        return
-    preview = baseline.get("config_preview")
-    if not isinstance(preview, str) or ('"ntp_servers"' not in preview and '"time_sync_mode"' not in preview):
-        return
-    try:
-        payload = json.loads(preview)
-    except json.JSONDecodeError:
-        return
-    if not isinstance(payload, dict) or ("ntp_servers" not in payload and "time_sync_mode" not in payload):
-        return
-    payload.pop("ntp_servers", None)
-    payload.pop("time_sync_mode", None)
-    summary = [
-        item
-        for item in baseline.get("summary", [])
-        if "NTP server" not in str(item) and "time sync" not in str(item).lower() and "timesyncd" not in str(item).lower()
-    ]
-    config_preview = json.dumps(payload, indent=2, sort_keys=True)
-    baseline["summary"] = summary
-    baseline["config_preview"] = config_preview
-    baseline["snapshot_hash"] = appliance_snapshot_hash(
-        {
-            "unit_id": "appliance_settings",
-            "summary": summary,
-            "config_path": baseline.get("config_path", APPLIANCE_SETTINGS_STAGED_CONFIG_PATH),
-            "config_preview": config_preview,
-        }
-    )
 
 
 def save_appliance_apply_baselines(db: Session, baselines: dict[str, dict[str, Any]]) -> None:
@@ -7044,19 +7005,19 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
             baseline=baselines.get("ldap"),
         ),
         make_appliance_apply_unit(
-            unit_id="chronyd",
-            label="Chrony",
-            page_url="/chrony",
+            unit_id="ntpd",
+            label="NTP / NTS",
+            page_url="/ntp",
             context=ntp,
             summary=[
-                "service enabled" if ntp["chrony_settings"].enabled else "service disabled",
-                f"{len(ntp['chrony_settings_json']['upstream_servers'])} upstream servers",
+                "service enabled" if ntp["ntp_settings"].enabled else "service disabled",
+                f"{len(ntp['ntp_settings_json']['upstream_servers'])} upstream servers",
                 f"{len(ntp['selected_ntp_interfaces'])} listen interfaces",
             ],
             validation_errors=ntp["ntp_validation_errors"],
-            config_path=CHRONY_STAGED_CONFIG_PATH,
+            config_path=NTP_STAGED_CONFIG_PATH,
             config_preview=ntp["ntp_config_preview"],
-            baseline=baselines.get("chronyd"),
+            baseline=baselines.get("ntpd"),
         ),
         make_appliance_apply_unit(
             unit_id="vcf_backups",
@@ -7183,22 +7144,22 @@ def dnsmasq_apply_status(db: Session, dnsmasq: dict[str, Any]) -> dict[str, Any]
     return appliance_apply_status_from_unit(unit)
 
 
-def chronyd_apply_status(db: Session, ntp: dict[str, Any]) -> dict[str, Any]:
+def ntpd_apply_status(db: Session, ntp: dict[str, Any]) -> dict[str, Any]:
     baselines = load_appliance_apply_baselines(db)
     unit = make_appliance_apply_unit(
-        unit_id="chronyd",
-        label="Chrony",
-        page_url="/chrony",
+        unit_id="ntpd",
+        label="NTP / NTS",
+        page_url="/ntp",
         context=ntp,
         summary=[
-            "service enabled" if ntp["chrony_settings"].enabled else "service disabled",
-            f"{len(ntp['chrony_settings_json']['upstream_servers'])} upstream servers",
+            "service enabled" if ntp["ntp_settings"].enabled else "service disabled",
+            f"{len(ntp['ntp_settings_json']['upstream_servers'])} upstream servers",
             f"{len(ntp['selected_ntp_interfaces'])} listen interfaces",
         ],
         validation_errors=ntp["ntp_validation_errors"],
-        config_path=CHRONY_STAGED_CONFIG_PATH,
+        config_path=NTP_STAGED_CONFIG_PATH,
         config_preview=ntp["ntp_config_preview"],
-        baseline=baselines.get("chronyd"),
+        baseline=baselines.get("ntpd"),
     )
     return appliance_apply_status_from_unit(unit)
 
@@ -7866,7 +7827,7 @@ def log_sources_context(*, max_lines: int = 100) -> list[dict[str, Any]]:
             max_lines=line_count,
             path_label="slapd.service journal: LDAP and LDAPS directory events",
         ),
-        journal_log_source("chrony", "Chrony", "chronyd.service", adapter.read_chronyd_logs(), max_lines=line_count),
+        journal_log_source("ntp", "NTP / NTS", "ntpd.service", adapter.read_ntpd_logs(), max_lines=line_count),
         journal_log_source("nginx", "Nginx", "nginx.service", adapter.read_nginx_logs(), max_lines=line_count),
         journal_log_source(
             "nginx-access",
@@ -8146,14 +8107,14 @@ def execute_appliance_apply_unit(unit: dict[str, Any], *, adapter: SystemAdapter
                 Path(config_path).unlink(missing_ok=True)
             except OSError:
                 pass
-    elif unit_id == "chronyd":
-        config_path = CHRONY_STAGED_CONFIG_PATH
+    elif unit_id == "ntpd":
+        config_path = NTP_STAGED_CONFIG_PATH
         if not adapter.dry_run:
-            config_path = stage_appliance_apply_config(CHRONY_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+            config_path = stage_appliance_apply_config(NTP_STAGED_CONFIG_PATH, unit["raw_config_preview"])
         results = run_adapter_steps(
             [
-                lambda: adapter.validate_chronyd_config(config_path),
-                lambda: adapter.apply_chronyd_config(config_path),
+                lambda: adapter.validate_ntpd_config(config_path),
+                lambda: adapter.apply_ntpd_config(config_path),
             ]
         )
     elif unit_id == "vcf_backups":
@@ -13443,19 +13404,19 @@ def update_kms_settings_from_ui(
     return RedirectResponse("/kms", status_code=303)
 
 
-@router.get("/chrony", response_class=HTMLResponse, response_model=None)
-def chrony_page(
+@router.get("/ntp", response_class=HTMLResponse, response_model=None)
+def ntp_page(
     request: Request,
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
     context = ntp_context(db)
-    return render(request, "chrony.html", {"identity": identity, **context, "appliance_apply_status": chronyd_apply_status(db, context)})
+    return render(request, "ntp.html", {"identity": identity, **context, "appliance_apply_status": ntpd_apply_status(db, context)})
 
 
-@router.get("/chrony/source-health", response_class=JSONResponse, response_model=None)
-def chrony_source_health(identity: Identity = Depends(require_session_identity)) -> JSONResponse:
-    result = SystemAdapter().read_chronyd_status()
+@router.get("/ntp/source-health", response_class=JSONResponse, response_model=None)
+def ntp_source_health(identity: Identity = Depends(require_session_identity)) -> JSONResponse:
+    result = SystemAdapter().read_ntpd_status()
     parsed_status: dict[str, Any] = {}
     if result.stdout:
         try:
@@ -13476,11 +13437,11 @@ def chrony_source_health(identity: Identity = Depends(require_session_identity))
     )
 
 
-@router.post("/chrony/settings", response_model=None)
-def update_chrony_settings_from_ui(
+@router.post("/ntp/settings", response_model=None)
+def update_ntp_settings_from_ui(
     request: Request,
     enabled: str | None = Form(None),
-    hostname: str = Form(CHRONY_DEFAULT_HOSTNAME),
+    hostname: str = Form(NTP_DEFAULT_HOSTNAME),
     listen_interfaces: list[str] = Form(default_factory=list),
     listen_addresses: list[str] = Form(default_factory=list),
     listen_interfaces_present: str | None = Form(None),
@@ -13494,24 +13455,20 @@ def update_chrony_settings_from_ui(
     upstream_enabled: list[str] = Form(default_factory=list),
     upstream_use_nts: list[str] = Form(default_factory=list),
     upstream_description: list[str] = Form(default_factory=list),
-    upstream_maxdelay: list[str] = Form(default_factory=list),
     allow_clients: str = Form("any"),
     nts_server_enabled: str | None = Form(None),
     nts_server_cert_path: str = Form(""),
     nts_server_key_path: str = Form(""),
-    command_port_disabled: str | None = Form(None),
     minsources: int | None = Form(None),
-    maxchange_seconds: int | None = Form(None),
-    authselectmode: str = Form(""),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> RedirectResponse | JSONResponse:
     verify_csrf(request, csrf)
-    settings = get_chrony_settings_row(db)
-    capability_result = SystemAdapter().read_chronyd_capabilities()
-    chrony_capabilities = chronyd_capabilities_payload(capability_result)
-    chrony_nts_supported = bool(chrony_capabilities.get("nts"))
+    settings = get_ntp_settings_row(db)
+    capability_result = SystemAdapter().read_ntpd_capabilities()
+    ntp_capabilities = ntpd_capabilities_payload(capability_result)
+    ntp_nts_supported = bool(ntp_capabilities.get("nts"))
     selected_interfaces, selected_addresses = resolve_service_bind_targets(
         db,
         [*listen_interfaces, listen_interface],
@@ -13522,7 +13479,7 @@ def update_chrony_settings_from_ui(
         listen_addresses_present=listen_addresses_present,
     )
     settings.enabled = enabled == "on"
-    settings.hostname = normalize_dns_hostname(hostname.strip() or CHRONY_DEFAULT_HOSTNAME)
+    settings.hostname = normalize_dns_hostname(hostname.strip() or NTP_DEFAULT_HOSTNAME)
     settings.listen_interface = selected_interfaces
     settings.listen_address = selected_addresses
     settings.port = port
@@ -13544,13 +13501,12 @@ def update_chrony_settings_from_ui(
                         "id": str(item.get("id") or f"source-{index}"),
                         "source": source,
                         "enabled": bool(item.get("enabled", True)),
-                        "use_nts": chrony_nts_supported and bool(item.get("use_nts", False)),
+                        "use_nts": ntp_nts_supported and bool(item.get("use_nts", False)),
                         "description": str(item.get("description") or "").strip(),
-                        "maxdelay": str(item.get("maxdelay") or "").strip(),
                     }
                 )
     if not source_rows:
-        max_rows = max(len(upstream_source), len(upstream_description), len(upstream_maxdelay))
+        max_rows = max(len(upstream_source), len(upstream_description))
         enabled_indexes = {int(value) for value in upstream_enabled if str(value).isdigit()}
         nts_indexes = {int(value) for value in upstream_use_nts if str(value).isdigit()}
         for index in range(max_rows):
@@ -13562,38 +13518,34 @@ def update_chrony_settings_from_ui(
                     "id": f"source-{index + 1}",
                     "source": source,
                     "enabled": index in enabled_indexes,
-                    "use_nts": chrony_nts_supported and index in nts_indexes,
+                    "use_nts": ntp_nts_supported and index in nts_indexes,
                     "description": upstream_description[index].strip() if index < len(upstream_description) else "",
-                    "maxdelay": upstream_maxdelay[index].strip() if index < len(upstream_maxdelay) else "",
                 }
             )
     if not source_rows:
         source_rows = [
-            {"id": f"legacy-{index}", "source": server, "enabled": True, "use_nts": False, "description": "", "maxdelay": ""}
+            {"id": f"source-{index}", "source": server, "enabled": True, "use_nts": False, "description": ""}
             for index, server in enumerate(split_servers(upstream_servers), start=1)
         ]
-    settings.upstream_sources_json = dump_chrony_upstream_sources(source_rows)
+    settings.upstream_sources_json = dump_ntp_upstream_sources(source_rows)
     settings.upstream_servers = join_servers([str(row["source"]) for row in source_rows if row.get("enabled")])
     settings.allow_clients = join_allow_clients(split_allow_clients(allow_clients))
-    settings.nts_server_enabled = chrony_nts_supported and nts_server_enabled == "on"
-    chrony_nts_cert_path, chrony_nts_key_path, _chrony_nts_chain_path = chrony_nts_certificate_paths(settings)
-    settings.nts_server_cert_path = chrony_nts_cert_path
-    settings.nts_server_key_path = chrony_nts_key_path
+    settings.nts_server_enabled = ntp_nts_supported and nts_server_enabled == "on"
+    _ntp_nts_cert_path, ntp_nts_key_path, ntp_nts_chain_path = ntp_nts_certificate_paths(settings)
+    settings.nts_server_cert_path = ntp_nts_chain_path
+    settings.nts_server_key_path = ntp_nts_key_path
     settings.nts_ke_port = 4460
-    settings.command_port_disabled = command_port_disabled == "on"
     settings.minsources = minsources if minsources and minsources > 0 else None
-    settings.maxchange_seconds = maxchange_seconds if maxchange_seconds and maxchange_seconds > 0 else None
-    settings.authselectmode = authselectmode.strip()
-    settings.config_path = CHRONY_STAGED_CONFIG_PATH
+    settings.config_path = NTP_STAGED_CONFIG_PATH
     settings.updated_at = utcnow()
     db.add(settings)
     db.commit()
     if settings.nts_server_enabled:
         ensure_ca_state(db)
-    record_audit(db, actor=identity.username, action="update_chrony_settings", resource_type="chronyd", resource_id=str(settings.id))
+    record_audit(db, actor=identity.username, action="update_ntp_settings", resource_type="ntpd", resource_id=str(settings.id))
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         context = ntp_context(db)
-        saved_settings = context["chrony_settings"]
+        saved_settings = context["ntp_settings"]
         return JSONResponse(
             {
                 "status": "saved",
@@ -13605,21 +13557,21 @@ def update_chrony_settings_from_ui(
                 "listen_interfaces": split_interfaces(saved_settings.listen_interface),
                 "listen_addresses": split_addresses(saved_settings.listen_address),
                 "port": saved_settings.port,
-                "upstream_servers": context["chrony_settings_json"]["upstream_servers"],
-                "upstream_sources": context["chrony_settings_json"]["upstream_sources"],
+                "upstream_servers": context["ntp_settings_json"]["upstream_servers"],
+                "upstream_sources": context["ntp_settings_json"]["upstream_sources"],
                 "allow_clients": saved_settings.allow_clients,
                 "nts_server_enabled": saved_settings.nts_server_enabled,
                 "nts_server_cert_path": saved_settings.nts_server_cert_path,
                 "nts_server_key_path": saved_settings.nts_server_key_path,
                 "nts_ke_port": saved_settings.nts_ke_port,
-                "nts_supported": context["chrony_nts_supported"],
+                "nts_supported": context["ntp_nts_supported"],
                 "valid": not context["ntp_validation_errors"],
                 "validation_errors": context["ntp_validation_errors"],
                 "config_path": saved_settings.config_path,
                 "config_preview": context["ntp_config_preview"],
             }
         )
-    return RedirectResponse("/chrony", status_code=303)
+    return RedirectResponse("/ntp", status_code=303)
 
 
 def parse_kms_owner_client_id(raw_value: str | int | None) -> int | None:
@@ -17103,8 +17055,6 @@ def update_settings_from_ui(
     settings.root_ssh_enabled = bool(root_ssh_enabled)
     settings.service_dns_target_naming = normalize_service_dns_target_naming(service_dns_target_naming)
     settings.external_dns_servers = normalize_multiline_values(external_dns_servers)
-    chrony_settings = get_chrony_settings_row(db)
-    chrony_enabled = bool(chrony_settings.enabled)
     settings.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
     settings.updated_at = utcnow()
     dns_settings = get_dns_settings_row(db)
@@ -17124,7 +17074,6 @@ def update_settings_from_ui(
         dns_record_conflict=bool(dns_settings.enabled) and appliance_dns_record_conflict(db, settings.fqdn),
         ca_enabled=bool(ca_settings.enabled),
         management_https_cert_available=True,
-        chrony_enabled=chrony_enabled,
         web_terminal_options=terminal_options,
     )
     ca_state_errors: list[str] = []
@@ -17141,7 +17090,6 @@ def update_settings_from_ui(
         dns_record_conflict=bool(dns_settings.enabled) and appliance_dns_record_conflict(db, settings.fqdn),
         ca_enabled=bool(ca_settings.enabled),
         management_https_cert_available=management_https_cert_available,
-        chrony_enabled=chrony_enabled,
         web_terminal_options=terminal_options,
     )
     validation_errors = [*ca_state_errors, *validation_errors]
@@ -17172,7 +17120,6 @@ def update_settings_from_ui(
                 "resolver_mode": context["appliance_settings_resolver_mode"],
                 "observed_dhcp_dns_servers": context["appliance_settings_observed_dhcp_dns_servers"],
                 "local_dns_enabled": context["local_dns_enabled"],
-                "chrony_enabled": context["chrony_enabled"],
                 "management_interface": context["management_interface"],
                 "dns_record_action": dns_record_action,
                 "valid": not context["appliance_settings_validation_errors"],

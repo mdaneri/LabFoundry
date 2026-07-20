@@ -41,7 +41,7 @@
             ]),
             ("Core Services", [
               ("DNS", "/dns", "read:dns"),
-              ("Chrony", "/chrony", "read:services"),
+              ("NTP / NTS", "/ntp", "read:services"),
               ("DHCP", "/dhcp", "read:dhcp")
             ]),
             ("Identity & Trust", [
@@ -224,20 +224,20 @@
         </div>
       </div>
     </dialog>
-    <dialog id="chrony-source-health-modal" class="preview-modal" aria-labelledby="chrony-source-health-title">
+    <dialog id="ntp-source-health-modal" class="preview-modal" aria-labelledby="ntp-source-health-title">
       <div class="preview-modal-panel">
         <div class="preview-modal-head">
           <div>
             <p class="kicker">Runtime check</p>
-            <h2 id="chrony-source-health-title">Chrony Source Health</h2>
+            <h2 id="ntp-source-health-title">NTP / NTS Source Health</h2>
           </div>
           <div class="preview-modal-actions">
-            <span class="status-pill muted" data-chrony-source-health-status>not checked</span>
-            <button class="button secondary compact-button" type="button" data-chrony-source-health-refresh>Refresh</button>
-            <button class="button ghost icon-button" type="button" data-chrony-source-health-close aria-label="Close source health" title="Close">×</button>
+            <span class="status-pill muted" data-ntp-source-health-status>not checked</span>
+            <button class="button secondary compact-button" type="button" data-ntp-source-health-refresh>Refresh</button>
+            <button class="button ghost icon-button" type="button" data-ntp-source-health-close aria-label="Close source health" title="Close">×</button>
           </div>
         </div>
-        <pre><code data-chrony-source-health-output>Use the Chrony service menu to check chronyc tracking, sources, and authdata.</code></pre>
+        <pre><code data-ntp-source-health-output>Use the NTP / NTS service menu to check ntpq peers, runtime variables, and NTS state.</code></pre>
       </div>
     </dialog>
     {% if identity %}
