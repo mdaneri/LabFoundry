@@ -2537,6 +2537,25 @@ textarea {
   box-shadow: 0 0 0 1px #dc2626;
 }
 
+.tabulator-row-menu-button {
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #475569;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tabulator-row-menu-button:hover,
+.tabulator-row-menu-button:focus-visible {
+  background: #e8f0ff;
+  color: var(--primary);
+}
+
 .dns-fallback-table {
   margin-top: 10px;
 }
