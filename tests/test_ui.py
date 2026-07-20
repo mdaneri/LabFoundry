@@ -1583,6 +1583,7 @@ def test_ntp_page_autosave_updates_desired_state_and_preview(client, monkeypatch
     assert "ntp-upstreams-table" in page.text
     assert "ntp-main-panel" in page.text
     assert '"source": "0.pool.ntp.org"' in page.text
+    assert '"source": "ptbtime1.ptb.de"' in page.text
     assert '"source": "time.google.com"' in page.text
     assert '"source": "time.nist.gov"' in page.text
     assert '"source": "time.facebook.com"' in page.text

@@ -26,6 +26,13 @@ NTP_DEFAULT_UPSTREAM_SOURCE_ROWS: list[dict[str, object]] = [
         "description": "Netnod public NTS",
     },
     {
+        "id": "ptb-germany-nts",
+        "source": "ptbtime1.ptb.de",
+        "enabled": False,
+        "use_nts": True,
+        "description": "PTB Germany public NTS",
+    },
+    {
         "id": "pool-0-ntp",
         "source": "0.pool.ntp.org",
         "enabled": False,
