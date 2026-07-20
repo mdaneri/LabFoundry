@@ -7,7 +7,7 @@ from labfoundry.app.models import (
     FirewallSettings,
     KmsSettings,
     LdapSettings,
-    ChronySettings,
+    NtpSettings,
     PhysicalInterface,
     VcfBackupSettings,
     VcfOfflineDepotSettings,
@@ -198,7 +198,7 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
             ldap_enabled=True,
             ldap_port=1389,
         ),
-        chrony_settings=ChronySettings(enabled=True, listen_interface="eth2.50\neth3.60", port=123, nts_server_enabled=True),
+        ntp_settings=NtpSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=123, nts_server_enabled=True),
         vcf_backup_settings=VcfBackupSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=22),
         vcf_depot_settings=VcfOfflineDepotSettings(enabled=True, listen_interface="eth2.50\neth3.60", port=8443),
         vcf_registry_settings=VcfPrivateRegistrySettings(enabled=True, listen_interface="eth2.50\neth3.60", port=9443),
@@ -223,11 +223,11 @@ def test_managed_service_firewall_rules_include_all_enabled_service_listeners():
     assert by_name["ldap-ldaps-eth2.50"].protocol == "tcp"
     assert by_name["ldap-plaintext-eth0"].destination_port == "1389"
     assert by_name["ldap-plaintext-eth2.50"].protocol == "tcp"
-    assert by_name["chronyd-eth2.50"].protocol == "udp"
-    assert by_name["chronyd-eth2.50"].destination_port == "123"
-    assert by_name["chronyd-eth3.60"].interface_name == "eth3.60"
-    assert by_name["chronyd-nts-eth2.50"].protocol == "tcp"
-    assert by_name["chronyd-nts-eth2.50"].destination_port == "4460"
+    assert by_name["ntpd-eth2.50"].protocol == "udp"
+    assert by_name["ntpd-eth2.50"].destination_port == "123"
+    assert by_name["ntpd-eth3.60"].interface_name == "eth3.60"
+    assert by_name["ntpd-nts-eth2.50"].protocol == "tcp"
+    assert by_name["ntpd-nts-eth2.50"].destination_port == "4460"
     assert by_name["vcf-backups-sftp-eth2.50"].destination_port == "22"
     assert by_name["vcf-backups-sftp-eth3.60"].interface_name == "eth3.60"
     assert by_name["public-services-eth2.50"].destination_port == "80"
@@ -250,7 +250,7 @@ def test_managed_service_firewall_rules_skip_ca_portal_when_ca_disabled():
         ca_settings=CaSettings(enabled=False, listen_interface="eth2"),
         ca_portal_interfaces=["eth2", "eth3.50"],
         kms_settings=KmsSettings(enabled=False),
-        chrony_settings=ChronySettings(enabled=False),
+        ntp_settings=NtpSettings(enabled=False),
         vcf_backup_settings=VcfBackupSettings(enabled=False),
         vcf_depot_settings=VcfOfflineDepotSettings(enabled=False),
         vcf_registry_settings=VcfPrivateRegistrySettings(enabled=False),
@@ -267,7 +267,7 @@ def test_managed_service_firewall_rules_add_https_for_extra_terminal_interfaces(
         dhcp_scopes=[],
         ca_settings=CaSettings(enabled=False),
         kms_settings=KmsSettings(enabled=False),
-        chrony_settings=ChronySettings(enabled=False),
+        ntp_settings=NtpSettings(enabled=False),
         vcf_backup_settings=VcfBackupSettings(enabled=False),
         vcf_depot_settings=VcfOfflineDepotSettings(enabled=False),
         vcf_registry_settings=VcfPrivateRegistrySettings(enabled=False),
@@ -291,7 +291,7 @@ def test_managed_service_firewall_rules_use_assigned_source_group():
         dhcp_scopes=[],
         ca_settings=CaSettings(enabled=False),
         kms_settings=KmsSettings(enabled=False),
-        chrony_settings=ChronySettings(enabled=False),
+        ntp_settings=NtpSettings(enabled=False),
         vcf_backup_settings=VcfBackupSettings(enabled=True, listen_interface="eth2.50", port=22),
         vcf_depot_settings=VcfOfflineDepotSettings(enabled=False),
         vcf_registry_settings=VcfPrivateRegistrySettings(enabled=False),

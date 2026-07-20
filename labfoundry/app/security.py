@@ -158,7 +158,7 @@ UI_PATH_SCOPES = [
     ("/dhcp", "read:dhcp", "write:dhcp"),
     ("/kms", "read:kms", "write:kms"),
     ("/ldap", "read:ldap", "write:ldap"),
-    ("/chrony", "read:services", "write:services"),
+    ("/ntp", "read:services", "write:services"),
     ("/esxi-pxe", "read:esxi-pxe", "write:esxi-pxe"),
     ("/vcf-trust/root-ca", "read:ca", "write:ca"),
     ("/vcf-trust", "read:dashboard", "write:ca"),

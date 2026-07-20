@@ -474,7 +474,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "url": args.client_ca_request_url or args.appliance_url,
             },
         },
-        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "ca", "kms", "ldap", "appliance_settings", "vcf_backups", "vcf_offline_depot", "public_services"],
+        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "ca", "ntpd", "kms", "ldap", "appliance_settings", "vcf_backups", "vcf_offline_depot", "public_services"],
         "pxe_boot": {
             "enabled": bool(args.pxe_client_mac),
             "mode": args.pxe_test_mode,
@@ -488,6 +488,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "DNS and DHCP desired state",
             "firewall, routing, NAT, and WAN desired state",
             "CA desired state, root certificate download, atomic generated certificate request with explicit SAN verification, client CSR request, issued certificate download, and client-side verification",
+            "NTPsec desired state, NTS upstream and server mode, ntpq health, UDP/123 compatibility, and Alpine chrony-nts authenticated synchronization",
             "KMS desired state, DNS/firewall apply, PyKMIP service, and TLS client-certificate probe",
             "Managed LDAP desired state, two isolated organization suffixes, duplicate uid support, nested groups, configurable LDAP/LDAPS listeners, management-interface exclusion, and CA hostname verification",
             "VCF Backup desired state, local user sync, SFTP listener, and client probe",
@@ -998,6 +999,50 @@ def configure_ca(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]
     if status >= 400 or "BEGIN CERTIFICATE" not in root_ca:
         raise LifecycleError(f"CA root download failed with HTTP {status}")
     return {"root_ca": certificate_summary(root_ca)}
+
+
+def configure_ntp(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    status, body, _headers = client.request("GET", "/ntp")
+    if status >= 400:
+        raise LifecycleError(f"GET /ntp failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    hostname = f"ntp.{args.domain}"
+    sources = json.dumps(
+        [
+            {"id": "cloudflare-nts", "source": "time.cloudflare.com", "enabled": True, "use_nts": True, "description": "Cloudflare public NTS"},
+            {"id": "netnod-nts", "source": "nts.netnod.se", "enabled": True, "use_nts": True, "description": "Netnod public NTS"},
+        ]
+    )
+    form = {
+        "enabled": "on",
+        "hostname": hostname,
+        "listen_interfaces_present": "1",
+        "listen_interfaces": [args.site_interface],
+        "port": "123",
+        "upstream_sources_json": sources,
+        "allow_clients": str(ip_interface(args.site_cidr).network),
+        "nts_server_enabled": "on",
+        "minsources": "1",
+        "csrf": csrf,
+    }
+    status, response_body, _headers = client.request(
+        "POST",
+        "/ntp/settings",
+        form=form,
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    if status >= 400:
+        raise LifecycleError(f"NTP settings update failed with HTTP {status}: {response_body[:500]}")
+    payload = json.loads(response_body)
+    if not payload.get("valid") or not payload.get("nts_server_enabled"):
+        raise LifecycleError(f"NTP/NTS desired state is not ready: {payload.get('validation_errors')}")
+    return {
+        "hostname": payload.get("hostname"),
+        "listen_interfaces": payload.get("listen_interfaces"),
+        "listen_addresses": payload.get("listen_addresses"),
+        "upstream_sources": payload.get("upstream_sources"),
+        "nts_server_enabled": payload.get("nts_server_enabled"),
+    }
 
 
 def configure_management_https(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
@@ -1936,6 +1981,12 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
             f"pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand {powercli_probe}"
         ),
         "ca": "test -f /etc/labfoundry/ca/ca-bundle.pem && openssl x509 -in /etc/labfoundry/ca/root-ca.pem -noout -subject",
+        "ntpsec": (
+            "rpm -q ntpsec && systemctl is-active ntpd.service && "
+            "ntpq -pn && ntpq -c rv && ntpq -c ntsinfo && "
+            f"test \"$(stat -c '%U:%G %a' /etc/labfoundry/ntp/certs/ntp.{args.domain}.key)\" = 'root:ntp 640' && "
+            "nft list ruleset | grep -F 'ntpd-' && nft list ruleset | grep -F 'ntpd-nts-'"
+        ),
         "kms_files": (
             "for path in "
             "/etc/labfoundry/kms/pykmip.conf "
@@ -2315,6 +2366,29 @@ def client_checks(args: argparse.Namespace) -> dict[str, Any]:
     return evidence
 
 
+def ntp_client_checks(args: argparse.Namespace) -> dict[str, Any]:
+    if args.skip_client_checks:
+        return {"skipped": "client checks disabled"}
+    if not args.client_a_host:
+        return {"skipped": "client A host not provided"}
+    site_ip = str(ip_interface(args.site_cidr).ip)
+    hostname = f"ntp.{args.domain}"
+    elevate = elevation_probe()
+    command = (
+        f"ELEV=\"$({elevate})\"; test -n \"$ELEV\"; "
+        "command -v chronyd; chronyd -v; "
+        f"curl -ksS --connect-timeout 10 --max-time 30 https://{site_ip}/ca/downloads/root-ca.pem -o /tmp/labfoundry-root-ca.pem; "
+        "grep -F 'BEGIN CERTIFICATE' /tmp/labfoundry-root-ca.pem; "
+        f"printf '%s\\n' 'server {hostname} iburst nts' 'ntstrustedcerts /tmp/labfoundry-root-ca.pem' 'driftfile /tmp/labfoundry-chrony-nts.drift' > /tmp/labfoundry-chrony-nts.conf; "
+        "$ELEV timeout 90 chronyd -Q -t 75 -f /tmp/labfoundry-chrony-nts.conf; "
+        f"printf '%s\\n' 'server {site_ip} iburst' 'driftfile /tmp/labfoundry-chrony-ntp.drift' > /tmp/labfoundry-chrony-ntp.conf; "
+        "$ELEV timeout 45 chronyd -Q -t 30 -f /tmp/labfoundry-chrony-ntp.conf"
+    )
+    result = ssh_command(args.client_a_host, args, command, role="client")
+    require_success(result, "client A NTS-authenticated and ordinary NTP probes")
+    return {"client_a": result, "hostname": hostname, "ordinary_ntp_target": site_ip}
+
+
 def wan_packet_loss_check(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
     if args.skip_client_checks:
         return {"skipped": "client checks disabled"}
@@ -2468,6 +2542,8 @@ def export_settings_backup(client: HttpClient, args: argparse.Namespace, archive
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(archive_bytes)
     data = archive.get("data") or {}
+    if "ntp_settings" not in data or "chrony_settings" in data:
+        raise LifecycleError("Settings backup must contain ntp_settings and must not contain chrony_settings.")
     return {
         "path": str(path),
         "kind": archive.get("kind"),
@@ -2496,6 +2572,8 @@ def restore_settings_backup(client: HttpClient, args: argparse.Namespace) -> dic
         raise LifecycleError(f"Settings backup restore failed with HTTP {status}: {summarize_html_response(response_body)}")
     archive = json.loads(archive_path.read_text(encoding="utf-8-sig"))
     data = archive.get("data") or {}
+    if "ntp_settings" not in data or "chrony_settings" in data:
+        raise LifecycleError("Settings restore archive must contain ntp_settings and must not contain chrony_settings.")
     return {
         "path": str(archive_path),
         "http_status": status,
@@ -2599,6 +2677,7 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "configure-esxi-pxe", configure_esxi_pxe, client, args)
     run_step(results, "configure-firewall-wan", configure_firewall_wan, client, args)
     run_step(results, "configure-ca", configure_ca, client, args)
+    run_step(results, "configure-ntp", configure_ntp, client, args)
     run_step(results, "configure-vcf-backups", configure_vcf_backups, client, args)
     run_step(results, "configure-vcf-offline-depot", configure_vcf_offline_depot, client, args)
     run_step(results, "configure-kms", configure_kms, client, args)
@@ -2614,10 +2693,12 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
     run_step(results, "ca-generated-certificate-request-check", ca_generated_certificate_request_check, client, args)
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
+    run_step(results, "apply-ntp-unit", apply_units, client, ["ntpd", "firewall"], args)
     run_step(results, "apply-vcf-offline-depot-unit", apply_units, client, ["dnsmasq", "firewall", "vcf_offline_depot", "public_services"], args)
     run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "wan", "kms"], args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
+    run_step(results, "ntp-client-checks", ntp_client_checks, args)
     run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)
     run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)
     run_step(results, "vcf-backup-client-check", vcf_backup_client_check, args)
@@ -2665,10 +2746,12 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
         args,
     )
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
+    run_step(results, "apply-ntp-unit", apply_units, client, ["ntpd", "firewall"], args)
     run_step(results, "apply-vcf-offline-depot-unit", apply_units, client, ["dnsmasq", "firewall", "vcf_offline_depot", "public_services"], args)
     run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "wan", "kms"], args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
+    run_step(results, "ntp-client-checks", ntp_client_checks, args)
     run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)
     cert_evidence = run_step(results, "ca-client-certificate-check", ca_client_certificate_check, client, args)
     if args.certificate_baseline_result:

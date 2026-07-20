@@ -61,7 +61,7 @@ COMMANDS: dict[str, set[str]] = {
     "ca": {"validate", "apply"},
     "kms": {"validate", "apply"},
     "ldap": {"validate", "apply", "status", "export", "logs"},
-    "chronyd": {"validate", "apply", "status", "logs", "capabilities"},
+    "ntpd": {"validate", "apply", "status", "logs", "capabilities"},
     "nginx": {"logs", "access-logs", "error-logs"},
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
@@ -91,9 +91,9 @@ NO_PATH_ACTIONS = {
     ("dnsmasq", "leases"),
     ("dnsmasq", "logs"),
     ("dnsmasq", "reload"),
-    ("chronyd", "status"),
-    ("chronyd", "logs"),
-    ("chronyd", "capabilities"),
+    ("ntpd", "status"),
+    ("ntpd", "logs"),
+    ("ntpd", "capabilities"),
     ("ldap", "status"),
     ("ldap", "logs"),
     ("nginx", "logs"),
@@ -118,7 +118,7 @@ CONSOLE_MANAGED_SERVICE_UNITS = (
     "nginx.service",
     "sshd.service",
     "dnsmasq.service",
-    "chronyd.service",
+    "ntpd.service",
     "slapd.service",
     "labfoundry-kms.service",
 )
@@ -188,9 +188,11 @@ PYKMIP_CONFIG_PATH = PYKMIP_CONFIG_DIR / "server.conf"
 PYKMIP_SERVER_VENV_PATH = Path("/opt/labfoundry/.venv/bin/pykmip-server")
 LABFOUNDRY_VENV_PYTHON_PATH = Path("/opt/labfoundry/.venv/bin/python")
 PYKMIP_COMPAT_SCRIPT_PATH = Path("/opt/labfoundry/labfoundry/app/services/pykmip_compat_server.py")
-CHRONY_APPLY_DIR = Path("/var/lib/labfoundry/apply/chronyd")
-CHRONY_CONFIG_PATH = Path("/etc/chrony.conf")
-CHRONY_STATE_DIR = Path("/var/lib/chrony")
+NTP_APPLY_DIR = Path("/var/lib/labfoundry/apply/ntpd")
+NTP_CONFIG_PATH = Path("/etc/ntp.conf")
+NTP_STATE_DIR = Path("/var/lib/ntp")
+NTP_DRIFT_PATH = NTP_STATE_DIR / "ntp.drift"
+NTP_NTS_COOKIE_PATH = NTP_STATE_DIR / "nts-keys"
 NETWORK_APPLY_DIR = Path("/var/lib/labfoundry/apply/network")
 WAN_APPLY_DIR = Path("/var/lib/labfoundry/apply/wan")
 APPLIANCE_UPDATE_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-update")
@@ -206,8 +208,6 @@ LAB_ROUTE_RULE_PRIORITY = 2000
 ROUTE_RULE_PRIORITY_WINDOW = 100
 APPLIANCE_SETTINGS_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-settings")
 PUBLIC_SERVICES_APPLY_DIR = Path("/var/lib/labfoundry/apply/public-services")
-TIMESYNCD_CONFIG_DIR = Path("/etc/systemd/timesyncd.conf.d")
-TIMESYNCD_CONFIG_PATH = TIMESYNCD_CONFIG_DIR / "labfoundry.conf"
 LOCAL_USERS_APPLY_DIR = Path("/var/lib/labfoundry/apply/local-users")
 CA_APPLY_DIR = Path("/var/lib/labfoundry/apply/ca")
 CA_MANAGED_PATH_BASE = Path("/etc/labfoundry")
@@ -254,6 +254,7 @@ VCF_DEPOT_DEFAULT_USERNAME = "vcf-depot"
 VCF_DEPOT_HTPASSWD_PATH = Path("/etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd")
 VCF_DEPOT_SHADOW_PATH = Path("/etc/shadow")
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+BRACKETED_NTP_SOURCE_PATTERN = re.compile(r"^\[([^\]]+)\](?::(\d+))?$")
 VCF_BACKUPS_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-backups")
 VCF_BACKUPS_CONFIG_DIR = Path("/etc/ssh/sshd_config.d")
 VCF_BACKUPS_CONFIG_PATH = VCF_BACKUPS_CONFIG_DIR / "labfoundry-vcf-backups.conf"
@@ -496,14 +497,14 @@ def _validate_ldap_config_path(path_value: str) -> Path:
     return path
 
 
-def _validate_chronyd_config_path(path_value: str) -> Path:
+def _validate_ntpd_config_path(path_value: str) -> Path:
     path = Path(_validate_path(path_value)).resolve()
     if path.suffix != ".conf":
-        raise ValueError("chronyd config path must end with .conf")
-    if not path.is_relative_to(CHRONY_APPLY_DIR.resolve()):
-        raise ValueError(f"chronyd config must be staged under {CHRONY_APPLY_DIR}")
+        raise ValueError("ntpd config path must end with .conf")
+    if not path.is_relative_to(NTP_APPLY_DIR.resolve()):
+        raise ValueError(f"ntpd config must be staged under {NTP_APPLY_DIR}")
     if not path.exists():
-        raise ValueError(f"chronyd config does not exist: {path}")
+        raise ValueError(f"ntpd config does not exist: {path}")
     return path
 
 
@@ -2739,28 +2740,71 @@ def _handle_kms(action: str, args: list[str]) -> int:
     return 0
 
 
-def _chronyd_config_enabled(path: Path) -> bool:
+def _ntpd_config_enabled(path: Path) -> bool:
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip().lower()
-        if stripped.startswith("# labfoundry chrony enabled:"):
+        if stripped.startswith("# labfoundry ntp enabled:"):
             return stripped.split(":", 1)[1].strip() == "true"
     return False
 
 
-def _chronyd_config_errors(path: Path) -> list[str]:
+def _parse_ntpd_server(value: str) -> tuple[str, int | None, bool]:
+    source = str(value or "").strip()
+    if not source:
+        raise ValueError("source is empty")
+    host = source
+    port: int | None = None
+    bracketed = BRACKETED_NTP_SOURCE_PATTERN.fullmatch(source)
+    if bracketed:
+        host = bracketed.group(1)
+        port = int(bracketed.group(2)) if bracketed.group(2) else None
+        try:
+            if ip_address(host).version != 6:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("bracketed source must contain a valid IPv6 address") from exc
+    else:
+        try:
+            parsed_address = ip_address(source)
+        except ValueError:
+            parsed_address = None
+            if source.count(":") == 1:
+                possible_host, possible_port = source.rsplit(":", 1)
+                if possible_port.isdigit():
+                    host = possible_host
+                    port = int(possible_port)
+            try:
+                parsed_address = ip_address(host)
+            except ValueError:
+                parsed_address = None
+        if parsed_address is not None:
+            host = str(parsed_address)
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+    try:
+        parsed_host = ip_address(host)
+    except ValueError:
+        normalized_host = host.strip().strip(".").lower()
+        if not HOSTNAME_PATTERN.fullmatch(normalized_host):
+            raise ValueError("host must be an IPv4 address, IPv6 address, or fully qualified DNS name")
+        return normalized_host, port, False
+    return str(parsed_host), port, True
+
+
+def _ntpd_config_errors(path: Path) -> list[str]:
     errors: list[str] = []
     servers: list[str] = []
     listen_addresses: list[str] = []
     allow_entries: list[str] = []
     nts_server_cert = ""
     nts_server_key = ""
+    nts_cookie_dir = ""
     nts_requested = False
-    enabled = _chronyd_config_enabled(path)
+    restrict_lines: list[list[str]] = []
+    enabled = _ntpd_config_enabled(path)
 
     def add_allow_entry(value: str) -> None:
         normalized = value.strip().lower()
-        if normalized == "any":
-            normalized = "all"
         if normalized and normalized not in allow_entries:
             allow_entries.append(normalized)
 
@@ -2772,129 +2816,210 @@ def _chronyd_config_errors(path: Path) -> list[str]:
         if lower.startswith("server "):
             parts = line.split()
             if len(parts) < 2:
-                errors.append("chronyd server lines must include a server.")
+                errors.append("ntpd server lines must include a server.")
             else:
                 servers.append(parts[1])
                 nts_requested = nts_requested or "nts" in {part.lower() for part in parts[2:]}
-        elif lower.startswith("bindaddress "):
+        elif lower.startswith("interface listen "):
             parts = line.split()
-            if len(parts) < 2:
-                errors.append("chronyd bindaddress lines must include an address.")
+            if len(parts) != 3:
+                errors.append("ntpd interface listen lines must include one address.")
             else:
-                listen_addresses.append(parts[1])
-        elif lower.startswith("allow "):
-            parts = line.split()
-            if len(parts) >= 2:
-                add_allow_entry(parts[1])
-        elif lower.startswith("ntsservercert "):
+                listen_addresses.append(parts[2])
+        elif lower.startswith("nts cert "):
             parts = line.split(maxsplit=1)
-            nts_server_cert = parts[1].strip() if len(parts) == 2 else ""
+            nts_server_cert = line.split(maxsplit=2)[2].strip() if len(line.split(maxsplit=2)) == 3 else ""
             nts_requested = True
-        elif lower.startswith("ntsserverkey "):
-            parts = line.split(maxsplit=1)
-            nts_server_key = parts[1].strip() if len(parts) == 2 else ""
+        elif lower.startswith("nts key "):
+            nts_server_key = line.split(maxsplit=2)[2].strip() if len(line.split(maxsplit=2)) == 3 else ""
             nts_requested = True
-        elif lower.startswith("# labfoundry chrony client allow list:"):
+        elif lower.startswith("nts cookie "):
+            nts_cookie_dir = line.split(maxsplit=2)[2].strip() if len(line.split(maxsplit=2)) == 3 else ""
+            nts_requested = True
+        elif lower.startswith("restrict "):
+            restrict_lines.append(lower.split())
+        elif lower.startswith("# labfoundry ntp client allow list:"):
             for item in line.split(":", 1)[1].replace(",", "\n").splitlines():
                 add_allow_entry(item)
     if enabled and not servers:
-        errors.append("chronyd config must include at least one server line.")
+        errors.append("ntpd config must include at least one server line.")
     if enabled:
-        for server in servers:
-            try:
-                ip_address(server)
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            parts = raw_line.strip().split()
+            if len(parts) < 2 or parts[0].lower() != "server":
                 continue
+            server = parts[1]
+            try:
+                _host, _port, is_ip = _parse_ntpd_server(server)
             except ValueError:
-                pass
-            normalized = server.strip().strip(".").lower()
-            if not HOSTNAME_PATTERN.fullmatch(normalized):
-                errors.append(f"chronyd server {server} must be a valid DNS name or IP address.")
+                errors.append(
+                    f"ntpd server {server} must be an IPv4 address, IPv6 address, or fully qualified DNS name with an optional port."
+                )
+                continue
+            if is_ip and "nts" in {part.lower() for part in parts[2:]}:
+                errors.append(f"NTS server {server} must use a certificate-valid DNS hostname, not an IP address.")
     if enabled and not listen_addresses:
-        errors.append("enabled chronyd config must include at least one bindaddress.")
+        errors.append("enabled ntpd config must include at least one interface listen address.")
+    if enabled and "interface ignore wildcard" not in path.read_text(encoding="utf-8").lower():
+        errors.append("enabled ntpd config must ignore all interfaces before explicit listeners.")
     for address in listen_addresses:
         try:
             ip_address(address)
         except ValueError:
-            errors.append(f"chronyd bindaddress {address} must be a valid IP address.")
+            errors.append(f"ntpd interface listen address {address} must be a valid IP address.")
     if nts_server_cert or nts_server_key:
         if not nts_server_cert:
-            errors.append("chronyd NTS server config must include ntsservercert.")
+            errors.append("ntpd NTS server config must include nts cert.")
         if not nts_server_key:
-            errors.append("chronyd NTS server config must include ntsserverkey.")
+            errors.append("ntpd NTS server config must include nts key.")
         for label, value in {"certificate": nts_server_cert, "key": nts_server_key}.items():
             if value and not Path(value).is_absolute():
-                errors.append(f"chronyd NTS server {label} path must be absolute.")
+                errors.append(f"ntpd NTS server {label} path must be absolute.")
             elif value and not Path(value).is_file():
-                errors.append(f"chronyd NTS server {label} does not exist: {value}")
-    if enabled and nts_requested and not _chronyd_supports_nts():
-        errors.append("installed chronyd does not support NTS; use an NTS-capable appliance image before enabling NTS sources or server mode.")
+                errors.append(f"ntpd NTS server {label} does not exist: {value}")
+    if nts_server_cert or nts_server_key:
+        if not nts_cookie_dir:
+            errors.append("ntpd NTS server config must include nts cookie storage.")
+        elif not nts_cookie_dir.startswith("/"):
+            errors.append("ntpd NTS cookie storage path must be absolute.")
+    if enabled and nts_requested and not _ntpd_supports_nts():
+        errors.append("installed ntpd is not the required NTPsec implementation with NTS support.")
     if allow_entries:
-        if "all" in allow_entries and len(allow_entries) > 1:
-            errors.append("chronyd client allow list can use 'all' only by itself.")
+        if "any" in allow_entries and len(allow_entries) > 1:
+            errors.append("ntpd client allow list can use 'any' only by itself.")
         for entry in allow_entries:
-            if entry == "all":
+            if entry == "any":
                 continue
             try:
                 ip_network(entry, strict=False)
             except ValueError:
-                errors.append(f"chronyd client allow entry {entry} must be 'all' or a valid IPv4/IPv6 CIDR.")
+                errors.append(f"ntpd client allow entry {entry} must be 'any' or a valid IPv4/IPv6 CIDR.")
+    if enabled:
+        default_restrictions = [tokens for tokens in restrict_lines if len(tokens) >= 2 and tokens[1] == "default"]
+        if not default_restrictions:
+            errors.append("enabled ntpd config must include a default access restriction.")
+        elif "any" in allow_entries:
+            flags = set(default_restrictions[-1][2:])
+            if not {"nomodify", "noquery"}.issubset(flags) or {"ignore", "noserve"} & flags:
+                errors.append("ntpd default access restriction must permit time while denying remote modification and queries.")
+        else:
+            flags = set(default_restrictions[-1][2:])
+            if "ignore" not in flags:
+                errors.append("ntpd default access restriction must ignore clients outside the allow list.")
+            rendered_restrictions = [" ".join(tokens) for tokens in restrict_lines]
+            for entry in allow_entries:
+                network = ip_network(entry, strict=False)
+                matching = [line for line in rendered_restrictions if str(network.network_address) in line]
+                if not matching or not any("nomodify" in line and "noquery" in line and "noserve" not in line for line in matching):
+                    errors.append(f"ntpd client allow entry {entry} must permit time while denying modification and queries.")
+        source_restrictions = [tokens for tokens in restrict_lines if len(tokens) >= 2 and tokens[1] == "source"]
+        if not source_restrictions or not {"nomodify", "noquery"}.issubset(set(source_restrictions[-1][2:])):
+            errors.append("enabled ntpd config must permit dynamic upstream replies while denying source modification and queries.")
     return errors
 
 
-def _chronyd_supports_nts() -> bool:
-    chronyd = shutil.which("chronyd")
-    if chronyd is None:
+def _ntpd_supports_nts() -> bool:
+    ntpd = shutil.which("ntpd")
+    if ntpd is None:
         return False
     try:
-        result = _run([chronyd, "-v"], timeout=2)
+        result = _run([ntpd, "--version"], timeout=2)
     except (OSError, subprocess.TimeoutExpired):
         return False
-    features = f"{result.stdout}\n{result.stderr}"
-    return result.returncode == 0 and "+NTS" in features.split()
+    version_text = f"{result.stdout}\n{result.stderr}".lower()
+    return result.returncode == 0 and "ntpsec" in version_text
 
 
-def _install_chronyd_config(config_path: Path) -> None:
-    CHRONY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CHRONY_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp_target = CHRONY_CONFIG_PATH.with_suffix(".conf.tmp")
+def _ntpd_runtime_identity_errors() -> list[str]:
+    errors: list[str] = []
+    rpm = shutil.which("rpm")
+    if rpm is None:
+        errors.append("rpm command not found; cannot verify the Photon ntpsec package.")
+    else:
+        try:
+            package = _run([rpm, "-q", "ntpsec"], timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            package = None
+        if package is None or package.returncode != 0:
+            errors.append("Photon ntpsec package is required.")
+        try:
+            python_bindings = _run([rpm, "-q", "python3-ntp"], timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            python_bindings = None
+        if python_bindings is None or python_bindings.returncode != 0:
+            errors.append("Photon python3-ntp package is required for ntpq.")
+    ntpd = shutil.which("ntpd")
+    if ntpd is None:
+        errors.append("ntpd command not found.")
+    else:
+        try:
+            version = _run([ntpd, "--version"], timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            version = None
+        version_text = f"{version.stdout}\n{version.stderr}".lower() if version is not None else ""
+        if version is None or version.returncode != 0 or "ntpsec" not in version_text:
+            errors.append("installed ntpd is not Photon NTPsec.")
+    return errors
+
+
+def _install_ntpd_config(config_path: Path) -> None:
+    NTP_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    NTP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        ntp_user = pwd.getpwnam("ntp")
+        ntp_group = grp.getgrnam("ntp")
+    except KeyError as exc:
+        raise RuntimeError("ntp user/group not found; Photon ntpsec package ownership is unavailable") from exc
+    os.chown(NTP_STATE_DIR, ntp_user.pw_uid, ntp_group.gr_gid)
+    os.chmod(NTP_STATE_DIR, 0o750)
+    if NTP_NTS_COOKIE_PATH.is_dir():
+        try:
+            NTP_NTS_COOKIE_PATH.rmdir()
+        except OSError as exc:
+            raise RuntimeError(f"NTPsec cookie path is an unexpected non-empty directory: {NTP_NTS_COOKIE_PATH}") from exc
+    if not NTP_DRIFT_PATH.exists() or NTP_DRIFT_PATH.stat().st_size == 0:
+        NTP_DRIFT_PATH.write_text("0.0\n", encoding="utf-8")
+    os.chown(NTP_DRIFT_PATH, ntp_user.pw_uid, ntp_group.gr_gid)
+    os.chmod(NTP_DRIFT_PATH, 0o644)
+    tmp_target = NTP_CONFIG_PATH.with_suffix(".conf.tmp")
     shutil.copy2(config_path, tmp_target)
     os.chmod(tmp_target, 0o644)
-    tmp_target.replace(CHRONY_CONFIG_PATH)
+    tmp_target.replace(NTP_CONFIG_PATH)
 
 
-def _chronyd_nts_server_key_path(config_path: Path) -> Path | None:
+def _ntpd_nts_server_key_path(config_path: Path) -> Path | None:
     for raw_line in config_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
-        if line.lower().startswith("ntsserverkey "):
-            parts = line.split(maxsplit=1)
-            if len(parts) == 2 and parts[1].strip():
-                return Path(parts[1].strip())
+        if line.lower().startswith("nts key "):
+            parts = line.split(maxsplit=2)
+            if len(parts) == 3 and parts[2].strip():
+                return Path(parts[2].strip())
     return None
 
 
-def _grant_chronyd_nts_server_key_read(config_path: Path) -> Path | None:
-    key_path = _chronyd_nts_server_key_path(config_path)
+def _grant_ntpd_nts_server_key_read(config_path: Path) -> Path | None:
+    key_path = _ntpd_nts_server_key_path(config_path)
     if key_path is None or not key_path.exists():
         return key_path
     try:
-        chrony_group = grp.getgrnam("chrony")
+        ntp_group = grp.getgrnam("ntp")
     except KeyError as exc:
-        raise RuntimeError("chrony group not found; cannot grant chronyd access to NTS server key") from exc
-    os.chown(key_path, 0, chrony_group.gr_gid)
+        raise RuntimeError("ntp group not found; cannot grant ntpd access to NTS server key") from exc
+    os.chown(key_path, 0, ntp_group.gr_gid)
     os.chmod(key_path, 0o640)
     return key_path
 
 
-def _chronyd_status() -> int:
-    chronyc = shutil.which("chronyc")
-    if chronyc is None:
-        print(json.dumps({"error": "chronyc command not found"}, sort_keys=True))
+def _ntpd_status() -> int:
+    ntpq = shutil.which("ntpq")
+    if ntpq is None:
+        print(json.dumps({"error": "ntpq command not found"}, sort_keys=True))
         return 0
     payload = {}
     for key, command in {
-        "tracking": [chronyc, "-n", "tracking"],
-        "sources": [chronyc, "-n", "sources", "-v"],
-        "authdata": [chronyc, "-n", "authdata"],
+        "peers": [ntpq, "-pn"],
+        "variables": [ntpq, "-c", "rv"],
+        "nts": [ntpq, "-c", "ntsinfo"],
     }.items():
         try:
             result = _run(command, timeout=1.5)
@@ -2907,14 +3032,14 @@ def _chronyd_status() -> int:
             payload[key] = {
                 "returncode": 124,
                 "stdout": "",
-                "stderr": "chronyc status command timed out after 1.5 seconds",
+                "stderr": "ntpq status command timed out after 1.5 seconds",
             }
     print(json.dumps(payload, sort_keys=True))
     return 0
 
 
-def _chronyd_logs() -> int:
-    return _systemd_unit_logs("chronyd.service")
+def _ntpd_logs() -> int:
+    return _systemd_unit_logs("ntpd.service")
 
 
 def _handle_nginx(action: str, args: list[str]) -> int:
@@ -2945,83 +3070,87 @@ def _handle_nginx(action: str, args: list[str]) -> int:
     return 0
 
 
-def _chronyd_capabilities() -> int:
-    chronyd = shutil.which("chronyd")
-    if chronyd is None:
-        print(json.dumps({"nts": False, "error": "chronyd command not found"}, sort_keys=True))
+def _ntpd_capabilities() -> int:
+    ntpd = shutil.which("ntpd")
+    if ntpd is None:
+        print(json.dumps({"nts": False, "error": "ntpd command not found"}, sort_keys=True))
         return 0
     try:
-        result = _run([chronyd, "-v"], timeout=2)
+        result = _run([ntpd, "--version"], timeout=2)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({"nts": False, "error": str(exc)}, sort_keys=True))
         return 0
     version_text = f"{result.stdout}\n{result.stderr}".strip()
-    print(json.dumps({"nts": result.returncode == 0 and "+NTS" in version_text.split(), "version": version_text}, sort_keys=True))
+    identity_errors = _ntpd_runtime_identity_errors()
+    print(json.dumps({"nts": result.returncode == 0 and "ntpsec" in version_text.lower() and not identity_errors, "version": version_text, "errors": identity_errors}, sort_keys=True))
     return 0
 
 
-def _handle_chronyd(action: str, args: list[str]) -> int:
+def _handle_ntpd(action: str, args: list[str]) -> int:
     if action == "capabilities":
         if args:
-            print("chronyd capabilities does not accept a path", file=sys.stderr)
+            print("ntpd capabilities does not accept a path", file=sys.stderr)
             return 2
-        return _chronyd_capabilities()
+        return _ntpd_capabilities()
     if action == "logs":
         if args:
-            print("chronyd logs does not accept a path", file=sys.stderr)
+            print("ntpd logs does not accept a path", file=sys.stderr)
             return 2
-        return _chronyd_logs()
+        return _ntpd_logs()
     if action == "status":
         if args:
-            print("chronyd status does not accept a path", file=sys.stderr)
+            print("ntpd status does not accept a path", file=sys.stderr)
             return 2
-        return _chronyd_status()
+        return _ntpd_status()
     if len(args) != 1:
-        print(f"chronyd {action} requires exactly one staged config path", file=sys.stderr)
+        print(f"ntpd {action} requires exactly one staged config path", file=sys.stderr)
         return 2
     try:
-        config_path = _validate_chronyd_config_path(args[0])
+        config_path = _validate_ntpd_config_path(args[0])
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    errors = _chronyd_config_errors(config_path)
-    enabled = _chronyd_config_enabled(config_path)
+    errors = _ntpd_config_errors(config_path)
+    enabled = _ntpd_config_enabled(config_path)
+    if enabled:
+        errors.extend(_ntpd_runtime_identity_errors())
     if action == "validate":
         if errors:
             for error in errors:
                 print(error, file=sys.stderr)
             return 2
-        print(json.dumps({"chronyd": "validation ok", "enabled": enabled, "service": "chronyd.service"}, sort_keys=True))
+        print(json.dumps({"ntpd": "validation ok", "enabled": enabled, "service": "ntpd.service"}, sort_keys=True))
         return 0
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
         return 2
     if not enabled:
-        disable = _run(["systemctl", "disable", "--now", "chronyd.service"])
+        disable = _run(["systemctl", "disable", "--now", "ntpd.service"])
         print(disable.stdout, end="")
         print(disable.stderr, end="", file=sys.stderr)
         if disable.returncode != 0:
             return disable.returncode
-        print(json.dumps({"chronyd": "apply complete", "enabled": False, "service": "chronyd.service"}, sort_keys=True))
+        print(json.dumps({"ntpd": "apply complete", "enabled": False, "service": "ntpd.service"}, sort_keys=True))
         return 0
-    _install_chronyd_config(config_path)
     try:
-        _grant_chronyd_nts_server_key_read(config_path)
+        _install_ntpd_config(config_path)
+        _grant_ntpd_nts_server_key_read(config_path)
     except (OSError, RuntimeError) as exc:
-        print(f"chronyd NTS server key permission update failed: {exc}", file=sys.stderr)
+        print(f"ntpd config installation failed: {exc}", file=sys.stderr)
         return 2
     for command in [
+        ["systemctl", "disable", "--now", "chronyd.service"],
         ["systemctl", "disable", "--now", "systemd-timesyncd"],
-        ["systemctl", "enable", "chronyd.service"],
-        ["systemctl", "restart", "chronyd.service"],
+        ["systemctl", "enable", "ntpd.service"],
+        ["systemctl", "restart", "ntpd.service"],
     ]:
         result = _run(command)
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
         if result.returncode != 0 and command[:3] != ["systemctl", "disable", "--now"]:
             return result.returncode
-    print(json.dumps({"chronyd": "apply complete", "enabled": True, "config_path": str(CHRONY_CONFIG_PATH), "service": "chronyd.service"}, sort_keys=True))
+    print(json.dumps({"ntpd": "apply complete", "enabled": True, "config_path": str(NTP_CONFIG_PATH), "service": "ntpd.service"}, sort_keys=True))
     return 0
 
 
@@ -3078,18 +3207,6 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
         except ValueError:
             errors.append(f"resolver server {server} must be an IP address.")
 
-    ntp_servers = [str(server).strip() for server in payload.get("ntp_servers") or [] if str(server).strip()]
-    if "ntp_servers" in payload and not ntp_servers:
-        errors.append("ntp_servers must include at least one server when present.")
-    for server in ntp_servers:
-        try:
-            ip_address(server)
-            continue
-        except ValueError:
-            pass
-        normalized = server.strip().strip(".").lower()
-        if not HOSTNAME_PATTERN.fullmatch(normalized):
-            errors.append(f"ntp server {server} must be a valid DNS name or IP address.")
 
     management_interface = str(payload.get("management_interface") or "").strip()
     if not _valid_network_interface_name(management_interface):
@@ -3216,36 +3333,6 @@ def _run_checked_commands(commands: list[list[str]]) -> int:
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
         if result.returncode != 0:
-            return result.returncode
-    return 0
-
-
-def _configure_timesyncd(ntp_servers: list[str]) -> int:
-    if not ntp_servers:
-        return 0
-    TIMESYNCD_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config_text = "\n".join(
-        [
-            "# Managed by LabFoundry. Local changes may be overwritten.",
-            "[Time]",
-            f"NTP={' '.join(ntp_servers)}",
-            "",
-        ]
-    )
-    tmp_target = TIMESYNCD_CONFIG_PATH.with_suffix(".conf.tmp")
-    tmp_target.write_text(config_text, encoding="utf-8")
-    os.chmod(tmp_target, 0o644)
-    tmp_target.replace(TIMESYNCD_CONFIG_PATH)
-    commands = [
-        ["systemctl", "disable", "--now", "chronyd.service"],
-        ["systemctl", "enable", "--now", "systemd-timesyncd"],
-        ["systemctl", "restart", "systemd-timesyncd"],
-    ]
-    for command in commands:
-        result = _run(command)
-        print(result.stdout, end="")
-        print(result.stderr, end="", file=sys.stderr)
-        if result.returncode != 0 and command[:3] != ["systemctl", "disable", "--now"]:
             return result.returncode
     return 0
 
@@ -3953,8 +4040,7 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                     "web_terminal_enabled": bool(payload.get("web_terminal_enabled")),
                     "root_ssh_enabled": bool(payload.get("root_ssh_enabled")),
                     "management_interface": payload["management_interface"],
-                    "time_sync_mode": str(payload.get("time_sync_mode") or ""),
-                    "scope": "systemd-resolved, optional systemd-timesyncd, LabFoundry management UI, root SSH login, and web terminal trust",
+                    "scope": "systemd-resolved, LabFoundry management UI, root SSH login, and web terminal trust",
                 },
                 sort_keys=True,
             )
@@ -3970,7 +4056,6 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     management_interface = str(payload["management_interface"])
     resolver_mode = str(payload["resolver_mode"])
     resolver_servers = [str(server) for server in payload["resolver_servers"]]
-    ntp_servers = [str(server) for server in payload.get("ntp_servers") or []]
     domains = ["~."] if resolver_mode == "local_dns" else []
     hostname = _apply_hostname(fqdn)
     if hostname != 0:
@@ -3978,9 +4063,6 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     resolver = _configure_dhcp_resolver(management_interface) if resolver_mode == "dhcp" else _configure_resolver(management_interface, resolver_servers, domains)
     if resolver.returncode != 0:
         return resolver.returncode
-    timesyncd = _configure_timesyncd(ntp_servers)
-    if timesyncd != 0:
-        return timesyncd
     root_ssh = _configure_root_ssh(bool(payload.get("root_ssh_enabled")))
     if root_ssh != 0:
         return root_ssh
@@ -4001,7 +4083,6 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                 "web_terminal_interfaces": payload.get("web_terminal_interfaces") or [],
                 "resolver_mode": resolver_mode,
                 "resolver_servers": resolver_servers,
-                "time_sync_mode": str(payload.get("time_sync_mode") or ""),
             },
             sort_keys=True,
         )
@@ -7271,8 +7352,8 @@ def main(argv: list[str]) -> int:
         return _handle_kms(action, normalized_args)
     if group == "ldap":
         return _handle_ldap(action, normalized_args)
-    if group == "chronyd":
-        return _handle_chronyd(action, normalized_args)
+    if group == "ntpd":
+        return _handle_ntpd(action, normalized_args)
     if group == "nginx":
         return _handle_nginx(action, normalized_args)
     if group == "vcf-backups":

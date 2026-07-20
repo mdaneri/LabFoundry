@@ -110,7 +110,7 @@ Provisioned appliances install `python3-curses` and run the root-owned
 `labfoundry-console.service` exclusively on `/dev/tty1`. Provisioning masks only
 `getty@tty1.service`; switching to tty2 or a later virtual terminal starts the
 normal Photon login flow. The recovery console edits only management IPv4/IPv6,
-DNS, ordinary NTP sources, persistent Firewall state, and reversible service
+DNS, persistent Firewall state, and reversible service
 isolation. F3 temporarily runs `top`; F4 opens a separately authenticated and
 audited root Bash session; and exiting either restores the appliance screen.
 See [Local appliance console](../../docs/appliance-console.md).
@@ -330,7 +330,7 @@ selected SFTP user is new, disabled/enabled, has a pending password, changes she
 
 The firewall preview derives LabFoundry-managed service allow rules from
 enabled service listener desired state, including management, DNS, DHCP, KMS,
-Chrony, VCF Backup, VCF Offline Depot, and VCF Private Registry listeners. DHCP VLAN
+NTPsec, VCF Backup, VCF Offline Depot, and VCF Private Registry listeners. DHCP VLAN
 moves or service listener moves should be applied with the changed Firewall
 unit when `/appliance-apply` shows it pending.
 

@@ -157,34 +157,34 @@ class SystemAdapter:
     def export_ldap_recovery(self, archive_path: str) -> AdapterResult:
         return self._helper_result("ldap", "export", archive_path, dry_run_message="dry-run: LDAP recovery export command recorded")
 
-    def apply_chronyd_config(self, config_path: str) -> AdapterResult:
-        return self._helper_result("chronyd", "apply", config_path, dry_run_message="dry-run: Chrony apply command recorded")
+    def apply_ntpd_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("ntpd", "apply", config_path, dry_run_message="dry-run: NTPsec apply command recorded")
 
-    def validate_chronyd_config(self, config_path: str) -> AdapterResult:
-        return self._helper_result("chronyd", "validate", config_path, dry_run_message="dry-run: Chrony validation command recorded")
+    def validate_ntpd_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("ntpd", "validate", config_path, dry_run_message="dry-run: NTPsec validation command recorded")
 
-    def read_chronyd_status(self) -> AdapterResult:
+    def read_ntpd_status(self) -> AdapterResult:
         if self.dry_run:
             return self._record_only_result(
-                ["labfoundry-helper", "chronyd", "status"],
+                ["labfoundry-helper", "ntpd", "status"],
                 json.dumps(
                     {
-                        "tracking": {"returncode": 0, "stdout": "Reference ID    : 00000000 (dry-run)\nLeap status     : Normal\n", "stderr": ""},
-                        "sources": {"returncode": 0, "stdout": "MS Name/IP address Stratum Poll Reach LastRx Last sample\n", "stderr": ""},
-                        "authdata": {"returncode": 0, "stdout": "Name/IP address Mode KeyID Type KLen Last Atmp NAK Cook CLen\n", "stderr": ""},
+                        "peers": {"returncode": 0, "stdout": "remote refid st t when poll reach delay offset jitter\n", "stderr": ""},
+                        "variables": {"returncode": 0, "stdout": "status=0615 leap_none, sync_ntp\n", "stderr": ""},
+                        "nts": {"returncode": 0, "stdout": "NTS client status unavailable in dry-run\n", "stderr": ""},
                     },
                     sort_keys=True,
                 ),
             )
-        return self._helper_result("chronyd", "status", dry_run_message="dry-run: Chrony status command recorded", use_sudo=False, timeout_seconds=5)
+        return self._helper_result("ntpd", "status", dry_run_message="dry-run: NTPsec status command recorded", use_sudo=False, timeout_seconds=5)
 
-    def read_chronyd_logs(self) -> AdapterResult:
+    def read_ntpd_logs(self) -> AdapterResult:
         if self.dry_run:
             return self._record_only_result(
-                ["labfoundry-helper", "chronyd", "logs"],
-                "No host Chrony journal is read in development mode.",
+                ["labfoundry-helper", "ntpd", "logs"],
+                "No host NTPsec journal is read in development mode.",
             )
-        return self._helper_result("chronyd", "logs", dry_run_message="dry-run: Chrony log read command recorded", timeout_seconds=5)
+        return self._helper_result("ntpd", "logs", dry_run_message="dry-run: NTPsec log read command recorded", timeout_seconds=5)
 
     def read_ldap_logs(self) -> AdapterResult:
         if self.dry_run:
@@ -226,13 +226,13 @@ class SystemAdapter:
             )
         return self._helper_result("nginx", "error-logs", dry_run_message="dry-run: Nginx error log read command recorded", timeout_seconds=5)
 
-    def read_chronyd_capabilities(self) -> AdapterResult:
+    def read_ntpd_capabilities(self) -> AdapterResult:
         if self.dry_run:
-            return self._record_only_result(["labfoundry-helper", "chronyd", "capabilities"], json.dumps({"nts": True, "version": "dry-run +NTS"}))
+            return self._record_only_result(["labfoundry-helper", "ntpd", "capabilities"], json.dumps({"nts": True, "version": "ntpd ntpsec dry-run"}))
         return self._helper_result(
-            "chronyd",
+            "ntpd",
             "capabilities",
-            dry_run_message="dry-run: Chrony capability check recorded",
+            dry_run_message="dry-run: NTPsec capability check recorded",
             use_sudo=False,
             timeout_seconds=5,
         )

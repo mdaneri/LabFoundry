@@ -55,6 +55,7 @@ users:
 package_update: true
 packages:
   - bind-tools
+  - chrony-nts
   - curl
   - iproute2
   - iputils

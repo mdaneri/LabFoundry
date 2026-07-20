@@ -2519,12 +2519,33 @@ textarea {
   overflow: hidden;
 }
 
-.chrony-upstreams-table {
-  min-height: 190px;
+.ntp-upstreams-table {
+  flex: 1 1 0;
+  min-height: 320px;
 }
 
-.chrony-upstreams-section {
+.ntp-upstreams-section {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
   margin-top: 14px;
+}
+
+.ntp-main-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tabulator .tabulator-cell.invalid-ntp-source-cell {
+  color: #b91c1c;
+  background: #fff7f7;
+}
+
+.tabulator .tabulator-cell input.invalid-ntp-source-input {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 1px #dc2626;
 }
 
 .dns-fallback-table {
@@ -3082,7 +3103,7 @@ label > span,
   margin-bottom: 2px;
 }
 
-.chrony-port-grid {
+.ntp-port-grid {
   align-items: end;
 }
 
@@ -6138,6 +6159,15 @@ textarea {
   .firewall-managed-section,
   .firewall-managed-section .readonly-tabulator-shell,
   .services-table {
+    min-height: 320px;
+  }
+
+  .ntp-main-panel {
+    display: block;
+    overflow-x: auto;
+  }
+
+  .ntp-upstreams-section {
     min-height: 320px;
   }
 

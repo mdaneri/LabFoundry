@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     appliance_management_ipv6_gateway: str = ""
     appliance_root_ssh_enabled: bool = False
     appliance_external_dns_servers: str = "1.1.1.1\n9.9.9.9"
-    appliance_ntp_servers: str = "time.cloudflare.com\nnts.netnod.se"
     dry_run_system_adapters: bool = True
     management_source_cidr: str = "192.168.49.0/24"
     repository_path: Path = Path("/mnt/labfoundry-vcf-offline-depot")

@@ -12,7 +12,7 @@ Implementation screenshots:
 
 Viewport: VMware Workstation virtual console, 640 x 480 pixels, 80 x 30 terminal cells.
 
-State: healthy dual-stack-capable management console with DHCP IPv4, Automatic RA/SLAAC IPv6, enabled Chrony and Firewall; management editor focused on the IPv4 mode field.
+State: healthy dual-stack-capable management console with DHCP IPv4, Automatic RA/SLAAC IPv6, and enabled Firewall; management editor focused on the IPv4 mode field.
 
 Full-view comparison evidence: `C:\Users\m_dan\AppData\Local\Temp\labfoundry-console-comparison-final.png`. The final screen deliberately incorporates the requested changes instead of literally retaining the earlier screenshot: pale-blue header, product version beside the title, separate system rows, no ONLINE label, repaired Photon release line, spacing before management URLs, normalized network rows, separated Firewall status, and F3/F4 footer actions.
 
@@ -23,7 +23,7 @@ Focused comparison evidence: `C:\Users\m_dan\AppData\Local\Temp\labfoundry-conso
 No actionable P0, P1, or P2 visual differences remain.
 
 - Fonts and typography: the Photon virtual-console bitmap font is consistent across the screen and editor. Title, section, label, value, and action hierarchy is legible without wrapping at 80 columns.
-- Spacing and layout rhythm: the header and body have explicit separation; Interface, address families, DNS, NTP/Chrony, and Firewall occupy stable rows. The editor has balanced section spacing and remains inside the 72 x 22 minimum.
+- Spacing and layout rhythm: the header and body have explicit separation; Interface, address families, DNS, and Firewall occupy stable rows. The editor has balanced section spacing and remains inside the 72 x 22 minimum.
 - Colors and visual tokens: pale blue, slate/gray, LabFoundry blue, green, amber, and red map consistently to the Linux console's eight-color capability. The focused control is dark blue, other editable controls are pale blue, and disabled fields remain neutral.
 - Image quality and asset fidelity: no raster imagery, logos, icons, or decorative assets belong to this terminal UI. The captured terminal text and borders are sharp at native resolution.
 - Copy and content: labels match the approved appliance scope. IPv6 remains Disabled, Automatic RA/SLAAC, or Static; DHCPv6 is intentionally not implied.

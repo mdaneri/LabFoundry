@@ -21,7 +21,7 @@ from labfoundry.app.models import (
     KmsSettings,
     LdapSettings,
     NatRule,
-    ChronySettings,
+    NtpSettings,
     PhysicalInterface,
     Route,
     ServiceState,
@@ -39,7 +39,7 @@ from labfoundry.app.services.local_users import DEFAULT_LOCAL_USER_SHELL, POWERS
 from labfoundry.app.services.ldap import LDAP_DEFAULT_HOSTNAME, LDAP_STAGED_CONFIG_PATH
 from labfoundry.app.services.dnsmasq import join_domains, split_domains, validate_dns_record
 from labfoundry.app.services.networking import normalize_interface_mode, normalize_ipv4_method
-from labfoundry.app.services.chrony import CHRONY_DEFAULT_HOSTNAME, CHRONY_STAGED_CONFIG_PATH, default_chrony_upstream_fields
+from labfoundry.app.services.ntp import NTP_DEFAULT_HOSTNAME, NTP_STAGED_CONFIG_PATH, default_ntp_upstream_fields
 from labfoundry.app.services.service_registry import RETIRED_SERVICE_IDS, SERVICE_STATE_DEFAULTS
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
 from labfoundry.app.services.vcf_offline_depot import VCF_DEPOT_DEFAULT_USERNAME
@@ -222,7 +222,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
         existing_service = db.execute(select(ServiceState).where(ServiceState.service == service_state["service"])).scalar_one_or_none()
         if existing_service is None:
             db.add(ServiceState(**service_state))
-        elif service_state["service"] in {"chronyd", "repository", "vcf-backups"}:
+        elif service_state["service"] in {"ntpd", "repository", "vcf-backups"}:
             existing_service.display_name = service_state["display_name"]
             existing_service.detail = service_state["detail"]
             if existing_service.health == "unconfigured":
@@ -244,21 +244,20 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
             management_https_enabled=appliance_mode,
             root_ssh_enabled=settings.appliance_root_ssh_enabled,
             external_dns_servers=_settings_lines(settings.appliance_external_dns_servers),
-            ntp_servers=_settings_lines(settings.appliance_ntp_servers),
         )
         db.add(appliance_settings)
         db.flush()
 
-    chrony_settings = db.execute(select(ChronySettings)).scalar_one_or_none()
-    if chrony_settings is None:
-        chrony_upstreams = default_chrony_upstream_fields(_settings_lines(settings.appliance_ntp_servers) or appliance_settings.ntp_servers)
-        chrony_settings = ChronySettings(
-            hostname=CHRONY_DEFAULT_HOSTNAME,
-            upstream_servers=chrony_upstreams["upstream_servers"],
-            upstream_sources_json=chrony_upstreams["upstream_sources_json"],
-            config_path=CHRONY_STAGED_CONFIG_PATH,
+    ntp_settings = db.execute(select(NtpSettings)).scalar_one_or_none()
+    if ntp_settings is None:
+        ntp_upstreams = default_ntp_upstream_fields()
+        ntp_settings = NtpSettings(
+            hostname=NTP_DEFAULT_HOSTNAME,
+            upstream_servers=ntp_upstreams["upstream_servers"],
+            upstream_sources_json=ntp_upstreams["upstream_sources_json"],
+            config_path=NTP_STAGED_CONFIG_PATH,
         )
-        db.add(chrony_settings)
+        db.add(ntp_settings)
         db.flush()
 
     if db.execute(select(LdapSettings)).scalar_one_or_none() is None:

@@ -1,7 +1,7 @@
 from ipaddress import ip_address
 
-from labfoundry.app.models import ChronySettings, DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
-from labfoundry.app.services.chrony import CHRONY_DEFAULT_UPSTREAM_SERVERS, chrony_upstream_sources, dump_chrony_upstream_sources, render_chrony_config
+from labfoundry.app.models import NtpSettings, DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
+from labfoundry.app.services.ntp import NTP_DEFAULT_UPSTREAM_SERVERS, dump_ntp_upstream_sources, ntp_upstream_sources, parse_ntp_source, render_ntp_config, validate_ntp_state
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNSMASQ_LEASE_FILE_PATH,
@@ -148,73 +148,169 @@ def test_dnsmasq_renderer_filters_loopback_configured_upstreams():
     assert "server=127.0.0.1" not in config
 
 
-def test_chrony_renderer_supports_nts_sources_server_and_hardening():
-    settings = ChronySettings(
+def test_ntp_renderer_supports_nts_sources_server_and_hardening():
+    settings = NtpSettings(
         enabled=True,
         hostname="ntp.labfoundry.internal",
         listen_interface="eth2",
         listen_address="192.168.50.1",
-        upstream_sources_json=dump_chrony_upstream_sources(
+        port=123,
+        allow_clients="any",
+        nts_ke_port=4460,
+        config_path="/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf",
+        upstream_sources_json=dump_ntp_upstream_sources(
             [
-                {"source": "time.cloudflare.com", "enabled": True, "use_nts": True, "description": "secure", "maxdelay": "0.5"},
+                {"source": "time.cloudflare.com", "enabled": True, "use_nts": True, "description": "secure"},
                 {"source": "time.google.com", "enabled": True, "use_nts": False, "description": ""},
                 {"source": "disabled.example.com", "enabled": False, "use_nts": True, "description": ""},
             ]
         ),
         nts_server_enabled=True,
-        nts_server_cert_path="/etc/labfoundry/certs/chrony.pem",
-        nts_server_key_path="/etc/labfoundry/certs/chrony.key",
-        command_port_disabled=True,
+        nts_server_cert_path="/etc/labfoundry/certs/ntp.pem",
+        nts_server_key_path="/etc/labfoundry/certs/ntp.key",
         minsources=2,
-        maxchange_seconds=30,
-        authselectmode="prefer",
     )
 
-    config = render_chrony_config(settings)
+    config = render_ntp_config(settings)
 
-    assert "ntsdumpdir /var/lib/chrony" in config
-    assert "server time.cloudflare.com iburst nts maxdelay 0.5" in config
+    assert "driftfile /var/lib/ntp/ntp.drift" in config
+    assert "interface ignore wildcard" in config
+    assert "restrict source kod limited nomodify noquery" in config
+    assert "interface listen 192.168.50.1" in config
+    assert "restrict default kod limited nomodify noquery" in config
+    assert "server time.cloudflare.com iburst nts" in config
     assert "server time.google.com iburst" in config
     assert "disabled.example.com" not in config
-    assert "ntsservercert /etc/labfoundry/certs/chrony.pem" in config
-    assert "ntsserverkey /etc/labfoundry/certs/chrony.key" in config
-    assert "cmdport 0" in config
-    assert "minsources 2" in config
-    assert "maxchange 30 1 1" in config
-    assert "authselectmode prefer" in config
+    assert "nts enable" in config
+    assert "nts cert /etc/labfoundry/certs/ntp.pem" in config
+    assert "nts key /etc/labfoundry/certs/ntp.key" in config
+    assert "nts cookie /var/lib/ntp/nts-keys" in config
+    assert "tos minsane 2" in config
 
 
-def test_chrony_legacy_default_server_fallback_uses_nts_sources():
-    settings = ChronySettings(
+def test_ntp_default_server_fallback_uses_nts_sources():
+    settings = NtpSettings(
         hostname="ntp.labfoundry.internal",
-        upstream_servers=CHRONY_DEFAULT_UPSTREAM_SERVERS,
+        upstream_servers=NTP_DEFAULT_UPSTREAM_SERVERS,
         upstream_sources_json="",
     )
 
-    sources = chrony_upstream_sources(settings)
-    config = render_chrony_config(settings)
+    sources = ntp_upstream_sources(settings)
+    config = render_ntp_config(settings)
 
-    assert [source["source"] for source in sources] == ["time.cloudflare.com", "nts.netnod.se"]
-    assert [source["use_nts"] for source in sources] == [True, True]
+    assert [source["source"] for source in sources] == [
+        "time.cloudflare.com",
+        "nts.netnod.se",
+        "ptbtime1.ptb.de",
+        "0.pool.ntp.org",
+        "1.pool.ntp.org",
+        "2.pool.ntp.org",
+        "3.pool.ntp.org",
+        "time.google.com",
+        "time.nist.gov",
+        "time.facebook.com",
+    ]
+    assert [source["use_nts"] for source in sources[:3]] == [True, True, True]
+    assert sources[2]["enabled"] is False
+    assert all(source["enabled"] is False and source["use_nts"] is False for source in sources[3:])
     assert "server time.cloudflare.com iburst nts" in config
     assert "server nts.netnod.se iburst nts" in config
+    assert "server ptbtime1.ptb.de" not in config
+    assert "server 0.pool.ntp.org" not in config
+    assert "server time.google.com" not in config
 
 
-def test_chrony_custom_server_fallback_remains_plain_ntp():
-    settings = ChronySettings(upstream_servers="time.google.com", upstream_sources_json="")
+def test_ntp_custom_server_fallback_remains_plain_ntp():
+    settings = NtpSettings(upstream_servers="time.google.com", upstream_sources_json="")
 
-    sources = chrony_upstream_sources(settings)
+    sources = ntp_upstream_sources(settings)
 
     assert sources == [
         {
-            "id": "legacy-1",
+            "id": "source-1",
             "source": "time.google.com",
             "enabled": True,
             "use_nts": False,
             "description": "",
-            "maxdelay": "",
         }
     ]
+
+
+def test_ntp_rejects_nts_source_ip_and_renders_disabled_state_without_servers():
+    invalid = NtpSettings(
+        enabled=True,
+        hostname="ntp.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        port=123,
+        allow_clients="any",
+        nts_server_enabled=False,
+        nts_ke_port=4460,
+        config_path="/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf",
+        upstream_sources_json=dump_ntp_upstream_sources(
+            [{"source": "192.0.2.10", "enabled": True, "use_nts": True, "description": "invalid NTS identity"}]
+        ),
+    )
+    assert "certificate-valid DNS hostname" in "\n".join(validate_ntp_state(invalid, {"eth2"}))
+
+    disabled = NtpSettings(enabled=False, hostname="ntp.labfoundry.internal", listen_interface="", listen_address="", upstream_servers="", upstream_sources_json="", allow_clients="any")
+    config = render_ntp_config(disabled)
+    assert "# LabFoundry NTP enabled: false" in config
+    assert "server " not in config
+
+
+def test_ntp_sources_accept_addresses_fqdns_and_optional_ports():
+    settings = NtpSettings(
+        enabled=True,
+        hostname="ntp.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        port=123,
+        allow_clients="any",
+        nts_ke_port=4460,
+        config_path="/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf",
+        upstream_sources_json=dump_ntp_upstream_sources(
+            [
+                {"source": "time.example.com:7443", "enabled": True, "use_nts": True, "description": "custom NTS-KE"},
+                {"source": "192.0.2.10:123", "enabled": True, "use_nts": False, "description": "IPv4"},
+                {"source": "2001:db8::10", "enabled": True, "use_nts": False, "description": "IPv6"},
+                {"source": "[2001:db8::20]:123", "enabled": True, "use_nts": False, "description": "IPv6 port"},
+            ]
+        ),
+    )
+
+    assert validate_ntp_state(settings, {"eth2"}) == []
+    config = render_ntp_config(settings)
+    assert "server time.example.com:7443 iburst nts" in config
+    assert "server 192.0.2.10:123 iburst" in config
+    assert "server [2001:db8::10] iburst" in config
+    assert "server [2001:db8::20]:123 iburst" in config
+    assert parse_ntp_source("time.example.com:7443") == ("time.example.com", 7443, False)
+
+
+def test_ntp_sources_reject_invalid_identity_port_and_nts_ip():
+    settings = NtpSettings(
+        enabled=True,
+        hostname="ntp.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        port=123,
+        allow_clients="any",
+        nts_ke_port=4460,
+        config_path="/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf",
+        upstream_sources_json=dump_ntp_upstream_sources(
+            [
+                {"source": "not-a-fqdn", "enabled": True, "use_nts": False, "description": ""},
+                {"source": "time.example.com:70000", "enabled": True, "use_nts": False, "description": ""},
+                {"source": "192.0.2.10:4460", "enabled": True, "use_nts": True, "description": ""},
+            ]
+        ),
+    )
+
+    errors = "\n".join(validate_ntp_state(settings, {"eth2"}))
+    assert "NTP upstream server not-a-fqdn" in errors
+    assert "NTP upstream server time.example.com:70000" in errors
+    assert "NTS upstream 192.0.2.10:4460 must use a certificate-valid DNS hostname" in errors
 
 
 def test_dnsmasq_renderer_supports_dnssec_rebind_logging_and_extended_records():

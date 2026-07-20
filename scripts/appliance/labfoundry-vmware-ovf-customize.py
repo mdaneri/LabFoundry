@@ -26,7 +26,6 @@ PROPERTY_IPV6_CIDR = f"{PROPERTY_PREFIX}ipv6_cidr"
 PROPERTY_IPV6_GATEWAY = f"{PROPERTY_PREFIX}ipv6_gateway"
 PROPERTY_FQDN = f"{PROPERTY_PREFIX}fqdn"
 PROPERTY_DNS = f"{PROPERTY_PREFIX}dns_servers"
-PROPERTY_NTP = f"{PROPERTY_PREFIX}ntp_servers"
 PROPERTY_ADMIN_PASSWORD = f"{PROPERTY_PREFIX}admin_password"
 PROPERTY_ROOT_PASSWORD = f"{PROPERTY_PREFIX}root_password"
 PROPERTY_ROOT_SSH_ENABLED = f"{PROPERTY_PREFIX}root_ssh_enabled"
@@ -47,7 +46,6 @@ MARKER_PATH = Path("/var/lib/labfoundry/vmware-ovf-customization.applied")
 LOG_PATH = Path("/var/log/labfoundry/vmware-ovf-customize.log")
 DEFAULT_INTERFACE = "eth0"
 FQDN_PATTERN = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$")
-NTP_NAME_PATTERN = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9_.-]+(?<!-)$")
 
 
 class OvfCustomizationError(ValueError):
@@ -113,17 +111,6 @@ def validate_dns_servers(value: str, *, required: bool = False) -> list[str]:
             ip_address(server)
         except ValueError as exc:
             raise OvfCustomizationError(f"DNS server must be an IP address: {server}") from exc
-    return servers
-
-
-def validate_ntp_servers(value: str) -> list[str]:
-    servers = split_list(value)
-    for server in servers:
-        try:
-            ip_address(server)
-        except ValueError:
-            if not NTP_NAME_PATTERN.match(server):
-                raise OvfCustomizationError(f"NTP server must be a DNS name or IP address: {server}") from None
     return servers
 
 
@@ -196,7 +183,6 @@ def validate_properties(properties: dict[str, str]) -> dict[str, object]:
 
     fqdn = validate_fqdn(properties[PROPERTY_FQDN])
     dns_servers = validate_dns_servers(properties.get(PROPERTY_DNS, ""))
-    ntp_servers = validate_ntp_servers(properties.get(PROPERTY_NTP, ""))
     return {
         "management_mode": management_mode,
         "cidr": str(cidr) if cidr else "dhcp",
@@ -207,7 +193,6 @@ def validate_properties(properties: dict[str, str]) -> dict[str, object]:
         "ipv6_gateway": str(ipv6_gateway) if ipv6_gateway else "",
         "fqdn": fqdn,
         "dns_servers": dns_servers,
-        "ntp_servers": ntp_servers,
         "admin_password": properties[PROPERTY_ADMIN_PASSWORD],
         "root_password": properties[PROPERTY_ROOT_PASSWORD],
         "root_ssh_enabled": parse_boolean_property(properties, PROPERTY_ROOT_SSH_ENABLED),
@@ -228,7 +213,6 @@ def redacted_summary(config: dict[str, object]) -> dict[str, object]:
         "ipv6_gateway": config["ipv6_gateway"],
         "fqdn": config["fqdn"],
         "dns_server_count": len(config["dns_servers"]),
-        "ntp_server_count": len(config["ntp_servers"]),
         "admin_password_set": bool(config["admin_password"]),
         "root_password_set": bool(config["root_password"]),
         "root_ssh_enabled": config["root_ssh_enabled"],
@@ -436,7 +420,6 @@ def apply_customization(config: dict[str, object], *, dry_run: bool = False) -> 
             "LABFOUNDRY_APPLIANCE_MANAGEMENT_IPV6_GATEWAY": config["ipv6_gateway"],
             "LABFOUNDRY_APPLIANCE_ROOT_SSH_ENABLED": str(config["root_ssh_enabled"]).lower(),
             "LABFOUNDRY_APPLIANCE_EXTERNAL_DNS_SERVERS": ",".join(config["dns_servers"]),
-            "LABFOUNDRY_APPLIANCE_NTP_SERVERS": ",".join(config["ntp_servers"]),
             "LABFOUNDRY_MANAGEMENT_SOURCE_CIDR": config["management_source_cidr"],
         },
     )

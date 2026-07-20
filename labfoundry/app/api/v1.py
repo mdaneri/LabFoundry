@@ -41,7 +41,7 @@ from labfoundry.app.models import (
     LdapSettings,
     LdapUser,
     NatRule,
-    ChronySettings,
+    NtpSettings,
     PhysicalInterface,
     Route,
     RoutingRule,
@@ -214,7 +214,7 @@ from labfoundry.app.services.appliance_settings import (
     web_terminal_interface_options,
     web_terminal_interfaces_to_json,
 )
-from labfoundry.app.services.chrony import default_chrony_upstream_fields
+from labfoundry.app.services.ntp import default_ntp_upstream_fields
 from labfoundry.app.services.ca import ca_service_state
 from labfoundry.app.services.firewall import (
     FIREWALL_ACTIONS,
@@ -454,14 +454,13 @@ def get_kms_settings_row(db: Session) -> KmsSettings:
     return settings
 
 
-def get_chrony_settings(db: Session) -> ChronySettings:
-    settings = db.execute(select(ChronySettings)).scalar_one_or_none()
+def get_ntp_settings(db: Session) -> NtpSettings:
+    settings = db.execute(select(NtpSettings)).scalar_one_or_none()
     if settings is None:
-        appliance_settings = get_appliance_settings(db)
-        chrony_upstreams = default_chrony_upstream_fields(appliance_settings.ntp_servers)
-        settings = ChronySettings(
-            upstream_servers=chrony_upstreams["upstream_servers"],
-            upstream_sources_json=chrony_upstreams["upstream_sources_json"],
+        ntp_upstreams = default_ntp_upstream_fields()
+        settings = NtpSettings(
+            upstream_servers=ntp_upstreams["upstream_servers"],
+            upstream_sources_json=ntp_upstreams["upstream_sources_json"],
         )
         db.add(settings)
         db.commit()
@@ -634,7 +633,7 @@ def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[Fir
         ca_settings=db.execute(select(CaSettings)).scalar_one_or_none() or CaSettings(),
         ca_portal_interfaces=ca_portal_firewall_interfaces(physical_interfaces, vlan_interfaces, interface_networks),
         kms_settings=get_kms_settings_row(db),
-        chrony_settings=get_chrony_settings(db),
+        ntp_settings=get_ntp_settings(db),
         vcf_backup_settings=get_vcf_backup_settings(db),
         vcf_depot_settings=get_vcf_offline_depot_settings(db),
         vcf_registry_settings=get_vcf_private_registry_settings(db),
@@ -2265,12 +2264,12 @@ def get_service_logs(service: str, identity: Annotated[Identity, Depends(require
 
 @router.get("/logs", response_model=list[str], tags=["Logs"], operation_id="listLogs")
 def list_logs(identity: Annotated[Identity, Depends(require_scope("read:logs"))]) -> list[str]:
-    return ["system", "labfoundry", "dnsmasq", "ldap", "chrony", "nginx", "openssh", "nftables"]
+    return ["system", "labfoundry", "dnsmasq", "ldap", "ntp", "nginx", "openssh", "nftables"]
 
 
 @router.get("/logs/{source}", response_model=list[str], tags=["Logs"], operation_id="getLogSource")
 def get_log_source(source: str, identity: Annotated[Identity, Depends(require_scope("read:logs"))]) -> list[str]:
-    if source not in {"system", "labfoundry", "dnsmasq", "ldap", "chrony", "nginx", "openssh", "nftables"}:
+    if source not in {"system", "labfoundry", "dnsmasq", "ldap", "ntp", "nginx", "openssh", "nftables"}:
         raise HTTPException(status_code=404, detail="Log source is not approved")
     return [f"dry-run log source for {source}", "Host log streaming is not enabled in the MVP scaffold."]
 

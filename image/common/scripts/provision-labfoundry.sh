@@ -81,7 +81,7 @@ case "$LABFOUNDRY_GUEST_PLATFORM" in
     exit 2
     ;;
 esac
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv python3-curses sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite procps-ng $GUEST_INTEGRATION_PACKAGES nftables dnsmasq chrony openldap openldap-servers ipxe syslinux nginx powershell
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv python3-curses python3-ntp sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite procps-ng $GUEST_INTEGRATION_PACKAGES nftables dnsmasq ntpsec openldap openldap-servers ipxe syslinux nginx powershell
 
 log_step "installing VCF PowerCLI $LABFOUNDRY_POWERCLI_VERSION"
 export LABFOUNDRY_POWERCLI_VERSION
@@ -101,6 +101,11 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command \
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
+
+log_step "leaving only Photon NTPsec available for desired-state activation"
+systemctl disable --now ntpd.service 2>/dev/null || true
+systemctl disable --now systemd-timesyncd.service 2>/dev/null || true
+systemctl disable --now chronyd.service 2>/dev/null || true
 
 log_step "disabling systemd SSH-over-vsock auto generator"
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "hyperv" ]; then
@@ -123,7 +128,7 @@ install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/dnsmasq"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/kms"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/ldap"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/local-users"
-install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/chronyd"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/ntpd"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-backups"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-offline-depot"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/vcfDownloadTool/active-tool"

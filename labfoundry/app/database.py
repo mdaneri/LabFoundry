@@ -36,7 +36,7 @@ def init_db() -> None:
     _ensure_sqlite_dhcp_columns()
     _ensure_sqlite_user_sync_columns()
     _ensure_sqlite_appliance_settings_columns()
-    _ensure_sqlite_chrony_settings_columns()
+    _ensure_sqlite_ntp_settings_columns()
     _ensure_sqlite_dns_security_columns()
     _ensure_sqlite_ca_columns()
     _ensure_sqlite_vcf_depot_columns()
@@ -149,35 +149,32 @@ def _ensure_sqlite_appliance_settings_columns() -> None:
                 connection.execute(text(f"ALTER TABLE appliance_settings ADD COLUMN {name} {definition}"))
 
 
-def _ensure_sqlite_chrony_settings_columns() -> None:
+def _ensure_sqlite_ntp_settings_columns() -> None:
     if not str(engine.url).startswith("sqlite"):
         return
     inspector = inspect(engine)
-    if "chrony_settings" not in inspector.get_table_names():
+    if "ntp_settings" not in inspector.get_table_names():
         return
-    existing = {column["name"] for column in inspector.get_columns("chrony_settings")}
+    existing = {column["name"] for column in inspector.get_columns("ntp_settings")}
     columns = {
         "hostname": "VARCHAR(180) DEFAULT 'ntp.labfoundry.internal'",
         "listen_interface": "VARCHAR(240) DEFAULT ''",
         "listen_address": "VARCHAR(240) DEFAULT ''",
         "port": "INTEGER DEFAULT 123",
         "upstream_servers": "TEXT DEFAULT 'time.cloudflare.com\nnts.netnod.se'",
-        "upstream_sources_json": """TEXT DEFAULT '[{"description":"Cloudflare public NTS","enabled":true,"id":"cloudflare-nts","maxdelay":"","source":"time.cloudflare.com","use_nts":true},{"description":"Netnod public NTS","enabled":true,"id":"netnod-nts","maxdelay":"","source":"nts.netnod.se","use_nts":true}]'""",
+        "upstream_sources_json": """TEXT DEFAULT '[{"description":"Cloudflare public NTS","enabled":true,"id":"cloudflare-nts","source":"time.cloudflare.com","use_nts":true},{"description":"Netnod public NTS","enabled":true,"id":"netnod-nts","source":"nts.netnod.se","use_nts":true}]'""",
         "allow_clients": "TEXT DEFAULT 'any'",
         "nts_server_enabled": "BOOLEAN DEFAULT 0",
         "nts_server_cert_path": "VARCHAR(300) DEFAULT ''",
         "nts_server_key_path": "VARCHAR(300) DEFAULT ''",
         "nts_ke_port": "INTEGER DEFAULT 4460",
-        "command_port_disabled": "BOOLEAN DEFAULT 0",
         "minsources": "INTEGER",
-        "maxchange_seconds": "INTEGER",
-        "authselectmode": "VARCHAR(20) DEFAULT ''",
-        "config_path": "VARCHAR(240) DEFAULT '/var/lib/labfoundry/apply/chronyd/labfoundry-chrony.conf'",
+        "config_path": "VARCHAR(240) DEFAULT '/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf'",
     }
     with engine.begin() as connection:
         for name, definition in columns.items():
             if name not in existing:
-                connection.execute(text(f"ALTER TABLE chrony_settings ADD COLUMN {name} {definition}"))
+                connection.execute(text(f"ALTER TABLE ntp_settings ADD COLUMN {name} {definition}"))
 
 
 def _ensure_sqlite_dns_security_columns() -> None:

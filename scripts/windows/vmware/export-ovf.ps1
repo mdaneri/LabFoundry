@@ -634,9 +634,8 @@ function Add-LabFoundryOvfProperties {
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ipv6_gateway' -Label 'Management IPv6 gateway' -Description 'Optional with a static IPv6 CIDR. Use an on-link global address or a link-local address; leave blank when no IPv6 default route is required.' -Required $false
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'dns_servers' -Label 'DNS servers' -Description 'Optional resolver IPs separated by commas, spaces, or new lines. Blank DHCP deployments keep lease-provided DNS.' -Required $false
 
-    Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Appliance identity and time'
+    Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Appliance identity'
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'fqdn' -Label 'Appliance FQDN' -Description 'Fully qualified appliance name applied to Photon OS and LabFoundry desired state.' -Required $true
-    Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'ntp_servers' -Label 'NTP servers' -Description 'Optional NTP server names or IPs. If blank, the image defaults are kept.' -Required $false
 
     Add-LabFoundryOvfCategory -Document $document -ProductSection $productSection -Name 'Initial credentials'
     Set-LabFoundryOvfProperty -Document $document -ProductSection $productSection -Key 'admin_password' -Label 'LabFoundry admin password' -Description 'Required initial LabFoundry web admin password; minimum 12 characters. The value is consumed on first boot and not logged.' -Required $true -Password $true -MinLength 12

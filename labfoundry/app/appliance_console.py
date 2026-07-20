@@ -40,8 +40,7 @@ from sqlalchemy import select
 
 from labfoundry.app.audit import record_audit
 from labfoundry.app.database import SessionLocal
-from labfoundry.app.models import ApplianceSettings, ChronySettings, FirewallSettings, Job, JobStatus, JobStep, PhysicalInterface, utcnow
-from labfoundry.app.services.chrony import dump_chrony_upstream_sources
+from labfoundry.app.models import ApplianceSettings, FirewallSettings, Job, JobStatus, JobStep, PhysicalInterface, utcnow
 from labfoundry.app.services.dnsmasq import join_servers, split_servers
 
 
@@ -51,9 +50,6 @@ MAINTENANCE_STATE_PATH = Path("/var/lib/labfoundry/console/services.json")
 CONSOLE_ACTOR = "console:root"
 CONSOLE_REFRESH_ENV = "LABFOUNDRY_CONSOLE_REFRESH_SECONDS"
 BASH_PATH = "/usr/bin/bash"
-HOSTNAME_PATTERN = re.compile(
-    r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
-)
 
 
 def _console_refresh_seconds() -> int:
@@ -88,8 +84,6 @@ class ConsoleStatus:
     ipv6_cidr: str
     ipv6_gateway: str
     dns_servers: tuple[str, ...]
-    ntp_servers: tuple[str, ...]
-    chrony_enabled: bool
     app_active: bool
     firewall_enabled: bool
     maintenance_isolation: bool
@@ -269,7 +263,6 @@ def load_console_status() -> ConsoleStatus:
     with SessionLocal() as db:
         interface = _management_interface(db)
         settings = db.scalar(select(ApplianceSettings).order_by(ApplianceSettings.id))
-        chrony = db.scalar(select(ChronySettings).order_by(ChronySettings.id))
         firewall = db.scalar(select(FirewallSettings).order_by(FirewallSettings.id))
         method = (interface.ipv4_method or "static").strip().lower()
         cidr = (interface.host_ip_cidr if method == "dhcp" else interface.ip_cidr) or _fallback_cidr(interface.name, 4)
@@ -282,7 +275,6 @@ def load_console_status() -> ConsoleStatus:
         )
         ipv6_gateway = interface.ipv6_gateway or (_fallback_gateway(interface.name, 6) if ipv6_mode == "automatic" else "")
         dns_servers = tuple(split_servers(settings.external_dns_servers if settings else "")) or _fallback_dns_servers(interface.name)
-        ntp_servers = tuple(split_servers(chrony.upstream_servers if chrony else (settings.ntp_servers if settings else "")))
         fqdn = settings.fqdn if settings and settings.fqdn else socket.getfqdn()
 
     urls = management_urls(
@@ -307,8 +299,6 @@ def load_console_status() -> ConsoleStatus:
         ipv6_cidr=ipv6_cidr,
         ipv6_gateway=ipv6_gateway,
         dns_servers=dns_servers,
-        ntp_servers=ntp_servers,
-        chrony_enabled=bool(chrony and chrony.enabled),
         app_active=_service_active("labfoundry.service"),
         firewall_enabled=bool(firewall and firewall.enabled),
         maintenance_isolation=MAINTENANCE_STATE_PATH.exists(),
@@ -397,22 +387,6 @@ def validate_dns_servers(raw: str) -> list[str]:
             ip_address(server)
         except ValueError as exc:
             raise ConsoleOperationError(f"DNS server {server} must be an IPv4 or IPv6 address.") from exc
-    return servers
-
-
-def validate_ntp_servers(raw: str) -> list[str]:
-    servers = [item for item in re.split(r"[\s,]+", raw.strip()) if item]
-    if not servers:
-        raise ConsoleOperationError("At least one NTP server is required.")
-    for server in servers:
-        try:
-            ip_address(server)
-            continue
-        except ValueError:
-            pass
-        normalized = server.strip().strip(".").lower()
-        if not HOSTNAME_PATTERN.fullmatch(normalized):
-            raise ConsoleOperationError(f"NTP server {server} must be a valid DNS name or IP address.")
     return servers
 
 
@@ -585,34 +559,6 @@ def configure_dns(raw_servers: str) -> str:
         db.commit()
         record_audit(db, actor=CONSOLE_ACTOR, action="console_update_dns", resource_type="appliance_settings", resource_id=str(settings.id))
     return _submit_console_apply({"appliance_settings"})
-
-
-def configure_ntp(raw_servers: str) -> str:
-    servers = validate_ntp_servers(raw_servers)
-    _ensure_no_active_apply()
-    with SessionLocal() as db:
-        settings = db.scalar(select(ApplianceSettings).order_by(ApplianceSettings.id))
-        chrony = db.scalar(select(ChronySettings).order_by(ChronySettings.id))
-        if settings is None or chrony is None:
-            raise ConsoleOperationError("Chrony desired state is unavailable.")
-        settings.ntp_servers = join_servers(servers)
-        chrony.upstream_servers = join_servers(servers)
-        chrony.upstream_sources_json = dump_chrony_upstream_sources(
-            [
-                {
-                    "id": f"console-{index}",
-                    "source": server,
-                    "enabled": True,
-                    "use_nts": False,
-                    "description": "Configured from the local appliance console",
-                    "maxdelay": "",
-                }
-                for index, server in enumerate(servers, start=1)
-            ]
-        )
-        db.commit()
-        record_audit(db, actor=CONSOLE_ACTOR, action="console_update_ntp", resource_type="chrony", resource_id=str(chrony.id))
-    return _submit_console_apply({"chronyd"})
 
 
 def configure_firewall(enabled: bool) -> str:
@@ -900,13 +846,6 @@ class CursesConsole:
             self._network_table_row("DNS", ", ".join(status.dns_servers) or "Not configured", width),
             curses.color_pair(2),
         )
-        ntp = self._network_table_row(
-            "NTP",
-            ", ".join(status.ntp_servers) or "Not configured",
-            width,
-            auxiliary=("Chrony", "enabled" if status.chrony_enabled else "disabled"),
-        )
-        self._safe_add(19, 6, ntp, curses.color_pair(2))
         auxiliary: tuple[str, str] | None = None
         if status.maintenance_isolation:
             auxiliary = ("Isolation", "enabled")
@@ -918,7 +857,7 @@ class CursesConsole:
             width,
             auxiliary=auxiliary,
         )
-        self._safe_add(20, 6, firewall, curses.color_pair(5 if status.firewall_enabled else 6) | curses.A_BOLD)
+        self._safe_add(19, 6, firewall, curses.color_pair(5 if status.firewall_enabled else 6) | curses.A_BOLD)
         if self.message:
             message_row = height - 2 if height > 22 else 19
             self._safe_add(message_row, 4, self.message, curses.color_pair(7 if self.message_error else 5) | curses.A_BOLD)
@@ -1299,9 +1238,9 @@ class CursesConsole:
             choice = self._dialog(
                 "Customize LabFoundry",
                 ["Only management recovery settings are available from the local console."],
-                ["Management IP, gateways, and DNS", "NTP servers", "Enable firewall" if not status.firewall_enabled else "Disable firewall", isolation_label, "Back"],
+                ["Management IP, gateways, and DNS", "Enable firewall" if not status.firewall_enabled else "Disable firewall", isolation_label, "Back"],
             )
-            if choice == 4:
+            if choice == 3:
                 return
             if choice == 0:
                 management = self._management_form(status)
@@ -1335,10 +1274,6 @@ class CursesConsole:
                     )
                 self._restore_main_surface()
             elif choice == 1:
-                value = self._prompt("NTP servers", "Comma- or space-separated names or IP addresses:", ", ".join(status.ntp_servers))
-                if value is not None and self._dialog("Apply NTP servers", [value], ["Apply", "Cancel"]) == 0:
-                    self._apply_action(lambda: configure_ntp(value), "NTP desired state applied")
-            elif choice == 2:
                 enabling_firewall = not status.firewall_enabled
                 firewall_label = "Enable firewall" if enabling_firewall else "Disable firewall"
                 warning = (
@@ -1349,10 +1284,10 @@ class CursesConsole:
                 confirm = self._dialog(firewall_label, [warning], [firewall_label, "Cancel"])
                 if confirm == 0:
                     self._apply_action(lambda: configure_firewall(enabling_firewall), f"{firewall_label} completed")
-            elif choice == 3:
+            elif choice == 2:
                 enabling = not status.maintenance_isolation
                 warning = (
-                    "Stops and disables the web UI, SSH, DNS/DHCP, Chrony, LDAP, and KMS."
+                    "Stops and disables appliance application services."
                     if enabling
                     else "Restores only the services that were enabled before isolation."
                 )

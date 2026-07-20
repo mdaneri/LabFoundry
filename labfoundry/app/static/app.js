@@ -3181,9 +3181,9 @@ function initializeServicesTable() {
           },
         },
         {
-          label: "Check Chrony source health",
-          action: () => openChronySourceHealthModal(),
-          disabled: (component) => component.getData().service !== "chronyd",
+          label: "Check NTPsec source health",
+          action: () => openNTPsecSourceHealthModal(),
+          disabled: (component) => component.getData().service !== "ntpd",
         },
       ],
       columns: [
@@ -4543,79 +4543,192 @@ function initializeLdapPasswordModal() {
   }
 }
 
-function chronyBlankUpstreamRow() {
+function parseNtpUpstreamSource(value) {
+  const source = String(value || "").trim();
+  if (!source) return null;
+  let host = source;
+  let port = "";
+  const bracketed = source.match(/^\[([^\]]+)\](?::(\d+))?$/);
+  if (bracketed) {
+    host = bracketed[1];
+    port = bracketed[2] || "";
+    if (!isValidIpv6Address(host)) return null;
+  } else if (!isValidIpv6Address(source) && source.split(":").length === 2) {
+    const parts = source.split(":");
+    if (/^\d+$/.test(parts[1])) {
+      [host, port] = parts;
+    }
+  }
+  if (port && (Number(port) < 1 || Number(port) > 65535)) return null;
+  const normalizedHost = host.replace(/\.$/, "").toLowerCase();
+  const fqdnPattern = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+  if (!isValidIpv4Address(host) && !isValidIpv6Address(host) && !fqdnPattern.test(normalizedHost)) return null;
+  return { host: normalizedHost, port: port ? Number(port) : null };
+}
+
+function ntpUpstreamSourceFormatter(cell) {
+  const data = cell.getRow().getData();
+  const value = String(cell.getValue() || "").trim();
+  if (data.is_new && !value) {
+    return '<span class="add-row-hint">+ Add source here</span>';
+  }
+  const valid = Boolean(parseNtpUpstreamSource(value));
+  cell.getElement().classList.toggle("invalid-ntp-source-cell", !valid);
+  cell.getElement().title = valid ? "" : "Enter an IPv4 address, IPv6 address, or FQDN, optionally followed by :port.";
+  return escapeHtml(value);
+}
+
+function ntpUpstreamSourceEditor(cell, onRendered, success, cancel) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = cell.getValue() || "";
+  input.placeholder = "time.example.com[:4460]";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.setAttribute("aria-label", "NTP upstream source");
+  let finished = false;
+
+  const updateValidity = () => {
+    const value = input.value.trim();
+    input.classList.toggle("invalid-ntp-source-input", Boolean(value) && !parseNtpUpstreamSource(value));
+  };
+  const submit = () => {
+    if (finished) return true;
+    const value = input.value.trim();
+    if (value && !parseNtpUpstreamSource(value)) {
+      input.classList.add("invalid-ntp-source-input");
+      const status = document.getElementById("ntp-settings-autosave-status");
+      if (status instanceof HTMLElement) {
+        status.dataset.state = "error";
+        status.textContent = "Enter an IPv4 address, IPv6 address, or FQDN, optionally followed by :port.";
+      }
+      return false;
+    }
+    finished = true;
+    success(value);
+    return true;
+  };
+  input.addEventListener("input", updateValidity);
+  input.addEventListener("blur", () => {
+    if (!submit()) cancel();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    } else if (event.key === "Escape") {
+      finished = true;
+      cancel();
+    }
+  });
+  onRendered(() => {
+    input.focus();
+    input.select();
+    updateValidity();
+  });
+  return input;
+}
+
+function ntpBlankUpstreamRow() {
   return {
     id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     source: "",
     enabled: false,
     use_nts: false,
-    maxdelay: "",
     description: "",
     is_new: true,
   };
 }
 
-function chronyUpstreamRowHasSource(cell) {
+function ntpUpstreamRowHasSource(cell) {
   return Boolean(String(cell.getRow().getData().source || "").trim());
 }
 
-function chronyGuardedTickFormatter(cell) {
-  if (!chronyUpstreamRowHasSource(cell)) {
+function ntpGuardedTickFormatter(cell) {
+  if (!ntpUpstreamRowHasSource(cell)) {
     return "";
   }
   return labFoundryBooleanFormatter(cell);
 }
 
-function chronyUnsupportedNtsFormatter(cell) {
-  if (!chronyUpstreamRowHasSource(cell)) {
+function ntpNtsTickFormatter(cell) {
+  if (!ntpUpstreamRowHasSource(cell) || !cell.getValue()) {
     return "";
   }
-  return '<span class="muted" title="NTS is not supported by the installed chronyd binary">unavailable</span>';
+  return labFoundryBooleanFormatter(cell);
 }
 
-function chronyGuardedTextFormatter(cell) {
-  if (!chronyUpstreamRowHasSource(cell)) {
+function ntpUnsupportedNtsFormatter(cell) {
+  if (!ntpUpstreamRowHasSource(cell)) {
+    return "";
+  }
+  return '<span class="muted" title="NTS is not supported by the installed ntpd binary">unavailable</span>';
+}
+
+function ntpGuardedTextFormatter(cell) {
+  if (!ntpUpstreamRowHasSource(cell)) {
     return "";
   }
   return escapeHtml(cell.getValue() || "");
 }
 
-function normalizeChronyUpstreamRows(rows = []) {
+function normalizeNTPsecUpstreamRows(rows = []) {
   return rows
     .map((row, index) => ({
       id: row.id || `source-${index + 1}`,
       source: String(row.source || "").trim(),
       enabled: row.enabled !== false,
       use_nts: Boolean(row.use_nts),
-      maxdelay: String(row.maxdelay || "").trim(),
       description: String(row.description || "").trim(),
     }))
     .filter((row) => row.source);
 }
 
-function syncChronyUpstreamsHiddenInput(table) {
-  const hiddenInput = document.querySelector("[data-chrony-upstreams-json]");
+function syncNTPsecUpstreamsHiddenInput(table) {
+  const hiddenInput = document.querySelector("[data-ntp-upstreams-json]");
   if (!(hiddenInput instanceof HTMLInputElement)) {
     return;
   }
-  hiddenInput.value = JSON.stringify(normalizeChronyUpstreamRows(table.getData()));
+  hiddenInput.value = JSON.stringify(normalizeNTPsecUpstreamRows(table.getData()));
 }
 
-function ensureChronyUpstreamAddRow(table) {
+function ensureNTPsecUpstreamAddRow(table) {
   const rows = table.getData();
   const hasBlankRow = rows.some((row) => row.is_new && !String(row.source || "").trim());
   if (!hasBlankRow) {
-    table.addRow(chronyBlankUpstreamRow(), false);
+    table.addRow(ntpBlankUpstreamRow(), false);
   }
 }
 
-function initializeChronyUpstreamsTable() {
-  const tableElement = document.getElementById("chrony-upstreams-table");
+function submitNtpUpstreamTableChange(table, hiddenInput) {
+  syncNTPsecUpstreamsHiddenInput(table);
+  if (hiddenInput instanceof HTMLInputElement) {
+    hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+}
+
+async function deleteNtpUpstreamFromMenu(row, table, hiddenInput) {
+  const data = row.getData();
+  if (data.is_new) return;
+  const source = String(data.source || "upstream server");
+  const confirmed = await requestConfirmation({
+    title: `Delete ${source}?`,
+    message: "This removes the upstream server from NTP desired state. The appliance is not changed until global appliance apply runs.",
+    label: "Delete server",
+  });
+  if (!confirmed) return;
+  await row.delete();
+  ensureNTPsecUpstreamAddRow(table);
+  submitNtpUpstreamTableChange(table, hiddenInput);
+}
+
+function initializeNTPsecUpstreamsTable() {
+  const tableElement = document.getElementById("ntp-upstreams-table");
   if (!(tableElement instanceof HTMLElement)) {
     return;
   }
   const fallback = document.getElementById(tableElement.dataset.fallbackId || "");
-  const hiddenInput = document.querySelector("[data-chrony-upstreams-json]");
+  const hiddenInput = document.querySelector("[data-ntp-upstreams-json]");
   if (typeof Tabulator === "undefined") {
     if (fallback instanceof HTMLElement) {
       fallback.classList.remove("hidden");
@@ -4623,10 +4736,10 @@ function initializeChronyUpstreamsTable() {
     return;
   }
   try {
-    const parsedRows = JSON.parse(tableElement.dataset.chronyUpstreams || "[]");
-    const ntsSupported = tableElement.dataset.chronyNtsSupported !== "false";
-    const rows = normalizeChronyUpstreamRows(parsedRows);
-    rows.push(chronyBlankUpstreamRow());
+    const parsedRows = JSON.parse(tableElement.dataset.ntpUpstreams || "[]");
+    const ntsSupported = tableElement.dataset.ntpNtsSupported !== "false";
+    const rows = normalizeNTPsecUpstreamRows(parsedRows);
+    rows.push(ntpBlankUpstreamRow());
     const table = new Tabulator(tableElement, {
       data: rows,
       index: "id",
@@ -4635,47 +4748,55 @@ function initializeChronyUpstreamsTable() {
       rowHeight: 34,
       placeholder: "Add an upstream source.",
       reactiveData: false,
+      rowContextMenu: [
+        {
+          label: "Delete server",
+          action: (event, row) => deleteNtpUpstreamFromMenu(row, table, hiddenInput),
+          disabled: (row) => row.getData().is_new,
+        },
+      ],
       columns: lockNewRecordColumns([
         {
           title: "Source",
           field: "source",
-          editor: "input",
-          minWidth: 180,
-          formatter: (cell) => {
-            const value = String(cell.getValue() || "");
-            return dnsAddRowHintFormatter(cell, value || "+ Add source here");
-          },
+          editor: ntpUpstreamSourceEditor,
+          formatter: ntpUpstreamSourceFormatter,
+          width: 360,
+          minWidth: 230,
+          headerTooltip: "IPv4, IPv6, or fully qualified DNS name. Append :port when the upstream uses a non-default port; use [IPv6]:port for IPv6.",
         },
         {
           title: "NTS",
           field: "use_nts",
-          formatter: ntsSupported ? chronyGuardedTickFormatter : chronyUnsupportedNtsFormatter,
+          formatter: ntsSupported ? ntpNtsTickFormatter : ntpUnsupportedNtsFormatter,
           editor: ntsSupported ? "tickCross" : false,
-          editable: ntsSupported ? chronyUpstreamRowHasSource : false,
+          editable: ntsSupported ? ntpUpstreamRowHasSource : false,
           width: ntsSupported ? 70 : 105,
           hozAlign: "center",
         },
-        { title: "Max delay", field: "maxdelay", editor: "input", editable: chronyUpstreamRowHasSource, width: 105, formatter: chronyGuardedTextFormatter },
-        { title: "Enabled", field: "enabled", formatter: chronyGuardedTickFormatter, editor: "tickCross", editable: chronyUpstreamRowHasSource, width: 92, hozAlign: "center" },
-        { title: "Description", field: "description", editor: "input", editable: chronyUpstreamRowHasSource, minWidth: 170, formatter: chronyGuardedTextFormatter },
+        { title: "Enabled", field: "enabled", formatter: ntpGuardedTickFormatter, editor: "tickCross", editable: ntpUpstreamRowHasSource, width: 92, hozAlign: "center" },
+        { title: "Description", field: "description", editor: "input", editable: ntpUpstreamRowHasSource, minWidth: 240, widthGrow: 5, formatter: ntpGuardedTextFormatter },
       ], "source"),
       rowFormatter: (row) => {
         markNewRecordRow(row, "source");
       },
     });
-    table.on("cellEdited", (cell) => {
+    table.on("cellEdited", async (cell) => {
       const row = cell.getRow();
       const data = row.getData();
+      if (!data.is_new && cell.getField() === "source" && !String(data.source || "").trim()) {
+        await row.delete();
+        ensureNTPsecUpstreamAddRow(table);
+        submitNtpUpstreamTableChange(table, hiddenInput);
+        return;
+      }
       if (data.is_new && String(data.source || "").trim()) {
         row.update({ is_new: false, id: data.id || `source-${Date.now()}`, enabled: true });
-        ensureChronyUpstreamAddRow(table);
+        ensureNTPsecUpstreamAddRow(table);
       }
-      syncChronyUpstreamsHiddenInput(table);
-      if (hiddenInput instanceof HTMLInputElement) {
-        hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
-      }
+      submitNtpUpstreamTableChange(table, hiddenInput);
     });
-    syncChronyUpstreamsHiddenInput(table);
+    syncNTPsecUpstreamsHiddenInput(table);
     if (fallback instanceof HTMLElement) {
       fallback.classList.add("hidden");
     }
@@ -4686,7 +4807,7 @@ function initializeChronyUpstreamsTable() {
   }
 }
 
-function updateChronySettingsPreview(form, payload = {}) {
+function updateNtpSettingsPreview(form, payload = {}) {
   updateDerivedListenAddressSummary(form, payload);
   const configPath = document.querySelector("[data-ntp-config-path]");
   if (configPath instanceof HTMLElement && payload.config_path) {
@@ -4726,7 +4847,7 @@ function updateNtpValidation(payload = {}) {
       const message = document.createElement("p");
       message.className = "muted";
       message.setAttribute("data-ntp-validation-message", "");
-      message.textContent = "The desired Chrony state passes LabFoundry validation. Appliance validation still runs through the allowlisted Chrony helper before apply.";
+      message.textContent = "The desired NTPsec state passes LabFoundry validation. Appliance validation still runs through the allowlisted NTPsec helper before apply.";
       validationPanel.insertBefore(message, previewAnchor);
     }
     return;
@@ -4748,20 +4869,20 @@ function updateNtpValidation(payload = {}) {
   }
 }
 
-function initializeChronySettings() {
+function initializeNtpSettings() {
   document.querySelectorAll("[data-ntp-settings]").forEach((form) => {
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
     form.addEventListener("labfoundry:autosave-success", (event) => {
       const payload = event.detail || {};
-      updateChronySettingsPreview(form, payload);
+      updateNtpSettingsPreview(form, payload);
       updateNtpValidation(payload);
     });
   });
 }
 
-function formatChronySourceHealthSection(name, section = {}) {
+function formatNTPsecSourceHealthSection(name, section = {}) {
   const title = name.charAt(0).toUpperCase() + name.slice(1);
   const returnCode = Number(section.returncode ?? 0);
   const stdout = String(section.stdout || "").trimEnd();
@@ -4779,18 +4900,18 @@ function formatChronySourceHealthSection(name, section = {}) {
   return lines.join("\n");
 }
 
-function formatChronySourceHealthPayload(payload = {}) {
+function formatNTPsecSourceHealthPayload(payload = {}) {
   const sections = payload.status && typeof payload.status === "object" ? payload.status : {};
-  const names = ["tracking", "sources", "authdata"];
+  const names = ["peers", "variables", "nts"];
   if (names.some((name) => sections[name])) {
-    return names.map((name) => formatChronySourceHealthSection(name, sections[name] || {})).join("\n\n");
+    return names.map((name) => formatNTPsecSourceHealthSection(name, sections[name] || {})).join("\n\n");
   }
   const stdout = String(payload.stdout || "").trimEnd();
   const stderr = String(payload.stderr || "").trimEnd();
-  return [stdout, stderr ? `stderr: ${stderr}` : ""].filter(Boolean).join("\n\n") || "No Chrony source health output was returned.";
+  return [stdout, stderr ? `stderr: ${stderr}` : ""].filter(Boolean).join("\n\n") || "No NTPsec source health output was returned.";
 }
 
-function setChronySourceHealthStatus(statusElement, text, state) {
+function setNTPsecSourceHealthStatus(statusElement, text, state) {
   if (!(statusElement instanceof HTMLElement)) {
     return;
   }
@@ -4800,10 +4921,10 @@ function setChronySourceHealthStatus(statusElement, text, state) {
   statusElement.classList.toggle("muted", state === "muted");
 }
 
-let chronySourceHealthLoader = null;
+let ntpSourceHealthLoader = null;
 
-function openChronySourceHealthModal() {
-  const modal = document.getElementById("chrony-source-health-modal");
+function openNTPsecSourceHealthModal() {
+  const modal = document.getElementById("ntp-source-health-modal");
   if (!(modal instanceof HTMLDialogElement)) {
     return;
   }
@@ -4812,59 +4933,59 @@ function openChronySourceHealthModal() {
   } else {
     modal.setAttribute("open", "");
   }
-  if (typeof chronySourceHealthLoader === "function") {
-    chronySourceHealthLoader();
+  if (typeof ntpSourceHealthLoader === "function") {
+    ntpSourceHealthLoader();
   }
 }
 
-function initializeChronySourceHealthModal() {
-  const modal = document.getElementById("chrony-source-health-modal");
-  const output = modal?.querySelector("[data-chrony-source-health-output]");
-  const status = modal?.querySelector("[data-chrony-source-health-status]");
-  const refreshButton = modal?.querySelector("[data-chrony-source-health-refresh]");
-  const closeButton = modal?.querySelector("[data-chrony-source-health-close]");
+function initializeNTPsecSourceHealthModal() {
+  const modal = document.getElementById("ntp-source-health-modal");
+  const output = modal?.querySelector("[data-ntp-source-health-output]");
+  const status = modal?.querySelector("[data-ntp-source-health-status]");
+  const refreshButton = modal?.querySelector("[data-ntp-source-health-refresh]");
+  const closeButton = modal?.querySelector("[data-ntp-source-health-close]");
   if (!(modal instanceof HTMLDialogElement) || !(output instanceof HTMLElement)) {
     return;
   }
 
   const loadHealth = async () => {
-    setChronySourceHealthStatus(status, "checking", "muted");
-    output.textContent = "Checking chronyc tracking, sources, and authdata...";
+    setNTPsecSourceHealthStatus(status, "checking", "muted");
+    output.textContent = "Checking ntpq peers, runtime variables, and NTS state...";
     if (refreshButton instanceof HTMLButtonElement) {
       refreshButton.disabled = true;
     }
     try {
-      const response = await fetch("/chrony/source-health", {
+      const response = await fetch("/ntp/source-health", {
         method: "GET",
         credentials: "same-origin",
         headers: { Accept: "application/json" },
       });
       const payload = await response.json();
-      output.textContent = formatChronySourceHealthPayload(payload);
+      output.textContent = formatNTPsecSourceHealthPayload(payload);
       const failedSection = Object.values(payload.status || {}).some((section) => Number(section?.returncode ?? 0) !== 0);
       if (!response.ok || !payload.ok || failedSection) {
-        setChronySourceHealthStatus(status, "needs attention", "warn");
+        setNTPsecSourceHealthStatus(status, "needs attention", "warn");
       } else if (payload.dry_run) {
-        setChronySourceHealthStatus(status, "dry-run", "muted");
+        setNTPsecSourceHealthStatus(status, "dry-run", "muted");
       } else {
-        setChronySourceHealthStatus(status, "healthy", "good");
+        setNTPsecSourceHealthStatus(status, "healthy", "good");
       }
     } catch (error) {
-      output.textContent = error instanceof Error ? error.message : "Unable to check Chrony source health.";
-      setChronySourceHealthStatus(status, "failed", "warn");
+      output.textContent = error instanceof Error ? error.message : "Unable to check NTPsec source health.";
+      setNTPsecSourceHealthStatus(status, "failed", "warn");
     } finally {
       if (refreshButton instanceof HTMLButtonElement) {
         refreshButton.disabled = false;
       }
     }
   };
-  chronySourceHealthLoader = loadHealth;
+  ntpSourceHealthLoader = loadHealth;
 
-  document.querySelectorAll("[data-chrony-source-health-open]").forEach((button) => {
+  document.querySelectorAll("[data-ntp-source-health-open]").forEach((button) => {
     if (!(button instanceof HTMLButtonElement)) {
       return;
     }
-    button.addEventListener("click", openChronySourceHealthModal);
+    button.addEventListener("click", openNTPsecSourceHealthModal);
   });
   if (refreshButton instanceof HTMLButtonElement) {
     refreshButton.addEventListener("click", loadHealth);
@@ -13531,9 +13652,9 @@ document.addEventListener("DOMContentLoaded", initializeLdapPageState);
 document.addEventListener("DOMContentLoaded", initializeLdapDirectoryTables);
 document.addEventListener("DOMContentLoaded", initializeLdapPasswordModal);
 document.addEventListener("DOMContentLoaded", initializeLdapBindSecretModal);
-document.addEventListener("DOMContentLoaded", initializeChronySettings);
-document.addEventListener("DOMContentLoaded", initializeChronyUpstreamsTable);
-document.addEventListener("DOMContentLoaded", initializeChronySourceHealthModal);
+document.addEventListener("DOMContentLoaded", initializeNtpSettings);
+document.addEventListener("DOMContentLoaded", initializeNTPsecUpstreamsTable);
+document.addEventListener("DOMContentLoaded", initializeNTPsecSourceHealthModal);
 document.addEventListener("DOMContentLoaded", initializeVcfRegistryBundlesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotProfilesTable);
 document.addEventListener("DOMContentLoaded", initializeVcfDepotTasksTable);

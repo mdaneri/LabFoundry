@@ -9,6 +9,7 @@ import tarfile
 import hashlib
 import re
 import stat
+from ipaddress import ip_network
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3811,7 +3812,6 @@ def appliance_settings_json(
     web_terminal_enabled: bool = False,
     web_terminal_interfaces: list[str] | None = None,
     web_terminal_addresses: list[str] | None = None,
-    ntp_servers: list[str] | None = None,
 ) -> str:
     import json
 
@@ -3836,13 +3836,10 @@ def appliance_settings_json(
         "management_https_cert_path": management_https_cert_path,
         "management_https_key_path": management_https_key_path,
     }
-    if ntp_servers is not None:
-        payload["time_sync_mode"] = "systemd-timesyncd"
-        payload["ntp_servers"] = ntp_servers
     return json.dumps(payload)
 
 
-def chronyd_config_text(
+def ntpd_config_text(
     *,
     enabled: bool = True,
     server: str = "time1.google.com",
@@ -3851,27 +3848,32 @@ def chronyd_config_text(
     nts_server_cert_path: str = "",
     nts_server_key_path: str = "",
 ) -> str:
-    allow_directives = []
-    for entry in allow_clients.replace(",", "\n").splitlines():
-        value = entry.strip()
-        if value:
-            allow_directives.append(f"allow {value}")
+    restrict_lines = ["restrict default kod limited nomodify noquery"]
+    if allow_clients != "any":
+        restrict_lines = ["restrict default ignore"]
+        for entry in allow_clients.replace(",", "\n").splitlines():
+            try:
+                network = ip_network(entry.strip(), strict=False)
+            except ValueError:
+                continue
+            restrict_lines.append(
+                f"restrict {network.network_address} mask {network.netmask} kod limited nomodify noquery"
+            )
     return "\n".join(
         [
             "# Managed by LabFoundry. Local changes may be overwritten.",
-            f"# LabFoundry Chrony enabled: {str(enabled).lower()}",
-            "# LabFoundry Chrony hostname: ntp.labfoundry.internal",
-            "# LabFoundry Chrony listen interfaces: eth2.50",
-            f"# LabFoundry Chrony listen addresses: {listen_address if listen_address else 'none'}",
-            f"# LabFoundry Chrony client allow list: {allow_clients}",
-            "driftfile /var/lib/chrony/drift",
-            "makestep 1.0 3",
-            "rtcsync",
+            f"# LabFoundry NTP enabled: {str(enabled).lower()}",
+            "# LabFoundry NTP hostname: ntp.labfoundry.internal",
+            "# LabFoundry NTP listen interfaces: eth2.50",
+            f"# LabFoundry NTP listen addresses: {listen_address if listen_address else 'none'}",
+            f"# LabFoundry NTP client allow list: {allow_clients}",
+            "driftfile /var/lib/ntp/ntp.drift",
+            "interface ignore wildcard",
             *([f"server {server} iburst"] if server else []),
-            *([f"bindaddress {listen_address}"] if listen_address else []),
-            *allow_directives,
-            *([f"ntsservercert {nts_server_cert_path}"] if nts_server_cert_path else []),
-            *([f"ntsserverkey {nts_server_key_path}"] if nts_server_key_path else []),
+            *([f"interface listen {listen_address}"] if listen_address else []),
+            "restrict source kod limited nomodify noquery",
+            *restrict_lines,
+            *(["nts enable", f"nts cert {nts_server_cert_path}", f"nts key {nts_server_key_path}", "nts cookie /var/lib/ntp/nts-keys"] if nts_server_cert_path and nts_server_key_path else []),
             "",
         ]
     )
@@ -4079,16 +4081,6 @@ def test_appliance_settings_helper_accepts_dhcp_resolver_mode(tmp_path):
     errors = helper._appliance_settings_config_errors(config_path)
 
     assert errors == []
-
-
-def test_appliance_settings_helper_rejects_invalid_ntp_server(tmp_path):
-    helper = load_helper_module()
-    config_path = tmp_path / "labfoundry-settings.json"
-    config_path.write_text(appliance_settings_json(ntp_servers=["bad_name"]), encoding="utf-8")
-
-    errors = helper._appliance_settings_config_errors(config_path)
-
-    assert "ntp server bad_name must be a valid DNS name or IP address." in errors
 
 
 def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tmp_path):
@@ -4377,188 +4369,200 @@ def test_appliance_settings_helper_applies_external_resolver_without_catchall(mo
     assert "DNS=9.9.9.9" in network_text
 
 
-def test_appliance_settings_helper_configures_timesyncd_when_ntp_servers_present(monkeypatch, tmp_path):
+def test_ntpd_helper_rejects_invalid_staged_config(monkeypatch, tmp_path):
     helper = load_helper_module()
-    apply_dir = tmp_path / "apply" / "appliance-settings"
-    networkd_dir = tmp_path / "etc" / "systemd" / "network"
-    dropin_dir = tmp_path / "systemd" / "labfoundry.service.d"
-    timesyncd_dir = tmp_path / "etc" / "systemd" / "timesyncd.conf.d"
-    timesyncd_path = timesyncd_dir / "labfoundry.conf"
+    apply_dir = tmp_path / "apply" / "ntpd"
     apply_dir.mkdir(parents=True)
-    networkd_dir.mkdir(parents=True)
-    mgmt_network = networkd_dir / "00-labfoundry-mgmt.network"
-    mgmt_network.write_text("\n".join(["[Match]", "Name=eth0", "", "[Network]", "Address=192.168.49.1/24"]) + "\n", encoding="utf-8")
-    config_path = apply_dir / "labfoundry-settings.json"
-    config_path.write_text(appliance_settings_json(ntp_servers=["time.cloudflare.com", "192.0.2.10"]), encoding="utf-8")
-    patch_appliance_settings_nginx_paths(monkeypatch, helper, tmp_path)
-    commands: list[list[str]] = []
+    config_path = apply_dir / "labfoundry-ntp.conf"
+    config_path.write_text(ntpd_config_text(server="bad_name", listen_address="not-an-ip", allow_clients="any, 192.168.50.0/24"), encoding="utf-8")
 
-    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
+    monkeypatch.setattr(helper, "NTP_APPLY_DIR", apply_dir)
 
-    monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
-    monkeypatch.setattr(helper, "NETWORKD_MGMT_CONFIG_PATH", mgmt_network)
-    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_DROPIN_DIR", dropin_dir)
-    monkeypatch.setattr(helper, "LABFOUNDRY_SERVICE_HTTPS_DROPIN_PATH", dropin_dir / "management-https.conf")
-    monkeypatch.setattr(helper, "TIMESYNCD_CONFIG_DIR", timesyncd_dir)
-    monkeypatch.setattr(helper, "TIMESYNCD_CONFIG_PATH", timesyncd_path)
-    monkeypatch.setattr(helper, "_run", fake_run)
-    monkeypatch.setattr(
-        helper.shutil,
-        "which",
-        lambda command: {
-            "hostnamectl": "/usr/bin/hostnamectl",
-            "nginx": "/usr/sbin/nginx",
-            "sshd": "/usr/sbin/sshd",
-        }.get(command),
+    errors = helper._ntpd_config_errors(config_path)
+
+    assert "ntpd server bad_name must be an IPv4 address, IPv6 address, or fully qualified DNS name with an optional port." in errors
+    assert "ntpd interface listen address not-an-ip must be a valid IP address." in errors
+    assert "ntpd client allow list can use 'any' only by itself." in errors
+
+
+def test_ntpd_helper_accepts_source_ports_and_rejects_invalid_or_nts_ip_sources(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    monkeypatch.setattr(helper, "_ntpd_supports_nts", lambda: True)
+    valid_config = tmp_path / "valid-ntp.conf"
+    valid_config.write_text(
+        ntpd_config_text(server="time.example.com:7443").replace(
+            "server time.example.com:7443 iburst",
+            "server time.example.com:7443 iburst nts\nserver [2001:db8::10]:123 iburst",
+        ),
+        encoding="utf-8",
     )
+    assert helper._ntpd_config_errors(valid_config) == []
 
-    assert helper._handle_appliance_settings("apply", [str(config_path)]) == 0
+    invalid_port = tmp_path / "invalid-port.conf"
+    invalid_port.write_text(ntpd_config_text(server="time.example.com:70000"), encoding="utf-8")
+    assert "optional port" in "\n".join(helper._ntpd_config_errors(invalid_port))
 
-    timesyncd_text = timesyncd_path.read_text(encoding="utf-8")
-    assert "NTP=time.cloudflare.com 192.0.2.10" in timesyncd_text
-    assert ["systemctl", "disable", "--now", "chronyd.service"] in commands
-    assert ["systemctl", "enable", "--now", "systemd-timesyncd"] in commands
-    assert ["systemctl", "restart", "systemd-timesyncd"] in commands
+    nts_ip = tmp_path / "nts-ip.conf"
+    nts_ip.write_text(
+        ntpd_config_text(server="192.0.2.10:4460").replace(" iburst", " iburst nts"),
+        encoding="utf-8",
+    )
+    assert "certificate-valid DNS hostname" in "\n".join(helper._ntpd_config_errors(nts_ip))
 
 
-def test_chronyd_helper_rejects_invalid_staged_config(monkeypatch, tmp_path):
+def test_ntpd_helper_apply_installs_config_and_switches_from_timesyncd(monkeypatch, tmp_path):
     helper = load_helper_module()
-    apply_dir = tmp_path / "apply" / "chronyd"
+    apply_dir = tmp_path / "apply" / "ntpd"
+    config_path = apply_dir / "labfoundry-ntp.conf"
+    ntp_conf = tmp_path / "etc" / "ntp.conf"
+    state_dir = tmp_path / "var" / "lib" / "ntp"
     apply_dir.mkdir(parents=True)
-    config_path = apply_dir / "labfoundry-chrony.conf"
-    config_path.write_text(chronyd_config_text(server="bad_name", listen_address="not-an-ip", allow_clients="all, 192.168.50.0/24"), encoding="utf-8")
-
-    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
-
-    errors = helper._chronyd_config_errors(config_path)
-
-    assert "chronyd server bad_name must be a valid DNS name or IP address." in errors
-    assert "chronyd bindaddress not-an-ip must be a valid IP address." in errors
-    assert "chronyd client allow list can use 'all' only by itself." in errors
-
-
-def test_chronyd_helper_apply_installs_config_and_switches_from_timesyncd(monkeypatch, tmp_path):
-    helper = load_helper_module()
-    apply_dir = tmp_path / "apply" / "chronyd"
-    config_path = apply_dir / "labfoundry-chrony.conf"
-    chrony_conf = tmp_path / "etc" / "chrony.conf"
-    state_dir = tmp_path / "var" / "lib" / "chrony"
-    apply_dir.mkdir(parents=True)
-    config_path.write_text(chronyd_config_text(), encoding="utf-8")
+    config_path.write_text(ntpd_config_text(), encoding="utf-8")
     commands: list[list[str]] = []
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
-    monkeypatch.setattr(helper, "CHRONY_CONFIG_PATH", chrony_conf)
-    monkeypatch.setattr(helper, "CHRONY_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "NTP_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "NTP_CONFIG_PATH", ntp_conf)
+    monkeypatch.setattr(helper, "NTP_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "NTP_DRIFT_PATH", state_dir / "ntp.drift")
+    monkeypatch.setattr(helper, "NTP_NTS_COOKIE_PATH", state_dir / "nts-keys")
+    monkeypatch.setattr(helper, "_ntpd_runtime_identity_errors", lambda: [])
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda name: type("NtpUser", (), {"pw_uid": 123})())
+    monkeypatch.setattr(helper.grp, "getgrnam", lambda name: type("NtpGroup", (), {"gr_gid": 44})())
+    monkeypatch.setattr(helper.os, "chown", lambda *args: None, raising=False)
     monkeypatch.setattr(helper, "_run", fake_run)
+    (state_dir / "nts-keys").mkdir(parents=True)
 
-    assert helper._handle_chronyd("apply", [str(config_path)]) == 0
+    assert helper._handle_ntpd("apply", [str(config_path)]) == 0
 
-    assert chrony_conf.read_text(encoding="utf-8") == config_path.read_text(encoding="utf-8")
+    assert ntp_conf.read_text(encoding="utf-8") == config_path.read_text(encoding="utf-8")
     assert state_dir.exists()
+    assert (state_dir / "ntp.drift").read_text(encoding="utf-8") == "0.0\n"
+    assert not (state_dir / "nts-keys").exists()
     assert ["systemctl", "disable", "--now", "systemd-timesyncd"] in commands
-    assert ["systemctl", "enable", "chronyd.service"] in commands
-    assert ["systemctl", "restart", "chronyd.service"] in commands
+    assert ["systemctl", "disable", "--now", "chronyd.service"] in commands
+    assert ["systemctl", "enable", "ntpd.service"] in commands
+    assert ["systemctl", "restart", "ntpd.service"] in commands
 
 
-def test_chronyd_helper_apply_grants_chrony_group_read_to_nts_key(monkeypatch, tmp_path):
+def test_ntpd_helper_apply_grants_ntp_group_read_to_nts_key(monkeypatch, tmp_path):
     helper = load_helper_module()
-    apply_dir = tmp_path / "apply" / "chronyd"
+    apply_dir = tmp_path / "apply" / "ntpd"
     managed_root = tmp_path / "etc" / "labfoundry"
-    config_path = apply_dir / "labfoundry-chrony.conf"
-    chrony_conf = tmp_path / "etc" / "chrony.conf"
-    state_dir = tmp_path / "var" / "lib" / "chrony"
-    cert_path = managed_root / "chrony" / "certs" / "ntp.labfoundry.internal.crt"
-    key_path = managed_root / "chrony" / "certs" / "ntp.labfoundry.internal.key"
+    config_path = apply_dir / "labfoundry-ntp.conf"
+    ntp_conf = tmp_path / "etc" / "ntp.conf"
+    state_dir = tmp_path / "var" / "lib" / "ntp"
+    cert_path = managed_root / "ntp" / "certs" / "ntp.labfoundry.internal.crt"
+    key_path = managed_root / "ntp" / "certs" / "ntp.labfoundry.internal.key"
     apply_dir.mkdir(parents=True)
     cert_path.parent.mkdir(parents=True)
     cert_path.write_text("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n", encoding="utf-8")
     key_path.write_text("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n", encoding="utf-8")
     key_path.chmod(0o600)
     config_path.write_text(
-        chronyd_config_text(nts_server_cert_path=str(cert_path), nts_server_key_path=str(key_path)),
+        ntpd_config_text(nts_server_cert_path=str(cert_path), nts_server_key_path=str(key_path)),
         encoding="utf-8",
     )
     commands: list[list[str]] = []
     chown_calls: list[tuple[Path, int, int]] = []
 
-    class ChronyGroup:
+    class NTPsecGroup:
         gr_gid = 44
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
-    monkeypatch.setattr(helper, "CHRONY_CONFIG_PATH", chrony_conf)
-    monkeypatch.setattr(helper, "CHRONY_STATE_DIR", state_dir)
-    monkeypatch.setattr(helper.grp, "getgrnam", lambda name: ChronyGroup())
+    monkeypatch.setattr(helper, "NTP_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "NTP_CONFIG_PATH", ntp_conf)
+    monkeypatch.setattr(helper, "NTP_STATE_DIR", state_dir)
+    monkeypatch.setattr(helper, "NTP_DRIFT_PATH", state_dir / "ntp.drift")
+    monkeypatch.setattr(helper, "NTP_NTS_COOKIE_PATH", state_dir / "nts-keys")
+    monkeypatch.setattr(helper.grp, "getgrnam", lambda name: NTPsecGroup())
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda name: type("NtpUser", (), {"pw_uid": 123})())
     monkeypatch.setattr(helper.os, "chown", lambda path, uid, gid: chown_calls.append((Path(path), uid, gid)), raising=False)
-    monkeypatch.setattr(helper, "_chronyd_supports_nts", lambda: True)
+    monkeypatch.setattr(helper, "_ntpd_supports_nts", lambda: True)
+    monkeypatch.setattr(helper, "_ntpd_runtime_identity_errors", lambda: [])
     monkeypatch.setattr(helper, "_run", fake_run)
 
-    assert helper._handle_chronyd("apply", [str(config_path)]) == 0
+    assert helper._handle_ntpd("apply", [str(config_path)]) == 0
 
     assert (key_path, 0, 44) in chown_calls
     if os.name != "nt":
         assert oct(key_path.stat().st_mode & 0o777) == "0o640"
-    assert ["systemctl", "restart", "chronyd.service"] in commands
+    assert ["systemctl", "restart", "ntpd.service"] in commands
 
 
-def test_chronyd_helper_rejects_missing_nts_certificate_files(monkeypatch, tmp_path):
+def test_ntpd_helper_rejects_missing_nts_certificate_files(monkeypatch, tmp_path):
     helper = load_helper_module()
-    apply_dir = tmp_path / "apply" / "chronyd"
-    config_path = apply_dir / "labfoundry-chrony.conf"
+    apply_dir = tmp_path / "apply" / "ntpd"
+    config_path = apply_dir / "labfoundry-ntp.conf"
     apply_dir.mkdir(parents=True)
     config_path.write_text(
-        chronyd_config_text(
+        ntpd_config_text(
             nts_server_cert_path=str(tmp_path / "missing.crt"),
             nts_server_key_path=str(tmp_path / "missing.key"),
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
-    monkeypatch.setattr(helper, "_chronyd_supports_nts", lambda: True)
+    monkeypatch.setattr(helper, "NTP_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "_ntpd_supports_nts", lambda: True)
 
-    errors = helper._chronyd_config_errors(config_path)
+    errors = helper._ntpd_config_errors(config_path)
 
-    assert f"chronyd NTS server certificate does not exist: {tmp_path / 'missing.crt'}" in errors
-    assert f"chronyd NTS server key does not exist: {tmp_path / 'missing.key'}" in errors
+    assert f"ntpd NTS server certificate does not exist: {tmp_path / 'missing.crt'}" in errors
+    assert f"ntpd NTS server key does not exist: {tmp_path / 'missing.key'}" in errors
 
 
-def test_chronyd_helper_rejects_nts_when_installed_binary_lacks_support(monkeypatch, tmp_path):
+def test_ntpd_helper_rejects_nts_when_installed_binary_lacks_support(monkeypatch, tmp_path):
     helper = load_helper_module()
-    apply_dir = tmp_path / "apply" / "chronyd"
-    config_path = apply_dir / "labfoundry-chrony.conf"
+    apply_dir = tmp_path / "apply" / "ntpd"
+    config_path = apply_dir / "labfoundry-ntp.conf"
     apply_dir.mkdir(parents=True)
-    config_path.write_text(chronyd_config_text(server="time.cloudflare.com").replace(" iburst", " iburst nts"), encoding="utf-8")
-    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
-    monkeypatch.setattr(helper, "_chronyd_supports_nts", lambda: False)
+    config_path.write_text(ntpd_config_text(server="time.cloudflare.com").replace(" iburst", " iburst nts"), encoding="utf-8")
+    monkeypatch.setattr(helper, "NTP_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "_ntpd_supports_nts", lambda: False)
 
-    errors = helper._chronyd_config_errors(config_path)
+    errors = helper._ntpd_config_errors(config_path)
 
-    assert "installed chronyd does not support NTS" in "\n".join(errors)
+    assert "required NTPsec implementation with NTS support" in "\n".join(errors)
 
 
-def test_chronyd_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
+def test_ntpd_helper_rejects_remote_control_or_blocked_time_service(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "ntpd"
+    config_path = apply_dir / "labfoundry-ntp.conf"
+    apply_dir.mkdir(parents=True)
+    config_path.write_text(
+        ntpd_config_text(allow_clients="any").replace(
+            "restrict default kod limited nomodify noquery",
+            "restrict default noserve",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(helper, "NTP_APPLY_DIR", apply_dir)
+
+    errors = helper._ntpd_config_errors(config_path)
+
+    assert "ntpd default access restriction must permit time while denying remote modification and queries." in errors
+
+
+def test_ntpd_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
     helper = load_helper_module()
     commands: list[list[str]] = []
     monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/journalctl" if command == "journalctl" else None)
     monkeypatch.setattr(
         helper,
         "_run",
-        lambda command: commands.append(command) or subprocess.CompletedProcess(command, 0, "chronyd ready\n", ""),
+        lambda command: commands.append(command) or subprocess.CompletedProcess(command, 0, "ntpd ready\n", ""),
     )
 
-    assert helper._handle_chronyd("logs", []) == 0
-    assert "chronyd ready" in capsys.readouterr().out
-    assert commands == [["/usr/bin/journalctl", "-u", "chronyd.service", "-n", "500", "--no-pager", "--output=short-iso"]]
+    assert helper._handle_ntpd("logs", []) == 0
+    assert "ntpd ready" in capsys.readouterr().out
+    assert commands == [["/usr/bin/journalctl", "-u", "ntpd.service", "-n", "500", "--no-pager", "--output=short-iso"]]
 
 
 def test_ldap_helper_logs_reads_fixed_systemd_unit(monkeypatch, capsys):
@@ -4627,66 +4631,84 @@ def test_nginx_helper_reads_only_fixed_http_log_files(monkeypatch, tmp_path, cap
     assert "does not accept a path" in capsys.readouterr().err
 
 
-def test_chronyd_helper_capabilities_reports_missing_nts(monkeypatch, capsys):
+def test_ntpd_helper_capabilities_reports_missing_nts(monkeypatch, capsys):
     helper = load_helper_module()
-    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/sbin/chronyd" if command == "chronyd" else None)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: {"ntpd": "/usr/sbin/ntpd", "rpm": "/usr/bin/rpm"}.get(command))
     monkeypatch.setattr(
         helper,
         "_run",
-        lambda command, timeout=None: subprocess.CompletedProcess(command, 0, "chronyd version 4.3 (+CMDMON -NTS)\n", ""),
+        lambda command, timeout=None: subprocess.CompletedProcess(command, 0, "ntpd ntpsec-1.2.3\n" if "--version" in command else "ntpsec-1.2.3-15.ph5\n", ""),
     )
 
-    assert helper._handle_chronyd("capabilities", []) == 0
-    assert json.loads(capsys.readouterr().out)["nts"] is False
+    assert helper._handle_ntpd("capabilities", []) == 0
+    assert json.loads(capsys.readouterr().out)["nts"] is True
 
 
-def test_chronyd_helper_disabled_apply_stops_chronyd_without_installing_config(monkeypatch, tmp_path):
+def test_ntpd_helper_requires_photon_package_and_ntpsec_binary_identity(monkeypatch):
     helper = load_helper_module()
-    apply_dir = tmp_path / "apply" / "chronyd"
-    config_path = apply_dir / "labfoundry-chrony.conf"
-    chrony_conf = tmp_path / "etc" / "chrony.conf"
+    monkeypatch.setattr(helper.shutil, "which", lambda command: {"ntpd": "/usr/sbin/ntpd", "rpm": "/usr/bin/rpm"}.get(command))
+
+    def fake_run(command, timeout=None):
+        if command[-2:] in (["-q", "ntpsec"], ["-q", "python3-ntp"]):
+            return subprocess.CompletedProcess(command, 1, "", f"package {command[-1]} is not installed\n")
+        return subprocess.CompletedProcess(command, 0, "ntpd 4.2.8p15\n", "")
+
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._ntpd_runtime_identity_errors() == [
+        "Photon ntpsec package is required.",
+        "Photon python3-ntp package is required for ntpq.",
+        "installed ntpd is not Photon NTPsec.",
+    ]
+
+
+def test_ntpd_helper_disabled_apply_stops_ntpd_without_installing_config(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "ntpd"
+    config_path = apply_dir / "labfoundry-ntp.conf"
+    ntp_conf = tmp_path / "etc" / "ntp.conf"
     apply_dir.mkdir(parents=True)
-    config_path.write_text(chronyd_config_text(enabled=False, listen_address="", allow_clients="all"), encoding="utf-8")
+    config_path.write_text(ntpd_config_text(enabled=False, listen_address="", allow_clients="any"), encoding="utf-8")
     commands: list[list[str]] = []
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
-    monkeypatch.setattr(helper, "CHRONY_CONFIG_PATH", chrony_conf)
+    monkeypatch.setattr(helper, "NTP_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "NTP_CONFIG_PATH", ntp_conf)
     monkeypatch.setattr(helper, "_run", fake_run)
 
-    assert helper._handle_chronyd("apply", [str(config_path)]) == 0
+    assert helper._handle_ntpd("apply", [str(config_path)]) == 0
 
-    assert not chrony_conf.exists()
-    assert commands == [["systemctl", "disable", "--now", "chronyd.service"]]
+    assert not ntp_conf.exists()
+    assert commands == [["systemctl", "disable", "--now", "ntpd.service"]]
 
 
-def test_chronyd_helper_disabled_apply_allows_empty_upstream_list(monkeypatch, tmp_path):
+def test_ntpd_helper_disabled_apply_allows_empty_upstream_list(monkeypatch, tmp_path):
     helper = load_helper_module()
-    apply_dir = tmp_path / "apply" / "chronyd"
-    config_path = apply_dir / "labfoundry-chrony.conf"
-    chrony_conf = tmp_path / "etc" / "chrony.conf"
+    apply_dir = tmp_path / "apply" / "ntpd"
+    config_path = apply_dir / "labfoundry-ntp.conf"
+    ntp_conf = tmp_path / "etc" / "ntp.conf"
     apply_dir.mkdir(parents=True)
-    config_path.write_text(chronyd_config_text(enabled=False, server="", listen_address="", allow_clients="all"), encoding="utf-8")
+    config_path.write_text(ntpd_config_text(enabled=False, server="", listen_address="", allow_clients="any"), encoding="utf-8")
     commands: list[list[str]] = []
 
     def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(helper, "CHRONY_APPLY_DIR", apply_dir)
-    monkeypatch.setattr(helper, "CHRONY_CONFIG_PATH", chrony_conf)
+    monkeypatch.setattr(helper, "NTP_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "NTP_CONFIG_PATH", ntp_conf)
     monkeypatch.setattr(helper, "_run", fake_run)
 
-    assert helper._handle_chronyd("apply", [str(config_path)]) == 0
+    assert helper._handle_ntpd("apply", [str(config_path)]) == 0
 
-    assert not chrony_conf.exists()
-    assert commands == [["systemctl", "disable", "--now", "chronyd.service"]]
+    assert not ntp_conf.exists()
+    assert commands == [["systemctl", "disable", "--now", "ntpd.service"]]
 
 
-def test_chronyd_helper_status_reads_tracking_sources_and_authdata(monkeypatch, capsys):
+def test_ntpd_helper_status_reads_peers_variables_and_nts(monkeypatch, capsys):
     helper = load_helper_module()
     commands: list[tuple[list[str], float | None]] = []
 
@@ -4694,38 +4716,38 @@ def test_chronyd_helper_status_reads_tracking_sources_and_authdata(monkeypatch, 
         commands.append((command, timeout))
         return subprocess.CompletedProcess(command, 0, f"{' '.join(command[2:])} ok\n", "")
 
-    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/chronyc" if command == "chronyc" else None)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/ntpq" if command == "ntpq" else None)
     monkeypatch.setattr(helper, "_run", fake_run)
 
-    assert helper._handle_chronyd("status", []) == 0
+    assert helper._handle_ntpd("status", []) == 0
 
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    assert payload["tracking"]["stdout"] == "tracking ok\n"
-    assert payload["sources"]["stdout"] == "sources -v ok\n"
-    assert payload["authdata"]["stdout"] == "authdata ok\n"
+    assert payload["peers"]["stdout"] == " ok\n"
+    assert payload["variables"]["stdout"] == "rv ok\n"
+    assert payload["nts"]["stdout"] == "ntsinfo ok\n"
     assert commands == [
-        (["/usr/bin/chronyc", "-n", "tracking"], 1.5),
-        (["/usr/bin/chronyc", "-n", "sources", "-v"], 1.5),
-        (["/usr/bin/chronyc", "-n", "authdata"], 1.5),
+        (["/usr/bin/ntpq", "-pn"], 1.5),
+        (["/usr/bin/ntpq", "-c", "rv"], 1.5),
+        (["/usr/bin/ntpq", "-c", "ntsinfo"], 1.5),
     ]
 
 
-def test_chronyd_helper_status_reports_timeout_without_blocking(monkeypatch, capsys):
+def test_ntpd_helper_status_reports_timeout_without_blocking(monkeypatch, capsys):
     helper = load_helper_module()
 
     def fake_run(command: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(command, timeout)
 
-    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/chronyc" if command == "chronyc" else None)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/ntpq" if command == "ntpq" else None)
     monkeypatch.setattr(helper, "_run", fake_run)
 
-    assert helper._handle_chronyd("status", []) == 0
+    assert helper._handle_ntpd("status", []) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tracking"]["returncode"] == 124
-    assert payload["sources"]["returncode"] == 124
-    assert payload["authdata"]["stderr"] == "chronyc status command timed out after 1.5 seconds"
+    assert payload["peers"]["returncode"] == 124
+    assert payload["variables"]["returncode"] == 124
+    assert payload["nts"]["stderr"] == "ntpq status command timed out after 1.5 seconds"
 
 
 def test_appliance_settings_hostname_fallback_writes_etc_hostname(monkeypatch, tmp_path):

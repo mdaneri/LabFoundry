@@ -12,7 +12,7 @@ from labfoundry.app.models import (
     FirewallSettings,
     KmsSettings,
     LdapSettings,
-    ChronySettings,
+    NtpSettings,
     PhysicalInterface,
     RoutingRule,
     VcfBackupSettings,
@@ -152,7 +152,7 @@ def managed_service_firewall_rules(
     ca_settings: CaSettings,
     ca_portal_interfaces: list[str] | None = None,
     kms_settings: KmsSettings,
-    chrony_settings: ChronySettings,
+    ntp_settings: NtpSettings,
     vcf_backup_settings: VcfBackupSettings,
     vcf_depot_settings: VcfOfflineDepotSettings,
     vcf_registry_settings: VcfPrivateRegistrySettings,
@@ -248,27 +248,27 @@ def managed_service_firewall_rules(
                         priority=64 + index,
                     )
                 )
-    if chrony_settings.enabled:
-        for index, interface_name in enumerate(split_interfaces(chrony_settings.listen_interface), start=1):
-            rule_name = f"chronyd-{interface_name}"
+    if ntp_settings.enabled:
+        for index, interface_name in enumerate(split_interfaces(ntp_settings.listen_interface), start=1):
+            rule_name = f"ntpd-{interface_name}"
             rules.append(
                 _service_firewall_rule(
                     name=rule_name,
-                    service="Chrony",
+                    service="NTPsec",
                     interface_name=interface_name,
                     source=_managed_rule_source(rule_name, interface_name, interface_networks, source_groups_by_id, source_group_assignments),
                     protocol="udp",
-                    ports=str(chrony_settings.port),
+                    ports=str(ntp_settings.port),
                     priority=65 + index,
                 )
             )
-            if chrony_settings.nts_server_enabled:
-                nts_rule_name = f"chronyd-nts-{interface_name}"
-                nts_ke_port = chrony_settings.nts_ke_port or 4460
+            if ntp_settings.nts_server_enabled:
+                nts_rule_name = f"ntpd-nts-{interface_name}"
+                nts_ke_port = ntp_settings.nts_ke_port or 4460
                 rules.append(
                     _service_firewall_rule(
                         name=nts_rule_name,
-                        service="Chrony NTS-KE",
+                        service="NTPsec NTS-KE",
                         interface_name=interface_name,
                         source=_managed_rule_source(nts_rule_name, interface_name, interface_networks, source_groups_by_id, source_group_assignments),
                         protocol="tcp",
