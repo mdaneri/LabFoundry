@@ -648,6 +648,12 @@ def _write_secret_file(path: Path, value: str, mode: int) -> None:
     path.chmod(mode)
 
 
+def _grant_ldap_private_key_read(key_path: Path) -> None:
+    account_name = _ldap_account_name()
+    shutil.chown(key_path, user="root", group=account_name)
+    os.chmod(key_path, 0o640)
+
+
 def _handle_ca(action: str, args: list[str]) -> int:
     try:
         config_path = _validate_ca_config_path(args[0])
@@ -698,6 +704,12 @@ def _handle_ca(action: str, args: list[str]) -> int:
         if key_path_value and certificate.get("private_key_pem"):
             key_path = _ca_managed_path(key_path_value, "key_path")
             _write_secret_file(key_path, str(certificate["private_key_pem"]), 0o600)
+            if key_path == LDAP_KEY_PATH.resolve():
+                try:
+                    _grant_ldap_private_key_read(key_path)
+                except (LookupError, OSError) as exc:
+                    print(f"Could not preserve slapd access to the LDAP private key: {exc}", file=sys.stderr)
+                    return 1
             written.append(str(key_path))
     print(json.dumps({"ca": "apply complete", "config_path": str(config_path), "written_files": written, "removed_files": removed}, sort_keys=True))
     return 0
@@ -2358,11 +2370,10 @@ def _apply_ldap_config(payload: dict) -> int:
         if service.get("ldaps_enabled", True):
             key_path = Path(str(service["key_path"]))
             try:
-                shutil.chown(key_path, user="root", group=account_name)
+                _grant_ldap_private_key_read(key_path)
             except (LookupError, OSError) as exc:
                 print(f"Could not assign the LDAP private key to the slapd group: {exc}", file=sys.stderr)
                 return 1
-            os.chmod(key_path, 0o640)
         _install_ldap_listener_config(service)
         daemon_reload = _run(["systemctl", "daemon-reload"])
         if daemon_reload.returncode != 0:

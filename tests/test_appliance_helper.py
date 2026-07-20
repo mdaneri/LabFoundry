@@ -369,9 +369,9 @@ def test_ldap_private_key_is_group_readable_only_for_slapd(monkeypatch, tmp_path
     modes: list[tuple[Path, int]] = []
     monkeypatch.setattr(helper.shutil, "chown", lambda path, *, user, group: ownership.append((Path(path), user, group)))
     monkeypatch.setattr(helper.os, "chmod", lambda path, mode: modes.append((Path(path), mode)))
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
 
-    helper.shutil.chown(key_path, user="root", group="ldap")
-    helper.os.chmod(key_path, 0o640)
+    helper._grant_ldap_private_key_read(key_path)
 
     assert ownership == [(key_path, "root", "ldap")]
     assert modes == [(key_path, 0o640)]
@@ -1974,6 +1974,39 @@ def test_ca_helper_validates_and_writes_managed_files(monkeypatch, tmp_path):
     assert key_path.read_text(encoding="utf-8").startswith("-----BEGIN PRIVATE KEY-----")
     if os.name != "nt":
         assert oct(key_path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_ca_helper_preserves_slapd_access_when_rewriting_ldap_key(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    apply_dir = tmp_path / "apply" / "ca"
+    managed_root = tmp_path / "etc" / "labfoundry"
+    ldap_key_path = managed_root / "ldap" / "tls" / "server.key"
+    apply_dir.mkdir(parents=True)
+    payload = json.loads(ca_payload_text(managed_root))
+    payload["certificates"][0]["key_path"] = str(ldap_key_path)
+    config_path = apply_dir / "labfoundry-ca.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    ownership: list[tuple[Path, str, str]] = []
+    modes: list[tuple[Path, int]] = []
+    real_chmod = helper.os.chmod
+
+    def track_ldap_key_mode(path, mode, **kwargs):
+        real_chmod(path, mode, **kwargs)
+        if Path(path) == ldap_key_path:
+            modes.append((Path(path), mode))
+
+    monkeypatch.setattr(helper, "CA_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
+    monkeypatch.setattr(helper, "LDAP_KEY_PATH", ldap_key_path)
+    monkeypatch.setattr(helper, "_ldap_account_name", lambda: "ldap")
+    monkeypatch.setattr(helper, "_ca_key_matches_certificate", lambda certificate_pem, private_key_pem: True)
+    monkeypatch.setattr(helper.shutil, "chown", lambda path, *, user, group: ownership.append((Path(path), user, group)))
+    monkeypatch.setattr(helper.os, "chmod", track_ldap_key_mode)
+
+    assert helper._handle_ca("apply", [str(config_path)]) == 0
+
+    assert ownership == [(ldap_key_path, "root", "ldap")]
+    assert modes == [(ldap_key_path, 0o600), (ldap_key_path, 0o640)]
 
 
 def test_ca_helper_removes_stale_crl_when_publication_is_empty(monkeypatch, tmp_path):
