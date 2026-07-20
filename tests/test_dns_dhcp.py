@@ -198,10 +198,23 @@ def test_ntp_default_server_fallback_uses_nts_sources():
     sources = ntp_upstream_sources(settings)
     config = render_ntp_config(settings)
 
-    assert [source["source"] for source in sources] == ["time.cloudflare.com", "nts.netnod.se"]
-    assert [source["use_nts"] for source in sources] == [True, True]
+    assert [source["source"] for source in sources] == [
+        "time.cloudflare.com",
+        "nts.netnod.se",
+        "0.pool.ntp.org",
+        "1.pool.ntp.org",
+        "2.pool.ntp.org",
+        "3.pool.ntp.org",
+        "time.google.com",
+        "time.nist.gov",
+        "time.facebook.com",
+    ]
+    assert [source["use_nts"] for source in sources[:2]] == [True, True]
+    assert all(source["enabled"] is False and source["use_nts"] is False for source in sources[2:])
     assert "server time.cloudflare.com iburst nts" in config
     assert "server nts.netnod.se iburst nts" in config
+    assert "server 0.pool.ntp.org" not in config
+    assert "server time.google.com" not in config
 
 
 def test_ntp_custom_server_fallback_remains_plain_ntp():

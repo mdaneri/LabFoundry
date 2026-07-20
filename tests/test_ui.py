@@ -684,7 +684,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v121" in service_worker.text
+    assert "labfoundry-pwa-v122" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -696,8 +696,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=ntp-grid-20260719-2" in service_worker.text
-    assert "/static/app.js?v=ntp-grid-20260719-2" in service_worker.text
+    assert "/static/app.css?v=ntp-grid-20260719-3" in service_worker.text
+    assert "/static/app.js?v=ntp-grid-20260719-3" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -706,7 +706,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=ntp-grid-20260719-2" in offline.text
+    assert "/static/app.css?v=ntp-grid-20260719-3" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -722,8 +722,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=ntp-grid-20260719-2" in page.text
-    assert "/static/app.js?v=ntp-grid-20260719-2" in page.text
+    assert "/static/app.css?v=ntp-grid-20260719-3" in page.text
+    assert "/static/app.js?v=ntp-grid-20260719-3" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -1581,6 +1581,10 @@ def test_ntp_page_autosave_updates_desired_state_and_preview(client, monkeypatch
     assert "ntp-source-health-modal" in page.text
     assert "Check source health" not in page.text
     assert "ntp-upstreams-table" in page.text
+    assert '"source": "0.pool.ntp.org"' in page.text
+    assert '"source": "time.google.com"' in page.text
+    assert '"source": "time.nist.gov"' in page.text
+    assert '"source": "time.facebook.com"' in page.text
     assert "NTS-KE disabled" in page.text or "NTS-KE ntp.labfoundry.internal:4460" in page.text
     assert page.text.index('id="ntp-upstreams-table"') < page.text.index('<aside class="side-stack">')
     assert "NTS-KE port" in page.text
@@ -1646,7 +1650,6 @@ def test_ntp_page_autosave_updates_desired_state_and_preview(client, monkeypatch
     assert "initializeNTPsecUpstreamsTable" in js.text
     assert "ntpUpstreamRowHasSource" in js.text
     assert "editable: ntpUpstreamRowHasSource" in js.text
-    assert "rowContextMenu" in js.text
     assert "clickMenu" in js.text
     assert "ntpUpstreamMenuFormatter" in js.text
     assert 'aria-label="Open upstream server menu"' in js.text
@@ -9807,7 +9810,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "ntp-grid-20260719-2" in page.text
+    assert "ntp-grid-20260719-3" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

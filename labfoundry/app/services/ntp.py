@@ -25,8 +25,59 @@ NTP_DEFAULT_UPSTREAM_SOURCE_ROWS: list[dict[str, object]] = [
         "use_nts": True,
         "description": "Netnod public NTS",
     },
+    {
+        "id": "pool-0-ntp",
+        "source": "0.pool.ntp.org",
+        "enabled": False,
+        "use_nts": False,
+        "description": "NTP Pool rotating server set 0",
+    },
+    {
+        "id": "pool-1-ntp",
+        "source": "1.pool.ntp.org",
+        "enabled": False,
+        "use_nts": False,
+        "description": "NTP Pool rotating server set 1",
+    },
+    {
+        "id": "pool-2-ntp",
+        "source": "2.pool.ntp.org",
+        "enabled": False,
+        "use_nts": False,
+        "description": "NTP Pool rotating server set 2 (IPv4/IPv6)",
+    },
+    {
+        "id": "pool-3-ntp",
+        "source": "3.pool.ntp.org",
+        "enabled": False,
+        "use_nts": False,
+        "description": "NTP Pool rotating server set 3",
+    },
+    {
+        "id": "google-ntp",
+        "source": "time.google.com",
+        "enabled": False,
+        "use_nts": False,
+        "description": "Google public NTP (leap smear; do not mix time scales)",
+    },
+    {
+        "id": "nist-ntp",
+        "source": "time.nist.gov",
+        "enabled": False,
+        "use_nts": False,
+        "description": "NIST Internet Time Service",
+    },
+    {
+        "id": "meta-ntp",
+        "source": "time.facebook.com",
+        "enabled": False,
+        "use_nts": False,
+        "description": "Meta public NTP",
+    },
 ]
-NTP_DEFAULT_UPSTREAM_SERVERS = "\n".join(str(source["source"]) for source in NTP_DEFAULT_UPSTREAM_SOURCE_ROWS)
+NTP_DEFAULT_UPSTREAM_SERVERS = "\n".join(
+    str(source["source"]) for source in NTP_DEFAULT_UPSTREAM_SOURCE_ROWS if bool(source["enabled"])
+)
 NTP_DEFAULT_NTS_KE_PORT = 4460
 NTP_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf"
 NTP_EFFECTIVE_CONFIG_PATH = "/etc/ntp.conf"

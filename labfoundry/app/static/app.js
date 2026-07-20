@@ -4753,12 +4753,6 @@ function initializeNTPsecUpstreamsTable() {
       rowHeight: 34,
       placeholder: "Add an upstream source.",
       reactiveData: false,
-      rowContextMenu: (row) => row.getData().is_new ? [] : [
-        {
-          label: "Delete server",
-          action: (event, selectedRow) => deleteNtpUpstreamFromMenu(selectedRow, table, hiddenInput),
-        },
-      ],
       columns: lockNewRecordColumns([
         {
           title: "Source",
