@@ -1,0 +1,14 @@
+desktop-image: "labfoundry.png"
+desktop-color: "#0f172a"
+title-text: " "
+
++ boot_menu {
+    left = 50%-220
+    top = 72%
+    width = 440
+    height = 52
+    item_height = 22
+    item_spacing = 8
+    item_color = "#bfdbfe"
+    selected_item_color = "#ffffff"
+}

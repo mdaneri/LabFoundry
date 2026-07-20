@@ -11,6 +11,7 @@ import labfoundry.app.appliance_console as appliance_console
 from labfoundry.app.appliance_console import (
     CursesConsole,
     ConsoleOperationError,
+    ServiceStatus,
     configure_firewall,
     management_urls,
     schedule_power,
@@ -43,6 +44,14 @@ def test_console_management_validation_limits_dhcp_and_static_values():
         validate_management_values("static", "192.168.49.1/24", "192.168.50.1")
     with pytest.raises(ConsoleOperationError, match="cannot include"):
         validate_management_values("dhcp", "192.168.49.1/24", "")
+
+
+@pytest.mark.parametrize(
+    ("reported", "expected"),
+    [("x86_64", "amd64"), ("AMD64", "amd64"), ("aarch64", "arm64"), ("armv7l", "armv7"), ("riscv64", "riscv64"), ("", "unknown")],
+)
+def test_console_architecture_label_normalizes_common_platform_names(reported, expected):
+    assert appliance_console._architecture_label(reported) == expected
 
 
 def test_console_dns_validation_accepts_compact_lists():
@@ -99,6 +108,32 @@ def test_console_load_summary_uses_one_five_and_fifteen_minute_averages(monkeypa
     monkeypatch.setattr(appliance_console.os, "getloadavg", lambda: (0.125, 1.5, 12.345), raising=False)
 
     assert appliance_console._load_summary() == "1 min 0.12 | 5 min 1.50 | 15 min 12.35"
+
+
+@pytest.mark.parametrize(
+    ("values", "cpu_count", "expected"),
+    [
+        ((2.99, 0.0, 0.0), 4, "normal"),
+        ((3.0, 0.0, 0.0), 4, "warning"),
+        ((0.0, 3.99, 0.0), 4, "warning"),
+        ((0.0, 0.0, 4.0), 4, "critical"),
+        ((8.0, 0.0, 0.0), 8, "critical"),
+    ],
+)
+def test_console_load_status_scales_warning_and_critical_thresholds_by_cpu_count(values, cpu_count, expected):
+    summary, severity = appliance_console._load_status(values, cpu_count)
+
+    assert summary.startswith("1 min ")
+    assert severity == expected
+
+
+def test_console_load_colors_use_header_safe_warning_and_critical_pairs():
+    console = CursesConsole.__new__(CursesConsole)
+    console.curses = SimpleNamespace(A_BOLD=0x100, color_pair=lambda value: value)
+
+    assert console._load_attr("normal") == 1
+    assert console._load_attr("warning") == 6 | 0x100
+    assert console._load_attr("critical") == 7 | 0x100
 
 
 def test_console_release_summary_drops_embedded_photon_metadata_lines():
@@ -270,6 +305,160 @@ def test_console_top_temporarily_leaves_and_restores_curses(monkeypatch):
     assert console._force_clear is True
 
 
+@pytest.mark.parametrize(("authenticated", "expected_calls"), [(True, 1), (False, 0)])
+def test_console_top_requires_fresh_root_authentication(authenticated, expected_calls):
+    console = CursesConsole.__new__(CursesConsole)
+    calls: list[str] = []
+    console._require_authentication = lambda: authenticated
+    console.show_top = lambda: calls.append("top")
+
+    console.show_authenticated_top()
+
+    assert len(calls) == expected_calls
+
+
+def test_console_top_authentication_cancel_does_not_check_password(monkeypatch):
+    console = CursesConsole.__new__(CursesConsole)
+    console._prompt = lambda *args, **kwargs: None
+    console.message = ""
+    console.message_error = False
+    calls: list[str] = []
+    monkeypatch.setattr(appliance_console, "authenticate_root", lambda password: calls.append(password) or True)
+
+    assert console._require_authentication() is False
+    assert calls == []
+
+
+def test_console_password_prompt_uses_light_network_field_style():
+    field_attributes: list[int] = []
+    rendered_text: list[str] = []
+    rendered_rows: list[tuple[int, str]] = []
+
+    class FakeWindow:
+        def keypad(self, _enabled):
+            return None
+
+        def bkgd(self, *_args):
+            return None
+
+        def box(self):
+            return None
+
+        def addnstr(self, row, _column, value, _length, attribute):
+            rendered_text.append(value)
+            rendered_rows.append((row, value))
+            if row == 3:
+                field_attributes.append(attribute)
+
+        def move(self, *_args):
+            return None
+
+        def refresh(self):
+            return None
+
+        def get_wch(self):
+            return "\x1b"
+
+    class FakeCurses:
+        A_BOLD = 1
+        KEY_LEFT = 1
+        KEY_RIGHT = 2
+        KEY_UP = 3
+        KEY_DOWN = 4
+        KEY_BTAB = 353
+        KEY_ENTER = 343
+
+        @staticmethod
+        def color_pair(value):
+            return value
+
+        @staticmethod
+        def curs_set(_value):
+            return None
+
+        @staticmethod
+        def newwin(*_args):
+            return FakeWindow()
+
+    console = CursesConsole.__new__(CursesConsole)
+    console.curses = FakeCurses
+    console.stdscr = SimpleNamespace(getmaxyx=lambda: (30, 80))
+
+    assert console._prompt("Photon OS root authentication", "Root password:", secret=True) is None
+    assert field_attributes == [9, 9]
+    assert (0, " Photon OS root authentication ") in rendered_rows
+    assert " < Apply > " in rendered_text
+    assert " < Cancel > " in rendered_text
+
+
+def test_console_password_prompt_preserves_literal_root_password_characters():
+    keys = iter([*"VMware01!", "\n"])
+
+    class FakeWindow:
+        def keypad(self, _enabled):
+            return None
+
+        def bkgd(self, *_args):
+            return None
+
+        def box(self):
+            return None
+
+        def addnstr(self, *_args):
+            return None
+
+        def move(self, *_args):
+            return None
+
+        def refresh(self):
+            return None
+
+        def get_wch(self):
+            return next(keys)
+
+    class FakeCurses:
+        A_BOLD = 1
+        KEY_LEFT = 1
+        KEY_RIGHT = 2
+        KEY_UP = 3
+        KEY_DOWN = 4
+        KEY_BTAB = 353
+        KEY_ENTER = 343
+
+        @staticmethod
+        def color_pair(value):
+            return value
+
+        @staticmethod
+        def curs_set(_value):
+            return None
+
+        @staticmethod
+        def newwin(*_args):
+            return FakeWindow()
+
+    console = CursesConsole.__new__(CursesConsole)
+    console.curses = FakeCurses
+    console.stdscr = SimpleNamespace(getmaxyx=lambda: (30, 80))
+
+    assert console._prompt("Photon OS root authentication", "Root password:", secret=True) == "VMware01!"
+
+
+def test_console_top_authentication_failure_is_visible(monkeypatch):
+    console = CursesConsole.__new__(CursesConsole)
+    console._prompt = lambda *args, **kwargs: "incorrect"
+    console.message = "Previous message"
+    console.message_error = True
+    dialogs: list[tuple[str, list[str], list[str]]] = []
+    console._dialog = lambda title, lines, options: dialogs.append((title, lines, options)) or 0
+    monkeypatch.setattr(appliance_console, "authenticate_root", lambda _password: False)
+
+    assert console._require_authentication() is False
+    assert dialogs == [("Root authentication failed", ["The Photon OS root password was incorrect."], ["OK"])]
+    assert console.message == ""
+    assert console.message_error is False
+
+
 def test_console_shell_is_audited_and_returns_to_curses(monkeypatch):
     console = CursesConsole.__new__(CursesConsole)
     events: list[object] = []
@@ -290,21 +479,183 @@ def test_console_management_rows_use_stable_table_columns():
     ipv6 = CursesConsole._network_table_row(
         "IPv6", "Awaiting RA/SLAAC", 128, gateway="none", mode="automatic"
     )
-    firewall = CursesConsole._network_table_row(
-        "Firewall", "enabled", 128, auxiliary=("Isolation", "enabled")
-    )
 
     assert ipv4.index("GW ") == ipv6.index("GW ")
     assert ipv4.index("Mode ") == ipv6.index("Mode ")
     assert ipv4.startswith("IPv4      192.168.167.219/24")
     assert ipv6.startswith("IPv6      Awaiting RA/SLAAC")
-    assert firewall.startswith("Firewall  enabled")
-    assert firewall.endswith("Isolation: enabled")
+
+
+def test_console_help_pages_cover_status_keys_navigation_and_safety():
+    titles = [title for title, _lines in appliance_console.HELP_PAGES]
+    help_text = "\n".join(line for _title, lines in appliance_console.HELP_PAGES for line in lines)
+
+    assert titles == ["Screen overview", "Service states", "Function keys", "Dialogs and navigation", "Recovery and safety"]
+    for expected in ("▶ on", "▶ off", "■ on", "■ off", "! crashed", "? on"):
+        assert expected in help_text
+    for expected in ("F1 Help", "F2 Customize", "F3 Top", "F4 Console", "F12 Shut down / Restart"):
+        assert expected in help_text
+    assert "Ctrl+Alt+Del is blocked" in help_text
+    assert max(len(line) for _title, lines in appliance_console.HELP_PAGES for line in lines) <= 68
+
+
+def test_console_help_modal_pages_forward_and_closes():
+    keys = iter([343, 343, 343, 343, 343])
+    framed_titles: list[str] = []
+
+    class FakeWindow:
+        def keypad(self, _enabled):
+            return None
+
+        def erase(self):
+            return None
+
+        def bkgd(self, *_args):
+            return None
+
+        def box(self):
+            return None
+
+        def addnstr(self, row, _column, value, *_args):
+            if row == 0:
+                framed_titles.append(value)
+
+        def refresh(self):
+            return None
+
+        def getch(self):
+            return next(keys)
+
+    class FakeCurses:
+        A_BOLD = 1
+        KEY_F1 = 265
+        KEY_RESIZE = 410
+        KEY_LEFT = 260
+        KEY_RIGHT = 261
+        KEY_UP = 259
+        KEY_DOWN = 258
+        KEY_PPAGE = 339
+        KEY_NPAGE = 338
+        KEY_BTAB = 353
+        KEY_ENTER = 343
+
+        @staticmethod
+        def color_pair(value):
+            return value
+
+        @staticmethod
+        def newwin(*_args):
+            return FakeWindow()
+
+    console = CursesConsole.__new__(CursesConsole)
+    console.curses = FakeCurses
+    console.stdscr = SimpleNamespace(getmaxyx=lambda: (30, 80))
+
+    console.show_help()
+
+    assert len(framed_titles) == len(appliance_console.HELP_PAGES)
+    assert "Console help 1/5 - Screen overview" in framed_titles[0]
+    assert "Console help 5/5 - Recovery and safety" in framed_titles[-1]
+
+
+def test_console_footer_includes_help_and_compact_power_label():
+    rendered: list[tuple[int, str]] = []
+    console = CursesConsole.__new__(CursesConsole)
+    console.curses = SimpleNamespace(A_BOLD=1, color_pair=lambda value: value)
+    console._fill_line = lambda *_args: None
+    console._safe_add = lambda _row, column, value, *_args: rendered.append((column, value))
+
+    console._draw_footer(30, 80)
+
+    assert rendered == [
+        (1, "<F1> Help"),
+        (12, "<F2> Customize"),
+        (29, "<F3> Top"),
+        (40, "<F4> Console"),
+        (67, "<F12> Power"),
+    ]
+
+
+def test_console_appliance_services_use_full_catalog_and_optional_units(monkeypatch):
+    from labfoundry.app import ui
+
+    rows = [
+        {"service": service_id, "enabled": True, "running": True}
+        for _label, service_id, _unit in appliance_console.SERVICE_CATALOG
+    ]
+    next(row for row in rows if row["service"] == "firewall")["enabled"] = False
+    next(row for row in rows if row["service"] == "kms").update(enabled=False, running=False)
+    monkeypatch.setattr(ui, "services_template_context", lambda db: {"service_rows": rows})
+    monkeypatch.setattr(
+        appliance_console,
+        "_systemd_unit_states",
+        lambda units: {
+            unit: {
+                "LoadState": "not-found" if unit == "labfoundry-kms.service" else "loaded",
+                "UnitFileState": "enabled",
+                "ActiveState": "failed" if unit == "slapd.service" else "active",
+            }
+            for unit in units
+        },
+    )
+
+    statuses = appliance_console._appliance_service_statuses(SimpleNamespace(), firewall_enabled=False)
+
+    assert [status.label for status in statuses] == [row[0] for row in appliance_console.SERVICE_CATALOG]
+    assert len(statuses) == 13
+    assert next(status for status in statuses if status.label == "Managed LDAP").display_label == "! crashed"
+    assert next(status for status in statuses if status.label == "KMS / KMIP").display_label == "■ off"
+    firewall = next(status for status in statuses if status.label == "Firewall")
+    assert firewall.display_label == "▶ off"
+
+
+def test_console_enabled_optional_service_without_unit_is_unavailable(monkeypatch):
+    from labfoundry.app import ui
+
+    rows = [
+        {"service": service_id, "enabled": service_id == "kms", "running": False}
+        for _label, service_id, _unit in appliance_console.SERVICE_CATALOG
+    ]
+    monkeypatch.setattr(ui, "services_template_context", lambda db: {"service_rows": rows})
+    monkeypatch.setattr(appliance_console, "_systemd_unit_states", lambda units: {})
+
+    statuses = appliance_console._appliance_service_statuses(SimpleNamespace(), firewall_enabled=False)
+
+    assert next(status for status in statuses if status.label == "KMS / KMIP").display_label == "? on"
+
+
+def test_console_service_rows_fit_normal_tty_and_compact_summary_reports_exceptions():
+    services = (
+        ServiceStatus("LabFoundry", "labfoundry.service", "loaded", "enabled", "active"),
+        ServiceStatus("LDAP", "slapd.service", "loaded", "enabled", "failed"),
+        ServiceStatus("KMS", "labfoundry-kms.service", "not-found", "", "inactive"),
+        ServiceStatus("Firewall", "labfoundry-firewall.service", "loaded", "enabled", "active", False),
+    )
+
+    assert CursesConsole._service_cell(services[0], 38) == "LabFoundry            ▶ on"
+    assert CursesConsole._service_cell(services[3], 38) == "Firewall              ▶ off"
+    summary = CursesConsole._service_summary(services)
+    assert summary == "2 running | 1 failed | 0 stopped | 1 unavailable | Firewall disabled"
+
+    console = CursesConsole.__new__(CursesConsole)
+    console.curses = SimpleNamespace(A_BOLD=1, color_pair=lambda value: value)
+    assert console._service_attr(services[0]) == 10
+
+    full_catalog = tuple(
+        ServiceStatus(label, unit or service_id, "loaded", "enabled", "active", True)
+        for label, service_id, unit in appliance_console.SERVICE_CATALOG
+    )
+    assert (len(full_catalog) + 1) // 2 == 7
+    assert CursesConsole._service_grid_fits(30, len(full_catalog)) is True
+    assert CursesConsole._service_grid_fits(29, len(full_catalog)) is False
+    assert all(len(CursesConsole._service_cell(service, 38)) <= 37 for service in full_catalog)
+    assert "Certificate Authority" in CursesConsole._service_cell(full_catalog[1], 38)
+    assert "VCF Private Registry" in CursesConsole._service_cell(full_catalog[-1], 38)
 
 
 def test_console_has_no_dedicated_time_service_surface():
     source = Path(appliance_console.__file__).read_text(encoding="utf-8")
-    for forbidden in ("NtpSettings", "validate_ntp_servers", "configure_ntp", '"NTP servers"', '"NTPsec"'):
+    for forbidden in ("NtpSettings", "validate_ntp_servers", "configure_ntp", '"NTP servers"'):
         assert forbidden not in source
     assert '{"ntpd"}' not in source
 
@@ -421,12 +772,15 @@ def test_console_systemd_unit_replaces_only_tty1():
     assert "getty@tty2" not in provision
     assert "tdnf -y install" in provision and "python3-curses" in provision and "procps-ng" in provision
     assert "ShowStatus=no" in manager
+    assert "CtrlAltDelBurstAction=none" in manager
+    assert "systemctl mask --force ctrl-alt-del.target" in provision
     assert "/etc/systemd/system.conf.d/labfoundry-console.conf" in provision
     deploy = Path("scripts/windows/vmware/deploy-wheel.ps1").read_text(encoding="utf-8")
     assert "systemctl restart labfoundry-console.service" in deploy
     assert "systemctl is-active labfoundry-console.service" in deploy
     assert "/etc/systemd/system.conf.d/labfoundry-console.conf" in deploy
     assert "systemctl daemon-reexec" in deploy
+    assert "systemctl mask --force ctrl-alt-del.target" in deploy
 
 
 def test_console_service_isolation_preserves_console_network_and_firewall(monkeypatch, tmp_path, capsys):

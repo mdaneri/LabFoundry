@@ -244,10 +244,14 @@ console URL, Swagger URL, OpenAPI URL, root certificate URL, and
 `ssh admin@<appliance-ip>` command.
 
 The VM's first virtual terminal runs the LabFoundry recovery console; tty2 and
-later terminals retain Photon login prompts. F3 temporarily runs `top`, while
-F4 requires the Photon root password before opening an audited root Bash
-session. Exiting either process restores and physically redraws the appliance
-screen. See [Local appliance console](../../docs/appliance-console.md).
+later terminals retain Photon login prompts. Its normal 80x30 layout includes
+boot and runtime state for the appliance services, including Firewall desired
+state. F3 and F4 each require a fresh Photon root password before opening `top`
+or an audited root Bash session. Exiting either process restores and physically
+redraws the appliance screen. Installed VMs use a 640x480 LabFoundry GRUB theme
+with the official Photon OS logo; wheel deployment can synchronize the boot
+branding but never reboots the appliance automatically. See
+[Local appliance console](../../docs/appliance-console.md).
 
 ### Windows DNS for lab FQDNs
 

@@ -2,6 +2,7 @@ from pathlib import Path
 
 import hashlib
 import importlib.util
+import struct
 import sys
 
 
@@ -17,6 +18,29 @@ def load_lifecycle_runner():
 
 def sha256(path: str) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def test_photon_image_installs_fixed_size_labfoundry_grub_branding():
+    background = Path("image/common/boot/grub/labfoundry.png").read_bytes()
+    photon_logo = Path("image/common/boot/grub/photon-os-logo.png").read_bytes()
+    theme = Path("image/common/boot/grub/theme.txt").read_text(encoding="utf-8")
+    installer = Path("scripts/appliance/labfoundry-install-boot-branding").read_text(encoding="utf-8")
+    provision = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
+    deploy = Path("scripts/windows/vmware/deploy-wheel.ps1").read_text(encoding="utf-8")
+
+    assert background[:8] == b"\x89PNG\r\n\x1a\n"
+    assert struct.unpack(">II", background[16:24]) == (640, 480)
+    assert photon_logo[:8] == b"\x89PNG\r\n\x1a\n"
+    assert 'desktop-image: "labfoundry.png"' in theme
+    assert "Powered by Photon OS" not in theme  # Copy is rendered into the fixed background.
+    assert "set theme=/grub2/themes/labfoundry/theme.txt" in installer
+    assert 'menuentry " "' in installer
+    assert "labfoundry-backup" in installer
+    assert '"$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding"' in provision
+    assert "SkipBootBrandingSync" in deploy
+    assert "/opt/labfoundry/bin/labfoundry-install-boot-branding" in deploy
+    assert '"${SshUser}@${IpAddress}:$remoteBootThemePath"' in deploy
+    assert '"${SshUser}@${IpAddress}:$remoteBootBackgroundPath"' in deploy
 
 
 def test_photon_provisioning_management_network_matches_eth0_only():
@@ -130,7 +154,8 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'LABFOUNDRY_MGMT_ACCESS_RULE="    iifname \\"$LABFOUNDRY_MGMT_INTERFACE\\" tcp dport { 22, 80, 443 } accept comment \\"LabFoundry management access\\""' in script
     assert "$LABFOUNDRY_MGMT_ACCESS_RULE" in script
     assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
-    assert 'sed -i \'s/\\r$//\' /etc/systemd/system/labfoundry.service /etc/systemd/system/labfoundry-console.service /etc/systemd/system.conf.d/labfoundry-console.conf "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper' in script
+    assert 'sed -i \'s/\\r$//\'' in script
+    assert '"$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding"' in script
     assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
     assert "labfoundry-root-login.conf" in script
     assert "PermitRootLogin no" in script

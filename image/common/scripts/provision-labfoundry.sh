@@ -249,6 +249,7 @@ install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/common/systemd/labfoundr
 install -d -o root -g root -m 0755 /etc/systemd/system.conf.d
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/common/systemd/labfoundry-console-manager.conf" /etc/systemd/system.conf.d/labfoundry-console.conf
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
+install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-install-boot-branding" "$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-bootstrap-https" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
@@ -256,7 +257,7 @@ if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry-vmware-ovf-customize.service" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
 install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
-sed -i 's/\r$//' /etc/systemd/system/labfoundry.service /etc/systemd/system/labfoundry-console.service /etc/systemd/system.conf.d/labfoundry-console.conf "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper
+sed -i 's/\r$//' /etc/systemd/system/labfoundry.service /etc/systemd/system/labfoundry-console.service /etc/systemd/system.conf.d/labfoundry-console.conf "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   sed -i 's/\r$//' "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
@@ -269,7 +270,10 @@ find "$LABFOUNDRY_HOME/labfoundry" "$LABFOUNDRY_HOME/scripts" "$LABFOUNDRY_HOME/
 find "$LABFOUNDRY_HOME/.venv" -type d -exec chmod 0755 {} +
 find "$LABFOUNDRY_HOME/.venv" -type f -exec chmod u+rw,go+r {} +
 find "$LABFOUNDRY_HOME/.venv/bin" -type f -exec chmod a+rx {} +
-chmod 0755 "$LABFOUNDRY_HOME/bin" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
+chmod 0755 "$LABFOUNDRY_HOME/bin" "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding"
+"$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding" \
+  "$LABFOUNDRY_HOME/image/common/boot/grub/theme.txt" \
+  "$LABFOUNDRY_HOME/image/common/boot/grub/labfoundry.png"
 cat >/etc/ssh/sshd_config.d/labfoundry-root-login.conf <<'EOF'
 # Managed by LabFoundry. Local changes may be overwritten by Appliance Settings apply.
 PermitRootLogin no
@@ -400,6 +404,7 @@ systemctl enable labfoundry-data-disks.service
 systemctl enable labfoundry-bootstrap-https.service
 systemctl enable labfoundry
 systemctl mask getty@tty1.service
+systemctl mask --force ctrl-alt-del.target
 systemctl enable labfoundry-console.service
 systemctl enable --now nginx
 

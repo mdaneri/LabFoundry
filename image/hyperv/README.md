@@ -111,8 +111,12 @@ Provisioned appliances install `python3-curses` and run the root-owned
 `getty@tty1.service`; switching to tty2 or a later virtual terminal starts the
 normal Photon login flow. The recovery console edits only management IPv4/IPv6,
 DNS, persistent Firewall state, and reversible service
-isolation. F3 temporarily runs `top`; F4 opens a separately authenticated and
-audited root Bash session; and exiting either restores the appliance screen.
+isolation. The normal 80x30 display includes boot and runtime state for the
+appliance services, including Firewall desired state. F3 and F4 each require a
+fresh Photon root-password check before opening `top` or an audited root Bash
+session, and exiting either restores the appliance screen. Installed images use
+a 640x480 LabFoundry GRUB theme with the official Photon OS logo while preserving
+the existing timeout, kernel arguments, and Photon boot implementation.
 See [Local appliance console](../../docs/appliance-console.md).
 
 If Packer prints `Using SSH communicator to connect: <ip>` and waits even
