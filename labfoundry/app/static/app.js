@@ -4658,11 +4658,6 @@ function ntpNtsTickFormatter(cell) {
   return labFoundryBooleanFormatter(cell);
 }
 
-function ntpUpstreamMenuFormatter(cell) {
-  if (cell.getRow().getData().is_new) return "";
-  return '<button class="tabulator-row-menu-button" type="button" aria-label="Open upstream server menu">&#8942;</button>';
-}
-
 function ntpUnsupportedNtsFormatter(cell) {
   if (!ntpUpstreamRowHasSource(cell)) {
     return "";
@@ -4753,6 +4748,13 @@ function initializeNTPsecUpstreamsTable() {
       rowHeight: 34,
       placeholder: "Add an upstream source.",
       reactiveData: false,
+      rowContextMenu: [
+        {
+          label: "Delete server",
+          action: (event, row) => deleteNtpUpstreamFromMenu(row, table, hiddenInput),
+          disabled: (row) => row.getData().is_new,
+        },
+      ],
       columns: lockNewRecordColumns([
         {
           title: "Source",
@@ -4774,22 +4776,6 @@ function initializeNTPsecUpstreamsTable() {
         },
         { title: "Enabled", field: "enabled", formatter: ntpGuardedTickFormatter, editor: "tickCross", editable: ntpUpstreamRowHasSource, width: 92, hozAlign: "center" },
         { title: "Description", field: "description", editor: "input", editable: ntpUpstreamRowHasSource, minWidth: 240, widthGrow: 5, formatter: ntpGuardedTextFormatter },
-        {
-          title: "",
-          formatter: ntpUpstreamMenuFormatter,
-          width: 42,
-          minWidth: 42,
-          headerSort: false,
-          resizable: false,
-          hozAlign: "center",
-          clickMenu: [
-            {
-              label: "Delete server",
-              disabled: (cell) => cell.getRow().getData().is_new,
-              action: (event, cell) => deleteNtpUpstreamFromMenu(cell.getRow(), table, hiddenInput),
-            },
-          ],
-        },
       ], "source"),
       rowFormatter: (row) => {
         markNewRecordRow(row, "source");
