@@ -4902,7 +4902,7 @@ function formatNTPsecSourceHealthSection(name, section = {}) {
 
 function formatNTPsecSourceHealthPayload(payload = {}) {
   const sections = payload.status && typeof payload.status === "object" ? payload.status : {};
-  const names = ["tracking", "sources", "authdata"];
+  const names = ["peers", "variables", "nts"];
   if (names.some((name) => sections[name])) {
     return names.map((name) => formatNTPsecSourceHealthSection(name, sections[name] || {})).join("\n\n");
   }
