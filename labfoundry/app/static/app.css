@@ -2520,11 +2520,22 @@ textarea {
 }
 
 .ntp-upstreams-table {
-  min-height: 190px;
+  flex: 1 1 0;
+  min-height: 320px;
 }
 
 .ntp-upstreams-section {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
   margin-top: 14px;
+}
+
+.ntp-main-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .tabulator .tabulator-cell.invalid-ntp-source-cell {
@@ -6148,6 +6159,15 @@ textarea {
   .firewall-managed-section,
   .firewall-managed-section .readonly-tabulator-shell,
   .services-table {
+    min-height: 320px;
+  }
+
+  .ntp-main-panel {
+    display: block;
+    overflow-x: auto;
+  }
+
+  .ntp-upstreams-section {
     min-height: 320px;
   }
 
