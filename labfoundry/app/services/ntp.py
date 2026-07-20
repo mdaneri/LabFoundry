@@ -34,6 +34,56 @@ NTP_DRIFT_PATH = "/var/lib/ntp/ntp.drift"
 NTP_NTS_COOKIE_PATH = "/var/lib/ntp/nts-keys"
 
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+BRACKETED_SOURCE_PATTERN = re.compile(r"^\[([^\]]+)\](?::(\d+))?$")
+
+
+def parse_ntp_source(value: str) -> tuple[str, int | None, bool]:
+    source = str(value or "").strip()
+    if not source:
+        raise ValueError("source is empty")
+    host = source
+    port: int | None = None
+    bracketed = BRACKETED_SOURCE_PATTERN.fullmatch(source)
+    if bracketed:
+        host = bracketed.group(1)
+        port = int(bracketed.group(2)) if bracketed.group(2) else None
+        try:
+            if ip_address(host).version != 6:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("bracketed source must contain a valid IPv6 address") from exc
+    else:
+        try:
+            parsed_address = ip_address(source)
+        except ValueError:
+            parsed_address = None
+            if source.count(":") == 1:
+                possible_host, possible_port = source.rsplit(":", 1)
+                if possible_port.isdigit():
+                    host = possible_host
+                    port = int(possible_port)
+            try:
+                parsed_address = ip_address(host)
+            except ValueError:
+                parsed_address = None
+        if parsed_address is not None:
+            host = str(parsed_address)
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+    try:
+        parsed_host = ip_address(host)
+    except ValueError:
+        normalized_host = normalize_hostname(host)
+        if not HOSTNAME_PATTERN.fullmatch(normalized_host):
+            raise ValueError("host must be an IPv4 address, IPv6 address, or fully qualified DNS name")
+        return normalized_host, port, False
+    return str(parsed_host), port, True
+
+
+def normalize_ntp_source(value: str) -> str:
+    host, port, is_ip = parse_ntp_source(value)
+    rendered_host = f"[{host}]" if is_ip and ip_address(host).version == 6 else host
+    return f"{rendered_host}:{port}" if port is not None else rendered_host
 
 
 def ntp_upstream_sources(settings: NtpSettings) -> list[dict[str, object]]:
@@ -168,13 +218,11 @@ def validate_ntp_state(settings: NtpSettings, available_interfaces: set[str]) ->
             errors.append("At least one NTP upstream server is required.")
         for source in sources:
             server = str(source.get("source") or "").strip()
-            is_ip = False
             try:
-                ip_address(server)
-                is_ip = True
+                _host, _port, is_ip = parse_ntp_source(server)
             except ValueError:
-                if not HOSTNAME_PATTERN.fullmatch(normalize_hostname(server)):
-                    errors.append(f"NTP upstream server {server} must be a valid DNS name or IP address.")
+                errors.append(f"NTP upstream server {server} must be an IPv4 address, IPv6 address, or fully qualified DNS name with an optional port.")
+                continue
             if source.get("use_nts") and is_ip:
                 errors.append(f"NTS upstream {server} must use a certificate-valid DNS hostname, not an IP address.")
     if settings.port != 123:
@@ -248,7 +296,12 @@ def render_ntp_config(settings: NtpSettings) -> str:
         )
     lines.append("")
     for source in sources:
-        parts = ["server", str(source["source"]).strip(), "iburst"]
+        raw_source = str(source["source"]).strip()
+        try:
+            rendered_source = normalize_ntp_source(raw_source)
+        except ValueError:
+            rendered_source = raw_source
+        parts = ["server", rendered_source, "iburst"]
         if source.get("use_nts"):
             parts.append("nts")
         lines.append(" ".join(parts))

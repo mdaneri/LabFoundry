@@ -4380,9 +4380,34 @@ def test_ntpd_helper_rejects_invalid_staged_config(monkeypatch, tmp_path):
 
     errors = helper._ntpd_config_errors(config_path)
 
-    assert "ntpd server bad_name must be a valid DNS name or IP address." in errors
+    assert "ntpd server bad_name must be an IPv4 address, IPv6 address, or fully qualified DNS name with an optional port." in errors
     assert "ntpd interface listen address not-an-ip must be a valid IP address." in errors
     assert "ntpd client allow list can use 'any' only by itself." in errors
+
+
+def test_ntpd_helper_accepts_source_ports_and_rejects_invalid_or_nts_ip_sources(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    monkeypatch.setattr(helper, "_ntpd_supports_nts", lambda: True)
+    valid_config = tmp_path / "valid-ntp.conf"
+    valid_config.write_text(
+        ntpd_config_text(server="time.example.com:7443").replace(
+            "server time.example.com:7443 iburst",
+            "server time.example.com:7443 iburst nts\nserver [2001:db8::10]:123 iburst",
+        ),
+        encoding="utf-8",
+    )
+    assert helper._ntpd_config_errors(valid_config) == []
+
+    invalid_port = tmp_path / "invalid-port.conf"
+    invalid_port.write_text(ntpd_config_text(server="time.example.com:70000"), encoding="utf-8")
+    assert "optional port" in "\n".join(helper._ntpd_config_errors(invalid_port))
+
+    nts_ip = tmp_path / "nts-ip.conf"
+    nts_ip.write_text(
+        ntpd_config_text(server="192.0.2.10:4460").replace(" iburst", " iburst nts"),
+        encoding="utf-8",
+    )
+    assert "certificate-valid DNS hostname" in "\n".join(helper._ntpd_config_errors(nts_ip))
 
 
 def test_ntpd_helper_apply_installs_config_and_switches_from_timesyncd(monkeypatch, tmp_path):

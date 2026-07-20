@@ -4543,6 +4543,92 @@ function initializeLdapPasswordModal() {
   }
 }
 
+function parseNtpUpstreamSource(value) {
+  const source = String(value || "").trim();
+  if (!source) return null;
+  let host = source;
+  let port = "";
+  const bracketed = source.match(/^\[([^\]]+)\](?::(\d+))?$/);
+  if (bracketed) {
+    host = bracketed[1];
+    port = bracketed[2] || "";
+    if (!isValidIpv6Address(host)) return null;
+  } else if (!isValidIpv6Address(source) && source.split(":").length === 2) {
+    const parts = source.split(":");
+    if (/^\d+$/.test(parts[1])) {
+      [host, port] = parts;
+    }
+  }
+  if (port && (Number(port) < 1 || Number(port) > 65535)) return null;
+  const normalizedHost = host.replace(/\.$/, "").toLowerCase();
+  const fqdnPattern = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+  if (!isValidIpv4Address(host) && !isValidIpv6Address(host) && !fqdnPattern.test(normalizedHost)) return null;
+  return { host: normalizedHost, port: port ? Number(port) : null };
+}
+
+function ntpUpstreamSourceFormatter(cell) {
+  const data = cell.getRow().getData();
+  const value = String(cell.getValue() || "").trim();
+  if (data.is_new && !value) {
+    return '<span class="add-row-hint">+ Add source here</span>';
+  }
+  const valid = Boolean(parseNtpUpstreamSource(value));
+  cell.getElement().classList.toggle("invalid-ntp-source-cell", !valid);
+  cell.getElement().title = valid ? "" : "Enter an IPv4 address, IPv6 address, or FQDN, optionally followed by :port.";
+  return escapeHtml(value);
+}
+
+function ntpUpstreamSourceEditor(cell, onRendered, success, cancel) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = cell.getValue() || "";
+  input.placeholder = "time.example.com[:4460]";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.setAttribute("aria-label", "NTP upstream source");
+  let finished = false;
+
+  const updateValidity = () => {
+    const value = input.value.trim();
+    input.classList.toggle("invalid-ntp-source-input", Boolean(value) && !parseNtpUpstreamSource(value));
+  };
+  const submit = () => {
+    if (finished) return true;
+    const value = input.value.trim();
+    if (value && !parseNtpUpstreamSource(value)) {
+      input.classList.add("invalid-ntp-source-input");
+      const status = document.getElementById("ntp-settings-autosave-status");
+      if (status instanceof HTMLElement) {
+        status.dataset.state = "error";
+        status.textContent = "Enter an IPv4 address, IPv6 address, or FQDN, optionally followed by :port.";
+      }
+      return false;
+    }
+    finished = true;
+    success(value);
+    return true;
+  };
+  input.addEventListener("input", updateValidity);
+  input.addEventListener("blur", () => {
+    if (!submit()) cancel();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    } else if (event.key === "Escape") {
+      finished = true;
+      cancel();
+    }
+  });
+  onRendered(() => {
+    input.focus();
+    input.select();
+    updateValidity();
+  });
+  return input;
+}
+
 function ntpBlankUpstreamRow() {
   return {
     id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -4560,6 +4646,13 @@ function ntpUpstreamRowHasSource(cell) {
 
 function ntpGuardedTickFormatter(cell) {
   if (!ntpUpstreamRowHasSource(cell)) {
+    return "";
+  }
+  return labFoundryBooleanFormatter(cell);
+}
+
+function ntpNtsTickFormatter(cell) {
+  if (!ntpUpstreamRowHasSource(cell) || !cell.getValue()) {
     return "";
   }
   return labFoundryBooleanFormatter(cell);
@@ -4607,6 +4700,28 @@ function ensureNTPsecUpstreamAddRow(table) {
   }
 }
 
+function submitNtpUpstreamTableChange(table, hiddenInput) {
+  syncNTPsecUpstreamsHiddenInput(table);
+  if (hiddenInput instanceof HTMLInputElement) {
+    hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+}
+
+async function deleteNtpUpstreamFromMenu(row, table, hiddenInput) {
+  const data = row.getData();
+  if (data.is_new) return;
+  const source = String(data.source || "upstream server");
+  const confirmed = await requestConfirmation({
+    title: `Delete ${source}?`,
+    message: "This removes the upstream server from NTP desired state. The appliance is not changed until global appliance apply runs.",
+    label: "Delete server",
+  });
+  if (!confirmed) return;
+  await row.delete();
+  ensureNTPsecUpstreamAddRow(table);
+  submitNtpUpstreamTableChange(table, hiddenInput);
+}
+
 function initializeNTPsecUpstreamsTable() {
   const tableElement = document.getElementById("ntp-upstreams-table");
   if (!(tableElement instanceof HTMLElement)) {
@@ -4633,44 +4748,52 @@ function initializeNTPsecUpstreamsTable() {
       rowHeight: 34,
       placeholder: "Add an upstream source.",
       reactiveData: false,
+      rowContextMenu: (row) => row.getData().is_new ? [] : [
+        {
+          label: "Delete server",
+          action: (event, selectedRow) => deleteNtpUpstreamFromMenu(selectedRow, table, hiddenInput),
+        },
+      ],
       columns: lockNewRecordColumns([
         {
           title: "Source",
           field: "source",
-          editor: "input",
-          minWidth: 180,
-          formatter: (cell) => {
-            const value = String(cell.getValue() || "");
-            return dnsAddRowHintFormatter(cell, value || "+ Add source here");
-          },
+          editor: ntpUpstreamSourceEditor,
+          formatter: ntpUpstreamSourceFormatter,
+          width: 360,
+          minWidth: 230,
+          headerTooltip: "IPv4, IPv6, or fully qualified DNS name. Append :port when the upstream uses a non-default port; use [IPv6]:port for IPv6.",
         },
         {
           title: "NTS",
           field: "use_nts",
-          formatter: ntsSupported ? ntpGuardedTickFormatter : ntpUnsupportedNtsFormatter,
+          formatter: ntsSupported ? ntpNtsTickFormatter : ntpUnsupportedNtsFormatter,
           editor: ntsSupported ? "tickCross" : false,
           editable: ntsSupported ? ntpUpstreamRowHasSource : false,
           width: ntsSupported ? 70 : 105,
           hozAlign: "center",
         },
         { title: "Enabled", field: "enabled", formatter: ntpGuardedTickFormatter, editor: "tickCross", editable: ntpUpstreamRowHasSource, width: 92, hozAlign: "center" },
-        { title: "Description", field: "description", editor: "input", editable: ntpUpstreamRowHasSource, minWidth: 170, formatter: ntpGuardedTextFormatter },
+        { title: "Description", field: "description", editor: "input", editable: ntpUpstreamRowHasSource, minWidth: 240, widthGrow: 5, formatter: ntpGuardedTextFormatter },
       ], "source"),
       rowFormatter: (row) => {
         markNewRecordRow(row, "source");
       },
     });
-    table.on("cellEdited", (cell) => {
+    table.on("cellEdited", async (cell) => {
       const row = cell.getRow();
       const data = row.getData();
+      if (!data.is_new && cell.getField() === "source" && !String(data.source || "").trim()) {
+        await row.delete();
+        ensureNTPsecUpstreamAddRow(table);
+        submitNtpUpstreamTableChange(table, hiddenInput);
+        return;
+      }
       if (data.is_new && String(data.source || "").trim()) {
         row.update({ is_new: false, id: data.id || `source-${Date.now()}`, enabled: true });
         ensureNTPsecUpstreamAddRow(table);
       }
-      syncNTPsecUpstreamsHiddenInput(table);
-      if (hiddenInput instanceof HTMLInputElement) {
-        hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
-      }
+      submitNtpUpstreamTableChange(table, hiddenInput);
     });
     syncNTPsecUpstreamsHiddenInput(table);
     if (fallback instanceof HTMLElement) {

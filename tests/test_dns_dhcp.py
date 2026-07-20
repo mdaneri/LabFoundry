@@ -1,7 +1,7 @@
 from ipaddress import ip_address
 
 from labfoundry.app.models import NtpSettings, DhcpOption, DhcpReservation, DhcpScope, DhcpSettings, DnsRecord, DnsSettings, PhysicalInterface, VlanInterface
-from labfoundry.app.services.ntp import NTP_DEFAULT_UPSTREAM_SERVERS, ntp_upstream_sources, dump_ntp_upstream_sources, render_ntp_config, validate_ntp_state
+from labfoundry.app.services.ntp import NTP_DEFAULT_UPSTREAM_SERVERS, dump_ntp_upstream_sources, ntp_upstream_sources, parse_ntp_source, render_ntp_config, validate_ntp_state
 from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNSMASQ_LEASE_FILE_PATH,
@@ -241,6 +241,60 @@ def test_ntp_rejects_nts_source_ip_and_renders_disabled_state_without_servers():
     config = render_ntp_config(disabled)
     assert "# LabFoundry NTP enabled: false" in config
     assert "server " not in config
+
+
+def test_ntp_sources_accept_addresses_fqdns_and_optional_ports():
+    settings = NtpSettings(
+        enabled=True,
+        hostname="ntp.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        port=123,
+        allow_clients="any",
+        nts_ke_port=4460,
+        config_path="/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf",
+        upstream_sources_json=dump_ntp_upstream_sources(
+            [
+                {"source": "time.example.com:7443", "enabled": True, "use_nts": True, "description": "custom NTS-KE"},
+                {"source": "192.0.2.10:123", "enabled": True, "use_nts": False, "description": "IPv4"},
+                {"source": "2001:db8::10", "enabled": True, "use_nts": False, "description": "IPv6"},
+                {"source": "[2001:db8::20]:123", "enabled": True, "use_nts": False, "description": "IPv6 port"},
+            ]
+        ),
+    )
+
+    assert validate_ntp_state(settings, {"eth2"}) == []
+    config = render_ntp_config(settings)
+    assert "server time.example.com:7443 iburst nts" in config
+    assert "server 192.0.2.10:123 iburst" in config
+    assert "server [2001:db8::10] iburst" in config
+    assert "server [2001:db8::20]:123 iburst" in config
+    assert parse_ntp_source("time.example.com:7443") == ("time.example.com", 7443, False)
+
+
+def test_ntp_sources_reject_invalid_identity_port_and_nts_ip():
+    settings = NtpSettings(
+        enabled=True,
+        hostname="ntp.labfoundry.internal",
+        listen_interface="eth2",
+        listen_address="192.168.50.1",
+        port=123,
+        allow_clients="any",
+        nts_ke_port=4460,
+        config_path="/var/lib/labfoundry/apply/ntpd/labfoundry-ntp.conf",
+        upstream_sources_json=dump_ntp_upstream_sources(
+            [
+                {"source": "not-a-fqdn", "enabled": True, "use_nts": False, "description": ""},
+                {"source": "time.example.com:70000", "enabled": True, "use_nts": False, "description": ""},
+                {"source": "192.0.2.10:4460", "enabled": True, "use_nts": True, "description": ""},
+            ]
+        ),
+    )
+
+    errors = "\n".join(validate_ntp_state(settings, {"eth2"}))
+    assert "NTP upstream server not-a-fqdn" in errors
+    assert "NTP upstream server time.example.com:70000" in errors
+    assert "NTS upstream 192.0.2.10:4460 must use a certificate-valid DNS hostname" in errors
 
 
 def test_dnsmasq_renderer_supports_dnssec_rebind_logging_and_extended_records():

@@ -254,6 +254,7 @@ VCF_DEPOT_DEFAULT_USERNAME = "vcf-depot"
 VCF_DEPOT_HTPASSWD_PATH = Path("/etc/labfoundry/nginx/htpasswd/vcf-offline-depot.htpasswd")
 VCF_DEPOT_SHADOW_PATH = Path("/etc/shadow")
 HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+BRACKETED_NTP_SOURCE_PATTERN = re.compile(r"^\[([^\]]+)\](?::(\d+))?$")
 VCF_BACKUPS_APPLY_DIR = Path("/var/lib/labfoundry/apply/vcf-backups")
 VCF_BACKUPS_CONFIG_DIR = Path("/etc/ssh/sshd_config.d")
 VCF_BACKUPS_CONFIG_PATH = VCF_BACKUPS_CONFIG_DIR / "labfoundry-vcf-backups.conf"
@@ -2747,6 +2748,49 @@ def _ntpd_config_enabled(path: Path) -> bool:
     return False
 
 
+def _parse_ntpd_server(value: str) -> tuple[str, int | None, bool]:
+    source = str(value or "").strip()
+    if not source:
+        raise ValueError("source is empty")
+    host = source
+    port: int | None = None
+    bracketed = BRACKETED_NTP_SOURCE_PATTERN.fullmatch(source)
+    if bracketed:
+        host = bracketed.group(1)
+        port = int(bracketed.group(2)) if bracketed.group(2) else None
+        try:
+            if ip_address(host).version != 6:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("bracketed source must contain a valid IPv6 address") from exc
+    else:
+        try:
+            parsed_address = ip_address(source)
+        except ValueError:
+            parsed_address = None
+            if source.count(":") == 1:
+                possible_host, possible_port = source.rsplit(":", 1)
+                if possible_port.isdigit():
+                    host = possible_host
+                    port = int(possible_port)
+            try:
+                parsed_address = ip_address(host)
+            except ValueError:
+                parsed_address = None
+        if parsed_address is not None:
+            host = str(parsed_address)
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+    try:
+        parsed_host = ip_address(host)
+    except ValueError:
+        normalized_host = host.strip().strip(".").lower()
+        if not HOSTNAME_PATTERN.fullmatch(normalized_host):
+            raise ValueError("host must be an IPv4 address, IPv6 address, or fully qualified DNS name")
+        return normalized_host, port, False
+    return str(parsed_host), port, True
+
+
 def _ntpd_config_errors(path: Path) -> list[str]:
     errors: list[str] = []
     servers: list[str] = []
@@ -2806,13 +2850,14 @@ def _ntpd_config_errors(path: Path) -> list[str]:
                 continue
             server = parts[1]
             try:
-                ip_address(server)
-                if "nts" in {part.lower() for part in parts[2:]}:
-                    errors.append(f"NTS server {server} must use a certificate-valid DNS hostname, not an IP address.")
+                _host, _port, is_ip = _parse_ntpd_server(server)
             except ValueError:
-                normalized = server.strip().strip(".").lower()
-                if not HOSTNAME_PATTERN.fullmatch(normalized):
-                    errors.append(f"ntpd server {server} must be a valid DNS name or IP address.")
+                errors.append(
+                    f"ntpd server {server} must be an IPv4 address, IPv6 address, or fully qualified DNS name with an optional port."
+                )
+                continue
+            if is_ip and "nts" in {part.lower() for part in parts[2:]}:
+                errors.append(f"NTS server {server} must use a certificate-valid DNS hostname, not an IP address.")
     if enabled and not listen_addresses:
         errors.append("enabled ntpd config must include at least one interface listen address.")
     if enabled and "interface ignore wildcard" not in path.read_text(encoding="utf-8").lower():

@@ -13,9 +13,9 @@
 
     <div class="metric-grid service-summary-grid">
       <div class="metric">
-        <span>Endpoint</span>
-        <strong>{{ ntp_primary_listen_address or "no interface IP" }}:{{ ntp_settings.port }}</strong>
-        <small>{{ ntp_bind_label }}</small>
+        <span>Endpoints</span>
+        <strong>NTP {{ ntp_primary_listen_address or "no interface IP" }}:{{ ntp_settings.port }}</strong>
+        <small>{% if ntp_settings.nts_server_enabled %}NTS-KE {{ ntp_settings.hostname }}:{{ ntp_settings.nts_ke_port }} · {% else %}NTS-KE disabled · {% endif %}{{ ntp_bind_label }}</small>
       </div>
       <div class="metric">
         <span>Hostname</span>
@@ -54,7 +54,7 @@
         <tbody>
           {% for source in ntp_settings_json.upstream_sources + [{"source": "", "enabled": false, "use_nts": false, "description": ""}] %}
             <tr>
-              <td><input class="table-input" name="upstream_source" value="{{ source.source }}" placeholder="time.example.com" form="ntp-settings-form"></td>
+              <td><input class="table-input" name="upstream_source" value="{{ source.source }}" placeholder="time.example.com[:4460]" form="ntp-settings-form"></td>
               <td>
                 <label class="inline-check">
                   <input type="checkbox" name="upstream_use_nts" value="{{ loop.index0 }}"{% if source.use_nts %} checked{% endif %}{% if not ntp_nts_supported %} disabled{% endif %} form="ntp-settings-form">
