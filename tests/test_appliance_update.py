@@ -383,6 +383,14 @@ def test_software_source_and_managed_module_lifecycle(client):
     assert grouped_page.text.index('data-tab-target="appliance-update-streams"') < grouped_page.text.index('data-tab-target="appliance-update-sources"')
     assert "Synchronize repositories" in grouped_page.text
     assert grouped_page.text.count('class="appliance-update-source-actions"') == 1
+    assert 'class="button secondary icon-button"' in grouped_page.text
+    assert 'aria-label="Synchronize repositories"' in grouped_page.text
+    assert 'class="muted appliance-update-source-intro"' in grouped_page.text
+    assert 'data-appliance-update-validation-panel' in grouped_page.text
+    assert "Staged update manifest" in grouped_page.text
+    assert 'data-config-preview-open' in grouped_page.text
+    assert '<div class="config-preview">' not in grouped_page.text
+    assert grouped_page.text.index("Update Info") < grouped_page.text.index('data-appliance-update-validation-panel')
     source_actions = grouped_page.text.index('class="appliance-update-source-actions"')
     source_list = grouped_page.text.index('class="apply-unit-list"', source_actions)
     assert source_actions < source_list

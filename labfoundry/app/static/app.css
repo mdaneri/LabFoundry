@@ -1158,6 +1158,21 @@ textarea {
   min-width: 0;
 }
 
+.detail-rail .settings-list > div {
+  grid-template-columns: minmax(0, 160px) minmax(0, 1fr);
+  min-width: 0;
+}
+
+.detail-rail .settings-list > div > span,
+.detail-rail .settings-list > div > strong {
+  min-width: 0;
+}
+
+.detail-rail .settings-list > div > strong {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .side-stack {
   display: grid;
   gap: 14px;
@@ -4144,6 +4159,25 @@ textarea {
 .appliance-update-source-actions form,
 .appliance-update-source-actions .field-label {
   margin: 0;
+}
+
+#appliance-update-workspace {
+  overflow-x: hidden;
+}
+
+#appliance-update-workspace > .tab-panels,
+#appliance-update-workspace .tab-panel {
+  max-width: 100%;
+}
+
+.appliance-update-source-intro {
+  display: grid;
+  gap: 3px;
+  max-width: 104ch;
+}
+
+.appliance-update-source-intro span {
+  min-width: 0;
 }
 
 .apply-unit-card {

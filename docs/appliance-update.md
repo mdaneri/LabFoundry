@@ -42,12 +42,17 @@ host package clients.
 
 Source editors autosave individual definitions, but synchronization remains an
 explicit audited runtime-maintenance action because it can write package-client
-configuration. The compact synchronization action stays in the **Update
+configuration. The compact synchronization icon stays in the **Update
 Sources** header rather than interrupting the repository and managed-module
 editors. The UI reports the effective built-in Photon repositories and
 pip index discovered from the appliance rather than substituting explanatory
 placeholder strings. Repository fields use aligned compact controls, and the
 ecosystem/repository tabs preserve the active editing context after changes.
+
+The Update Streams workspace keeps stream selection and task actions in the
+main pane. Its staged manifest is exposed from the compact **Validation** card
+at the bottom of the detail rail and opens in the shared preview modal instead
+of occupying the main workflow.
 
 A source cannot be deleted while a managed package still references it. Rebind
 or delete those packages first. Removing a managed PowerShell module stops

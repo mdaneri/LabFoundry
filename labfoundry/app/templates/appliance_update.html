@@ -17,13 +17,13 @@
       <div class="appliance-update-source-actions">
         <form method="post" action="/appliance-update/source-sync">
           <input type="hidden" name="csrf" value="{{ csrf_token }}">
-          <span class="field-label"><button class="button secondary compact" type="submit">Synchronize repositories</button><button class="help-icon" type="button" data-help="Writes the autosaved desired repository state to the appliance package clients through an audited maintenance task. LabFoundry validates enabled sources before updating its owned tdnf, pip, and PowerShell configuration.">i</button></span>
+          <span class="field-label"><button class="button secondary icon-button" type="submit" aria-label="Synchronize repositories" title="Synchronize repositories">↻</button><button class="help-icon" type="button" data-help="Writes the autosaved desired repository state to the appliance package clients through an audited maintenance task. LabFoundry validates enabled sources before updating its owned tdnf, pip, and PowerShell configuration.">i</button></span>
         </form>
         <span class="status-pill {{ 'warn' if system_adapter_dry_run else 'good' }}">{{ "dry-run" if system_adapter_dry_run else "real" }}</span>
       </div>
     </div>
 
-    <p class="muted">Configure package repositories as desired state, then synchronize them with the appliance package clients through an audited runtime-maintenance task. LabFoundry release repositories expose channel manifests under <code>channels/&lt;channel&gt;/manifest.json</code>.</p>
+    <p class="muted appliance-update-source-intro"><span>Configure package repositories as desired state, then synchronize them with the appliance package clients through an audited runtime-maintenance task.</span><span>LabFoundry release repositories expose channel manifests under <code>channels/&lt;channel&gt;/manifest.json</code>.</span></p>
     <div class="apply-unit-list">
       {% for group in update_source_groups %}
         <details class="apply-unit-card config-diff update-source-details" id="update-source-group-{{ group.kind }}" data-update-source-group="{{ group.kind }}">
@@ -125,14 +125,6 @@
     {% if update_error %}
       <div class="alert error">{{ update_error }}</div>
     {% endif %}
-    {% if update_settings_errors %}
-      <div class="alert error">
-        {% for error in update_settings_errors %}
-          <div>{{ error }}</div>
-        {% endfor %}
-      </div>
-    {% endif %}
-
     <form class="form-stack" method="post">
       <input type="hidden" name="csrf" value="{{ csrf_token }}">
       <div class="panel-head compact">
@@ -193,12 +185,6 @@
       {% endif %}
     {% endif %}
 
-    <div class="config-preview">
-      <div class="preview-head">
-        <span>Staged update manifest</span>
-      </div>
-      <code class="language-json">{{ appliance_update_manifest_preview }}</code>
-    </div>
       </div>
     </div>
   </div>
@@ -249,6 +235,28 @@
       {% else %}
         <p class="muted">{{ update_info_file.error }}</p>
       {% endif %}
+    </div>
+
+    <div class="panel detail-panel" data-appliance-update-validation-panel>
+      <div class="panel-head">
+        <h2>Validation</h2>
+        <span class="status-pill {{ 'good' if not update_settings_errors else 'warn' }}">{{ "valid" if not update_settings_errors else "needs attention" }}</span>
+      </div>
+      {% if update_settings_errors %}
+        <div class="alert error">
+          {% for error in update_settings_errors %}
+            <div>{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="muted">The selected update streams and repository settings pass LabFoundry validation. Runtime checks still run before any package changes.</p>
+      {% endif %}
+      {% set preview_label = "Staged update manifest" %}
+      {% set preview_path = appliance_update_staged_config_path %}
+      {% set preview_title = "Appliance Update staged manifest" %}
+      {% set preview_text = appliance_update_manifest_preview %}
+      {% set preview_code_class = "language-json" %}
+      {% include "partials/config_preview_action.html" %}
     </div>
   </aside>
 </section>
