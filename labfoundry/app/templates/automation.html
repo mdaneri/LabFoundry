@@ -150,6 +150,47 @@
       <div class="confirm-modal-actions"><button class="button secondary" type="button" data-automation-script-modal-cancel>Cancel</button><button class="button primary" type="button" data-automation-script-source-confirm>Use script content</button></div>
     </div>
   </dialog>
+  <dialog id="automation-script-run-modal" class="confirm-modal wide-modal automation-script-run-modal" aria-labelledby="automation-script-run-modal-title">
+    <form id="automation-script-run-form" class="confirm-modal-panel form-stack" method="post" data-automation-script-run-form>
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <div class="confirm-modal-body form-stack">
+        <p class="kicker">Managed script execution</p>
+        <h2 id="automation-script-run-modal-title">Run latest revision</h2>
+        <p class="muted" data-automation-script-run-description>Review the immutable revision and provide its literal arguments before creating the task.</p>
+        <div class="settings-list compact-settings-list automation-script-run-facts">
+          <div><span>Script</span><strong data-automation-script-run-name></strong></div>
+          <div><span>Revision</span><strong data-automation-script-run-revision></strong></div>
+          <div><span>Interpreter</span><strong data-automation-script-run-interpreter></strong></div>
+        </div>
+        <label>
+          <span class="field-label"><span>Script parameters</span><button class="help-icon" type="button" data-help="Passes a literal argument vector to this execution. Quote values containing spaces and use backslash continuation for Bash or Python and backtick continuation for PowerShell. No shell expansion is performed; do not enter secrets.">i</button></span>
+          <textarea name="script_arguments" rows="5" data-automation-script-run-arguments spellcheck="false"></textarea>
+          <small class="muted" data-automation-script-run-hint></small>
+        </label>
+      </div>
+      <div class="confirm-modal-actions"><button class="button secondary" type="button" data-automation-script-run-cancel>Cancel</button><button class="button primary" type="submit">Run script now</button></div>
+    </form>
+  </dialog>
+  <dialog id="automation-script-diff-modal" class="confirm-modal wide-modal automation-script-diff-modal" aria-labelledby="automation-script-diff-modal-title">
+    <div class="confirm-modal-panel form-stack">
+      <div class="confirm-modal-body form-stack">
+        <p class="kicker">Managed script revisions</p>
+        <h2 id="automation-script-diff-modal-title">Compare revisions</h2>
+        <p class="muted" data-automation-script-diff-description>Select a revision cell to compare the latest immutable source with the revision immediately before it.</p>
+        <div class="automation-revision-diff-grid">
+          <section>
+            <div class="automation-revision-diff-heading"><h3 data-automation-script-diff-previous-title>Previous revision</h3><span class="status-pill muted" data-automation-script-diff-previous-meta></span></div>
+            <div class="terminal-note automation-revision-diff-preview"><code class="language-diff" data-automation-script-diff-previous></code></div>
+          </section>
+          <section>
+            <div class="automation-revision-diff-heading"><h3 data-automation-script-diff-current-title>Current revision</h3><span class="status-pill muted" data-automation-script-diff-current-meta></span></div>
+            <div class="terminal-note automation-revision-diff-preview"><code class="language-diff" data-automation-script-diff-current></code></div>
+          </section>
+        </div>
+      </div>
+      <div class="confirm-modal-actions"><button class="button ghost" type="button" data-automation-script-diff-close>Close</button></div>
+    </div>
+  </dialog>
   {% for script in automation_scripts %}
     <div class="hidden">
       <form id="delete-automation-script-{{ script.id }}" action="/automation/scripts/{{ script.id }}/delete" method="post" data-confirm-modal data-confirm-title="Delete {{ script.name }}?" data-confirm-message="This permanently removes the managed script and every immutable revision. Schedules that use a revision block deletion; existing task history remains." data-confirm-label="Delete managed script"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button danger compact" type="submit">Delete managed script</button></form>
@@ -160,7 +201,6 @@
       </form>
       {% if script.revisions %}{% set latest = script.revisions[-1] %}
       <form id="automation-script-toggle-{{ script.id }}" action="/automation/scripts/revisions/{{ latest.id }}/toggle" method="post"><input type="hidden" name="csrf" value="{{ csrf_token }}"></form>
-      <form id="automation-script-run-{{ script.id }}" action="/automation/scripts/revisions/{{ latest.id }}/run" method="post"><input type="hidden" name="csrf" value="{{ csrf_token }}"></form>
       {% endif %}
     </div>
   {% endfor %}

@@ -9830,7 +9830,6 @@ function renderTaskDetail(task) {
   const statusPill = modal.querySelector("[data-task-detail-status]");
   const summary = modal.querySelector("[data-task-detail-summary]");
   const facts = modal.querySelector("[data-task-detail-facts]");
-  const error = modal.querySelector("[data-task-detail-error]");
   const errorDetails = modal.querySelector("[data-task-detail-errors]");
   const errorContent = modal.querySelector("[data-task-detail-errors-content]");
   const consoleDetails = modal.querySelector("[data-task-detail-console]");
@@ -9868,11 +9867,6 @@ function renderTaskDetail(task) {
       row.append(key, val);
       facts.append(row);
     });
-  }
-  if (error instanceof HTMLElement) {
-    const primaryError = Array.isArray(task.error_messages) ? task.error_messages[0] : task.error;
-    error.textContent = primaryError || "";
-    error.classList.toggle("hidden", !primaryError);
   }
   if (errorDetails instanceof HTMLDetailsElement && errorContent instanceof HTMLElement) {
     const errorMessages = Array.isArray(task.error_messages) ? task.error_messages.filter(Boolean) : [];
@@ -13745,6 +13739,9 @@ function initializeAutomationTables() {
   const scheduleModal = document.getElementById("automation-schedule-modal");
   const scheduleForm = document.querySelector("[data-automation-schedule-form]");
   const scriptModal = document.getElementById("automation-script-modal");
+  const scriptRunModal = document.getElementById("automation-script-run-modal");
+  const scriptRunForm = document.querySelector("[data-automation-script-run-form]");
+  const scriptDiffModal = document.getElementById("automation-script-diff-modal");
   let activeScriptRow = null;
   let activeScriptInterpreter = "bash";
   let createScriptFromGridRow = null;
@@ -13866,6 +13863,112 @@ function initializeAutomationTables() {
       });
     }
   }
+
+  const updateScriptRunGuidance = (interpreter) => {
+    if (!(scriptRunModal instanceof HTMLDialogElement)) return;
+    const argumentsInput = scriptRunModal.querySelector("[data-automation-script-run-arguments]");
+    const hint = scriptRunModal.querySelector("[data-automation-script-run-hint]");
+    const normalized = ["bash", "powershell", "python"].includes(interpreter) ? interpreter : "bash";
+    const marker = normalized === "powershell" ? "`" : "\\";
+    const label = normalized === "powershell" ? "PowerShell" : normalized === "python" ? "Python" : "Bash";
+    if (argumentsInput instanceof HTMLTextAreaElement) {
+      argumentsInput.placeholder = normalized === "powershell"
+        ? "-Server `\n'vcf.example.internal' `\n-Port 443"
+        : "--server \\\n'vcf.example.internal' \\\n--port 443";
+    }
+    if (hint instanceof HTMLElement) hint.textContent = `${label}: enter one logical command line; end a visual continuation line with ${marker}. Arguments are passed literally without shell evaluation.`;
+  };
+  const openScriptRunModal = (data) => {
+    if (!(scriptRunModal instanceof HTMLDialogElement) || !(scriptRunForm instanceof HTMLFormElement) || !data?.latest_revision_id) return;
+    scriptRunForm.reset();
+    scriptRunForm.action = `/automation/scripts/revisions/${encodeURIComponent(data.latest_revision_id)}/run`;
+    const name = scriptRunModal.querySelector("[data-automation-script-run-name]");
+    const revision = scriptRunModal.querySelector("[data-automation-script-run-revision]");
+    const interpreter = scriptRunModal.querySelector("[data-automation-script-run-interpreter]");
+    if (name instanceof HTMLElement) name.textContent = data.name || "—";
+    if (revision instanceof HTMLElement) revision.textContent = `r${data.latest_revision || 0}`;
+    if (interpreter instanceof HTMLElement) interpreter.textContent = data.interpreter || "—";
+    updateScriptRunGuidance(data.interpreter || "bash");
+    scriptRunModal.showModal();
+    window.requestAnimationFrame(() => scriptRunModal.querySelector("[data-automation-script-run-arguments]")?.focus({ preventScroll: true }));
+  };
+  scriptRunModal?.querySelector("[data-automation-script-run-cancel]")?.addEventListener("click", () => scriptRunModal.close());
+
+  const sideBySideRevisionDiff = (previousContent, currentContent) => {
+    const previousLines = String(previousContent || "").replaceAll("\r\n", "\n").split("\n");
+    const currentLines = String(currentContent || "").replaceAll("\r\n", "\n").split("\n");
+    const operations = [];
+    if (previousLines.length * currentLines.length <= 250000) {
+      const matrix = Array.from({ length: previousLines.length + 1 }, () => new Uint32Array(currentLines.length + 1));
+      for (let left = previousLines.length - 1; left >= 0; left -= 1) {
+        for (let right = currentLines.length - 1; right >= 0; right -= 1) {
+          matrix[left][right] = previousLines[left] === currentLines[right]
+            ? matrix[left + 1][right + 1] + 1
+            : Math.max(matrix[left + 1][right], matrix[left][right + 1]);
+        }
+      }
+      let left = 0;
+      let right = 0;
+      while (left < previousLines.length || right < currentLines.length) {
+        if (left < previousLines.length && right < currentLines.length && previousLines[left] === currentLines[right]) {
+          operations.push({ type: "same", line: previousLines[left] });
+          left += 1;
+          right += 1;
+        } else if (right < currentLines.length && (left >= previousLines.length || matrix[left][right + 1] >= matrix[left + 1][right])) {
+          operations.push({ type: "added", line: currentLines[right] });
+          right += 1;
+        } else {
+          operations.push({ type: "removed", line: previousLines[left] });
+          left += 1;
+        }
+      }
+    } else {
+      const lineCount = Math.max(previousLines.length, currentLines.length);
+      for (let index = 0; index < lineCount; index += 1) {
+        const previousLine = previousLines[index];
+        const currentLine = currentLines[index];
+        if (previousLine === currentLine) operations.push({ type: "same", line: previousLine || "" });
+        else {
+          if (previousLine !== undefined) operations.push({ type: "removed", line: previousLine });
+          if (currentLine !== undefined) operations.push({ type: "added", line: currentLine });
+        }
+      }
+    }
+    return {
+      previous: operations.map((operation) => operation.type === "added" ? "  " : `${operation.type === "removed" ? "-" : " "} ${operation.line}`).join("\n"),
+      current: operations.map((operation) => operation.type === "removed" ? "  " : `${operation.type === "added" ? "+" : " "} ${operation.line}`).join("\n"),
+    };
+  };
+  const openScriptRevisionDiff = (data) => {
+    if (!(scriptDiffModal instanceof HTMLDialogElement)) return;
+    const revisions = Array.isArray(data?.revisions) ? data.revisions : [];
+    if (revisions.length < 2) return;
+    const current = revisions[revisions.length - 1];
+    const previous = revisions[revisions.length - 2];
+    const comparison = sideBySideRevisionDiff(previous.content, current.content);
+    const description = scriptDiffModal.querySelector("[data-automation-script-diff-description]");
+    const previousTitle = scriptDiffModal.querySelector("[data-automation-script-diff-previous-title]");
+    const currentTitle = scriptDiffModal.querySelector("[data-automation-script-diff-current-title]");
+    const previousMeta = scriptDiffModal.querySelector("[data-automation-script-diff-previous-meta]");
+    const currentMeta = scriptDiffModal.querySelector("[data-automation-script-diff-current-meta]");
+    const previousCode = scriptDiffModal.querySelector("[data-automation-script-diff-previous]");
+    const currentCode = scriptDiffModal.querySelector("[data-automation-script-diff-current]");
+    if (description instanceof HTMLElement) description.textContent = `${data.name}: immutable source changes from r${previous.revision} to r${current.revision}.`;
+    if (previousTitle instanceof HTMLElement) previousTitle.textContent = `Previous · r${previous.revision}`;
+    if (currentTitle instanceof HTMLElement) currentTitle.textContent = `Current · r${current.revision}`;
+    if (previousMeta instanceof HTMLElement) previousMeta.textContent = `${previous.interpreter} · ${previous.enabled ? "enabled" : "disabled"}`;
+    if (currentMeta instanceof HTMLElement) currentMeta.textContent = `${current.interpreter} · ${current.enabled ? "enabled" : "disabled"}`;
+    if (previousCode instanceof HTMLElement) {
+      previousCode.textContent = comparison.previous;
+      highlightConfigPreviewElement(previousCode);
+    }
+    if (currentCode instanceof HTMLElement) {
+      currentCode.textContent = comparison.current;
+      highlightConfigPreviewElement(currentCode);
+    }
+    scriptDiffModal.showModal();
+  };
+  scriptDiffModal?.querySelector("[data-automation-script-diff-close]")?.addEventListener("click", () => scriptDiffModal.close());
 
   const schedulesElement = document.getElementById("automation-schedules-table");
   if (schedulesElement instanceof HTMLElement && scheduleModal instanceof HTMLDialogElement && scheduleForm instanceof HTMLFormElement) {
@@ -14332,9 +14435,14 @@ function initializeAutomationTables() {
           action: (_event, row) => openScriptSource(row),
         },
         {
-          label: "Queue latest revision",
+          label: "Run latest revision",
           disabled: (component) => component.getData().is_new || !component.getData().latest_enabled,
-          action: (_event, row) => submitForm("automation-script-run", row.getData().id),
+          action: (_event, row) => openScriptRunModal(row.getData()),
+        },
+        {
+          label: "Compare latest revisions",
+          disabled: (component) => component.getData().is_new || !Array.isArray(component.getData().revisions) || component.getData().revisions.length < 2,
+          action: (_event, row) => openScriptRevisionDiff(row.getData()),
         },
         {
           label: "Enable or disable latest revision",
@@ -14385,7 +14493,20 @@ function initializeAutomationTables() {
             if (!data.is_new || data.is_activated || String(data.name || "").trim()) openScriptSource(cell.getRow());
           },
         },
-        { title: "Revision", field: "latest_revision", width: 85, formatter: (cell) => cell.getRow().getData().is_new ? "new" : `r${cell.getValue()}` },
+        {
+          title: "Revision",
+          field: "latest_revision",
+          width: 85,
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            if (data.is_new) return "new";
+            const revisionLabel = `r${cell.getValue()}`;
+            return Array.isArray(data.revisions) && data.revisions.length >= 2
+              ? `<button class="automation-revision-button" type="button" aria-label="Compare ${escapeHtml(data.name)} revisions" title="Compare latest revisions">${revisionLabel}</button>`
+              : revisionLabel;
+          },
+          cellClick: (_event, cell) => openScriptRevisionDiff(cell.getRow().getData()),
+        },
         { title: "State", field: "latest_enabled", width: 85, formatter: labFoundryBooleanFormatter, editor: "tickCross", editable: (cell) => !cell.getRow().getData().is_new, hozAlign: "center", headerSort: false, cellEdited: (cell) => submitForm("automation-script-toggle", cell.getRow().getData().id) },
         { title: "Schedules", field: "schedule_count", width: 95, formatter: (cell) => cell.getRow().getData().is_new ? "0" : cell.getValue() },
         { title: "Updated", field: "updated_at", minWidth: 165, formatter: (cell) => cell.getRow().getData().is_new ? "after creation" : cell.getValue() },

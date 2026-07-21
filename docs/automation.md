@@ -49,9 +49,15 @@ Managed-script rows edit name, description, interpreter, timeout, and state in
 the grid. Source is opened through the compact source action in a nearly
 full-window CodeMirror modal, which also imports `.sh`, `.bash`, `.py`, `.ps1`,
 or `.txt` files up to 1 MiB. An edit that changes revision-owned fields creates
-a new disabled immutable revision; it never rewrites historical source.
+a new disabled immutable revision; it never rewrites historical source. When a
+script has at least two revisions, selecting its revision cell opens a
+two-column Prism-highlighted comparison of the latest source and the revision
+immediately before it.
 
-Schedule parameters are entered as one logical command line. Bash and Python
+**Run latest revision** opens a confirmation modal instead of immediately
+creating a task. The modal names the exact revision and interpreter and accepts
+the same literal parameter syntax used by schedules. Schedule and manual-run
+parameters are entered as one logical command line. Bash and Python
 use backslash line continuation and POSIX-style literal argument parsing;
 PowerShell uses the backtick continuation marker and PowerShell-style quoting.
 LabFoundry passes the resulting argument vector directly to the selected script

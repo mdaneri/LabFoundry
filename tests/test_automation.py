@@ -104,6 +104,11 @@ def test_managed_script_revision_is_immutable_enabled_and_run_by_worker(client):
     assert 'automation-fill-grid' in page.text
     assert 'id="automation-schedule-edit-' not in page.text
     assert 'id="automation-script-modal"' in page.text
+    assert 'id="automation-script-run-modal"' in page.text
+    assert 'data-automation-script-run-arguments' in page.text
+    assert 'id="automation-script-diff-modal"' in page.text
+    assert 'data-automation-script-diff-previous' in page.text
+    assert 'data-automation-script-diff-current' in page.text
     assert "data-automation-schedule-kind" in page.text
     assert 'data-automation-schedule-timing="cron"' in page.text
     assert 'data-automation-schedule-timing="once"' in page.text
@@ -173,11 +178,91 @@ def test_managed_script_revision_is_immutable_enabled_and_run_by_worker(client):
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "managed-script")).scalar_one()
         payload = json.loads(job.result)
+        task_config = json.loads(job.task_config_json)
         assert job.status == "succeeded"
+        assert task_config["arguments"] == []
         assert payload["dry_run"] is True
         assert payload["content_sha256"] == revision.content_sha256
         assert payload["command"][1:3] == ["automation", "run"]
         assert not (Path("data") / "automation" / "scripts" / f"{job.id}.ps1").exists()
+
+
+def test_manual_script_run_collects_parameters_and_exposes_revision_diff(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import AutomationScript, AutomationScriptRevision, Job
+
+    login(client)
+    page = client.get("/automation")
+    csrf = csrf_from_page(page.text)
+    assert client.post(
+        "/automation/scripts",
+        data={
+            "csrf": csrf,
+            "name": "revision-diff-script",
+            "description": "Compare immutable source",
+            "interpreter": "powershell",
+            "timeout_seconds": "60",
+            "content": "Write-Output 'first'",
+        },
+        follow_redirects=False,
+    ).status_code == 303
+    with SessionLocal() as db:
+        script = db.execute(select(AutomationScript).where(AutomationScript.name == "revision-diff-script")).scalar_one()
+        script_id = script.id
+
+    assert client.post(
+        f"/automation/scripts/{script_id}/revisions",
+        data={
+            "csrf": csrf,
+            "interpreter": "powershell",
+            "timeout_seconds": "90",
+            "content": "Write-Output 'second'\nWrite-Output $args.Count",
+        },
+        follow_redirects=False,
+    ).status_code == 303
+    with SessionLocal() as db:
+        revisions = db.execute(
+            select(AutomationScriptRevision)
+            .where(AutomationScriptRevision.script_id == script_id)
+            .order_by(AutomationScriptRevision.revision)
+        ).scalars().all()
+        assert [revision.revision for revision in revisions] == [1, 2]
+        latest_revision_id = revisions[-1].id
+
+    assert client.post(
+        f"/automation/scripts/revisions/{latest_revision_id}/toggle",
+        data={"csrf": csrf},
+        follow_redirects=False,
+    ).status_code == 303
+
+    page = client.get("/automation")
+    rows_payload = page.text.split('<script type="application/json" id="automation-scripts-data">', 1)[1].split("</script>", 1)[0]
+    rows = json.loads(rows_payload)
+    row = next(item for item in rows if item["id"] == script_id)
+    assert [revision["revision"] for revision in row["revisions"]] == [1, 2]
+    assert row["revisions"][0]["content"] == "Write-Output 'first'"
+    assert row["revisions"][1]["content"].endswith("Write-Output $args.Count")
+
+    app_js = Path("labfoundry/app/static/app.js").read_text()
+    assert 'label: "Run latest revision"' in app_js
+    assert 'label: "Compare latest revisions"' in app_js
+    assert 'class="automation-revision-button"' in app_js
+    assert 'class="language-diff"' in page.text
+    assert "sideBySideRevisionDiff" in app_js
+    assert "highlightConfigPreviewElement(previousCode);" in app_js
+    assert "highlightConfigPreviewElement(currentCode);" in app_js
+    assert "Queue latest revision" not in app_js
+
+    parameters = "-Server `\n'vcf lab.example' `\n-Count 2"
+    response = client.post(
+        f"/automation/scripts/revisions/{latest_revision_id}/run",
+        data={"csrf": csrf, "script_arguments": parameters},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        job = db.execute(select(Job).where(Job.type == "managed-script")).scalar_one()
+        assert json.loads(job.task_config_json)["arguments"] == ["-Server", "vcf lab.example", "-Count", "2"]
 
 
 def test_due_schedule_queues_one_job_and_skips_overlap(client):

@@ -7773,6 +7773,19 @@ def automation_context(db: Session) -> dict[str, Any]:
                 "interpreter": latest.interpreter if latest else "",
                 "timeout_seconds": latest.timeout_seconds if latest else 3600,
                 "source_content": latest.content if latest else "",
+                "revisions": [
+                    {
+                        "id": revision.id,
+                        "revision": revision.revision,
+                        "interpreter": revision.interpreter,
+                        "timeout_seconds": revision.timeout_seconds,
+                        "enabled": revision.enabled,
+                        "content": revision.content,
+                        "created_by": revision.created_by,
+                        "created_at": revision.created_at.isoformat(),
+                    }
+                    for revision in script.revisions
+                ],
                 "latest_enabled": latest.enabled if latest else False,
                 "enabled_revisions": sum(1 for revision in script.revisions if revision.enabled),
                 "updated_at": script.updated_at.isoformat(),
@@ -9974,6 +9987,7 @@ def run_automation_script_revision(
     revision_id: int,
     request: Request,
     csrf: str = Form(...),
+    script_arguments: str = Form(""),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
@@ -9982,6 +9996,10 @@ def run_automation_script_revision(
     revision = db.get(AutomationScriptRevision, revision_id)
     if revision is None or not revision.enabled:
         raise HTTPException(status_code=400, detail="Enable the managed script revision before running it.")
+    try:
+        arguments = parse_script_arguments(script_arguments, revision.interpreter)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     job = Job(
         id=f"job_{uuid4().hex[:12]}",
         type="managed-script",
@@ -9989,12 +10007,12 @@ def run_automation_script_revision(
         created_by=identity.username,
         progress_percent=0,
         trigger="manual",
-        task_config_json=json.dumps({"revision_id": revision.id}, sort_keys=True),
+        task_config_json=json.dumps({"arguments": arguments, "revision_id": revision.id}, sort_keys=True),
         result=json.dumps({"status": "pending", "revision_id": revision.id}, indent=2),
     )
     db.add(job)
     db.commit()
-    record_audit(db, actor=identity.username, action="queue_managed_script", resource_type="job", resource_id=job.id, detail=f"revision_id={revision.id}; sha256={revision.content_sha256}")
+    record_audit(db, actor=identity.username, action="queue_managed_script", resource_type="job", resource_id=job.id, detail=f"revision_id={revision.id}; sha256={revision.content_sha256}; arguments_count={len(arguments)}")
     return RedirectResponse("/tasks", status_code=303)
 
 

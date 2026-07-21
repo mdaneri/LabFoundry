@@ -4533,6 +4533,92 @@ textarea {
   color: #166534;
 }
 
+.automation-revision-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.automation-revision-button:hover,
+.automation-revision-button:focus-visible {
+  color: var(--accent-dark);
+}
+
+.automation-script-run-modal {
+  width: min(760px, calc(100vw - 48px));
+  max-width: none;
+}
+
+.automation-script-run-facts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.automation-script-run-modal textarea {
+  min-height: 140px;
+  font-family: var(--font-sans);
+}
+
+.automation-script-diff-modal {
+  width: min(1480px, calc(100vw - 48px));
+  max-width: none;
+}
+
+.automation-script-diff-modal .confirm-modal-panel {
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: min(820px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+}
+
+.automation-script-diff-modal .confirm-modal-body {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.automation-revision-diff-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-height: 0;
+  height: 100%;
+}
+
+.automation-revision-diff-grid > section {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 7px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.automation-revision-diff-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.automation-revision-diff-heading h3 {
+  margin: 0;
+}
+
+.automation-revision-diff-preview {
+  min-height: 0;
+  overflow: auto;
+}
+
+.automation-revision-diff-preview code {
+  display: block;
+  min-width: max-content;
+  white-space: pre;
+}
+
 @media (max-width: 680px) {
   .automation-option-grid {
     grid-template-columns: 1fr;
@@ -4555,6 +4641,16 @@ textarea {
     height: calc(100vh - 20px);
     max-height: calc(100vh - 20px);
     padding: 14px;
+  }
+
+  .automation-script-run-facts,
+  .automation-revision-diff-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .automation-script-diff-modal .confirm-modal-panel {
+    height: calc(100vh - 20px);
+    max-height: calc(100vh - 20px);
   }
 }
 

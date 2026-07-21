@@ -582,6 +582,7 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert 'class="language-json" data-task-detail-result' in page.text
     assert "data-task-detail-errors" in page.text
     assert "data-task-detail-errors-content" in page.text
+    assert 'class="alert error hidden" data-task-detail-error' not in page.text
     assert "data-task-detail-console" in page.text
     assert "data-task-detail-console-content" in page.text
     assert "data-task-detail-console-error-content" in page.text
@@ -623,6 +624,7 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert "highlightConfigPreviewElement(result);" in app_js
     assert "highlightConfigPreviewElement(content);" in app_js
     assert 'errorContent.textContent = errorMessages.join("\\n\\n");' in app_js
+    assert 'modal.querySelector("[data-task-detail-error]")' not in app_js
 
     status_response = client.get("/tasks/status?job_id=job_taskgrid001")
     assert status_response.status_code == 200
@@ -751,7 +753,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v126" in service_worker.text
+    assert "labfoundry-pwa-v128" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -763,8 +765,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=tasks-console-compact-20260721-1" in service_worker.text
-    assert "/static/app.js?v=tasks-state-console-20260721-2" in service_worker.text
+    assert "/static/app.css?v=automation-run-diff-20260721-4" in service_worker.text
+    assert "/static/app.js?v=automation-run-diff-20260721-4" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -773,7 +775,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=tasks-console-compact-20260721-1" in offline.text
+    assert "/static/app.css?v=automation-run-diff-20260721-4" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -789,8 +791,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=tasks-console-compact-20260721-1" in page.text
-    assert "/static/app.js?v=tasks-state-console-20260721-2" in page.text
+    assert "/static/app.css?v=automation-run-diff-20260721-4" in page.text
+    assert "/static/app.js?v=automation-run-diff-20260721-4" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -9878,7 +9880,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "tasks-console-compact-20260721-1" in page.text
+    assert "automation-run-diff-20260721-4" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
