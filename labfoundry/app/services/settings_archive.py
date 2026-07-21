@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from labfoundry import __version__
 from labfoundry.app.models import (
     ApplianceSettings,
+    AutomationScript,
+    AutomationScriptRevision,
     CaCertificate,
     CaProfile,
     CaSettings,
@@ -26,12 +29,14 @@ from labfoundry.app.models import (
     KmsClient,
     KmsKey,
     KmsSettings,
+    Job,
     LdapGroup,
     LdapGroupMembership,
     LdapOrganization,
     LdapRecoveryArchive,
     LdapSettings,
     LdapUser,
+    ManagedPackage,
     NatRule,
     NtpSettings,
     PhysicalInterface,
@@ -39,6 +44,8 @@ from labfoundry.app.models import (
     RoutingRule,
     ServiceState,
     Setting,
+    Schedule,
+    UpdateSource,
     User,
     VcfBackupSettings,
     VcfDepotDownloadProfile,
@@ -48,7 +55,7 @@ from labfoundry.app.models import (
     VlanInterface,
     WanPolicy,
 )
-from labfoundry.app.seed import SEED_EXAMPLES_SETTING_KEY, seed_initial_data
+from labfoundry.app.seed import SEED_EXAMPLES_SETTING_KEY, seed_initial_data, seed_update_sources
 from labfoundry.app.services.dnsmasq import DNS_CONDITIONAL_FORWARDERS_SETTING_KEY
 from labfoundry.app.services.esxi_pxe import host_variables_json, normalize_host_mac, normalize_host_variables
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY
@@ -93,6 +100,11 @@ SCALAR_TABLES = {
 }
 
 RESTORE_DELETE_MODELS = [
+    Schedule,
+    AutomationScriptRevision,
+    AutomationScript,
+    ManagedPackage,
+    UpdateSource,
     LdapRecoveryArchive,
     EsxiPxeHost,
     EsxiKickstart,
@@ -184,6 +196,10 @@ def export_settings_archive(db: Session, *, actor: str) -> dict[str, Any]:
     data["vcf_backup_settings"] = _vcf_backup_settings_to_archive(db)
     data["vcf_offline_depot_settings"] = _vcf_offline_depot_settings_to_archive(db)
     data["esxi_pxe_hosts"] = _esxi_pxe_hosts_to_archive(db)
+    data["update_sources"] = _update_sources_to_archive(db)
+    data["managed_packages"] = _managed_packages_to_archive(db)
+    data["automation_scripts"] = _automation_scripts_to_archive(db)
+    data["schedules"] = _schedules_to_archive(db)
     data["settings"] = _settings_rows(db)
     return payload
 
@@ -307,6 +323,67 @@ def _esxi_pxe_hosts_to_archive(db: Session) -> list[dict[str, Any]]:
     return rows
 
 
+def _update_sources_to_archive(db: Session) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for source in db.execute(select(UpdateSource).order_by(UpdateSource.kind, UpdateSource.priority, UpdateSource.name)).scalars().all():
+        payload = _row_to_dict(source, exclude={"credential_encrypted", "validation_status", "validation_message"})
+        payload["credential_status"] = "not_exported"
+        rows.append(payload)
+    return rows
+
+
+def _managed_packages_to_archive(db: Session) -> list[dict[str, Any]]:
+    sources = {source.id: source for source in db.execute(select(UpdateSource)).scalars().all()}
+    rows: list[dict[str, Any]] = []
+    for package in db.execute(select(ManagedPackage).order_by(ManagedPackage.ecosystem, ManagedPackage.name)).scalars().all():
+        payload = _row_to_dict(package, exclude={"source_id"})
+        source = sources.get(package.source_id)
+        payload["source_kind"] = source.kind if source else ""
+        payload["source_name"] = source.name if source else ""
+        rows.append(payload)
+    return rows
+
+
+def _automation_scripts_to_archive(db: Session) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for script in db.execute(select(AutomationScript).order_by(AutomationScript.name)).scalars().all():
+        payload = _row_to_dict(script)
+        payload["revisions"] = [
+            _row_to_dict(revision, exclude={"script_id", "enabled"}) | {"enabled": False}
+            for revision in db.execute(
+                select(AutomationScriptRevision)
+                .where(AutomationScriptRevision.script_id == script.id)
+                .order_by(AutomationScriptRevision.revision)
+            ).scalars().all()
+        ]
+        rows.append(payload)
+    return rows
+
+
+def _schedules_to_archive(db: Session) -> list[dict[str, Any]]:
+    profiles = {profile.id: profile.name for profile in db.execute(select(VcfDepotDownloadProfile)).scalars().all()}
+    revisions = {revision.id: revision for revision in db.execute(select(AutomationScriptRevision)).scalars().all()}
+    scripts = {script.id: script.name for script in db.execute(select(AutomationScript)).scalars().all()}
+    rows: list[dict[str, Any]] = []
+    for schedule in db.execute(select(Schedule).order_by(Schedule.name)).scalars().all():
+        payload = _row_to_dict(schedule, exclude={"enabled", "next_run_at", "last_run_at", "last_job_id", "run_once_at"})
+        payload["enabled"] = False
+        payload["run_once_at"] = schedule.run_once_at.isoformat() if schedule.run_once_at else None
+        try:
+            config = json.loads(schedule.task_config_json or "{}")
+        except json.JSONDecodeError:
+            config = {}
+        if schedule.task_type == "vcf_depot_download":
+            payload["vcf_profile_name"] = profiles.get(config.get("profile_id"), "")
+        elif schedule.task_type == "managed_script":
+            revision = revisions.get(config.get("revision_id"))
+            if revision is not None:
+                payload["script_name"] = scripts.get(revision.script_id, "")
+                payload["script_revision"] = revision.revision
+        rows.append(payload)
+    return rows
+
+
 def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, int]:
     _validate_archive(archive)
     data = archive["data"]
@@ -363,6 +440,10 @@ def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, 
         counts[key] = _insert_rows(db, SCALAR_TABLES[key], data.get(key, []))
     db.flush()
     counts["esxi_pxe_hosts"] = _restore_esxi_pxe_hosts(db, data.get("esxi_pxe_hosts", []))
+    counts["update_sources"] = _restore_update_sources(db, data.get("update_sources", []))
+    counts["managed_packages"] = _restore_managed_packages(db, data.get("managed_packages", []))
+    counts["automation_scripts"] = _restore_automation_scripts(db, data.get("automation_scripts", []))
+    counts["schedules"] = _restore_schedules(db, data.get("schedules", []))
     counts["settings"] = _insert_rows(db, Setting, [row for row in data.get("settings", []) if row.get("key") in SAFE_SETTING_KEYS])
     _disable_startup_example_seed(db)
     db.commit()
@@ -391,6 +472,10 @@ def desired_state_counts(db: Session) -> dict[str, int]:
     counts["ldap_group_memberships"] = len(db.execute(select(LdapGroupMembership)).scalars().all())
     counts["vcf_backup_settings"] = len(db.execute(select(VcfBackupSettings)).scalars().all())
     counts["esxi_pxe_hosts"] = len(db.execute(select(EsxiPxeHost)).scalars().all())
+    counts["update_sources"] = len(db.execute(select(UpdateSource)).scalars().all())
+    counts["managed_packages"] = len(db.execute(select(ManagedPackage)).scalars().all())
+    counts["automation_scripts"] = len(db.execute(select(AutomationScript)).scalars().all())
+    counts["schedules"] = len(db.execute(select(Schedule)).scalars().all())
     counts["settings"] = len(db.execute(select(Setting).where(Setting.key.in_(SAFE_SETTING_KEYS))).scalars().all())
     return counts
 
@@ -412,6 +497,10 @@ def _clear_desired_state(db: Session) -> None:
     recovery_archives = db.execute(select(LdapRecoveryArchive)).scalars().all()
     for recovery_archive in recovery_archives:
         clear_ldap_recovery_payload(recovery_archive)
+    for job in db.execute(select(Job).where(Job.schedule_id.is_not(None))).scalars().all():
+        job.schedule_id = None
+        db.add(job)
+    db.flush()
     for model in RESTORE_DELETE_MODELS:
         db.execute(delete(model))
     db.flush()
@@ -449,6 +538,98 @@ def _validate_archive(archive: dict[str, Any]) -> None:
 def _insert_rows(db: Session, model: type, rows: list[dict[str, Any]]) -> int:
     for row in rows:
         db.add(model(**_model_kwargs(model, row)))
+    db.flush()
+    return len(rows)
+
+
+def _restore_update_sources(db: Session, rows: list[dict[str, Any]]) -> int:
+    if not rows:
+        seed_update_sources(db)
+        db.flush()
+        return len(db.execute(select(UpdateSource)).scalars().all())
+    for row in rows:
+        payload = _model_kwargs(
+            UpdateSource,
+            row,
+            exclude={"credential_encrypted", "validation_status", "validation_message"},
+        )
+        payload.update(
+            {
+                "credential_encrypted": "",
+                "validation_status": "not_checked",
+                "validation_message": "Credentials are not included in settings archives; synchronize this source after restore.",
+            }
+        )
+        db.add(UpdateSource(**payload))
+    db.flush()
+    return len(rows)
+
+
+def _restore_managed_packages(db: Session, rows: list[dict[str, Any]]) -> int:
+    if not rows:
+        return len(db.execute(select(ManagedPackage)).scalars().all())
+    sources = {
+        (source.kind, source.name): source.id
+        for source in db.execute(select(UpdateSource)).scalars().all()
+    }
+    for row in rows:
+        payload = _model_kwargs(ManagedPackage, row, exclude={"source_id"})
+        payload["source_id"] = sources.get((str(row.get("source_kind") or ""), str(row.get("source_name") or "")))
+        db.add(ManagedPackage(**payload))
+    db.flush()
+    return len(rows)
+
+
+def _restore_automation_scripts(db: Session, rows: list[dict[str, Any]]) -> int:
+    for row in rows:
+        script = AutomationScript(**_model_kwargs(AutomationScript, row))
+        db.add(script)
+        db.flush()
+        for revision_row in row.get("revisions", []):
+            if not isinstance(revision_row, dict):
+                continue
+            payload = _model_kwargs(AutomationScriptRevision, revision_row, exclude={"script_id", "enabled"})
+            payload.update({"script_id": script.id, "enabled": False})
+            db.add(AutomationScriptRevision(**payload))
+    db.flush()
+    return len(rows)
+
+
+def _restore_schedules(db: Session, rows: list[dict[str, Any]]) -> int:
+    profiles = {profile.name: profile.id for profile in db.execute(select(VcfDepotDownloadProfile)).scalars().all()}
+    scripts = {script.name: script.id for script in db.execute(select(AutomationScript)).scalars().all()}
+    revisions = {
+        (revision.script_id, revision.revision): revision.id
+        for revision in db.execute(select(AutomationScriptRevision)).scalars().all()
+    }
+    for row in rows:
+        payload = _model_kwargs(
+            Schedule,
+            row,
+            exclude={"enabled", "next_run_at", "last_run_at", "last_job_id", "run_once_at"},
+        )
+        raw_once = row.get("run_once_at")
+        payload.update(
+            {
+                "enabled": False,
+                "next_run_at": None,
+                "last_run_at": None,
+                "last_job_id": "",
+                "run_once_at": datetime.fromisoformat(raw_once) if isinstance(raw_once, str) and raw_once else None,
+            }
+        )
+        try:
+            config = json.loads(str(payload.get("task_config_json") or "{}"))
+        except json.JSONDecodeError:
+            config = {}
+        task_type = str(payload.get("task_type") or "")
+        if task_type == "vcf_depot_download":
+            config["profile_id"] = profiles.get(str(row.get("vcf_profile_name") or ""), 0)
+        elif task_type == "managed_script":
+            script_id = scripts.get(str(row.get("script_name") or ""), 0)
+            config["revision_id"] = revisions.get((script_id, int(row.get("script_revision") or 0)), 0)
+        payload["task_config_json"] = json.dumps(config, sort_keys=True)
+        db.add(Schedule(**payload))
     db.flush()
     return len(rows)
 

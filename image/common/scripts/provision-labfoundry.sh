@@ -120,6 +120,13 @@ fi
 if ! id labfoundry >/dev/null 2>&1; then
   useradd --system --gid labfoundry --home-dir "$LABFOUNDRY_STATE" --shell /sbin/nologin labfoundry
 fi
+if ! getent group labfoundry-automation >/dev/null 2>&1; then
+  groupadd --system labfoundry-automation
+fi
+if ! id labfoundry-automation >/dev/null 2>&1; then
+  useradd --system --gid labfoundry-automation --home-dir "$LABFOUNDRY_STATE/automation" --shell /sbin/nologin labfoundry-automation
+fi
+usermod -a -G labfoundry-automation labfoundry
 
 install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE"
@@ -137,6 +144,9 @@ install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/dnsmasq"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/kms"
 install -d -o labfoundry -g labfoundry -m 0700 "$LABFOUNDRY_STATE/ldap/recovery"
 install -d -o root -g root -m 0755 "$LABFOUNDRY_STATE/users"
+install -d -o labfoundry -g labfoundry-automation -m 0750 "$LABFOUNDRY_STATE/automation"
+install -d -o labfoundry -g labfoundry-automation -m 0750 "$LABFOUNDRY_STATE/automation/scripts"
+install -d -o labfoundry-automation -g labfoundry-automation -m 0750 "$LABFOUNDRY_STATE/automation/runs"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG/kms"
 install -d -o root -g root -m 0755 /etc/labfoundry
@@ -246,6 +256,7 @@ chown root:labfoundry /etc/labfoundry/labfoundry.env
 
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry.service" /etc/systemd/system/labfoundry.service
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/common/systemd/labfoundry-console.service" /etc/systemd/system/labfoundry-console.service
+install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/common/systemd/labfoundry-worker.service" /etc/systemd/system/labfoundry-worker.service
 install -d -o root -g root -m 0755 /etc/systemd/system.conf.d
 install -o root -g root -m 0644 "$LABFOUNDRY_HOME/image/common/systemd/labfoundry-console-manager.conf" /etc/systemd/system.conf.d/labfoundry-console.conf
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-helper"
@@ -257,7 +268,7 @@ if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry-vmware-ovf-customize.service" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
 install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper
-sed -i 's/\r$//' /etc/systemd/system/labfoundry.service /etc/systemd/system/labfoundry-console.service /etc/systemd/system.conf.d/labfoundry-console.conf "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper
+sed -i 's/\r$//' /etc/systemd/system/labfoundry.service /etc/systemd/system/labfoundry-worker.service /etc/systemd/system/labfoundry-console.service /etc/systemd/system.conf.d/labfoundry-console.conf "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https" /etc/sudoers.d/labfoundry-helper
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   sed -i 's/\r$//' "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
 fi
@@ -403,6 +414,7 @@ fi
 systemctl enable labfoundry-data-disks.service
 systemctl enable labfoundry-bootstrap-https.service
 systemctl enable labfoundry
+systemctl enable labfoundry-worker.service
 systemctl mask getty@tty1.service
 systemctl mask --force ctrl-alt-del.target
 systemctl enable labfoundry-console.service

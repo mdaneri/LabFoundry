@@ -156,6 +156,9 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert 'install -o root -g root -m 0440 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/sudoers.d/labfoundry-helper" /etc/sudoers.d/labfoundry-helper' in script
     assert 'sed -i \'s/\\r$//\'' in script
     assert '"$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding"' in script
+    assert "/etc/systemd/system/labfoundry-worker.service" in script
+    assert 'useradd --system --gid labfoundry-automation' in script
+    assert 'systemctl enable labfoundry-worker.service' in script
     assert "labfoundry ALL=(root) NOPASSWD: /opt/labfoundry/bin/labfoundry-helper *" in sudoers
     assert "labfoundry-root-login.conf" in script
     assert "PermitRootLogin no" in script
@@ -601,6 +604,11 @@ def test_vmware_deploy_wheel_supports_password_backed_noninteractive_deploy():
     assert "$env:PYTHONPATH" in script
     assert "function Invoke-PasswordBackedDeploy" in script
     assert "import paramiko" in script
+    assert 'sys.stdout.reconfigure(errors="replace")' in script
+    assert "--local-worker-service" in script
+    assert "systemctl enable labfoundry-worker.service" in script
+    assert "systemctl restart labfoundry-worker.service" in script
+    assert "systemctl is-active labfoundry-worker.service" in script
     assert "LABFOUNDRY_DEPLOY_SSH_PASSWORD" in script
     assert "client.set_missing_host_key_policy(paramiko.AutoAddPolicy())" in script
     assert "sudo -S -p '' sh" in script

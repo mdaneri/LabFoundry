@@ -2,7 +2,7 @@
 {% block page_title %}Tasks{% endblock %}
 
 {% block content %}
-<section class="panel tasks-panel" data-tasks-page data-selected-task-id="{{ selected_task_id }}" data-csrf="{{ csrf_token }}" data-tasks='{{ task_rows | tojson }}'>
+<section class="panel tasks-panel" data-tasks-page data-selected-task-id="{{ selected_task_id }}" data-csrf="{{ csrf_token }}" data-tasks='{{ task_rows | tojson }}' data-task-component-options='{{ task_component_filter_options | tojson }}'>
   <div class="panel-head">
     <div>
       <h2>Tasks</h2>
@@ -60,6 +60,13 @@
         <summary>Redacted error messages</summary>
         <div class="terminal-note task-result-preview">
           <code class="language-labfoundry-log" data-task-detail-errors-content></code>
+        </div>
+      </details>
+      <details class="task-result-details hidden" data-task-detail-console open>
+        <summary>Console output</summary>
+        <div class="terminal-note task-result-preview">
+          <code class="language-labfoundry-log" data-task-detail-console-content></code>
+          <code class="task-console-stderr hidden" data-task-detail-console-error-content></code>
         </div>
       </details>
       <details class="task-result-details">

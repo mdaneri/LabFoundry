@@ -9798,8 +9798,10 @@ function initializeVcfDepotTaskLogModal() {
 
 let labFoundryTasksTable = null;
 let labFoundryTasks = [];
+let labFoundryTaskComponentOptions = [];
 let labFoundrySelectedTaskId = "";
 let labFoundryTasksRefreshTimer = 0;
+let labFoundryTasksReopenSelected = false;
 
 function taskStatusActive(status) {
   return ["pending", "running"].includes(String(status || ""));
@@ -9831,6 +9833,9 @@ function renderTaskDetail(task) {
   const error = modal.querySelector("[data-task-detail-error]");
   const errorDetails = modal.querySelector("[data-task-detail-errors]");
   const errorContent = modal.querySelector("[data-task-detail-errors-content]");
+  const consoleDetails = modal.querySelector("[data-task-detail-console]");
+  const consoleContent = modal.querySelector("[data-task-detail-console-content]");
+  const consoleErrorContent = modal.querySelector("[data-task-detail-console-error-content]");
   const result = modal.querySelector("[data-task-detail-result]");
   const cancelButton = modal.querySelector("[data-task-detail-cancel]");
   const logButton = modal.querySelector("[data-task-detail-log]");
@@ -9876,6 +9881,18 @@ function renderTaskDetail(task) {
     errorContent.textContent = errorMessages.join("\n\n");
     highlightConfigPreviewElement(errorContent);
   }
+  if (consoleDetails instanceof HTMLDetailsElement && consoleContent instanceof HTMLElement && consoleErrorContent instanceof HTMLElement) {
+    const consoleStdout = String(task.console_stdout || "").trim();
+    const consoleStderr = String(task.console_stderr || "").trim();
+    const hasConsoleOutput = Boolean(consoleStdout || consoleStderr);
+    consoleDetails.classList.toggle("hidden", !hasConsoleOutput);
+    consoleDetails.open = hasConsoleOutput;
+    consoleContent.textContent = consoleStdout;
+    consoleContent.classList.toggle("hidden", !consoleStdout);
+    highlightConfigPreviewElement(consoleContent);
+    consoleErrorContent.textContent = consoleStderr ? `stderr:\n${consoleStderr}` : "";
+    consoleErrorContent.classList.toggle("hidden", !consoleStderr);
+  }
   if (result instanceof HTMLElement) {
     result.textContent = task.result_json || "{}";
     highlightConfigPreviewElement(result);
@@ -9906,26 +9923,21 @@ function openTaskDetail(taskOrId) {
   }
 }
 
-async function refreshTasksPage({ reopen = false } = {}) {
+function applyTasksStatusPayload(payload, { reopen = false } = {}) {
   const page = document.querySelector("[data-tasks-page]");
   if (!(page instanceof HTMLElement)) {
-    return;
+    return [];
   }
   const queryId = labFoundrySelectedTaskId || page.dataset.selectedTaskId || "";
-  const response = await fetch(`/tasks/status?job_id=${encodeURIComponent(queryId)}`, { credentials: "same-origin" });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.detail || "Unable to refresh tasks.");
-  }
   labFoundryTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
   const count = document.querySelector("[data-tasks-count]");
   if (count instanceof HTMLElement) {
     const active = Number(payload.active_count || 0);
-    count.textContent = active ? `${active} active · ${labFoundryTasks.length} total` : `${labFoundryTasks.length} tasks`;
+    const total = Number(payload.total_count ?? labFoundryTasks.length);
+    const filtered = Number(payload.filtered_count ?? labFoundryTasks.length);
+    const taskCount = filtered === total ? `${total} tasks` : `${filtered} of ${total} tasks`;
+    count.textContent = active ? `${active} active · ${taskCount}` : taskCount;
     count.className = `status-pill ${active ? "warn" : "muted"}`;
-  }
-  if (labFoundryTasksTable) {
-    labFoundryTasksTable.replaceData(labFoundryTasks);
   }
   const selected = payload.selected_task || taskById(queryId);
   if (selected && (reopen || document.getElementById("task-detail-modal")?.open)) {
@@ -9938,6 +9950,40 @@ async function refreshTasksPage({ reopen = false } = {}) {
   if (labFoundryTasks.some((task) => taskStatusActive(task.status))) {
     labFoundryTasksRefreshTimer = window.setTimeout(() => refreshTasksPage().catch(() => {}), 2000);
   }
+  return labFoundryTasks;
+}
+
+async function refreshTasksPage({ reopen = false } = {}) {
+  const page = document.querySelector("[data-tasks-page]");
+  if (!(page instanceof HTMLElement)) {
+    return;
+  }
+  if (labFoundryTasksTable) {
+    labFoundryTasksReopenSelected = reopen;
+    await labFoundryTasksTable.replaceData();
+    return;
+  }
+  const queryId = labFoundrySelectedTaskId || page.dataset.selectedTaskId || "";
+  const response = await fetch(`/tasks/status?job_id=${encodeURIComponent(queryId)}`, { credentials: "same-origin" });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.detail || "Unable to refresh tasks.");
+  }
+  applyTasksStatusPayload(payload, { reopen });
+}
+
+async function requestTasksTableData(_url, _config, params = {}) {
+  const query = new URLSearchParams();
+  query.set("job_id", labFoundrySelectedTaskId || document.querySelector("[data-tasks-page]")?.dataset.selectedTaskId || "");
+  query.set("page", String(params.page || 1));
+  query.set("size", String(params.size || 25));
+  query.set("filters", JSON.stringify(params.filters || params.filter || []));
+  const response = await fetch(`/tasks/status?${query.toString()}`, { credentials: "same-origin" });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.detail || "Unable to filter tasks.");
+  }
+  return payload;
 }
 
 async function openTaskLog(taskId) {
@@ -10021,18 +10067,32 @@ function initializeTasksPage() {
   } catch (_error) {
     labFoundryTasks = [];
   }
+  try {
+    labFoundryTaskComponentOptions = JSON.parse(page.dataset.taskComponentOptions || "[]");
+  } catch (_error) {
+    labFoundryTaskComponentOptions = [];
+  }
   labFoundrySelectedTaskId = page.dataset.selectedTaskId || new URLSearchParams(window.location.search).get("job_id") || "";
   const tableElement = document.getElementById("tasks-table");
   const fallback = document.getElementById(tableElement?.dataset.fallbackId || "");
   if (tableElement instanceof HTMLElement && typeof window.Tabulator === "function") {
     labFoundryTasksTable = new window.Tabulator(tableElement, {
-      data: labFoundryTasks,
+      ajaxURL: "/tasks/status",
+      ajaxParams: () => ({ job_id: labFoundrySelectedTaskId || page.dataset.selectedTaskId || "" }),
+      ajaxRequestFunc: requestTasksTableData,
+      ajaxResponse: (_url, _params, response) => {
+        applyTasksStatusPayload({ ...response, tasks: response.data || response.tasks || [] }, { reopen: labFoundryTasksReopenSelected });
+        labFoundryTasksReopenSelected = false;
+        return response;
+      },
       layout: "fitColumns",
       height: "100%",
       pagination: true,
-      paginationMode: "local",
+      paginationMode: "remote",
       paginationSize: 25,
       paginationCounter: "rows",
+      filterMode: "remote",
+      headerFilterLiveFilterDelay: 500,
       placeholder: "No tasks have been recorded yet.",
       selectableRows: 1,
       rowContextMenu: [
@@ -10058,21 +10118,48 @@ function initializeTasksPage() {
         },
       ],
       columns: [
-        { title: "Status", field: "status", width: 130, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
+        {
+          title: "Status",
+          field: "status",
+          width: 130,
+          formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()),
+          headerFilter: "list",
+          headerFilterParams: { values: { "": "All", succeeded: "Succeeded", failed: "Failed", running: "Running", pending: "Pending", cancelled: "Cancelled" } },
+          headerFilterFunc: "=",
+        },
         {
           title: "Task / component",
           field: "id",
-          minWidth: 290,
-          widthGrow: 2,
+          minWidth: 260,
+          widthGrow: 1.5,
+          headerFilter: "list",
+          headerFilterParams: {
+            values: labFoundryTaskComponentOptions,
+            autocomplete: true,
+            freetext: true,
+            allowEmpty: true,
+            clearable: true,
+            listOnEmpty: true,
+          },
+          headerFilterFunc: "like",
+          headerFilterPlaceholder: "Choose or type custom",
           formatter: (cell) => {
             const data = cell.getRow().getData();
             const label = data.is_step ? data.label : data.type_label;
             return `<span class="service-name-cell"><strong>${escapeHtml(label || "Task")}</strong><small>${escapeHtml(data.id || "")}</small></span>`;
           },
         },
-        { title: "State", field: "state", minWidth: 160, formatter: (cell) => escapeHtml(cell.getValue() || "") },
+        {
+          title: "State",
+          field: "state",
+          minWidth: 160,
+          formatter: (cell) => escapeHtml(cell.getValue() || ""),
+          headerFilter: "list",
+          headerFilterParams: { values: { "": "All", pending: "Pending", running: "Running", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled" } },
+          headerFilterFunc: "=",
+        },
         { title: "Progress", field: "progress_percent", width: 105, formatter: (cell) => `${Number(cell.getValue() || 0)}%` },
-        { title: "Created", field: "created_at", minWidth: 190, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Created", field: "created_at", minWidth: 190, formatter: (cell) => escapeHtml(cell.getValue() || "—"), headerFilter: "input", headerFilterPlaceholder: "Filter date" },
         { title: "Duration", field: "duration", width: 105, formatter: (cell) => applianceApplyDuration(cell.getRow().getData()) },
       ],
       dataTree: true,
@@ -11517,6 +11604,11 @@ function initializeTabs() {
       });
       redrawDnsRecordTables(panel);
       redrawLdapDirectoryTables(panel);
+      window.requestAnimationFrame(() => {
+        panel.querySelectorAll(".tabulator-grid").forEach((element) => {
+          element.labfoundryTabulator?.redraw(true);
+        });
+      });
     });
   });
   const storedDomain = storedDnsActiveZone();
@@ -13633,6 +13725,696 @@ function initializeLdapBindSecretModal() {
   }
 }
 
+function initializeAutomationTables() {
+  if (typeof Tabulator === "undefined") return;
+
+  const parseTableData = (elementId) => {
+    const element = document.getElementById(elementId);
+    if (!(element instanceof HTMLScriptElement)) return [];
+    try {
+      const value = JSON.parse(element.textContent || "[]");
+      return Array.isArray(value) ? value : [];
+    } catch (_error) {
+      return [];
+    }
+  };
+  const submitForm = (prefix, id) => {
+    const form = document.getElementById(`${prefix}-${id}`);
+    if (form instanceof HTMLFormElement) form.requestSubmit();
+  };
+  const scheduleModal = document.getElementById("automation-schedule-modal");
+  const scheduleForm = document.querySelector("[data-automation-schedule-form]");
+  const scriptModal = document.getElementById("automation-script-modal");
+  let activeScriptRow = null;
+  let activeScriptInterpreter = "bash";
+  let createScriptFromGridRow = null;
+  const openAutomationModal = (modal) => {
+    if (!(modal instanceof HTMLDialogElement)) return;
+    modal.showModal();
+    window.requestAnimationFrame(() => modal.querySelector("input:not([type='hidden']), select, textarea")?.focus({ preventScroll: true }));
+  };
+  scriptModal?.querySelector("[data-automation-script-modal-cancel]")?.addEventListener("click", () => scriptModal.close());
+  if (scriptModal instanceof HTMLDialogElement) {
+    const scriptFileInput = scriptModal.querySelector("[data-automation-script-file]");
+    const scriptTextarea = scriptModal.querySelector("#automation-script-content");
+    const scriptImportStatus = scriptModal.querySelector("[data-automation-script-import-status]");
+    const scriptLanguage = scriptModal.querySelector("[data-automation-script-language]");
+    const scriptModalTitle = scriptModal.querySelector("#automation-script-modal-title");
+    const scriptModalDescription = scriptModal.querySelector("[data-automation-script-source-description]");
+    const scriptConfirm = scriptModal.querySelector("[data-automation-script-source-confirm]");
+    const setScriptEditorValue = (value) => {
+      if (!(scriptTextarea instanceof HTMLTextAreaElement)) return;
+      if (window.LabFoundryCodeMirror && typeof window.LabFoundryCodeMirror.setValue === "function") {
+        window.LabFoundryCodeMirror.setValue(scriptTextarea, value);
+      } else {
+        scriptTextarea.value = value;
+        scriptTextarea.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    };
+    const scriptEditorValue = () => {
+      if (!(scriptTextarea instanceof HTMLTextAreaElement)) return "";
+      return scriptTextarea.labFoundryCodeMirrorView?.state?.doc?.toString() ?? scriptTextarea.value;
+    };
+    const updateScriptLanguage = (interpreter) => {
+      activeScriptInterpreter = ["bash", "powershell", "python"].includes(interpreter) ? interpreter : "bash";
+      if (scriptLanguage instanceof HTMLElement) scriptLanguage.textContent = activeScriptInterpreter;
+      if (scriptTextarea instanceof HTMLTextAreaElement) {
+        scriptTextarea.dataset.scriptInterpreter = activeScriptInterpreter;
+        scriptTextarea.setAttribute("aria-label", `${activeScriptInterpreter} managed script source code`);
+      }
+    };
+    const openScriptSourceEditor = (row) => {
+      if (!row || !(scriptTextarea instanceof HTMLTextAreaElement)) return;
+      const data = row.getData();
+      activeScriptRow = row;
+      updateScriptLanguage(data.interpreter || "bash");
+      setScriptEditorValue(data.source_content || "");
+      if (scriptFileInput instanceof HTMLInputElement) scriptFileInput.value = "";
+      if (scriptModalTitle instanceof HTMLElement) scriptModalTitle.textContent = data.is_new ? "Add script source" : `New ${data.name} revision`;
+      if (scriptModalDescription instanceof HTMLElement) {
+        scriptModalDescription.textContent = data.is_new
+          ? "Enter or import the first immutable revision, then return it to the new grid row."
+          : `Edit or import source for a new immutable revision. Revision ${data.latest_revision} remains unchanged.`;
+      }
+      if (scriptConfirm instanceof HTMLButtonElement) scriptConfirm.textContent = data.is_new ? "Use script content" : "Create new disabled revision";
+      if (scriptImportStatus instanceof HTMLElement) {
+        scriptImportStatus.textContent = "Paste code or import a .sh, .bash, .py, .ps1, or .txt file (maximum 1 MiB).";
+        scriptImportStatus.classList.remove("error-text");
+      }
+      scriptModal.showModal();
+      window.requestAnimationFrame(() => {
+        if (window.LabFoundryCodeMirror && typeof window.LabFoundryCodeMirror.focus === "function") window.LabFoundryCodeMirror.focus(scriptTextarea);
+        else scriptTextarea.focus({ preventScroll: true });
+      });
+    };
+    scriptModal.labfoundryOpenSourceEditor = openScriptSourceEditor;
+    if (scriptFileInput instanceof HTMLInputElement && scriptTextarea instanceof HTMLTextAreaElement) {
+      scriptFileInput.addEventListener("change", async () => {
+        const file = scriptFileInput.files?.[0];
+        if (!file) return;
+        if (file.size > 1024 * 1024) {
+          scriptFileInput.value = "";
+          if (scriptImportStatus instanceof HTMLElement) {
+            scriptImportStatus.textContent = "Choose a script file no larger than 1 MiB.";
+            scriptImportStatus.classList.add("error-text");
+          }
+          return;
+        }
+        const extension = file.name.toLowerCase().split(".").pop() || "";
+        const interpreterByExtension = { sh: "bash", bash: "bash", py: "python", ps1: "powershell" };
+        const inferredInterpreter = interpreterByExtension[extension];
+        if (inferredInterpreter) updateScriptLanguage(inferredInterpreter);
+        const fileText = await file.text();
+        setScriptEditorValue(fileText);
+        if (window.LabFoundryCodeMirror && typeof window.LabFoundryCodeMirror.focus === "function") window.LabFoundryCodeMirror.focus(scriptTextarea);
+        else scriptTextarea.focus();
+        if (scriptImportStatus instanceof HTMLElement) {
+          const interpreterNote = inferredInterpreter ? `; interpreter set to ${inferredInterpreter}` : "";
+          scriptImportStatus.textContent = `${file.name} loaded into the editor${interpreterNote}. Review it before creating the revision.`;
+          scriptImportStatus.classList.remove("error-text");
+        }
+      });
+    }
+    if (scriptConfirm instanceof HTMLButtonElement) {
+      scriptConfirm.addEventListener("click", () => {
+        if (!activeScriptRow) return;
+        const content = scriptEditorValue();
+        if (!content.trim()) {
+          if (scriptImportStatus instanceof HTMLElement) {
+            scriptImportStatus.textContent = "Script content is required.";
+            scriptImportStatus.classList.add("error-text");
+          }
+          return;
+        }
+        const data = activeScriptRow.getData();
+        if (data.is_new) {
+          Promise.resolve(activeScriptRow.update({ source_content: content, source_ready: true, interpreter: activeScriptInterpreter })).then(() => {
+            activeScriptRow.reformat();
+            scriptModal.close("source-ready");
+            if (typeof createScriptFromGridRow === "function") createScriptFromGridRow(activeScriptRow);
+          });
+          return;
+        }
+        const revisionForm = document.getElementById(`automation-script-revision-${data.id}`);
+        if (!(revisionForm instanceof HTMLFormElement)) return;
+        revisionForm.elements.interpreter.value = activeScriptInterpreter;
+        revisionForm.elements.timeout_seconds.value = String(data.timeout_seconds || 3600);
+        revisionForm.elements.content.value = content;
+        scriptConfirm.disabled = true;
+        scriptConfirm.textContent = "Creating revision…";
+        revisionForm.requestSubmit();
+      });
+    }
+  }
+
+  const schedulesElement = document.getElementById("automation-schedules-table");
+  if (schedulesElement instanceof HTMLElement && scheduleModal instanceof HTMLDialogElement && scheduleForm instanceof HTMLFormElement) {
+    const scheduleRows = parseTableData("automation-schedules-data");
+    scheduleRows.push({ is_new: true, name: "" });
+    const wizardSteps = [
+      { id: "identity", title: "Name the schedule", description: "Set the schedule identity and choose its allowlisted task type." },
+      { id: "config", title: "Choose update streams", description: "Select the repository-backed update streams this task should check." },
+      { id: "timing", title: "Choose when it runs", description: "Configure recurring or one-time execution in an explicit timezone." },
+      { id: "state", title: "Choose the initial state", description: "Enable the schedule now or save it disabled for review before the worker can queue it." },
+      { id: "review", title: "Review the schedule", description: "Confirm the workflow, timing, inputs, and initial state." },
+    ];
+    const wizardPages = [...scheduleForm.querySelectorAll("[data-automation-wizard-step]")];
+    const wizardNav = [...scheduleForm.querySelectorAll("[data-automation-wizard-nav]")];
+    const wizardKicker = scheduleForm.querySelector("[data-automation-wizard-kicker]");
+    const wizardTitle = scheduleForm.querySelector("[data-automation-wizard-title]");
+    const wizardDescription = scheduleForm.querySelector("[data-automation-wizard-description]");
+    const wizardErrors = scheduleForm.querySelector("[data-automation-wizard-errors]");
+    const wizardBack = scheduleForm.querySelector("[data-automation-wizard-back]");
+    const wizardNext = scheduleForm.querySelector("[data-automation-wizard-next]");
+    const wizardSubmit = scheduleForm.querySelector("[data-automation-wizard-submit]");
+    const wizardModalTitle = scheduleForm.querySelector("[data-automation-wizard-modal-title]");
+    const configStepLabel = scheduleForm.querySelector("[data-automation-config-step-label]");
+    const configStepSubtitle = scheduleForm.querySelector("[data-automation-config-step-subtitle]");
+    const taskType = scheduleForm.querySelector("[data-automation-task-type]");
+    const scriptRevision = scheduleForm.querySelector("[data-automation-script-revision]");
+    const scriptArguments = scheduleForm.querySelector("[data-automation-script-arguments]");
+    const scriptArgumentsHint = scheduleForm.querySelector("[data-automation-script-arguments-hint]");
+    const scheduleKind = scheduleForm.querySelector("[data-automation-schedule-kind]");
+    const cronExpression = scheduleForm.querySelector("[data-automation-cron-expression]");
+    const cronFrequency = scheduleForm.querySelector("[data-automation-cron-frequency]");
+    const cronMinute = scheduleForm.querySelector("[data-automation-cron-minute]");
+    const cronTime = scheduleForm.querySelector("[data-automation-cron-time]");
+    const cronWeekday = scheduleForm.querySelector("[data-automation-cron-weekday]");
+    const cronMonthday = scheduleForm.querySelector("[data-automation-cron-monthday]");
+    const cronCustom = scheduleForm.querySelector("[data-automation-cron-custom]");
+    const cronSummary = scheduleForm.querySelector("[data-automation-cron-summary]");
+    const cronPreview = scheduleForm.querySelector("[data-automation-cron-preview]");
+    let wizardStepIndex = 0;
+    let highestWizardStep = 0;
+
+    const showWizardError = (message = "") => {
+      if (!(wizardErrors instanceof HTMLElement)) return;
+      wizardErrors.textContent = message;
+      wizardErrors.classList.toggle("hidden", !message);
+    };
+    const selectedScriptInterpreter = () => scriptRevision instanceof HTMLSelectElement
+      ? String(scriptRevision.selectedOptions[0]?.dataset.interpreter || "bash")
+      : "bash";
+    const quoteScriptArgument = (value, interpreter) => {
+      const argument = String(value);
+      if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(argument)) return argument;
+      if (interpreter === "powershell") return `'${argument.replaceAll("'", "''")}'`;
+      return `'${argument.replaceAll("'", `'"'"'`)}'`;
+    };
+    const formatScriptArguments = (argumentsList, interpreter) => {
+      if (!Array.isArray(argumentsList) || !argumentsList.length) return "";
+      const continuation = interpreter === "powershell" ? " `\n" : " \\\n";
+      return argumentsList.map((argument) => quoteScriptArgument(argument, interpreter)).join(continuation);
+    };
+    const updateScriptArgumentsGuidance = () => {
+      if (!(scriptArguments instanceof HTMLTextAreaElement)) return;
+      const interpreter = selectedScriptInterpreter();
+      const marker = interpreter === "powershell" ? "`" : "\\";
+      const label = interpreter === "powershell" ? "PowerShell" : interpreter === "python" ? "Python" : "Bash";
+      scriptArguments.placeholder = interpreter === "powershell"
+        ? "-Server `\n'vcf.example.internal' `\n-Port 443"
+        : "--server \\\n'vcf.example.internal' \\\n--port 443";
+      if (scriptArgumentsHint instanceof HTMLElement) {
+        scriptArgumentsHint.textContent = `${label}: enter one logical command line; end a visual continuation line with ${marker}. Quoted spaces stay in one literal argument.`;
+      }
+    };
+    const updateConfigVisibility = () => {
+      const value = taskType instanceof HTMLSelectElement ? taskType.value : "";
+      const step = wizardSteps.find((item) => item.id === "config");
+      const configCopy = value === "managed_script"
+        ? { label: "Managed script", subtitle: "Choose enabled revision", title: "Choose a managed script", description: "Select the enabled immutable script revision this schedule should run." }
+        : value === "vcf_depot_download"
+          ? { label: "Depot profile", subtitle: "Choose download profile", title: "Choose a depot profile", description: "Select the enabled VCF Offline Depot download profile this schedule should run." }
+          : value === "appliance_update_install"
+            ? { label: "Update streams", subtitle: "Choose install streams", title: "Choose update streams", description: "Select the repository-backed update streams this task should install." }
+            : { label: "Update streams", subtitle: "Choose check streams", title: "Choose update streams", description: "Select the repository-backed update streams this task should check." };
+      if (step) {
+        step.title = configCopy.title;
+        step.description = configCopy.description;
+      }
+      if (configStepLabel instanceof HTMLElement) configStepLabel.textContent = configCopy.label;
+      if (configStepSubtitle instanceof HTMLElement) configStepSubtitle.textContent = configCopy.subtitle;
+      scheduleForm.querySelectorAll("[data-automation-config]").forEach((element) => {
+        const group = element.getAttribute("data-automation-config");
+        const visible = group === "appliance-update"
+          ? value.startsWith("appliance_update_")
+          : group === "vcf-depot"
+            ? value === "vcf_depot_download"
+            : value === "managed_script";
+        element.classList.toggle("hidden", !visible);
+      });
+      if (wizardSteps[wizardStepIndex]?.id === "config") showWizardStep(wizardStepIndex);
+    };
+    const cronWeekdayNames = { "0": "Sunday", "1": "Monday", "2": "Tuesday", "3": "Wednesday", "4": "Thursday", "5": "Friday", "6": "Saturday" };
+    const cronPartsFromTime = () => {
+      const [hour = "2", minute = "0"] = String(cronTime?.value || "02:00").split(":");
+      return { hour: String(Number(hour)), minute: String(Number(minute)), label: `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}` };
+    };
+    const updateCronBuilder = () => {
+      if (!(cronExpression instanceof HTMLInputElement) || !(cronFrequency instanceof HTMLSelectElement)) return;
+      const frequency = cronFrequency.value;
+      scheduleForm.querySelectorAll("[data-automation-cron-control]").forEach((element) => {
+        const control = element.getAttribute("data-automation-cron-control");
+        const visible = control === frequency || (control === "time" && ["daily", "weekly", "monthly"].includes(frequency));
+        element.classList.toggle("hidden", !visible);
+        element.querySelectorAll("input, select").forEach((input) => { input.required = visible; });
+      });
+      const timezoneValue = String(scheduleForm.elements.timezone_name.value || "UTC");
+      const time = cronPartsFromTime();
+      let expression = "0 2 * * *";
+      let summary = `Every day at ${time.label} ${timezoneValue}`;
+      if (frequency === "hourly") {
+        const minute = String(Number(cronMinute?.value || 0));
+        expression = `${minute} * * * *`;
+        summary = `Every hour at minute ${minute} · ${timezoneValue}`;
+      } else if (frequency === "daily") {
+        expression = `${time.minute} ${time.hour} * * *`;
+      } else if (frequency === "weekly") {
+        const weekday = String(cronWeekday?.value || "1");
+        expression = `${time.minute} ${time.hour} * * ${weekday}`;
+        summary = `Every ${cronWeekdayNames[weekday]} at ${time.label} ${timezoneValue}`;
+      } else if (frequency === "monthly") {
+        const monthday = String(Number(cronMonthday?.value || 1));
+        expression = `${time.minute} ${time.hour} ${monthday} * *`;
+        summary = `Every month on day ${monthday} at ${time.label} ${timezoneValue}`;
+      } else {
+        expression = String(cronCustom?.value || "").trim();
+        summary = `Custom schedule in ${timezoneValue}`;
+      }
+      cronExpression.value = expression;
+      if (cronSummary instanceof HTMLElement) cronSummary.textContent = summary;
+      if (cronPreview instanceof HTMLElement) cronPreview.textContent = expression;
+    };
+    const loadCronBuilder = (rawExpression = "0 2 * * *") => {
+      if (!(cronFrequency instanceof HTMLSelectElement)) return;
+      const expression = String(rawExpression || "0 2 * * *").trim();
+      const fields = expression.split(/\s+/);
+      const numeric = (value, minimum, maximum) => /^\d+$/.test(value) && Number(value) >= minimum && Number(value) <= maximum;
+      let frequency = "custom";
+      if (fields.length === 5 && numeric(fields[0], 0, 59) && fields.slice(1).every((value) => value === "*")) {
+        frequency = "hourly";
+        if (cronMinute instanceof HTMLInputElement) cronMinute.value = fields[0];
+      } else if (fields.length === 5 && numeric(fields[0], 0, 59) && numeric(fields[1], 0, 23) && fields[2] === "*" && fields[3] === "*" && fields[4] === "*") {
+        frequency = "daily";
+      } else if (fields.length === 5 && numeric(fields[0], 0, 59) && numeric(fields[1], 0, 23) && fields[2] === "*" && fields[3] === "*" && numeric(fields[4], 0, 6)) {
+        frequency = "weekly";
+        if (cronWeekday instanceof HTMLSelectElement) cronWeekday.value = fields[4];
+      } else if (fields.length === 5 && numeric(fields[0], 0, 59) && numeric(fields[1], 0, 23) && numeric(fields[2], 1, 31) && fields[3] === "*" && fields[4] === "*") {
+        frequency = "monthly";
+        if (cronMonthday instanceof HTMLInputElement) cronMonthday.value = fields[2];
+      }
+      if (["daily", "weekly", "monthly"].includes(frequency) && cronTime instanceof HTMLInputElement) {
+        cronTime.value = `${fields[1].padStart(2, "0")}:${fields[0].padStart(2, "0")}`;
+      }
+      if (cronCustom instanceof HTMLInputElement) cronCustom.value = expression;
+      cronFrequency.value = frequency;
+      updateCronBuilder();
+    };
+    const updateTimingVisibility = () => {
+      const value = scheduleKind instanceof HTMLSelectElement ? scheduleKind.value : "cron";
+      scheduleForm.querySelectorAll("[data-automation-schedule-timing]").forEach((element) => {
+        const visible = element.getAttribute("data-automation-schedule-timing") === value;
+        element.classList.toggle("hidden", !visible);
+        element.querySelectorAll("[data-automation-timing-required]").forEach((input) => { input.required = visible; });
+      });
+      if (value === "cron") updateCronBuilder();
+    };
+    const showWizardStep = (index) => {
+      wizardStepIndex = Math.max(0, Math.min(index, wizardSteps.length - 1));
+      highestWizardStep = Math.max(highestWizardStep, wizardStepIndex);
+      const step = wizardSteps[wizardStepIndex];
+      wizardPages.forEach((page) => page.classList.toggle("hidden", page.getAttribute("data-automation-wizard-step") !== step.id));
+      wizardNav.forEach((button, buttonIndex) => {
+        button.classList.toggle("active", buttonIndex === wizardStepIndex);
+        button.disabled = buttonIndex > highestWizardStep;
+      });
+      if (wizardKicker instanceof HTMLElement) wizardKicker.textContent = `Step ${wizardStepIndex + 1} of ${wizardSteps.length}`;
+      if (wizardTitle instanceof HTMLElement) wizardTitle.textContent = step.title;
+      if (wizardDescription instanceof HTMLElement) wizardDescription.textContent = step.description;
+      wizardBack?.classList.toggle("hidden", wizardStepIndex === 0);
+      wizardNext?.classList.toggle("hidden", wizardStepIndex === wizardSteps.length - 1);
+      wizardSubmit?.classList.toggle("hidden", wizardStepIndex !== wizardSteps.length - 1);
+      showWizardError();
+    };
+    const validateWizardStep = () => {
+      const page = wizardPages[wizardStepIndex];
+      if (!(page instanceof HTMLElement)) return true;
+      const taskValue = taskType instanceof HTMLSelectElement ? taskType.value : "";
+      if (wizardSteps[wizardStepIndex].id === "config") {
+        if (taskValue.startsWith("appliance_update_") && !scheduleForm.querySelector('input[name="selected_streams"]:checked')) {
+          showWizardError("Select at least one update stream.");
+          return false;
+        }
+        const requiredConfig = taskValue === "managed_script" ? "revision_id" : taskValue === "vcf_depot_download" ? "vcf_profile_id" : "";
+        if (requiredConfig && !String(scheduleForm.elements[requiredConfig]?.value || "")) {
+          showWizardError(taskValue === "managed_script" ? "Choose an enabled managed script revision." : "Choose an enabled VCF Offline Depot profile.");
+          scheduleForm.elements[requiredConfig]?.focus();
+          return false;
+        }
+      }
+      const invalid = [...page.querySelectorAll("input, select")].find((control) => !control.closest(".hidden") && !control.checkValidity());
+      if (invalid) {
+        invalid.reportValidity();
+        return false;
+      }
+      return true;
+    };
+    const reviewValue = (selector, value) => {
+      const target = scheduleForm.querySelector(selector);
+      if (target instanceof HTMLElement) target.textContent = value || "not configured";
+    };
+    const populateScheduleReview = () => {
+      const taskValue = taskType instanceof HTMLSelectElement ? taskType.value : "";
+      const kindValue = scheduleKind instanceof HTMLSelectElement ? scheduleKind.value : "cron";
+      const timezoneValue = String(scheduleForm.elements.timezone_name.value || "UTC");
+      const timingValue = kindValue === "once"
+        ? `One time · ${scheduleForm.elements.run_once_at.value || "not set"}`
+        : `Cron · ${scheduleForm.elements.cron_expression.value || "not set"}`;
+      let configValue = "No additional inputs";
+      if (taskValue.startsWith("appliance_update_")) {
+        configValue = [...scheduleForm.querySelectorAll('input[name="selected_streams"]:checked')].map((input) => input.closest("label")?.innerText.trim() || input.value).join(", ");
+      } else if (taskValue === "managed_script") {
+        const scriptLabel = scheduleForm.elements.revision_id.selectedOptions[0]?.textContent?.trim() || "not selected";
+        const hasArguments = Boolean(String(scheduleForm.elements.script_arguments.value || "").trim());
+        configValue = `${scriptLabel} · ${hasArguments ? "parameters configured" : "no parameters"}`;
+      } else if (taskValue === "vcf_depot_download") {
+        configValue = scheduleForm.elements.vcf_profile_id.selectedOptions[0]?.textContent?.trim() || "not selected";
+      }
+      reviewValue("[data-automation-review-name]", String(scheduleForm.elements.name.value || ""));
+      reviewValue("[data-automation-review-task]", taskValue.replaceAll("_", " "));
+      reviewValue("[data-automation-review-timing]", timingValue);
+      reviewValue("[data-automation-review-timezone]", timezoneValue);
+      reviewValue("[data-automation-review-state]", scheduleForm.elements.enabled.checked ? "Enabled" : "Disabled");
+      reviewValue("[data-automation-review-config]", configValue);
+    };
+    const openScheduleWizard = (rowData = null) => {
+      scheduleForm.reset();
+      scheduleForm.action = rowData ? `/automation/schedules/${rowData.id}/edit` : "/automation/schedules";
+      if (wizardModalTitle instanceof HTMLElement) wizardModalTitle.textContent = rowData ? `Edit ${rowData.name}` : "Add schedule";
+      if (wizardSubmit instanceof HTMLButtonElement) wizardSubmit.textContent = rowData ? "Update schedule" : "Create schedule";
+      if (rowData) {
+        scheduleForm.elements.name.value = rowData.name || "";
+        scheduleForm.elements.task_type.value = rowData.task_type || "appliance_update_check";
+        scheduleForm.elements.schedule_kind.value = rowData.schedule_kind || "cron";
+        scheduleForm.elements.timezone_name.value = rowData.timezone || "UTC";
+        scheduleForm.elements.cron_expression.value = rowData.cron_expression || "0 2 * * *";
+        scheduleForm.elements.run_once_at.value = rowData.run_once_local || "";
+        scheduleForm.elements.enabled.checked = Boolean(rowData.enabled);
+        const selectedStreams = new Set(rowData.task_config?.selected_streams || []);
+        scheduleForm.querySelectorAll('input[name="selected_streams"]').forEach((input) => { input.checked = selectedStreams.has(input.value); });
+        scheduleForm.elements.vcf_profile_id.value = String(rowData.task_config?.profile_id || "");
+        scheduleForm.elements.revision_id.value = String(rowData.task_config?.revision_id || "");
+        scheduleForm.elements.script_arguments.value = formatScriptArguments(rowData.task_config?.arguments, selectedScriptInterpreter());
+      }
+      updateScriptArgumentsGuidance();
+      loadCronBuilder(rowData?.cron_expression || "0 2 * * *");
+      updateConfigVisibility();
+      updateTimingVisibility();
+      highestWizardStep = 0;
+      showWizardStep(0);
+      scheduleModal.showModal();
+      window.requestAnimationFrame(() => scheduleForm.elements.name.focus({ preventScroll: true }));
+    };
+    taskType?.addEventListener("change", updateConfigVisibility);
+    scriptRevision?.addEventListener("change", updateScriptArgumentsGuidance);
+    scheduleKind?.addEventListener("change", updateTimingVisibility);
+    [cronFrequency, cronMinute, cronTime, cronWeekday, cronMonthday, cronCustom].forEach((control) => {
+      control?.addEventListener("input", updateCronBuilder);
+      control?.addEventListener("change", updateCronBuilder);
+    });
+    scheduleForm.elements.timezone_name?.addEventListener("input", updateCronBuilder);
+    wizardNext?.addEventListener("click", () => {
+      if (!validateWizardStep()) return;
+      if (wizardStepIndex + 1 === wizardSteps.length - 1) populateScheduleReview();
+      showWizardStep(wizardStepIndex + 1);
+    });
+    wizardBack?.addEventListener("click", () => showWizardStep(wizardStepIndex - 1));
+    wizardNav.forEach((button, index) => button.addEventListener("click", () => {
+      if (index <= highestWizardStep) {
+        if (index === wizardSteps.length - 1) populateScheduleReview();
+        showWizardStep(index);
+      }
+    }));
+    scheduleForm.querySelector("[data-automation-schedule-modal-cancel]")?.addEventListener("click", () => scheduleModal.close());
+    scheduleForm.addEventListener("submit", (event) => {
+      if (wizardStepIndex !== wizardSteps.length - 1 || !validateWizardStep()) event.preventDefault();
+    });
+    schedulesElement.labfoundryTabulator = new Tabulator(schedulesElement, {
+      data: scheduleRows,
+      layout: "fitColumns",
+      placeholder: "No automation schedules have been created.",
+      rowFormatter: (row) => markNewRecordRow(row, "name"),
+      rowContextMenu: [
+        {
+          label: "Run now",
+          disabled: (component) => component.getData().is_new,
+          action: (_event, row) => submitForm("automation-schedule-run", row.getData().id),
+        },
+        {
+          label: "Edit schedule",
+          disabled: (component) => component.getData().is_new,
+          action: (_event, row) => openScheduleWizard(row.getData()),
+        },
+        {
+          label: "Delete schedule",
+          disabled: (component) => component.getData().is_new,
+          action: (_event, row) => submitForm("automation-schedule-delete", row.getData().id),
+        },
+      ],
+      columns: [
+        {
+          title: "Name",
+          field: "name",
+          minWidth: 150,
+          formatter: (cell) => cell.getRow().getData().is_new ? '<button class="add-row-button" type="button">+ Add schedule here</button>' : escapeHtml(cell.getValue()),
+          cellClick: (_event, cell) => {
+            if (cell.getRow().getData().is_new) openScheduleWizard();
+          },
+        },
+        { title: "Task", field: "task_type", minWidth: 150, formatter: (cell) => cell.getRow().getData().is_new ? "" : String(cell.getValue() || "").replaceAll("_", " ") },
+        { title: "Schedule", field: "schedule", minWidth: 150 },
+        { title: "Timezone", field: "timezone", minWidth: 130 },
+        { title: "Next run", field: "next_run_at", minWidth: 170 },
+        { title: "Last task", field: "last_job_status", width: 110 },
+        { title: "State", field: "enabled", width: 85, formatter: labFoundryBooleanFormatter, editor: "tickCross", editable: (cell) => !cell.getRow().getData().is_new, hozAlign: "center", headerSort: false, cellEdited: (cell) => submitForm("automation-schedule-toggle", cell.getRow().getData().id) },
+      ],
+    });
+  }
+
+  const executionsElement = document.getElementById("automation-executions-table");
+  if (executionsElement instanceof HTMLElement) {
+    const executionRows = parseTableData("automation-executions-data");
+    const openExecutionTask = (rowData) => {
+      if (rowData?.task_url) window.location.assign(rowData.task_url);
+    };
+    executionsElement.labfoundryTabulator = new Tabulator(executionsElement, {
+      data: executionRows,
+      layout: "fitColumns",
+      height: "100%",
+      pagination: true,
+      paginationMode: "local",
+      paginationSize: 25,
+      paginationCounter: "rows",
+      placeholder: "No schedule executions have been recorded yet.",
+      rowContextMenu: [
+        {
+          label: "Open associated task",
+          action: (_event, row) => openExecutionTask(row.getData()),
+        },
+      ],
+      columns: [
+        { title: "Status", field: "status", width: 115, formatter: (cell) => taskStatusPillHtml(cell.getRow().getData()) },
+        { title: "Schedule", field: "schedule_name", minWidth: 165, widthGrow: 2, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Workflow", field: "task_label", minWidth: 165, widthGrow: 2, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Trigger", field: "trigger_label", width: 110, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Planned", field: "planned_for", minWidth: 180, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Started", field: "started_at", minWidth: 180, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        { title: "Finished", field: "finished_at", minWidth: 180, formatter: (cell) => escapeHtml(cell.getValue() || "—") },
+        {
+          title: "Associated task",
+          field: "id",
+          minWidth: 250,
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            return `<a href="${escapeHtml(data.task_url || "/tasks")}"><code>${escapeHtml(data.id || "")}</code></a>`;
+          },
+        },
+      ],
+    });
+    executionsElement.labfoundryTabulator.on("rowDblClick", (_event, row) => openExecutionTask(row.getData()));
+  }
+
+  const scriptsElement = document.getElementById("automation-scripts-table");
+  if (scriptsElement instanceof HTMLElement) {
+    const scriptRows = parseTableData("automation-scripts-data");
+    scriptRows.push({ is_new: true, is_activated: false, name: "", description: "", interpreter: "bash", timeout_seconds: 3600, source_content: "", source_ready: false });
+    const showScriptGridStatus = (message, isError = false) => {
+      const status = document.getElementById("automation-script-grid-status");
+      if (!(status instanceof HTMLElement)) return;
+      status.textContent = message;
+      status.classList.toggle("hidden", !message);
+      status.classList.toggle("error-text", isError);
+    };
+    const openScriptSource = (row) => {
+      if (scriptModal instanceof HTMLDialogElement && typeof scriptModal.labfoundryOpenSourceEditor === "function") {
+        scriptModal.labfoundryOpenSourceEditor(row);
+      }
+    };
+    const saveExistingScriptMetadata = (cell) => {
+      const row = cell.getRow();
+      const data = row.getData();
+      const name = String(data.name || "").trim();
+      if (!name) {
+        showScriptGridStatus("Script name is required.", true);
+        if (typeof cell.restoreOldValue === "function") cell.restoreOldValue();
+        return;
+      }
+      const form = document.getElementById(`automation-script-edit-${data.id}`);
+      if (!(form instanceof HTMLFormElement)) return;
+      form.elements.name.value = name;
+      form.elements.description.value = String(data.description || "").trim();
+      showScriptGridStatus("Saving managed-script metadata…");
+      form.requestSubmit();
+    };
+    const createRevisionFromGridCell = (cell) => {
+      const row = cell.getRow();
+      const data = row.getData();
+      const timeout = Number(data.timeout_seconds || 0);
+      if (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400) {
+        showScriptGridStatus("Timeout must be between 1 and 86400 seconds.", true);
+        if (typeof cell.restoreOldValue === "function") cell.restoreOldValue();
+        return;
+      }
+      const form = document.getElementById(`automation-script-revision-${data.id}`);
+      if (!(form instanceof HTMLFormElement)) return;
+      form.elements.interpreter.value = data.interpreter || "bash";
+      form.elements.timeout_seconds.value = String(timeout);
+      form.elements.content.value = data.source_content || "";
+      showScriptGridStatus("Creating a new disabled immutable revision…");
+      form.requestSubmit();
+    };
+    createScriptFromGridRow = (row) => {
+      const data = row.getData();
+      const name = String(data.name || "").trim();
+      if (!name) {
+        showScriptGridStatus("Enter a script name first.", true);
+        return;
+      }
+      if (!String(data.source_content || "").trim()) {
+        showScriptGridStatus("Open the Source (…) editor and add script content before creating the revision.", true);
+        openScriptSource(row);
+        return;
+      }
+      const timeout = Number(data.timeout_seconds || 0);
+      if (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400) {
+        showScriptGridStatus("Timeout must be between 1 and 86400 seconds.", true);
+        return;
+      }
+      const form = document.getElementById("automation-script-create-form");
+      if (!(form instanceof HTMLFormElement)) return;
+      form.elements.name.value = name;
+      form.elements.description.value = String(data.description || "").trim();
+      form.elements.interpreter.value = data.interpreter || "bash";
+      form.elements.timeout_seconds.value = String(timeout);
+      form.elements.content.value = data.source_content;
+      showScriptGridStatus("Creating the first immutable disabled revision…");
+      form.requestSubmit();
+    };
+    scriptsElement.labfoundryTabulator = new Tabulator(scriptsElement, {
+      data: scriptRows,
+      layout: "fitColumns",
+      placeholder: "No managed scripts have been created.",
+      rowFormatter: (row) => markNewRecordRow(row, "name"),
+      rowContextMenu: [
+        {
+          label: "Create new revision",
+          disabled: (component) => component.getData().is_new,
+          action: (_event, row) => openScriptSource(row),
+        },
+        {
+          label: "Queue latest revision",
+          disabled: (component) => component.getData().is_new || !component.getData().latest_enabled,
+          action: (_event, row) => submitForm("automation-script-run", row.getData().id),
+        },
+        {
+          label: "Enable or disable latest revision",
+          disabled: (component) => component.getData().is_new,
+          action: (_event, row) => submitForm("automation-script-toggle", row.getData().id),
+        },
+        {
+          label: "Delete managed script",
+          disabled: (component) => component.getData().is_new,
+          action: (_event, row) => submitForm("delete-automation-script", row.getData().id),
+        },
+      ],
+      columns: lockNewRecordColumns([
+        {
+          title: "Name",
+          field: "name",
+          width: 250,
+          minWidth: 230,
+          editor: "input",
+          editable: true,
+          formatter: (cell) => dnsAddRowHintFormatter(cell, "+ Add managed script here"),
+          cellEdited: (cell) => {
+            if (cell.getRow().getData().is_new) {
+              cell.getRow().update({ is_activated: Boolean(String(cell.getValue() || "").trim()) });
+              cell.getRow().reformat();
+              return;
+            }
+            saveExistingScriptMetadata(cell);
+          },
+        },
+        { title: "Description", field: "description", minWidth: 190, editor: "input", editable: true, formatter: (cell) => dnsAddRowHintFormatter(cell, "optional note..."), cellEdited: (cell) => { if (!cell.getRow().getData().is_new) saveExistingScriptMetadata(cell); } },
+        { title: "Interpreter", field: "interpreter", width: 115, editor: "list", editable: true, editorParams: { values: { bash: "bash", powershell: "powershell", python: "python" } }, cellEdited: (cell) => { if (!cell.getRow().getData().is_new) createRevisionFromGridCell(cell); } },
+        { title: "Timeout", field: "timeout_seconds", width: 95, editor: "number", editable: true, editorParams: { min: 1, max: 86400 }, cellEdited: (cell) => { if (!cell.getRow().getData().is_new) createRevisionFromGridCell(cell); } },
+        {
+          title: "Source",
+          field: "source_content",
+          width: 78,
+          headerSort: false,
+          editable: false,
+          hozAlign: "center",
+          formatter: (cell) => {
+            const data = cell.getRow().getData();
+            const ready = data.is_new && data.source_ready;
+            return `<button class="automation-source-button${ready ? " ready" : ""}" type="button" aria-label="${ready ? "Edit loaded" : "Open"} script source" title="${ready ? "Script source loaded" : "Open CodeMirror source editor"}">…</button>`;
+          },
+          cellClick: (_event, cell) => {
+            const data = cell.getRow().getData();
+            if (!data.is_new || data.is_activated || String(data.name || "").trim()) openScriptSource(cell.getRow());
+          },
+        },
+        { title: "Revision", field: "latest_revision", width: 85, formatter: (cell) => cell.getRow().getData().is_new ? "new" : `r${cell.getValue()}` },
+        { title: "State", field: "latest_enabled", width: 85, formatter: labFoundryBooleanFormatter, editor: "tickCross", editable: (cell) => !cell.getRow().getData().is_new, hozAlign: "center", headerSort: false, cellEdited: (cell) => submitForm("automation-script-toggle", cell.getRow().getData().id) },
+        { title: "Schedules", field: "schedule_count", width: 95, formatter: (cell) => cell.getRow().getData().is_new ? "0" : cell.getValue() },
+        { title: "Updated", field: "updated_at", minWidth: 165, formatter: (cell) => cell.getRow().getData().is_new ? "after creation" : cell.getValue() },
+      ], "name"),
+    });
+  }
+
+}
+
+function initializeManagedPackagePolicies() {
+  document.querySelectorAll("[data-managed-package-form]").forEach((form) => {
+    const policy = form.querySelector("[data-managed-package-policy]");
+    const target = form.querySelector("[data-managed-package-target]");
+    const targetLabel = form.querySelector("[data-managed-package-target-label]");
+    if (!(policy instanceof HTMLSelectElement) || !(target instanceof HTMLInputElement)) return;
+    const updateTargetState = () => {
+      const usesLatest = policy.value === "latest";
+      if (usesLatest) target.value = "";
+      target.disabled = usesLatest;
+      target.required = !usesLatest;
+      target.placeholder = usesLatest ? "Resolved from repository" : "Required for pinned policy";
+      target.setAttribute("aria-disabled", usesLatest ? "true" : "false");
+      targetLabel?.classList.toggle("muted", usesLatest);
+    };
+    policy.addEventListener("change", updateTargetState);
+    updateTargetState();
+  });
+}
+
 document.addEventListener("DOMContentLoaded", initializeDashboard);
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
@@ -13652,6 +14434,8 @@ document.addEventListener("DOMContentLoaded", initializeLdapPageState);
 document.addEventListener("DOMContentLoaded", initializeLdapDirectoryTables);
 document.addEventListener("DOMContentLoaded", initializeLdapPasswordModal);
 document.addEventListener("DOMContentLoaded", initializeLdapBindSecretModal);
+document.addEventListener("DOMContentLoaded", initializeAutomationTables);
+document.addEventListener("DOMContentLoaded", initializeManagedPackagePolicies);
 document.addEventListener("DOMContentLoaded", initializeNtpSettings);
 document.addEventListener("DOMContentLoaded", initializeNTPsecUpstreamsTable);
 document.addEventListener("DOMContentLoaded", initializeNTPsecSourceHealthModal);

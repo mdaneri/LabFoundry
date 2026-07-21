@@ -24,7 +24,6 @@ from labfoundry.app.ui import (
     ensure_ca_state,
     initialize_factory_appliance_apply_baseline,
     recover_interrupted_appliance_apply_jobs,
-    recover_interrupted_vcf_depot_download_jobs,
     recover_interrupted_vcf_helper_jobs,
 )
 from labfoundry.app.ui import router as ui_router
@@ -64,7 +63,6 @@ async def lifespan(app: FastAPI):
         appliance_mode = settings.environment == "appliance"
         seed_initial_data(db, include_examples=not appliance_mode, appliance_mode=appliance_mode)
         recover_interrupted_appliance_apply_jobs(db)
-        recover_interrupted_vcf_depot_download_jobs(db)
         recover_interrupted_vcf_helper_jobs(db)
         refresh_startup_host_inventory(db, environment=settings.environment)
         if appliance_mode:

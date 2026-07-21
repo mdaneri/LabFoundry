@@ -2124,6 +2124,41 @@ def test_wan_helper_apply_routes_nat_and_netem(monkeypatch, tmp_path):
     assert sysctl_path.read_text(encoding="utf-8") == "net.ipv4.ip_forward = 1\n"
 
 
+def test_automation_helper_gives_powershell_private_writable_xdg_home(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    script_root = tmp_path / "scripts"
+    run_root = tmp_path / "runs"
+    script_root.mkdir()
+    script_path = script_root / "job.ps1"
+    script_path.write_text("Write-Output 'ok'\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "ok\n", "")
+
+    monkeypatch.setattr(helper, "AUTOMATION_SCRIPT_DIR", script_root)
+    monkeypatch.setattr(helper, "AUTOMATION_RUN_DIR", run_root)
+    monkeypatch.setattr(helper, "_command_path", lambda command: "/usr/bin/pwsh" if command == "pwsh" else None)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/systemd-run" if command == "systemd-run" else None)
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda _username: SimpleNamespace(pw_uid=1200, pw_gid=1200))
+    monkeypatch.setattr(helper, "_chown_path", lambda *_args: None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    assert helper._handle_automation("run", [str(script_path), "powershell", "30", "--", "-Mode", "check"]) == 0
+    assert len(commands) == 1
+    command = commands[0]
+    home_argument = next(argument for argument in command if argument.startswith("--setenv=HOME="))
+    run_home = Path(home_argument.split("=", 2)[2])
+    assert f"--setenv=XDG_CACHE_HOME={run_home / '.cache'}" in command
+    assert f"--setenv=XDG_CONFIG_HOME={run_home / '.config'}" in command
+    assert f"--setenv=XDG_DATA_HOME={run_home / '.local' / 'share'}" in command
+    assert f"--property=ReadWritePaths={run_home}" in command
+    assert f"--property=WorkingDirectory={run_home}" in command
+    assert command[-4:] == ["/usr/bin/pwsh", str(script_path), "-Mode", "check"]
+    assert not run_home.exists()
+
+
 def test_real_mutating_helper_action_escapes_service_mount_namespace(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry.conf"

@@ -34,13 +34,16 @@ def test_existing_database_startup_adds_job_steps_table(tmp_path):
         database.init_db()
         table_names = set(database.inspect(migrated_engine).get_table_names())
         step_columns = {column["name"] for column in database.inspect(migrated_engine).get_columns("job_steps")}
+        job_columns = {column["name"] for column in database.inspect(migrated_engine).get_columns("jobs")}
     finally:
         migrated_engine.dispose()
         database.engine = previous_engine
         database.SessionLocal.configure(bind=previous_engine)
 
     assert "job_steps" in table_names
+    assert {"update_sources", "managed_packages", "automation_scripts", "automation_script_revisions", "schedules"} <= table_names
     assert {"job_id", "component_key", "position", "status", "result", "error"} <= step_columns
+    assert {"schedule_id", "trigger", "planned_for", "task_config_json"} <= job_columns
 
 
 def test_physical_interface_ipv6_enabled_migration_backfills_only_static_ipv6(tmp_path):

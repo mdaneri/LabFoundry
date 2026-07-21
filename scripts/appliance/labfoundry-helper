@@ -68,7 +68,8 @@ COMMANDS: dict[str, set[str]] = {
     "vcf-offline-depot": {"validate", "stage-tool", "reset-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties"},
     "esxi-pxe": {"validate", "apply"},
     "public-services": {"validate", "apply"},
-    "appliance-update": {"check", "apply", "restart-service"},
+    "appliance-update": {"check", "apply", "sync-sources", "restart-service"},
+    "automation": {"run"},
     "appliance-power": {"reboot", "shutdown"},
     "console": {"disable-services", "restore-services", "status"},
     "wan": {"validate", "apply"},
@@ -85,6 +86,7 @@ SYSTEMD_RUN_REAL_ACTIONS = {
     "relocate-bundles",
     "export",
     "restart-service",
+    "sync-sources",
 }
 SYSTEMD_RUN_CHILD_ENV = "LABFOUNDRY_HELPER_SYSTEMD_RUN_CHILD"
 NO_PATH_ACTIONS = {
@@ -108,9 +110,15 @@ NO_PATH_ACTIONS = {
     ("vcf-offline-depot", "generate-software-depot-id"),
     ("vcf-offline-depot", "reset-tool"),
 }
-NON_PATH_ARGUMENT_ACTIONS = {("local-users", "authenticate")}
+NON_PATH_ARGUMENT_ACTIONS = {("local-users", "authenticate"), ("automation", "run")}
 LABFOUNDRY_SERVICE_USER = "labfoundry"
 LABFOUNDRY_STATE_DIR = Path("/var/lib/labfoundry")
+AUTOMATION_SCRIPT_DIR = LABFOUNDRY_STATE_DIR / "automation" / "scripts"
+AUTOMATION_RUN_DIR = LABFOUNDRY_STATE_DIR / "automation" / "runs"
+AUTOMATION_USER = "labfoundry-automation"
+UPDATE_SOURCE_STATE_PATH = Path("/etc/labfoundry/update-sources.json")
+MANAGED_PHOTON_REPO_PATH = Path("/etc/yum.repos.d/labfoundry-managed.repo")
+LABFOUNDRY_PIP_CONFIG_PATH = Path("/opt/labfoundry/.venv/pip.conf")
 CONSOLE_STATE_DIR = LABFOUNDRY_STATE_DIR / "console"
 CONSOLE_SERVICE_STATE_PATH = CONSOLE_STATE_DIR / "services.json"
 CONSOLE_MANAGED_SERVICE_UNITS = (
@@ -6876,13 +6884,13 @@ def _load_appliance_update_config(path: Path) -> dict:
     return payload
 
 
-def _appliance_update_config_errors(payload: dict) -> list[str]:
+def _appliance_update_config_errors(payload: dict, *, require_streams: bool = True) -> list[str]:
     errors: list[str] = []
     selected = payload.get("selected_streams")
-    if not isinstance(selected, list) or not selected:
+    if not isinstance(selected, list) or (require_streams and not selected):
         errors.append("selected_streams must include at least one update stream.")
     else:
-        allowed = {"photon_os", "python_libraries", "labfoundry_wheel"}
+        allowed = {"photon_os", "python_libraries", "powershell_modules", "labfoundry_wheel"}
         for stream in selected:
             if stream not in allowed:
                 errors.append(f"unsupported update stream {stream}.")
@@ -6904,9 +6912,30 @@ def _appliance_update_config_errors(payload: dict) -> list[str]:
             errors.append("python_index_url must be an http or https URL.")
         if parsed.username or parsed.password:
             errors.append("python_index_url must not include embedded credentials.")
+    powershell_repository_url = str(sources.get("powershell_repository_url") or "").strip()
+    powershell_repository_name = str(sources.get("powershell_repository_name") or "").strip()
+    if "powershell_modules" in (selected or []) and not powershell_repository_url:
+        errors.append("powershell_repository_url is required when PowerShell Modules is selected.")
+    if powershell_repository_url:
+        parsed = urlparse(powershell_repository_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            errors.append("powershell_repository_url must be an http or https URL.")
+        if parsed.username or parsed.password:
+            errors.append("powershell_repository_url must not include embedded credentials.")
     requirements = payload.get("python_requirements", [])
     if requirements and (not isinstance(requirements, list) or not all(isinstance(item, str) and item.strip() for item in requirements)):
         errors.append("python_requirements must be a list of requirement strings.")
+    powershell_modules = payload.get("powershell_modules", [])
+    if powershell_modules and (
+        not isinstance(powershell_modules, list)
+        or not all(
+            isinstance(item, dict)
+            and str(item.get("name") or "").strip()
+            and str(item.get("repository_name") or powershell_repository_name).strip()
+            for item in powershell_modules
+        )
+    ):
+        errors.append("powershell_modules must be a list of module objects with names and repositories.")
     return errors
 
 
@@ -6945,6 +6974,8 @@ def _download_labfoundry_update_manifest(manifest_url: str) -> dict:
     for key in ("version", "git_commit", "wheel", "sha256"):
         if not str(payload.get(key) or "").strip():
             raise ValueError(f"LabFoundry manifest missing {key}")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", str(payload["git_commit"])):
+        raise ValueError("LabFoundry manifest git_commit must be a full 40-character hexadecimal commit")
     if not re.fullmatch(r"[0-9a-fA-F]{64}", str(payload["sha256"])):
         raise ValueError("LabFoundry manifest sha256 must be a 64-character hex digest")
     return payload
@@ -6977,6 +7008,134 @@ def _write_update_info(info: dict) -> None:
     tmp_path.replace(APPLIANCE_UPDATE_INFO_PATH)
 
 
+def _powershell_encoded_command(script: str) -> str:
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+def _powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _sync_appliance_update_sources(payload: dict) -> dict:
+    definitions = payload.get("source_definitions") or []
+    if not isinstance(definitions, list):
+        raise ValueError("source_definitions must be a list")
+    commands: list[dict] = []
+
+    managed_photon = [
+        source
+        for source in definitions
+        if isinstance(source, dict)
+        and source.get("kind") == "photon"
+        and source.get("enabled") is True
+        and isinstance(source.get("settings"), dict)
+        and source["settings"].get("managed") is True
+    ]
+    photon_path = MANAGED_PHOTON_REPO_PATH
+    if managed_photon:
+        sections: list[str] = []
+        for source in managed_photon:
+            source_id = re.sub(r"[^a-z0-9_.-]+", "-", str(source.get("name") or "labfoundry").lower()).strip("-")
+            if not source_id:
+                raise ValueError("managed Photon source name must contain a usable repository identifier")
+            source_url = str(source.get("url") or "").strip()
+            parsed = urlparse(source_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(f"managed Photon source {source_id} must use an HTTP(S) base URL")
+            settings = source["settings"]
+            lines = [
+                f"[{source_id}]",
+                f"name={source.get('name') or source_id}",
+                f"baseurl={source_url}",
+                "enabled=1",
+                f"gpgcheck={1 if settings.get('gpgcheck', True) else 0}",
+                f"sslverify={1 if settings.get('tls_verify', True) else 0}",
+            ]
+            if str(settings.get("gpgkey") or "").strip():
+                lines.append(f"gpgkey={str(settings['gpgkey']).strip()}")
+            sections.append("\n".join(lines))
+        photon_path.parent.mkdir(parents=True, exist_ok=True)
+        photon_path.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
+        photon_path.chmod(0o644)
+        commands.append({"command": ["write", str(photon_path)], "returncode": 0, "success": True, "stdout": f"wrote {len(managed_photon)} managed Photon repositories", "stderr": ""})
+    elif photon_path.exists():
+        photon_path.unlink()
+        commands.append({"command": ["remove", str(photon_path)], "returncode": 0, "success": True, "stdout": "removed managed Photon repository file", "stderr": ""})
+
+    python_source = next(
+        (source for source in definitions if isinstance(source, dict) and source.get("kind") == "python" and source.get("enabled") is True),
+        None,
+    )
+    pip_path = LABFOUNDRY_PIP_CONFIG_PATH
+    python_url = str(python_source.get("url") or "").strip() if python_source else ""
+    if python_url:
+        parsed = urlparse(python_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Python source must use an HTTP(S) index URL")
+        python_settings = python_source.get("settings") if isinstance(python_source.get("settings"), dict) else {}
+        pip_lines = ["[global]", f"index-url = {python_url}"]
+        if python_settings.get("tls_verify") is False:
+            pip_lines.append(f"trusted-host = {parsed.hostname}")
+        pip_path.write_text("\n".join(pip_lines) + "\n", encoding="utf-8")
+        pip_path.chmod(0o644)
+        commands.append({"command": ["write", str(pip_path)], "returncode": 0, "success": True, "stdout": "configured LabFoundry virtualenv pip index", "stderr": ""})
+    elif pip_path.exists():
+        pip_path.unlink()
+        commands.append({"command": ["remove", str(pip_path)], "returncode": 0, "success": True, "stdout": "restored LabFoundry virtualenv pip defaults", "stderr": ""})
+
+    pwsh = _command_path("pwsh")
+    try:
+        previous_state = json.loads(UPDATE_SOURCE_STATE_PATH.read_text(encoding="utf-8")) if UPDATE_SOURCE_STATE_PATH.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        previous_state = {}
+    previous_powershell_names = {
+        str(value) for value in previous_state.get("powershell_repositories", []) if str(value).strip()
+    } if isinstance(previous_state, dict) else set()
+    current_powershell_names: set[str] = set()
+    for source in definitions:
+        if not isinstance(source, dict) or source.get("kind") != "powershell" or source.get("enabled") is not True:
+            continue
+        if pwsh is None:
+            commands.append({"command": ["pwsh"], "returncode": 127, "success": False, "stdout": "", "stderr": "pwsh command not found"})
+            continue
+        name = str(source.get("name") or "").strip()
+        url = str(source.get("url") or "").strip()
+        if not name:
+            raise ValueError("PowerShell source name is required")
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"PowerShell source {name} must use an HTTP(S) URL")
+        current_powershell_names.add(name)
+        trusted = bool((source.get("settings") or {}).get("trusted")) if isinstance(source.get("settings"), dict) else False
+        policy = "Trusted" if trusted else "Untrusted"
+        script = (
+            '$ErrorActionPreference = "Stop"; '
+            f"$name = {_powershell_literal(name)}; $url = {_powershell_literal(url)}; "
+            "$existing = Get-PSRepository -Name $name -ErrorAction SilentlyContinue; "
+            f"if ($existing) {{ Set-PSRepository -Name $name -SourceLocation $url -InstallationPolicy {policy} }} "
+            f"else {{ Register-PSRepository -Name $name -SourceLocation $url -InstallationPolicy {policy} }}; "
+            "Get-PSRepository -Name $name | Select-Object Name,SourceLocation,InstallationPolicy | ConvertTo-Json -Compress"
+        )
+        commands.append(_command_payload([pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", _powershell_encoded_command(script)]))
+    if pwsh is not None:
+        for name in sorted(previous_powershell_names - current_powershell_names):
+            script = (
+                '$ErrorActionPreference = "Stop"; '
+                f"$name = {_powershell_literal(name)}; "
+                "$existing = Get-PSRepository -Name $name -ErrorAction SilentlyContinue; "
+                "if ($existing) { Unregister-PSRepository -Name $name }; "
+                "[pscustomobject]@{Name=$name;Removed=[bool]$existing} | ConvertTo-Json -Compress"
+            )
+            commands.append(_command_payload([pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", _powershell_encoded_command(script)]))
+    UPDATE_SOURCE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UPDATE_SOURCE_STATE_PATH.write_text(
+        json.dumps({"powershell_repositories": sorted(current_powershell_names)}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    UPDATE_SOURCE_STATE_PATH.chmod(0o600)
+    return {"status": "succeeded" if all(command.get("success") for command in commands) else "failed", "commands": commands}
+
+
 def _check_appliance_update(payload: dict) -> dict:
     selected = set(payload.get("selected_streams") or [])
     sources = payload.get("sources") or {}
@@ -6994,6 +7153,24 @@ def _check_appliance_update(payload: dict) -> dict:
             command.extend(["--index-url", python_index_url])
         commands.append(_command_payload(command, success_codes={0}))
         checks["python_libraries"] = "pip outdated check completed."
+    if "powershell_modules" in selected:
+        pwsh = _command_path("pwsh") or "pwsh"
+        default_repository = str(sources.get("powershell_repository_name") or "").strip()
+        module_checks: list[dict] = []
+        for module in payload.get("powershell_modules") or []:
+            name = str(module.get("name") or "").strip()
+            target = str(module.get("target_version") or "").strip()
+            repository = str(module.get("repository_name") or default_repository).strip()
+            script = (
+                '$ErrorActionPreference = "Stop"; '
+                f"$module = Find-Module -Name {_powershell_literal(name)} -Repository {_powershell_literal(repository)}"
+                + (f" -RequiredVersion {_powershell_literal(target)}" if target else "")
+                + "; $module | Select-Object Name,Version,Repository | ConvertTo-Json -Compress"
+            )
+            command = _command_payload([pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", _powershell_encoded_command(script)])
+            commands.append(command)
+            module_checks.append({"name": name, "repository": repository, "target_version": target, "success": command["success"]})
+        checks["powershell_modules"] = module_checks
     if "labfoundry_wheel" in selected:
         manifest = _download_labfoundry_update_manifest(str(sources.get("labfoundry_manifest_url") or ""))
         checks["labfoundry_wheel"] = {
@@ -7009,7 +7186,12 @@ def _apply_python_libraries(payload: dict) -> list[dict]:
     sources = payload.get("sources") or {}
     requirements = [str(item).strip() for item in payload.get("python_requirements", []) if str(item).strip()]
     python = _appliance_update_python()
-    commands = [_command_payload([python, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])]
+    bootstrap_command = [python, "-m", "pip", "install", "--upgrade"]
+    python_index_url = str(sources.get("python_index_url") or "").strip()
+    if python_index_url:
+        bootstrap_command.extend(["--index-url", python_index_url])
+    bootstrap_command.extend(["pip", "setuptools", "wheel"])
+    commands = [_command_payload(bootstrap_command)]
     if requirements:
         command = [python, "-m", "pip", "install", "--upgrade"]
         python_index_url = str(sources.get("python_index_url") or "").strip()
@@ -7018,6 +7200,29 @@ def _apply_python_libraries(payload: dict) -> list[dict]:
         command.extend(requirements)
         commands.append(_command_payload(command))
     _restore_labfoundry_venv_permissions()
+    return commands
+
+
+def _apply_powershell_modules(payload: dict) -> list[dict]:
+    sources = payload.get("sources") or {}
+    default_repository = str(sources.get("powershell_repository_name") or "").strip()
+    pwsh = _command_path("pwsh") or "pwsh"
+    commands: list[dict] = []
+    for module in payload.get("powershell_modules") or []:
+        name = str(module.get("name") or "").strip()
+        target = str(module.get("target_version") or "").strip()
+        policy = str(module.get("policy") or "pinned")
+        repository = str(module.get("repository_name") or default_repository).strip()
+        version_argument = f" -RequiredVersion {_powershell_literal(target)}" if policy == "pinned" and target else ""
+        script = (
+            '$ErrorActionPreference = "Stop"; '
+            f"Install-Module -Name {_powershell_literal(name)} -Repository {_powershell_literal(repository)}"
+            f"{version_argument} -Scope AllUsers -Force -AllowClobber -AcceptLicense -Confirm:$false; "
+            f"$module = Get-Module -Name {_powershell_literal(name)} -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1; "
+            "if (-not $module) { throw 'Installed module could not be found' }; Import-Module $module.Path -Force; "
+            "$module | Select-Object Name,Version,Path | ConvertTo-Json -Compress"
+        )
+        commands.append(_command_payload([pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", _powershell_encoded_command(script)]))
     return commands
 
 
@@ -7047,7 +7252,6 @@ def _apply_appliance_update(payload: dict) -> dict:
     if "photon_os" in selected:
         tdnf = _command_path("tdnf") or "tdnf"
         commands.append(_command_payload([tdnf, "-y", "makecache"]))
-        commands.append(_command_payload([tdnf, "-y", "install", "openldap", "openldap-servers"]))
         commands.append(_command_payload([tdnf, "-y", "update"]))
         attempted["photon_os"] = "Photon OS packages updated from configured repositories."
         reboot_recommended = True
@@ -7055,6 +7259,10 @@ def _apply_appliance_update(payload: dict) -> dict:
         python_commands = _apply_python_libraries(payload)
         commands.extend(python_commands)
         attempted["python_libraries"] = "LabFoundry virtualenv Python libraries updated."
+    if "powershell_modules" in selected:
+        powershell_commands = _apply_powershell_modules(payload)
+        commands.extend(powershell_commands)
+        attempted["powershell_modules"] = "Managed PowerShell modules updated from the configured repository."
     if "labfoundry_wheel" in selected:
         manifest, wheel_commands = _apply_labfoundry_wheel(payload)
         commands.extend(wheel_commands)
@@ -7082,20 +7290,21 @@ def _restart_labfoundry_service_after_update() -> int:
         print("systemctl command not found", file=sys.stderr)
         return 127
     systemd_run = shutil.which("systemd-run")
-    if systemd_run is not None:
-        result = _run(
-            [
-                systemd_run,
-                "--quiet",
-                "--on-active=2",
-                "--unit=labfoundry-update-restart",
-                systemctl,
-                "restart",
-                "labfoundry.service",
-            ]
-        )
-    else:
-        result = _run([systemctl, "restart", "labfoundry.service"])
+    if systemd_run is None:
+        print("systemd-run is required to schedule the delayed LabFoundry service restart", file=sys.stderr)
+        return 127
+    result = _run(
+        [
+            systemd_run,
+            "--quiet",
+            "--on-active=3",
+            "--unit=labfoundry-update-restart",
+            systemctl,
+            "restart",
+            "labfoundry.service",
+            "labfoundry-worker.service",
+        ]
+    )
     print(result.stdout, end="")
     print(result.stderr, end="", file=sys.stderr)
     return result.returncode
@@ -7224,6 +7433,82 @@ def _handle_console(action: str, args: list[str]) -> int:
     return 2
 
 
+def _handle_automation(action: str, args: list[str]) -> int:
+    if action != "run" or len(args) < 3:
+        print("automation run requires script path, interpreter, timeout seconds, and optional arguments after --", file=sys.stderr)
+        return 2
+    script_value, interpreter, timeout_value, *remaining = args
+    if remaining and remaining[0] != "--":
+        print("automation script arguments must follow --", file=sys.stderr)
+        return 2
+    script_arguments = remaining[1:] if remaining else []
+    try:
+        script_path = Path(script_value).resolve(strict=True)
+        script_root = AUTOMATION_SCRIPT_DIR.resolve(strict=True)
+        if not script_path.is_relative_to(script_root) or not script_path.is_file():
+            raise ValueError(f"automation script must be a regular file under {AUTOMATION_SCRIPT_DIR}")
+        timeout_seconds = int(timeout_value)
+        if timeout_seconds < 1 or timeout_seconds > 86400:
+            raise ValueError("automation timeout must be between 1 and 86400 seconds")
+        command_name = {"bash": "bash", "python": "python3", "powershell": "pwsh"}.get(interpreter)
+        if command_name is None:
+            raise ValueError("automation interpreter must be bash, python, or powershell")
+        executable = _command_path(command_name)
+        systemd_run = shutil.which("systemd-run")
+        if executable is None:
+            raise ValueError(f"automation interpreter is not installed: {command_name}")
+        if systemd_run is None:
+            raise ValueError("systemd-run is required for managed automation scripts")
+        account = pwd.getpwnam(AUTOMATION_USER)
+    except (KeyError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    AUTOMATION_RUN_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(AUTOMATION_RUN_DIR, 0o750)
+    _chown_path(script_path, int(account.pw_uid), int(account.pw_gid))
+    os.chmod(script_path, 0o400)
+    unit_suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    run_home = AUTOMATION_RUN_DIR / unit_suffix
+    writable_directories = [run_home, run_home / ".cache", run_home / ".config", run_home / ".local", run_home / ".local" / "share"]
+    for directory in writable_directories:
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+        _chown_path(directory, int(account.pw_uid), int(account.pw_gid))
+    try:
+        result = _run(
+            [
+                systemd_run,
+                "--quiet",
+                "--wait",
+                "--pipe",
+                "--collect",
+                "--service-type=exec",
+                f"--unit=labfoundry-automation-{unit_suffix}",
+                f"--uid={AUTOMATION_USER}",
+                f"--setenv=HOME={run_home}",
+                f"--setenv=XDG_CACHE_HOME={run_home / '.cache'}",
+                f"--setenv=XDG_CONFIG_HOME={run_home / '.config'}",
+                f"--setenv=XDG_DATA_HOME={run_home / '.local' / 'share'}",
+                "--property=NoNewPrivileges=yes",
+                "--property=PrivateTmp=yes",
+                "--property=ProtectSystem=strict",
+                "--property=ProtectHome=yes",
+                f"--property=ReadWritePaths={run_home}",
+                f"--property=WorkingDirectory={run_home}",
+                f"--property=TimeoutStartSec={timeout_seconds}",
+                executable,
+                str(script_path),
+                *script_arguments,
+            ]
+        )
+    finally:
+        shutil.rmtree(run_home, ignore_errors=True)
+    print(result.stdout[-8000:], end="")
+    print(result.stderr[-8000:], end="", file=sys.stderr)
+    return result.returncode
+
+
 def _schedule_appliance_power(action: str) -> int:
     systemctl = _command_path("systemctl")
     systemd_run = shutil.which("systemd-run")
@@ -7261,7 +7546,7 @@ def _handle_appliance_update(action: str, args: list[str]) -> int:
     try:
         config_path = _validate_appliance_update_config_path(args[0])
         payload = _load_appliance_update_config(config_path)
-        errors = _appliance_update_config_errors(payload)
+        errors = _appliance_update_config_errors(payload, require_streams=action != "sync-sources")
     except (IndexError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -7290,6 +7575,14 @@ def _handle_appliance_update(action: str, args: list[str]) -> int:
         if any(not command.get("success") for command in result.get("commands", [])):
             return 1
         return 0
+    if action == "sync-sources":
+        try:
+            result = _sync_appliance_update_sources(payload)
+        except Exception as exc:  # noqa: BLE001 - helper reports source configuration failures as stderr.
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get("status") == "succeeded" else 1
     if action == "restart-service":
         return _restart_labfoundry_service_after_update()
 
@@ -7375,6 +7668,8 @@ def main(argv: list[str]) -> int:
         return _handle_public_services(action, normalized_args)
     if group == "appliance-update":
         return _handle_appliance_update(action, normalized_args)
+    if group == "automation":
+        return _handle_automation(action, normalized_args)
     if group == "appliance-power":
         return _handle_appliance_power(action, normalized_args)
     if group == "console":

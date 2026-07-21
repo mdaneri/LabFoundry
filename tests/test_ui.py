@@ -546,6 +546,26 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
                 error="The component reported an apply failure.",
             )
         )
+        db.add(
+            Job(
+                id="job_taskgrid_leaf",
+                type="appliance-update",
+                status=JobStatus.SUCCEEDED.value,
+                created_by="admin",
+                progress_percent=100,
+                result=json.dumps(
+                    {
+                        "state": "succeeded",
+                        "stdout": (
+                            '{"action":"run","args":["script.ps1"],"dry_run":false,'
+                            '"group":"automation","helper":"labfoundry-helper","timestamp":"2026-07-21T18:50:14Z"}\n'
+                            "PowerShell output"
+                        ),
+                        "stderr": "",
+                    }
+                ),
+            )
+        )
         db.commit()
 
     page = client.get("/tasks?job_id=job_taskgrid001")
@@ -562,26 +582,40 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert 'class="language-json" data-task-detail-result' in page.text
     assert "data-task-detail-errors" in page.text
     assert "data-task-detail-errors-content" in page.text
+    assert "data-task-detail-console" in page.text
+    assert "data-task-detail-console-content" in page.text
+    assert "data-task-detail-console-error-content" in page.text
     assert 'class="terminal-note task-log-preview"' in page.text
     assert 'class="language-labfoundry-log" data-task-log-content' in page.text
     assert "task-grid-shell" in page.text
+    assert "data-task-component-options" in page.text
     assert 'data-selected-task-id="job_taskgrid001"' in page.text
     plain_page = client.get("/tasks")
     assert plain_page.status_code == 200
     assert 'data-selected-task-id=""' in plain_page.text
     app_js = Path("labfoundry/app/static/app.js").read_text()
-    assert 'paginationMode: "local"' in app_js
     tasks_table_js = app_js.split("function initializeTasksPage", 1)[1].split("function updateVcfDepotSummary", 1)[0]
+    assert 'paginationMode: "remote"' in tasks_table_js
     assert "paginationSizeSelector" not in tasks_table_js
     assert 'labFoundryTasksTable.on("rowDblClick", (_event, row) => openTaskDetail(row.getData()))' in app_js
     assert "rowContextMenu" in tasks_table_js
     assert 'label: "Details"' in tasks_table_js
     assert 'label: "Log"' in tasks_table_js
     assert 'label: "Cancel task"' in tasks_table_js
+    assert 'filterMode: "remote"' in tasks_table_js
+    assert "ajaxRequestFunc: requestTasksTableData" in tasks_table_js
+    assert 'query.set("filters", JSON.stringify(params.filters || params.filter || []));' in app_js
+    assert 'headerFilterPlaceholder: "Choose or type custom"' in tasks_table_js
+    assert "values: labFoundryTaskComponentOptions" in tasks_table_js
+    assert "autocomplete: true" in tasks_table_js
+    assert "freetext: true" in tasks_table_js
+    assert 'title: "State"' in tasks_table_js
+    assert 'pending: "Pending", running: "Running", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled"' in tasks_table_js
     assert 'title: "Actions"' not in tasks_table_js
     assert "data-task-row-menu-toggle" not in app_js
     app_css = Path("labfoundry/app/static/app.css").read_text()
-    assert ".tasks-panel {\n  display: grid;\n  gap: 14px;\n  grid-template-rows: auto minmax(0, 1fr);" in app_css
+    assert ".tasks-panel {\n  display: grid;\n  gap: 14px;\n  grid-template-rows: auto minmax(0, 1fr);\n  min-width: 0;\n  max-width: 100%;" in app_css
+    assert ".task-grid-shell {\n  width: 100%;\n  max-width: 100%;" in app_css
     assert ".task-detail-facts {\n  grid-template-columns: repeat(2, minmax(0, 1fr));" in app_css
     assert ".task-detail-facts div {\n  grid-template-columns: 92px minmax(0, 1fr);" in app_css
     assert ".task-row-menu" not in app_css
@@ -599,8 +633,41 @@ def test_tasks_page_lists_redacts_logs_and_cancels(client):
     assert selected["result"]["api_password"] == "[redacted]"
     failed_step = selected["_children"][0]
     assert failed_step["error_messages"][0] == "LDAP validation failed without exposing bind_password=[redacted]"
+    assert failed_step["status_pill"] == "error"
     assert "DirectorySecret1!" not in json.dumps(failed_step)
     assert payload["active_count"] == 1
+    assert payload["filtered_count"] == 2
+    assert payload["total_count"] == 2
+    leaf = next(row for row in payload["tasks"] if row["id"] == "job_taskgrid_leaf")
+    assert "_children" not in leaf
+    assert leaf["console_output"] == "PowerShell output"
+    assert leaf["console_stdout"] == "PowerShell output"
+    assert leaf["console_stderr"] == ""
+    assert '"action":"run"' in leaf["result"]["stdout"]
+
+    component_filter = client.get(
+        "/tasks/status",
+        params={"filters": json.dumps([{"field": "id", "type": "like", "value": "Managed LDAP"}])},
+    )
+    assert component_filter.status_code == 200
+    component_payload = component_filter.json()
+    assert [row["id"] for row in component_payload["tasks"]] == ["job_taskgrid001"]
+    assert component_payload["filtered_count"] == 1
+    assert component_payload["total_count"] == 2
+
+    status_filter = client.get(
+        "/tasks/status",
+        params={"filters": json.dumps([{"field": "status", "type": "=", "value": "succeeded"}])},
+    )
+    assert status_filter.status_code == 200
+    assert [row["id"] for row in status_filter.json()["tasks"]] == ["job_taskgrid_leaf"]
+
+    invalid_filter = client.get(
+        "/tasks/status",
+        params={"filters": json.dumps([{"field": "error", "type": "regex", "value": ".*"}])},
+    )
+    assert invalid_filter.status_code == 400
+    assert "_children" not in failed_step
 
     log_response = client.get("/tasks/job_taskgrid001/log")
     assert log_response.status_code == 200
@@ -684,7 +751,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v125" in service_worker.text
+    assert "labfoundry-pwa-v126" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -696,8 +763,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=ntp-grid-20260719-6" in service_worker.text
-    assert "/static/app.js?v=ntp-grid-20260719-6" in service_worker.text
+    assert "/static/app.css?v=tasks-console-compact-20260721-1" in service_worker.text
+    assert "/static/app.js?v=tasks-state-console-20260721-2" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -706,7 +773,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=ntp-grid-20260719-6" in offline.text
+    assert "/static/app.css?v=tasks-console-compact-20260721-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -722,8 +789,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=ntp-grid-20260719-6" in page.text
-    assert "/static/app.js?v=ntp-grid-20260719-6" in page.text
+    assert "/static/app.css?v=tasks-console-compact-20260721-1" in page.text
+    assert "/static/app.js?v=tasks-state-console-20260721-2" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -8065,7 +8132,7 @@ def test_vcf_offline_depot_accepts_pasted_download_token_and_activation_code(cli
         assert "uploaded-secret-activation-code" not in snapshot
 
 
-def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, monkeypatch):
+def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path):
     import html
     import json
 
@@ -8080,8 +8147,6 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
 
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     make_vcfdt_archive(archive_path)
-    queued: list[tuple[str, int]] = []
-    monkeypatch.setattr("labfoundry.app.ui.queue_vcf_depot_download_job", lambda job_id, profile_id: queued.append((job_id, profile_id)))
     with SessionLocal() as db:
         settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
         settings.tool_archive_path = str(archive_path)
@@ -8161,7 +8226,7 @@ def test_vcf_offline_depot_manual_profile_download_starts_job(client, tmp_path, 
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "vcf-depot-download")).scalar_one()
         profile = db.get(VcfDepotDownloadProfile, profile_id)
-        assert queued == [(job.id, profile_id)]
+        assert json.loads(job.task_config_json or "{}") == {"profile_id": profile_id}
         assert job.status == "pending"
         assert '"profile_name": "vcf-install"' in (job.result or "")
         assert '"dry_run": false' in (job.result or "")
@@ -8303,7 +8368,9 @@ def test_vcf_offline_depot_profile_credentials_block_start_not_apply(client, tmp
         assert db.execute(select(Job).where(Job.type == "vcf-depot-download")).scalar_one_or_none() is None
 
 
-def test_vcf_offline_depot_manual_profile_download_accepts_activation_code_without_token(client, tmp_path, monkeypatch):
+def test_vcf_offline_depot_manual_profile_download_accepts_activation_code_without_token(client, tmp_path):
+    import json
+
     from sqlalchemy import select
 
     from labfoundry.app.database import SessionLocal
@@ -8315,8 +8382,6 @@ def test_vcf_offline_depot_manual_profile_download_accepts_activation_code_witho
 
     archive_path = tmp_path / "vcf-download-tool-9.1.0.test.tar.gz"
     make_vcfdt_archive(archive_path)
-    queued: list[tuple[str, int]] = []
-    monkeypatch.setattr("labfoundry.app.ui.queue_vcf_depot_download_job", lambda job_id, profile_id: queued.append((job_id, profile_id)))
     with SessionLocal() as db:
         settings = db.execute(select(VcfOfflineDepotSettings)).scalar_one()
         settings.tool_archive_path = str(archive_path)
@@ -8358,7 +8423,7 @@ def test_vcf_offline_depot_manual_profile_download_accepts_activation_code_witho
 
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "vcf-depot-download")).scalar_one()
-        assert queued == [(job.id, profile_id)]
+        assert json.loads(job.task_config_json or "{}") == {"profile_id": profile_id}
         assert "configuration get --software-depot-id" not in (job.result or "")
         assert "--depot-download-activation-code-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/activation-code.txt" in (job.result or "")
         assert "--depot-download-token-file=/var/lib/labfoundry/vcfDownloadTool/active-tool/secrets/download-token.txt" not in (job.result or "")
@@ -9813,7 +9878,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "ntp-grid-20260719-6" in page.text
+    assert "tasks-console-compact-20260721-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

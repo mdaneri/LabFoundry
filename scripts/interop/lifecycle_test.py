@@ -1848,7 +1848,10 @@ def appliance_health(client: HttpClient, args: argparse.Namespace) -> dict[str, 
     ssh = ssh_command(
         args.appliance_ssh_host,
         args,
-        "systemctl is-active labfoundry && curl -fsS http://127.0.0.1:8000/openapi.json >/dev/null",
+        "systemctl is-active labfoundry && "
+        "systemctl is-active labfoundry-worker && "
+        "systemctl is-enabled labfoundry-worker && "
+        "curl -fsS http://127.0.0.1:8000/openapi.json >/dev/null",
         role="appliance",
     )
     require_success(ssh, "appliance health SSH probe")

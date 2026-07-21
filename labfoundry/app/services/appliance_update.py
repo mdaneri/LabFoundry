@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import ast
+import configparser
 import hashlib
 import json
 import os
 import platform
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from functools import lru_cache
 from importlib import metadata as importlib_metadata
@@ -20,17 +23,22 @@ from labfoundry.app.models import Job
 APPLIANCE_UPDATE_SETTINGS_KEY = "appliance_update.settings.v1"
 APPLIANCE_UPDATE_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/appliance-update/labfoundry-update.json"
 APPLIANCE_UPDATE_INFO_PATH = "/etc/labfoundry/update-info"
-DEFAULT_LABFOUNDRY_MANIFEST_URL = "http://localhost:18080/update/manifest.json"
-UPDATE_STREAMS = ("photon_os", "python_libraries", "labfoundry_wheel")
+PHOTON_REPOSITORY_DIR = Path("/etc/yum.repos.d")
+PIP_BUILTIN_INDEX_URL = "https://pypi.org/simple"
+DEFAULT_LABFOUNDRY_MANIFEST_URL = ""
+UPDATE_STREAMS = ("photon_os", "python_libraries", "powershell_modules", "labfoundry_wheel")
 UPDATE_STREAM_LABELS = {
     "photon_os": "Photon OS",
     "python_libraries": "Python Libraries",
+    "powershell_modules": "PowerShell Modules",
     "labfoundry_wheel": "LabFoundry Wheel",
 }
 DEFAULT_UPDATE_SETTINGS = {
     "photon_source": "configured Photon repositories",
     "python_index_url": "",
     "labfoundry_manifest_url": DEFAULT_LABFOUNDRY_MANIFEST_URL,
+    "powershell_repository_name": "",
+    "powershell_repository_url": "",
 }
 DIRECT_PYTHON_REQUIREMENTS = [
     "argon2-cffi>=23.1.0",
@@ -104,7 +112,7 @@ def version_with_git(base_version: str, git_commit: str) -> str:
     return f"{normalized}+g{short}" if short else normalized
 
 
-def update_settings_from_json(raw_value: str) -> dict[str, str]:
+def update_settings_from_json(raw_value: str) -> dict[str, Any]:
     settings = dict(DEFAULT_UPDATE_SETTINGS)
     if raw_value:
         try:
@@ -119,12 +127,10 @@ def update_settings_from_json(raw_value: str) -> dict[str, str]:
     return settings
 
 
-def update_settings_to_json(settings: dict[str, str]) -> str:
+def update_settings_to_json(settings: dict[str, Any]) -> str:
     normalized = dict(DEFAULT_UPDATE_SETTINGS)
     for key in normalized:
         normalized[key] = str(settings.get(key) or "").strip()
-    if not normalized["labfoundry_manifest_url"]:
-        normalized["labfoundry_manifest_url"] = DEFAULT_LABFOUNDRY_MANIFEST_URL
     return json.dumps(normalized, indent=2, sort_keys=True)
 
 
@@ -139,10 +145,11 @@ def validate_update_url(value: str, label: str) -> list[str]:
     return []
 
 
-def validate_update_settings(settings: dict[str, str]) -> list[str]:
+def validate_update_settings(settings: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     errors.extend(validate_update_url(settings.get("python_index_url", ""), "Python index URL"))
     errors.extend(validate_update_url(settings.get("labfoundry_manifest_url", ""), "LabFoundry manifest URL"))
+    errors.extend(validate_update_url(settings.get("powershell_repository_url", ""), "PowerShell repository URL"))
     return errors
 
 
@@ -161,7 +168,7 @@ def redact_url_userinfo(value: str) -> str:
     return parsed._replace(netloc=f"[redacted]@{host}").geturl()
 
 
-def render_update_manifest(*, selected_streams: list[str], settings: dict[str, str], actor: str) -> str:
+def render_update_manifest(*, selected_streams: list[str], settings: dict[str, Any], actor: str) -> str:
     payload = {
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -171,7 +178,11 @@ def render_update_manifest(*, selected_streams: list[str], settings: dict[str, s
             "photon_os": settings.get("photon_source") or DEFAULT_UPDATE_SETTINGS["photon_source"],
             "python_index_url": redact_url_userinfo(settings.get("python_index_url", "")),
             "labfoundry_manifest_url": redact_url_userinfo(settings.get("labfoundry_manifest_url") or DEFAULT_LABFOUNDRY_MANIFEST_URL),
+            "powershell_repository_name": str(settings.get("powershell_repository_name") or ""),
+            "powershell_repository_url": redact_url_userinfo(str(settings.get("powershell_repository_url") or "")),
         },
+        "powershell_modules": settings.get("powershell_modules") if isinstance(settings.get("powershell_modules"), list) else [],
+        "source_definitions": settings.get("source_definitions") if isinstance(settings.get("source_definitions"), list) else [],
         "python_requirements": DIRECT_PYTHON_REQUIREMENTS,
         "current": current_version_info(),
         "policy": {
@@ -207,3 +218,89 @@ def read_appliance_file(path_value: str) -> dict[str, Any]:
     except OSError as exc:
         return {"path": path_value, "available": False, "content": "", "error": str(exc)}
     return {"path": path_value, "available": True, "content": text, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+
+def photon_repository_details(repository_dir: Path | None = None) -> list[dict[str, str]]:
+    directory = repository_dir or PHOTON_REPOSITORY_DIR
+    rows: list[dict[str, str]] = []
+    try:
+        paths = sorted(directory.glob("*.repo"))
+    except OSError:
+        paths = []
+    for path in paths:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            parser.read(path, encoding="utf-8")
+        except (OSError, configparser.Error):
+            continue
+        for section in parser.sections():
+            enabled = parser.get(section, "enabled", fallback="1").strip().lower()
+            if enabled in {"0", "false", "no", "off"}:
+                continue
+            location = ""
+            location_type = ""
+            for option in ("baseurl", "mirrorlist", "metalink"):
+                candidate = " ".join(parser.get(section, option, fallback="").split())
+                if candidate:
+                    location = candidate
+                    location_type = option
+                    break
+            rows.append(
+                {
+                    "id": section,
+                    "name": parser.get(section, "name", fallback=section).strip() or section,
+                    "location": location,
+                    "location_type": location_type,
+                    "file": path.name,
+                }
+            )
+    return rows
+
+
+def photon_repository_summary(repository_dir: Path | None = None) -> str:
+    rows = photon_repository_details(repository_dir)
+    if not rows:
+        return f"No enabled repositories found in {repository_dir or PHOTON_REPOSITORY_DIR}"
+    return "\n".join(
+        f"{row['id']} | {row['name']} | {row['location_type']}={row['location']}"
+        if row["location"]
+        else f"{row['id']} | {row['name']} | {row['file']}"
+        for row in rows
+    )
+
+
+@lru_cache(maxsize=1)
+def effective_pip_index() -> dict[str, str]:
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "config", "list"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"url": PIP_BUILTIN_INDEX_URL, "source": "pip built-in default", "error": str(exc)}
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, separator, raw_value = line.partition("=")
+        if not separator:
+            continue
+        value = raw_value.strip()
+        try:
+            parsed_value = ast.literal_eval(value)
+        except (SyntaxError, ValueError):
+            parsed_value = value.strip("'\"")
+        values[key.strip().lower()] = str(parsed_value).strip()
+    for key, source in (
+        (":env:.index-url", "pip environment"),
+        ("global.index-url", "pip global configuration"),
+        ("install.index-url", "pip install configuration"),
+    ):
+        if values.get(key):
+            return {"url": values[key], "source": source, "error": "" if result.returncode == 0 else result.stderr.strip()}
+    return {
+        "url": PIP_BUILTIN_INDEX_URL,
+        "source": "pip built-in default",
+        "error": "" if result.returncode == 0 else result.stderr.strip(),
+    }

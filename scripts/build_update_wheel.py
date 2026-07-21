@@ -90,8 +90,10 @@ def build_wheel(source: Path, dist: Path) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build a LabFoundry update wheel and manifest.")
-    parser.add_argument("-o", "--output", default="dist/update", help="Output directory for wheel and manifest.")
+    parser = argparse.ArgumentParser(description="Build a repository-style LabFoundry update wheel and channel manifests.")
+    parser.add_argument("-o", "--output", default="dist/update", help="Repository output directory.")
+    parser.add_argument("--channel", choices=("stable", "preview", "development"), default="stable", help="Release channel to update.")
+    parser.add_argument("--clean", action="store_true", help="Remove the existing repository tree before publishing this channel.")
     args = parser.parse_args()
 
     pyproject_text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -99,15 +101,20 @@ def main() -> int:
     built_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     version = version_with_git(project_version(pyproject_text), git_commit)
     output = (ROOT / args.output).resolve()
-    if output.exists():
+    if output.exists() and args.clean:
         shutil.rmtree(output)
-    output.mkdir(parents=True)
+    output.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="labfoundry-update-build-") as temp_root:
+        temp_path = Path(temp_root)
         source = Path(temp_root) / "src"
         copy_source(source)
         patch_version(source, version, git_commit, built_at)
-        wheel = build_wheel(source, output)
+        built_wheel = build_wheel(source, temp_path / "wheel")
+        packages = output / "packages"
+        packages.mkdir(parents=True, exist_ok=True)
+        wheel = packages / built_wheel.name
+        shutil.copy2(built_wheel, wheel)
 
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
     manifest = {
@@ -117,12 +124,34 @@ def main() -> int:
         "git_commit": git_commit,
         "built_at": built_at,
         "requires_python": ">=3.12",
-        "wheel": wheel.name,
+        "wheel": f"../../packages/{wheel.name}",
         "sha256": digest,
     }
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    channel_dir = output / "channels" / args.channel
+    channel_dir.mkdir(parents=True, exist_ok=True)
+    channel_manifest = channel_dir / "manifest.json"
+    channel_manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    compatibility_manifest = {**manifest, "wheel": f"packages/{wheel.name}"}
+    (output / "manifest.json").write_text(json.dumps(compatibility_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    index_path = output / "index.json"
+    try:
+        existing_index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
+    except json.JSONDecodeError:
+        existing_index = {}
+    channels = existing_index.get("channels") if isinstance(existing_index, dict) else {}
+    channels = dict(channels) if isinstance(channels, dict) else {}
+    channels[args.channel] = f"channels/{args.channel}/manifest.json"
+    repository_index = {
+        "schema_version": 1,
+        "name": "labfoundry",
+        "channels": dict(sorted(channels.items())),
+        "generated_at": built_at,
+    }
+    index_path.write_text(json.dumps(repository_index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"built {wheel}")
-    print(f"manifest {output / 'manifest.json'}")
+    print(f"channel manifest {channel_manifest}")
+    print(f"repository index {index_path}")
+    print(f"compatibility manifest {output / 'manifest.json'}")
     return 0
 
 
