@@ -14,7 +14,13 @@
       <div>
         <h2>Update Sources</h2>
       </div>
-      <span class="status-pill {{ 'warn' if system_adapter_dry_run else 'good' }}">{{ "dry-run" if system_adapter_dry_run else "real" }}</span>
+      <div class="appliance-update-source-actions">
+        <form method="post" action="/appliance-update/source-sync">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <span class="field-label"><button class="button secondary compact" type="submit">Synchronize repositories</button><button class="help-icon" type="button" data-help="Writes the autosaved desired repository state to the appliance package clients through an audited maintenance task. LabFoundry validates enabled sources before updating its owned tdnf, pip, and PowerShell configuration.">i</button></span>
+        </form>
+        <span class="status-pill {{ 'warn' if system_adapter_dry_run else 'good' }}">{{ "dry-run" if system_adapter_dry_run else "real" }}</span>
+      </div>
     </div>
 
     <p class="muted">Configure package repositories as desired state, then synchronize them with the appliance package clients through an audited runtime-maintenance task. LabFoundry release repositories expose channel manifests under <code>channels/&lt;channel&gt;/manifest.json</code>.</p>
@@ -67,11 +73,6 @@
         </details>
       {% endfor %}
     </div>
-    <form method="post" action="/appliance-update/source-sync" class="apply-change-set-actions">
-      <input type="hidden" name="csrf" value="{{ csrf_token }}">
-      <span class="field-label"><button class="button secondary" type="submit">Synchronize repositories</button><button class="help-icon" type="button" data-help="Queues an audited helper task that validates enabled sources and synchronizes LabFoundry-owned tdnf, pip, and PowerShell repository configuration. Source editing itself does not mutate package clients.">i</button></span>
-    </form>
-
     <details id="managed-packages" class="apply-unit-card config-diff update-source-details managed-package-details">
       <summary>
         <span><strong>Managed PowerShell Modules</strong> · one tab per module</span>

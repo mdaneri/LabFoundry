@@ -382,6 +382,10 @@ def test_software_source_and_managed_module_lifecycle(client):
     assert 'data-tab-target="appliance-update-streams"' in grouped_page.text
     assert grouped_page.text.index('data-tab-target="appliance-update-streams"') < grouped_page.text.index('data-tab-target="appliance-update-sources"')
     assert "Synchronize repositories" in grouped_page.text
+    assert grouped_page.text.count('class="appliance-update-source-actions"') == 1
+    source_actions = grouped_page.text.index('class="appliance-update-source-actions"')
+    source_list = grouped_page.text.index('class="apply-unit-list"', source_actions)
+    assert source_actions < source_list
     assert 'aria-label="Managed PowerShell modules"' in grouped_page.text
     assert 'data-tab-target="powershell-module-new"' in grouped_page.text
     assert "VCF.PowerCLI" in grouped_page.text

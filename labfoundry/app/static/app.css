@@ -4133,6 +4133,19 @@ textarea {
   flex-wrap: wrap;
 }
 
+.appliance-update-source-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.appliance-update-source-actions form,
+.appliance-update-source-actions .field-label {
+  margin: 0;
+}
+
 .apply-unit-card {
   gap: 14px;
   min-width: 0;

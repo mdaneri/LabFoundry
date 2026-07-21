@@ -42,7 +42,9 @@ host package clients.
 
 Source editors autosave individual definitions, but synchronization remains an
 explicit audited runtime-maintenance action because it can write package-client
-configuration. The UI reports the effective built-in Photon repositories and
+configuration. The compact synchronization action stays in the **Update
+Sources** header rather than interrupting the repository and managed-module
+editors. The UI reports the effective built-in Photon repositories and
 pip index discovered from the appliance rather than substituting explanatory
 placeholder strings. Repository fields use aligned compact controls, and the
 ecosystem/repository tabs preserve the active editing context after changes.
