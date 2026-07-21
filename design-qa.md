@@ -80,3 +80,41 @@ Findings:
 - Managed LDAP preserves organization, Users/Groups mode, and per-organization grid offsets across reloads using browser-local page state.
 
 Managed LDAP web follow-up final result: passed
+
+## Managed script revision comparison follow-up
+
+Reference and implementation evidence:
+
+- Source reference: `C:\Users\m_dan\AppData\Local\Temp\codex-clipboard-743a6bab-f5ec-4abe-84ff-997b9b1a779a.png`.
+- Live implementation: `test-results/design-qa/automation-revision-diff-light-final.png`.
+- Combined comparison input: `test-results/design-qa/automation-revision-diff-comparison.png`.
+- Browser viewport: 2446 x 1562 pixels. Reference: 2048 x 436 pixels. The comparison normalizes both surfaces to 2446 pixels wide and crops the implementation to the active modal.
+- State: Automation > Managed Scripts, `fdd` revision comparison open with r1 as the base and r2 as the comparison.
+
+Findings:
+
+- No actionable P0, P1, or P2 visual differences remain.
+- Typography: the viewer uses the LabFoundry sans hierarchy for controls and metadata, with a compact monospace source surface and interpreter-specific Prism highlighting.
+- Spacing and layout: the modal uses nearly the full workspace width, keeps paired source rows and line numbers aligned, and stays content-sized for short revisions while allowing bounded scrolling for long revisions.
+- Colors and tokens: the shell uses the standard light LabFoundry surface, border, blue header, and muted metadata tokens. Removed and added rows use soft red and green fills with stronger edge markers.
+- Copy and content: operators can choose any base and comparison revision. Each option and heading includes the immutable revision number, creation date, interpreter, and enabled state.
+- Image and asset quality: this workflow contains no decorative raster assets. Native browser text, borders, controls, and Prism tokens remain sharp at the captured viewport.
+
+Comparison history:
+
+1. P1: the first implementation used a narrow generic modal with large unused vertical space. Fix: rebuild it as one shared, near-full-width aligned diff surface with compact content height.
+2. P1: the reference-derived dark shell conflicted with the established LabFoundry application style. Fix: retain the diff structure but move the modal shell, toolbar, revision headers, and unchanged rows to the product's light surface system.
+3. P2: the original comparison was fixed to the latest two revisions and omitted creation dates. Fix: add dated base/comparison selectors populated from all immutable revisions and refresh the Prism diff in place.
+4. P2: switching to the initial hash-selected tab could request a Tabulator redraw before table initialization. Fix: gate tab redraws on the `tableBuilt` event; the final reload and modal-open interaction produced no browser warnings or errors.
+
+Primary interactions tested:
+
+- Revision cell opens the comparison viewer.
+- Base and comparison selectors expose every revision with date and state and update the selected comparison without mutating history.
+- Close control remains keyboard- and pointer-accessible.
+- Diff rows preserve aligned line numbers, additions, removals, empty counterparts, and collapsed unchanged runs.
+- Live reload and modal open completed without browser console warnings or errors.
+
+Managed script revision comparison final result: passed
+
+final result: passed

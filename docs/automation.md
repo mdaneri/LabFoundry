@@ -51,8 +51,11 @@ full-window CodeMirror modal, which also imports `.sh`, `.bash`, `.py`, `.ps1`,
 or `.txt` files up to 1 MiB. An edit that changes revision-owned fields creates
 a new disabled immutable revision; it never rewrites historical source. When a
 script has at least two revisions, selecting its revision cell opens a
-two-column Prism-highlighted comparison of the latest source and the revision
-immediately before it.
+near-full-window, two-column comparison. Base and comparison selectors list
+every immutable revision with its creation date and state, so operators can
+compare any two revisions. The viewer aligns corresponding rows, shows original
+line numbers, collapses long unchanged runs, colors removals and additions, and
+uses a Prism grammar selected from the script interpreter.
 
 **Run latest revision** opens a confirmation modal instead of immediately
 creating a task. The modal names the exact revision and interpreter and accepts

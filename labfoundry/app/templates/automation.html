@@ -172,23 +172,31 @@
     </form>
   </dialog>
   <dialog id="automation-script-diff-modal" class="confirm-modal wide-modal automation-script-diff-modal" aria-labelledby="automation-script-diff-modal-title">
-    <div class="confirm-modal-panel form-stack">
-      <div class="confirm-modal-body form-stack">
-        <p class="kicker">Managed script revisions</p>
-        <h2 id="automation-script-diff-modal-title">Compare revisions</h2>
-        <p class="muted" data-automation-script-diff-description>Select a revision cell to compare the latest immutable source with the revision immediately before it.</p>
-        <div class="automation-revision-diff-grid">
-          <section>
-            <div class="automation-revision-diff-heading"><h3 data-automation-script-diff-previous-title>Previous revision</h3><span class="status-pill muted" data-automation-script-diff-previous-meta></span></div>
-            <div class="terminal-note automation-revision-diff-preview"><code class="language-diff" data-automation-script-diff-previous></code></div>
-          </section>
-          <section>
-            <div class="automation-revision-diff-heading"><h3 data-automation-script-diff-current-title>Current revision</h3><span class="status-pill muted" data-automation-script-diff-current-meta></span></div>
-            <div class="terminal-note automation-revision-diff-preview"><code class="language-diff" data-automation-script-diff-current></code></div>
-          </section>
+    <div class="confirm-modal-panel automation-revision-diff-shell">
+      <header class="automation-revision-diff-toolbar">
+        <div>
+          <p class="kicker">Managed script revisions</p>
+          <h2 id="automation-script-diff-modal-title">Compare revisions</h2>
+        </div>
+        <button class="button secondary compact" type="button" data-automation-script-diff-close>Close</button>
+      </header>
+      <div class="automation-revision-diff-filebar">
+        <div class="automation-revision-diff-file-identity">
+          <strong data-automation-script-diff-name>Managed script</strong>
+          <span class="automation-diff-stat added" data-automation-script-diff-added>+0</span>
+          <span class="automation-diff-stat removed" data-automation-script-diff-removed>-0</span>
+        </div>
+        <div class="automation-revision-diff-selectors">
+          <label><span class="field-label"><span>Base revision</span><button class="help-icon" type="button" data-help="Chooses the immutable revision shown on the left side of the comparison. The revision date is the time that source revision was created.">i</button></span><select data-automation-script-diff-previous></select></label>
+          <label><span class="field-label"><span>Compare revision</span><button class="help-icon" type="button" data-help="Chooses the immutable revision shown on the right side. Changing either selector refreshes the highlighted diff without modifying revision history.">i</button></span><select data-automation-script-diff-current></select></label>
         </div>
       </div>
-      <div class="confirm-modal-actions"><button class="button ghost" type="button" data-automation-script-diff-close>Close</button></div>
+      <div class="automation-revision-diff-headings" aria-hidden="true">
+        <div><strong data-automation-script-diff-previous-title>Previous revision</strong><span data-automation-script-diff-previous-meta></span></div>
+        <div><strong data-automation-script-diff-current-title>Current revision</strong><span data-automation-script-diff-current-meta></span></div>
+      </div>
+      <div class="automation-revision-diff-table" data-automation-script-diff-table role="table" aria-label="Side-by-side managed script revision diff"></div>
+      <p class="automation-revision-diff-summary" data-automation-script-diff-description>Select a revision cell to compare the latest immutable source with the revision immediately before it.</p>
     </div>
   </dialog>
   {% for script in automation_scripts %}

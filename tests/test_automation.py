@@ -107,8 +107,9 @@ def test_managed_script_revision_is_immutable_enabled_and_run_by_worker(client):
     assert 'id="automation-script-run-modal"' in page.text
     assert 'data-automation-script-run-arguments' in page.text
     assert 'id="automation-script-diff-modal"' in page.text
-    assert 'data-automation-script-diff-previous' in page.text
-    assert 'data-automation-script-diff-current' in page.text
+    assert 'data-automation-script-diff-table' in page.text
+    assert 'data-automation-script-diff-added' in page.text
+    assert 'data-automation-script-diff-removed' in page.text
     assert "data-automation-schedule-kind" in page.text
     assert 'data-automation-schedule-timing="cron"' in page.text
     assert 'data-automation-schedule-timing="once"' in page.text
@@ -242,15 +243,22 @@ def test_manual_script_run_collects_parameters_and_exposes_revision_diff(client)
     assert [revision["revision"] for revision in row["revisions"]] == [1, 2]
     assert row["revisions"][0]["content"] == "Write-Output 'first'"
     assert row["revisions"][1]["content"].endswith("Write-Output $args.Count")
+    assert all(revision["created_at"] for revision in row["revisions"])
 
     app_js = Path("labfoundry/app/static/app.js").read_text()
     assert 'label: "Run latest revision"' in app_js
     assert 'label: "Compare latest revisions"' in app_js
     assert 'class="automation-revision-button"' in app_js
-    assert 'class="language-diff"' in page.text
+    assert 'class="automation-revision-diff-table"' in page.text
+    assert "data-automation-script-diff-previous" in page.text
+    assert "data-automation-script-diff-current" in page.text
     assert "sideBySideRevisionDiff" in app_js
-    assert "highlightConfigPreviewElement(previousCode);" in app_js
-    assert "highlightConfigPreviewElement(currentCode);" in app_js
+    assert "revisionOptionLabel" in app_js
+    assert "revisionCreatedLabel" in app_js
+    assert "highlightScriptDiffLine" in app_js
+    assert 'window.Prism.highlight(String(line || ""), grammar, language)' in app_js
+    assert 'collapsed.textContent = `${row.count} unchanged lines`' in app_js
+    assert 'code.className = `automation-diff-code ${state}' in app_js
     assert "Queue latest revision" not in app_js
 
     parameters = "-Server `\n'vcf lab.example' `\n-Count 2"

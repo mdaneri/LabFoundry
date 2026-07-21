@@ -210,6 +210,70 @@ function registerLabFoundryPrismLanguages() {
       punctuation: /,/,
     };
   }
+  if (!window.Prism.languages["labfoundry-powershell"]) {
+    window.Prism.languages["labfoundry-powershell"] = {
+      comment: /#.*/,
+      string: {
+        pattern: /"(?:`.|[^"`])*"|'(?:''|[^'])*'/,
+        greedy: true,
+      },
+      variable: /\$(?:\{[^}\r\n]+\}|[A-Za-z_][\w:]*)/,
+      parameter: {
+        pattern: /(^|\s)-[A-Za-z][\w-]*/,
+        lookbehind: true,
+        alias: "property",
+      },
+      function: /\b[A-Za-z]+-[A-Za-z][\w-]*\b/,
+      keyword: /\b(?:begin|break|catch|class|continue|data|do|dynamicparam|else|elseif|end|enum|exit|filter|finally|for|foreach|from|function|if|in|param|process|return|switch|throw|trap|try|until|using|while|workflow)\b/i,
+      boolean: /\$(?:true|false|null)\b/i,
+      number: /\b(?:0x[\da-f]+|\d+(?:\.\d+)?)\b/i,
+      operator: /-eq|-ne|-gt|-ge|-lt|-le|-like|-notlike|-match|-notmatch|-and|-or|-not|\+|-|\*|\/|%|=|\||&/i,
+      punctuation: /[{}\[\]();,.]/,
+    };
+  }
+  if (!window.Prism.languages["labfoundry-bash"]) {
+    window.Prism.languages["labfoundry-bash"] = {
+      comment: /#.*/,
+      string: {
+        pattern: /"(?:\\.|[^"\\])*"|'[^']*'/,
+        greedy: true,
+      },
+      variable: /\$(?:\{[^}\r\n]+\}|[A-Za-z_][\w]*|\d+|[@*#?$!-])/,
+      parameter: {
+        pattern: /(^|\s)--?[A-Za-z][\w-]*/,
+        lookbehind: true,
+        alias: "property",
+      },
+      keyword: /\b(?:case|coproc|do|done|elif|else|esac|fi|for|function|if|in|select|then|time|until|while)\b/,
+      builtin: {
+        pattern: /\b(?:cd|echo|eval|exec|exit|export|printf|pwd|read|readonly|return|set|shift|source|test|trap|unset)\b/,
+        alias: "function",
+      },
+      number: /\b\d+(?:\.\d+)?\b/,
+      operator: /&&|\|\||<<|>>|[|&;<>]=?|=/,
+      punctuation: /[{}\[\](),]/,
+    };
+  }
+  if (!window.Prism.languages["labfoundry-python"]) {
+    window.Prism.languages["labfoundry-python"] = {
+      comment: /#.*/,
+      string: {
+        pattern: /(?:[rubf]{0,2})(?:"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*')/i,
+        greedy: true,
+      },
+      decorator: {
+        pattern: /(^[\t ]*)@[A-Za-z_][\w.]*/m,
+        lookbehind: true,
+        alias: "annotation",
+      },
+      keyword: /\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|exec|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b/,
+      builtin: /\b(?:bool|bytes|dict|enumerate|filter|float|int|len|list|map|max|min|open|print|range|set|str|sum|super|tuple|type|zip)\b/,
+      boolean: /\b(?:True|False|None)\b/,
+      number: /\b(?:0[box][\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/i,
+      operator: /\/\/?=?|\*\*?=?|[-+%=]=?|!=|:=|<=?|>=?|==|&|\||\^|~|@/,
+      punctuation: /[{}\[\];(),.:]/,
+    };
+  }
 }
 
 function previewLanguageForText(text, element) {
@@ -11600,7 +11664,9 @@ function initializeTabs() {
       redrawLdapDirectoryTables(panel);
       window.requestAnimationFrame(() => {
         panel.querySelectorAll(".tabulator-grid").forEach((element) => {
-          element.labfoundryTabulator?.redraw(true);
+          if (element.labfoundryTabulatorReady) {
+            element.labfoundryTabulator?.redraw(true);
+          }
         });
       });
     });
@@ -13894,6 +13960,19 @@ function initializeAutomationTables() {
   };
   scriptRunModal?.querySelector("[data-automation-script-run-cancel]")?.addEventListener("click", () => scriptRunModal.close());
 
+  const scriptDiffLanguage = (interpreter) => {
+    if (interpreter === "powershell") return "labfoundry-powershell";
+    if (interpreter === "python") return "labfoundry-python";
+    return "labfoundry-bash";
+  };
+  const highlightScriptDiffLine = (line, interpreter) => {
+    registerLabFoundryPrismLanguages();
+    const language = scriptDiffLanguage(interpreter);
+    const grammar = window.Prism?.languages?.[language];
+    return grammar && typeof window.Prism.highlight === "function"
+      ? window.Prism.highlight(String(line || ""), grammar, language)
+      : escapeHtml(String(line || ""));
+  };
   const sideBySideRevisionDiff = (previousContent, currentContent) => {
     const previousLines = String(previousContent || "").replaceAll("\r\n", "\n").split("\n");
     const currentLines = String(currentContent || "").replaceAll("\r\n", "\n").split("\n");
@@ -13934,40 +14013,159 @@ function initializeAutomationTables() {
         }
       }
     }
+    const rows = [];
+    let previousNumber = 1;
+    let currentNumber = 1;
+    let operationIndex = 0;
+    while (operationIndex < operations.length) {
+      const operation = operations[operationIndex];
+      if (operation.type === "same") {
+        rows.push({
+          kind: "same",
+          previous: { number: previousNumber, line: operation.line },
+          current: { number: currentNumber, line: operation.line },
+        });
+        previousNumber += 1;
+        currentNumber += 1;
+        operationIndex += 1;
+        continue;
+      }
+      const removed = [];
+      const added = [];
+      while (operationIndex < operations.length && operations[operationIndex].type !== "same") {
+        const changedOperation = operations[operationIndex];
+        if (changedOperation.type === "removed") removed.push(changedOperation.line);
+        if (changedOperation.type === "added") added.push(changedOperation.line);
+        operationIndex += 1;
+      }
+      const changedRowCount = Math.max(removed.length, added.length);
+      for (let changedIndex = 0; changedIndex < changedRowCount; changedIndex += 1) {
+        const previousLine = removed[changedIndex];
+        const currentLine = added[changedIndex];
+        rows.push({
+          kind: "changed",
+          previous: previousLine === undefined ? null : { number: previousNumber, line: previousLine },
+          current: currentLine === undefined ? null : { number: currentNumber, line: currentLine },
+        });
+        if (previousLine !== undefined) previousNumber += 1;
+        if (currentLine !== undefined) currentNumber += 1;
+      }
+    }
+    const compactRows = [];
+    let rowIndex = 0;
+    while (rowIndex < rows.length) {
+      if (rows[rowIndex].kind !== "same") {
+        compactRows.push(rows[rowIndex]);
+        rowIndex += 1;
+        continue;
+      }
+      let sameRunEnd = rowIndex;
+      while (sameRunEnd < rows.length && rows[sameRunEnd].kind === "same") sameRunEnd += 1;
+      const sameRunLength = sameRunEnd - rowIndex;
+      if (sameRunLength > 12) {
+        compactRows.push(...rows.slice(rowIndex, rowIndex + 3));
+        compactRows.push({ kind: "collapsed", count: sameRunLength - 6 });
+        compactRows.push(...rows.slice(sameRunEnd - 3, sameRunEnd));
+      } else {
+        compactRows.push(...rows.slice(rowIndex, sameRunEnd));
+      }
+      rowIndex = sameRunEnd;
+    }
     return {
-      previous: operations.map((operation) => operation.type === "added" ? "  " : `${operation.type === "removed" ? "-" : " "} ${operation.line}`).join("\n"),
-      current: operations.map((operation) => operation.type === "removed" ? "  " : `${operation.type === "added" ? "+" : " "} ${operation.line}`).join("\n"),
+      rows: compactRows,
+      addedCount: operations.filter((operation) => operation.type === "added").length,
+      removedCount: operations.filter((operation) => operation.type === "removed").length,
     };
+  };
+  const appendRevisionDiffCell = (rowElement, side, entry, state, interpreter) => {
+    const lineNumber = document.createElement("span");
+    lineNumber.className = `automation-diff-line-number ${side}`;
+    lineNumber.textContent = entry ? String(entry.number) : "";
+    lineNumber.setAttribute("role", "cell");
+    const code = document.createElement("code");
+    code.className = `automation-diff-code ${state} language-${scriptDiffLanguage(interpreter)}`;
+    code.setAttribute("role", "cell");
+    if (entry) code.innerHTML = highlightScriptDiffLine(entry.line, interpreter);
+    rowElement.append(lineNumber, code);
+  };
+  let activeScriptDiffData = null;
+  const revisionCreatedLabel = (revision) => {
+    const parsed = new Date(revision?.created_at || "");
+    if (Number.isNaN(parsed.getTime())) return "date unavailable";
+    return `${parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" })} UTC`;
+  };
+  const revisionOptionLabel = (revision) => `r${revision.revision} · ${revisionCreatedLabel(revision)} · ${revision.enabled ? "enabled" : "disabled"}`;
+  const renderScriptRevisionDiff = () => {
+    if (!(scriptDiffModal instanceof HTMLDialogElement) || !activeScriptDiffData) return;
+    const revisions = Array.isArray(activeScriptDiffData.revisions) ? activeScriptDiffData.revisions : [];
+    const previousSelect = scriptDiffModal.querySelector("[data-automation-script-diff-previous]");
+    const currentSelect = scriptDiffModal.querySelector("[data-automation-script-diff-current]");
+    if (!(previousSelect instanceof HTMLSelectElement) || !(currentSelect instanceof HTMLSelectElement)) return;
+    const previous = revisions.find((revision) => String(revision.id) === previousSelect.value);
+    const current = revisions.find((revision) => String(revision.id) === currentSelect.value);
+    if (!previous || !current) return;
+    const comparison = sideBySideRevisionDiff(previous.content, current.content);
+    const description = scriptDiffModal.querySelector("[data-automation-script-diff-description]");
+    const scriptName = scriptDiffModal.querySelector("[data-automation-script-diff-name]");
+    const addedCount = scriptDiffModal.querySelector("[data-automation-script-diff-added]");
+    const removedCount = scriptDiffModal.querySelector("[data-automation-script-diff-removed]");
+    const previousTitle = scriptDiffModal.querySelector("[data-automation-script-diff-previous-title]");
+    const currentTitle = scriptDiffModal.querySelector("[data-automation-script-diff-current-title]");
+    const previousMeta = scriptDiffModal.querySelector("[data-automation-script-diff-previous-meta]");
+    const currentMeta = scriptDiffModal.querySelector("[data-automation-script-diff-current-meta]");
+    const diffTable = scriptDiffModal.querySelector("[data-automation-script-diff-table]");
+    const extension = current.interpreter === "powershell" ? "ps1" : current.interpreter === "python" ? "py" : "sh";
+    if (description instanceof HTMLElement) description.textContent = `Immutable source comparison from r${previous.revision} (${revisionCreatedLabel(previous)}) to r${current.revision} (${revisionCreatedLabel(current)}). Unchanged runs are collapsed.`;
+    if (scriptName instanceof HTMLElement) scriptName.textContent = `${activeScriptDiffData.name}.${extension}`;
+    if (addedCount instanceof HTMLElement) addedCount.textContent = `+${comparison.addedCount}`;
+    if (removedCount instanceof HTMLElement) removedCount.textContent = `-${comparison.removedCount}`;
+    if (previousTitle instanceof HTMLElement) previousTitle.textContent = `r${previous.revision} · previous`;
+    if (currentTitle instanceof HTMLElement) currentTitle.textContent = `r${current.revision} · current`;
+    if (previousMeta instanceof HTMLElement) previousMeta.textContent = `${revisionCreatedLabel(previous)} · ${previous.interpreter} · ${previous.enabled ? "enabled" : "disabled"}`;
+    if (currentMeta instanceof HTMLElement) currentMeta.textContent = `${revisionCreatedLabel(current)} · ${current.interpreter} · ${current.enabled ? "enabled" : "disabled"}`;
+    if (diffTable instanceof HTMLElement) {
+      diffTable.replaceChildren();
+      comparison.rows.forEach((row) => {
+        if (row.kind === "collapsed") {
+          const collapsed = document.createElement("div");
+          collapsed.className = "automation-revision-diff-collapse";
+          collapsed.setAttribute("role", "row");
+          collapsed.textContent = `${row.count} unchanged lines`;
+          diffTable.append(collapsed);
+          return;
+        }
+        const rowElement = document.createElement("div");
+        rowElement.className = `automation-revision-diff-row ${row.kind}`;
+        rowElement.setAttribute("role", "row");
+        appendRevisionDiffCell(rowElement, "previous", row.previous, row.kind === "changed" && row.previous ? "removed" : row.previous ? "same" : "empty", previous.interpreter);
+        appendRevisionDiffCell(rowElement, "current", row.current, row.kind === "changed" && row.current ? "added" : row.current ? "same" : "empty", current.interpreter);
+        diffTable.append(rowElement);
+      });
+    }
   };
   const openScriptRevisionDiff = (data) => {
     if (!(scriptDiffModal instanceof HTMLDialogElement)) return;
     const revisions = Array.isArray(data?.revisions) ? data.revisions : [];
     if (revisions.length < 2) return;
-    const current = revisions[revisions.length - 1];
-    const previous = revisions[revisions.length - 2];
-    const comparison = sideBySideRevisionDiff(previous.content, current.content);
-    const description = scriptDiffModal.querySelector("[data-automation-script-diff-description]");
-    const previousTitle = scriptDiffModal.querySelector("[data-automation-script-diff-previous-title]");
-    const currentTitle = scriptDiffModal.querySelector("[data-automation-script-diff-current-title]");
-    const previousMeta = scriptDiffModal.querySelector("[data-automation-script-diff-previous-meta]");
-    const currentMeta = scriptDiffModal.querySelector("[data-automation-script-diff-current-meta]");
-    const previousCode = scriptDiffModal.querySelector("[data-automation-script-diff-previous]");
-    const currentCode = scriptDiffModal.querySelector("[data-automation-script-diff-current]");
-    if (description instanceof HTMLElement) description.textContent = `${data.name}: immutable source changes from r${previous.revision} to r${current.revision}.`;
-    if (previousTitle instanceof HTMLElement) previousTitle.textContent = `Previous · r${previous.revision}`;
-    if (currentTitle instanceof HTMLElement) currentTitle.textContent = `Current · r${current.revision}`;
-    if (previousMeta instanceof HTMLElement) previousMeta.textContent = `${previous.interpreter} · ${previous.enabled ? "enabled" : "disabled"}`;
-    if (currentMeta instanceof HTMLElement) currentMeta.textContent = `${current.interpreter} · ${current.enabled ? "enabled" : "disabled"}`;
-    if (previousCode instanceof HTMLElement) {
-      previousCode.textContent = comparison.previous;
-      highlightConfigPreviewElement(previousCode);
-    }
-    if (currentCode instanceof HTMLElement) {
-      currentCode.textContent = comparison.current;
-      highlightConfigPreviewElement(currentCode);
-    }
+    const previousSelect = scriptDiffModal.querySelector("[data-automation-script-diff-previous]");
+    const currentSelect = scriptDiffModal.querySelector("[data-automation-script-diff-current]");
+    if (!(previousSelect instanceof HTMLSelectElement) || !(currentSelect instanceof HTMLSelectElement)) return;
+    activeScriptDiffData = data;
+    const options = revisions.map((revision) => {
+      const option = document.createElement("option");
+      option.value = String(revision.id);
+      option.textContent = revisionOptionLabel(revision);
+      return option;
+    });
+    previousSelect.replaceChildren(...options.map((option) => option.cloneNode(true)));
+    currentSelect.replaceChildren(...options);
+    previousSelect.value = String(revisions[revisions.length - 2].id);
+    currentSelect.value = String(revisions[revisions.length - 1].id);
+    renderScriptRevisionDiff();
     scriptDiffModal.showModal();
   };
+  scriptDiffModal?.querySelector("[data-automation-script-diff-previous]")?.addEventListener("change", renderScriptRevisionDiff);
+  scriptDiffModal?.querySelector("[data-automation-script-diff-current]")?.addEventListener("change", renderScriptRevisionDiff);
   scriptDiffModal?.querySelector("[data-automation-script-diff-close]")?.addEventListener("click", () => scriptDiffModal.close());
 
   const schedulesElement = document.getElementById("automation-schedules-table");
@@ -14302,6 +14500,9 @@ function initializeAutomationTables() {
         { title: "State", field: "enabled", width: 85, formatter: labFoundryBooleanFormatter, editor: "tickCross", editable: (cell) => !cell.getRow().getData().is_new, hozAlign: "center", headerSort: false, cellEdited: (cell) => submitForm("automation-schedule-toggle", cell.getRow().getData().id) },
       ],
     });
+    schedulesElement.labfoundryTabulator.on("tableBuilt", () => {
+      schedulesElement.labfoundryTabulatorReady = true;
+    });
   }
 
   const executionsElement = document.getElementById("automation-executions-table");
@@ -14343,6 +14544,9 @@ function initializeAutomationTables() {
           },
         },
       ],
+    });
+    executionsElement.labfoundryTabulator.on("tableBuilt", () => {
+      executionsElement.labfoundryTabulatorReady = true;
     });
     executionsElement.labfoundryTabulator.on("rowDblClick", (_event, row) => openExecutionTask(row.getData()));
   }
@@ -14511,6 +14715,9 @@ function initializeAutomationTables() {
         { title: "Schedules", field: "schedule_count", width: 95, formatter: (cell) => cell.getRow().getData().is_new ? "0" : cell.getValue() },
         { title: "Updated", field: "updated_at", minWidth: 165, formatter: (cell) => cell.getRow().getData().is_new ? "after creation" : cell.getValue() },
       ], "name"),
+    });
+    scriptsElement.labfoundryTabulator.on("tableBuilt", () => {
+      scriptsElement.labfoundryTabulatorReady = true;
     });
   }
 
