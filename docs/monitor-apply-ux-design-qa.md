@@ -6,7 +6,7 @@
 - Desktop viewport: 1968 × 1562 CSS pixels at the browser's native device density.
 - Narrow viewport: 900 × 1200 CSS pixels.
 - Live implementation: VMware appliance `192.168.167.219`, deployed with the repository VMware wheel helper.
-- Final shared cache revision: `monitor-apply-ux-20260722-10` / `labfoundry-pwa-v148`.
+- Final shared cache revision: `monitor-apply-ux-20260722-11` / `labfoundry-pwa-v149`.
 
 ## Comparison
 

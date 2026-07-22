@@ -6956,6 +6956,23 @@ textarea {
   padding-right: 7px;
 }
 
+.monitor-chart-zoom-field {
+  margin-bottom: 0;
+}
+
+.monitor-chart-zoom-field > .monitor-chart-zoom-input {
+  display: flex;
+  margin-bottom: 0;
+}
+
+.monitor-chart-zoom-field .help-icon::after {
+  bottom: auto;
+  left: auto;
+  right: 0;
+  top: calc(100% + 8px);
+  transform: none;
+}
+
 .monitor-chart-zoom-input input {
   appearance: textfield;
   border: 0;

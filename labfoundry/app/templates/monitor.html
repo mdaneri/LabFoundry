@@ -173,9 +173,12 @@
           <button class="button secondary icon-button" type="button" data-monitor-chart-zoom-out aria-label="Zoom out of chart" title="Zoom out" disabled>
             <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/></svg>
           </button>
-          <span class="monitor-chart-zoom-input">
-            <input type="number" min="100" max="800" step="25" value="100" inputmode="numeric" data-monitor-chart-zoom-percent aria-label="Chart zoom percentage">
-            <span aria-hidden="true">%</span>
+          <span class="field-label monitor-chart-zoom-field">
+            <span class="monitor-chart-zoom-input">
+              <input type="number" min="100" max="800" step="25" value="100" inputmode="numeric" data-monitor-chart-zoom-percent aria-label="Chart zoom percentage">
+              <span aria-hidden="true">%</span>
+            </span>
+            <button class="help-icon" type="button" data-help="Changes the visible time-window magnification for this expanded chart only. 100% shows the complete selected history range; higher values show a narrower window around the current focus.">i</button>
           </span>
           <button class="button secondary icon-button" type="button" data-monitor-chart-zoom-in aria-label="Zoom in on chart" title="Zoom in">
             <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6"/><path d="M8 11h6"/></svg>
