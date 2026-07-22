@@ -123,6 +123,8 @@ after creating the SiteA, WAN/SiteB, and trunk-like vmnets.
 
 ## Fidelity Boundary
 
+For ESX Storage appliance acceptance, attach an extra blank VMDK to the normal Workstation test appliance, initialize it only through global `esx_storage` apply, and apply the matching DNS/DHCP and Firewall units. Record the job ID, `/dev/disk/by-id` fingerprint, UUID mount, generated A/AAAA names, `exportfs -v`, TCP/111/2049/20048 sockets, nftables family rules, and persistence after appliance reboot. Workstation proves real Photon disk/NFS/DNS/firewall behavior; the Hyper-V/ESX 9 lifecycle remains authoritative for IPv4 and IPv6 VMkernel mounts and datastore I/O.
+
 VMware Workstation vmnets provide isolated layer-2 segments, but they do not
 match Hyper-V's explicit access/trunk VLAN port model. The Workstation lifecycle
 therefore validates the appliance workflow, management reachability, service

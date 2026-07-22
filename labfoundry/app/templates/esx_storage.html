@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block page_title %}ESX Storage{% endblock %}
+{% block content %}
+<section class="split-workspace">
+  <div class="panel wide-panel">
+    <div class="panel-head">
+      <div>
+        <h2>ESX NFS Datastore Storage</h2>
+        <p class="muted">Publish ESX 9.x datastores over NFS 3 or NFS 4.1. IPv4 and IPv6 are equivalent connection paths.</p>
+      </div>
+      <span class="status-pill {{ 'good' if esx_storage_settings.enabled else 'muted' }}">{{ "enabled" if esx_storage_settings.enabled else "disabled" }}</span>
+    </div>
+
+    <div class="tab-buttons" role="tablist" aria-label="ESX Storage resources">
+      <button class="tab-button active" type="button" role="tab" data-tab-target="storage-volumes" aria-selected="true">Storage Volumes</button>
+      <button class="tab-button" type="button" role="tab" data-tab-target="nfs-datastores" aria-selected="false">NFS Datastores</button>
+    </div>
+    <div class="tab-panels">
+      <section id="storage-volumes" class="tab-panel active" role="tabpanel">
+        <div
+          id="esx-storage-volumes-table"
+          class="tabulator-shell"
+          data-esx-storage-volumes='{{ esx_storage_volume_rows | tojson }}'
+          data-fallback-id="esx-storage-volumes-fallback"
+        ></div>
+        <table id="esx-storage-volumes-fallback" class="data-table">
+          <thead><tr><th>Name</th><th>Source</th><th>Stable identity / mount</th><th>Capacity</th><th>Filesystem</th><th>State</th></tr></thead>
+          <tbody>
+            {% for volume in esx_storage_volume_rows %}
+              <tr>
+                <td>{{ volume.name }}</td>
+                <td>{{ "blank disk" if volume.source_type == "blank_disk" else "mounted ext4" }}</td>
+                <td><code>{{ volume.stable_device_id or volume.mount_path }}</code></td>
+                <td>{{ volume.capacity_bytes }}</td>
+                <td>{{ volume.filesystem_uuid or "pending ext4 format" }}</td>
+                <td><span class="status-pill {{ 'good' if volume.applied else 'warn' }}">{{ volume.state }}</span></td>
+              </tr>
+            {% else %}
+              <tr><td colspan="6" class="muted">No storage volumes are configured.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+
+        {% if esx_storage_can_write %}
+          <details class="editor-card">
+            <summary>+ Add storage volume</summary>
+            <form class="form-stack" action="/esx-storage/volumes" method="post" data-esx-storage-volume-form>
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <label><span class="field-label"><span>Volume name</span><button class="help-icon" type="button" data-help="Stable LabFoundry name used to derive the UUID mount path for a newly initialized disk. It does not rename existing data.">i</button></span><input name="name" required maxlength="120" placeholder="esx-data-01"></label>
+              <label><span class="field-label"><span>Source</span><button class="help-icon" type="button" data-help="Choose an approved blank whole disk for ext4 initialization, or an already mounted ext4 filesystem. LabFoundry never reformats an existing filesystem.">i</button></span><select name="source_type" data-esx-storage-volume-source><option value="blank_disk">Approved blank whole disk</option><option value="mounted_ext4">Existing mounted ext4 volume</option></select></label>
+              <label data-esx-storage-blank-source><span class="field-label"><span>Blank disk</span><button class="help-icon" type="button" data-help="Only whole disks that pass live safety inventory are selectable. The complete model, serial, WWN, size, and /dev/disk/by-id identity are captured for format review and immediate pre-format revalidation.">i</button></span><select name="stable_device_id"><option value="">Select an eligible blank disk</option>{% for disk in esx_storage_disk_inventory if disk.candidate_type == 'blank_disk' and disk.eligible %}<option value="{{ disk.stable_device_id }}">{{ disk.model or 'Disk' }} · {{ disk.size_bytes }} bytes · {{ disk.serial or disk.wwn or disk.stable_device_id }}</option>{% endfor %}</select></label>
+              <label data-esx-storage-mounted-source hidden><span class="field-label"><span>Mounted ext4 volume</span><button class="help-icon" type="button" data-help="Only eligible mounted ext4 filesystems discovered by live inventory are selectable. The operating-system filesystem and already claimed volumes are excluded.">i</button></span><select name="mount_path"><option value="">Select an eligible mounted ext4 volume</option>{% for disk in esx_storage_disk_inventory if disk.candidate_type == 'mounted_ext4' and disk.eligible %}<option value="{{ disk.mount_path }}">{{ disk.mount_path }} · {{ disk.size_bytes }} bytes · UUID {{ disk.filesystem_uuid }}</option>{% endfor %}</select></label>
+              {% if esx_storage_inventory_error %}<p class="autosave-status" data-state="error">{{ esx_storage_inventory_error }}</p>{% endif %}
+              <button class="button primary" type="submit">Add volume to desired state</button>
+            </form>
+          </details>
+        {% endif %}
+      </section>
+
+      <section id="nfs-datastores" class="tab-panel" role="tabpanel" hidden>
+        <div
+          id="esx-storage-shares-table"
+          class="tabulator-shell"
+          data-esx-storage-shares='{{ esx_storage_share_rows | tojson }}'
+          data-csrf="{{ csrf_token }}"
+          data-can-write="{{ 'true' if esx_storage_can_write else 'false' }}"
+          data-interfaces='{{ esx_storage_interfaces | tojson }}'
+          data-fallback-id="esx-storage-shares-fallback"
+        ></div>
+        <table id="esx-storage-shares-fallback" class="data-table">
+          <thead><tr><th>Datastore</th><th>Volume / path</th><th>NFS</th><th>Interface</th><th>Families</th><th>VMkernel clients</th><th>Actions</th></tr></thead>
+          <tbody>
+            {% for share in esx_storage_share_rows %}
+              <tr>
+                <td>{{ share.datastore_name }}</td>
+                <td>{{ share.volume_name }} / <code>{{ share.relative_path }}</code></td>
+                <td>{{ share.preferred_nfs_version }}</td>
+                <td>{{ share.interface_name }}</td>
+                <td>{{ share.address_families | join(" + ") }}</td>
+                <td><code>IPv4: {{ share.ipv4_clients | join(", ") or "none" }}<br>IPv6: {{ share.ipv6_clients | join(", ") or "none" }}</code></td>
+                <td>
+                  {% if esx_storage_can_write %}
+                    <form id="esx-storage-remove-share-{{ share.id }}" action="/esx-storage/shares/{{ share.id }}/delete" method="post" data-confirm-modal data-confirm-title="Remove {{ share.datastore_name }}?" data-confirm-message="This removes the export from desired state after global appliance apply. Files and the backing volume are preserved." data-confirm-label="Remove datastore">
+                      <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button tiny danger" type="submit">Remove</button>
+                    </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="7" class="muted">No NFS datastores are configured.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+
+        {% if esx_storage_can_write %}
+          <details class="editor-card" open>
+            <summary>+ Add NFS datastore</summary>
+            <form class="form-stack" action="/esx-storage/shares" method="post" data-esx-storage-share-form>
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <label><span class="field-label"><span>Datastore name</span><button class="help-icon" type="button" data-help="Name shown in ESX. Every host mounting this datastore must use this same name, NFS version, and the generated hostname for its selected family.">i</button></span><input name="datastore_name" required maxlength="120" placeholder="esx-nfs-01"></label>
+              <label><span class="field-label"><span>Backing volume</span><button class="help-icon" type="button" data-help="Selects the ext4 volume containing this datastore directory. Disabling or removing the share never deletes data from the volume.">i</button></span><select name="volume_id" required><option value="">Select volume</option>{% for volume in esx_storage_volumes %}<option value="{{ volume.id }}">{{ volume.name }}</option>{% endfor %}</select></label>
+              <label><span class="field-label"><span>Relative directory</span><button class="help-icon" type="button" data-help="Contained directory below the volume mount. Traversal, symlink escape, overlapping exports, and root-plus-child exports are rejected.">i</button></span><input name="relative_path" required placeholder="datastores/esx-nfs-01"></label>
+              <label><span class="field-label"><span>Preferred NFS version</span><button class="help-icon" type="button" data-help="Controls the documented ESX mount path. NFS 3 uses the full /srv export path; NFS 4.1 uses /&lt;share&gt;. Every host for one datastore must use the same version.">i</button></span><select name="preferred_nfs_version"><option value="4.1">NFS 4.1</option><option value="3">NFS 3</option></select></label>
+              <label><span class="field-label"><span>Storage interface / VLAN</span><button class="help-icon" type="button" data-help="One addressed storage, services, access, or route interface/VLAN owns both IPv4 and IPv6 listeners selected below.">i</button></span><select name="interface_name" required data-esx-storage-interface>{% for interface in esx_storage_interfaces %}<option value="{{ interface.name }}" data-ipv4="{{ interface.ipv4|join(',') }}" data-ipv6="{{ interface.ipv6|join(',') }}">{{ interface.name }} — IPv4 {{ interface.ipv4|join(', ') or 'none' }} / IPv6 {{ interface.ipv6|join(', ') or 'none' }}</option>{% endfor %}</select></label>
+              <fieldset>
+                <legend><span class="field-label"><span>Address families</span><button class="help-icon" type="button" data-help="Enable IPv4, IPv6, or both. Neither family is preferred or used as fallback; LabFoundry generates a separate DNS name, firewall allowlist, and ESX command for every enabled family.">i</button></span></legend>
+                <label class="inline-check"><input type="checkbox" name="address_families" value="ipv4" checked> IPv4</label>
+                <label class="inline-check"><input type="checkbox" name="address_families" value="ipv6" checked> IPv6</label>
+              </fieldset>
+              <label><span class="field-label"><span>IPv4 VMkernel clients</span><button class="help-icon" type="button" data-help="One IPv4 VMkernel IP or CIDR per line. At least one is required when IPv4 is enabled; firewall and export access are restricted to these clients.">i</button></span><textarea name="ipv4_clients" rows="3" placeholder="192.168.87.11/32"></textarea></label>
+              <label><span class="field-label"><span>IPv6 VMkernel clients</span><button class="help-icon" type="button" data-help="One IPv6 VMkernel IP or CIDR per line. At least one is required when IPv6 is enabled; firewall and export access are restricted to these clients.">i</button></span><textarea name="ipv6_clients" rows="3" placeholder="2001:db8:87::11/128"></textarea></label>
+              <input type="hidden" name="enabled" value="on">
+              <button class="button primary" type="submit">Add NFS datastore</button>
+            </form>
+          </details>
+        {% endif %}
+
+        {% for share in esx_storage_share_rows if share.enabled %}
+          <section class="info-band">
+            <div><h3>{{ share.datastore_name }}</h3><p class="muted">Use one explicit generated hostname per family. There is no resolver-selected family preference.</p></div>
+            <div class="settings-list">
+              {% for command in share.connection_commands.ipv4 %}<div><span>IPv4 · NFS {{ share.preferred_nfs_version }}</span><code>{{ command }}</code></div>{% endfor %}
+              {% for command in share.connection_commands.ipv6 %}<div><span>IPv6 · NFS {{ share.preferred_nfs_version }}</span><code>{{ command }}</code></div>{% endfor %}
+            </div>
+          </section>
+        {% endfor %}
+      </section>
+    </div>
+  </div>
+
+  <aside class="side-stack">
+    {% include "partials/appliance_apply_status.html" %}
+
+    <div class="panel detail-panel">
+      <div class="panel-head"><h2>Service Settings</h2><span class="status-pill {{ 'good' if esx_storage_settings.enabled else 'muted' }}">{{ "enabled" if esx_storage_settings.enabled else "disabled" }}</span></div>
+      <form class="form-stack" action="/esx-storage/settings" method="post" data-autosave-form data-autosave-status-id="esx-storage-settings-status">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label class="switch-field"><span class="field-label"><span>Service enabled</span><button class="help-icon" type="button" data-help="Enables ESX Storage desired state. Host services change only through global appliance apply, after DNS, exports, disk safety, and firewall validation succeed.">i</button></span><input class="switch-input" type="checkbox" name="enabled" {{ "checked" if esx_storage_settings.enabled else "" }} {{ "disabled" if not esx_storage_can_write else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label><span class="field-label"><span>Canonical service hostname</span><button class="help-icon" type="button" data-help="Canonical nfs.&lt;domain&gt; alias. Dual-stack ESX instructions use family-specific generated A or AAAA target names so DNS resolver preference cannot choose a family implicitly.">i</button></span><input name="hostname" value="{{ esx_storage_settings.hostname }}" required {{ "readonly" if not esx_storage_can_write else "" }}></label>
+        <p id="esx-storage-settings-status" class="autosave-status" data-state="idle">Changes save automatically.</p>
+      </form>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Validation</h2><span class="status-pill {{ 'good' if not esx_storage_validation_errors else 'warn' }}">{{ "valid" if not esx_storage_validation_errors else "needs attention" }}</span></div>
+      {% if esx_storage_validation_errors %}<div class="error-list" role="list">{% for error in esx_storage_validation_errors %}<div role="listitem">{{ error }}</div>{% endfor %}</div>{% else %}<p class="muted">The desired NFS, disk, DNS, IPv4, IPv6, export, and firewall state passes LabFoundry validation.</p>{% endif %}
+      {% if esx_storage_validation_warnings %}<div class="warning-list" role="list">{% for warning in esx_storage_validation_warnings %}<div role="listitem">{{ warning }}</div>{% endfor %}</div>{% endif %}
+      <div class="settings-list"><div><span>Generated DNS</span><strong>{{ esx_storage_dns_records|length }} records</strong></div><div><span>Managed firewall</span><strong>{{ esx_storage_firewall_rules|length }} family rules</strong></div><div><span>Stale DNS cleanup</span><strong>{{ esx_storage_stale_dns_record_count }}</strong></div></div>
+      {% set preview_label = "ESX Storage manifest" %}{% set preview_path = esx_storage_config_path %}{% set preview_title = "ESX Storage rendered manifest" %}{% set preview_button_label = "manifest" %}{% set preview_text = esx_storage_manifest_preview %}{% include "partials/config_preview_action.html" %}
+    </div>
+  </aside>
+</section>
+{% endblock %}

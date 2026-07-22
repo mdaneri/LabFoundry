@@ -24,6 +24,9 @@ from labfoundry.app.models import (
     DnsSettings,
     EsxiKickstart,
     EsxiPxeHost,
+    EsxNfsShare,
+    EsxStorageSettings,
+    EsxStorageVolume,
     FirewallRule,
     FirewallSettings,
     KmsClient,
@@ -97,6 +100,7 @@ SCALAR_TABLES = {
     "vcf_offline_depot_settings": VcfOfflineDepotSettings,
     "vcf_depot_download_profiles": VcfDepotDownloadProfile,
     "esxi_kickstarts": EsxiKickstart,
+    "esx_storage_settings": EsxStorageSettings,
 }
 
 RESTORE_DELETE_MODELS = [
@@ -108,6 +112,9 @@ RESTORE_DELETE_MODELS = [
     LdapRecoveryArchive,
     EsxiPxeHost,
     EsxiKickstart,
+    EsxNfsShare,
+    EsxStorageVolume,
+    EsxStorageSettings,
     VcfRegistryBundle,
     VcfDepotDownloadProfile,
     VcfOfflineDepotSettings,
@@ -196,6 +203,12 @@ def export_settings_archive(db: Session, *, actor: str) -> dict[str, Any]:
     data["vcf_backup_settings"] = _vcf_backup_settings_to_archive(db)
     data["vcf_offline_depot_settings"] = _vcf_offline_depot_settings_to_archive(db)
     data["esxi_pxe_hosts"] = _esxi_pxe_hosts_to_archive(db)
+    data["esx_storage_volumes"] = [_row_to_dict(row) for row in db.execute(select(EsxStorageVolume).order_by(EsxStorageVolume.name)).scalars().all()]
+    volume_names = {row.id: row.name for row in db.execute(select(EsxStorageVolume)).scalars().all()}
+    data["esx_nfs_shares"] = [
+        _row_to_dict(row, exclude={"volume_id"}) | {"volume_name": volume_names.get(row.volume_id, "")}
+        for row in db.execute(select(EsxNfsShare).order_by(EsxNfsShare.datastore_name)).scalars().all()
+    ]
     data["update_sources"] = _update_sources_to_archive(db)
     data["managed_packages"] = _managed_packages_to_archive(db)
     data["automation_scripts"] = _automation_scripts_to_archive(db)
@@ -440,6 +453,9 @@ def restore_settings_archive(db: Session, archive: dict[str, Any]) -> dict[str, 
         counts[key] = _insert_rows(db, SCALAR_TABLES[key], data.get(key, []))
     db.flush()
     counts["esxi_pxe_hosts"] = _restore_esxi_pxe_hosts(db, data.get("esxi_pxe_hosts", []))
+    counts["esx_storage_settings"] = _insert_rows(db, EsxStorageSettings, data.get("esx_storage_settings", []))
+    counts["esx_storage_volumes"] = _restore_esx_storage_volumes(db, data.get("esx_storage_volumes", []))
+    counts["esx_nfs_shares"] = _restore_esx_nfs_shares(db, data.get("esx_nfs_shares", []))
     counts["update_sources"] = _restore_update_sources(db, data.get("update_sources", []))
     counts["managed_packages"] = _restore_managed_packages(db, data.get("managed_packages", []))
     counts["automation_scripts"] = _restore_automation_scripts(db, data.get("automation_scripts", []))
@@ -472,6 +488,8 @@ def desired_state_counts(db: Session) -> dict[str, int]:
     counts["ldap_group_memberships"] = len(db.execute(select(LdapGroupMembership)).scalars().all())
     counts["vcf_backup_settings"] = len(db.execute(select(VcfBackupSettings)).scalars().all())
     counts["esxi_pxe_hosts"] = len(db.execute(select(EsxiPxeHost)).scalars().all())
+    counts["esx_storage_volumes"] = len(db.execute(select(EsxStorageVolume)).scalars().all())
+    counts["esx_nfs_shares"] = len(db.execute(select(EsxNfsShare)).scalars().all())
     counts["update_sources"] = len(db.execute(select(UpdateSource)).scalars().all())
     counts["managed_packages"] = len(db.execute(select(ManagedPackage)).scalars().all())
     counts["automation_scripts"] = len(db.execute(select(AutomationScript)).scalars().all())
@@ -781,3 +799,28 @@ def _restore_esxi_pxe_hosts(db: Session, rows: list[dict[str, Any]]) -> int:
         db.add(EsxiPxeHost(**payload))
     db.flush()
     return len(rows)
+
+
+def _restore_esx_storage_volumes(db: Session, rows: list[dict[str, Any]]) -> int:
+    for row in rows:
+        payload = _model_kwargs(EsxStorageVolume, row, exclude={"applied", "state"})
+        payload["applied"] = False
+        payload["state"] = "mounted" if payload.get("source_type") == "mounted_ext4" else "pending_verification"
+        db.add(EsxStorageVolume(**payload))
+    db.flush()
+    return len(rows)
+
+
+def _restore_esx_nfs_shares(db: Session, rows: list[dict[str, Any]]) -> int:
+    volumes = {row.name: row.id for row in db.execute(select(EsxStorageVolume)).scalars().all()}
+    restored = 0
+    for row in rows:
+        volume_id = volumes.get(str(row.get("volume_name") or ""))
+        if volume_id is None:
+            continue
+        payload = _model_kwargs(EsxNfsShare, row, exclude={"volume_id"})
+        payload["volume_id"] = volume_id
+        db.add(EsxNfsShare(**payload))
+        restored += 1
+    db.flush()
+    return restored

@@ -11993,6 +11993,40 @@ function applianceApplyReviewRow(unit) {
   });
   row.append(head, summary);
 
+  if (Array.isArray(unit.format_volumes) && unit.format_volumes.length) {
+    const formatPanel = document.createElement("div");
+    formatPanel.className = "alert warning esx-storage-format-confirmations";
+    const title = document.createElement("strong");
+    title.textContent = "Destructive disk initialization authorization";
+    formatPanel.append(title);
+    unit.format_volumes.forEach((volume) => {
+      const fingerprint = volume.fingerprint || {};
+      const label = document.createElement("label");
+      label.className = "form-field";
+      const caption = document.createElement("span");
+      caption.className = "field-label";
+      caption.textContent = `${volume.name}: ${volume.stable_device_id} · ${fingerprint.model || "model unknown"} · serial ${fingerprint.serial || "unknown"} · WWN ${fingerprint.wwn || "unknown"} · ${Number(fingerprint.size_bytes || 0).toLocaleString()} bytes`;
+      const input = document.createElement("input");
+      input.type = "text";
+      input.placeholder = volume.confirmation || `FORMAT ${volume.name}`;
+      input.autocomplete = "off";
+      input.dataset.esxFormatConfirmation = "";
+      input.dataset.expected = volume.confirmation || `FORMAT ${volume.name}`;
+      const hidden = document.createElement("input");
+      hidden.type = "hidden";
+      hidden.name = "format_confirmations";
+      hidden.disabled = true;
+      hidden.value = JSON.stringify({ volume_id: volume.id, confirmation: input.dataset.expected });
+      input.addEventListener("input", () => {
+        hidden.disabled = input.value !== input.dataset.expected;
+        updateApplianceApplySelection();
+      });
+      label.append(caption, input, hidden);
+      formatPanel.append(label);
+    });
+    row.append(formatPanel);
+  }
+
   const messages = [...(unit.validation_errors || []), ...(unit.validation_warnings || [])];
   if (messages.length) {
     const alert = document.createElement("div");
@@ -12025,11 +12059,18 @@ function updateApplianceApplySelection() {
   if (!(modal instanceof HTMLDialogElement)) return;
   const selectedCheckboxes = Array.from(modal.querySelectorAll("[data-appliance-apply-review-checkbox]:checked"));
   const selected = selectedCheckboxes.length;
+  const incompleteFormatConfirmations = selectedCheckboxes.some((checkbox) => {
+    const row = checkbox.closest("[data-apply-unit-id]");
+    if (!(row instanceof HTMLElement)) return false;
+    return Array.from(row.querySelectorAll("[data-esx-format-confirmation]")).some((input) => input instanceof HTMLInputElement && input.value !== input.dataset.expected);
+  });
   if (selectionSummary instanceof HTMLElement) {
-    selectionSummary.textContent = `${selected} component${selected === 1 ? "" : "s"} selected`;
+    selectionSummary.textContent = incompleteFormatConfirmations
+      ? `${selected} component${selected === 1 ? "" : "s"} selected · complete disk format confirmation`
+      : `${selected} component${selected === 1 ? "" : "s"} selected`;
   }
   if (submit instanceof HTMLButtonElement) {
-    submit.disabled = selected === 0;
+    submit.disabled = selected === 0 || incompleteFormatConfirmations;
   }
   if (connectionWarning instanceof HTMLElement) {
     const messages = new Set();
@@ -15209,7 +15250,125 @@ function initializeManagedPackagePolicies() {
   });
 }
 
+function initializeEsxStorageTables() {
+  const volumeElement = document.getElementById("esx-storage-volumes-table");
+  const shareElement = document.getElementById("esx-storage-shares-table");
+  if (!(volumeElement instanceof HTMLElement) && !(shareElement instanceof HTMLElement)) return;
+  if (typeof Tabulator === "undefined") return;
+
+  if (volumeElement instanceof HTMLElement) {
+    const rows = JSON.parse(volumeElement.dataset.esxStorageVolumes || "[]");
+    new Tabulator(volumeElement, {
+      data: rows,
+      layout: "fitColumns",
+      placeholder: "No storage volumes are configured.",
+      columns: [
+        { title: "Name", field: "name", minWidth: 130 },
+        { title: "Source", field: "source_type", formatter: (cell) => cell.getValue() === "blank_disk" ? "blank disk" : "mounted ext4" },
+        { title: "Stable identity / mount", field: "stable_device_id", minWidth: 260, formatter: (cell) => `<code>${escapeHtml(cell.getValue() || cell.getRow().getData().mount_path || "")}</code>` },
+        { title: "Capacity", field: "capacity_bytes", formatter: (cell) => Number(cell.getValue() || 0).toLocaleString() },
+        { title: "Filesystem", field: "filesystem_uuid", formatter: (cell) => cell.getValue() || "pending ext4 format" },
+        { title: "State", field: "state" },
+      ],
+    });
+    document.getElementById(volumeElement.dataset.fallbackId || "")?.classList.add("hidden");
+  }
+
+  if (shareElement instanceof HTMLElement) {
+    const rows = JSON.parse(shareElement.dataset.esxStorageShares || "[]");
+    const interfaces = JSON.parse(shareElement.dataset.interfaces || "[]");
+    const canWrite = shareElement.dataset.canWrite === "true";
+    const interfaceValues = Object.fromEntries(interfaces.map((item) => [item.name, item.name]));
+    const editor = canWrite ? "input" : false;
+    const saveCell = async (cell) => {
+      const row = cell.getRow().getData();
+      const field = cell.getField();
+      let value = cell.getValue();
+      if (["address_families", "ipv4_clients", "ipv6_clients"].includes(field)) {
+        value = Array.isArray(value) ? value : String(value || "").split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
+      }
+      const response = await fetch(`/api/v1/esx-storage/shares/${row.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: value }),
+      });
+      if (!response.ok) {
+        cell.restoreOldValue();
+        const payload = await response.json().catch(() => ({}));
+        showTransientGridStatus(payload.detail || "The NFS datastore change could not be saved.");
+        return;
+      }
+      showTransientGridStatus("NFS datastore desired state saved.");
+      scheduleApplianceApplySidebarRefresh();
+    };
+    new Tabulator(shareElement, {
+      data: rows,
+      layout: "fitColumns",
+      placeholder: "No NFS datastores are configured.",
+      rowContextMenu: canWrite ? [
+        {
+          label: "Remove datastore",
+          action: (_event, row) => {
+            const form = document.getElementById(`esx-storage-remove-share-${row.getData().id}`);
+            if (form instanceof HTMLFormElement) form.requestSubmit();
+          },
+        },
+      ] : [],
+      columns: [
+        { title: "Datastore", field: "datastore_name", editor, cellEdited: saveCell, minWidth: 145 },
+        { title: "Volume", field: "volume_name", minWidth: 120 },
+        { title: "Path", field: "relative_path", editor, cellEdited: saveCell, minWidth: 150 },
+        { title: "NFS", field: "preferred_nfs_version", editor: canWrite ? "list" : false, editorParams: { values: { "4.1": "4.1", "3": "3" } }, cellEdited: saveCell },
+        { title: "Interface / VLAN", field: "interface_name", editor: canWrite ? "list" : false, editorParams: { values: interfaceValues }, cellEdited: saveCell, minWidth: 130 },
+        { title: "Families", field: "address_families", editor: canWrite ? "list" : false, editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" }, multiselect: true }, formatter: (cell) => (cell.getValue() || []).map((value) => value === "ipv4" ? "IPv4" : "IPv6").join(" + "), cellEdited: saveCell },
+        { title: "IPv4 VMkernel clients", field: "ipv4_clients", editor, formatter: (cell) => (cell.getValue() || []).join(", "), cellEdited: saveCell, minWidth: 170 },
+        { title: "IPv6 VMkernel clients", field: "ipv6_clients", editor, formatter: (cell) => (cell.getValue() || []).join(", "), cellEdited: saveCell, minWidth: 180 },
+        { title: "Enabled", field: "enabled", formatter: "tickCross", editor: canWrite ? "tickCross" : false, cellEdited: saveCell },
+      ],
+    });
+    document.getElementById(shareElement.dataset.fallbackId || "")?.classList.add("hidden");
+  }
+}
+
+function initializeEsxStorageFamilyDefaults() {
+  const form = document.querySelector("[data-esx-storage-share-form]");
+  const select = form?.querySelector("[data-esx-storage-interface]");
+  if (!(form instanceof HTMLFormElement) || !(select instanceof HTMLSelectElement)) return;
+  const update = () => {
+    const option = select.selectedOptions[0];
+    for (const family of ["ipv4", "ipv6"]) {
+      const checkbox = form.querySelector(`input[name="address_families"][value="${family}"]`);
+      if (!(checkbox instanceof HTMLInputElement)) continue;
+      checkbox.checked = Boolean(option?.dataset[family]);
+    }
+  };
+  select.addEventListener("change", update);
+  update();
+}
+
+function initializeEsxStorageVolumeSource() {
+  const form = document.querySelector("[data-esx-storage-volume-form]");
+  const source = form?.querySelector("[data-esx-storage-volume-source]");
+  const blank = form?.querySelector("[data-esx-storage-blank-source]");
+  const mounted = form?.querySelector("[data-esx-storage-mounted-source]");
+  if (!(form instanceof HTMLFormElement) || !(source instanceof HTMLSelectElement)) return;
+  const update = () => {
+    const usesBlankDisk = source.value === "blank_disk";
+    blank?.toggleAttribute("hidden", !usesBlankDisk);
+    mounted?.toggleAttribute("hidden", usesBlankDisk);
+    const stableIdentity = blank?.querySelector('select[name="stable_device_id"]');
+    const mountPath = mounted?.querySelector('select[name="mount_path"]');
+    if (stableIdentity instanceof HTMLSelectElement) stableIdentity.required = usesBlankDisk;
+    if (mountPath instanceof HTMLSelectElement) mountPath.required = !usesBlankDisk;
+  };
+  source.addEventListener("change", update);
+  update();
+}
+
 document.addEventListener("DOMContentLoaded", initializeDashboard);
+document.addEventListener("DOMContentLoaded", initializeEsxStorageTables);
+document.addEventListener("DOMContentLoaded", initializeEsxStorageFamilyDefaults);
+document.addEventListener("DOMContentLoaded", initializeEsxStorageVolumeSource);
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);

@@ -50,6 +50,9 @@ from labfoundry.app.models import (
     DnsSettings,
     EsxiKickstart,
     EsxiPxeHost,
+    EsxNfsShare,
+    EsxStorageSettings,
+    EsxStorageVolume,
     FirewallRule,
     FirewallSettings,
     Job,
@@ -353,6 +356,22 @@ from labfoundry.app.services.firewall import (
     validate_firewall_source_groups,
     validate_firewall_rule,
     validate_firewall_state,
+)
+from labfoundry.app.services.esx_storage import (
+    ESX_STORAGE_DNS_DESCRIPTION,
+    ESX_STORAGE_STAGED_CONFIG_PATH,
+    StorageInterface,
+    desired_dns_records as desired_esx_storage_dns_records,
+    firewall_rule_specs as esx_storage_firewall_rule_specs,
+    format_authorization as esx_storage_format_authorization,
+    manifest_json as esx_storage_manifest_json,
+    normalize_families as normalize_esx_storage_families,
+    normalize_relative_path as normalize_esx_storage_relative_path,
+    parse_disk_inventory_output as parse_esx_storage_disk_inventory_output,
+    render_manifest as render_esx_storage_manifest,
+    select_inventory_candidate as select_esx_storage_inventory_candidate,
+    split_lines as split_esx_storage_lines,
+    storage_slug as esx_storage_slug,
 )
 from labfoundry.app.services.kms import (
     KMS_BACKENDS,
@@ -3010,6 +3029,7 @@ def firewall_context(db: Session, *, reconcile: bool = True) -> dict:
         source_group_assignments=source_group_state["assignments"],
         web_terminal_interfaces=terminal_interfaces,
         ldap_settings=get_ldap_settings_row(db),
+        esx_storage_rules=esx_storage_firewall_rule_specs(esx_storage_context(db, reconcile=False)["esx_storage_manifest"]),
     )
     generated_rules.extend(
         managed_routing_firewall_rules(
@@ -4662,6 +4682,125 @@ def ensure_dns_for_esxi_pxe(db: Session, boot: dict[str, Any], actor: str | None
     )
 
 
+def get_esx_storage_settings_row(db: Session) -> EsxStorageSettings:
+    settings = db.execute(select(EsxStorageSettings).order_by(EsxStorageSettings.id)).scalars().first()
+    if settings is None:
+        dns = db.execute(select(DnsSettings).order_by(DnsSettings.id)).scalars().first()
+        domain = (dns.domain if dns else "labfoundry.internal").splitlines()[0].strip().strip(".")
+        settings = EsxStorageSettings(enabled=False, hostname=f"nfs.{domain}")
+        db.add(settings)
+        db.flush()
+    return settings
+
+
+def esx_storage_bind_state(db: Session, shares: list[EsxNfsShare] | None = None) -> tuple[str, str, dict[str, StorageInterface]]:
+    options = service_bind_options(db)
+    by_name = {str(option["name"]): option for option in options}
+    interfaces = {
+        name: StorageInterface(
+            name,
+            tuple(address for address in option.get("addresses", []) if ":" not in address),
+            tuple(address for address in option.get("addresses", []) if ":" in address),
+        )
+        for name, option in by_name.items()
+    }
+    active = shares if shares is not None else db.execute(select(EsxNfsShare).where(EsxNfsShare.enabled.is_(True))).scalars().all()
+    names: list[str] = []
+    addresses: list[str] = []
+    for share in active:
+        if not share.enabled or share.interface_name not in interfaces:
+            continue
+        if share.interface_name not in names:
+            names.append(share.interface_name)
+        try:
+            families = normalize_esx_storage_families(share.address_families)
+        except ValueError:
+            families = []
+        option = by_name[share.interface_name]
+        for address in option.get("addresses", []):
+            family = "ipv6" if ":" in address else "ipv4"
+            if family in families and address not in addresses:
+                addresses.append(address)
+    return join_interfaces(names), join_addresses(addresses), interfaces
+
+
+def ensure_dns_for_esx_storage(db: Session, actor: str | None, *, previous_hostname: str | None = None) -> str | None:
+    settings = get_esx_storage_settings_row(db)
+    settings.hostname = normalize_dns_hostname(settings.hostname)
+    volumes = db.execute(select(EsxStorageVolume).order_by(EsxStorageVolume.name)).scalars().all()
+    shares = db.execute(select(EsxNfsShare).order_by(EsxNfsShare.datastore_name)).scalars().all()
+    _listen_interface, _listen_address, interfaces = esx_storage_bind_state(db, shares)
+    dns = db.execute(select(DnsSettings).order_by(DnsSettings.id)).scalars().first()
+    manifest = render_esx_storage_manifest(
+        settings,
+        volumes,
+        shares,
+        interfaces,
+        dns_enabled=bool(dns and dns.enabled),
+        dns_naming_mode=get_appliance_settings_row(db).service_dns_target_naming or "ip",
+    )
+    desired = desired_esx_storage_dns_records(manifest) if settings.enabled and any(share.enabled for share in shares) else []
+    desired_keys = {(row["hostname"], row["record_type"], row["address"]) for row in desired}
+    owned = db.execute(select(DnsRecord).where(DnsRecord.description == ESX_STORAGE_DNS_DESCRIPTION)).scalars().all()
+    actions: list[str] = []
+    for record in owned:
+        if (record.hostname, record.record_type, record.address) in desired_keys:
+            continue
+        db.delete(record)
+        actions.append("removed-stale")
+        if actor:
+            record_audit(
+                db,
+                actor=actor,
+                action="delete_dns_record_from_esx_storage_stale_endpoint",
+                resource_type="dns_record",
+                resource_id=str(record.id),
+                detail=f"{record.hostname} {record.record_type} -> {record.address}",
+            )
+    for desired_record in desired:
+        matching = db.execute(
+            select(DnsRecord).where(
+                DnsRecord.hostname == desired_record["hostname"],
+                DnsRecord.record_type == desired_record["record_type"],
+            )
+        ).scalars().all()
+        if any(record.description != ESX_STORAGE_DNS_DESCRIPTION for record in matching):
+            actions.append("conflict")
+            continue
+        existing = next((record for record in matching if record.address == desired_record["address"]), None)
+        if existing:
+            if not existing.enabled:
+                existing.enabled = True
+                actions.append("updated")
+            else:
+                actions.append("unchanged")
+            continue
+        record = DnsRecord(
+            hostname=desired_record["hostname"],
+            record_type=desired_record["record_type"],
+            address=desired_record["address"],
+            description=ESX_STORAGE_DNS_DESCRIPTION,
+            enabled=True,
+        )
+        db.add(record)
+        db.flush()
+        actions.append("created")
+        if actor:
+            record_audit(
+                db,
+                actor=actor,
+                action="create_dns_record_from_esx_storage",
+                resource_type="dns_record",
+                resource_id=str(record.id),
+                detail=f"{record.hostname} {record.record_type} -> {record.address}",
+            )
+    if previous_hostname and normalize_dns_hostname(previous_hostname) != settings.hostname:
+        actions.append("removed-old")
+    if actions:
+        db.flush()
+    return summarize_dns_actions(actions)
+
+
 def reconcile_service_dns_aliases(db: Session, actor: str | None = None) -> list[str]:
     changed: list[str] = []
     kms_settings = db.execute(select(KmsSettings)).scalar_one_or_none()
@@ -4679,6 +4818,9 @@ def reconcile_service_dns_aliases(db: Session, actor: str | None = None) -> list
     esxi_action = ensure_dns_for_esxi_pxe(db, esxi_pxe_boot_settings(db), actor, previous_hostname=str(esxi_pxe_boot_settings(db).get("hostname") or ""))
     if esxi_action:
         changed.append("ESXi PXE")
+    esx_action = ensure_dns_for_esx_storage(db, actor, previous_hostname=get_esx_storage_settings_row(db).hostname)
+    if esx_action:
+        changed.append("ESX Storage")
     return changed
 
 
@@ -6321,6 +6463,7 @@ APPLIANCE_APPLY_UNIT_IDS = {
     "firewall",
     "dnsmasq",
     "esxi_pxe",
+    "esx_storage",
     "ca",
     "kms",
     "ldap",
@@ -6904,6 +7047,121 @@ def parse_optional_esxi_kickstart_id(db: Session, kickstart_id: str, *, label: s
     return normalized_id
 
 
+def esx_storage_context(db: Session, *, reconcile: bool = True) -> dict[str, Any]:
+    settings = get_esx_storage_settings_row(db)
+    volumes = db.execute(select(EsxStorageVolume).order_by(EsxStorageVolume.name)).scalars().all()
+    shares = db.execute(select(EsxNfsShare).order_by(EsxNfsShare.datastore_name)).scalars().all()
+    listen_interface, listen_address, interfaces = esx_storage_bind_state(db, shares)
+    if reconcile:
+        ensure_dns_for_esx_storage(db, None, previous_hostname=settings.hostname)
+    dns = db.execute(select(DnsSettings).order_by(DnsSettings.id)).scalars().first()
+    naming_mode = get_appliance_settings_row(db).service_dns_target_naming or "ip"
+    manifest = render_esx_storage_manifest(
+        settings,
+        volumes,
+        shares,
+        interfaces,
+        dns_enabled=bool(dns and dns.enabled),
+        dns_naming_mode=naming_mode,
+    )
+    desired_records = desired_esx_storage_dns_records(manifest)
+    owned_records = db.execute(select(DnsRecord).where(DnsRecord.description == ESX_STORAGE_DNS_DESCRIPTION)).scalars().all()
+    desired_keys = {(row["hostname"], row["record_type"], row["address"]) for row in desired_records}
+    record_conflicts: list[str] = []
+    for record in desired_records:
+        existing = db.execute(
+            select(DnsRecord).where(DnsRecord.hostname == record["hostname"], DnsRecord.record_type == record["record_type"])
+        ).scalars().all()
+        if any(row.description != ESX_STORAGE_DNS_DESCRIPTION for row in existing):
+            record_conflicts.append(f"DNS record {record['hostname']} {record['record_type']} is operator-owned and blocks ESX Storage.")
+    validation_errors = [*manifest["validation"]["errors"], *record_conflicts]
+    disk_inventory: list[dict[str, Any]] = []
+    inventory_error = ""
+    inventory_result = SystemAdapter().esx_storage_inventory()
+    if inventory_result.returncode:
+        inventory_error = inventory_result.stderr.strip() or "ESX Storage disk inventory is unavailable."
+    else:
+        try:
+            disk_inventory = parse_esx_storage_disk_inventory_output(
+                inventory_result.stdout,
+                claimed_ids={row.stable_device_id for row in volumes if row.stable_device_id},
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            inventory_error = str(exc)
+    volume_rows = [
+        {
+            "id": row.id,
+            "name": row.name,
+            "source_type": row.source_type,
+            "stable_device_id": row.stable_device_id,
+            "device_model": row.device_model,
+            "device_serial": row.device_serial,
+            "device_wwn": row.device_wwn,
+            "capacity_bytes": row.capacity_bytes,
+            "filesystem_uuid": row.filesystem_uuid,
+            "filesystem_label": row.filesystem_label,
+            "mount_path": row.mount_path,
+            "state": row.state,
+            "applied": row.applied,
+        }
+        for row in volumes
+    ]
+    share_rows: list[dict[str, Any]] = []
+    rendered_by_id = {item["id"]: item for item in manifest["shares"]}
+    for row in shares:
+        rendered = rendered_by_id[row.id]
+        share_rows.append(
+            {
+                "id": row.id,
+                "datastore_name": row.datastore_name,
+                "volume_id": row.volume_id,
+                "volume_name": rendered["volume_name"],
+                "relative_path": row.relative_path,
+                "preferred_nfs_version": row.preferred_nfs_version,
+                "interface_name": row.interface_name,
+                "address_families": rendered["address_families"],
+                "ipv4_clients": rendered["clients"]["ipv4"],
+                "ipv6_clients": rendered["clients"]["ipv6"],
+                "listeners": rendered["listeners"],
+                "target_hostnames": rendered["target_hostnames"],
+                "remote_path": rendered["remote_path"],
+                "connection_commands": rendered["connection_commands"],
+                "enabled": row.enabled,
+            }
+        )
+    return {
+        "esx_storage_settings": settings,
+        "esx_storage_volumes": volumes,
+        "esx_storage_volume_rows": volume_rows,
+        "esx_storage_disk_inventory": disk_inventory,
+        "esx_storage_inventory_error": inventory_error,
+        "esx_storage_shares": shares,
+        "esx_storage_share_rows": share_rows,
+        "esx_storage_interfaces": [
+            {
+                "name": interface.name,
+                "ipv4": list(interface.ipv4),
+                "ipv6": list(interface.ipv6),
+                "default_families": [family for family in ("ipv4", "ipv6") if (interface.ipv4 if family == "ipv4" else interface.ipv6)],
+            }
+            for interface in interfaces.values()
+        ],
+        "esx_storage_listen_interface": listen_interface,
+        "esx_storage_listen_address": listen_address,
+        "esx_storage_manifest": manifest,
+        "esx_storage_manifest_preview": esx_storage_manifest_json(manifest),
+        "esx_storage_validation_errors": list(dict.fromkeys(validation_errors)),
+        "esx_storage_validation_warnings": manifest["validation"]["warnings"],
+        "esx_storage_dns_records": desired_records,
+        "esx_storage_owned_dns_record_count": len(owned_records),
+        "esx_storage_stale_dns_record_count": len(
+            [record for record in owned_records if (record.hostname, record.record_type, record.address) not in desired_keys]
+        ),
+        "esx_storage_firewall_rules": esx_storage_firewall_rule_specs(manifest),
+        "esx_storage_config_path": ESX_STORAGE_STAGED_CONFIG_PATH,
+    }
+
+
 def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[str, Any]]:
     baselines = load_appliance_apply_baselines(db)
     local_users = local_users_apply_context(db, baselines.get("local_users"))
@@ -6913,6 +7171,7 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
     firewall = firewall_context(db, reconcile=reconcile)
     dnsmasq = dnsmasq_context(db, reconcile=reconcile)
     esxi_pxe = esxi_pxe_context(db)
+    esx_storage = esx_storage_context(db, reconcile=reconcile)
     ca = ca_context(db, reconcile=reconcile)
     kms = kms_context(db, reconcile=reconcile)
     ldap = ldap_context(db, reconcile=reconcile)
@@ -7071,6 +7330,23 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
             config_path=esxi_pxe["esxi_pxe_config_path"],
             config_preview=esxi_pxe["esxi_pxe_manifest"],
             baseline=baselines.get("esxi_pxe"),
+        ),
+        make_appliance_apply_unit(
+            unit_id="esx_storage",
+            label="ESX Storage",
+            page_url="/esx-storage",
+            context=esx_storage,
+            summary=[
+                "service enabled" if esx_storage["esx_storage_settings"].enabled else "service disabled",
+                f"{len(esx_storage['esx_storage_volumes'])} storage volumes",
+                f"{len([row for row in esx_storage['esx_storage_shares'] if row.enabled])} enabled NFS datastores",
+                "IPv4 and IPv6 are equivalent listener families",
+            ],
+            validation_errors=esx_storage["esx_storage_validation_errors"],
+            validation_warnings=esx_storage["esx_storage_validation_warnings"],
+            config_path=ESX_STORAGE_STAGED_CONFIG_PATH,
+            config_preview=esx_storage["esx_storage_manifest_preview"],
+            baseline=baselines.get("esx_storage"),
         ),
         make_appliance_apply_unit(
             unit_id="ca",
@@ -8160,6 +8436,7 @@ def log_sources_context(*, max_lines: int = 100) -> list[dict[str, Any]]:
             path_label="slapd.service journal: LDAP and LDAPS directory events",
         ),
         journal_log_source("ntp", "NTP / NTS", "ntpd.service", adapter.read_ntpd_logs(), max_lines=line_count),
+        journal_log_source("esx-storage", "ESX Storage NFS", "nfs-server.service", adapter.esx_storage_logs(), max_lines=line_count),
         journal_log_source("nginx", "Nginx", "nginx.service", adapter.read_nginx_logs(), max_lines=line_count),
         journal_log_source(
             "nginx-access",
@@ -8399,6 +8676,16 @@ def execute_appliance_apply_unit(unit: dict[str, Any], *, adapter: SystemAdapter
             [
                 lambda: adapter.validate_esxi_pxe_config(config_path),
                 lambda: adapter.apply_esxi_pxe_config(config_path),
+            ]
+        )
+    elif unit_id == "esx_storage":
+        config_path = ESX_STORAGE_STAGED_CONFIG_PATH
+        if not adapter.dry_run:
+            config_path = stage_appliance_apply_config(ESX_STORAGE_STAGED_CONFIG_PATH, unit["raw_config_preview"])
+        results = run_adapter_steps(
+            [
+                lambda: adapter.validate_esx_storage_config(config_path),
+                lambda: adapter.apply_esx_storage_config(config_path),
             ]
         )
     elif unit_id == "ca":
@@ -10081,6 +10368,17 @@ def appliance_apply_review(
             "config_diff": unit["config_diff"],
             "has_baseline": unit["has_baseline"],
             "selected": unit["valid"],
+            "format_volumes": [
+                {
+                    "id": volume["id"],
+                    "name": volume["name"],
+                    "stable_device_id": volume["stable_device_id"],
+                    "fingerprint": volume["fingerprint"],
+                    "confirmation": f"FORMAT {volume['name']}",
+                }
+                for volume in unit.get("context", {}).get("esx_storage_manifest", {}).get("volumes", [])
+                if volume.get("requires_format")
+            ],
         }
         for unit in context["changed_apply_units"]
     ]
@@ -10220,8 +10518,13 @@ def run_appliance_apply_job(job_id: str, *, force_real: bool = False) -> None:
                 job.progress_percent = min(95, int(((index - 1) / total_steps) * 100))
                 db.commit()
 
+                execution_unit = unit
+                if unit["id"] == "esx_storage":
+                    manifest = json.loads(unit["raw_config_preview"])
+                    manifest["format_authorizations"] = list(job_result.get("format_authorizations") or [])
+                    execution_unit = {**unit, "raw_config_preview": esx_storage_manifest_json(manifest)}
                 result = execute_appliance_apply_unit(
-                    unit,
+                    execution_unit,
                     adapter=SystemAdapter(dry_run=False) if force_real else None,
                 )
                 result = _redact_task_value(result)
@@ -10240,6 +10543,24 @@ def run_appliance_apply_job(job_id: str, *, force_real: bool = False) -> None:
                 job.result = json.dumps({**current_payload, "units": unit_results}, indent=2)
                 persist_vcf_depot_metadata_from_apply(db, [result])
                 if result["success"]:
+                    if unit["id"] == "esx_storage" and not result.get("dry_run"):
+                        inventory_result = SystemAdapter(dry_run=False).esx_storage_inventory()
+                        if inventory_result.returncode == 0:
+                            try:
+                                inventory_rows = json.loads(inventory_result.stdout.splitlines()[-1])
+                            except (IndexError, json.JSONDecodeError):
+                                inventory_rows = []
+                            inventory_by_id = {str(item.get("stable_device_id") or ""): item for item in inventory_rows}
+                            for volume in db.execute(select(EsxStorageVolume)).scalars().all():
+                                inventory = inventory_by_id.get(volume.stable_device_id)
+                                if volume.source_type == "mounted_ext4" or inventory:
+                                    volume.applied = True
+                                    volume.state = "mounted"
+                                if inventory:
+                                    volume.filesystem_uuid = str(inventory.get("filesystem_uuid") or volume.filesystem_uuid)
+                                    volume.filesystem_label = str(inventory.get("filesystem_label") or volume.filesystem_label)
+                                    volume.device_path = str(inventory.get("device_path") or volume.device_path)
+                                    volume.updated_at = utcnow()
                     db.flush()
                     db.expire_all()
                     refreshed_units = appliance_apply_units(db, reconcile=False)
@@ -10355,6 +10676,7 @@ def submit_appliance_apply(
     request: Request,
     background_tasks: BackgroundTasks,
     selected_units: list[str] = Form(default=[]),
+    format_confirmations: list[str] = Form(default=[]),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
@@ -10391,6 +10713,28 @@ def submit_appliance_apply(
         for unit in units
         if unit["changed"] and unit["id"] not in selected_ids
     ]
+    parsed_format_confirmations: dict[int, str] = {}
+    for raw_confirmation in format_confirmations:
+        try:
+            item = json.loads(raw_confirmation)
+            parsed_format_confirmations[int(item["volume_id"])] = str(item["confirmation"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            detail = "A disk format confirmation was malformed. Reopen appliance review and try again."
+            return JSONResponse({"detail": detail}, status_code=422) if wants_json else Response(detail, status_code=422, media_type="text/plain")
+
+    required_format_volumes = []
+    if "esx_storage" in selected_ids:
+        required_format_volumes = [
+            volume
+            for volume in unit_map["esx_storage"]["context"]["esx_storage_manifest"]["volumes"]
+            if volume.get("requires_format")
+        ]
+    for volume in required_format_volumes:
+        expected = f"FORMAT {volume['name']}"
+        if parsed_format_confirmations.get(int(volume["id"])) != expected:
+            detail = f"Formatting {volume['name']} requires the exact confirmation {expected!r}."
+            return JSONResponse({"detail": detail}, status_code=422) if wants_json else Response(detail, status_code=422, media_type="text/plain")
+
     job_result = {
         "selected_units": [unit["id"] for unit in selected_ordered_units],
         "skipped_changed_units": skipped_changed_units,
@@ -10410,6 +10754,7 @@ def submit_appliance_apply(
         ],
         "units": [],
         "dry_run": bool(get_settings().dry_run_system_adapters),
+        "format_authorizations": [],
     }
     with APPLIANCE_APPLY_SUBMIT_LOCK:
         db.expire_all()
@@ -10422,6 +10767,17 @@ def submit_appliance_apply(
             return JSONResponse({"detail": detail}, status_code=409) if wants_json else Response(detail, status_code=409, media_type="text/plain")
 
         job_id = f"job_{uuid4().hex[:12]}"
+        if required_format_volumes:
+            manifest = unit_map["esx_storage"]["context"]["esx_storage_manifest"]
+            job_result["format_authorizations"] = [
+                esx_storage_format_authorization(
+                    job_id=job_id,
+                    manifest=manifest,
+                    volume=volume,
+                    confirmation=parsed_format_confirmations[int(volume["id"])],
+                )
+                for volume in required_format_volumes
+            ]
         job = Job(
             id=job_id,
             type="appliance-apply",
@@ -16693,6 +17049,208 @@ def update_vcf_backup_settings_from_ui(
     return RedirectResponse("/vcf-backups", status_code=303)
 
 
+def require_esx_storage_write(identity: Identity) -> None:
+    if not identity.can("write:esx-storage"):
+        raise HTTPException(status_code=403, detail="ESX Storage write permission is required.")
+
+
+@router.get("/esx-storage", response_class=HTMLResponse, response_model=None)
+def esx_storage_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    context = esx_storage_context(db)
+    return render(
+        request,
+        "esx_storage.html",
+        {
+            "identity": identity,
+            "esx_storage_can_write": identity.can("write:esx-storage"),
+            **context,
+            "appliance_apply_status": appliance_apply_status(db, "esx_storage"),
+        },
+    )
+
+
+@router.post("/esx-storage/settings", response_model=None)
+def update_esx_storage_settings_from_ui(
+    request: Request,
+    enabled: str | None = Form(None),
+    hostname: str = Form("nfs.labfoundry.internal"),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    require_esx_storage_write(identity)
+    settings = get_esx_storage_settings_row(db)
+    previous_hostname = settings.hostname
+    normalized_hostname = normalize_dns_hostname(hostname)
+    if not normalized_hostname or "." not in normalized_hostname:
+        raise HTTPException(status_code=400, detail="ESX Storage hostname must be a fully qualified DNS name.")
+    settings.enabled = enabled == "on"
+    settings.hostname = normalized_hostname
+    settings.updated_at = utcnow()
+    dns_action = ensure_dns_for_esx_storage(db, identity.username, previous_hostname=previous_hostname)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_esx_storage_settings", resource_type="esx_storage", resource_id=str(settings.id), detail=f"enabled={settings.enabled} hostname={settings.hostname}")
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = esx_storage_context(db)
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": settings.updated_at.isoformat(),
+                "dns_record_action": dns_action,
+                "valid": not context["esx_storage_validation_errors"],
+                "validation_errors": context["esx_storage_validation_errors"],
+                "validation_warnings": context["esx_storage_validation_warnings"],
+                "config_preview": context["esx_storage_manifest_preview"],
+                "appliance_apply_status": appliance_apply_client_status(appliance_apply_status(db, "esx_storage")),
+            }
+        )
+    return RedirectResponse("/esx-storage", status_code=303)
+
+
+@router.post("/esx-storage/volumes", response_model=None)
+def create_esx_storage_volume_from_ui(
+    request: Request,
+    name: str = Form(...),
+    source_type: str = Form("blank_disk"),
+    stable_device_id: str = Form(""),
+    mount_path: str = Form(""),
+    device_model: str = Form(""),
+    device_serial: str = Form(""),
+    device_wwn: str = Form(""),
+    capacity_bytes: int = Form(0),
+    filesystem_uuid: str = Form(""),
+    filesystem_label: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_esx_storage_write(identity)
+    normalized_name = name.strip()
+    if source_type not in {"blank_disk", "mounted_ext4"}:
+        raise HTTPException(status_code=400, detail="Volume source must be a blank disk or mounted ext4 volume.")
+    if source_type == "blank_disk" and not stable_device_id.startswith("/dev/disk/by-id/"):
+        raise HTTPException(status_code=400, detail="Blank disks require a stable /dev/disk/by-id identity.")
+    if source_type == "mounted_ext4" and not mount_path.startswith("/"):
+        raise HTTPException(status_code=400, detail="Existing ext4 volumes require an absolute mount path.")
+    candidate: dict[str, Any] = {}
+    if not get_settings().dry_run_system_adapters:
+        inventory_result = SystemAdapter(dry_run=False).esx_storage_inventory()
+        if inventory_result.returncode:
+            raise HTTPException(status_code=503, detail=inventory_result.stderr or "ESX Storage disk inventory failed.")
+        try:
+            inventory = parse_esx_storage_disk_inventory_output(
+                inventory_result.stdout,
+                claimed_ids=set(db.execute(select(EsxStorageVolume.stable_device_id)).scalars().all()),
+            )
+            candidate = select_esx_storage_inventory_candidate(
+                inventory,
+                source_type=source_type,
+                stable_device_id=stable_device_id,
+                mount_path=mount_path,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    row = EsxStorageVolume(
+        name=normalized_name,
+        source_type=source_type,
+        stable_device_id=str(candidate.get("stable_device_id") or stable_device_id).strip(),
+        device_path=str(candidate.get("device_path") or ""),
+        device_model=str(candidate.get("model") or device_model).strip(),
+        device_serial=str(candidate.get("serial") or device_serial).strip(),
+        device_wwn=str(candidate.get("wwn") or device_wwn).strip(),
+        capacity_bytes=int(candidate.get("size_bytes") or max(capacity_bytes, 0)),
+        filesystem_uuid=str(candidate.get("filesystem_uuid") or filesystem_uuid).strip(),
+        filesystem_label=str(candidate.get("filesystem_label") or filesystem_label).strip(),
+        mount_path=str(candidate.get("mount_path") or mount_path).strip() or f"/mnt/labfoundry-esx-storage/{esx_storage_slug(normalized_name)}",
+        state="pending_format" if source_type == "blank_disk" else "mounted",
+        applied=False,
+    )
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="The volume name or stable device identity is already claimed.") from exc
+    record_audit(db, actor=identity.username, action="create_esx_storage_volume", resource_type="esx_storage_volume", resource_id=str(row.id), detail=f"name={row.name} source_type={row.source_type}")
+    return RedirectResponse("/esx-storage#storage-volumes", status_code=303)
+
+
+@router.post("/esx-storage/shares", response_model=None)
+def create_esx_nfs_share_from_ui(
+    request: Request,
+    datastore_name: str = Form(...),
+    volume_id: int = Form(...),
+    relative_path: str = Form(...),
+    preferred_nfs_version: str = Form("4.1"),
+    interface_name: str = Form(...),
+    address_families: list[str] = Form(default_factory=list),
+    ipv4_clients: str = Form(""),
+    ipv6_clients: str = Form(""),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_esx_storage_write(identity)
+    if db.get(EsxStorageVolume, volume_id) is None:
+        raise HTTPException(status_code=400, detail="Selected storage volume does not exist.")
+    if preferred_nfs_version not in {"3", "4.1"}:
+        raise HTTPException(status_code=400, detail="Preferred NFS version must be 3 or 4.1.")
+    families = normalize_esx_storage_families(address_families)
+    if not families:
+        raise HTTPException(status_code=400, detail="Select IPv4, IPv6, or both.")
+    row = EsxNfsShare(
+        datastore_name=datastore_name.strip(),
+        volume_id=volume_id,
+        relative_path=normalize_esx_storage_relative_path(relative_path),
+        preferred_nfs_version=preferred_nfs_version,
+        interface_name=interface_name.strip(),
+        address_families="\n".join(families),
+        ipv4_clients="\n".join(split_esx_storage_lines(ipv4_clients)),
+        ipv6_clients="\n".join(split_esx_storage_lines(ipv6_clients)),
+        enabled=enabled == "on",
+    )
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="A datastore with this name already exists.") from exc
+    ensure_dns_for_esx_storage(db, identity.username)
+    db.commit()
+    record_audit(db, actor=identity.username, action="create_esx_nfs_share", resource_type="esx_nfs_share", resource_id=str(row.id), detail=f"datastore={row.datastore_name} families={','.join(families)}")
+    return RedirectResponse("/esx-storage#nfs-datastores", status_code=303)
+
+
+@router.post("/esx-storage/shares/{share_id}/delete", response_model=None)
+def delete_esx_nfs_share_from_ui(
+    request: Request,
+    share_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_esx_storage_write(identity)
+    row = db.get(EsxNfsShare, share_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="NFS datastore share not found.")
+    name = row.datastore_name
+    db.delete(row)
+    db.flush()
+    ensure_dns_for_esx_storage(db, identity.username)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_esx_nfs_share", resource_type="esx_nfs_share", resource_id=str(share_id), detail=f"datastore={name}; underlying data preserved")
+    return RedirectResponse("/esx-storage#nfs-datastores", status_code=303)
+
+
 @router.get("/authentication", response_class=HTMLResponse, response_model=None)
 def authentication(
     request: Request,
@@ -17117,6 +17675,21 @@ def vcf_depot_service_grid_row(service: ServiceState, db: Session) -> dict[str, 
     return row
 
 
+def esx_storage_service_grid_row(service: ServiceState, db: Session) -> dict[str, object]:
+    row = service_state_status_row(service)
+    settings = get_esx_storage_settings_row(db)
+    row["enabled"] = settings.enabled
+    row["detail"] = "NFS 3 / 4.1 over equivalent IPv4 and IPv6 listeners"
+    if not settings.enabled:
+        row["running"] = False
+        row["health"] = "disabled"
+    elif row.get("running"):
+        row["health"] = "healthy"
+    else:
+        row["health"] = "degraded"
+    return row
+
+
 def service_grid_row(service: ServiceState, db: Session, dns_enabled: bool, dhcp_enabled: bool) -> dict[str, object]:
     if service.service == "dns":
         return dnsmasq_backed_service_grid_row(service, dns_enabled)
@@ -17130,6 +17703,8 @@ def service_grid_row(service: ServiceState, db: Session, dns_enabled: bool, dhcp
         return vcf_backup_service_grid_row(service, db)
     if service.service == "repository":
         return vcf_depot_service_grid_row(service, db)
+    if service.service == "esx-storage":
+        return esx_storage_service_grid_row(service, db)
     return service_state_to_grid_row(service)
 
 

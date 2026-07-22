@@ -36,6 +36,14 @@ SERVICE_STATE_DEFAULTS = [
         "detail": "/var/lib/labfoundry/pxe/http/esxi/ks",
     },
     {
+        "service": "esx-storage",
+        "display_name": "ESX Storage NFS",
+        "running": False,
+        "enabled": False,
+        "health": "disabled",
+        "detail": "NFS 3 / 4.1 · IPv4 / IPv6",
+    },
+    {
         "service": "vcf-private-registry",
         "display_name": "VCF Private Registry",
         "running": False,
@@ -69,4 +77,5 @@ SERVICE_SYSTEMD_UNITS = {
     "ntpd": "ntpd.service",
     "kms": "labfoundry-kms.service",
     "ldap": "slapd.service",
+    "esx-storage": "nfs-server.service",
 }

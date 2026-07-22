@@ -786,6 +786,62 @@ class VcfBackupSettings(Base):
     sftp_user: Mapped[User | None] = relationship()
 
 
+class EsxStorageSettings(Base):
+    __tablename__ = "esx_storage_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    hostname: Mapped[str] = mapped_column(String(253), default="nfs.labfoundry.internal")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class EsxStorageVolume(Base):
+    __tablename__ = "esx_storage_volumes"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_esx_storage_volume_name"),
+        UniqueConstraint("stable_device_id", name="uq_esx_storage_volume_device"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    source_type: Mapped[str] = mapped_column(String(20), default="blank_disk")
+    stable_device_id: Mapped[str] = mapped_column(String(500), default="")
+    device_path: Mapped[str] = mapped_column(String(500), default="")
+    device_model: Mapped[str] = mapped_column(String(240), default="")
+    device_serial: Mapped[str] = mapped_column(String(240), default="")
+    device_wwn: Mapped[str] = mapped_column(String(240), default="")
+    capacity_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    filesystem_uuid: Mapped[str] = mapped_column(String(120), default="")
+    filesystem_label: Mapped[str] = mapped_column(String(120), default="")
+    mount_path: Mapped[str] = mapped_column(String(500), default="")
+    state: Mapped[str] = mapped_column(String(40), default="pending_format")
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    shares: Mapped[list["EsxNfsShare"]] = relationship(back_populates="volume")
+
+
+class EsxNfsShare(Base):
+    __tablename__ = "esx_nfs_shares"
+    __table_args__ = (UniqueConstraint("datastore_name", name="uq_esx_nfs_share_datastore_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    datastore_name: Mapped[str] = mapped_column(String(120), index=True)
+    volume_id: Mapped[int] = mapped_column(ForeignKey("esx_storage_volumes.id"), index=True)
+    relative_path: Mapped[str] = mapped_column(String(500), default="")
+    preferred_nfs_version: Mapped[str] = mapped_column(String(10), default="4.1")
+    interface_name: Mapped[str] = mapped_column(String(80), default="")
+    address_families: Mapped[str] = mapped_column(String(40), default="ipv4\nipv6")
+    ipv4_clients: Mapped[str] = mapped_column(Text, default="")
+    ipv6_clients: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    volume: Mapped[EsxStorageVolume] = relationship(back_populates="shares")
+
+
 class VcfTrustTarget(Base):
     __tablename__ = "vcf_trust_targets"
     __table_args__ = (UniqueConstraint("address", "api_port", name="uq_vcf_trust_target_address_api_port"),)

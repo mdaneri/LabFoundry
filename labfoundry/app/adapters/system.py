@@ -101,6 +101,23 @@ class SystemAdapter:
     def apply_esxi_pxe_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("esxi-pxe", "apply", config_path, dry_run_message="dry-run: ESXi PXE apply command recorded")
 
+    def esx_storage_inventory(self) -> AdapterResult:
+        if self.dry_run:
+            return self._record_only_result(["labfoundry-helper", "esx-storage", "inventory"], "[]")
+        return self._helper_result("esx-storage", "inventory", dry_run_message="dry-run: ESX Storage disk inventory command recorded", use_sudo=False)
+
+    def validate_esx_storage_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("esx-storage", "validate", config_path, dry_run_message="dry-run: ESX Storage validation command recorded")
+
+    def apply_esx_storage_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("esx-storage", "apply", config_path, dry_run_message="dry-run: ESX Storage apply command recorded", timeout_seconds=180)
+
+    def esx_storage_status(self) -> AdapterResult:
+        return self._helper_result("esx-storage", "status", dry_run_message="dry-run: ESX Storage status command recorded", use_sudo=False, timeout_seconds=5)
+
+    def esx_storage_logs(self) -> AdapterResult:
+        return self._helper_result("esx-storage", "logs", dry_run_message="dry-run: ESX Storage log read command recorded", timeout_seconds=5)
+
     def read_dhcp_leases(self) -> AdapterResult:
         if self.dry_run:
             return self._record_only_result(

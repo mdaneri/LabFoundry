@@ -96,6 +96,14 @@ The real apply path stages schema-v2 `/var/lib/labfoundry/apply/esxi-pxe/labfoun
 
 ESXi PXE boot settings also affect DNS/DHCP and Firewall desired state. Apply the changed DNS/DHCP, ESXi PXE, and Firewall units together when the DHCP IP zone, HTTP port, or boot files change so dnsmasq returns zone-scoped guide-aligned first-stage and second-stage boot files and the appliance exposes UDP/69 plus the PXE HTTP port on the selected bind targets.
 
+## ESX Storage Apply
+
+The `esx_storage` unit stages `/var/lib/labfoundry/apply/esx-storage/labfoundry-esx-storage.json` and is the only path that may initialize approved blank disks, mount ESX Storage volumes, create bind exports, or change `rpcbind.service` and `nfs-server.service`. IPv4 and IPv6 are equivalent: every enabled family is validated against the selected interface/VLAN, its own VMkernel allowlist, generated A/AAAA target, ESX command, and family-specific firewall rule.
+
+Blank whole-disk initialization requires the global review modal to show the stable `/dev/disk/by-id` path plus model, serial, WWN, and size and accept the exact `FORMAT <volume-name>` confirmation. The server binds that authorization to the appliance-apply job ID, manifest SHA256, and stable identity. The helper validates the complete manifest, re-inventories the disk immediately before `mkfs.ext4`, mounts by UUID, and never performs destructive rollback. Settings backups and apply baselines exclude format authorization.
+
+NFS 3 and 4.1 run over TCP with NFS 2/4.0 disabled and mountd fixed to TCP/20048. Exports use AUTH_SYS with `rw,sync,no_subtree_check,no_root_squash` and per-family client CIDRs. NFS 3 firewall rules open TCP/111, TCP/20048, and TCP/2049; NFS 4.1 rules open TCP/2049. Endpoint changes reconcile app-owned DNS records and make ESX Storage, DNS/DHCP, and Firewall pending together. See [ESX Storage over NFS](esx-storage.md).
+
 ## Firewall Apply
 
 Managed LDAP contributes Firewall-owned TCP/636 rules on every selected LDAP listener interface. Plaintext TCP/389 is never generated.

@@ -162,6 +162,7 @@ def managed_service_firewall_rules(
     source_group_assignments: dict[str, str] | None = None,
     web_terminal_interfaces: list[str] | None = None,
     ldap_settings: LdapSettings | None = None,
+    esx_storage_rules: list[dict[str, str]] | None = None,
 ) -> list[FirewallRule]:
     source_groups_by_id = {str(group.get("id", "")): group for group in source_groups or []}
     source_group_assignments = source_group_assignments or {}
@@ -363,6 +364,18 @@ def managed_service_firewall_rules(
                     priority=110 + index,
                 )
             )
+    for spec in esx_storage_rules or []:
+        rules.append(
+            _service_firewall_rule(
+                name=spec["name"],
+                service=f"ESX NFS {spec['family'].upper()}",
+                interface_name=spec["interface_name"],
+                source=spec["source"],
+                protocol="tcp",
+                ports=spec["ports"],
+                priority=125 + len(rules),
+            )
+        )
     return rules
 
 

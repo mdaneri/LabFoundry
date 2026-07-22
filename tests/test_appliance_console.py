@@ -715,7 +715,7 @@ def test_console_appliance_services_use_full_catalog_and_optional_units(monkeypa
     statuses = appliance_console._appliance_service_statuses(SimpleNamespace(), firewall_enabled=False)
 
     assert [status.label for status in statuses] == [row[0] for row in appliance_console.SERVICE_CATALOG]
-    assert len(statuses) == 13
+    assert len(statuses) == 14
     assert next(status for status in statuses if status.label == "Managed LDAP").display_label == "! crashed"
     assert next(status for status in statuses if status.label == "KMS / KMIP").display_label == "■ off"
     firewall = next(status for status in statuses if status.label == "Firewall")

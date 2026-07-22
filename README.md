@@ -23,6 +23,7 @@ builder lives in [`image/hyperv/`](image/hyperv/) and provisions:
 - `/var/lib/labfoundry` for durable state;
 - `/var/log/labfoundry` for local logs;
 - fixed appliance mount points under `/mnt/labfoundry-vcf-*`;
+- operator-approved ESX Storage ext4 mounts under `/mnt/labfoundry-esx-storage`, with Photon `nfs-utils` and `rpcbind` installed but disabled until global apply;
 - `labfoundry.service` running uvicorn from a Python virtual environment;
 - nginx enabled as the default management front door, with deployed-VM first
   boot generating the integrated root CA and `appliance:https` certificate,
@@ -336,7 +337,7 @@ LabFoundry treats service pages as desired-state editors. Routine setting and gr
 
 Use `Appliance Apply` to review and submit appliance changes. The bottom-left pending card and page-level review actions open a wide review modal. There is no separate appliance-apply page; a direct GET to `/appliance-apply` redirects to the Dashboard and opens the same modal. The workflow:
 
-- lists changed apply units such as Local Users, Appliance Settings, Network, Routes & WAN Simulation, DNS/DHCP, ESXi PXE, Firewall, Certificate Authority, KMS, Managed LDAP, VCF Backups, VCF Offline Depot, VCF Private Registry, and Public Services;
+- lists changed apply units such as Local Users, Appliance Settings, Network, Routes & WAN Simulation, DNS/DHCP, ESXi PXE, ESX Storage, Firewall, Certificate Authority, KMS, Managed LDAP, VCF Backups, VCF Offline Depot, VCF Private Registry, and Public Services;
 - checks changed valid units by default;
 - shows compact summaries with collapsed, on-demand rendered config previews or diffs;
 - lets operators unselect changed units that should stay pending;
@@ -411,6 +412,12 @@ The MVP follows these boundaries:
 - Subprocess calls must use argument arrays, not arbitrary shell strings.
 - The global `/appliance-apply` workflow is the only appliance enforcement path.
 
+## ESX Storage
+
+ESX Storage lives at `/esx-storage` under VCF Workflows and publishes ESX 9.x datastores over NFS 3 or NFS 4.1. IPv4 and IPv6 are equal v1 connection families: each share selects one addressed interface/VLAN and enables IPv4, IPv6, or both with matching VMkernel client allowlists. LabFoundry generates explicit family-specific A/AAAA target names and ESX commands, the canonical `nfs.<domain>` alias, PTR-capable app-owned host records, and equivalent family-specific nftables rules.
+
+Blank whole disks require stable `/dev/disk/by-id` identity, complete job-scoped `FORMAT <volume-name>` authorization, immediate safety revalidation, whole-device ext4 formatting, and UUID mounts under `/mnt/labfoundry-esx-storage`; existing mounted ext4 volumes are also supported. Global apply stages `/var/lib/labfoundry/apply/esx-storage/labfoundry-esx-storage.json`, manages bind exports under `/srv/labfoundry/esx-storage`, and enables `rpcbind`/`nfs-server` only while valid shares are active. Removing desired state never deletes stored data. Settings backup/restore includes the service, volume identities, and shares but never format authorization. See [ESX Storage over NFS](docs/esx-storage.md) for network, DNS, mount, safety, lifecycle, and iSCSI-boundary details.
+
 ## REST API
 
 API prefix:
@@ -444,6 +451,7 @@ Initial resource areas:
 - NAT
 - WAN
 - VCF Offline Depot
+- ESX Storage status, disk inventory, volumes, and NFS shares
 - Services
 - Logs
 - Audit

@@ -64,6 +64,7 @@ def test_login_and_dashboard_render(client):
         "/certificate-authority",
         "/kms",
         "/esxi-pxe",
+        "/esx-storage",
         "/vcf-helper",
         "/vcf-offline-depot",
         "/vcf-private-registry",
@@ -755,7 +756,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v149" in service_worker.text
+    assert "labfoundry-pwa-v150" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -768,7 +769,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=monitor-apply-ux-20260722-11" in service_worker.text
-    assert "/static/app.js?v=monitor-apply-ux-20260722-11" in service_worker.text
+    assert "/static/app.js?v=esx-storage-20260722-2" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -812,7 +813,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "<th>Device</th><th>Read/s</th><th>Write/s</th>" in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=monitor-apply-ux-20260722-11" in page.text
-    assert "/static/app.js?v=monitor-apply-ux-20260722-11" in page.text
+    assert "/static/app.js?v=esx-storage-20260722-2" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -4861,6 +4862,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "LDAP / LDAPS" in response.text
     assert "KMS" in response.text
     assert "NTP / NTS" in response.text
+    assert "ESX Storage NFS" in response.text
     assert "Nginx" in response.text
     assert "HTTP Access" in response.text
     assert "HTTP Errors" in response.text
@@ -4890,7 +4892,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert '<option value="500" >500</option>' in response.text
     assert "Refresh 5s" in response.text
     assert 'class="language-labfoundry-log" data-log-lines-output' in response.text
-    assert response.text.count('data-terminal-note-open="false"') == 10
+    assert response.text.count('data-terminal-note-open="false"') == 11
     toolbar = response.text.split('<div class="logs-toolbar">', 1)[1].split("</div>", 1)[0]
     assert toolbar.index("data-log-refresh-status") < toolbar.index("data-log-lines")
     assert "logs-refresh-status" in toolbar
@@ -4924,9 +4926,10 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
         "dnsmasq-dns",
         "dnsmasq-dhcp",
         "dnsmasq-tftp",
-        "ldap",
-        "ntp",
-        "nginx",
+            "ldap",
+            "ntp",
+            "esx-storage",
+            "nginx",
         "nginx-access",
         "nginx-error",
         "kms",
