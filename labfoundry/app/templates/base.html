@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=automation-run-diff-20260721-10">
+    <link rel="stylesheet" href="/static/app.css?v=monitor-series-20260722-1">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -95,7 +95,8 @@
         {% endif %}
       </aside>
 
-      <main class="main-pane">
+      {% set page_apply_status = appliance_apply_status|default(None) %}
+      <main class="main-pane"{% if page_apply_status %} data-page-apply-unit="{{ page_apply_status.id }}"{% endif %}>
         <header class="topbar">
           <div>
             <h1>{% block page_title %}Dashboard{% endblock %}</h1>
@@ -132,7 +133,6 @@
           {% endif %}
         </header>
 
-        {% set page_apply_status = appliance_apply_status|default(None) %}
         {% set current_page_apply_changed = page_apply_status and page_apply_status.changed %}
         {% if identity and current_page_apply_changed %}
           <div class="page-apply-notice {{ 'needs-attention' if page_apply_status.validation_errors else 'pending' }}">
@@ -299,7 +299,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=automation-run-diff-20260721-10"></script>
+    <script src="/static/app.js?v=apply-notice-refresh-20260722-1"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

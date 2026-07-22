@@ -755,7 +755,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v134" in service_worker.text
+    assert "labfoundry-pwa-v138" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -767,8 +767,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=automation-run-diff-20260721-10" in service_worker.text
-    assert "/static/app.js?v=automation-run-diff-20260721-10" in service_worker.text
+    assert "/static/app.css?v=monitor-series-20260722-1" in service_worker.text
+    assert "/static/app.js?v=apply-notice-refresh-20260722-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -777,7 +777,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=automation-run-diff-20260721-10" in offline.text
+    assert "/static/app.css?v=monitor-series-20260722-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -789,12 +789,13 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "Virtual Machine" in page.text
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
+    assert "monitor-network-panel" in page.text
     assert "Unprivileged control plane" not in page.text
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=automation-run-diff-20260721-10" in page.text
-    assert "/static/app.js?v=automation-run-diff-20260721-10" in page.text
+    assert "/static/app.css?v=monitor-series-20260722-1" in page.text
+    assert "/static/app.js?v=apply-notice-refresh-20260722-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -804,7 +805,12 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert ".validation-preview-action" in app_css.text
     assert ".validation-preview-source" in app_css.text
     assert ".monitor-chart-panel.has-monitor-table" in app_css.text
-    assert "grid-template-rows: auto minmax(260px, 1fr) minmax(0, auto);" in app_css.text
+    assert "grid-template-rows: auto auto minmax(0, auto);" in app_css.text
+    assert ".monitor-network-panel" in app_css.text
+    assert "align-self: start;" in app_css.text
+    app_js = client.get("/static/app.js").text
+    assert "monitorHistoryChartData(payload.cpu_cores" in app_js
+    assert "monitorHistoryChartData(payload.networks" in app_js
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -813,6 +819,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "summary" in payload
     assert "virtualization" in payload
     assert "cpu" in payload
+    assert "cpu_cores" in payload
     assert "memory" in payload
     assert "network_totals" in payload
     assert "disks" in payload
@@ -1166,7 +1173,8 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
 
     current = client.get("/appliance-apply/status")
     assert current.status_code == 200
-    assert current.json() == {
+    current_payload = current.json()
+    assert {key: value for key, value in current_payload.items() if key != "units"} == {
         "pending_count": 0,
         "label": "Appliance Apply",
         "detail": "Desired state current",
@@ -1174,6 +1182,8 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
         "locked": False,
         "active_task": None,
     }
+    assert current_payload["units"]
+    assert all(not unit["changed"] for unit in current_payload["units"])
 
     page = client.get("/dns")
     csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -1202,6 +1212,8 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
     assert "pending unit" in pending.json()["detail"]
     assert pending.json()["badge"] == "pending"
     pending_count = pending.json()["pending_count"]
+    pending_dns = next(unit for unit in pending.json()["units"] if unit["id"] == "dnsmasq")
+    assert pending_dns["changed"] is True
 
     import inspect
 
@@ -1229,8 +1241,19 @@ def test_appliance_apply_status_api_tracks_autosaved_desired_state(client):
     assert dns_page.status_code == 200
     assert "data-appliance-apply-sidebar" in dns_page.text
     assert 'data-pending-count="1"' in dns_page.text
+    assert 'data-page-apply-unit="dnsmasq"' in dns_page.text
     assert "DNS/DHCP (dnsmasq) has pending appliance changes" in dns_page.text
     assert "Review and submit them from the global apply workflow." in dns_page.text
+
+    with SessionLocal() as db:
+        units = appliance_apply_units(db)
+        update_appliance_apply_baselines(db, units, {"dnsmasq"})
+        db.commit()
+
+    applied = client.get("/appliance-apply/status")
+    assert applied.status_code == 200
+    applied_dns = next(unit for unit in applied.json()["units"] if unit["id"] == "dnsmasq")
+    assert applied_dns["changed"] is False
 
     apply_page = client.get("/appliance-apply", follow_redirects=False)
     assert apply_page.status_code == 303
@@ -4041,6 +4064,7 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert "data-ldap-bind-secret-close" in created.text
     assert "data-copy-value" in created.text
     assert "data-download-value" in created.text
+    assert 'data-download-filename="vcf-bind-credential-org-a.txt"' in created.text
     assert "ldap-users-table" in created.text
     assert "ldap-groups-table" in created.text
     assert "data-ldap-organization-tabs" in created.text
@@ -4064,6 +4088,9 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert f'data-ldap-organization-id="{organization_id}"' in created.text
     assert 'data-tab-storage-key="labfoundry:ldap:resource-tab"' in created.text
     app_js = client.get("/static/app.js").text
+    assert "window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)" in app_js
+    assert 'target.closest("[data-download-value]")' in app_js
+    assert 'document.addEventListener("DOMContentLoaded", () => initializeDownloadValueButtons())' in app_js
     assert 'const LDAP_ORGANIZATION_SELECTION_KEY = "labfoundry:ldap:organization"' in app_js
     assert "function initializeLdapPageState()" in app_js
     ldap_page_state_js = app_js.split("function initializeLdapPageState()", 1)[1].split("function attachLdapGridState(", 1)[0]
@@ -4180,6 +4207,8 @@ def test_managed_ldap_page_creates_org_user_group_and_shows_secret_once(client):
     assert "function ldapGroupMembershipFormatter(cell)" in app_js
     assert "formatter: ldapGroupMembershipFormatter" in ldap_grid_js
     assert '<th>Type</th><th>Member</th>' in app_js
+    assert "function updateCurrentPageApplyNotice(payload = {})" in app_js
+    assert "updateCurrentPageApplyNotice(payload);" in app_js
     assert "function updatePageApplyNotice(status = {})" in app_js
     assert "if (payload.appliance_apply_status) updatePageApplyNotice(payload.appliance_apply_status);" in app_js
     assert "function updateLdapSettingsStatus(payload = {})" in app_js
@@ -4441,6 +4470,59 @@ def test_local_users_password_policy_staging_and_apply_redaction(client):
         assert plaintext not in (job.result or "")
         user = db.execute(select(User).where(User.username == "sync-me")).scalar_one()
         assert not hasattr(user, "pending_os_password_encrypted")
+
+
+def test_apply_status_reads_preserve_multiple_staged_service_user_passwords(client):
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import User
+    from labfoundry.app.services.local_users import clear_pending_os_password, has_pending_os_password
+    from labfoundry.app.ui import appliance_apply_units
+
+    login(client)
+    users_page = client.get("/users")
+    csrf = users_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    with SessionLocal() as db:
+        service_users = db.execute(select(User).where(User.username.in_(["vcf-backup", "vcf-depot"]))).scalars().all()
+        assert {user.username for user in service_users} == {"vcf-backup", "vcf-depot"}
+        for user in service_users:
+            clear_pending_os_password(user)
+        user_ids = {user.username: user.id for user in service_users}
+
+    for username, password in {
+        "vcf-backup": "Backup-Bridge1!",
+        "vcf-depot": "Depot-Bridge1!",
+    }.items():
+        reset = client.post(
+            f"/users/{user_ids[username]}/password",
+            data={"password": password, "confirm_password": password, "csrf": csrf},
+            follow_redirects=False,
+        )
+        assert reset.status_code == 303
+
+    for _ in range(2):
+        status = client.get("/appliance-apply/status")
+        assert status.status_code == 200
+
+    with SessionLocal() as db:
+        service_users = db.execute(select(User).where(User.username.in_(["vcf-backup", "vcf-depot"]))).scalars().all()
+        assert all(user.enabled for user in service_users)
+        assert all(has_pending_os_password(user) for user in service_users)
+        local_users_unit = next(unit for unit in appliance_apply_units(db) if unit["id"] == "local_users")
+        payload = json.loads(local_users_unit["raw_config_preview"])
+        service_rows = {
+            row["username"]: row
+            for row in payload["users"]
+            if row["username"] in {"vcf-backup", "vcf-depot"}
+        }
+        assert set(service_rows) == {"vcf-backup", "vcf-depot"}
+        assert all(row["enabled"] for row in service_rows.values())
+        assert all(bool(row.get("password")) for row in service_rows.values())
+        for user in service_users:
+            clear_pending_os_password(user)
 
 
 def test_real_local_users_apply_clears_pending_passwords_and_baselines_post_apply(client, monkeypatch, tmp_path):
@@ -8698,6 +8780,8 @@ def test_vcf_backups_settings_autosave_and_status_api(client):
     assert "# Service listener targets: 192.168.50.1:22" in response.json()["config_preview"]
     assert "Match User vcf-backup" in response.json()["config_preview"]
     assert "ForceCommand internal-sftp -d /backups" in response.json()["config_preview"]
+    assert response.json()["appliance_apply_status"]["id"] == "vcf_backups"
+    assert response.json()["appliance_apply_status"]["changed"] is True
     assert "enabled" in client.get("/vcf-backups").text
 
     raw_token = create_api_token(client, ["read:vcf-backups"])
@@ -9884,7 +9968,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "automation-run-diff-20260721-10" in page.text
+    assert "monitor-series-20260722-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

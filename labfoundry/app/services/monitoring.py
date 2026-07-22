@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from labfoundry.app.config import Settings, get_settings
 from labfoundry.app.database import SessionLocal
-from labfoundry.app.models import MonitorDiskSample, MonitorNetworkSample, MonitorSample, utcnow
+from labfoundry.app.models import MonitorCpuSample, MonitorDiskSample, MonitorNetworkSample, MonitorSample, utcnow
 
 
 SECTOR_SIZE = 512
@@ -46,6 +46,13 @@ VIRTUAL_FILESYSTEMS = {
 
 @dataclass(frozen=True)
 class CpuCounters:
+    total: int
+    idle: int
+
+
+@dataclass(frozen=True)
+class CpuCoreCounters:
+    name: str
     total: int
     idle: int
 
@@ -88,6 +95,7 @@ class DiskUsage:
 class MonitorSnapshot:
     sampled_at: datetime
     cpu: CpuCounters | None = None
+    cpus: list[CpuCoreCounters] = field(default_factory=list)
     cpu_count: int = 0
     load: tuple[float | None, float | None, float | None] = (None, None, None)
     memory_total_bytes: int = 0
@@ -116,6 +124,24 @@ def parse_proc_stat_cpu(text: str) -> CpuCounters | None:
         total = sum(values[:8]) if len(values) >= 8 else sum(values)
         return CpuCounters(total=total, idle=idle)
     return None
+
+
+def parse_proc_stat_cpus(text: str) -> list[CpuCoreCounters]:
+    cpus: list[CpuCoreCounters] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts or not parts[0].startswith("cpu") or not parts[0][3:].isdigit():
+            continue
+        try:
+            values = [int(value) for value in parts[1:]]
+        except ValueError:
+            continue
+        if len(values) < 4:
+            continue
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        total = sum(values[:8]) if len(values) >= 8 else sum(values)
+        cpus.append(CpuCoreCounters(name=parts[0], total=total, idle=idle))
+    return cpus
 
 
 def cpu_percent(previous: CpuCounters | None, current: CpuCounters | None) -> float | None:
@@ -220,12 +246,13 @@ class SystemMetricsCollector:
 
     def collect(self, sampled_at: datetime | None = None) -> MonitorSnapshot:
         sampled_at = sampled_at or utcnow()
-        cpu = self._read_cpu()
+        cpu, cpus = self._read_cpu()
         memory = self._read_memory()
         return MonitorSnapshot(
             sampled_at=sampled_at,
             cpu=cpu,
-            cpu_count=os.cpu_count() or 0,
+            cpus=cpus,
+            cpu_count=len(cpus) or os.cpu_count() or 0,
             load=self._read_load(),
             memory_total_bytes=memory["total"],
             memory_available_bytes=memory["available"],
@@ -259,9 +286,11 @@ class SystemMetricsCollector:
             "platform": platform.platform(),
         }
 
-    def _read_cpu(self) -> CpuCounters | None:
+    def _read_cpu(self) -> tuple[CpuCounters | None, list[CpuCoreCounters]]:
         text = self._read_text(self.proc_path / "stat")
-        return parse_proc_stat_cpu(text) if text else None
+        if not text:
+            return None, []
+        return parse_proc_stat_cpu(text), parse_proc_stat_cpus(text)
 
     def _read_load(self) -> tuple[float | None, float | None, float | None]:
         text = self._read_text(self.proc_path / "loadavg")
@@ -385,7 +414,7 @@ def record_monitor_sample(db: Session, *, collector: SystemMetricsCollector | No
     snapshot = collector.collect(sampled_at=sampled_at)
     previous = db.execute(
         select(MonitorSample)
-        .options(selectinload(MonitorSample.network_samples), selectinload(MonitorSample.disk_samples))
+        .options(selectinload(MonitorSample.cpu_samples), selectinload(MonitorSample.network_samples), selectinload(MonitorSample.disk_samples))
         .order_by(desc(MonitorSample.sampled_at), desc(MonitorSample.id))
     ).scalars().first()
     previous_cpu = CpuCounters(previous.cpu_total_jiffies, previous.cpu_idle_jiffies) if previous else None
@@ -405,6 +434,17 @@ def record_monitor_sample(db: Session, *, collector: SystemMetricsCollector | No
         swap_total_bytes=snapshot.swap_total_bytes,
         swap_used_bytes=snapshot.swap_used_bytes,
     )
+    previous_cpus = {row.cpu_name: row for row in previous.cpu_samples} if previous else {}
+    for row in snapshot.cpus:
+        old = previous_cpus.get(row.name)
+        sample.cpu_samples.append(
+            MonitorCpuSample(
+                cpu_name=row.name,
+                percent=cpu_percent(CpuCounters(old.total_jiffies, old.idle_jiffies), CpuCounters(row.total, row.idle)) if old else None,
+                total_jiffies=row.total,
+                idle_jiffies=row.idle,
+            )
+        )
     previous_networks = {row.interface_name: row for row in previous.network_samples} if previous and elapsed > 0 else {}
     for row in snapshot.networks:
         old = previous_networks.get(row.name)
@@ -455,6 +495,7 @@ def prune_monitor_samples(db: Session, *, retention_hours: int) -> int:
     old_ids = list(db.execute(select(MonitorSample.id).where(MonitorSample.sampled_at < cutoff)).scalars().all())
     if not old_ids:
         return 0
+    db.execute(delete(MonitorCpuSample).where(MonitorCpuSample.sample_id.in_(old_ids)))
     db.execute(delete(MonitorNetworkSample).where(MonitorNetworkSample.sample_id.in_(old_ids)))
     db.execute(delete(MonitorDiskSample).where(MonitorDiskSample.sample_id.in_(old_ids)))
     db.execute(delete(MonitorSample).where(MonitorSample.id.in_(old_ids)))
@@ -483,7 +524,7 @@ def monitor_payload(db: Session, *, hours: int = 6, collector: SystemMetricsColl
     cutoff = utcnow() - timedelta(hours=hours)
     samples = db.execute(
         select(MonitorSample)
-        .options(selectinload(MonitorSample.network_samples), selectinload(MonitorSample.disk_samples))
+        .options(selectinload(MonitorSample.cpu_samples), selectinload(MonitorSample.network_samples), selectinload(MonitorSample.disk_samples))
         .where(MonitorSample.sampled_at >= cutoff)
         .order_by(MonitorSample.sampled_at, MonitorSample.id)
     ).scalars().all()
@@ -503,6 +544,7 @@ def monitor_payload(db: Session, *, hours: int = 6, collector: SystemMetricsColl
             {"sampled_at": sample.sampled_at.isoformat(), "percent": sample.cpu_percent, "load1": sample.load1, "load5": sample.load5, "load15": sample.load15}
             for sample in samples
         ],
+        "cpu_cores": _cpu_cores(samples),
         "memory": [
             {
                 "sampled_at": sample.sampled_at.isoformat(),
@@ -519,6 +561,24 @@ def monitor_payload(db: Session, *, hours: int = 6, collector: SystemMetricsColl
         "disk_io": _disk_totals(samples),
         "disks": _disks(samples),
     }
+
+
+def _cpu_cores(samples: list[MonitorSample]) -> list[dict[str, Any]]:
+    by_name: dict[str, list[MonitorCpuSample]] = {}
+    for sample in samples:
+        for row in sample.cpu_samples:
+            by_name.setdefault(row.cpu_name, []).append(row)
+    return [
+        {
+            "name": name,
+            "current_percent": rows[-1].percent,
+            "points": [
+                {"sampled_at": row.sample.sampled_at.isoformat(), "percent": row.percent}
+                for row in rows
+            ],
+        }
+        for name, rows in sorted(by_name.items(), key=lambda item: (0, int(item[0][3:])) if item[0][3:].isdigit() else (1, item[0]))
+    ]
 
 
 def _summary(samples: list[MonitorSample]) -> dict[str, Any]:

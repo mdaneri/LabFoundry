@@ -731,6 +731,7 @@ class MonitorResponse(BaseModel):
     summary: dict[str, Any]
     virtualization: dict[str, Any]
     cpu: list[dict[str, Any]]
+    cpu_cores: list[dict[str, Any]]
     memory: list[dict[str, Any]]
     network_totals: list[dict[str, Any]]
     networks: list[dict[str, Any]]
