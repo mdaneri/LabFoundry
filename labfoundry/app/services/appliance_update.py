@@ -22,6 +22,7 @@ from labfoundry.app.models import Job
 
 APPLIANCE_UPDATE_SETTINGS_KEY = "appliance_update.settings.v1"
 APPLIANCE_UPDATE_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/appliance-update/labfoundry-update.json"
+APPLIANCE_UPDATE_STAGED_CREDENTIALS_PATH = "/var/lib/labfoundry/apply/appliance-update/labfoundry-update-credentials.json"
 APPLIANCE_UPDATE_INFO_PATH = "/etc/labfoundry/update-info"
 PHOTON_REPOSITORY_DIR = Path("/etc/yum.repos.d")
 PIP_BUILTIN_INDEX_URL = "https://pypi.org/simple"
@@ -177,7 +178,11 @@ def render_update_manifest(*, selected_streams: list[str], settings: dict[str, A
         "sources": {
             "photon_os": settings.get("photon_source") or DEFAULT_UPDATE_SETTINGS["photon_source"],
             "python_index_url": redact_url_userinfo(settings.get("python_index_url", "")),
+            "python_index_urls": [redact_url_userinfo(str(value)) for value in settings.get("python_index_urls", []) if str(value).strip()],
             "labfoundry_manifest_url": redact_url_userinfo(settings.get("labfoundry_manifest_url") or DEFAULT_LABFOUNDRY_MANIFEST_URL),
+            "labfoundry_manifest_urls": [
+                redact_url_userinfo(str(value)) for value in settings.get("labfoundry_manifest_urls", []) if str(value).strip()
+            ],
             "powershell_repository_name": str(settings.get("powershell_repository_name") or ""),
             "powershell_repository_url": redact_url_userinfo(str(settings.get("powershell_repository_url") or "")),
         },

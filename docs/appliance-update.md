@@ -21,8 +21,10 @@ configured PowerShell repositories.
   RPM signature and TLS verification settings. The built-in source reads the
   enabled repository ids, names, and base/mirror locations from
   `/etc/yum.repos.d` and does not rewrite those files.
-- **Python** leaves pip defaults intact when its URL is blank. Setting an
-  HTTP(S) Simple API URL writes the LabFoundry virtualenv's owned `pip.conf`.
+- **Python** leaves pip defaults intact when its URL is blank. Enabled HTTP(S)
+  Simple API sources are ordered by priority: the first is pip's primary index
+  and the remaining sources are extra indexes. Synchronization writes them to
+  the LabFoundry virtualenv's owned `pip.conf`.
   The built-in source queries the LabFoundry virtualenv's pip configuration and
   displays its effective index URL with no LabFoundry override.
 - **PowerShell** defaults to `PSGallery` at
@@ -32,7 +34,17 @@ configured PowerShell repositories.
   PSGallery and private galleries can coexist.
 - **LabFoundry** takes a repository base URL and a `stable`, `preview`, or
   `development` channel. The UI derives the manifest URL, so operators no
-  longer need to invent a manifest path.
+  longer need to invent a manifest path. Enabled repositories are tried in
+  priority order, allowing a secondary release repository to serve as a
+  manifest fallback.
+
+Repository credentials are encrypted in the database and are never rendered
+in the staged update manifest, task configuration, audit detail, or recorded
+helper command. Immediately before real helper execution, the worker decrypts
+credentials into a separate mode-0600 staging file. The helper uses that
+protected runtime channel for HTTP Basic requests, pip indexes, PowerShellGet,
+and LabFoundry-managed Photon repositories; the worker removes the staging file
+after the operation. Settings archives continue to omit source credentials.
 
 Saving source fields updates control-plane configuration only. **Synchronize
 repositories** queues a helper-backed synchronization task. Disabled or removed

@@ -312,6 +312,39 @@ def test_due_schedule_queues_one_job_and_skips_overlap(client):
         assert len(db.execute(select(Job).where(Job.schedule_id == schedule_id)).scalars().all()) == 1
 
 
+def test_worker_rejects_queued_vcf_download_when_profile_was_disabled(client, monkeypatch):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStatus, VcfDepotDownloadProfile
+    from labfoundry.app.worker import run_worker_once
+    import labfoundry.app.ui as ui
+
+    client.get("/login")
+    called = []
+    monkeypatch.setattr(ui, "run_vcf_depot_download_job", lambda *_args: called.append(True))
+    with SessionLocal() as db:
+        profile = VcfDepotDownloadProfile(name="disabled-after-queue", enabled=False)
+        db.add(profile)
+        db.flush()
+        job = Job(
+            id="job_disabled_vcf_profile",
+            type="vcf-depot-download",
+            status=JobStatus.PENDING.value,
+            created_by="admin",
+            progress_percent=0,
+            task_config_json=json.dumps({"profile_id": profile.id}),
+            result="{}",
+        )
+        db.add(job)
+        db.commit()
+
+    assert run_worker_once() == "job_disabled_vcf_profile"
+    assert called == []
+    with SessionLocal() as db:
+        failed = db.get(Job, "job_disabled_vcf_profile")
+        assert failed.status == JobStatus.FAILED.value
+        assert "Enable the scheduled VCF Offline Depot profile" in failed.error
+
+
 def test_schedule_edit_run_now_and_script_dependency_guards(client):
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import AutomationScript, AutomationScriptRevision, Job, Schedule

@@ -439,6 +439,174 @@ def test_software_source_and_managed_module_lifecycle(client):
     assert client.post(f"/appliance-update/sources/{source_id}/delete", data={"csrf": csrf}, follow_redirects=False).status_code == 303
 
 
+def test_effective_update_settings_preserves_all_enabled_repository_sources(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import UpdateSource
+    from labfoundry.app.services.update_sources import effective_update_settings
+
+    client.get("/login")
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                UpdateSource(kind="python", name="Backup Python", url="https://python-backup.example.test/simple", priority=80, enabled=True),
+                UpdateSource(
+                    kind="labfoundry",
+                    name="Backup releases",
+                    url="https://updates-backup.example.test/labfoundry",
+                    priority=80,
+                    enabled=True,
+                    settings_json=json.dumps({"channel": "preview"}),
+                ),
+            ]
+        )
+        primary_python = db.execute(select(UpdateSource).where(UpdateSource.kind == "python")).scalars().first()
+        primary_labfoundry = db.execute(select(UpdateSource).where(UpdateSource.kind == "labfoundry")).scalars().first()
+        primary_python.url = "https://python-primary.example.test/simple"
+        primary_labfoundry.url = "https://updates-primary.example.test/labfoundry"
+        db.commit()
+
+        settings = effective_update_settings(db)
+
+    assert settings["python_index_urls"] == [
+        "https://python-primary.example.test/simple",
+        "https://python-backup.example.test/simple",
+    ]
+    assert settings["labfoundry_manifest_urls"] == [
+        "https://updates-primary.example.test/labfoundry/channels/stable/manifest.json",
+        "https://updates-backup.example.test/labfoundry/channels/preview/manifest.json",
+    ]
+    manifest = json.loads(
+        __import__("labfoundry.app.services.appliance_update", fromlist=["render_update_manifest"]).render_update_manifest(
+            selected_streams=["python_libraries", "labfoundry_wheel"], settings=settings, actor="test"
+        )
+    )
+    assert manifest["sources"]["python_index_urls"] == settings["python_index_urls"]
+    assert manifest["sources"]["labfoundry_manifest_urls"] == settings["labfoundry_manifest_urls"]
+
+
+def test_source_credentials_use_protected_runtime_channel_without_manifest_disclosure(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import UpdateSource
+    from labfoundry.app.secrets import encrypt_secret
+    from labfoundry.app.services.appliance_update import render_update_manifest
+    from labfoundry.app.services.update_sources import effective_update_settings, update_source_credentials
+
+    client.get("/login")
+    with SessionLocal() as db:
+        source = db.execute(select(UpdateSource).where(UpdateSource.kind == "python")).scalars().first()
+        source.url = "https://private.example.test/simple"
+        source.credential_encrypted = encrypt_secret(json.dumps({"username": "repo-user", "secret": "repo-token"}))
+        db.commit()
+        source_id = source.id
+        settings = effective_update_settings(db)
+        credentials = update_source_credentials(db)
+
+    preview = render_update_manifest(selected_streams=["python_libraries"], settings=settings, actor="test")
+    assert "repo-user" not in preview
+    assert "repo-token" not in preview
+    assert credentials[str(source_id)] == {"username": "repo-user", "secret": "repo-token"}
+
+
+def test_helper_uses_all_python_indexes_and_credentials_without_logging_them(monkeypatch):
+    helper = load_helper_module()
+    captured = {}
+
+    def fake_command(command, *, success_codes=None, env=None):
+        captured["command"] = command
+        captured["env"] = env or {}
+        return {"command": command, "returncode": 0, "success": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(helper, "_command_payload", fake_command)
+    payload = {
+        "selected_streams": ["python_libraries"],
+        "sources": {
+            "python_index_url": "https://primary.example.test/simple",
+            "python_index_urls": ["https://primary.example.test/simple", "https://backup.example.test/simple"],
+        },
+        "source_definitions": [
+            {"id": 10, "kind": "python", "url": "https://primary.example.test/simple", "enabled": True},
+            {"id": 11, "kind": "python", "url": "https://backup.example.test/simple", "enabled": True},
+        ],
+    }
+    result = helper._check_appliance_update(
+        payload,
+        {"10": {"username": "primary", "secret": "token-one"}, "11": {"username": "backup", "secret": "token-two"}},
+    )
+    assert result["checks"]["python_libraries"] == "pip outdated check completed."
+    assert captured["env"]["PIP_INDEX_URL"] == "https://primary:token-one@primary.example.test/simple"
+    assert captured["env"]["PIP_EXTRA_INDEX_URL"] == "https://backup:token-two@backup.example.test/simple"
+    assert "token-one" not in " ".join(captured["command"])
+    assert "token-two" not in " ".join(captured["command"])
+
+
+def test_helper_redacts_repository_credentials_from_package_client_output(monkeypatch):
+    from types import SimpleNamespace
+
+    helper = load_helper_module()
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda _command, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="index https://repo-user:repo-token@private.example.test/simple",
+            stderr="authentication failed for repo-user using repo-token",
+        ),
+    )
+    result = helper._command_payload(
+        ["python", "-m", "pip", "list"],
+        env={
+            "PIP_INDEX_URL": "https://repo-user:repo-token@private.example.test/simple",
+            "LF_REPO_USER": "repo-user",
+            "LF_REPO_SECRET": "repo-token",
+        },
+    )
+    rendered = json.dumps(result)
+    assert "repo-user" not in rendered
+    assert "repo-token" not in rendered
+    assert "[redacted]" in rendered
+
+
+def test_helper_falls_back_to_next_labfoundry_release_source(monkeypatch):
+    helper = load_helper_module()
+    attempted = []
+    expected_manifest = {
+        "version": "0.2.0",
+        "git_commit": "a" * 40,
+        "wheel": "labfoundry-0.2.0.whl",
+        "sha256": "b" * 64,
+    }
+
+    def fake_manifest(url, credential=None):
+        attempted.append((url, credential))
+        if "primary" in url:
+            raise OSError("primary unavailable")
+        return expected_manifest
+
+    monkeypatch.setattr(helper, "_download_labfoundry_update_manifest", fake_manifest)
+    manifest, url, credential = helper._download_labfoundry_manifest_from_sources(
+        {
+            "sources": {
+                "labfoundry_manifest_urls": [
+                    "https://primary.example.test/manifest.json",
+                    "https://backup.example.test/manifest.json",
+                ]
+            },
+            "source_definitions": [
+                {"id": 1, "kind": "labfoundry", "url": "https://primary.example.test/manifest.json", "enabled": True},
+                {"id": 2, "kind": "labfoundry", "url": "https://backup.example.test/manifest.json", "enabled": True},
+            ],
+        },
+        {"2": {"username": "backup", "secret": "token"}},
+    )
+    assert manifest == expected_manifest
+    assert url == "https://backup.example.test/manifest.json"
+    assert credential == {"username": "backup", "secret": "token"}
+    assert [item[0] for item in attempted] == [
+        "https://primary.example.test/manifest.json",
+        "https://backup.example.test/manifest.json",
+    ]
+
+
 def test_helper_syncs_owned_photon_and_python_sources(monkeypatch, tmp_path):
     helper = load_helper_module()
     photon_path = tmp_path / "labfoundry-managed.repo"

@@ -26,8 +26,8 @@ import hashlib
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
-from urllib.request import urlopen
+from urllib.parse import quote, unquote, urljoin, urlparse
+from urllib.request import Request, urlopen
 
 try:
     import grp
@@ -295,8 +295,10 @@ LOCAL_USERS_RESERVED_USERNAMES = {
 }
 
 
-def _run(command: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+def _run(
+    command: list[str], *, timeout: float | None = None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout, env=env)
 
 
 def _run_with_input(command: list[str], input_text: str) -> subprocess.CompletedProcess[str]:
@@ -6884,6 +6886,23 @@ def _load_appliance_update_config(path: Path) -> dict:
     return payload
 
 
+def _load_appliance_update_credentials(args: list[str]) -> dict[str, dict[str, str]]:
+    if len(args) < 2:
+        return {}
+    path = Path(args[1])
+    if not path.is_relative_to(APPLIANCE_UPDATE_APPLY_DIR) or path.name != "labfoundry-update-credentials.json":
+        raise ValueError("appliance update credentials must use the protected staged credentials path")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    sources = payload.get("sources") if isinstance(payload, dict) else None
+    if not isinstance(sources, dict):
+        raise ValueError("appliance update credentials must contain a sources object")
+    return {
+        str(source_id): {"username": str(value.get("username") or ""), "secret": str(value.get("secret") or "")}
+        for source_id, value in sources.items()
+        if isinstance(value, dict) and str(value.get("secret") or "")
+    }
+
+
 def _appliance_update_config_errors(payload: dict, *, require_streams: bool = True) -> list[str]:
     errors: list[str] = []
     selected = payload.get("selected_streams")
@@ -6898,20 +6917,39 @@ def _appliance_update_config_errors(payload: dict, *, require_streams: bool = Tr
     if not isinstance(sources, dict):
         errors.append("sources must be an object.")
         return errors
+    manifest_urls_value = sources.get("labfoundry_manifest_urls")
+    manifest_urls = (
+        [str(value).strip() for value in manifest_urls_value if str(value).strip()]
+        if isinstance(manifest_urls_value, list)
+        else []
+    )
     manifest_url = str(sources.get("labfoundry_manifest_url") or "").strip()
+    if not manifest_urls and manifest_url:
+        manifest_urls = [manifest_url]
     if "labfoundry_wheel" in (selected or []):
-        parsed = urlparse(manifest_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            errors.append("labfoundry_manifest_url must be an http or https URL when LabFoundry Wheel is selected.")
-        if parsed.username or parsed.password:
-            errors.append("labfoundry_manifest_url must not include embedded credentials.")
+        if not manifest_urls:
+            errors.append("at least one labfoundry manifest URL is required when LabFoundry Wheel is selected.")
+        for value in manifest_urls:
+            parsed = urlparse(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                errors.append("each labfoundry manifest URL must be an http or https URL.")
+            if parsed.username or parsed.password:
+                errors.append("labfoundry manifest URLs must not include embedded credentials.")
+    python_urls_value = sources.get("python_index_urls")
+    python_urls = (
+        [str(value).strip() for value in python_urls_value if str(value).strip()]
+        if isinstance(python_urls_value, list)
+        else []
+    )
     python_index_url = str(sources.get("python_index_url") or "").strip()
-    if python_index_url:
-        parsed = urlparse(python_index_url)
+    if not python_urls and python_index_url:
+        python_urls = [python_index_url]
+    for value in python_urls:
+        parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            errors.append("python_index_url must be an http or https URL.")
+            errors.append("each python index URL must be an http or https URL.")
         if parsed.username or parsed.password:
-            errors.append("python_index_url must not include embedded credentials.")
+            errors.append("python index URLs must not include embedded credentials.")
     powershell_repository_url = str(sources.get("powershell_repository_url") or "").strip()
     powershell_repository_name = str(sources.get("powershell_repository_name") or "").strip()
     if "powershell_modules" in (selected or []) and not powershell_repository_url:
@@ -6943,28 +6981,49 @@ def _appliance_update_python() -> str:
     return str(LABFOUNDRY_VENV_PYTHON_PATH if LABFOUNDRY_VENV_PYTHON_PATH.exists() else sys.executable)
 
 
-def _command_payload(command: list[str], *, success_codes: set[int] | None = None) -> dict:
-    result = _run(command)
+def _command_payload(
+    command: list[str], *, success_codes: set[int] | None = None, env: dict[str, str] | None = None
+) -> dict:
+    result = _run(command, env=env) if env is not None else _run(command)
     success_codes = success_codes or {0}
+    stdout = result.stdout[-4000:]
+    stderr = result.stderr[-4000:]
+    if env:
+        sensitive_values = [str(env.get("LF_REPO_USER") or ""), str(env.get("LF_REPO_SECRET") or "")]
+        for key in ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL"):
+            for value in str(env.get(key) or "").split():
+                parsed = urlparse(value)
+                sensitive_values.extend([value, unquote(parsed.username or ""), unquote(parsed.password or "")])
+        for value in sorted({value for value in sensitive_values if value}, key=len, reverse=True):
+            stdout = stdout.replace(value, "[redacted]")
+            stderr = stderr.replace(value, "[redacted]")
     return {
         "command": command,
         "returncode": result.returncode,
         "success": result.returncode in success_codes,
-        "stdout": result.stdout[-4000:],
-        "stderr": result.stderr[-4000:],
+        "stdout": stdout,
+        "stderr": stderr,
     }
 
 
-def _fetch_http_bytes(url: str) -> bytes:
+def _fetch_http_bytes(url: str, credential: dict[str, str] | None = None) -> bytes:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"unsupported update URL: {url}")
-    with urlopen(url, timeout=60) as response:
+    request: str | Request = url
+    if credential and str(credential.get("secret") or ""):
+        token = base64.b64encode(
+            f"{credential.get('username', '')}:{credential['secret']}".encode("utf-8")
+        ).decode("ascii")
+        request = Request(url, headers={"Authorization": f"Basic {token}"})
+    with urlopen(request, timeout=60) as response:
         return response.read()
 
 
-def _download_labfoundry_update_manifest(manifest_url: str) -> dict:
-    raw = _fetch_http_bytes(manifest_url)
+def _download_labfoundry_update_manifest(
+    manifest_url: str, credential: dict[str, str] | None = None
+) -> dict:
+    raw = _fetch_http_bytes(manifest_url, credential) if credential else _fetch_http_bytes(manifest_url)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -6979,6 +7038,88 @@ def _download_labfoundry_update_manifest(manifest_url: str) -> dict:
     if not re.fullmatch(r"[0-9a-fA-F]{64}", str(payload["sha256"])):
         raise ValueError("LabFoundry manifest sha256 must be a 64-character hex digest")
     return payload
+
+
+def _source_credential(source: dict, credentials: dict[str, dict[str, str]]) -> dict[str, str] | None:
+    credential = credentials.get(str(source.get("id") or ""))
+    return credential if isinstance(credential, dict) and str(credential.get("secret") or "") else None
+
+
+def _authenticated_url(url: str, credential: dict[str, str] | None) -> str:
+    if not credential:
+        return url
+    parsed = urlparse(url)
+    username = quote(str(credential.get("username") or ""), safe="")
+    secret = quote(str(credential.get("secret") or ""), safe="")
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return parsed._replace(netloc=f"{username}:{secret}@{host}").geturl()
+
+
+def _enabled_sources(payload: dict, kind: str) -> list[dict]:
+    definitions = payload.get("source_definitions") or []
+    return [
+        source for source in definitions
+        if isinstance(source, dict) and source.get("kind") == kind and source.get("enabled") is True
+    ]
+
+
+def _python_index_urls(payload: dict) -> list[str]:
+    sources = payload.get("sources") or {}
+    configured = sources.get("python_index_urls")
+    if isinstance(configured, list):
+        urls = [str(value).strip() for value in configured if str(value).strip()]
+        if urls:
+            return urls
+    legacy = str(sources.get("python_index_url") or "").strip()
+    return [legacy] if legacy else []
+
+
+def _python_source_pairs(payload: dict) -> list[tuple[str, dict]]:
+    pairs = [
+        (str(source.get("url") or "").strip(), source)
+        for source in _enabled_sources(payload, "python")
+        if str(source.get("url") or "").strip()
+    ]
+    if pairs:
+        return pairs
+    return [(url, {}) for url in _python_index_urls(payload)]
+
+
+def _labfoundry_manifest_sources(payload: dict) -> list[tuple[str, dict]]:
+    definitions = _enabled_sources(payload, "labfoundry")
+    pairs: list[tuple[str, dict]] = []
+    for source in definitions:
+        base = str(source.get("url") or "").strip()
+        if not base:
+            continue
+        settings = source.get("settings") if isinstance(source.get("settings"), dict) else {}
+        channel = str(settings.get("channel") or "stable")
+        url = base if base.lower().endswith(".json") else f"{base.rstrip('/')}/channels/{channel}/manifest.json"
+        pairs.append((url, source))
+    if pairs:
+        return pairs
+    sources = payload.get("sources") or {}
+    configured = sources.get("labfoundry_manifest_urls")
+    urls = [str(value).strip() for value in configured if str(value).strip()] if isinstance(configured, list) else []
+    if not urls:
+        legacy = str(sources.get("labfoundry_manifest_url") or "").strip()
+        urls = [legacy] if legacy else []
+    return [(url, {}) for url in urls]
+
+
+def _download_labfoundry_manifest_from_sources(
+    payload: dict, credentials: dict[str, dict[str, str]]
+) -> tuple[dict, str, dict[str, str] | None]:
+    failures: list[str] = []
+    for manifest_url, source in _labfoundry_manifest_sources(payload):
+        credential = _source_credential(source, credentials)
+        try:
+            return _download_labfoundry_update_manifest(manifest_url, credential), manifest_url, credential
+        except Exception as exc:  # noqa: BLE001 - ordered repositories are explicit failover sources.
+            failures.append(f"{manifest_url}: {exc}")
+    raise ValueError("No enabled LabFoundry manifest source succeeded: " + " ; ".join(failures))
 
 
 def _restore_labfoundry_venv_permissions() -> None:
@@ -7016,7 +7157,8 @@ def _powershell_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _sync_appliance_update_sources(payload: dict) -> dict:
+def _sync_appliance_update_sources(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> dict:
+    credentials = credentials or {}
     definitions = payload.get("source_definitions") or []
     if not isinstance(definitions, list):
         raise ValueError("source_definitions must be a list")
@@ -7053,32 +7195,39 @@ def _sync_appliance_update_sources(payload: dict) -> dict:
             ]
             if str(settings.get("gpgkey") or "").strip():
                 lines.append(f"gpgkey={str(settings['gpgkey']).strip()}")
+            credential = _source_credential(source, credentials)
+            if credential:
+                if any(character in str(credential.get("username") or "") + str(credential["secret"]) for character in "\r\n"):
+                    raise ValueError(f"managed Photon source {source_id} credentials must not contain line breaks")
+                lines.extend([f"username={credential.get('username', '')}", f"password={credential['secret']}"])
             sections.append("\n".join(lines))
         photon_path.parent.mkdir(parents=True, exist_ok=True)
         photon_path.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
-        photon_path.chmod(0o644)
+        photon_path.chmod(0o600 if any(_source_credential(source, credentials) for source in managed_photon) else 0o644)
         commands.append({"command": ["write", str(photon_path)], "returncode": 0, "success": True, "stdout": f"wrote {len(managed_photon)} managed Photon repositories", "stderr": ""})
     elif photon_path.exists():
         photon_path.unlink()
         commands.append({"command": ["remove", str(photon_path)], "returncode": 0, "success": True, "stdout": "removed managed Photon repository file", "stderr": ""})
 
-    python_source = next(
-        (source for source in definitions if isinstance(source, dict) and source.get("kind") == "python" and source.get("enabled") is True),
-        None,
-    )
     pip_path = LABFOUNDRY_PIP_CONFIG_PATH
-    python_url = str(python_source.get("url") or "").strip() if python_source else ""
-    if python_url:
-        parsed = urlparse(python_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("Python source must use an HTTP(S) index URL")
-        python_settings = python_source.get("settings") if isinstance(python_source.get("settings"), dict) else {}
-        pip_lines = ["[global]", f"index-url = {python_url}"]
-        if python_settings.get("tls_verify") is False:
-            pip_lines.append(f"trusted-host = {parsed.hostname}")
+    python_pairs = _python_source_pairs(payload)
+    if python_pairs:
+        authenticated_urls = [
+            _authenticated_url(url, _source_credential(source, credentials))
+            for url, source in python_pairs
+        ]
+        pip_lines = ["[global]", f"index-url = {authenticated_urls[0]}"]
+        if len(authenticated_urls) > 1:
+            pip_lines.append("extra-index-url =\n    " + "\n    ".join(authenticated_urls[1:]))
+        trusted_hosts = [
+            urlparse(url).hostname or "" for url, source in python_pairs
+            if isinstance(source.get("settings"), dict) and source["settings"].get("tls_verify") is False
+        ]
+        if trusted_hosts:
+            pip_lines.append("trusted-host =\n    " + "\n    ".join(trusted_hosts))
         pip_path.write_text("\n".join(pip_lines) + "\n", encoding="utf-8")
-        pip_path.chmod(0o644)
-        commands.append({"command": ["write", str(pip_path)], "returncode": 0, "success": True, "stdout": "configured LabFoundry virtualenv pip index", "stderr": ""})
+        pip_path.chmod(0o600 if any(_source_credential(source, credentials) for _, source in python_pairs) else 0o644)
+        commands.append({"command": ["write", str(pip_path)], "returncode": 0, "success": True, "stdout": f"configured {len(python_pairs)} LabFoundry virtualenv pip indexes", "stderr": ""})
     elif pip_path.exists():
         pip_path.unlink()
         commands.append({"command": ["remove", str(pip_path)], "returncode": 0, "success": True, "stdout": "restored LabFoundry virtualenv pip defaults", "stderr": ""})
@@ -7136,7 +7285,8 @@ def _sync_appliance_update_sources(payload: dict) -> dict:
     return {"status": "succeeded" if all(command.get("success") for command in commands) else "failed", "commands": commands}
 
 
-def _check_appliance_update(payload: dict) -> dict:
+def _check_appliance_update(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> dict:
+    credentials = credentials or {}
     selected = set(payload.get("selected_streams") or [])
     sources = payload.get("sources") or {}
     commands: list[dict] = []
@@ -7148,10 +7298,19 @@ def _check_appliance_update(payload: dict) -> dict:
         checks["photon_os"] = "tdnf check-update completed; exit 100 means updates are available."
     if "python_libraries" in selected:
         command = [_appliance_update_python(), "-m", "pip", "list", "--outdated", "--format=json"]
-        python_index_url = str(sources.get("python_index_url") or "").strip()
-        if python_index_url:
-            command.extend(["--index-url", python_index_url])
-        commands.append(_command_payload(command, success_codes={0}))
+        python_pairs = _python_source_pairs(payload)
+        env = os.environ.copy()
+        if python_pairs:
+            authenticated = [
+                _authenticated_url(url, _source_credential(source, credentials))
+                for url, source in python_pairs
+            ]
+            env["PIP_INDEX_URL"] = authenticated[0]
+            if len(authenticated) > 1:
+                env["PIP_EXTRA_INDEX_URL"] = " ".join(authenticated[1:])
+            commands.append(_command_payload(command, success_codes={0}, env=env))
+        else:
+            commands.append(_command_payload(command, success_codes={0}))
         checks["python_libraries"] = "pip outdated check completed."
     if "powershell_modules" in selected:
         pwsh = _command_path("pwsh") or "pwsh"
@@ -7163,47 +7322,59 @@ def _check_appliance_update(payload: dict) -> dict:
             repository = str(module.get("repository_name") or default_repository).strip()
             script = (
                 '$ErrorActionPreference = "Stop"; '
+                "$credentialArgs = if ($env:LF_REPO_SECRET) { $credential = New-Object System.Management.Automation.PSCredential($env:LF_REPO_USER, (ConvertTo-SecureString $env:LF_REPO_SECRET -AsPlainText -Force)); @{Credential=$credential} } else { @{} }; "
                 f"$module = Find-Module -Name {_powershell_literal(name)} -Repository {_powershell_literal(repository)}"
                 + (f" -RequiredVersion {_powershell_literal(target)}" if target else "")
+                + " @credentialArgs"
                 + "; $module | Select-Object Name,Version,Repository | ConvertTo-Json -Compress"
             )
-            command = _command_payload([pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", _powershell_encoded_command(script)])
+            source = next((item for item in _enabled_sources(payload, "powershell") if str(item.get("name") or "") == repository), {})
+            credential = _source_credential(source, credentials)
+            env = os.environ.copy()
+            if credential:
+                env.update({"LF_REPO_USER": str(credential.get("username") or ""), "LF_REPO_SECRET": str(credential["secret"])})
+            command_args = [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", _powershell_encoded_command(script)]
+            command = _command_payload(command_args, env=env) if credential else _command_payload(command_args)
             commands.append(command)
             module_checks.append({"name": name, "repository": repository, "target_version": target, "success": command["success"]})
         checks["powershell_modules"] = module_checks
     if "labfoundry_wheel" in selected:
-        manifest = _download_labfoundry_update_manifest(str(sources.get("labfoundry_manifest_url") or ""))
+        manifest, manifest_url, _credential = _download_labfoundry_manifest_from_sources(payload, credentials)
         checks["labfoundry_wheel"] = {
             "version": manifest.get("version"),
             "git_commit": manifest.get("git_commit"),
             "wheel": manifest.get("wheel"),
             "sha256": manifest.get("sha256"),
+            "manifest_url": manifest_url,
         }
     return {"checks": checks, "commands": commands}
 
 
-def _apply_python_libraries(payload: dict) -> list[dict]:
+def _apply_python_libraries(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> list[dict]:
+    credentials = credentials or {}
     sources = payload.get("sources") or {}
     requirements = [str(item).strip() for item in payload.get("python_requirements", []) if str(item).strip()]
     python = _appliance_update_python()
     bootstrap_command = [python, "-m", "pip", "install", "--upgrade"]
-    python_index_url = str(sources.get("python_index_url") or "").strip()
-    if python_index_url:
-        bootstrap_command.extend(["--index-url", python_index_url])
+    python_pairs = _python_source_pairs(payload)
+    env = os.environ.copy()
+    if python_pairs:
+        authenticated = [_authenticated_url(url, _source_credential(source, credentials)) for url, source in python_pairs]
+        env["PIP_INDEX_URL"] = authenticated[0]
+        if len(authenticated) > 1:
+            env["PIP_EXTRA_INDEX_URL"] = " ".join(authenticated[1:])
     bootstrap_command.extend(["pip", "setuptools", "wheel"])
-    commands = [_command_payload(bootstrap_command)]
+    commands = [_command_payload(bootstrap_command, env=env) if python_pairs else _command_payload(bootstrap_command)]
     if requirements:
         command = [python, "-m", "pip", "install", "--upgrade"]
-        python_index_url = str(sources.get("python_index_url") or "").strip()
-        if python_index_url:
-            command.extend(["--index-url", python_index_url])
         command.extend(requirements)
-        commands.append(_command_payload(command))
+        commands.append(_command_payload(command, env=env) if python_pairs else _command_payload(command))
     _restore_labfoundry_venv_permissions()
     return commands
 
 
-def _apply_powershell_modules(payload: dict) -> list[dict]:
+def _apply_powershell_modules(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> list[dict]:
+    credentials = credentials or {}
     sources = payload.get("sources") or {}
     default_repository = str(sources.get("powershell_repository_name") or "").strip()
     pwsh = _command_path("pwsh") or "pwsh"
@@ -7216,35 +7387,49 @@ def _apply_powershell_modules(payload: dict) -> list[dict]:
         version_argument = f" -RequiredVersion {_powershell_literal(target)}" if policy == "pinned" and target else ""
         script = (
             '$ErrorActionPreference = "Stop"; '
+            "$credentialArgs = if ($env:LF_REPO_SECRET) { $credential = New-Object System.Management.Automation.PSCredential($env:LF_REPO_USER, (ConvertTo-SecureString $env:LF_REPO_SECRET -AsPlainText -Force)); @{Credential=$credential} } else { @{} }; "
             f"Install-Module -Name {_powershell_literal(name)} -Repository {_powershell_literal(repository)}"
-            f"{version_argument} -Scope AllUsers -Force -AllowClobber -AcceptLicense -Confirm:$false; "
+            f"{version_argument} @credentialArgs -Scope AllUsers -Force -AllowClobber -AcceptLicense -Confirm:$false; "
             f"$module = Get-Module -Name {_powershell_literal(name)} -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1; "
             "if (-not $module) { throw 'Installed module could not be found' }; Import-Module $module.Path -Force; "
             "$module | Select-Object Name,Version,Path | ConvertTo-Json -Compress"
         )
-        commands.append(_command_payload([pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", _powershell_encoded_command(script)]))
+        source = next((item for item in _enabled_sources(payload, "powershell") if str(item.get("name") or "") == repository), {})
+        credential = _source_credential(source, credentials)
+        env = os.environ.copy()
+        if credential:
+            env.update({"LF_REPO_USER": str(credential.get("username") or ""), "LF_REPO_SECRET": str(credential["secret"])})
+        command_args = [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", _powershell_encoded_command(script)]
+        commands.append(_command_payload(command_args, env=env) if credential else _command_payload(command_args))
     return commands
 
 
-def _apply_labfoundry_wheel(payload: dict) -> tuple[dict, list[dict]]:
-    sources = payload.get("sources") or {}
-    manifest_url = str(sources.get("labfoundry_manifest_url") or "")
-    manifest = _download_labfoundry_update_manifest(manifest_url)
-    wheel_url = urljoin(manifest_url, str(manifest["wheel"]))
-    wheel_bytes = _fetch_http_bytes(wheel_url)
-    digest = hashlib.sha256(wheel_bytes).hexdigest()
-    if digest.lower() != str(manifest["sha256"]).lower():
-        raise ValueError(f"LabFoundry wheel sha256 mismatch: expected {manifest['sha256']} got {digest}")
-    with tempfile.TemporaryDirectory(prefix="labfoundry-update-") as temp_root:
-        wheel_path = Path(temp_root) / Path(str(manifest["wheel"])).name
-        wheel_path.write_bytes(wheel_bytes)
-        command = [_appliance_update_python(), "-m", "pip", "install", "--force-reinstall", "--no-deps", str(wheel_path)]
-        commands = [_command_payload(command)]
-    _restore_labfoundry_venv_permissions()
-    return manifest, commands
+def _apply_labfoundry_wheel(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> tuple[dict, list[dict]]:
+    credentials = credentials or {}
+    failures: list[str] = []
+    for manifest_url, source in _labfoundry_manifest_sources(payload):
+        credential = _source_credential(source, credentials)
+        try:
+            manifest = _download_labfoundry_update_manifest(manifest_url, credential)
+            wheel_url = urljoin(manifest_url, str(manifest["wheel"]))
+            wheel_bytes = _fetch_http_bytes(wheel_url, credential) if credential else _fetch_http_bytes(wheel_url)
+            digest = hashlib.sha256(wheel_bytes).hexdigest()
+            if digest.lower() != str(manifest["sha256"]).lower():
+                raise ValueError(f"LabFoundry wheel sha256 mismatch: expected {manifest['sha256']} got {digest}")
+            with tempfile.TemporaryDirectory(prefix="labfoundry-update-") as temp_root:
+                wheel_path = Path(temp_root) / Path(str(manifest["wheel"])).name
+                wheel_path.write_bytes(wheel_bytes)
+                command = [_appliance_update_python(), "-m", "pip", "install", "--force-reinstall", "--no-deps", str(wheel_path)]
+                commands = [_command_payload(command)]
+            _restore_labfoundry_venv_permissions()
+            return manifest, commands
+        except Exception as exc:  # noqa: BLE001 - try the next explicitly configured repository.
+            failures.append(f"{manifest_url}: {exc}")
+    raise ValueError("No enabled LabFoundry release source succeeded: " + " ; ".join(failures))
 
 
-def _apply_appliance_update(payload: dict) -> dict:
+def _apply_appliance_update(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> dict:
+    credentials = credentials or {}
     selected = set(payload.get("selected_streams") or [])
     commands: list[dict] = []
     attempted: dict[str, object] = {}
@@ -7256,15 +7441,15 @@ def _apply_appliance_update(payload: dict) -> dict:
         attempted["photon_os"] = "Photon OS packages updated from configured repositories."
         reboot_recommended = True
     if "python_libraries" in selected:
-        python_commands = _apply_python_libraries(payload)
+        python_commands = _apply_python_libraries(payload, credentials)
         commands.extend(python_commands)
         attempted["python_libraries"] = "LabFoundry virtualenv Python libraries updated."
     if "powershell_modules" in selected:
-        powershell_commands = _apply_powershell_modules(payload)
+        powershell_commands = _apply_powershell_modules(payload, credentials)
         commands.extend(powershell_commands)
         attempted["powershell_modules"] = "Managed PowerShell modules updated from the configured repository."
     if "labfoundry_wheel" in selected:
-        manifest, wheel_commands = _apply_labfoundry_wheel(payload)
+        manifest, wheel_commands = _apply_labfoundry_wheel(payload, credentials)
         commands.extend(wheel_commands)
         attempted["labfoundry_wheel"] = manifest
     succeeded = all(command.get("success") for command in commands)
@@ -7546,6 +7731,7 @@ def _handle_appliance_update(action: str, args: list[str]) -> int:
     try:
         config_path = _validate_appliance_update_config_path(args[0])
         payload = _load_appliance_update_config(config_path)
+        credentials = _load_appliance_update_credentials(args)
         errors = _appliance_update_config_errors(payload, require_streams=action != "sync-sources")
     except (IndexError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(str(exc), file=sys.stderr)
@@ -7557,7 +7743,7 @@ def _handle_appliance_update(action: str, args: list[str]) -> int:
 
     if action == "check":
         try:
-            result = _check_appliance_update(payload)
+            result = _check_appliance_update(payload, credentials)
         except Exception as exc:  # noqa: BLE001 - helper reports validation/check failures as stderr.
             print(str(exc), file=sys.stderr)
             return 1
@@ -7567,7 +7753,7 @@ def _handle_appliance_update(action: str, args: list[str]) -> int:
         return 0
     if action == "apply":
         try:
-            result = _apply_appliance_update(payload)
+            result = _apply_appliance_update(payload, credentials)
         except Exception as exc:  # noqa: BLE001 - helper reports update failures without tracebacks.
             print(str(exc), file=sys.stderr)
             return 1
@@ -7577,7 +7763,7 @@ def _handle_appliance_update(action: str, args: list[str]) -> int:
         return 0
     if action == "sync-sources":
         try:
-            result = _sync_appliance_update_sources(payload)
+            result = _sync_appliance_update_sources(payload, credentials)
         except Exception as exc:  # noqa: BLE001 - helper reports source configuration failures as stderr.
             print(str(exc), file=sys.stderr)
             return 1

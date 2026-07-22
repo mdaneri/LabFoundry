@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from labfoundry.app.models import ManagedPackage, UpdateSource
+from labfoundry.app.secrets import decrypt_secret
 
 
 UPDATE_SOURCE_KINDS = {"photon", "python", "powershell", "labfoundry"}
@@ -73,20 +74,22 @@ def effective_update_settings(db: Session, *, legacy: dict[str, str] | None = No
     legacy = legacy or {}
     sources = [source for source in source_rows(db) if source.enabled]
     photon = next((source for source in sources if source.kind == "photon"), None)
-    python = next((source for source in sources if source.kind == "python"), None)
+    python_sources = [source for source in sources if source.kind == "python"]
     powershell = next((source for source in sources if source.kind == "powershell"), None)
-    labfoundry = next((source for source in sources if source.kind == "labfoundry"), None)
+    labfoundry_sources = [source for source in sources if source.kind == "labfoundry"]
     packages = [package for package in managed_package_rows(db) if package.enabled]
-    manifest_url = labfoundry_manifest_url(labfoundry) if labfoundry is not None else ""
-    if not manifest_url:
-        manifest_url = str(legacy.get("labfoundry_manifest_url") or "")
-    python_url = python.url.strip() if python is not None else ""
-    if not python_url:
-        python_url = str(legacy.get("python_index_url") or "")
+    manifest_urls = [url for source in labfoundry_sources if (url := labfoundry_manifest_url(source))]
+    if not manifest_urls and str(legacy.get("labfoundry_manifest_url") or "").strip():
+        manifest_urls.append(str(legacy["labfoundry_manifest_url"]).strip())
+    python_urls = [source.url.strip() for source in python_sources if source.url.strip()]
+    if not python_urls and str(legacy.get("python_index_url") or "").strip():
+        python_urls.append(str(legacy["python_index_url"]).strip())
     return {
         "photon_source": photon.name if photon is not None else "configured Photon repositories",
-        "python_index_url": python_url,
-        "labfoundry_manifest_url": manifest_url,
+        "python_index_url": python_urls[0] if python_urls else "",
+        "python_index_urls": python_urls,
+        "labfoundry_manifest_url": manifest_urls[0] if manifest_urls else "",
+        "labfoundry_manifest_urls": manifest_urls,
         "powershell_repository_name": powershell.name if powershell is not None else "",
         "powershell_repository_url": powershell.url.strip() if powershell is not None else "",
         "powershell_repository_trusted": bool(update_source_settings(powershell).get("trusted")) if powershell is not None else False,
@@ -105,6 +108,25 @@ def effective_update_settings(db: Session, *, legacy: dict[str, str] | None = No
         ],
         "source_definitions": [update_source_payload(source) for source in sources],
     }
+
+
+def update_source_credentials(db: Session) -> dict[str, dict[str, str]]:
+    """Return decrypted credentials for the protected helper runtime channel only."""
+    credentials: dict[str, dict[str, str]] = {}
+    for source in source_rows(db):
+        if not source.enabled or not source.credential_encrypted or source.id is None:
+            continue
+        try:
+            payload = json.loads(decrypt_secret(source.credential_encrypted))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Credentials for update source {source.name} could not be decrypted.") from exc
+        if not isinstance(payload, dict) or not str(payload.get("secret") or ""):
+            continue
+        credentials[str(source.id)] = {
+            "username": str(payload.get("username") or ""),
+            "secret": str(payload["secret"]),
+        }
+    return credentials
 
 
 def default_source_settings(kind: str) -> dict[str, Any]:

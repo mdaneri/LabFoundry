@@ -116,6 +116,7 @@ from labfoundry.app.services.appliance_update import (
     APPLIANCE_UPDATE_INFO_PATH,
     APPLIANCE_UPDATE_SETTINGS_KEY,
     APPLIANCE_UPDATE_STAGED_CONFIG_PATH,
+    APPLIANCE_UPDATE_STAGED_CREDENTIALS_PATH,
     DEFAULT_LABFOUNDRY_MANIFEST_URL,
     UPDATE_STREAM_LABELS,
     UPDATE_STREAMS,
@@ -7815,19 +7816,42 @@ def execute_appliance_update_job(
     settings: dict[str, str],
     actor: str,
     mode: str,
+    credentials: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     adapter = SystemAdapter()
     manifest_preview = render_update_manifest(selected_streams=selected_stream_ids, settings=settings, actor=actor)
     config_path = APPLIANCE_UPDATE_STAGED_CONFIG_PATH
+    credentials_path = ""
     if not adapter.dry_run:
         config_path = stage_appliance_apply_config(APPLIANCE_UPDATE_STAGED_CONFIG_PATH, manifest_preview)
+        if credentials:
+            credentials_path = stage_appliance_apply_config(
+                APPLIANCE_UPDATE_STAGED_CREDENTIALS_PATH,
+                json.dumps({"sources": credentials}, sort_keys=True),
+            )
 
-    if mode == "source_sync":
-        results = [adapter.sync_appliance_update_sources(config_path)]
-    else:
-        results = [adapter.check_appliance_update_config(config_path)]
-        if mode == "run" and results[-1].returncode == 0:
-            results.append(adapter.apply_appliance_update_config(config_path))
+    try:
+        if mode == "source_sync":
+            results = [
+                adapter.sync_appliance_update_sources(config_path, credentials_path)
+                if credentials_path
+                else adapter.sync_appliance_update_sources(config_path)
+            ]
+        else:
+            results = [
+                adapter.check_appliance_update_config(config_path, credentials_path)
+                if credentials_path
+                else adapter.check_appliance_update_config(config_path)
+            ]
+            if mode == "run" and results[-1].returncode == 0:
+                results.append(
+                    adapter.apply_appliance_update_config(config_path, credentials_path)
+                    if credentials_path
+                    else adapter.apply_appliance_update_config(config_path)
+                )
+    finally:
+        if credentials_path:
+            Path(credentials_path).unlink(missing_ok=True)
 
     succeeded = all(result.returncode == 0 for result in results)
     return {

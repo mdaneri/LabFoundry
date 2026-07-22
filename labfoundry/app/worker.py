@@ -87,6 +87,7 @@ def _run_appliance_update(job_id: str) -> None:
         complete_appliance_update_task,
         execute_appliance_update_job,
     )
+    from labfoundry.app.services.update_sources import update_source_credentials
 
     with SessionLocal() as db:
         job = db.get(Job, job_id)
@@ -102,6 +103,7 @@ def _run_appliance_update(job_id: str) -> None:
                 settings=settings,
                 actor=job.created_by,
                 mode=mode,
+                credentials=update_source_credentials(db),
             )
         except Exception as exc:  # noqa: BLE001 - workers must persist a terminal job state.
             LOGGER.exception("Appliance update job %s failed before helper completion", job.id)
@@ -185,6 +187,7 @@ def run_worker_once() -> str | None:
             _run_appliance_update(job_id)
         elif job_type == "vcf-depot-download":
             from labfoundry.app.ui import run_vcf_depot_download_job
+            from labfoundry.app.models import VcfDepotDownloadProfile
 
             with SessionLocal() as db:
                 job = db.get(Job, job_id)
@@ -194,6 +197,9 @@ def run_worker_once() -> str | None:
                 if not config:
                     config = json_object(job.result or "{}", label="VCF job configuration")
                 profile_id = int(config.get("profile_id") or 0)
+                profile = db.get(VcfDepotDownloadProfile, profile_id)
+                if profile is None or not profile.enabled:
+                    raise ValueError("Enable the scheduled VCF Offline Depot profile before running it.")
             run_vcf_depot_download_job(job_id, profile_id)
         elif job_type == "managed-script":
             with SessionLocal() as db:

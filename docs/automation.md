@@ -6,7 +6,9 @@ the worker claims pending work and writes the normal task, audit, result, and
 error history. It supports:
 
 - Appliance Update checks and installs with selected update streams.
-- VCF Offline Depot download profiles.
+- Enabled VCF Offline Depot download profiles. The worker rechecks the profile
+  immediately before execution, so a profile disabled after queueing fails
+  closed instead of starting a download.
 - Explicitly enabled immutable managed-script revisions.
 
 Schedules use either a one-time local date/time or a standard five-field cron
