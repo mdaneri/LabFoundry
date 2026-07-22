@@ -305,6 +305,15 @@ def test_esx_storage_page_and_dual_stack_api_contract(client):
     assert "IPv4 and IPv6 are equivalent connection paths" in page.text
     assert 'id="esx-storage-volumes-table"' in page.text
     assert 'id="esx-storage-shares-table"' in page.text
+    assert 'data-esx-storage-wizard-open="volume"' in page.text
+    assert "+ Add storage volume here" in page.text
+    assert 'id="esx-storage-volume-modal"' in page.text
+    assert 'data-esx-storage-wizard="volume"' in page.text
+    assert 'data-esx-storage-wizard-open="share"' in page.text
+    assert "+ Add NFS datastore here" in page.text
+    assert 'id="esx-storage-share-modal"' in page.text
+    assert 'data-esx-storage-wizard="share"' in page.text
+    assert "initializeEsxStorageWizards" in client.get("/static/app.js").text
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import DnsRecord, DnsSettings, PhysicalInterface

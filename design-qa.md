@@ -118,3 +118,27 @@ Primary interactions tested:
 Managed script revision comparison final result: passed
 
 final result: passed
+
+# ESX Storage wizard design QA
+
+## Result
+
+Passed on the VMware test appliance at `https://192.168.167.219/esx-storage` using the annotated 1968 x 1562 browser captures as the source reference.
+
+## Visual comparison
+
+- Preserved the ESX Storage page shell, compact Tabulator grids, resource tabs, right-side Service Settings and Validation rail, typography, spacing, and status treatments from the reference.
+- Replaced each expanded inline add form with the established LabFoundry grid add-row affordance and modal wizard pattern.
+- Verified the volume wizard at the storage-selection step and the NFS datastore wizard at identity and review steps at the same desktop viewport.
+- The modal layout, step rail, field density, help controls, action placement, overlay, borders, and radii match the existing LabFoundry wizard system without clipping or overlap.
+
+## Interaction verification
+
+- `+ Add storage volume here` opens the three-step volume wizard.
+- Required volume identity and eligible-storage selection prevent invalid advancement.
+- `+ Add NFS datastore here` opens the four-step datastore wizard.
+- A dual-stack interface defaults both IPv4 and IPv6 on with equal treatment.
+- The client step independently requires IPv4 and IPv6 VMkernel clients when both families are enabled.
+- The review step shows the datastore, backing path, NFS version, interface, both address families, and both allowlists before any desired-state submission.
+- Cancel closes either wizard without creating a volume or datastore.
+- No browser console warnings or errors were recorded during the verified flow.

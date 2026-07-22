@@ -2,6 +2,8 @@
 
 LabFoundry ESX Storage publishes ESX 9.x datastores over kernel NFS 3 and NFS 4.1. IPv4 and IPv6 have equal status: a share may enable IPv4, IPv6, or both, and LabFoundry never treats either family as preferred, secondary, fallback, or future work.
 
+The Storage Volumes and NFS Datastores grids each end with an add row. Selecting it opens a guided modal that validates the current step before advancing and summarizes the desired state before creation. Volume initialization remains only a desired-state operation in this wizard; blank-disk formatting still requires explicit authorization in the global appliance review.
+
 ## Architecture
 
 One `EsxNfsShare` is one datastore name, one backing directory, one selected storage interface or VLAN, and one preferred NFS version. A dual-stack share remains one database object and one data directory. LabFoundry derives two equivalent connection paths when both families are enabled:

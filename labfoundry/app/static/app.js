@@ -15258,17 +15258,21 @@ function initializeEsxStorageTables() {
 
   if (volumeElement instanceof HTMLElement) {
     const rows = JSON.parse(volumeElement.dataset.esxStorageVolumes || "[]");
+    const canWrite = volumeElement.dataset.canWrite === "true";
+    const tableRows = canWrite ? [...rows, { is_new: true, name: "" }] : rows;
+    const volumeValue = (cell, formatter = (value) => value) => cell.getRow().getData().is_new ? "" : formatter(cell.getValue());
     new Tabulator(volumeElement, {
-      data: rows,
+      data: tableRows,
       layout: "fitColumns",
       placeholder: "No storage volumes are configured.",
+      rowFormatter: (row) => markNewRecordRow(row, "name"),
       columns: [
-        { title: "Name", field: "name", minWidth: 130 },
-        { title: "Source", field: "source_type", formatter: (cell) => cell.getValue() === "blank_disk" ? "blank disk" : "mounted ext4" },
-        { title: "Stable identity / mount", field: "stable_device_id", minWidth: 260, formatter: (cell) => `<code>${escapeHtml(cell.getValue() || cell.getRow().getData().mount_path || "")}</code>` },
-        { title: "Capacity", field: "capacity_bytes", formatter: (cell) => Number(cell.getValue() || 0).toLocaleString() },
-        { title: "Filesystem", field: "filesystem_uuid", formatter: (cell) => cell.getValue() || "pending ext4 format" },
-        { title: "State", field: "state" },
+        { title: "Name", field: "name", minWidth: 130, formatter: (cell) => cell.getRow().getData().is_new ? '<button class="add-row-button" type="button" data-esx-storage-wizard-open="volume">+ Add storage volume here</button>' : escapeHtml(cell.getValue()) },
+        { title: "Source", field: "source_type", formatter: (cell) => volumeValue(cell, (value) => value === "blank_disk" ? "blank disk" : "mounted ext4") },
+        { title: "Stable identity / mount", field: "stable_device_id", minWidth: 260, formatter: (cell) => cell.getRow().getData().is_new ? "" : `<code>${escapeHtml(cell.getValue() || cell.getRow().getData().mount_path || "")}</code>` },
+        { title: "Capacity", field: "capacity_bytes", formatter: (cell) => volumeValue(cell, (value) => Number(value || 0).toLocaleString()) },
+        { title: "Filesystem", field: "filesystem_uuid", formatter: (cell) => volumeValue(cell, (value) => value || "pending ext4 format") },
+        { title: "State", field: "state", formatter: (cell) => volumeValue(cell) },
       ],
     });
     document.getElementById(volumeElement.dataset.fallbackId || "")?.classList.add("hidden");
@@ -15280,6 +15284,8 @@ function initializeEsxStorageTables() {
     const canWrite = shareElement.dataset.canWrite === "true";
     const interfaceValues = Object.fromEntries(interfaces.map((item) => [item.name, item.name]));
     const editor = canWrite ? "input" : false;
+    const tableRows = canWrite ? [...rows, { is_new: true, datastore_name: "" }] : rows;
+    const shareValue = (cell, formatter = (value) => value) => cell.getRow().getData().is_new ? "" : formatter(cell.getValue());
     const saveCell = async (cell) => {
       const row = cell.getRow().getData();
       const field = cell.getField();
@@ -15302,12 +15308,14 @@ function initializeEsxStorageTables() {
       scheduleApplianceApplySidebarRefresh();
     };
     new Tabulator(shareElement, {
-      data: rows,
+      data: tableRows,
       layout: "fitColumns",
       placeholder: "No NFS datastores are configured.",
+      rowFormatter: (row) => markNewRecordRow(row, "datastore_name"),
       rowContextMenu: canWrite ? [
         {
           label: "Remove datastore",
+          disabled: (component) => component.getData().is_new,
           action: (_event, row) => {
             const form = document.getElementById(`esx-storage-remove-share-${row.getData().id}`);
             if (form instanceof HTMLFormElement) form.requestSubmit();
@@ -15315,19 +15323,158 @@ function initializeEsxStorageTables() {
         },
       ] : [],
       columns: [
-        { title: "Datastore", field: "datastore_name", editor, cellEdited: saveCell, minWidth: 145 },
-        { title: "Volume", field: "volume_name", minWidth: 120 },
-        { title: "Path", field: "relative_path", editor, cellEdited: saveCell, minWidth: 150 },
-        { title: "NFS", field: "preferred_nfs_version", editor: canWrite ? "list" : false, editorParams: { values: { "4.1": "4.1", "3": "3" } }, cellEdited: saveCell },
-        { title: "Interface / VLAN", field: "interface_name", editor: canWrite ? "list" : false, editorParams: { values: interfaceValues }, cellEdited: saveCell, minWidth: 130 },
-        { title: "Families", field: "address_families", editor: canWrite ? "list" : false, editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" }, multiselect: true }, formatter: (cell) => (cell.getValue() || []).map((value) => value === "ipv4" ? "IPv4" : "IPv6").join(" + "), cellEdited: saveCell },
-        { title: "IPv4 VMkernel clients", field: "ipv4_clients", editor, formatter: (cell) => (cell.getValue() || []).join(", "), cellEdited: saveCell, minWidth: 170 },
-        { title: "IPv6 VMkernel clients", field: "ipv6_clients", editor, formatter: (cell) => (cell.getValue() || []).join(", "), cellEdited: saveCell, minWidth: 180 },
-        { title: "Enabled", field: "enabled", formatter: "tickCross", editor: canWrite ? "tickCross" : false, cellEdited: saveCell },
+        { title: "Datastore", field: "datastore_name", editor, editable: (cell) => canWrite && !cell.getRow().getData().is_new, formatter: (cell) => cell.getRow().getData().is_new ? '<button class="add-row-button" type="button" data-esx-storage-wizard-open="share">+ Add NFS datastore here</button>' : escapeHtml(cell.getValue()), cellEdited: saveCell, minWidth: 145 },
+        { title: "Volume", field: "volume_name", minWidth: 120, formatter: (cell) => shareValue(cell) },
+        { title: "Path", field: "relative_path", editor, editable: (cell) => canWrite && !cell.getRow().getData().is_new, formatter: (cell) => shareValue(cell), cellEdited: saveCell, minWidth: 150 },
+        { title: "NFS", field: "preferred_nfs_version", editor: canWrite ? "list" : false, editable: (cell) => canWrite && !cell.getRow().getData().is_new, editorParams: { values: { "4.1": "4.1", "3": "3" } }, formatter: (cell) => shareValue(cell), cellEdited: saveCell },
+        { title: "Interface / VLAN", field: "interface_name", editor: canWrite ? "list" : false, editable: (cell) => canWrite && !cell.getRow().getData().is_new, editorParams: { values: interfaceValues }, formatter: (cell) => shareValue(cell), cellEdited: saveCell, minWidth: 130 },
+        { title: "Families", field: "address_families", editor: canWrite ? "list" : false, editable: (cell) => canWrite && !cell.getRow().getData().is_new, editorParams: { values: { ipv4: "IPv4", ipv6: "IPv6" }, multiselect: true }, formatter: (cell) => shareValue(cell, (value) => (value || []).map((family) => family === "ipv4" ? "IPv4" : "IPv6").join(" + ")), cellEdited: saveCell },
+        { title: "IPv4 VMkernel clients", field: "ipv4_clients", editor, editable: (cell) => canWrite && !cell.getRow().getData().is_new, formatter: (cell) => shareValue(cell, (value) => (value || []).join(", ")), cellEdited: saveCell, minWidth: 170 },
+        { title: "IPv6 VMkernel clients", field: "ipv6_clients", editor, editable: (cell) => canWrite && !cell.getRow().getData().is_new, formatter: (cell) => shareValue(cell, (value) => (value || []).join(", ")), cellEdited: saveCell, minWidth: 180 },
+        { title: "Enabled", field: "enabled", formatter: (cell) => shareValue(cell, (value) => value ? "enabled" : "disabled"), editor: canWrite ? "tickCross" : false, editable: (cell) => canWrite && !cell.getRow().getData().is_new, cellEdited: saveCell },
       ],
     });
     document.getElementById(shareElement.dataset.fallbackId || "")?.classList.add("hidden");
   }
+}
+
+function initializeEsxStorageWizards() {
+  const configurations = {
+    volume: [
+      ["Name the volume", "Choose a stable LabFoundry name and how storage is supplied."],
+      ["Select storage", "Choose the eligible whole disk or mounted ext4 filesystem backing this volume."],
+      ["Review the volume", "Confirm the desired state and the formatting safety boundary."],
+    ],
+    share: [
+      ["Define the datastore", "Choose its ESX identity and contained directory."],
+      ["Choose the endpoint", "Select one interface/VLAN, NFS version, and equal IPv4/IPv6 exposure."],
+      ["Restrict VMkernel clients", "Provide at least one client address or CIDR for every enabled family."],
+      ["Review the datastore", "Confirm the datastore, endpoint, and family-aware client allowlists."],
+    ],
+  };
+  const forms = new Map();
+  const setReviewValue = (form, key, value) => {
+    const target = form.querySelector(`[data-esx-storage-review="${key}"]`);
+    if (target instanceof HTMLElement) target.textContent = value || "not configured";
+  };
+
+  document.querySelectorAll("[data-esx-storage-wizard]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) return;
+    const kind = form.dataset.esxStorageWizard;
+    const steps = configurations[kind];
+    const modal = form.closest("dialog");
+    if (!steps || !(modal instanceof HTMLDialogElement)) return;
+    forms.set(kind, { form, modal });
+    const pages = [...form.querySelectorAll("[data-esx-storage-wizard-step]")];
+    const navButtons = [...form.querySelectorAll("[data-esx-storage-wizard-nav]")];
+    const kicker = form.querySelector("[data-esx-storage-wizard-kicker]");
+    const title = form.querySelector("[data-esx-storage-wizard-title]");
+    const description = form.querySelector("[data-esx-storage-wizard-description]");
+    const error = form.querySelector("[data-esx-storage-wizard-error]");
+    const back = form.querySelector("[data-esx-storage-wizard-back]");
+    const next = form.querySelector("[data-esx-storage-wizard-next]");
+    const submit = form.querySelector("[data-esx-storage-wizard-submit]");
+    let currentStep = 0;
+    let highestStep = 0;
+
+    const showError = (message = "") => {
+      if (!(error instanceof HTMLElement)) return;
+      error.textContent = message;
+      error.classList.toggle("hidden", !message);
+    };
+    const populateReview = () => {
+      if (kind === "volume") {
+        const source = form.elements.source_type;
+        const blankDisk = form.elements.stable_device_id;
+        const mountedVolume = form.elements.mount_path;
+        const target = source.value === "blank_disk" ? blankDisk : mountedVolume;
+        setReviewValue(form, "volume-name", form.elements.name.value);
+        setReviewValue(form, "volume-source", source.selectedOptions[0]?.textContent?.trim());
+        setReviewValue(form, "volume-target", target.selectedOptions[0]?.textContent?.trim());
+        return;
+      }
+      const families = [...form.querySelectorAll('input[name="address_families"]:checked')].map((input) => input.value === "ipv4" ? "IPv4" : "IPv6");
+      const clients = [];
+      if (families.includes("IPv4")) clients.push(`IPv4: ${String(form.elements.ipv4_clients.value || "").trim()}`);
+      if (families.includes("IPv6")) clients.push(`IPv6: ${String(form.elements.ipv6_clients.value || "").trim()}`);
+      setReviewValue(form, "share-name", form.elements.datastore_name.value);
+      setReviewValue(form, "share-path", `${form.elements.volume_id.selectedOptions[0]?.textContent?.trim() || "volume"} / ${form.elements.relative_path.value}`);
+      setReviewValue(form, "share-protocol", `NFS ${form.elements.preferred_nfs_version.value}`);
+      setReviewValue(form, "share-endpoint", `${form.elements.interface_name.value} · ${families.join(" + ")}`);
+      setReviewValue(form, "share-clients", clients.join(" · "));
+    };
+    const showStep = (index) => {
+      currentStep = Math.max(0, Math.min(index, pages.length - 1));
+      highestStep = Math.max(highestStep, currentStep);
+      pages.forEach((page, pageIndex) => page.classList.toggle("hidden", pageIndex !== currentStep));
+      navButtons.forEach((button, buttonIndex) => {
+        button.classList.toggle("active", buttonIndex === currentStep);
+        button.classList.toggle("complete", buttonIndex < currentStep);
+        button.disabled = buttonIndex > highestStep;
+      });
+      if (kicker instanceof HTMLElement) kicker.textContent = `Step ${currentStep + 1} of ${pages.length}`;
+      if (title instanceof HTMLElement) title.textContent = steps[currentStep][0];
+      if (description instanceof HTMLElement) description.textContent = steps[currentStep][1];
+      back?.classList.toggle("hidden", currentStep === 0);
+      next?.classList.toggle("hidden", currentStep === pages.length - 1);
+      submit?.classList.toggle("hidden", currentStep !== pages.length - 1);
+      if (currentStep === pages.length - 1) populateReview();
+      showError();
+    };
+    const validateStep = () => {
+      const page = pages[currentStep];
+      if (!(page instanceof HTMLElement)) return true;
+      const invalid = [...page.querySelectorAll("input, select, textarea")].find((control) => !control.closest("[hidden], .hidden") && !control.checkValidity());
+      if (invalid) {
+        invalid.reportValidity();
+        return false;
+      }
+      if (kind === "share" && currentStep === 1 && !form.querySelector('input[name="address_families"]:checked')) {
+        showError("Enable IPv4, IPv6, or both for this datastore.");
+        return false;
+      }
+      if (kind === "share" && currentStep === 2) {
+        const ipv4Enabled = Boolean(form.querySelector('input[name="address_families"][value="ipv4"]:checked'));
+        const ipv6Enabled = Boolean(form.querySelector('input[name="address_families"][value="ipv6"]:checked'));
+        if (ipv4Enabled && !String(form.elements.ipv4_clients.value || "").trim()) {
+          showError("Add at least one IPv4 VMkernel client IP or CIDR.");
+          form.elements.ipv4_clients.focus();
+          return false;
+        }
+        if (ipv6Enabled && !String(form.elements.ipv6_clients.value || "").trim()) {
+          showError("Add at least one IPv6 VMkernel client IP or CIDR.");
+          form.elements.ipv6_clients.focus();
+          return false;
+        }
+      }
+      return true;
+    };
+    const openWizard = () => {
+      form.reset();
+      highestStep = 0;
+      form.querySelector("[data-esx-storage-volume-source]")?.dispatchEvent(new Event("change"));
+      form.querySelector("[data-esx-storage-interface]")?.dispatchEvent(new Event("change"));
+      showStep(0);
+      modal.showModal();
+      window.requestAnimationFrame(() => pages[0]?.querySelector("input, select")?.focus({ preventScroll: true }));
+    };
+    form.esxStorageOpenWizard = openWizard;
+    next?.addEventListener("click", () => { if (validateStep()) showStep(currentStep + 1); });
+    back?.addEventListener("click", () => showStep(currentStep - 1));
+    navButtons.forEach((button, index) => button.addEventListener("click", () => { if (index <= highestStep) showStep(index); }));
+    form.querySelector("[data-esx-storage-wizard-cancel]")?.addEventListener("click", () => modal.close());
+    form.addEventListener("submit", (event) => {
+      if (currentStep !== pages.length - 1 || !validateStep()) event.preventDefault();
+    });
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const trigger = event.target.closest("[data-esx-storage-wizard-open]");
+    if (!(trigger instanceof HTMLElement)) return;
+    const entry = forms.get(trigger.dataset.esxStorageWizardOpen);
+    entry?.form.esxStorageOpenWizard?.();
+  });
 }
 
 function initializeEsxStorageFamilyDefaults() {
@@ -15367,6 +15514,7 @@ function initializeEsxStorageVolumeSource() {
 
 document.addEventListener("DOMContentLoaded", initializeDashboard);
 document.addEventListener("DOMContentLoaded", initializeEsxStorageTables);
+document.addEventListener("DOMContentLoaded", initializeEsxStorageWizards);
 document.addEventListener("DOMContentLoaded", initializeEsxStorageFamilyDefaults);
 document.addEventListener("DOMContentLoaded", initializeEsxStorageVolumeSource);
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
