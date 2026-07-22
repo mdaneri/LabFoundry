@@ -8,6 +8,10 @@ LabFoundry can run a VMware Workstation lifecycle lab alongside the Hyper-V
 lab. The Workstation path uses VMX/VMDK artifacts and `vmrun.exe`, then
 delegates appliance behavior checks to the shared Python lifecycle runner.
 
+Appliance VMX files set `disk.EnableUUID = "TRUE"` so Photon exposes stable
+`/dev/disk/by-id` identities. ESX Storage blank-disk claims depend on those
+identities and reject transient `/dev/sdX` names.
+
 ## Topology
 
 The default lifecycle lab creates isolated VM directories under:

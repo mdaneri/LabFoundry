@@ -1,6 +1,8 @@
 import importlib.machinery
 import importlib.util
-from pathlib import Path
+import json
+import subprocess
+from pathlib import Path, PurePosixPath
 
 from labfoundry.app.models import EsxNfsShare, EsxStorageSettings, EsxStorageVolume
 from labfoundry.app.services.esx_storage import (
@@ -211,6 +213,74 @@ def test_helper_blank_disk_revalidation_rejects_partition_mount_lvm_raid_and_os_
         "has holders",
         "is related to the operating-system disk",
     ]
+
+
+def test_helper_inventory_prefers_uuid_mount_and_keeps_all_mountpoints(monkeypatch):
+    helper = load_helper_module()
+    lsblk_payload = {
+        "blockdevices": [{
+            "name": "sdd",
+            "kname": "sdd",
+            "path": "/dev/sdd",
+            "type": "disk",
+            "size": 20 * 1024**3,
+            "model": "VMware Virtual S",
+            "fstype": "ext4",
+            "uuid": "3f832583-beec-4be7-969c-92519ea77273",
+            "label": "lf-ad26e4d9384f",
+            "mountpoints": [
+                "/srv/labfoundry/esx-storage/vmware-nfs3",
+                "/mnt/labfoundry-esx-storage/vmware-esx-data",
+            ],
+        }]
+    }
+    monkeypatch.setattr(helper, "_command_path", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda command: subprocess.CompletedProcess(command, 0, stdout=json.dumps(lsblk_payload), stderr=""),
+    )
+    monkeypatch.setattr(
+        helper,
+        "_esx_storage_by_id_map",
+        lambda: {"/dev/sdd": "/dev/disk/by-id/labfoundry-path-pci-0000_03_00_0-scsi-0_0_3_0"},
+    )
+    monkeypatch.setattr(helper, "_esx_storage_os_devices", lambda: set())
+
+    disk = helper._esx_storage_inventory()[0]
+
+    assert disk["mount_path"] == "/mnt/labfoundry-esx-storage/vmware-esx-data"
+    assert disk["mount_paths"] == [
+        "/srv/labfoundry/esx-storage/vmware-nfs3",
+        "/mnt/labfoundry-esx-storage/vmware-esx-data",
+    ]
+
+
+def test_helper_initialized_disk_retry_accepts_expected_mount_among_bind_mounts():
+    helper = load_helper_module()
+    entry = {
+        "filesystem_type": "ext4",
+        "filesystem_label": "lf-ad26e4d9384f",
+        "filesystem_uuid": "3f832583-beec-4be7-969c-92519ea77273",
+        "partitions": [],
+        "mount_paths": [
+            "/srv/labfoundry/esx-storage/vmware-nfs3",
+            "/mnt/labfoundry-esx-storage/vmware-esx-data",
+        ],
+        "holders": [],
+        "os_related": False,
+    }
+
+    assert helper._esx_storage_disk_is_initialized(
+        entry,
+        label="lf-ad26e4d9384f",
+        mount_path=PurePosixPath("/mnt/labfoundry-esx-storage/vmware-esx-data"),
+    )
+    assert not helper._esx_storage_disk_is_initialized(
+        entry,
+        label="lf-wrong-label",
+        mount_path=PurePosixPath("/mnt/labfoundry-esx-storage/vmware-esx-data"),
+    )
 
 
 def api_token(client, scopes: list[str]) -> str:

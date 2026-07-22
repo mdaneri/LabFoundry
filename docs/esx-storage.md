@@ -44,6 +44,8 @@ Storage Volumes supports two sources:
 
 A newly initialized disk becomes a whole-device ext4 filesystem mounted by filesystem UUID at `/mnt/labfoundry-esx-storage/<volume-slug>`. `/dev/sdX` names are never persisted. The global review displays the complete model, serial, WWN, size, and stable identity and requires the exact text `FORMAT <volume-name>`. The resulting authorization belongs only to that appliance-apply job and the exact manifest hash/device identity; it is not desired state and is not placed in baselines or settings backups.
 
+When a virtual SCSI controller does not expose a serial or WWN, the appliance udev policy creates a stable topology-derived `labfoundry-path-*` link under `/dev/disk/by-id`. The complete topology identity and fingerprint are still reviewed and revalidated; `/dev/sdX` is never accepted.
+
 The helper inventories the disk again immediately before `mkfs.ext4`. If any safety property changed, apply stops before formatting. Formatting is deliberately not rolled back. If a later mount, export, service, DNS, or firewall step fails, the successfully created ext4 filesystem remains intact and an idempotent retry continues from it. V1 has no wipe, reformat, or delete-data action.
 
 ## Share paths and exports

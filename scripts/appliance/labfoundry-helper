@@ -7722,6 +7722,10 @@ def _esx_storage_inventory() -> list[dict[str, object]]:
         device_type = str(item.get("type") or "")
         disk_path = device_path if device_type == "disk" else parent_disk
         mountpoints = [str(value) for value in (item.get("mountpoints") or []) if value]
+        primary_mount_path = next(
+            (path for path in mountpoints if path.startswith(f"{ESX_STORAGE_MOUNT_ROOT.as_posix().rstrip('/')}/")),
+            mountpoints[0] if mountpoints else "",
+        )
         kname = str(item.get("kname") or item.get("name") or "")
         holders_root = Path("/sys/class/block") / kname / "holders"
         holders = sorted(path.name for path in holders_root.iterdir()) if holders_root.is_dir() else []
@@ -7747,7 +7751,8 @@ def _esx_storage_inventory() -> list[dict[str, object]]:
                 "filesystem_type": filesystem_type,
                 "filesystem_uuid": filesystem_uuid,
                 "filesystem_label": str(item.get("label") or ""),
-                "mount_path": mountpoints[0] if mountpoints else "",
+                "mount_path": primary_mount_path,
+                "mount_paths": mountpoints,
                 "partitions": [str(child.get("path") or child.get("name") or "") for child in children],
                 "swap": device_path in swap_devices or filesystem_type == "swap",
                 "lvm": filesystem_type == "LVM2_member" or any("dm-" in holder for holder in holders),
@@ -7787,6 +7792,21 @@ def _esx_storage_blank_disk_errors(entry: dict[str, object]) -> list[str]:
         if entry.get(key):
             errors.append(label)
     return errors
+
+
+def _esx_storage_disk_is_initialized(entry: dict[str, object], *, label: str, mount_path: Path) -> bool:
+    return (
+        str(entry.get("filesystem_type") or "") == "ext4"
+        and str(entry.get("filesystem_label") or "") == label
+        and bool(entry.get("filesystem_uuid"))
+        and not entry.get("partitions")
+        and (
+            not entry.get("mount_paths")
+            or str(mount_path) in [str(path) for path in entry.get("mount_paths", [])]
+        )
+        and not entry.get("holders")
+        and not entry.get("os_related")
+    )
 
 
 def _esx_storage_manifest_errors(payload: dict[str, object], *, require_authorization: bool = False) -> list[str]:
@@ -7924,15 +7944,7 @@ def _esx_storage_apply(payload: dict[str, object]) -> dict[str, object]:
                         continue
                     if str(entry.get(inventory_key) or "") != str(expected_value):
                         raise ValueError(f"disk {stable_id} {label_name} changed after approval")
-                already_initialized = (
-                    str(entry.get("filesystem_type") or "") == "ext4"
-                    and str(entry.get("filesystem_label") or "") == label
-                    and bool(entry.get("filesystem_uuid"))
-                    and not entry.get("partitions")
-                    and str(entry.get("mount_path") or "") in {"", str(mount_path)}
-                    and not entry.get("holders")
-                    and not entry.get("os_related")
-                )
+                already_initialized = _esx_storage_disk_is_initialized(entry, label=label, mount_path=mount_path)
                 if not already_initialized:
                     safety_errors = _esx_storage_blank_disk_errors(entry)
                     if safety_errors:

@@ -111,6 +111,17 @@ log_step "leaving ESX NFS services disabled until global appliance apply"
 systemctl disable --now nfs-server.service 2>/dev/null || true
 systemctl disable --now rpcbind.service rpcbind.socket 2>/dev/null || true
 
+log_step "installing stable virtual-disk identity policy"
+install -d -o root -g root -m 0755 /etc/udev/rules.d
+cat > /etc/udev/rules.d/99-labfoundry-disk-identity.rules <<'EOF'
+# Some virtual SCSI controllers do not expose a serial/WWN. Preserve a stable
+# controller-path identity under /dev/disk/by-id so LabFoundry never claims a
+# transient /dev/sdX name. Native serial/WWN identities remain preferred.
+SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_SERIAL}=="", IMPORT{builtin}="path_id", ENV{ID_PATH_TAG}=="?*", SYMLINK+="disk/by-id/labfoundry-path-$env{ID_PATH_TAG}"
+EOF
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=block --action=add
+
 log_step "disabling systemd SSH-over-vsock auto generator"
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "hyperv" ]; then
   install -d -o root -g root -m 0755 /etc/systemd/system-generators
