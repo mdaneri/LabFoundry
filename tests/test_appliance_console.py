@@ -1,11 +1,13 @@
 import importlib.machinery
 import importlib.util
 import json
+import sqlite3
 import subprocess
 from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 import labfoundry.app.appliance_console as appliance_console
 from labfoundry.app.appliance_console import (
@@ -174,6 +176,49 @@ def test_console_missing_network_inventory_is_initializing_only_during_startup_g
         "Status unavailable: No management interface is available.",
         True,
     )
+
+
+def test_console_uninitialized_physical_interface_table_is_network_initialization(monkeypatch):
+    class UninitializedDatabase:
+        def __enter__(self):
+            raise SQLAlchemyOperationalError(
+                "SELECT * FROM physical_interfaces",
+                {},
+                sqlite3.OperationalError("no such table: physical_interfaces"),
+            )
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(appliance_console, "SessionLocal", UninitializedDatabase)
+
+    with pytest.raises(
+        appliance_console.ConsoleNetworkInventoryUnavailable,
+        match="Management interface inventory is initializing",
+    ):
+        appliance_console.load_console_status()
+
+
+def test_console_does_not_hide_unrelated_database_errors(monkeypatch):
+    error = SQLAlchemyOperationalError(
+        "SELECT * FROM settings",
+        {},
+        sqlite3.OperationalError("database disk image is malformed"),
+    )
+
+    class BrokenDatabase:
+        def __enter__(self):
+            raise error
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(appliance_console, "SessionLocal", BrokenDatabase)
+
+    with pytest.raises(SQLAlchemyOperationalError) as raised:
+        appliance_console.load_console_status()
+
+    assert raised.value is error
 
 
 def test_console_unrelated_status_failures_are_not_hidden_during_startup():

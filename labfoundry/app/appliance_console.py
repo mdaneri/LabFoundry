@@ -37,6 +37,7 @@ def _load_environment() -> None:
 _load_environment()
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 from labfoundry.app.audit import record_audit
 from labfoundry.app.database import SessionLocal
@@ -503,25 +504,34 @@ def management_urls(
 
 
 def load_console_status() -> ConsoleStatus:
-    with SessionLocal() as db:
-        interface = _management_interface(db)
-        settings = db.scalar(select(ApplianceSettings).order_by(ApplianceSettings.id))
-        firewall = db.scalar(select(FirewallSettings).order_by(FirewallSettings.id))
-        method = (interface.ipv4_method or "static").strip().lower()
-        cidr = (interface.host_ip_cidr if method == "dhcp" else interface.ip_cidr) or _fallback_cidr(interface.name, 4)
-        gateway = interface.gateway or _fallback_gateway(interface.name, 4)
-        ipv6_mode = "disabled" if not interface.ipv6_enabled else ("static" if interface.ipv6_cidr else "automatic")
-        ipv6_cidr = (
-            interface.ipv6_cidr
-            if ipv6_mode == "static"
-            else ((interface.host_ipv6_cidr or _fallback_cidr(interface.name, 6)) if ipv6_mode == "automatic" else "")
-        )
-        ipv6_gateway = interface.ipv6_gateway or (_fallback_gateway(interface.name, 6) if ipv6_mode == "automatic" else "")
-        dns_servers = tuple(split_servers(settings.external_dns_servers if settings else "")) or _fallback_dns_servers(interface.name)
-        fqdn = settings.fqdn if settings and settings.fqdn else socket.getfqdn()
+    try:
+        with SessionLocal() as db:
+            interface = _management_interface(db)
+            settings = db.scalar(select(ApplianceSettings).order_by(ApplianceSettings.id))
+            firewall = db.scalar(select(FirewallSettings).order_by(FirewallSettings.id))
+            method = (interface.ipv4_method or "static").strip().lower()
+            cidr = (interface.host_ip_cidr if method == "dhcp" else interface.ip_cidr) or _fallback_cidr(interface.name, 4)
+            gateway = interface.gateway or _fallback_gateway(interface.name, 4)
+            ipv6_mode = "disabled" if not interface.ipv6_enabled else ("static" if interface.ipv6_cidr else "automatic")
+            ipv6_cidr = (
+                interface.ipv6_cidr
+                if ipv6_mode == "static"
+                else ((interface.host_ipv6_cidr or _fallback_cidr(interface.name, 6)) if ipv6_mode == "automatic" else "")
+            )
+            ipv6_gateway = interface.ipv6_gateway or (
+                _fallback_gateway(interface.name, 6) if ipv6_mode == "automatic" else ""
+            )
+            dns_servers = tuple(split_servers(settings.external_dns_servers if settings else "")) or _fallback_dns_servers(
+                interface.name
+            )
+            fqdn = settings.fqdn if settings and settings.fqdn else socket.getfqdn()
 
-        firewall_enabled = bool(firewall and firewall.enabled)
-        services = _appliance_service_statuses(db, firewall_enabled=firewall_enabled)
+            firewall_enabled = bool(firewall and firewall.enabled)
+            services = _appliance_service_statuses(db, firewall_enabled=firewall_enabled)
+    except SQLAlchemyOperationalError as exc:
+        if "no such table: physical_interfaces" in str(exc).lower():
+            raise ConsoleNetworkInventoryUnavailable("Management interface inventory is initializing.") from exc
+        raise
 
     urls = management_urls(
         fqdn,
