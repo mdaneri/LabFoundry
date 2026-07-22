@@ -325,14 +325,33 @@ class SystemAdapter:
     def apply_public_services_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("public-services", "apply", config_path, dry_run_message="dry-run: public services nginx apply command recorded")
 
-    def check_appliance_update_config(self, config_path: str) -> AdapterResult:
-        return self._helper_result("appliance-update", "check", config_path, dry_run_message="dry-run: appliance update check command recorded")
+    def check_appliance_update_config(self, config_path: str, credentials_path: str = "") -> AdapterResult:
+        args = [config_path, credentials_path] if credentials_path else [config_path]
+        return self._helper_result("appliance-update", "check", *args, dry_run_message="dry-run: appliance update check command recorded")
 
-    def apply_appliance_update_config(self, config_path: str) -> AdapterResult:
-        return self._helper_result("appliance-update", "apply", config_path, dry_run_message="dry-run: appliance update apply command recorded")
+    def apply_appliance_update_config(self, config_path: str, credentials_path: str = "") -> AdapterResult:
+        args = [config_path, credentials_path] if credentials_path else [config_path]
+        return self._helper_result("appliance-update", "apply", *args, dry_run_message="dry-run: appliance update apply command recorded")
+
+    def sync_appliance_update_sources(self, config_path: str, credentials_path: str = "") -> AdapterResult:
+        args = [config_path, credentials_path] if credentials_path else [config_path]
+        return self._helper_result("appliance-update", "sync-sources", *args, dry_run_message="dry-run: software source synchronization recorded")
 
     def restart_appliance_after_update(self, config_path: str) -> AdapterResult:
         return self._helper_result("appliance-update", "restart-service", config_path, dry_run_message="dry-run: LabFoundry service restart command recorded")
+
+    def run_automation_script(self, script_path: str, interpreter: str, timeout_seconds: int, arguments: list[str] | None = None) -> AdapterResult:
+        return self._helper_result(
+            "automation",
+            "run",
+            script_path,
+            interpreter,
+            str(timeout_seconds),
+            "--",
+            *(arguments or []),
+            dry_run_message="dry-run: managed automation script execution recorded",
+            timeout_seconds=float(timeout_seconds + 30),
+        )
 
     def schedule_appliance_power(self, action: str) -> AdapterResult:
         if action not in {"reboot", "shutdown"}:

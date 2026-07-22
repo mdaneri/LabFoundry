@@ -150,21 +150,21 @@ Firewall desired state is nftables-backed. The image installs nftables and
 boots with management access to SSH, HTTPS, and the LabFoundry web UI.
 
 Appliance Update is a separate runtime-maintenance workflow from global
-`/appliance-apply`. It can check or run Photon OS package updates, Python
-library updates, and LabFoundry wheel updates through
-`labfoundry-helper appliance-update`. The LabFoundry wheel source defaults to
-`http://localhost:18080/update/manifest.json` for development, but Photon VM
-tests should point it at a URL reachable from the appliance when the update
-server runs on the Windows host. Build a versioned wheel and manifest with:
+`/appliance-apply`. Repository-style sources cover Photon/tdnf, Python/pip,
+PowerShell Gallery or an internal PowerShell repository, and LabFoundry release
+channels. Update work is queued to `labfoundry-worker.service`; the same worker
+runs Automation schedules, managed scripts, and VCF Offline Depot downloads.
+Build a versioned wheel repository with:
 
 ```bash
-python scripts/build_update_wheel.py
+python scripts/build_update_wheel.py --channel stable
 ```
 
-The generated LabFoundry version uses the project version plus git provenance,
-such as `0.1.0+gabcdef123456`; the update manifest records the full git commit,
-build time, wheel name, and SHA256. See
-[`docs/appliance-update.md`](docs/appliance-update.md).
+Publish the complete `dist/update` tree and configure its base URL; LabFoundry
+derives `channels/<channel>/manifest.json`. The manifest records the full git
+commit, build time, relative wheel name, and SHA256. See
+[`docs/appliance-update.md`](docs/appliance-update.md) and
+[`docs/automation.md`](docs/automation.md).
 
 The exported Hyper-V appliance resets to `192.168.49.1/24` on
 `LabFoundry-Mgmt`; the Windows host side should be `192.168.49.254/24`.
@@ -277,7 +277,7 @@ status: disabled until VCF Offline Depot is enabled, a Photon OS password is sta
 
 Set/reset this account from `Users`, then apply Local Users. The first service setup requires the changed VCF Offline Depot and Public Services units so both nginx front doors share the same authentication behavior, but later Local Users password applies refresh the existing nginx credential automatically. The same applied Photon password works in the `/PROD/login` browser form and with HTTPS Basic Auth from `curl` or `wget`. Leave `Unauthenticated access` off for normal VCF clients; enable it only for an isolated open mirror.
 
-VCF Offline Depot uses the proprietary VCF Download Tool to stage disconnected VCF 9 depot content. Uploading the VCF Download Tool file (`vcf-download-tool-*.tar.gz`) only validates and stores desired state, clears stale generated metadata, and records that a package is ready for apply; upload does not extract the archive, create runtime folders, run the tool, or generate a software depot ID. Global appliance apply for `vcf_offline_depot` validates the rendered nginx site, runs helper-owned `stage-tool`, extracts the uploaded archive under `/opt/labfoundry/vcf-download-tool/extracted`, exposes `/opt/labfoundry/vcf-download-tool/vcf-download-tool` as the stable wrapper, records the tool version from `vcf-download-tool --version`, applies `application-prodv2.properties` to both the helper extraction tree and `/var/lib/labfoundry/vcfDownloadTool/active-tool/conf/`, runs `vcf-download-tool configuration generate --software-depot-id`, syncs intent, and then applies HTTPS. Upload Broadcom credentials through the unified Broadcom credentials modal as either a download token or activation code, by file or pasted text; existing storage keys remain separate, and credential bodies are never returned in responses, previews, logs, or job output. Metadata and binaries profiles prefer the runtime download-token file used by `--depot-download-token-file` when present, otherwise they use the runtime activation-code file used by `--depot-download-activation-code-file`. Global appliance apply records show only sanitized filenames, presence flags, generated software depot ID metadata, generated tool version metadata, and generated command intent. The generated VCFDT script uses `/var/lib/labfoundry/vcfDownloadTool/active-tool` runtime credential paths, writes the telemetry flag, supports install, upgrade, upgrade-only, patch-only, Day-N component, and ESX activation-code workflows, and writes ESX disabled-platform selections to `conf/esxUserConfig.json`. Operators can manually start an individual download profile from the Download Profiles grid; Start is disabled until that profile has a token or activation-code file, but missing profile credentials do not block applying or disabling the depot service. Start creates a `vcf-depot-download` background job, prepares runtime credential files under the VCFDT working tree, and runs the selected VCFDT commands as the LabFoundry service user. Scheduling is not exposed yet. When enabled, the depot apply unit stages nginx config under `/var/lib/labfoundry/apply/vcf-offline-depot/`, serves the fixed depot store as an HTTPS static document root, uses the CA-managed `vcf_offline_depot:https` certificate/key file paths, and protects `/PROD/` with HTTP Basic Auth backed by the selected local `vcf-depot` user unless unauthenticated access is explicitly enabled.
+VCF Offline Depot uses the proprietary VCF Download Tool to stage disconnected VCF 9 depot content. Uploading the VCF Download Tool file (`vcf-download-tool-*.tar.gz`) only validates and stores desired state, clears stale generated metadata, and records that a package is ready for apply; upload does not extract the archive, create runtime folders, run the tool, or generate a software depot ID. Global appliance apply for `vcf_offline_depot` validates the rendered nginx site, runs helper-owned `stage-tool`, extracts the uploaded archive under `/opt/labfoundry/vcf-download-tool/extracted`, exposes `/opt/labfoundry/vcf-download-tool/vcf-download-tool` as the stable wrapper, records the tool version from `vcf-download-tool --version`, applies `application-prodv2.properties` to both the helper extraction tree and `/var/lib/labfoundry/vcfDownloadTool/active-tool/conf/`, runs `vcf-download-tool configuration generate --software-depot-id`, syncs intent, and then applies HTTPS. Upload Broadcom credentials through the unified Broadcom credentials modal as either a download token or activation code, by file or pasted text; existing storage keys remain separate, and credential bodies are never returned in responses, previews, logs, or job output. Metadata and binaries profiles prefer the runtime download-token file used by `--depot-download-token-file` when present, otherwise they use the runtime activation-code file used by `--depot-download-activation-code-file`. Global appliance apply records show only sanitized filenames, presence flags, generated software depot ID metadata, generated tool version metadata, and generated command intent. The generated VCFDT script uses `/var/lib/labfoundry/vcfDownloadTool/active-tool` runtime credential paths, writes the telemetry flag, supports install, upgrade, upgrade-only, patch-only, Day-N component, and ESX activation-code workflows, and writes ESX disabled-platform selections to `conf/esxUserConfig.json`. Operators can manually start an individual download profile from the Download Profiles grid; Start is disabled until that profile has a token or activation-code file, but missing profile credentials do not block applying or disabling the depot service. Start creates a durable `vcf-depot-download` task, prepares runtime credential files under the VCFDT working tree, and runs the selected VCFDT commands as the LabFoundry service user. Enabled profiles can also be scheduled under Operations → Automation. When enabled, the depot apply unit stages nginx config under `/var/lib/labfoundry/apply/vcf-offline-depot/`, serves the fixed depot store as an HTTPS static document root, uses the CA-managed `vcf_offline_depot:https` certificate/key file paths, and protects `/PROD/` with HTTP Basic Auth backed by the selected local `vcf-depot` user unless unauthenticated access is explicitly enabled.
 
 ## Public Service Front Door
 
@@ -295,7 +295,7 @@ Audit Events is a separate Operations page because it is structured history rath
 
 The top-right account menu contains About, `Sign out (<username>)`, and admin-only Reboot and Shutdown actions. About reports the installed LabFoundry build and Python version. Reboot and Shutdown always use the shared confirmation modal, create and commit an auditable task first, and then ask the constrained helper to schedule the host action after a five-second delay. These runtime maintenance tasks are separate from global Appliance Apply. Shutdown powers off the appliance, so hypervisor or physical access is required to start it again.
 
-Task detail modals render redacted result payloads as wrapped, syntax-highlighted JSON previews and task output as highlighted log previews. The task-log dialog uses nearly the full available viewport for operational output. Both previews remain inside the viewport and expose a copy action without presenting read-only content as a form control.
+The Tasks grid uses backend-owned filtering and pagination. Status and state use fixed choices, while Task / Component offers recorded task/component choices and accepts a custom fragment. Task detail modals render redacted result payloads as wrapped, syntax-highlighted JSON audit previews. Console output omits helper execution-envelope JSON, shows process stdout and stderr separately, and colors stderr red. The task-log dialog uses nearly the full available viewport for operational output. Preview controls are overlaid without reserving blank text rows, and read-only output remains inside the viewport rather than appearing as a form control.
 
 ## Appliance Apply Workflow
 

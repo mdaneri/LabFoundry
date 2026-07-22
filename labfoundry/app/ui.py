@@ -20,11 +20,12 @@ from secrets import token_urlsafe
 from typing import Any, Callable
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import desc, func, select
+from sqlalchemy import String, cast, desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -34,6 +35,8 @@ from labfoundry.app.config import get_settings
 from labfoundry.app.database import SessionLocal, get_db
 from labfoundry.app.models import (
     ApplianceSettings,
+    AutomationScript,
+    AutomationScriptRevision,
     ApiToken,
     AuditEvent,
     CaCertificate,
@@ -61,15 +64,18 @@ from labfoundry.app.models import (
     LdapRecoveryArchive,
     LdapSettings,
     LdapUser,
+    ManagedPackage,
     NatRule,
     NtpSettings,
     PhysicalInterface,
     Role,
     Route,
     RoutingRule,
+    Schedule,
     ServiceState,
     Setting,
     User,
+    UpdateSource,
     VcfBackupSettings,
     VcfDepotDownloadProfile,
     VcfOfflineDepotSettings,
@@ -110,17 +116,43 @@ from labfoundry.app.services.appliance_update import (
     APPLIANCE_UPDATE_INFO_PATH,
     APPLIANCE_UPDATE_SETTINGS_KEY,
     APPLIANCE_UPDATE_STAGED_CONFIG_PATH,
+    APPLIANCE_UPDATE_STAGED_CREDENTIALS_PATH,
     DEFAULT_LABFOUNDRY_MANIFEST_URL,
     UPDATE_STREAM_LABELS,
     UPDATE_STREAMS,
     current_version_info,
+    effective_pip_index,
     parse_latest_update_result,
+    photon_repository_details,
+    photon_repository_summary,
     read_appliance_file,
     render_update_manifest,
     selected_update_streams,
     update_settings_from_json,
     update_settings_to_json,
     validate_update_settings,
+)
+from labfoundry.app.services.automation import (
+    SCHEDULE_TASK_TYPES,
+    SCRIPT_INTERPRETERS,
+    create_script_revision,
+    enabled_script_revision,
+    enqueue_schedule_now,
+    next_schedule_run,
+    parse_script_arguments,
+    validate_schedule_values,
+)
+from labfoundry.app.services.update_sources import (
+    LABFOUNDRY_CHANNELS,
+    UPDATE_SOURCE_KINDS,
+    default_source_settings,
+    effective_update_settings,
+    managed_package_rows,
+    source_rows,
+    update_source_payload,
+    update_source_settings,
+    validate_update_source,
+    validate_managed_package,
 )
 from labfoundry.app.security import (
     Identity,
@@ -227,7 +259,7 @@ from labfoundry.app.services.vcf_depot_target import (
     configure_target_depot,
     inspect_target_depot,
 )
-from labfoundry.app.secrets import decrypt_secret, secret_key_status
+from labfoundry.app.secrets import decrypt_secret, encrypt_secret, secret_key_status
 from labfoundry.app.services.networking import (
     INTERFACE_MODES,
     INTERFACE_ROLES,
@@ -2936,11 +2968,6 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
             db.commit()
 
 
-def queue_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
-    thread = threading.Thread(target=run_vcf_depot_download_job, args=(job_id, profile_id), daemon=True)
-    thread.start()
-
-
 def firewall_context(db: Session, *, reconcile: bool = True) -> dict:
     settings = get_firewall_settings_row(db)
     rules = db.execute(select(FirewallRule).order_by(FirewallRule.priority, FirewallRule.name)).scalars().all()
@@ -5505,12 +5532,44 @@ def _task_status_pill(status_value: str) -> str:
     if status_value in {JobStatus.SUCCEEDED.value, "no-op"}:
         return "good"
     if status_value in FAILED_JOB_STATUSES:
-        return "warn"
+        return "error"
     if status_value == JobStatus.CANCELLED.value:
         return "muted"
     if status_value in ACTIVE_JOB_STATUSES:
         return "warn"
     return "muted"
+
+
+def _task_console_output(result: dict[str, Any]) -> str:
+    stdout, stderr = _task_console_streams(result)
+    sections: list[str] = []
+    if stdout:
+        sections.append(stdout)
+    if stderr:
+        sections.append(f"stderr:\n{stderr}")
+    return "\n\n".join(sections)
+
+
+def _task_console_streams(result: dict[str, Any]) -> tuple[str, str]:
+    return (
+        _strip_task_action_metadata(result.get("stdout")),
+        _strip_task_action_metadata(result.get("stderr")),
+    )
+
+
+def _strip_task_action_metadata(value: Any) -> str:
+    """Remove helper execution envelopes while preserving script output."""
+    text = str(value or "").strip()
+    decoder = json.JSONDecoder()
+    while text.startswith("{"):
+        try:
+            payload, end = decoder.raw_decode(text)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(payload, dict) or not {"helper", "group", "action"}.issubset(payload):
+            break
+        text = text[end:].lstrip()
+    return text
 
 
 def _task_type_label(job_type: str) -> str:
@@ -5570,7 +5629,8 @@ def _task_row(job: Job, identity: Identity | None = None) -> dict[str, Any]:
     steps = sorted(job.steps, key=lambda step: (step.position, step.id))
     if not summary and steps:
         summary = f"{len(steps)} component{'s' if len(steps) != 1 else ''}"
-    return {
+    console_stdout, console_stderr = _task_console_streams(result)
+    row = {
         "id": job.id,
         "type": job.type,
         "type_label": _task_type_label(job.type),
@@ -5585,11 +5645,16 @@ def _task_row(job: Job, identity: Identity | None = None) -> dict[str, Any]:
         "progress_percent": max(0, min(100, int(job.progress_percent or 0))),
         "result": result,
         "result_json": json.dumps(result, indent=2, sort_keys=True),
+        "console_output": _task_console_output(result),
+        "console_stdout": console_stdout,
+        "console_stderr": console_stderr,
         "error": error,
         "error_messages": error_messages,
         "can_cancel": _can_cancel_task(job, identity),
-        "_children": [_job_step_row(step) for step in steps],
     }
+    if steps:
+        row["_children"] = [_job_step_row(step) for step in steps]
+    return row
 
 
 def _job_step_row(step: JobStep) -> dict[str, Any]:
@@ -5599,6 +5664,7 @@ def _job_step_row(step: JobStep) -> dict[str, Any]:
     if error and error not in error_messages:
         error_messages.append(str(error))
     status_value = str(step.status or JobStatus.PENDING.value)
+    console_stdout, console_stderr = _task_console_streams(result)
     return {
         "id": step.id,
         "job_id": step.job_id,
@@ -5617,13 +5683,69 @@ def _job_step_row(step: JobStep) -> dict[str, Any]:
         "progress_percent": max(0, min(100, int(step.progress_percent or 0))),
         "result": result,
         "result_json": json.dumps(result, indent=2, sort_keys=True),
+        "console_output": _task_console_output(result),
+        "console_stdout": console_stdout,
+        "console_stderr": console_stderr,
         "error": error,
         "error_messages": error_messages,
         "can_cancel": False,
         "is_step": True,
         "position": step.position,
-        "_children": [],
     }
+
+
+def _task_filter_clauses(raw_filters: str) -> list[Any]:
+    try:
+        filters = json.loads(raw_filters or "[]")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Task filters must be valid JSON.") from exc
+    if not isinstance(filters, list) or len(filters) > 10:
+        raise HTTPException(status_code=400, detail="Task filters must be a list of at most 10 filters.")
+    clauses: list[Any] = []
+    allowed_fields = {"status", "id", "state", "created_at"}
+    for item in filters:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="Each task filter must be an object.")
+        field = str(item.get("field") or "")
+        filter_type = str(item.get("type") or "")
+        value = str(item.get("value") or "").strip()
+        if not value:
+            continue
+        if field not in allowed_fields or filter_type not in {"=", "like"} or len(value) > 100:
+            raise HTTPException(status_code=400, detail="Unsupported task filter.")
+        normalized = value.lower()
+        if field == "status":
+            clauses.append(func.lower(Job.status) == normalized)
+        elif field == "id":
+            type_value = normalized.replace(" ", "-")
+            clauses.append(
+                or_(
+                    func.lower(Job.id).contains(normalized),
+                    func.lower(Job.type).contains(normalized),
+                    func.lower(Job.type).contains(type_value),
+                    Job.steps.any(
+                        or_(
+                            func.lower(JobStep.label).contains(normalized),
+                            func.lower(JobStep.component_key).contains(normalized),
+                        )
+                    ),
+                )
+            )
+        elif field == "state":
+            clauses.append(or_(func.lower(Job.status).contains(normalized), func.lower(Job.result).contains(normalized)))
+        elif field == "created_at":
+            clauses.append(func.lower(cast(Job.created_at, String)).contains(normalized))
+    return clauses
+
+
+def _task_component_filter_options(db: Session) -> list[str]:
+    task_types = db.execute(select(Job.type).where(Job.type.is_not(None)).distinct().order_by(Job.type)).scalars().all()
+    component_labels = db.execute(
+        select(JobStep.label).where(JobStep.label.is_not(None), JobStep.label != "").distinct().order_by(JobStep.label)
+    ).scalars().all()
+    options = {_task_type_label(task_type) for task_type in task_types if task_type}
+    options.update(label for label in component_labels if label)
+    return sorted(options, key=str.lower)
 
 
 def _task_log_lines(job: Job, db: Session) -> list[str]:
@@ -7496,8 +7618,9 @@ def dashboard_snapshot(db: Session) -> dict[str, Any]:
     }
 
 
-def appliance_update_settings(db: Session) -> dict[str, str]:
-    return update_settings_from_json(setting_value(db, APPLIANCE_UPDATE_SETTINGS_KEY))
+def appliance_update_settings(db: Session) -> dict[str, Any]:
+    legacy = update_settings_from_json(setting_value(db, APPLIANCE_UPDATE_SETTINGS_KEY))
+    return effective_update_settings(db, legacy=legacy)
 
 
 def latest_appliance_update_job(db: Session) -> Job | None:
@@ -7507,10 +7630,31 @@ def latest_appliance_update_job(db: Session) -> Job | None:
 def appliance_update_context(db: Session) -> dict[str, Any]:
     settings = appliance_update_settings(db)
     latest_job = latest_appliance_update_job(db)
+    sources = source_rows(db)
+    packages = managed_package_rows(db)
+    source_payloads = [update_source_payload(source) for source in sources]
+    powershell_sources = [source for source in sources if source.kind == "powershell"]
+    powershell_packages = [package for package in packages if package.ecosystem == "powershell"]
     selected = list(UPDATE_STREAMS)
     manifest_preview = render_update_manifest(selected_streams=selected, settings=settings, actor="preview")
+    photon_repositories = photon_repository_details()
+    pip_index = effective_pip_index()
     return {
         "update_settings": settings,
+        "update_sources": source_payloads,
+        "update_source_groups": [
+            {"kind": kind, "sources": [source for source in source_payloads if source["kind"] == kind]}
+            for kind in sorted(UPDATE_SOURCE_KINDS)
+        ],
+        "update_source_kinds": sorted(UPDATE_SOURCE_KINDS),
+        "managed_packages": packages,
+        "powershell_sources": powershell_sources,
+        "powershell_packages": powershell_packages,
+        "photon_repository_details": photon_repositories,
+        "photon_repository_summary": photon_repository_summary(),
+        "photon_repository_rows": min(max(len(photon_repositories), 2), 8),
+        "effective_pip_index": pip_index,
+        "labfoundry_channels": sorted(LABFOUNDRY_CHANNELS),
         "update_streams": [{"id": stream, "label": UPDATE_STREAM_LABELS[stream]} for stream in UPDATE_STREAMS],
         "default_labfoundry_manifest_url": DEFAULT_LABFOUNDRY_MANIFEST_URL,
         "current_version_info": current_version_info(),
@@ -7524,22 +7668,190 @@ def appliance_update_context(db: Session) -> dict[str, Any]:
     }
 
 
+def automation_context(db: Session) -> dict[str, Any]:
+    schedules = db.execute(select(Schedule).order_by(Schedule.name)).scalars().all()
+    scripts = db.execute(
+        select(AutomationScript).options(selectinload(AutomationScript.revisions)).order_by(AutomationScript.name)
+    ).scalars().all()
+    schedule_rows: list[dict[str, Any]] = []
+    schedule_names = {schedule.id: schedule.name for schedule in schedules}
+    for schedule in schedules:
+        try:
+            task_config = json.loads(schedule.task_config_json or "{}")
+        except json.JSONDecodeError:
+            task_config = {}
+        latest_job = db.execute(select(Job).where(Job.schedule_id == schedule.id).order_by(desc(Job.created_at))).scalars().first()
+        local_once = ""
+        if schedule.run_once_at:
+            try:
+                run_once_at = schedule.run_once_at
+                if run_once_at.tzinfo is None:
+                    run_once_at = run_once_at.replace(tzinfo=timezone.utc)
+                local_once = run_once_at.astimezone(ZoneInfo(schedule.timezone_name)).strftime("%Y-%m-%dT%H:%M")
+            except ZoneInfoNotFoundError:
+                local_once = run_once_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        schedule_rows.append(
+            {
+                "id": schedule.id,
+                "name": schedule.name,
+                "task_type": schedule.task_type,
+                "schedule": schedule.run_once_at.isoformat() if schedule.schedule_kind == "once" and schedule.run_once_at else schedule.cron_expression,
+                "timezone": schedule.timezone_name,
+                "enabled": schedule.enabled,
+                "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else "",
+                "last_run_at": schedule.last_run_at.isoformat() if schedule.last_run_at else "",
+                "last_job_id": schedule.last_job_id,
+                "last_job_status": latest_job.status if latest_job else "never",
+                "task_config": task_config if isinstance(task_config, dict) else {},
+                "schedule_kind": schedule.schedule_kind,
+                "cron_expression": schedule.cron_expression,
+                "run_once_local": local_once,
+            }
+        )
+    execution_jobs = db.execute(
+        select(Job)
+        .where(Job.trigger.in_(["scheduled", "manual_schedule"]))
+        .order_by(desc(Job.created_at))
+        .limit(500)
+    ).scalars().all()
+    execution_rows: list[dict[str, Any]] = []
+    for job in execution_jobs:
+        result = _job_payload(job)
+        try:
+            task_config = json.loads(job.task_config_json or "{}")
+        except json.JSONDecodeError:
+            task_config = {}
+        if not isinstance(task_config, dict):
+            task_config = {}
+        stored_schedule_id = result.get("schedule_id") or task_config.get("_schedule_id")
+        schedule_id = job.schedule_id if job.schedule_id is not None else stored_schedule_id
+        schedule_name = str(result.get("schedule_name") or task_config.get("_schedule_name") or schedule_names.get(schedule_id) or f"Deleted schedule #{schedule_id or 'unknown'}")
+        execution_rows.append(
+            {
+                "id": job.id,
+                "schedule_id": schedule_id,
+                "schedule_name": schedule_name,
+                "task_type": job.type,
+                "task_label": _task_type_label(job.type),
+                "trigger": job.trigger,
+                "trigger_label": "Run now" if job.trigger == "manual_schedule" else "Scheduled",
+                "status": str(job.status or ""),
+                "status_pill": _task_status_pill(str(job.status or "")),
+                "planned_for": _task_time_label(job.planned_for),
+                "created_at": _task_time_label(job.created_at),
+                "started_at": _task_time_label(job.started_at),
+                "finished_at": _task_time_label(job.finished_at),
+                "task_url": f"/tasks?job_id={quote(job.id)}",
+            }
+        )
+    scheduled_revision_ids = {
+        row["task_config"].get("revision_id")
+        for row in schedule_rows
+        if row["task_type"] == "managed_script"
+    }
+    revision_schedule_counts: dict[int, int] = {}
+    enabled_revision_schedule_counts: dict[int, int] = {}
+    for row in schedule_rows:
+        if row["task_type"] != "managed_script":
+            continue
+        revision_id = row["task_config"].get("revision_id")
+        if isinstance(revision_id, int):
+            revision_schedule_counts[revision_id] = revision_schedule_counts.get(revision_id, 0) + 1
+            if row["enabled"]:
+                enabled_revision_schedule_counts[revision_id] = enabled_revision_schedule_counts.get(revision_id, 0) + 1
+    script_rows: list[dict[str, Any]] = []
+    revisions: list[AutomationScriptRevision] = []
+    for script in scripts:
+        revisions.extend(script.revisions)
+        latest = script.revisions[-1] if script.revisions else None
+        script_rows.append(
+            {
+                "id": script.id,
+                "name": script.name,
+                "description": script.description,
+                "latest_revision": latest.revision if latest else 0,
+                "latest_revision_id": latest.id if latest else None,
+                "interpreter": latest.interpreter if latest else "",
+                "timeout_seconds": latest.timeout_seconds if latest else 3600,
+                "source_content": latest.content if latest else "",
+                "revisions": [
+                    {
+                        "id": revision.id,
+                        "revision": revision.revision,
+                        "interpreter": revision.interpreter,
+                        "timeout_seconds": revision.timeout_seconds,
+                        "enabled": revision.enabled,
+                        "content": revision.content,
+                        "created_by": revision.created_by,
+                        "created_at": revision.created_at.isoformat(),
+                    }
+                    for revision in script.revisions
+                ],
+                "latest_enabled": latest.enabled if latest else False,
+                "enabled_revisions": sum(1 for revision in script.revisions if revision.enabled),
+                "updated_at": script.updated_at.isoformat(),
+                "schedule_count": sum(1 for revision in script.revisions if revision.id in scheduled_revision_ids),
+            }
+        )
+    profiles = db.execute(select(VcfDepotDownloadProfile).where(VcfDepotDownloadProfile.enabled.is_(True)).order_by(VcfDepotDownloadProfile.name)).scalars().all()
+    return {
+        "automation_schedule_rows": schedule_rows,
+        "automation_execution_rows": execution_rows,
+        "automation_script_rows": script_rows,
+        "automation_scripts": scripts,
+        "automation_revisions": sorted(revisions, key=lambda revision: (revision.script_id, revision.revision), reverse=True),
+        "automation_revision_schedule_counts": revision_schedule_counts,
+        "automation_enabled_revision_schedule_counts": enabled_revision_schedule_counts,
+        "automation_task_types": sorted(SCHEDULE_TASK_TYPES),
+        "automation_interpreters": sorted(SCRIPT_INTERPRETERS),
+        "automation_vcf_profiles": profiles,
+        "automation_update_streams": [{"id": stream, "label": UPDATE_STREAM_LABELS[stream]} for stream in UPDATE_STREAMS],
+        "system_adapter_dry_run": get_settings().dry_run_system_adapters,
+    }
+
+
 def execute_appliance_update_job(
     *,
     selected_stream_ids: list[str],
     settings: dict[str, str],
-    identity: Identity,
+    actor: str,
     mode: str,
+    credentials: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     adapter = SystemAdapter()
-    manifest_preview = render_update_manifest(selected_streams=selected_stream_ids, settings=settings, actor=identity.username)
+    manifest_preview = render_update_manifest(selected_streams=selected_stream_ids, settings=settings, actor=actor)
     config_path = APPLIANCE_UPDATE_STAGED_CONFIG_PATH
+    credentials_path = ""
     if not adapter.dry_run:
         config_path = stage_appliance_apply_config(APPLIANCE_UPDATE_STAGED_CONFIG_PATH, manifest_preview)
+        if credentials:
+            credentials_path = stage_appliance_apply_config(
+                APPLIANCE_UPDATE_STAGED_CREDENTIALS_PATH,
+                json.dumps({"sources": credentials}, sort_keys=True),
+            )
 
-    results = [adapter.check_appliance_update_config(config_path)]
-    if mode == "run" and results[-1].returncode == 0:
-        results.append(adapter.apply_appliance_update_config(config_path))
+    try:
+        if mode == "source_sync":
+            results = [
+                adapter.sync_appliance_update_sources(config_path, credentials_path)
+                if credentials_path
+                else adapter.sync_appliance_update_sources(config_path)
+            ]
+        else:
+            results = [
+                adapter.check_appliance_update_config(config_path, credentials_path)
+                if credentials_path
+                else adapter.check_appliance_update_config(config_path)
+            ]
+            if mode == "run" and results[-1].returncode == 0:
+                results.append(
+                    adapter.apply_appliance_update_config(config_path, credentials_path)
+                    if credentials_path
+                    else adapter.apply_appliance_update_config(config_path)
+                )
+    finally:
+        if credentials_path:
+            Path(credentials_path).unlink(missing_ok=True)
 
     succeeded = all(result.returncode == 0 for result in results)
     return {
@@ -7558,19 +7870,26 @@ def execute_appliance_update_job(
     }
 
 
-def create_appliance_update_task(db: Session, *, identity: Identity, update_result: dict[str, Any]) -> Job:
+def complete_appliance_update_task(db: Session, *, job: Job, update_result: dict[str, Any]) -> Job:
     now = utcnow()
-    job = Job(
-        id=f"job_{uuid4().hex[:12]}",
-        type="appliance-update",
-        status=update_result["status"],
-        created_by=identity.username,
-        started_at=now,
-        finished_at=now,
-        progress_percent=100,
-        result=json.dumps(update_result, indent=2),
-        error=None if update_result["success"] else "One or more appliance update steps reported a failure.",
-    )
+    if update_result.get("mode") == "source_sync":
+        for source in db.execute(select(UpdateSource).where(UpdateSource.enabled.is_(True))).scalars().all():
+            source.validation_status = "valid" if update_result["success"] else "invalid"
+            source.validation_message = (
+                "Source definition validated in dry-run; host package clients were not changed."
+                if update_result["success"] and update_result.get("dry_run")
+                else "Source synchronized with its appliance package client."
+                if update_result["success"]
+                else "Source synchronization failed. Review the task output."
+            )
+            source.validated_at = now
+            db.add(source)
+    job.status = update_result["status"]
+    job.started_at = job.started_at or now
+    job.finished_at = now
+    job.progress_percent = 100
+    job.result = json.dumps(update_result, indent=2)
+    job.error = None if update_result["success"] else "One or more appliance update steps reported a failure."
     db.add(job)
     db.commit()
     should_log_final_result = not update_result.get("restart_after_commit")
@@ -7581,7 +7900,7 @@ def create_appliance_update_task(db: Session, *, identity: Identity, update_resu
     detail = " ; ".join(" ".join(command["command"]) for command in update_result["commands"])
     record_audit(
         db,
-        actor=identity.username,
+        actor=job.created_by,
         action=f"{update_result['mode']}_appliance_update",
         resource_type="job",
         resource_id=job.id,
@@ -7601,7 +7920,7 @@ def create_appliance_update_task(db: Session, *, identity: Identity, update_resu
         should_log_final_result = True
         record_audit(
             db,
-            actor=identity.username,
+            actor=job.created_by,
             action="schedule_appliance_update_restart",
             resource_type="job",
             resource_id=job.id,
@@ -7619,11 +7938,11 @@ def appliance_update_exception_result(
     *,
     selected_stream_ids: list[str],
     settings: dict[str, str],
-    identity: Identity,
+    actor: str,
     mode: str,
     exc: Exception,
 ) -> dict[str, Any]:
-    manifest_preview = render_update_manifest(selected_streams=selected_stream_ids, settings=settings, actor=identity.username)
+    manifest_preview = render_update_manifest(selected_streams=selected_stream_ids, settings=settings, actor=actor)
     command = ["stage-appliance-update", APPLIANCE_UPDATE_STAGED_CONFIG_PATH]
     return {
         "unit_id": "appliance_update",
@@ -8787,6 +9106,316 @@ def update_appliance_update_settings(
     return RedirectResponse("/appliance-update", status_code=303)
 
 
+@router.post("/appliance-update/sources/{source_id}", response_model=None)
+def update_appliance_update_source(
+    source_id: int,
+    request: Request,
+    name: str = Form(...),
+    url: str = Form(""),
+    priority: int = Form(50),
+    enabled: str | None = Form(None),
+    enabled_present: str | None = Form(None),
+    trusted: str | None = Form(None),
+    channel: str = Form("stable"),
+    managed: str | None = Form(None),
+    gpgcheck: str | None = Form(None),
+    gpgkey: str = Form(""),
+    tls_verify: str | None = Form(None),
+    credential_username: str = Form(""),
+    credential_secret: str = Form(""),
+    clear_credential: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    source = db.get(UpdateSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Update source not found.")
+    source.name = name.strip()
+    source.url = url.strip()
+    source.priority = priority
+    if enabled_present is not None:
+        source.enabled = enabled == "on"
+    settings = update_source_settings(source)
+    if source.kind == "powershell":
+        settings["trusted"] = trusted == "on"
+    elif source.kind == "labfoundry":
+        settings["channel"] = channel.strip().lower()
+    elif source.kind == "photon":
+        settings.update({"managed": managed == "on", "gpgcheck": gpgcheck == "on", "gpgkey": gpgkey.strip(), "tls_verify": tls_verify == "on"})
+    elif source.kind == "python":
+        settings["tls_verify"] = tls_verify == "on"
+    source.settings_json = json.dumps(settings, sort_keys=True)
+    if clear_credential == "on":
+        source.credential_encrypted = ""
+    elif credential_secret:
+        source.credential_encrypted = encrypt_secret(
+            json.dumps({"username": credential_username.strip(), "secret": credential_secret})
+        )
+    source.validation_status = "not_checked"
+    source.validation_message = ""
+    source.validated_at = None
+    source.updated_at = utcnow()
+    errors = validate_update_source(source)
+    if not source.name:
+        errors.insert(0, "Source name is required.")
+    if errors:
+        db.rollback()
+        if request.headers.get("X-LabFoundry-Autosave") == "1":
+            return JSONResponse({"status": "error", "errors": errors}, status_code=422)
+        return render(
+            request,
+            "appliance_update.html",
+            {"identity": identity, **appliance_update_context(db), "update_error": " ".join(errors)},
+            status_code=422,
+        )
+    db.add(source)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        message = "A source with this name and type already exists."
+        if request.headers.get("X-LabFoundry-Autosave") == "1":
+            return JSONResponse({"status": "error", "errors": [message]}, status_code=409)
+        return render(request, "appliance_update.html", {"identity": identity, **appliance_update_context(db), "update_error": message}, status_code=409)
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_software_source",
+        resource_type="update_source",
+        resource_id=str(source.id),
+        detail=f"kind={source.kind}; name={source.name}",
+    )
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        return JSONResponse({"status": "saved", "saved_at": utcnow().isoformat()})
+    return RedirectResponse("/appliance-update", status_code=303)
+
+
+@router.post("/appliance-update/sources", response_model=None)
+def create_appliance_update_source(
+    request: Request,
+    kind: str = Form(...),
+    name: str = Form(...),
+    url: str = Form(""),
+    priority: int = Form(50),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    normalized_kind = kind.strip().lower()
+    source = UpdateSource(
+        kind=normalized_kind,
+        name=name.strip(),
+        url=url.strip(),
+        priority=priority,
+        enabled=enabled == "on",
+        settings_json=json.dumps(default_source_settings(normalized_kind), sort_keys=True),
+    )
+    errors = validate_update_source(source)
+    if not source.name:
+        errors.insert(0, "Source name is required.")
+    if errors:
+        return render(request, "appliance_update.html", {"identity": identity, **appliance_update_context(db), "update_error": " ".join(errors)}, status_code=422)
+    db.add(source)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return render(request, "appliance_update.html", {"identity": identity, **appliance_update_context(db), "update_error": "A source with this name and type already exists."}, status_code=409)
+    record_audit(db, actor=identity.username, action="create_software_source", resource_type="update_source", resource_id=str(source.id), detail=f"kind={source.kind}; name={source.name}")
+    return RedirectResponse("/appliance-update#update-sources", status_code=303)
+
+
+@router.post("/appliance-update/sources/{source_id}/delete", response_model=None)
+def delete_appliance_update_source(
+    source_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    source = db.get(UpdateSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Update source not found.")
+    packages = db.execute(select(ManagedPackage).where(ManagedPackage.source_id == source.id)).scalars().all()
+    if packages:
+        names = ", ".join(package.name for package in packages)
+        return render(request, "appliance_update.html", {"identity": identity, **appliance_update_context(db), "update_error": f"Reassign or delete packages using this source first: {names}."}, status_code=409)
+    name = source.name
+    kind = source.kind
+    db.delete(source)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_software_source", resource_type="update_source", resource_id=str(source_id), detail=f"kind={kind}; name={name}")
+    return RedirectResponse("/appliance-update#update-sources", status_code=303)
+
+
+def _managed_package_from_form(
+    package: ManagedPackage,
+    *,
+    name: str,
+    source_id: int,
+    policy: str,
+    target_version: str,
+    enabled: bool,
+    db: Session,
+) -> list[str]:
+    package.ecosystem = "powershell"
+    package.name = name.strip()
+    package.source_id = source_id
+    package.source = db.get(UpdateSource, source_id)
+    package.policy = policy.strip().lower()
+    package.target_version = target_version.strip() if package.policy == "pinned" else ""
+    package.enabled = enabled
+    package.updated_at = utcnow()
+    return validate_managed_package(package)
+
+
+@router.post("/appliance-update/packages", response_model=None)
+def create_managed_update_package(
+    request: Request,
+    name: str = Form(...),
+    source_id: int = Form(...),
+    policy: str = Form("pinned"),
+    target_version: str = Form(""),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    package = ManagedPackage(ecosystem="powershell", name="", source_id=source_id)
+    errors = _managed_package_from_form(package, name=name, source_id=source_id, policy=policy, target_version=target_version, enabled=enabled == "on", db=db)
+    if errors:
+        return render(request, "appliance_update.html", {"identity": identity, **appliance_update_context(db), "update_error": " ".join(errors)}, status_code=422)
+    db.add(package)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return render(request, "appliance_update.html", {"identity": identity, **appliance_update_context(db), "update_error": "This PowerShell module is already managed."}, status_code=409)
+    record_audit(db, actor=identity.username, action="create_managed_package", resource_type="managed_package", resource_id=str(package.id), detail=f"ecosystem=powershell; name={package.name}")
+    return RedirectResponse("/appliance-update#managed-packages", status_code=303)
+
+
+@router.post("/appliance-update/packages/{package_id}", response_model=None)
+def update_managed_update_package(
+    package_id: int,
+    request: Request,
+    name: str = Form(...),
+    source_id: int = Form(...),
+    policy: str = Form("pinned"),
+    target_version: str = Form(""),
+    enabled: str | None = Form(None),
+    enabled_present: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    package = db.get(ManagedPackage, package_id)
+    if package is None or package.ecosystem != "powershell":
+        raise HTTPException(status_code=404, detail="Managed PowerShell module not found.")
+    errors = _managed_package_from_form(package, name=name, source_id=source_id, policy=policy, target_version=target_version, enabled=(enabled == "on") if enabled_present is not None else package.enabled, db=db)
+    if errors:
+        db.rollback()
+        if request.headers.get("X-LabFoundry-Autosave") == "1":
+            return JSONResponse({"status": "error", "errors": errors}, status_code=422)
+        return render(request, "appliance_update.html", {"identity": identity, **appliance_update_context(db), "update_error": " ".join(errors)}, status_code=422)
+    db.add(package)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        message = "This PowerShell module is already managed."
+        if request.headers.get("X-LabFoundry-Autosave") == "1":
+            return JSONResponse({"status": "error", "errors": [message]}, status_code=409)
+        return render(request, "appliance_update.html", {"identity": identity, **appliance_update_context(db), "update_error": message}, status_code=409)
+    record_audit(db, actor=identity.username, action="update_managed_package", resource_type="managed_package", resource_id=str(package.id), detail=f"ecosystem=powershell; name={package.name}")
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        return JSONResponse({"status": "saved", "saved_at": utcnow().isoformat()})
+    return RedirectResponse("/appliance-update#managed-packages", status_code=303)
+
+
+@router.post("/appliance-update/packages/{package_id}/delete", response_model=None)
+def delete_managed_update_package(
+    package_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    package = db.get(ManagedPackage, package_id)
+    if package is None or package.ecosystem != "powershell":
+        raise HTTPException(status_code=404, detail="Managed PowerShell module not found.")
+    name = package.name
+    db.delete(package)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_managed_package", resource_type="managed_package", resource_id=str(package_id), detail=f"ecosystem=powershell; name={name}")
+    return RedirectResponse("/appliance-update#managed-packages", status_code=303)
+
+
+@router.post("/appliance-update/source-sync", response_model=None)
+def sync_appliance_update_sources(
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    errors = [error for source in source_rows(db) if source.enabled for error in validate_update_source(source)]
+    if errors:
+        return render(
+            request,
+            "appliance_update.html",
+            {"identity": identity, **appliance_update_context(db), "update_error": " ".join(errors)},
+            status_code=422,
+        )
+    settings = appliance_update_settings(db)
+    task_config = {"selected_streams": [], "settings": settings, "mode": "source_sync"}
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="appliance-update",
+        status=JobStatus.PENDING.value,
+        created_by=identity.username,
+        progress_percent=0,
+        trigger="manual",
+        task_config_json=json.dumps(task_config, sort_keys=True),
+        result=json.dumps({"status": "pending", "mode": "source_sync", "selected_streams": []}, indent=2),
+    )
+    db.add(job)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="queue_update_source_sync",
+        resource_type="job",
+        resource_id=job.id,
+    )
+    return render(
+        request,
+        "appliance_update.html",
+        {
+            "identity": identity,
+            **appliance_update_context(db),
+            "appliance_update_task": job,
+            "appliance_update_task_result": {"status": "pending", "dry_run": get_settings().dry_run_system_adapters},
+            "appliance_update_failures": [],
+        },
+    )
+
+
 def submit_appliance_update(
     *,
     request: Request,
@@ -8803,6 +9432,10 @@ def submit_appliance_update(
     errors = validate_update_settings(settings)
     if not selected:
         errors.append("Select at least one update stream.")
+    if "labfoundry_wheel" in selected and not str(settings.get("labfoundry_manifest_url") or "").strip():
+        errors.append("Configure a LabFoundry release repository before selecting LabFoundry Wheel.")
+    if "powershell_modules" in selected and not str(settings.get("powershell_repository_url") or "").strip():
+        errors.append("Configure an enabled PowerShell repository before selecting PowerShell Modules.")
     if errors:
         return render(
             request,
@@ -8815,22 +9448,56 @@ def submit_appliance_update(
             },
             status_code=422,
         )
-    try:
-        update_result = execute_appliance_update_job(selected_stream_ids=selected, settings=settings, identity=identity, mode=mode)
-    except Exception as exc:  # noqa: BLE001 - surface update infrastructure failures as recorded jobs.
-        APPLIANCE_UPDATE_LOGGER.exception(
-            "Appliance update task failed before helper execution mode=%s streams=%s",
-            mode,
-            ",".join(selected),
+    active = db.execute(
+        select(Job).where(
+            Job.type == "appliance-update",
+            Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
         )
-        update_result = appliance_update_exception_result(
-            selected_stream_ids=selected,
-            settings=settings,
-            identity=identity,
-            mode=mode,
-            exc=exc,
+    ).scalars().first()
+    if active is not None:
+        return render(
+            request,
+            "appliance_update.html",
+            {
+                "identity": identity,
+                **appliance_update_context(db),
+                "selected_update_stream_ids": selected,
+                "update_error": f"Appliance update task {active.id} is already pending or running.",
+            },
+            status_code=409,
         )
-    job = create_appliance_update_task(db, identity=identity, update_result=update_result)
+    task_config = {"selected_streams": selected, "settings": settings, "mode": mode}
+    update_result = {
+        "unit_id": "appliance_update",
+        "label": "Appliance Update",
+        "mode": mode,
+        "selected_streams": selected,
+        "selected_labels": [UPDATE_STREAM_LABELS[stream] for stream in selected],
+        "status": JobStatus.PENDING.value,
+        "success": False,
+        "dry_run": get_settings().dry_run_system_adapters,
+        "commands": [],
+    }
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="appliance-update",
+        status=JobStatus.PENDING.value,
+        created_by=identity.username,
+        progress_percent=0,
+        trigger="manual",
+        task_config_json=json.dumps(task_config, sort_keys=True),
+        result=json.dumps(update_result, indent=2),
+    )
+    db.add(job)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action=f"queue_{mode}_appliance_update",
+        resource_type="job",
+        resource_id=job.id,
+        detail=f"streams={','.join(selected)}",
+    )
     return render(
         request,
         "appliance_update.html",
@@ -8879,6 +9546,498 @@ def run_appliance_update(
         db=db,
         mode="run",
     )
+
+
+@router.get("/automation", response_class=HTMLResponse, response_model=None)
+def automation_page(
+    request: Request,
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    require_admin_identity(identity)
+    return render(request, "automation.html", {"identity": identity, **automation_context(db)})
+
+
+def _automation_render_error(request: Request, identity: Identity, db: Session, message: str, *, status_code: int = 422) -> HTMLResponse:
+    return render(
+        request,
+        "automation.html",
+        {"identity": identity, **automation_context(db), "automation_error": message},
+        status_code=status_code,
+    )
+
+
+def _automation_task_config(
+    db: Session,
+    *,
+    task_type: str,
+    selected_streams: list[str],
+    vcf_profile_id: int | None,
+    revision_id: int | None,
+    script_arguments: str,
+) -> tuple[dict[str, Any], str]:
+    if task_type in {"appliance_update_check", "appliance_update_install"}:
+        return {"selected_streams": selected_update_streams(selected_streams)}, ""
+    if task_type == "vcf_depot_download":
+        profile = db.get(VcfDepotDownloadProfile, vcf_profile_id or 0)
+        if profile is None or not profile.enabled:
+            return {}, "Choose an enabled VCF Offline Depot download profile."
+        return {"profile_id": profile.id}, ""
+    if task_type == "managed_script":
+        revision = enabled_script_revision(db, revision_id or 0)
+        if revision is None:
+            return {}, "Choose an enabled managed script revision."
+        try:
+            arguments = parse_script_arguments(script_arguments, revision.interpreter)
+        except ValueError as exc:
+            return {}, str(exc)
+        return {"revision_id": revision.id, "arguments": arguments}, ""
+    return {}, ""
+
+
+@router.post("/automation/schedules", response_model=None)
+def create_automation_schedule(
+    request: Request,
+    name: str = Form(...),
+    task_type: str = Form(...),
+    selected_streams: list[str] = Form(default=[]),
+    vcf_profile_id: int | None = Form(None),
+    revision_id: int | None = Form(None),
+    script_arguments: str = Form(""),
+    schedule_kind: str = Form("cron"),
+    cron_expression: str = Form("0 2 * * *"),
+    run_once_at: str = Form(""),
+    timezone_name: str = Form("UTC"),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    parsed_once: datetime | None = None
+    try:
+        if run_once_at.strip():
+            parsed_once = datetime.fromisoformat(run_once_at.strip())
+            if parsed_once.tzinfo is None:
+                parsed_once = parsed_once.replace(tzinfo=ZoneInfo(timezone_name))
+            parsed_once = parsed_once.astimezone(timezone.utc)
+    except (ValueError, ZoneInfoNotFoundError):
+        return _automation_render_error(request, identity, db, "One-time run date or timezone is invalid.")
+    task_config, config_error = _automation_task_config(
+        db,
+        task_type=task_type,
+        selected_streams=selected_streams,
+        vcf_profile_id=vcf_profile_id,
+        revision_id=revision_id,
+        script_arguments=script_arguments,
+    )
+    if config_error:
+        return _automation_render_error(request, identity, db, config_error)
+    task_config_json = json.dumps(task_config, sort_keys=True)
+    errors = validate_schedule_values(
+        task_type=task_type,
+        task_config_json=task_config_json,
+        schedule_kind=schedule_kind,
+        cron_expression=cron_expression,
+        run_once_at=parsed_once,
+        timezone_name=timezone_name,
+    )
+    if not name.strip():
+        errors.insert(0, "Schedule name is required.")
+    if errors:
+        return _automation_render_error(request, identity, db, " ".join(errors))
+    schedule = Schedule(
+        name=name.strip(),
+        task_type=task_type,
+        task_config_json=task_config_json,
+        schedule_kind=schedule_kind,
+        cron_expression=cron_expression.strip() if schedule_kind == "cron" else "",
+        run_once_at=parsed_once if schedule_kind == "once" else None,
+        timezone_name=timezone_name,
+        enabled=enabled == "on",
+        created_by=identity.username,
+    )
+    if schedule.enabled:
+        try:
+            schedule.next_run_at = next_schedule_run(schedule, after=utcnow())
+        except ValueError as exc:
+            return _automation_render_error(request, identity, db, str(exc))
+        if schedule.next_run_at is None:
+            return _automation_render_error(request, identity, db, "The enabled schedule does not have a future run time.")
+    db.add(schedule)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return _automation_render_error(request, identity, db, "A schedule with this name already exists.", status_code=409)
+    record_audit(db, actor=identity.username, action="create_automation_schedule", resource_type="schedule", resource_id=str(schedule.id), detail=f"task_type={task_type}")
+    return RedirectResponse("/automation#schedules", status_code=303)
+
+
+@router.post("/automation/schedules/{schedule_id}/edit", response_model=None)
+def edit_automation_schedule(
+    schedule_id: int,
+    request: Request,
+    name: str = Form(...),
+    task_type: str = Form(...),
+    selected_streams: list[str] = Form(default=[]),
+    vcf_profile_id: int | None = Form(None),
+    revision_id: int | None = Form(None),
+    script_arguments: str = Form(""),
+    schedule_kind: str = Form("cron"),
+    cron_expression: str = Form("0 2 * * *"),
+    run_once_at: str = Form(""),
+    timezone_name: str = Form("UTC"),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    schedule = db.get(Schedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    parsed_once: datetime | None = None
+    try:
+        if run_once_at.strip():
+            parsed_once = datetime.fromisoformat(run_once_at.strip())
+            if parsed_once.tzinfo is None:
+                parsed_once = parsed_once.replace(tzinfo=ZoneInfo(timezone_name))
+            parsed_once = parsed_once.astimezone(timezone.utc)
+    except (ValueError, ZoneInfoNotFoundError):
+        return _automation_render_error(request, identity, db, "One-time run date or timezone is invalid.")
+    task_config, config_error = _automation_task_config(
+        db,
+        task_type=task_type,
+        selected_streams=selected_streams,
+        vcf_profile_id=vcf_profile_id,
+        revision_id=revision_id,
+        script_arguments=script_arguments,
+    )
+    if config_error:
+        return _automation_render_error(request, identity, db, config_error)
+    task_config_json = json.dumps(task_config, sort_keys=True)
+    errors = validate_schedule_values(
+        task_type=task_type,
+        task_config_json=task_config_json,
+        schedule_kind=schedule_kind,
+        cron_expression=cron_expression,
+        run_once_at=parsed_once,
+        timezone_name=timezone_name,
+    )
+    if not name.strip():
+        errors.insert(0, "Schedule name is required.")
+    if errors:
+        return _automation_render_error(request, identity, db, " ".join(errors))
+    schedule.name = name.strip()
+    schedule.task_type = task_type
+    schedule.task_config_json = task_config_json
+    schedule.schedule_kind = schedule_kind
+    schedule.cron_expression = cron_expression.strip() if schedule_kind == "cron" else ""
+    schedule.run_once_at = parsed_once if schedule_kind == "once" else None
+    schedule.timezone_name = timezone_name
+    schedule.enabled = enabled == "on"
+    schedule.updated_at = utcnow()
+    try:
+        schedule.next_run_at = next_schedule_run(schedule, after=utcnow()) if schedule.enabled else None
+    except ValueError as exc:
+        db.rollback()
+        return _automation_render_error(request, identity, db, str(exc))
+    if schedule.enabled and schedule.next_run_at is None:
+        db.rollback()
+        return _automation_render_error(request, identity, db, "The enabled schedule does not have a future run time.")
+    db.add(schedule)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return _automation_render_error(request, identity, db, "A schedule with this name already exists.", status_code=409)
+    record_audit(db, actor=identity.username, action="update_automation_schedule", resource_type="schedule", resource_id=str(schedule.id), detail=f"task_type={task_type}")
+    return RedirectResponse("/automation#schedules", status_code=303)
+
+
+@router.post("/automation/schedules/{schedule_id}/run", response_model=None)
+def run_automation_schedule_now(
+    schedule_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    schedule = db.get(Schedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    try:
+        config = json.loads(schedule.task_config_json or "{}")
+    except json.JSONDecodeError:
+        return _automation_render_error(request, identity, db, "The schedule task configuration is invalid.")
+    if schedule.task_type == "managed_script" and enabled_script_revision(db, int(config.get("revision_id") or 0)) is None:
+        return _automation_render_error(request, identity, db, "Enable the scheduled script revision before running it.")
+    if schedule.task_type == "vcf_depot_download":
+        profile = db.get(VcfDepotDownloadProfile, int(config.get("profile_id") or 0))
+        if profile is None or not profile.enabled:
+            return _automation_render_error(request, identity, db, "Enable the scheduled VCF Offline Depot profile before running it.")
+    try:
+        job = enqueue_schedule_now(db, schedule=schedule, actor=identity.username)
+    except (KeyError, ValueError) as exc:
+        db.rollback()
+        return _automation_render_error(request, identity, db, str(exc), status_code=409)
+    return RedirectResponse(f"/tasks#{job.id}", status_code=303)
+
+
+@router.post("/automation/schedules/{schedule_id}/toggle", response_model=None)
+def toggle_automation_schedule(
+    schedule_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    schedule = db.get(Schedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    schedule.enabled = not schedule.enabled
+    try:
+        schedule.next_run_at = next_schedule_run(schedule, after=utcnow()) if schedule.enabled else None
+    except ValueError as exc:
+        schedule.enabled = False
+        return _automation_render_error(request, identity, db, str(exc))
+    if schedule.enabled and schedule.next_run_at is None:
+        schedule.enabled = False
+        return _automation_render_error(request, identity, db, "The schedule does not have a future run time.")
+    schedule.updated_at = utcnow()
+    db.add(schedule)
+    db.commit()
+    record_audit(db, actor=identity.username, action="enable_automation_schedule" if schedule.enabled else "disable_automation_schedule", resource_type="schedule", resource_id=str(schedule.id))
+    return RedirectResponse("/automation#schedules", status_code=303)
+
+
+@router.post("/automation/schedules/{schedule_id}/delete", response_model=None)
+def delete_automation_schedule(
+    schedule_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    schedule = db.get(Schedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    name = schedule.name
+    for job in db.execute(select(Job).where(Job.schedule_id == schedule.id)).scalars().all():
+        job.schedule_id = None
+        db.add(job)
+    db.delete(schedule)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_automation_schedule", resource_type="schedule", resource_id=str(schedule_id), detail=f"name={name}")
+    return RedirectResponse("/automation#schedules", status_code=303)
+
+
+@router.post("/automation/scripts", response_model=None)
+def create_automation_script_from_ui(
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(""),
+    interpreter: str = Form("powershell"),
+    content: str = Form(...),
+    timeout_seconds: int = Form(3600),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    if not name.strip():
+        return _automation_render_error(request, identity, db, "Script name is required.")
+    script = AutomationScript(name=name.strip(), description=description.strip(), created_by=identity.username)
+    db.add(script)
+    try:
+        db.flush()
+        create_script_revision(db, script=script, interpreter=interpreter, content=content, timeout_seconds=timeout_seconds, actor=identity.username)
+        db.commit()
+    except (IntegrityError, ValueError) as exc:
+        db.rollback()
+        message = "A script with this name already exists." if isinstance(exc, IntegrityError) else str(exc)
+        return _automation_render_error(request, identity, db, message, status_code=409 if isinstance(exc, IntegrityError) else 422)
+    record_audit(db, actor=identity.username, action="create_automation_script", resource_type="automation_script", resource_id=str(script.id))
+    return RedirectResponse("/automation#scripts", status_code=303)
+
+
+@router.post("/automation/scripts/{script_id}/revisions", response_model=None)
+def create_automation_script_revision_from_ui(
+    script_id: int,
+    request: Request,
+    interpreter: str = Form("powershell"),
+    content: str = Form(...),
+    timeout_seconds: int = Form(3600),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    script = db.get(AutomationScript, script_id)
+    if script is None:
+        raise HTTPException(status_code=404, detail="Managed script not found.")
+    try:
+        revision = create_script_revision(db, script=script, interpreter=interpreter, content=content, timeout_seconds=timeout_seconds, actor=identity.username)
+        script.updated_at = utcnow()
+        db.add(script)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        return _automation_render_error(request, identity, db, str(exc))
+    record_audit(db, actor=identity.username, action="create_automation_script_revision", resource_type="automation_script_revision", resource_id=str(revision.id), detail=f"script={script.name}; revision={revision.revision}")
+    return RedirectResponse("/automation#scripts", status_code=303)
+
+
+@router.post("/automation/scripts/{script_id}/edit", response_model=None)
+def edit_automation_script_from_ui(
+    script_id: int,
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(""),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    script = db.get(AutomationScript, script_id)
+    if script is None:
+        raise HTTPException(status_code=404, detail="Managed script not found.")
+    normalized_name = name.strip()
+    if not normalized_name:
+        return _automation_render_error(request, identity, db, "Script name is required.")
+    script.name = normalized_name
+    script.description = description.strip()
+    script.updated_at = utcnow()
+    db.add(script)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return _automation_render_error(request, identity, db, "A script with this name already exists.", status_code=409)
+    record_audit(db, actor=identity.username, action="edit_automation_script", resource_type="automation_script", resource_id=str(script.id))
+    return RedirectResponse("/automation#scripts", status_code=303)
+
+
+@router.post("/automation/scripts/{script_id}/delete", response_model=None)
+def delete_automation_script_from_ui(
+    script_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    script = db.execute(
+        select(AutomationScript).options(selectinload(AutomationScript.revisions)).where(AutomationScript.id == script_id)
+    ).scalar_one_or_none()
+    if script is None:
+        raise HTTPException(status_code=404, detail="Managed script not found.")
+    revision_ids = {revision.id for revision in script.revisions}
+    dependent_schedules: list[str] = []
+    for schedule in db.execute(select(Schedule).where(Schedule.task_type == "managed_script")).scalars().all():
+        try:
+            revision_id = json.loads(schedule.task_config_json or "{}").get("revision_id")
+        except (AttributeError, json.JSONDecodeError):
+            continue
+        if revision_id in revision_ids:
+            dependent_schedules.append(schedule.name)
+    if dependent_schedules:
+        return _automation_render_error(
+            request,
+            identity,
+            db,
+            f"Delete or reassign schedules using this script first: {', '.join(dependent_schedules)}.",
+            status_code=409,
+        )
+    name = script.name
+    db.delete(script)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_automation_script", resource_type="automation_script", resource_id=str(script_id), detail=f"name={name}")
+    return RedirectResponse("/automation#scripts", status_code=303)
+
+
+@router.post("/automation/scripts/revisions/{revision_id}/toggle", response_model=None)
+def toggle_automation_script_revision(
+    revision_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    revision = db.get(AutomationScriptRevision, revision_id)
+    if revision is None:
+        raise HTTPException(status_code=404, detail="Managed script revision not found.")
+    if revision.enabled:
+        dependent_schedules: list[str] = []
+        for schedule in db.execute(select(Schedule).where(Schedule.task_type == "managed_script", Schedule.enabled.is_(True))).scalars().all():
+            try:
+                configured_revision_id = json.loads(schedule.task_config_json or "{}").get("revision_id")
+            except (AttributeError, json.JSONDecodeError):
+                continue
+            if configured_revision_id == revision.id:
+                dependent_schedules.append(schedule.name)
+        if dependent_schedules:
+            return _automation_render_error(
+                request,
+                identity,
+                db,
+                f"Disable or edit schedules using this revision first: {', '.join(dependent_schedules)}.",
+                status_code=409,
+            )
+    revision.enabled = not revision.enabled
+    db.add(revision)
+    db.commit()
+    record_audit(db, actor=identity.username, action="enable_automation_script_revision" if revision.enabled else "disable_automation_script_revision", resource_type="automation_script_revision", resource_id=str(revision.id), detail=f"sha256={revision.content_sha256}")
+    return RedirectResponse("/automation#scripts", status_code=303)
+
+
+@router.post("/automation/scripts/revisions/{revision_id}/run", response_model=None)
+def run_automation_script_revision(
+    revision_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    script_arguments: str = Form(""),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    revision = db.get(AutomationScriptRevision, revision_id)
+    if revision is None or not revision.enabled:
+        raise HTTPException(status_code=400, detail="Enable the managed script revision before running it.")
+    try:
+        arguments = parse_script_arguments(script_arguments, revision.interpreter)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    job = Job(
+        id=f"job_{uuid4().hex[:12]}",
+        type="managed-script",
+        status=JobStatus.PENDING.value,
+        created_by=identity.username,
+        progress_percent=0,
+        trigger="manual",
+        task_config_json=json.dumps({"arguments": arguments, "revision_id": revision.id}, sort_keys=True),
+        result=json.dumps({"status": "pending", "revision_id": revision.id}, indent=2),
+    )
+    db.add(job)
+    db.commit()
+    record_audit(db, actor=identity.username, action="queue_managed_script", resource_type="job", resource_id=job.id, detail=f"revision_id={revision.id}; sha256={revision.content_sha256}; arguments_count={len(arguments)}")
+    return RedirectResponse("/tasks", status_code=303)
 
 
 @router.get("/appliance-apply", response_class=RedirectResponse, response_model=None)
@@ -15117,12 +16276,13 @@ def start_vcf_depot_profile_download_from_ui(
         finished_at=None,
         progress_percent=0,
         result=json.dumps(job_result, indent=2),
+        trigger="manual",
+        task_config_json=json.dumps({"profile_id": profile.id}, sort_keys=True),
     )
     profile.status = "ready"
     profile.updated_at = now
     db.add(job)
     db.commit()
-    queue_vcf_depot_download_job(job.id, profile.id)
     record_audit(
         db,
         actor=identity.username,
@@ -15136,7 +16296,7 @@ def start_vcf_depot_profile_download_from_ui(
             {
                 "status": "started",
                 "job_id": job.id,
-                "job_status": JobStatus.RUNNING.value,
+                "job_status": JobStatus.PENDING.value,
                 "profile_id": profile.id,
                 "profile_name": profile.name,
                 "profile_status": profile.status,
@@ -16122,6 +17282,7 @@ def tasks_page(
         {
             "identity": identity,
             "task_rows": task_rows,
+            "task_component_filter_options": _task_component_filter_options(db),
             "selected_task_id": selected_job_id,
         },
     )
@@ -16130,17 +17291,38 @@ def tasks_page(
 @router.get("/tasks/status", response_class=JSONResponse, response_model=None)
 def tasks_status(
     job_id: str = Query(""),
+    filters: str = Query("[]"),
+    page: int = Query(1, ge=1),
+    size: int = Query(25, ge=1, le=100),
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    jobs = db.execute(select(Job).options(selectinload(Job.steps)).order_by(desc(Job.created_at)).limit(500)).scalars().all()
+    clauses = _task_filter_clauses(filters)
+    total_count = int(db.scalar(select(func.count(Job.id))) or 0)
+    filtered_count = int(db.scalar(select(func.count(Job.id)).where(*clauses)) or 0)
+    active_count = int(db.scalar(select(func.count(Job.id)).where(Job.status.in_(ACTIVE_JOB_STATUSES))) or 0)
+    last_page = max(1, (filtered_count + size - 1) // size)
+    effective_page = min(page, last_page)
+    jobs = db.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .where(*clauses)
+        .order_by(desc(Job.created_at))
+        .offset((effective_page - 1) * size)
+        .limit(size)
+    ).scalars().all()
     rows = [_task_row(job, identity) for job in jobs]
-    selected = next((row for row in rows if job_id and row["id"] == job_id), None)
+    selected_job = db.scalar(select(Job).options(selectinload(Job.steps)).where(Job.id == job_id)) if job_id else None
+    selected = _task_row(selected_job, identity) if selected_job is not None else None
     return JSONResponse(
         {
+            "last_page": last_page,
+            "data": rows,
             "tasks": rows,
             "selected_task": selected,
-            "active_count": sum(1 for row in rows if row["status"] in ACTIVE_JOB_STATUSES),
+            "active_count": active_count,
+            "filtered_count": filtered_count,
+            "total_count": total_count,
             "server_time": utcnow().isoformat(),
         }
     )

@@ -233,6 +233,7 @@ function Invoke-PasswordBackedDeploy {
         [string]$LocalBootInstallerPath = '',
         [string]$LocalBootThemePath = '',
         [string]$LocalBootBackgroundPath = '',
+        [Parameter(Mandatory = $true)][string]$LocalWorkerServicePath,
         [Parameter(Mandatory = $true)][string]$LocalScriptPath,
         [Parameter(Mandatory = $true)][string]$RemoteDirectoryPath,
         [Parameter(Mandatory = $true)][string]$RemoteWheel,
@@ -241,6 +242,7 @@ function Invoke-PasswordBackedDeploy {
         [string]$RemoteBootInstaller = '',
         [string]$RemoteBootTheme = '',
         [string]$RemoteBootBackground = '',
+        [Parameter(Mandatory = $true)][string]$RemoteWorkerService,
         [Parameter(Mandatory = $true)][string]$RemoteScript,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
         [Parameter(Mandatory = $true)][int]$PollSeconds,
@@ -286,6 +288,7 @@ parser.add_argument("--local-console-manager", default="")
 parser.add_argument("--local-boot-installer", default="")
 parser.add_argument("--local-boot-theme", default="")
 parser.add_argument("--local-boot-background", default="")
+parser.add_argument("--local-worker-service", required=True)
 parser.add_argument("--local-script", required=True)
 parser.add_argument("--remote-dir", required=True)
 parser.add_argument("--remote-wheel", required=True)
@@ -294,6 +297,7 @@ parser.add_argument("--remote-console-manager", default="")
 parser.add_argument("--remote-boot-installer", default="")
 parser.add_argument("--remote-boot-theme", default="")
 parser.add_argument("--remote-boot-background", default="")
+parser.add_argument("--remote-worker-service", required=True)
 parser.add_argument("--remote-script", required=True)
 parser.add_argument("--timeout", type=int, required=True)
 parser.add_argument("--poll", type=int, required=True)
@@ -306,6 +310,7 @@ if not password:
 uploads = [
     (pathlib.Path(args.local_wheel), args.remote_wheel),
     (pathlib.Path(args.local_script), args.remote_script),
+    (pathlib.Path(args.local_worker_service), args.remote_worker_service),
 ]
 if args.local_helper:
     uploads.append((pathlib.Path(args.local_helper), args.remote_helper))
@@ -358,7 +363,8 @@ try:
         f"{shell_quote(remote_console_manager_argument)} "
         f"{shell_quote(remote_boot_installer_argument)} "
         f"{shell_quote(remote_boot_theme_argument)} "
-        f"{shell_quote(remote_boot_background_argument)}"
+        f"{shell_quote(remote_boot_background_argument)} "
+        f"{shell_quote(args.remote_worker_service)}"
     )
     stdin, stdout, stderr = client.exec_command(command, get_pty=True, timeout=args.timeout + 60)
     stdin.write(password + "\n")
@@ -402,6 +408,7 @@ finally:
             '--local-boot-installer', $LocalBootInstallerPath,
             '--local-boot-theme', $LocalBootThemePath,
             '--local-boot-background', $LocalBootBackgroundPath,
+            '--local-worker-service', $LocalWorkerServicePath,
             '--local-script', $LocalScriptPath,
             '--remote-dir', $RemoteDirectoryPath,
             '--remote-wheel', $RemoteWheel,
@@ -410,6 +417,7 @@ finally:
             '--remote-boot-installer', $RemoteBootInstaller,
             '--remote-boot-theme', $RemoteBootTheme,
             '--remote-boot-background', $RemoteBootBackground,
+            '--remote-worker-service', $RemoteWorkerService,
             '--remote-script', $RemoteScript,
             '--timeout', "$TimeoutSeconds",
             '--poll', "$PollSeconds"
@@ -443,6 +451,7 @@ $consoleManagerPath = Join-Path $resolvedRepoRoot 'image\common\systemd\labfound
 $bootInstallerPath = Join-Path $resolvedRepoRoot 'scripts\appliance\labfoundry-install-boot-branding'
 $bootThemePath = Join-Path $resolvedRepoRoot 'image\common\boot\grub\theme.txt'
 $bootBackgroundPath = Join-Path $resolvedRepoRoot 'image\common\boot\grub\labfoundry.png'
+$workerServicePath = Join-Path $resolvedRepoRoot 'image\common\systemd\labfoundry-worker.service'
 if (-not $SkipHelperSync -and -not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
     throw "LabFoundry helper script not found: $helperPath"
 }
@@ -456,12 +465,16 @@ if (-not $SkipBootBrandingSync) {
         }
     }
 }
+if (-not (Test-Path -LiteralPath $workerServicePath -PathType Leaf)) {
+    throw "LabFoundry worker service not found: $workerServicePath"
+}
 $remoteWheelPath = "$($RemoteDirectory.TrimEnd('/'))/$wheelName"
 $remoteHelperPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-helper"
 $remoteConsoleManagerPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-console-manager.conf"
 $remoteBootInstallerPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-install-boot-branding"
 $remoteBootThemePath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-grub-theme.txt"
 $remoteBootBackgroundPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-grub.png"
+$remoteWorkerServicePath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-worker.service"
 $remoteScriptPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-deploy-wheel.sh"
 
 if (-not $IpAddress) {
@@ -490,6 +503,7 @@ console_manager_path="${5:-}"
 boot_installer_path="${6:-}"
 boot_theme_path="${7:-}"
 boot_background_path="${8:-}"
+worker_service_path="${9:?worker service path required}"
 venv="/opt/labfoundry/.venv"
 python="$venv/bin/python"
 
@@ -515,6 +529,18 @@ if [ -n "$boot_installer_path" ]; then
     sed -i 's/\r$//' /opt/labfoundry/bin/labfoundry-install-boot-branding
     /opt/labfoundry/bin/labfoundry-install-boot-branding "$boot_theme_path" "$boot_background_path"
 fi
+if ! getent group labfoundry-automation >/dev/null 2>&1; then
+    groupadd --system labfoundry-automation
+fi
+if ! id labfoundry-automation >/dev/null 2>&1; then
+    useradd --system --gid labfoundry-automation --home-dir /var/lib/labfoundry/automation --shell /sbin/nologin labfoundry-automation
+fi
+usermod -a -G labfoundry-automation labfoundry
+install -d -o labfoundry -g labfoundry-automation -m 0750 /var/lib/labfoundry/automation /var/lib/labfoundry/automation/scripts
+install -d -o labfoundry-automation -g labfoundry-automation -m 0750 /var/lib/labfoundry/automation/runs
+install -o root -g root -m 0644 "$worker_service_path" /etc/systemd/system/labfoundry-worker.service
+sed -i 's/\r$//' /etc/systemd/system/labfoundry-worker.service
+systemctl daemon-reload
 find "$venv" -type d -exec chmod 755 {} \;
 find "$venv" -type f -exec chmod 644 {} \;
 find "$venv/bin" -type f -exec chmod 755 {} \;
@@ -524,6 +550,9 @@ if systemctl cat labfoundry-console.service >/dev/null 2>&1; then
 fi
 systemctl restart labfoundry
 systemctl is-active labfoundry
+systemctl enable labfoundry-worker.service
+systemctl restart labfoundry-worker.service
+systemctl is-active labfoundry-worker.service
 deadline=$(( $(date +%s) + timeout_seconds ))
 while ! curl -fsS http://127.0.0.1:8000/openapi.json >/dev/null; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -554,6 +583,7 @@ try {
     if (-not $SkipBootBrandingSync) {
         $uploadPaths += $bootInstallerPath
     }
+    $uploadPaths += $workerServicePath
     $uploadPaths += $tempScript
 
     $remoteHelperArgument = if ($SkipHelperSync) { '' } else { $remoteHelperPath }
@@ -579,6 +609,7 @@ try {
             -LocalBootInstallerPath $localBootInstallerArgument `
             -LocalBootThemePath $localBootThemeArgument `
             -LocalBootBackgroundPath $localBootBackgroundArgument `
+            -LocalWorkerServicePath $workerServicePath `
             -LocalScriptPath $tempScript `
             -RemoteDirectoryPath $RemoteDirectory `
             -RemoteWheel $remoteWheelPath `
@@ -587,6 +618,7 @@ try {
             -RemoteBootInstaller $remoteBootInstallerArgument `
             -RemoteBootTheme $remoteBootThemeArgument `
             -RemoteBootBackground $remoteBootBackgroundArgument `
+            -RemoteWorkerService $remoteWorkerServicePath `
             -RemoteScript $remoteScriptPath `
             -TimeoutSeconds $ReadinessTimeoutSeconds `
             -PollSeconds $ReadinessPollSeconds `
@@ -600,7 +632,7 @@ try {
         }
 
         Write-Host "Installing wheel and restarting labfoundry.service..."
-        Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument' '$remoteConsoleManagerArgument' '$remoteBootInstallerArgument' '$remoteBootThemeArgument' '$remoteBootBackgroundArgument'")
+        Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument' '$remoteConsoleManagerArgument' '$remoteBootInstallerArgument' '$remoteBootThemeArgument' '$remoteBootBackgroundArgument' '$remoteWorkerServicePath'")
     }
 
     if (-not $SkipHostCheck) {

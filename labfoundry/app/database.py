@@ -43,6 +43,26 @@ def init_db() -> None:
     _ensure_sqlite_vcf_trust_columns()
     _ensure_sqlite_esxi_pxe_columns()
     _ensure_sqlite_ldap_columns()
+    _ensure_sqlite_job_schedule_columns()
+
+
+def _ensure_sqlite_job_schedule_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "jobs" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("jobs")}
+    columns = {
+        "schedule_id": "INTEGER",
+        "trigger": "VARCHAR(20) DEFAULT 'manual'",
+        "planned_for": "DATETIME",
+        "task_config_json": "TEXT DEFAULT '{}'",
+    }
+    with engine.begin() as connection:
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE jobs ADD COLUMN {name} {definition}"))
 
 
 def _ensure_sqlite_network_columns() -> None:

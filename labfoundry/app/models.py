@@ -849,6 +849,97 @@ class VcfDepotDownloadProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class UpdateSource(Base):
+    __tablename__ = "update_sources"
+    __table_args__ = (UniqueConstraint("kind", "name", name="uq_update_source_kind_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    url: Mapped[str] = mapped_column(String(1000), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=50)
+    settings_json: Mapped[str] = mapped_column(Text, default="{}")
+    credential_encrypted: Mapped[str] = mapped_column(Text, default="")
+    validation_status: Mapped[str] = mapped_column(String(40), default="not_checked")
+    validation_message: Mapped[str] = mapped_column(Text, default="")
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ManagedPackage(Base):
+    __tablename__ = "managed_packages"
+    __table_args__ = (UniqueConstraint("ecosystem", "name", name="uq_managed_package_ecosystem_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ecosystem: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    source_id: Mapped[int | None] = mapped_column(ForeignKey("update_sources.id"), nullable=True, index=True)
+    policy: Mapped[str] = mapped_column(String(40), default="pinned")
+    target_version: Mapped[str] = mapped_column(String(120), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    source: Mapped[UpdateSource | None] = relationship()
+
+
+class AutomationScript(Base):
+    __tablename__ = "automation_scripts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    revisions: Mapped[list["AutomationScriptRevision"]] = relationship(
+        back_populates="script",
+        cascade="all, delete-orphan",
+        order_by="AutomationScriptRevision.revision",
+    )
+
+
+class AutomationScriptRevision(Base):
+    __tablename__ = "automation_script_revisions"
+    __table_args__ = (UniqueConstraint("script_id", "revision", name="uq_automation_script_revision"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    script_id: Mapped[int] = mapped_column(ForeignKey("automation_scripts.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    interpreter: Mapped[str] = mapped_column(String(20), default="powershell")
+    content: Mapped[str] = mapped_column(Text)
+    content_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=3600)
+    created_by: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    script: Mapped[AutomationScript] = relationship(back_populates="revisions")
+
+
+class Schedule(Base):
+    __tablename__ = "schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    task_type: Mapped[str] = mapped_column(String(80), index=True)
+    task_config_json: Mapped[str] = mapped_column(Text, default="{}")
+    schedule_kind: Mapped[str] = mapped_column(String(20), default="cron")
+    cron_expression: Mapped[str] = mapped_column(String(120), default="")
+    run_once_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    timezone_name: Mapped[str] = mapped_column(String(80), default="UTC")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_job_id: Mapped[str] = mapped_column(String(40), default="")
+    created_by: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class VcfRegistryBundle(Base):
     __tablename__ = "vcf_registry_bundles"
     __table_args__ = (UniqueConstraint("name", name="uq_vcf_registry_bundle_name"),)
@@ -914,6 +1005,10 @@ class Job(Base):
     progress_percent: Mapped[int] = mapped_column(Integer, default=0)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schedule_id: Mapped[int | None] = mapped_column(ForeignKey("schedules.id"), nullable=True, index=True)
+    trigger: Mapped[str] = mapped_column(String(20), default="manual")
+    planned_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    task_config_json: Mapped[str] = mapped_column(Text, default="{}")
 
     steps: Mapped[list["JobStep"]] = relationship(
         back_populates="job",

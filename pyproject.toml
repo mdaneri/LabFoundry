@@ -23,6 +23,7 @@ dependencies = [
 
 [project.scripts]
 labfoundry-console = "labfoundry.app.appliance_console:main"
+labfoundry-worker = "labfoundry.app.worker:main"
 
 [project.optional-dependencies]
 dev = [

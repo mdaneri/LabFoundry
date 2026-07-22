@@ -237,11 +237,16 @@ backup portability.
 Appliance Update is runtime maintenance and stays separate from desired-state
 `/appliance-apply`. It stages
 `/var/lib/labfoundry/apply/appliance-update/labfoundry-update.json` and uses
-`labfoundry-helper appliance-update` for Photon OS, Python library, and
-LabFoundry wheel streams. LabFoundry wheel updates verify the manifest SHA256,
+`labfoundry-helper appliance-update` for Photon OS, Python library, PowerShell
+module, and LabFoundry wheel streams. Sources are synchronized from repository
+definitions, and the LabFoundry release base URL derives a channel manifest at
+`channels/<channel>/manifest.json`. LabFoundry wheel updates verify the manifest SHA256,
 install with `pip --force-reinstall --no-deps`, restore virtualenv
 permissions, and schedule a delayed `labfoundry.service` restart. V1 records
 Photon reboot guidance but does not auto-reboot.
+The image also enables `labfoundry-worker.service`, which owns queued updates,
+VCF Offline Depot downloads, five-field cron/one-time schedules, and unprivileged
+managed-script execution.
 Firewall desired state is nftables-backed. Provisioning installs nftables,
 loads `/etc/labfoundry/nftables.d/labfoundry.nft`, and disables the older
 Photon iptables service so LabFoundry has a single firewall owner.
