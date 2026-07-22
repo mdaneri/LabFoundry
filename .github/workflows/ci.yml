@@ -5,6 +5,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Base commit used to validate the expected patch version
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -23,13 +29,13 @@ jobs:
         with:
           fetch-depth: 0
       - name: Check out pull request base
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'push'
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
           path: .version-base
       - name: Validate pull request patch version
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'push'
         run: python scripts/version.py check --root . --base-root .version-base
       - name: Validate main version consistency
         if: github.event_name == 'push'
