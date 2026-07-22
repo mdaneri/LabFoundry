@@ -38,6 +38,7 @@ VIRTUAL_FILESYSTEMS = {
     "proc",
     "pstore",
     "securityfs",
+    "selinuxfs",
     "sysfs",
     "tmpfs",
     "tracefs",
@@ -515,7 +516,7 @@ def ensure_recent_monitor_sample(db: Session, *, collector: SystemMetricsCollect
 
 def monitor_payload(db: Session, *, hours: int = 6, collector: SystemMetricsCollector | None = None) -> dict[str, Any]:
     settings = get_settings()
-    hours = max(1, min(6, int(hours)))
+    hours = max(1, min(24, int(hours)))
     if settings.monitor_enabled:
         collector = collector or SystemMetricsCollector(settings=settings)
         ensure_recent_monitor_sample(db, collector=collector)
@@ -559,6 +560,7 @@ def monitor_payload(db: Session, *, hours: int = 6, collector: SystemMetricsColl
         "network_totals": _network_totals(samples),
         "networks": _networks(samples),
         "disk_io": _disk_totals(samples),
+        "disk_devices": _disk_devices(samples),
         "disks": _disks(samples),
     }
 
@@ -668,20 +670,64 @@ def _networks(samples: list[MonitorSample]) -> list[dict[str, Any]]:
 def _disk_totals(samples: list[MonitorSample]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for sample in samples:
+        devices = _disk_rates_by_device(sample)
         rows.append(
             {
                 "sampled_at": sample.sampled_at.isoformat(),
-                "read_bytes_per_sec": round(sum(row.read_bytes_per_sec or 0 for row in sample.disk_samples), 2),
-                "write_bytes_per_sec": round(sum(row.write_bytes_per_sec or 0 for row in sample.disk_samples), 2),
+                "read_bytes_per_sec": round(sum(row["read_bytes_per_sec"] or 0 for row in devices.values()), 2),
+                "write_bytes_per_sec": round(sum(row["write_bytes_per_sec"] or 0 for row in devices.values()), 2),
             }
         )
     return rows
+
+
+def _disk_rates_by_device(sample: MonitorSample) -> dict[str, dict[str, float | None]]:
+    devices: dict[str, dict[str, float | None]] = {}
+    for row in sorted(sample.disk_samples, key=lambda item: (item.device, item.mount_point)):
+        if row.filesystem in VIRTUAL_FILESYSTEMS:
+            continue
+        device = row.device or row.mount_point
+        rates = devices.setdefault(device, {"read_bytes_per_sec": None, "write_bytes_per_sec": None, "used_percent": None})
+        if rates["read_bytes_per_sec"] is None and row.read_bytes_per_sec is not None:
+            rates["read_bytes_per_sec"] = row.read_bytes_per_sec
+        if rates["write_bytes_per_sec"] is None and row.write_bytes_per_sec is not None:
+            rates["write_bytes_per_sec"] = row.write_bytes_per_sec
+        if rates["used_percent"] is None and row.used_percent is not None:
+            rates["used_percent"] = row.used_percent
+    return devices
+
+
+def _disk_devices(samples: list[MonitorSample]) -> list[dict[str, Any]]:
+    by_device: dict[str, list[dict[str, Any]]] = {}
+    for sample in samples:
+        for device, rates in _disk_rates_by_device(sample).items():
+            by_device.setdefault(device, []).append(
+                {
+                    "sampled_at": sample.sampled_at.isoformat(),
+                    "read_bytes_per_sec": rates["read_bytes_per_sec"],
+                    "write_bytes_per_sec": rates["write_bytes_per_sec"],
+                    "used_percent": rates["used_percent"],
+                }
+            )
+    return [
+        {
+            "name": device,
+            "device": device,
+            "read_bytes_per_sec": points[-1]["read_bytes_per_sec"],
+            "write_bytes_per_sec": points[-1]["write_bytes_per_sec"],
+            "used_percent": points[-1]["used_percent"],
+            "points": points,
+        }
+        for device, points in sorted(by_device.items())
+    ]
 
 
 def _disks(samples: list[MonitorSample]) -> list[dict[str, Any]]:
     by_mount: dict[str, list[MonitorDiskSample]] = {}
     for sample in samples:
         for row in sample.disk_samples:
+            if row.filesystem in VIRTUAL_FILESYSTEMS:
+                continue
             by_mount.setdefault(row.mount_point, []).append(row)
     result: list[dict[str, Any]] = []
     for mount in sorted(by_mount):

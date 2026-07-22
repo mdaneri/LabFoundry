@@ -166,14 +166,15 @@ def test_scope_restrictions_are_enforced(client):
 def test_monitor_api_requires_monitoring_scope(client):
     token, _metadata = create_token(client, scopes=["read:monitoring"])
 
-    response = client.get("/api/v1/monitor?hours=3", headers={"Authorization": f"Bearer {token}"})
+    response = client.get("/api/v1/monitor?hours=24", headers={"Authorization": f"Bearer {token}"})
 
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload["window_hours"] == 3
+    assert payload["window_hours"] == 24
     assert "summary" in payload
     assert "virtualization" in payload
     assert "cpu" in payload
+    assert "disk_devices" in payload
 
 
 def test_sufficient_scopes_allow_wan_policy_creation_and_audit(client):

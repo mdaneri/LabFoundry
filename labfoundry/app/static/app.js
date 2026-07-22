@@ -18,12 +18,14 @@ document.addEventListener("click", (event) => {
 const DNS_ACTIVE_ZONE_STORAGE_KEY = "labfoundry:dns:active-zone";
 const PUBLIC_ADDRESS_MODE_COOKIE = "labfoundry_public_address_mode";
 const LABFOUNDRY_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const APPLIANCE_APPLY_SUCCESS_AUTO_CLOSE_MS = 15000;
 const labFoundryDnsRecordTables = new WeakMap();
 const labFoundryLdapDirectoryTables = new WeakMap();
 let ldapMembershipTooltip = null;
 const LDAP_ORGANIZATION_SELECTION_KEY = "labfoundry:ldap:organization";
 let applianceApplySidebarRefreshTimer = 0;
 let applianceApplyGlobalPollTimer = 0;
+let applianceApplyAutoCloseTimer = 0;
 let applianceApplyModalTable = null;
 let applianceApplyActiveJobId = "";
 
@@ -11915,6 +11917,28 @@ function showApplianceApplyModal(modal) {
   }
 }
 
+function clearApplianceApplyAutoClose() {
+  window.clearTimeout(applianceApplyAutoCloseTimer);
+  applianceApplyAutoCloseTimer = 0;
+}
+
+function scheduleApplianceApplyAutoClose(task) {
+  clearApplianceApplyAutoClose();
+  const { modal } = applianceApplyModalElements();
+  if (!(modal instanceof HTMLDialogElement) || task?.status !== "succeeded") return;
+  const taskId = String(task.id || "");
+  applianceApplyAutoCloseTimer = window.setTimeout(() => {
+    if (
+      modal.open
+      && modal.dataset.active !== "true"
+      && modal.dataset.taskId === taskId
+      && modal.dataset.taskStatus === "succeeded"
+    ) {
+      modal.close();
+    }
+  }, APPLIANCE_APPLY_SUCCESS_AUTO_CLOSE_MS);
+}
+
 function setApplianceApplyModalError(message = "") {
   const error = applianceApplyModalElements().error;
   if (error instanceof HTMLElement) {
@@ -12037,7 +12061,10 @@ function updateApplianceApplySelection() {
 async function openApplianceApplyReview() {
   const elements = applianceApplyModalElements();
   if (!(elements.modal instanceof HTMLDialogElement)) return;
+  clearApplianceApplyAutoClose();
   elements.modal.dataset.active = "false";
+  delete elements.modal.dataset.taskId;
+  delete elements.modal.dataset.taskStatus;
   elements.review?.classList.remove("hidden");
   elements.live?.classList.add("hidden");
   if (elements.title instanceof HTMLElement) elements.title.textContent = "Review appliance changes";
@@ -12130,6 +12157,8 @@ function renderApplianceApplyTask(task) {
   if (!(elements.modal instanceof HTMLDialogElement) || !task) return;
   const active = taskStatusActive(task.status);
   elements.modal.dataset.active = active ? "true" : "false";
+  elements.modal.dataset.taskId = String(task.id || "");
+  elements.modal.dataset.taskStatus = String(task.status || "");
   elements.review?.classList.add("hidden");
   elements.live?.classList.remove("hidden");
   if (elements.kicker instanceof HTMLElement) elements.kicker.textContent = "Master appliance task";
@@ -12179,6 +12208,7 @@ function renderApplianceApplyTask(task) {
     }
   }
   showApplianceApplyModal(elements.modal);
+  scheduleApplianceApplyAutoClose(task);
 }
 
 async function submitApplianceApplyForm(form) {
@@ -12254,6 +12284,7 @@ function initializeApplianceApplyProgress() {
   elements.modal.addEventListener("cancel", (event) => {
     if (elements.modal.dataset.active === "true") event.preventDefault();
   });
+  elements.modal.addEventListener("close", clearApplianceApplyAutoClose);
   elements.modal.querySelector("[data-appliance-apply-modal-close]")?.addEventListener("click", () => {
     if (elements.modal.dataset.active !== "true") elements.modal.close();
   });
@@ -12415,19 +12446,56 @@ function monitorSeriesPoints(rows, fields) {
 }
 
 const MONITOR_SERIES_COLORS = ["#2563eb", "#0f766e", "#d97706", "#9333ea", "#dc2626", "#0891b2", "#65a30d", "#c026d3"];
+const MONITOR_CHART_INTERACTIONS = new WeakMap();
+
+function monitorNearestChartTarget(interaction, pointerX, pointerY) {
+  let nearest = null;
+  const consider = (target, distance) => {
+    const preferDetail = nearest && distance === nearest.distance && nearest.target.line.aggregate && !target.line.aggregate;
+    if (distance <= 196 && (!nearest || distance < nearest.distance || preferDetail)) nearest = { distance, target };
+  };
+  interaction.hitTargets.forEach((target) => {
+    consider(target, ((target.x - pointerX) ** 2) + ((target.y - pointerY) ** 2));
+  });
+  interaction.hitSegments.forEach((segment) => {
+    const dx = segment.end.x - segment.start.x;
+    const dy = segment.end.y - segment.start.y;
+    const lengthSquared = (dx ** 2) + (dy ** 2);
+    const projection = lengthSquared > 0
+      ? Math.max(0, Math.min(1, (((pointerX - segment.start.x) * dx) + ((pointerY - segment.start.y) * dy)) / lengthSquared))
+      : 0;
+    const x = segment.start.x + (dx * projection);
+    const y = segment.start.y + (dy * projection);
+    consider(
+      {
+        line: segment.line,
+        time: segment.start.time + ((segment.end.time - segment.start.time) * projection),
+        value: segment.start.value + ((segment.end.value - segment.start.value) * projection),
+        x,
+        y,
+      },
+      ((x - pointerX) ** 2) + ((y - pointerY) ** 2),
+    );
+  });
+  return nearest?.target || null;
+}
 
 function monitorHistoryChartData(groups, dimensions) {
   const rowsByTime = new Map();
   const lines = [];
   (Array.isArray(groups) ? groups : []).forEach((group, groupIndex) => {
-    const color = MONITOR_SERIES_COLORS[groupIndex % MONITOR_SERIES_COLORS.length];
+    const aggregate = Boolean(group.aggregate);
+    const color = group.color || MONITOR_SERIES_COLORS[groupIndex % MONITOR_SERIES_COLORS.length];
     dimensions.forEach((dimension) => {
       const field = `series_${groupIndex}_${dimension.field}`;
       lines.push({
         field,
         label: [group.name, dimension.label].filter(Boolean).join(" "),
-        color,
+        color: dimension.color || color,
         dash: dimension.dash || [],
+        lineWidth: Number(dimension.lineWidth || group.lineWidth || (aggregate ? 3 : 1)),
+        alpha: Number(dimension.alpha || group.alpha || (aggregate ? 0.45 : 1)),
+        aggregate,
       });
       (Array.isArray(group.points) ? group.points : []).forEach((point) => {
         const sampledAt = point.sampled_at || "";
@@ -12446,6 +12514,131 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
   if (!(canvas instanceof HTMLCanvasElement)) {
     return;
   }
+  let interaction = MONITOR_CHART_INTERACTIONS.get(canvas);
+  if (!interaction) {
+    interaction = { dragging: false, geometry: null, highlightedField: "", highlightedTime: null, highlightedValue: null, hitSegments: [], hitTargets: [], legendTargets: [], lines: [], options: {}, pinned: false, rows: [], selectionEndX: null, selectionStartX: null, suppressClick: false };
+    MONITOR_CHART_INTERACTIONS.set(canvas, interaction);
+    canvas.addEventListener("pointerdown", (event) => {
+      const geometry = interaction.geometry;
+      if (typeof interaction.options.onAreaZoom !== "function" || !geometry) return;
+      const bounds = canvas.getBoundingClientRect();
+      const pointerX = event.clientX - bounds.left;
+      const pointerY = event.clientY - bounds.top;
+      if (pointerX < geometry.left || pointerX > geometry.right || pointerY < geometry.top || pointerY > geometry.bottom) return;
+      interaction.dragging = true;
+      interaction.selectionStartX = Math.max(geometry.left, Math.min(geometry.right, pointerX));
+      interaction.selectionEndX = interaction.selectionStartX;
+      interaction.highlightedField = "";
+      interaction.highlightedTime = null;
+      interaction.highlightedValue = null;
+      canvas.removeAttribute("title");
+      canvas.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+    });
+    canvas.addEventListener("pointermove", (event) => {
+      const bounds = canvas.getBoundingClientRect();
+      const pointerX = event.clientX - bounds.left;
+      const pointerY = event.clientY - bounds.top;
+      if (interaction.dragging && interaction.geometry) {
+        interaction.selectionEndX = Math.max(interaction.geometry.left, Math.min(interaction.geometry.right, pointerX));
+        drawMonitorChart(canvas, interaction.rows, interaction.lines, interaction.options);
+        return;
+      }
+      if (interaction.pinned) return;
+      const nearest = monitorNearestChartTarget(interaction, pointerX, pointerY);
+      const nextField = nearest?.line.field || "";
+      const nextTime = nearest?.time ?? null;
+      const nextValue = nearest?.value ?? null;
+      if (nextField === interaction.highlightedField && nextTime === interaction.highlightedTime && nextValue === interaction.highlightedValue) return;
+      interaction.highlightedField = nextField;
+      interaction.highlightedTime = nextTime;
+      interaction.highlightedValue = nextValue;
+      if (nearest) {
+        const formattedValue = interaction.options.formatY ? interaction.options.formatY(nearest.value) : String(nearest.value);
+        const formattedTime = new Date(nearest.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        canvas.title = `${nearest.line.label}: ${formattedValue} at ${formattedTime}`;
+      } else {
+        canvas.removeAttribute("title");
+      }
+      drawMonitorChart(canvas, interaction.rows, interaction.lines, interaction.options);
+    });
+    const clearHighlight = () => {
+      if (interaction.dragging || interaction.pinned) return;
+      if (!interaction.highlightedField) return;
+      interaction.highlightedField = "";
+      interaction.highlightedTime = null;
+      interaction.highlightedValue = null;
+      canvas.removeAttribute("title");
+      drawMonitorChart(canvas, interaction.rows, interaction.lines, interaction.options);
+    };
+    canvas.addEventListener("pointerleave", clearHighlight);
+    canvas.addEventListener("pointerout", clearHighlight);
+    const finishAreaSelection = (event) => {
+      if (!interaction.dragging || !interaction.geometry) return;
+      const geometry = interaction.geometry;
+      const startX = interaction.selectionStartX;
+      const endX = interaction.selectionEndX;
+      interaction.dragging = false;
+      interaction.selectionStartX = null;
+      interaction.selectionEndX = null;
+      canvas.releasePointerCapture?.(event.pointerId);
+      if (Number.isFinite(startX) && Number.isFinite(endX) && Math.abs(endX - startX) >= 12) {
+        interaction.suppressClick = true;
+        window.setTimeout(() => { interaction.suppressClick = false; }, 0);
+        const timeForX = (x) => geometry.minTime + ((x - geometry.left) / geometry.plotWidth) * (geometry.maxTime - geometry.minTime);
+        interaction.options.onAreaZoom({
+          startTime: timeForX(Math.min(startX, endX)),
+          endTime: timeForX(Math.max(startX, endX)),
+          fullMinTime: geometry.fullMinTime,
+          fullMaxTime: geometry.fullMaxTime,
+        });
+        return;
+      }
+      drawMonitorChart(canvas, interaction.rows, interaction.lines, interaction.options);
+    };
+    canvas.addEventListener("pointerup", finishAreaSelection);
+    canvas.addEventListener("pointercancel", finishAreaSelection);
+    canvas.addEventListener("click", (event) => {
+      if (interaction.suppressClick) {
+        interaction.suppressClick = false;
+        return;
+      }
+      const bounds = canvas.getBoundingClientRect();
+      const pointerX = event.clientX - bounds.left;
+      const pointerY = event.clientY - bounds.top;
+      const legendTarget = interaction.legendTargets.find((item) => pointerX >= item.left && pointerX <= item.right && pointerY >= item.top && pointerY <= item.bottom);
+      if (legendTarget) {
+        const selecting = !interaction.pinned || interaction.highlightedField !== legendTarget.line.field;
+        interaction.pinned = selecting;
+        interaction.highlightedField = selecting ? legendTarget.line.field : "";
+        interaction.highlightedTime = null;
+        interaction.highlightedValue = null;
+        if (selecting) canvas.title = `${legendTarget.line.label} (selected)`;
+        else canvas.removeAttribute("title");
+        drawMonitorChart(canvas, interaction.rows, interaction.lines, interaction.options);
+        return;
+      }
+      const target = monitorNearestChartTarget(interaction, pointerX, pointerY);
+      interaction.pinned = Boolean(target);
+      interaction.highlightedField = target?.line.field || "";
+      interaction.highlightedTime = target?.time ?? null;
+      interaction.highlightedValue = target?.value ?? null;
+      if (target) {
+        const formattedValue = interaction.options.formatY ? interaction.options.formatY(target.value) : String(target.value);
+        const formattedTime = new Date(target.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        canvas.title = `${target.line.label}: ${formattedValue} at ${formattedTime} (selected)`;
+      } else {
+        canvas.removeAttribute("title");
+      }
+      drawMonitorChart(canvas, interaction.rows, interaction.lines, interaction.options);
+    });
+  }
+  interaction.rows = rows;
+  interaction.lines = lines;
+  interaction.options = options;
+  interaction.hitSegments = [];
+  interaction.hitTargets = [];
+  interaction.legendTargets = [];
   const bounds = canvas.getBoundingClientRect();
   const width = Math.max(320, Math.floor(bounds.width || canvas.clientWidth || 640));
   const height = Math.max(180, Math.floor(bounds.height || canvas.clientHeight || 240));
@@ -12469,15 +12662,37 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
       legendX = 44;
       legendY += 16;
     }
-    legendPositions.push({ line, x: legendX, y: legendY });
+    legendPositions.push({ itemWidth, line, x: legendX, y: legendY });
     legendX += itemWidth;
   });
   const padding = { top: Math.max(18, legendY + 8), right: 18, bottom: 30, left: 44 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
-  const points = monitorSeriesPoints(rows, lines.map((line) => line.field));
+  const allPoints = monitorSeriesPoints(rows, lines.map((line) => line.field));
+  const fullMinTime = allPoints.length ? Math.min(...allPoints.map((point) => point.time)) : null;
+  const fullMaxTime = allPoints.length ? Math.max(...allPoints.map((point) => point.time)) : null;
+  let points = allPoints;
+  if (allPoints.length && Number(options.zoom || 1) > 1) {
+    const fullSpan = Math.max(1, fullMaxTime - fullMinTime);
+    const viewSpan = fullSpan / Number(options.zoom);
+    const requestedCenter = Number(options.zoomCenterTime);
+    const hasRequestedCenter = options.zoomCenterTime !== null && options.zoomCenterTime !== undefined && Number.isFinite(requestedCenter);
+    const center = hasRequestedCenter ? Math.max(fullMinTime, Math.min(fullMaxTime, requestedCenter)) : fullMaxTime;
+    let viewMinTime = center - (viewSpan / 2);
+    let viewMaxTime = center + (viewSpan / 2);
+    if (viewMinTime < fullMinTime) {
+      viewMaxTime += fullMinTime - viewMinTime;
+      viewMinTime = fullMinTime;
+    }
+    if (viewMaxTime > fullMaxTime) {
+      viewMinTime -= viewMaxTime - fullMaxTime;
+      viewMaxTime = fullMaxTime;
+    }
+    points = allPoints.filter((point) => point.time >= viewMinTime && point.time <= viewMaxTime);
+  }
   const values = points.flatMap((point) => lines.map((line) => point[line.field])).filter((value) => value !== null);
   if (!points.length || !values.length) {
+    interaction.geometry = null;
     context.fillStyle = "#64748b";
     context.font = "13px system-ui, sans-serif";
     context.fillText("Waiting for samples", padding.left, padding.top + 24);
@@ -12493,6 +12708,17 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
   const valueSpan = Math.max(1, maxValue - minValue);
   const xFor = (time) => padding.left + ((time - minTime) / timeSpan) * plotWidth;
   const yFor = (value) => padding.top + plotHeight - ((value - minValue) / valueSpan) * plotHeight;
+  interaction.geometry = {
+    bottom: padding.top + plotHeight,
+    fullMaxTime,
+    fullMinTime,
+    left: padding.left,
+    maxTime,
+    minTime,
+    plotWidth,
+    right: padding.left + plotWidth,
+    top: padding.top,
+  };
 
   context.strokeStyle = "#e2e8f0";
   context.lineWidth = 1;
@@ -12509,19 +12735,28 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
     context.fillText(label, 8, y + 4);
   }
 
-  lines.forEach((line) => {
+  const drawLines = [...lines].sort((left, right) => Number(right.aggregate) - Number(left.aggregate));
+  drawLines.forEach((line) => {
+    const highlighted = line.field === interaction.highlightedField;
     context.strokeStyle = line.color;
-    context.lineWidth = 2;
+    context.lineWidth = highlighted ? Math.max(Number(line.lineWidth || 2) + 2, 4) : Number(line.lineWidth || 2);
+    context.globalAlpha = highlighted ? 1 : Number(line.alpha || 1);
     context.setLineDash(line.dash || []);
     context.beginPath();
     let hasPoint = false;
+    let previousTarget = null;
     points.forEach((point) => {
       const value = point[line.field];
       if (value === null) {
+        previousTarget = null;
         return;
       }
       const x = xFor(point.time);
       const y = yFor(value);
+      const target = { line, time: point.time, value, x, y };
+      interaction.hitTargets.push(target);
+      if (previousTarget) interaction.hitSegments.push({ line, start: previousTarget, end: target });
+      previousTarget = target;
       if (!hasPoint) {
         context.moveTo(x, y);
         hasPoint = true;
@@ -12533,7 +12768,30 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
       context.stroke();
     }
   });
+  context.globalAlpha = 1;
   context.setLineDash([]);
+
+  const highlightedLine = lines.find((line) => line.field === interaction.highlightedField);
+  if (highlightedLine && Number.isFinite(interaction.highlightedTime) && Number.isFinite(interaction.highlightedValue) && interaction.highlightedTime >= minTime && interaction.highlightedTime <= maxTime) {
+    const highlightedPoint = { line: highlightedLine, x: xFor(interaction.highlightedTime), y: yFor(interaction.highlightedValue) };
+    context.fillStyle = "#ffffff";
+    context.strokeStyle = highlightedPoint.line.color;
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(highlightedPoint.x, highlightedPoint.y, 5, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+  }
+
+  if (interaction.dragging && Number.isFinite(interaction.selectionStartX) && Number.isFinite(interaction.selectionEndX)) {
+    const selectionLeft = Math.min(interaction.selectionStartX, interaction.selectionEndX);
+    const selectionWidth = Math.abs(interaction.selectionEndX - interaction.selectionStartX);
+    context.fillStyle = "rgba(37, 99, 235, 0.14)";
+    context.strokeStyle = "#2563eb";
+    context.lineWidth = 1;
+    context.fillRect(selectionLeft, padding.top, selectionWidth, plotHeight);
+    context.strokeRect(selectionLeft, padding.top, selectionWidth, plotHeight);
+  }
 
   const start = new Date(minTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const end = new Date(maxTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -12543,16 +12801,21 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
   context.fillText(end, width - padding.right, height - 10);
   context.textAlign = "left";
 
-  legendPositions.forEach(({ line, x, y }) => {
+  legendPositions.forEach(({ itemWidth, line, x, y }) => {
+    interaction.legendTargets.push({ bottom: y + 5, left: x - 3, line, right: x + itemWidth - 8, top: y - 13 });
+    const highlighted = line.field === interaction.highlightedField;
     context.strokeStyle = line.color;
+    context.lineWidth = highlighted ? Math.max(Number(line.lineWidth || 2) + 2, 4) : Number(line.lineWidth || 2);
     context.setLineDash(line.dash || []);
     context.beginPath();
     context.moveTo(x, y - 2);
     context.lineTo(x + 10, y - 2);
     context.stroke();
     context.fillStyle = "#334155";
+    context.font = `${highlighted ? "700 " : ""}11px system-ui, sans-serif`;
     context.fillText(line.label, x + 14, y);
   });
+  context.font = "11px system-ui, sans-serif";
   context.setLineDash([]);
 }
 
@@ -12584,7 +12847,7 @@ function renderMonitorDiskTable(tbody, rows) {
   }
   const disks = Array.isArray(rows) ? rows : [];
   if (!disks.length) {
-    tbody.replaceChildren(Object.assign(document.createElement("tr"), { innerHTML: '<td colspan="6" class="muted">No disks sampled</td>' }));
+    tbody.replaceChildren(Object.assign(document.createElement("tr"), { innerHTML: '<td colspan="4" class="muted">No disks sampled</td>' }));
     return;
   }
   tbody.replaceChildren(...disks.map((disk) => {
@@ -12606,13 +12869,86 @@ function renderMonitorDiskTable(tbody, rows) {
     bar.append(fill);
     usedCell.append(label, bar);
     [mountCell, deviceCell, usedCell].forEach((cell) => row.append(cell));
-    [formatMonitorBytes(disk.free_bytes), formatMonitorRate(disk.read_bytes_per_sec), formatMonitorRate(disk.write_bytes_per_sec)].forEach((value) => {
+    [formatMonitorBytes(disk.free_bytes)].forEach((value) => {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.append(cell);
     });
     return row;
   }));
+}
+
+function renderMonitorDiskActivityTable(tbody, rows) {
+  if (!(tbody instanceof HTMLElement)) return;
+  const devices = Array.isArray(rows) ? rows : [];
+  if (!devices.length) {
+    tbody.replaceChildren(Object.assign(document.createElement("tr"), { innerHTML: '<td colspan="3" class="muted">No devices sampled</td>' }));
+    return;
+  }
+  tbody.replaceChildren(...devices.map((device) => {
+    const row = document.createElement("tr");
+    [device.device || device.name || "--", formatMonitorRate(device.read_bytes_per_sec), formatMonitorRate(device.write_bytes_per_sec)].forEach((value) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    });
+    return row;
+  }));
+}
+
+const MONITOR_CHART_TITLES = {
+  cpu: "CPU Utilization",
+  memory: "Memory Pressure",
+  network: "Network Throughput",
+  disk: "Disk Activity",
+  diskUsage: "Disk Usage",
+};
+
+function drawMonitorChartType(canvas, type, payload, chartOptions = {}) {
+  if (type === "cpu") {
+    const chart = monitorHistoryChartData(
+      [
+        { name: "Total", points: payload.cpu, aggregate: true, color: "#0f172a" },
+        ...(Array.isArray(payload.cpu_cores) ? payload.cpu_cores : []),
+      ],
+      [{ field: "percent", label: "" }],
+    );
+    drawMonitorChart(canvas, chart.rows, chart.lines, { min: 0, max: 100, formatY: formatMonitorPercent, ...chartOptions });
+    return;
+  }
+  if (type === "memory") {
+    drawMonitorChart(canvas, payload.memory, [{ field: "used_percent", label: "Memory", color: "#0f766e" }], { min: 0, max: 100, formatY: formatMonitorPercent, ...chartOptions });
+    return;
+  }
+  if (type === "network") {
+    const chart = monitorHistoryChartData([
+      { name: "Total", points: payload.network_totals, aggregate: true, color: "#0f172a" },
+      ...(Array.isArray(payload.networks) ? payload.networks : []),
+    ], [
+      { field: "rx_bytes_per_sec", label: "RX" },
+      { field: "tx_bytes_per_sec", label: "TX", dash: [5, 3] },
+    ]);
+    drawMonitorChart(canvas, chart.rows, chart.lines, { min: 0, formatY: formatMonitorBytes, ...chartOptions });
+    return;
+  }
+  if (type === "disk") {
+    const chart = monitorHistoryChartData([
+      { name: "Total", points: payload.disk_io, aggregate: true, color: "#0f172a" },
+      ...(Array.isArray(payload.disk_devices) ? payload.disk_devices : []),
+    ], [
+      { field: "read_bytes_per_sec", label: "Read" },
+      { field: "write_bytes_per_sec", label: "Write", dash: [5, 3] },
+    ]);
+    drawMonitorChart(canvas, chart.rows, chart.lines, { min: 0, formatY: formatMonitorBytes, ...chartOptions });
+    return;
+  }
+  if (type === "diskUsage") {
+    const chart = monitorHistoryChartData(
+      Array.isArray(payload.disk_devices) ? payload.disk_devices : [],
+      [{ field: "used_percent", label: "" }],
+    );
+    drawMonitorChart(canvas, chart.rows, chart.lines, { min: 0, max: 100, formatY: formatMonitorPercent, ...chartOptions });
+  }
 }
 
 function renderMonitorPage(root, payload) {
@@ -12642,34 +12978,11 @@ function renderMonitorPage(root, payload) {
   }
   updateServerTime(payload.server_time || payload.generated_at);
 
-  const cpuChart = monitorHistoryChartData(payload.cpu_cores, [{ field: "percent", label: "" }]);
-  drawMonitorChart(
-    root.querySelector('[data-monitor-chart="cpu"]'),
-    cpuChart.lines.length ? cpuChart.rows : payload.cpu,
-    cpuChart.lines.length ? cpuChart.lines : [{ field: "percent", label: "CPU total", color: "#2563eb" }],
-    { min: 0, max: 100, formatY: formatMonitorPercent },
-  );
-  drawMonitorChart(root.querySelector('[data-monitor-chart="memory"]'), payload.memory, [{ field: "used_percent", label: "Memory", color: "#0f766e" }], { min: 0, max: 100, formatY: formatMonitorPercent });
-  const networkChart = monitorHistoryChartData(payload.networks, [
-    { field: "rx_bytes_per_sec", label: "RX" },
-    { field: "tx_bytes_per_sec", label: "TX", dash: [5, 3] },
-  ]);
-  drawMonitorChart(
-    root.querySelector('[data-monitor-chart="network"]'),
-    networkChart.rows,
-    networkChart.lines,
-    { min: 0, formatY: formatMonitorBytes },
-  );
-  drawMonitorChart(
-    root.querySelector('[data-monitor-chart="disk"]'),
-    payload.disk_io,
-    [
-      { field: "read_bytes_per_sec", label: "Read", color: "#0f766e" },
-      { field: "write_bytes_per_sec", label: "Write", color: "#9333ea" },
-    ],
-    { min: 0, formatY: formatMonitorBytes },
-  );
+  Object.keys(MONITOR_CHART_TITLES).forEach((type) => {
+    drawMonitorChartType(root.querySelector(`[data-monitor-chart="${type}"]`), type, payload);
+  });
   renderMonitorNetworkTable(root.querySelector("[data-monitor-network-table]"), payload.networks);
+  renderMonitorDiskActivityTable(root.querySelector("[data-monitor-disk-activity-table]"), payload.disk_devices);
   renderMonitorDiskTable(root.querySelector("[data-monitor-disk-table]"), payload.disks);
 }
 
@@ -12681,8 +12994,36 @@ function initializeMonitorPage() {
   let hours = 6;
   let latestPayload = null;
   let loading = false;
+  let expandedType = "";
+  let expandedZoomPercent = 100;
+  let expandedZoomCenterTime = null;
   const status = root.querySelector("[data-monitor-status]");
   const buttons = Array.from(root.querySelectorAll("[data-monitor-range]")).filter((button) => button instanceof HTMLButtonElement);
+  const modal = root.querySelector("[data-monitor-chart-modal]");
+  const modalCanvas = root.querySelector("[data-monitor-expanded-chart]");
+  const zoomInButton = root.querySelector("[data-monitor-chart-zoom-in]");
+  const zoomOutButton = root.querySelector("[data-monitor-chart-zoom-out]");
+  const zoomPercentInput = root.querySelector("[data-monitor-chart-zoom-percent]");
+  const captureZoomCenter = () => {
+    const highlightedTime = MONITOR_CHART_INTERACTIONS.get(modalCanvas)?.highlightedTime;
+    if (highlightedTime !== null && highlightedTime !== undefined && Number.isFinite(highlightedTime)) expandedZoomCenterTime = highlightedTime;
+  };
+  const applyAreaZoom = ({ startTime, endTime, fullMinTime, fullMaxTime }) => {
+    const selectedSpan = Math.max(1, endTime - startTime);
+    const fullSpan = Math.max(1, fullMaxTime - fullMinTime);
+    expandedZoomPercent = Math.max(100, Math.min(800, Math.round((fullSpan / selectedSpan) * 100)));
+    expandedZoomCenterTime = startTime + (selectedSpan / 2);
+    renderExpandedChart();
+  };
+  const renderExpandedChart = () => {
+    if (!latestPayload || !expandedType || !(modal instanceof HTMLDialogElement) || !modal.open) return;
+    monitorSetText(root, "[data-monitor-chart-modal-title]", MONITOR_CHART_TITLES[expandedType] || "Chart");
+    monitorSetText(root, "[data-monitor-chart-modal-range]", `Monitor chart · ${hours}h`);
+    if (zoomPercentInput instanceof HTMLInputElement) zoomPercentInput.value = String(expandedZoomPercent);
+    if (zoomInButton instanceof HTMLButtonElement) zoomInButton.disabled = expandedZoomPercent >= 800;
+    if (zoomOutButton instanceof HTMLButtonElement) zoomOutButton.disabled = expandedZoomPercent <= 100;
+    drawMonitorChartType(modalCanvas, expandedType, latestPayload, { onAreaZoom: applyAreaZoom, zoom: expandedZoomPercent / 100, zoomCenterTime: expandedZoomCenterTime });
+  };
   const setStatus = (value) => {
     if (status instanceof HTMLElement) {
       status.textContent = value;
@@ -12701,6 +13042,7 @@ function initializeMonitorPage() {
       }
       latestPayload = await response.json();
       renderMonitorPage(root, latestPayload);
+      renderExpandedChart();
       if (latestPayload.enabled === false) {
         setStatus("Monitoring disabled");
         return;
@@ -12716,13 +13058,57 @@ function initializeMonitorPage() {
   buttons.forEach((button) => {
     button.addEventListener("click", () => {
       hours = Number(button.dataset.monitorRange || 6);
+      expandedZoomPercent = 100;
+      expandedZoomCenterTime = null;
       buttons.forEach((candidate) => candidate.classList.toggle("active", candidate === button));
       load();
     });
   });
+  root.querySelectorAll("[data-monitor-chart-expand]").forEach((button) => {
+    button.addEventListener("click", () => {
+      expandedType = button.dataset.monitorChartExpand || "";
+      if (!MONITOR_CHART_TITLES[expandedType] || !(modal instanceof HTMLDialogElement)) return;
+      expandedZoomPercent = 100;
+      expandedZoomCenterTime = null;
+      modal.showModal();
+      window.requestAnimationFrame(renderExpandedChart);
+    });
+  });
+  zoomInButton?.addEventListener("click", () => {
+    captureZoomCenter();
+    expandedZoomPercent = Math.min(800, expandedZoomPercent + 25);
+    renderExpandedChart();
+  });
+  zoomOutButton?.addEventListener("click", () => {
+    expandedZoomPercent = Math.max(100, expandedZoomPercent - 25);
+    if (expandedZoomPercent === 100) expandedZoomCenterTime = null;
+    renderExpandedChart();
+  });
+  const applyZoomPercentInput = ({ clamp = false } = {}) => {
+    if (!(zoomPercentInput instanceof HTMLInputElement) || !zoomPercentInput.value.trim()) return;
+    const requested = Number(zoomPercentInput.value);
+    if (!Number.isFinite(requested) || (!clamp && (requested < 100 || requested > 800))) return;
+    expandedZoomPercent = Math.max(100, Math.min(800, Math.round(requested)));
+    if (expandedZoomPercent > 100) captureZoomCenter();
+    else expandedZoomCenterTime = null;
+    renderExpandedChart();
+  };
+  zoomPercentInput?.addEventListener("input", () => applyZoomPercentInput());
+  zoomPercentInput?.addEventListener("change", () => applyZoomPercentInput({ clamp: true }));
+  zoomPercentInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") event.currentTarget.blur();
+  });
+  root.querySelector("[data-monitor-chart-modal-close]")?.addEventListener("click", () => modal?.close());
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) modal.close();
+  });
+  modal?.addEventListener("close", () => {
+    expandedType = "";
+  });
   window.addEventListener("resize", () => {
     if (latestPayload) {
       renderMonitorPage(root, latestPayload);
+      renderExpandedChart();
     }
   });
   load();

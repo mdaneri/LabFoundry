@@ -83,7 +83,12 @@ def test_monitor_samples_persist_rates_and_payload(client, monkeypatch):
             swap_total_bytes=1_000,
             swap_used_bytes=100,
             networks=[NetworkCounters(name="eth0", rx_bytes=1_000, tx_bytes=2_000, rx_packets=10, tx_packets=20, rx_errors=0, tx_errors=0, rx_dropped=0, tx_dropped=0, oper_state="up")],
-            disks=[DiskUsage(mount_point="/", device="/dev/sda1", filesystem="ext4", total_bytes=10_000, used_bytes=4_000, free_bytes=6_000, used_percent=40.0, read_bytes=1_000, write_bytes=2_000)],
+            disks=[
+                DiskUsage(mount_point="/", device="/dev/sda1", filesystem="ext4", total_bytes=10_000, used_bytes=4_000, free_bytes=6_000, used_percent=40.0, read_bytes=1_000, write_bytes=2_000),
+                DiskUsage(mount_point="/etc", device="/dev/sda1", filesystem="ext4", total_bytes=10_000, used_bytes=4_000, free_bytes=6_000, used_percent=40.0, read_bytes=1_000, write_bytes=2_000),
+                DiskUsage(mount_point="/data", device="/dev/sdb1", filesystem="xfs", total_bytes=20_000, used_bytes=5_000, free_bytes=15_000, used_percent=25.0, read_bytes=500, write_bytes=1_000),
+                DiskUsage(mount_point="/sys/fs/selinux", device="selinuxfs", filesystem="selinuxfs", total_bytes=0, used_bytes=0, free_bytes=0, used_percent=None),
+            ],
         ),
         MonitorSnapshot(
             sampled_at=now,
@@ -97,7 +102,12 @@ def test_monitor_samples_persist_rates_and_payload(client, monkeypatch):
             swap_total_bytes=1_000,
             swap_used_bytes=125,
             networks=[NetworkCounters(name="eth0", rx_bytes=1_900, tx_bytes=2_600, rx_packets=19, tx_packets=26, rx_errors=1, tx_errors=0, rx_dropped=0, tx_dropped=1, oper_state="up")],
-            disks=[DiskUsage(mount_point="/", device="/dev/sda1", filesystem="ext4", total_bytes=10_000, used_bytes=5_000, free_bytes=5_000, used_percent=50.0, read_bytes=1_600, write_bytes=3_200)],
+            disks=[
+                DiskUsage(mount_point="/", device="/dev/sda1", filesystem="ext4", total_bytes=10_000, used_bytes=5_000, free_bytes=5_000, used_percent=50.0, read_bytes=1_600, write_bytes=3_200),
+                DiskUsage(mount_point="/etc", device="/dev/sda1", filesystem="ext4", total_bytes=10_000, used_bytes=5_000, free_bytes=5_000, used_percent=50.0, read_bytes=1_600, write_bytes=3_200),
+                DiskUsage(mount_point="/data", device="/dev/sdb1", filesystem="xfs", total_bytes=20_000, used_bytes=6_000, free_bytes=14_000, used_percent=30.0, read_bytes=800, write_bytes=1_600),
+                DiskUsage(mount_point="/sys/fs/selinux", device="selinuxfs", filesystem="selinuxfs", total_bytes=0, used_bytes=0, free_bytes=0, used_percent=None),
+            ],
         ),
     ]
 
@@ -120,6 +130,14 @@ def test_monitor_samples_persist_rates_and_payload(client, monkeypatch):
     assert payload["summary"]["memory"]["current_percent"] == 62.5
     assert payload["summary"]["network"]["rx_bytes_per_sec"] == 30.0
     assert payload["summary"]["disk"]["highest_used_mount"] == "/"
+    assert payload["disk_io"][-1]["read_bytes_per_sec"] == 30.0
+    assert payload["disk_io"][-1]["write_bytes_per_sec"] == 60.0
+    assert [row["device"] for row in payload["disk_devices"]] == ["/dev/sda1", "/dev/sdb1"]
+    assert "/sys/fs/selinux" not in [row["mount_point"] for row in payload["disks"]]
+    assert payload["disk_devices"][0]["points"][-1]["write_bytes_per_sec"] == 40.0
+    assert payload["disk_devices"][0]["points"][-1]["used_percent"] == 50.0
+    assert payload["disk_devices"][1]["used_percent"] == 30.0
+    assert payload["disk_devices"][1]["points"][-1]["read_bytes_per_sec"] == 10.0
     assert payload["virtualization"]["detected"] == "vmware"
     assert payload["server_time"] == payload["generated_at"]
 

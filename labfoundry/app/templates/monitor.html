@@ -55,6 +55,8 @@
       <button class="tab-button" type="button" data-monitor-range="1">1h</button>
       <button class="tab-button" type="button" data-monitor-range="3">3h</button>
       <button class="tab-button active" type="button" data-monitor-range="6">6h</button>
+      <button class="tab-button" type="button" data-monitor-range="12">12h</button>
+      <button class="tab-button" type="button" data-monitor-range="24">24h</button>
     </div>
     <span class="muted monitor-status-line" data-monitor-status>Loading metrics</span>
   </div>
@@ -63,7 +65,12 @@
     <article class="panel monitor-chart-panel">
       <div class="panel-head compact">
         <h2>CPU Utilization</h2>
-        <span class="status-pill muted" data-monitor-cpu-peak>peak --</span>
+        <div class="monitor-panel-actions">
+          <span class="status-pill muted" data-monitor-cpu-peak>peak --</span>
+          <button class="button ghost icon-button monitor-chart-expand" type="button" data-monitor-chart-expand="cpu" aria-label="Expand CPU utilization chart" title="Expand chart">
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/></svg>
+          </button>
+        </div>
       </div>
       <div class="monitor-chart"><canvas data-monitor-chart="cpu" aria-label="CPU utilization trend"></canvas></div>
     </article>
@@ -71,7 +78,12 @@
     <article class="panel monitor-chart-panel">
       <div class="panel-head compact">
         <h2>Memory Pressure</h2>
-        <span class="status-pill muted" data-monitor-memory-peak>peak --</span>
+        <div class="monitor-panel-actions">
+          <span class="status-pill muted" data-monitor-memory-peak>peak --</span>
+          <button class="button ghost icon-button monitor-chart-expand" type="button" data-monitor-chart-expand="memory" aria-label="Expand memory pressure chart" title="Expand chart">
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/></svg>
+          </button>
+        </div>
       </div>
       <div class="monitor-chart"><canvas data-monitor-chart="memory" aria-label="Memory pressure trend"></canvas></div>
     </article>
@@ -79,7 +91,12 @@
     <article class="panel monitor-chart-panel has-monitor-table monitor-network-panel">
       <div class="panel-head compact">
         <h2>Network Throughput</h2>
-        <span class="status-pill muted">RX / TX</span>
+        <div class="monitor-panel-actions">
+          <span class="status-pill muted">RX / TX</span>
+          <button class="button ghost icon-button monitor-chart-expand" type="button" data-monitor-chart-expand="network" aria-label="Expand network throughput chart" title="Expand chart">
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/></svg>
+          </button>
+        </div>
       </div>
       <div class="monitor-chart"><canvas data-monitor-chart="network" aria-label="Network throughput trend"></canvas></div>
       <div class="monitor-table-scroll">
@@ -94,23 +111,81 @@
       </div>
     </article>
 
-    <article class="panel monitor-chart-panel has-monitor-table">
+    <article class="panel monitor-chart-panel has-monitor-table monitor-disk-activity-panel">
       <div class="panel-head compact">
         <h2>Disk Activity</h2>
-        <span class="status-pill muted">Read / write</span>
+        <div class="monitor-panel-actions">
+          <span class="status-pill muted">Read / write</span>
+          <button class="button ghost icon-button monitor-chart-expand" type="button" data-monitor-chart-expand="disk" aria-label="Expand disk activity chart" title="Expand chart">
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/></svg>
+          </button>
+        </div>
       </div>
       <div class="monitor-chart"><canvas data-monitor-chart="disk" aria-label="Disk activity trend"></canvas></div>
+      <div class="monitor-table-scroll monitor-disk-activity-table-scroll">
+        <table class="data-table compact">
+          <thead>
+            <tr><th>Device</th><th>Read/s</th><th>Write/s</th></tr>
+          </thead>
+          <tbody data-monitor-disk-activity-table>
+            <tr><td colspan="3" class="muted">Loading devices</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="panel monitor-chart-panel has-monitor-table monitor-disk-usage-panel">
+      <div class="panel-head compact">
+        <h2>Disk Usage</h2>
+        <div class="monitor-panel-actions">
+          <span class="status-pill muted">Used capacity</span>
+          <button class="button ghost icon-button monitor-chart-expand" type="button" data-monitor-chart-expand="diskUsage" aria-label="Expand disk usage chart" title="Expand chart">
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="monitor-chart"><canvas data-monitor-chart="diskUsage" aria-label="Disk usage trend"></canvas></div>
       <div class="monitor-table-scroll">
         <table class="data-table compact">
           <thead>
-            <tr><th>Mount</th><th>Device</th><th>Used</th><th>Free</th><th>Read/s</th><th>Write/s</th></tr>
+            <tr><th>Mount</th><th>Device</th><th>Used</th><th>Free</th></tr>
           </thead>
           <tbody data-monitor-disk-table>
-            <tr><td colspan="6" class="muted">Loading disks</td></tr>
+            <tr><td colspan="4" class="muted">Loading disks</td></tr>
           </tbody>
         </table>
       </div>
     </article>
   </section>
+
+  <dialog class="monitor-chart-modal" data-monitor-chart-modal aria-labelledby="monitor-chart-modal-title">
+    <div class="monitor-chart-modal-panel">
+      <div class="monitor-chart-modal-head">
+        <div>
+          <p class="kicker" data-monitor-chart-modal-range>Monitor chart · 6h</p>
+          <h2 id="monitor-chart-modal-title" data-monitor-chart-modal-title>Chart</h2>
+        </div>
+        <button class="button ghost icon-button" type="button" data-monitor-chart-modal-close aria-label="Close expanded chart" title="Close">×</button>
+      </div>
+      <div class="monitor-chart monitor-chart-expanded">
+        <canvas data-monitor-expanded-chart aria-label="Expanded monitor chart"></canvas>
+        <div class="monitor-chart-zoom-controls" aria-label="Chart zoom controls">
+          <button class="button secondary icon-button" type="button" data-monitor-chart-zoom-out aria-label="Zoom out of chart" title="Zoom out" disabled>
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/></svg>
+          </button>
+          <span class="field-label monitor-chart-zoom-field">
+            <span class="monitor-chart-zoom-input">
+              <input type="number" min="100" max="800" step="25" value="100" inputmode="numeric" data-monitor-chart-zoom-percent aria-label="Chart zoom percentage">
+              <span aria-hidden="true">%</span>
+            </span>
+            <button class="help-icon" type="button" data-help="Changes the visible time-window magnification for this expanded chart only. 100% shows the complete selected history range; higher values show a narrower window around the current focus.">i</button>
+          </span>
+          <button class="button secondary icon-button" type="button" data-monitor-chart-zoom-in aria-label="Zoom in on chart" title="Zoom in">
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6"/><path d="M8 11h6"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </dialog>
 </section>
 {% endblock %}

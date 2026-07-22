@@ -853,7 +853,7 @@ def get_dashboard(
 def get_monitor(
     identity: Annotated[Identity, Depends(require_scope("read:monitoring"))],
     db: Session = Depends(get_db),
-    hours: int = Query(default=6, ge=1, le=6),
+    hours: int = Query(default=6, ge=1, le=24),
 ) -> MonitorResponse:
     return MonitorResponse(**monitor_payload(db, hours=hours))
 
