@@ -229,8 +229,23 @@ class MonitorSample(Base):
     swap_total_bytes: Mapped[int] = mapped_column(Integer, default=0)
     swap_used_bytes: Mapped[int] = mapped_column(Integer, default=0)
 
+    cpu_samples: Mapped[list["MonitorCpuSample"]] = relationship(back_populates="sample", cascade="all, delete-orphan")
     network_samples: Mapped[list["MonitorNetworkSample"]] = relationship(back_populates="sample", cascade="all, delete-orphan")
     disk_samples: Mapped[list["MonitorDiskSample"]] = relationship(back_populates="sample", cascade="all, delete-orphan")
+
+
+class MonitorCpuSample(Base):
+    __tablename__ = "monitor_cpu_samples"
+    __table_args__ = (Index("ix_monitor_cpu_sample_cpu", "sample_id", "cpu_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sample_id: Mapped[int] = mapped_column(ForeignKey("monitor_samples.id"), index=True)
+    cpu_name: Mapped[str] = mapped_column(String(40), index=True)
+    percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_jiffies: Mapped[int] = mapped_column(Integer, default=0)
+    idle_jiffies: Mapped[int] = mapped_column(Integer, default=0)
+
+    sample: Mapped[MonitorSample] = relationship(back_populates="cpu_samples")
 
 
 class MonitorNetworkSample(Base):

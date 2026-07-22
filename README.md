@@ -50,9 +50,10 @@ verbosity and can also forward the same operational events to an external
 syslog receiver.
 
 The `Monitor` page is an operator-facing, read-only runtime view for appliance
-resource health. It charts CPU, memory, network throughput, and disk activity
-over the last one, three, or six hours, and shows compact per-interface,
-per-mount, and virtual-machine context. The sampler records one row about every
+resource health. It charts each logical CPU, each interface's RX/TX throughput,
+memory pressure, and disk activity over the last one, three, or six hours, and
+shows compact per-interface, per-mount, and virtual-machine context. The sampler
+records one row about every
 30 seconds and keeps the six-hour window plus a small buffer. Collection uses
 Linux `/proc`, `/sys`, filesystem usage, DMI data, `systemd-detect-virt`, and
 `vmtoolsd` when present; it does not call privileged helpers or mutate host

@@ -1080,9 +1080,6 @@ def get_vcf_backup_settings_row(db: Session, *, reconcile_default_user: bool = T
         db.add(settings)
         db.commit()
         db.refresh(settings)
-    if reconcile_default_user and disable_default_vcf_backup_user_when_service_off(db, settings):
-        db.commit()
-        db.refresh(settings)
     return settings
 
 
@@ -1114,9 +1111,6 @@ def get_vcf_offline_depot_settings_row(
     elif reconcile and not settings.http_user_id and default_user is not None:
         settings.http_user_id = default_user.id
         settings.updated_at = utcnow()
-        db.commit()
-        db.refresh(settings)
-    if reconcile_default_user and disable_default_vcf_depot_user_when_service_off(db, settings):
         db.commit()
         db.refresh(settings)
     if reconcile and settings.depot_store_path == VCF_DEPOT_LEGACY_STORE_PATH:
@@ -10089,8 +10083,15 @@ def appliance_apply_status_api(
     context = appliance_apply_context(db)
     pending_count = context["changed_apply_unit_count"]
     active_job = active_appliance_apply_job(db)
+    units = [
+        appliance_apply_client_status(
+            appliance_apply_status_from_unit(unit, sidebar_pending_apply_count=pending_count)
+        )
+        for unit in context["apply_units"]
+    ]
     return JSONResponse(
         {
+            "units": units,
             "pending_count": pending_count,
             "label": "Review appliance changes" if pending_count else "Appliance Apply",
             "detail": f"{pending_count} pending {'unit' if pending_count == 1 else 'units'}" if pending_count else "Desired state current",
@@ -16588,6 +16589,7 @@ def update_vcf_backup_settings_from_ui(
         context = vcf_backup_context(db)
         saved_settings = context["vcf_backup_settings"]
         validation_errors = context["vcf_backup_validation_errors"]
+        apply_status = appliance_apply_client_status(appliance_apply_status(db, "vcf_backups"))
         return JSONResponse(
             {
                 "status": "saved",
@@ -16617,6 +16619,7 @@ def update_vcf_backup_settings_from_ui(
                 "validation_errors": validation_errors,
                 "config_path": saved_settings.config_path,
                 "config_preview": context["vcf_backup_config_preview"],
+                "appliance_apply_status": apply_status,
             }
         )
     return RedirectResponse("/vcf-backups", status_code=303)

@@ -1194,7 +1194,7 @@ function downloadValueButtonText(button) {
   document.body.append(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(objectUrl);
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
   showTransientGridStatus("Saved");
 }
 
@@ -1222,6 +1222,19 @@ document.addEventListener("click", (event) => {
   }
   event.preventDefault();
   copyValueButtonText(button);
+});
+
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  const button = target.closest("[data-download-value]");
+  if (!(button instanceof HTMLButtonElement) || button.dataset.downloadInitialized === "1") {
+    return;
+  }
+  event.preventDefault();
+  downloadValueButtonText(button);
 });
 
 function showDhcpReservationError(message) {
@@ -7582,6 +7595,7 @@ function setAutosaveStatus(element, message, state = "idle") {
 }
 
 function updateApplianceApplySidebar(payload = {}) {
+  updateCurrentPageApplyNotice(payload);
   const sidebar = document.querySelector("[data-appliance-apply-sidebar]");
   if (!(sidebar instanceof HTMLElement)) {
     return;
@@ -7603,6 +7617,19 @@ function updateApplianceApplySidebar(payload = {}) {
   }
   if (badge instanceof HTMLElement) {
     badge.textContent = "pending";
+  }
+}
+
+function updateCurrentPageApplyNotice(payload = {}) {
+  const mainPane = document.querySelector("main.main-pane[data-page-apply-unit]");
+  if (!(mainPane instanceof HTMLElement)) {
+    return;
+  }
+  const unitId = mainPane.dataset.pageApplyUnit || "";
+  const units = Array.isArray(payload.units) ? payload.units : [];
+  const status = units.find((unit) => unit?.id === unitId);
+  if (status) {
+    updatePageApplyNotice(status);
   }
 }
 
@@ -12387,6 +12414,34 @@ function monitorSeriesPoints(rows, fields) {
   }).filter((point) => Number.isFinite(point.time));
 }
 
+const MONITOR_SERIES_COLORS = ["#2563eb", "#0f766e", "#d97706", "#9333ea", "#dc2626", "#0891b2", "#65a30d", "#c026d3"];
+
+function monitorHistoryChartData(groups, dimensions) {
+  const rowsByTime = new Map();
+  const lines = [];
+  (Array.isArray(groups) ? groups : []).forEach((group, groupIndex) => {
+    const color = MONITOR_SERIES_COLORS[groupIndex % MONITOR_SERIES_COLORS.length];
+    dimensions.forEach((dimension) => {
+      const field = `series_${groupIndex}_${dimension.field}`;
+      lines.push({
+        field,
+        label: [group.name, dimension.label].filter(Boolean).join(" "),
+        color,
+        dash: dimension.dash || [],
+      });
+      (Array.isArray(group.points) ? group.points : []).forEach((point) => {
+        const sampledAt = point.sampled_at || "";
+        if (!sampledAt) return;
+        const row = rowsByTime.get(sampledAt) || { sampled_at: sampledAt };
+        row[field] = point[dimension.field];
+        rowsByTime.set(sampledAt, row);
+      });
+    });
+  });
+  const rows = Array.from(rowsByTime.values()).sort((left, right) => new Date(left.sampled_at).getTime() - new Date(right.sampled_at).getTime());
+  return { rows, lines };
+}
+
 function drawMonitorChart(canvas, rows, lines, options = {}) {
   if (!(canvas instanceof HTMLCanvasElement)) {
     return;
@@ -12404,7 +12459,20 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
 
-  const padding = { top: 18, right: 18, bottom: 30, left: 44 };
+  context.font = "11px system-ui, sans-serif";
+  const legendPositions = [];
+  let legendX = 44;
+  let legendY = 12;
+  lines.forEach((line) => {
+    const itemWidth = context.measureText(line.label).width + 42;
+    if (legendX > 44 && legendX + itemWidth > width - 18) {
+      legendX = 44;
+      legendY += 16;
+    }
+    legendPositions.push({ line, x: legendX, y: legendY });
+    legendX += itemWidth;
+  });
+  const padding = { top: Math.max(18, legendY + 8), right: 18, bottom: 30, left: 44 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
   const points = monitorSeriesPoints(rows, lines.map((line) => line.field));
@@ -12444,6 +12512,7 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
   lines.forEach((line) => {
     context.strokeStyle = line.color;
     context.lineWidth = 2;
+    context.setLineDash(line.dash || []);
     context.beginPath();
     let hasPoint = false;
     points.forEach((point) => {
@@ -12464,6 +12533,7 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
       context.stroke();
     }
   });
+  context.setLineDash([]);
 
   const start = new Date(minTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const end = new Date(maxTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -12473,14 +12543,17 @@ function drawMonitorChart(canvas, rows, lines, options = {}) {
   context.fillText(end, width - padding.right, height - 10);
   context.textAlign = "left";
 
-  let legendX = padding.left;
-  lines.forEach((line) => {
-    context.fillStyle = line.color;
-    context.fillRect(legendX, 8, 10, 3);
+  legendPositions.forEach(({ line, x, y }) => {
+    context.strokeStyle = line.color;
+    context.setLineDash(line.dash || []);
+    context.beginPath();
+    context.moveTo(x, y - 2);
+    context.lineTo(x + 10, y - 2);
+    context.stroke();
     context.fillStyle = "#334155";
-    context.fillText(line.label, legendX + 14, 12);
-    legendX += context.measureText(line.label).width + 42;
+    context.fillText(line.label, x + 14, y);
   });
+  context.setLineDash([]);
 }
 
 function renderMonitorNetworkTable(tbody, rows) {
@@ -12569,15 +12642,22 @@ function renderMonitorPage(root, payload) {
   }
   updateServerTime(payload.server_time || payload.generated_at);
 
-  drawMonitorChart(root.querySelector('[data-monitor-chart="cpu"]'), payload.cpu, [{ field: "percent", label: "CPU", color: "#2563eb" }], { min: 0, max: 100, formatY: formatMonitorPercent });
+  const cpuChart = monitorHistoryChartData(payload.cpu_cores, [{ field: "percent", label: "" }]);
+  drawMonitorChart(
+    root.querySelector('[data-monitor-chart="cpu"]'),
+    cpuChart.lines.length ? cpuChart.rows : payload.cpu,
+    cpuChart.lines.length ? cpuChart.lines : [{ field: "percent", label: "CPU total", color: "#2563eb" }],
+    { min: 0, max: 100, formatY: formatMonitorPercent },
+  );
   drawMonitorChart(root.querySelector('[data-monitor-chart="memory"]'), payload.memory, [{ field: "used_percent", label: "Memory", color: "#0f766e" }], { min: 0, max: 100, formatY: formatMonitorPercent });
+  const networkChart = monitorHistoryChartData(payload.networks, [
+    { field: "rx_bytes_per_sec", label: "RX" },
+    { field: "tx_bytes_per_sec", label: "TX", dash: [5, 3] },
+  ]);
   drawMonitorChart(
     root.querySelector('[data-monitor-chart="network"]'),
-    payload.network_totals,
-    [
-      { field: "rx_bytes_per_sec", label: "RX", color: "#2563eb" },
-      { field: "tx_bytes_per_sec", label: "TX", color: "#d97706" },
-    ],
+    networkChart.rows,
+    networkChart.lines,
     { min: 0, formatY: formatMonitorBytes },
   );
   drawMonitorChart(
@@ -14792,8 +14872,8 @@ document.addEventListener("DOMContentLoaded", initializeZoneEditors);
 document.addEventListener("DOMContentLoaded", initializeAccountMenu);
 document.addEventListener("DOMContentLoaded", initializeConfirmationModals);
 document.addEventListener("DOMContentLoaded", initializePreviewModalControls);
-document.addEventListener("DOMContentLoaded", initializeCopyValueButtons);
-document.addEventListener("DOMContentLoaded", initializeDownloadValueButtons);
+document.addEventListener("DOMContentLoaded", () => initializeCopyValueButtons());
+document.addEventListener("DOMContentLoaded", () => initializeDownloadValueButtons());
 document.addEventListener("DOMContentLoaded", initializeNonTabbableHelperControls);
 document.addEventListener("DOMContentLoaded", initializeSecretToggles);
 document.addEventListener("DOMContentLoaded", initializeSwitchFields);

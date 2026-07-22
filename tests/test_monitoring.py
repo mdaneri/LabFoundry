@@ -6,6 +6,7 @@ from sqlalchemy import select
 from labfoundry.app.config import get_settings
 from labfoundry.app.models import MonitorSample
 from labfoundry.app.services.monitoring import (
+    CpuCoreCounters,
     CpuCounters,
     DiskUsage,
     MonitorSnapshot,
@@ -16,6 +17,7 @@ from labfoundry.app.services.monitoring import (
     parse_meminfo,
     parse_net_dev,
     parse_proc_stat_cpu,
+    parse_proc_stat_cpus,
     record_monitor_sample,
 )
 
@@ -41,8 +43,13 @@ class FakeMonitorCollector:
 
 
 def test_monitor_parsers_handle_linux_proc_shapes():
-    cpu = parse_proc_stat_cpu("cpu  100 0 50 850 25 0 0 0\ncpu0 10 0 5 85 0 0 0 0\n")
+    proc_stat = "cpu  100 0 50 850 25 0 0 0\ncpu0 10 0 5 85 0 0 0 0\ncpu1 20 0 10 70 0 0 0 0\n"
+    cpu = parse_proc_stat_cpu(proc_stat)
     assert cpu == CpuCounters(total=1025, idle=875)
+    assert parse_proc_stat_cpus(proc_stat) == [
+        CpuCoreCounters(name="cpu0", total=100, idle=85),
+        CpuCoreCounters(name="cpu1", total=100, idle=70),
+    ]
     assert cpu_percent(CpuCounters(total=1000, idle=900), CpuCounters(total=1100, idle=950)) == 50.0
 
     memory = parse_meminfo("MemTotal:       2048 kB\nMemAvailable:   512 kB\nSwapTotal:      128 kB\nSwapFree:        64 kB\n")
@@ -67,6 +74,7 @@ def test_monitor_samples_persist_rates_and_payload(client, monkeypatch):
         MonitorSnapshot(
             sampled_at=now - timedelta(seconds=30),
             cpu=CpuCounters(total=1000, idle=900),
+            cpus=[CpuCoreCounters(name="cpu0", total=500, idle=450), CpuCoreCounters(name="cpu1", total=500, idle=450)],
             cpu_count=4,
             load=(0.25, 0.2, 0.1),
             memory_total_bytes=8_000,
@@ -80,6 +88,7 @@ def test_monitor_samples_persist_rates_and_payload(client, monkeypatch):
         MonitorSnapshot(
             sampled_at=now,
             cpu=CpuCounters(total=1100, idle=950),
+            cpus=[CpuCoreCounters(name="cpu0", total=550, idle=470), CpuCoreCounters(name="cpu1", total=550, idle=480)],
             cpu_count=4,
             load=(0.5, 0.3, 0.2),
             memory_total_bytes=8_000,
@@ -97,6 +106,7 @@ def test_monitor_samples_persist_rates_and_payload(client, monkeypatch):
         record_monitor_sample(db, collector=collector)
         second = record_monitor_sample(db, collector=collector)
         assert second.cpu_percent == 50.0
+        assert [row.percent for row in second.cpu_samples] == [60.0, 40.0]
         assert second.network_samples[0].rx_bytes_per_sec == 30.0
         assert second.disk_samples[0].write_bytes_per_sec == 40.0
 
@@ -104,6 +114,9 @@ def test_monitor_samples_persist_rates_and_payload(client, monkeypatch):
         payload = monitor_payload(db, hours=6, collector=FakeMonitorCollector([]))
 
     assert payload["summary"]["cpu"]["current_percent"] == 50.0
+    assert [row["name"] for row in payload["cpu_cores"]] == ["cpu0", "cpu1"]
+    assert [row["current_percent"] for row in payload["cpu_cores"]] == [60.0, 40.0]
+    assert payload["cpu_cores"][0]["points"][-1]["percent"] == 60.0
     assert payload["summary"]["memory"]["current_percent"] == 62.5
     assert payload["summary"]["network"]["rx_bytes_per_sec"] == 30.0
     assert payload["summary"]["disk"]["highest_used_mount"] == "/"

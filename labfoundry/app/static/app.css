@@ -6722,8 +6722,13 @@ textarea {
 }
 
 .monitor-chart-panel.has-monitor-table {
-  grid-template-rows: auto minmax(260px, 1fr) minmax(0, auto);
-  min-height: 100%;
+  align-content: start;
+  grid-template-rows: auto auto minmax(0, auto);
+  min-height: 0;
+}
+
+.monitor-network-panel {
+  align-self: start;
 }
 
 .monitor-chart {
