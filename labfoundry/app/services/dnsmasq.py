@@ -1060,8 +1060,11 @@ def render_dnsmasq_config(
             lines.append(f"local=/{domain}/")
     if dns_settings.authoritative:
         server = authoritative_server_name(dns_settings)
-        authoritative_interfaces = split_interfaces(dns_settings.listen_interface)
-        lines.append(f"auth-server={','.join([server, *authoritative_interfaces])}")
+        # Do not add interface/address arguments here. dnsmasq treats those
+        # destinations as authoritative-only and refuses recursion there.
+        # Normal interface/listen-address directives below keep authoritative
+        # zones, local PTR answers, and forwarding available on one listener.
+        lines.append(f"auth-server={server}")
         lines.append(
             "auth-soa="
             f"{dns_settings.authoritative_serial},{authoritative_contact_name(dns_settings)},"

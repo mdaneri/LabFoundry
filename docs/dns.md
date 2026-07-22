@@ -10,12 +10,14 @@ With **Authoritative** on, every managed forward domain renders as `auth-zone=do
 
 The authoritative renderer emits:
 
-- `auth-server` for the configured primary nameserver and selected DNS interfaces;
+- `auth-server` for the configured primary nameserver, with the ordinary `interface` and `listen-address` directives retaining the selected DNS bind targets;
 - one `auth-zone` per managed forward domain;
 - shared `auth-soa` and `auth-ttl` values;
 - A/AAAA `host-record` glue mapping the primary nameserver to every selected DNS listen address.
 
 The primary nameserver must belong to a managed domain. Its glue identity is generated and cannot conflict with operator CNAME or A/AAAA data. SOA expiry must be greater than refresh and retry, and all timer values must be positive 32-bit seconds.
+
+LabFoundry intentionally does not append interface or address arguments to `auth-server`. dnsmasq makes those destinations authoritative-only and returns `REFUSED` for recursive queries. Binding remains controlled by the selected `interface` and `listen-address` directives, allowing authoritative forward-zone answers, existing local PTR answers, and upstream forwarding to coexist on the lab listener.
 
 ## Generated zone records and serial
 
