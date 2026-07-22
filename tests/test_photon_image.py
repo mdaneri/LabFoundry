@@ -225,6 +225,17 @@ def test_bundled_ipxe_bootloaders_have_provenance_and_expected_hashes():
     assert "GNU GENERAL PUBLIC LICENSE" in gpl
 
 
+def test_packer_templates_stage_shared_boot_branding_assets():
+    for template_path in (
+        Path("image/hyperv/labfoundry-photon.pkr.hcl"),
+        Path("image/vmware-workstation/labfoundry-photon.pkr.hcl"),
+    ):
+        template = template_path.read_text(encoding="utf-8")
+
+        assert 'source      = "../common/boot"' in template
+        assert 'destination = "/tmp/labfoundry-src/image/common/boot"' in template
+
+
 def test_packer_build_uses_labfoundry_management_network_by_default():
     template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
