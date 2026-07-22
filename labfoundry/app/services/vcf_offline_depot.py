@@ -227,7 +227,7 @@ def _safe_extract_tar_gz(archive_path: Path, destination: Path) -> None:
         with tarfile.open(archive_path, "r:gz") as archive:
             members = archive.getmembers()
             _validate_tar_members(members, destination)
-            archive.extractall(destination)
+            archive.extractall(destination, filter="data")
     except (EOFError, tarfile.TarError, OSError) as exc:
         raise ValueError(VCF_DEPOT_INVALID_ARCHIVE_MESSAGE) from exc
 
