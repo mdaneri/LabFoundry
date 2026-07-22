@@ -10,14 +10,14 @@ With **Authoritative** on, every managed forward domain renders as `auth-zone=do
 
 The authoritative renderer emits:
 
-- `auth-server` for the configured primary nameserver, with the ordinary `interface` and `listen-address` directives retaining the selected DNS bind targets;
+- `auth-server` for the configured primary nameserver and every selected DNS interface;
 - one `auth-zone` per managed forward domain;
 - shared `auth-soa` and `auth-ttl` values;
 - A/AAAA `host-record` glue mapping the primary nameserver to every selected DNS listen address.
 
 The primary nameserver must belong to a managed domain. Its glue identity is generated and cannot conflict with operator CNAME or A/AAAA data. SOA expiry must be greater than refresh and retry, and all timer values must be positive 32-bit seconds.
 
-LabFoundry intentionally does not append interface or address arguments to `auth-server`. dnsmasq makes those destinations authoritative-only and returns `REFUSED` for recursive queries. Binding remains controlled by the selected `interface` and `listen-address` directives, allowing authoritative forward-zone answers, existing local PTR answers, and upstream forwarding to coexist on the lab listener.
+dnsmasq treats interfaces named by `auth-server` as authoritative-only destinations. Those selected DNS listeners return complete authoritative SOA, NS, glue, positive-record, and negative-SOA responses, but intentionally return `REFUSED` for unrelated recursive queries and non-authoritative reverse zones. The same dnsmasq process retains ordinary local/PTR and upstream-recursive service on listeners not named by `auth-server`, including appliance loopback. This service-level boundary is why v1 cannot provide authority and recursion on the same address and port.
 
 ## Generated zone records and serial
 
@@ -42,9 +42,9 @@ dig @192.168.50.1 labfoundry.internal SOA
 dig @192.168.50.1 labfoundry.internal NS
 dig @192.168.50.1 ns1.labfoundry.internal A
 dig @192.168.50.1 app.labfoundry.internal A
-dig @192.168.50.1 -x 192.168.50.20
 dig @192.168.50.1 missing.labfoundry.internal A
-dig @192.168.50.1 example.com A
+dig @127.0.0.1 -x 192.168.50.20
+dig @127.0.0.1 example.com A
 ```
 
-The missing managed name should return authoritative NXDOMAIN with SOA authority. The unrelated name verifies that configured upstream recursion still works. Replace addresses and names with the appliance's selected listener and managed data.
+The missing managed name should return authoritative NXDOMAIN with SOA authority. The loopback queries verify that existing PTR behavior and configured upstream recursion remain available on a non-authoritative listener. Replace addresses and names with the appliance's selected listener and managed data. To provide recursion on an external address, leave Authoritative off for that listener or select a separate DNS interface that is not part of the authoritative interface set.

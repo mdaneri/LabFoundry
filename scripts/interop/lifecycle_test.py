@@ -1938,13 +1938,13 @@ def skip_name(data, offset):
             return offset
         offset += length
 
-def query(name, qtype):
+def query(name, qtype, target=server):
     query_id = random.randrange(0, 65536)
     qname = b"".join(bytes([len(part)]) + part.encode("ascii") for part in name.rstrip(".").split(".")) + b"\\0"
     packet = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + qname + struct.pack("!HH", qtype, 1)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(5)
-    sock.sendto(packet, (server, 53))
+    sock.sendto(packet, (target, 53))
     data, _ = sock.recvfrom(4096)
     response_id, flags, qd, an, ns, ar = struct.unpack("!HHHHHH", data[:12])
     assert response_id == query_id
@@ -1968,7 +1968,6 @@ expected = [
     (domain, 2, 0, 2, True),
     ("ns1." + domain, 1, 0, 1, True),
     ("interop-appliance." + domain, 1, 0, 1, True),
-    ({reverse_name!r}, 12, 0, 12, True),
 ]
 for name, qtype, expected_rcode, expected_type, authoritative in expected:
     flags, sections = query(name, qtype)
@@ -1982,10 +1981,14 @@ assert flags & 0x000F == 3, (flags, sections)
 assert flags & 0x0400, (flags, sections)
 assert 6 in sections[1], (flags, sections)
 
-flags, sections = query("example.com", 1)
+flags, sections = query({reverse_name!r}, 12, "127.0.0.1")
+assert flags & 0x000F == 0, (flags, sections)
+assert 12 in sections[0], (flags, sections)
+
+flags, sections = query("example.com", 1, "127.0.0.1")
 assert flags & 0x000F == 0, (flags, sections)
 assert sections[0], (flags, sections)
-print("authoritative DNS lifecycle probes passed")
+print("authoritative DNS and recursive-loopback lifecycle probes passed")
 '''
     encoded = base64.b64encode(script.strip().encode("utf-8")).decode("ascii")
     return f"printf %s {encoded} | base64 -d | python3 -"

@@ -134,8 +134,7 @@ def test_dnsmasq_renderer_emits_shared_authoritative_zones_and_generated_glue():
     assert "auth-zone=labfoundry.internal" in config
     assert "auth-zone=sitea.internal" in config
     assert "local=/labfoundry.internal/" not in config
-    assert "auth-server=ns1.labfoundry.internal" in config
-    assert "auth-server=ns1.labfoundry.internal,eth1" not in config
+    assert "auth-server=ns1.labfoundry.internal,eth1,eth2" in config
     assert "auth-soa=2026072201,hostmaster.labfoundry.internal,1200,180,1209600" in config
     assert "auth-ttl=3600" in config
     assert "host-record=ns1.labfoundry.internal,192.168.50.1" in config

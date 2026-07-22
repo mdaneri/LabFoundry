@@ -170,9 +170,10 @@ def test_authoritative_dns_lifecycle_probe_covers_authority_reverse_nxdomain_and
     assert '("ns1." + domain, 1, 0, 1, True)' in script
     assert '("interop-appliance." + domain, 1, 0, 1, True)' in script
     assert "1.50.168.192.in-addr.arpa" in script
+    assert 'query(\'1.50.168.192.in-addr.arpa\', 12, "127.0.0.1")' in script
     assert 'query("missing-authoritative." + domain, 1)' in script
     assert "assert 6 in sections[1]" in script
-    assert 'query("example.com", 1)' in script
+    assert 'query("example.com", 1, "127.0.0.1")' in script
 
 
 def test_apply_units_retries_once_when_desired_state_drifts(monkeypatch):
