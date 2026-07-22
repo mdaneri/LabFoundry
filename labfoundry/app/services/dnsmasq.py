@@ -13,6 +13,10 @@ DNSMASQ_DNSSEC_TRUST_ANCHORS_PATH = "/var/lib/labfoundry/apply/dnsmasq/labfoundr
 DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX = "Deny DHCP for "
 DNS_RECORD_TYPES = {"A", "AAAA", "CNAME", "TXT", "SRV", "MX", "CAA", "PTR"}
 DNS_HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)*[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
+DNS_AUTHORITATIVE_TTL_DEFAULT = 3600
+DNS_AUTHORITATIVE_REFRESH_DEFAULT = 1200
+DNS_AUTHORITATIVE_RETRY_DEFAULT = 180
+DNS_AUTHORITATIVE_EXPIRE_DEFAULT = 1209600
 
 
 def _dhcp_scope_network(scope: DhcpScope):
@@ -163,6 +167,63 @@ def join_domains(domains: list[str]) -> str:
     return "\n".join(split_domains("\n".join(domains)))
 
 
+def authoritative_server_name(settings: DnsSettings) -> str:
+    domains = split_domains(settings.domain) or ["labfoundry.internal"]
+    return (settings.authoritative_server or f"ns1.{domains[0]}").strip().strip(".").lower()
+
+
+def authoritative_contact_name(settings: DnsSettings) -> str:
+    domains = split_domains(settings.domain) or ["labfoundry.internal"]
+    return (settings.authoritative_contact or f"hostmaster.{domains[0]}").strip().strip(".").lower()
+
+
+def ensure_dns_authoritative_defaults(settings: DnsSettings, *, now: datetime | None = None) -> bool:
+    changed = False
+    if not (settings.authoritative_server or "").strip():
+        settings.authoritative_server = authoritative_server_name(settings)
+        changed = True
+    if not (settings.authoritative_contact or "").strip():
+        settings.authoritative_contact = authoritative_contact_name(settings)
+        changed = True
+    if settings.authoritative_ttl is None:
+        settings.authoritative_ttl = DNS_AUTHORITATIVE_TTL_DEFAULT
+        changed = True
+    if settings.authoritative_refresh is None:
+        settings.authoritative_refresh = DNS_AUTHORITATIVE_REFRESH_DEFAULT
+        changed = True
+    if settings.authoritative_retry is None:
+        settings.authoritative_retry = DNS_AUTHORITATIVE_RETRY_DEFAULT
+        changed = True
+    if settings.authoritative_expire is None:
+        settings.authoritative_expire = DNS_AUTHORITATIVE_EXPIRE_DEFAULT
+        changed = True
+    if not settings.authoritative_serial or settings.authoritative_serial <= 0:
+        settings.authoritative_serial = int((now or datetime.now(timezone.utc)).timestamp())
+        changed = True
+    return changed
+
+
+def authoritative_zone_metadata(settings: DnsSettings, domain: str) -> dict[str, object]:
+    server = authoritative_server_name(settings)
+    zone = domain.strip().strip(".").lower()
+    owner = f"{server}."
+    if server == zone:
+        owner = "@"
+    elif server.endswith(f".{zone}"):
+        owner = server[: -(len(zone) + 1)]
+    return {
+        "server": server,
+        "contact": authoritative_contact_name(settings),
+        "ttl": int(settings.authoritative_ttl or DNS_AUTHORITATIVE_TTL_DEFAULT),
+        "serial": int(settings.authoritative_serial or 0),
+        "refresh": int(settings.authoritative_refresh or DNS_AUTHORITATIVE_REFRESH_DEFAULT),
+        "retry": int(settings.authoritative_retry or DNS_AUTHORITATIVE_RETRY_DEFAULT),
+        "expire": int(settings.authoritative_expire or DNS_AUTHORITATIVE_EXPIRE_DEFAULT),
+        "glue_owner": owner,
+        "glue_addresses": split_addresses(settings.listen_address),
+    }
+
+
 def record_data(record: DnsRecord) -> dict[str, object]:
     raw_data = (record.record_data_json or "").strip()
     if raw_data:
@@ -310,17 +371,34 @@ def render_zone_hosts_records(records: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_zone_file(domain: str, records: list[dict]) -> str:
+def render_zone_file(domain: str, records: list[dict], dns_settings: DnsSettings | None = None) -> str:
+    metadata = authoritative_zone_metadata(dns_settings, domain) if dns_settings and dns_settings.authoritative else None
+    ttl = int(metadata["ttl"]) if metadata else DNS_AUTHORITATIVE_TTL_DEFAULT
     lines = [
         f"$ORIGIN {domain}.",
-        "$TTL 3600",
+        f"$TTL {ttl}",
         "",
     ]
+    if metadata:
+        server = str(metadata["server"])
+        contact = str(metadata["contact"])
+        lines.extend(
+            [
+                f"@                        IN SOA   {server}. {contact}. {metadata['serial']} {metadata['refresh']} {metadata['retry']} {metadata['expire']} {metadata['ttl']}",
+                f"@                        IN NS    {server}.",
+            ]
+        )
+        for address in metadata["glue_addresses"]:
+            record_type = "AAAA" if ":" in str(address) else "A"
+            lines.append(f"{str(metadata['glue_owner']):<24} IN {record_type:<5} {address}")
+        lines.append("")
     for record in records:
         if record["enabled"] is False:
             continue
         record_type = record["record_type"].upper()
         if record_type not in DNS_RECORD_TYPES:
+            continue
+        if metadata and record_type in {"A", "AAAA"} and record["hostname"].strip().strip(".").lower() == metadata["server"]:
             continue
         data = record.get("record_data")
         payload = data if isinstance(data, dict) else dns_record_data_from_value(record_type, str(record["address"]))
@@ -329,18 +407,62 @@ def render_zone_file(domain: str, records: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def parse_zone_records(zone_text: str, domain: str) -> tuple[list[dict[str, str | bool | None]], list[str]]:
+def _zone_logical_lines(zone_text: str) -> list[tuple[int, str]]:
+    lines: list[tuple[int, str]] = []
+    buffer: list[str] = []
+    start_line = 0
+    depth = 0
+    for line_number, raw_line in enumerate(zone_text.splitlines(), start=1):
+        line = raw_line.split(";", 1)[0].strip()
+        if not line:
+            continue
+        if not buffer:
+            start_line = line_number
+        buffer.append(line)
+        depth += line.count("(") - line.count(")")
+        if depth <= 0:
+            logical = " ".join(buffer).replace("(", " ").replace(")", " ")
+            lines.append((start_line, " ".join(logical.split())))
+            buffer = []
+            depth = 0
+    if buffer:
+        lines.append((start_line, " ".join(" ".join(buffer).replace("(", " ").replace(")", " ").split())))
+    return lines
+
+
+def _absolute_zone_name(value: str, origin: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "@":
+        return origin
+    if normalized.endswith("."):
+        return normalized[:-1]
+    return f"{normalized}.{origin}" if normalized != origin and not normalized.endswith(f".{origin}") else normalized
+
+
+def parse_zone_records(
+    zone_text: str,
+    domain: str,
+    dns_settings: DnsSettings | None = None,
+) -> tuple[list[dict[str, str | bool | None]], list[str]]:
     records: list[dict[str, str | bool | None]] = []
     errors: list[str] = []
     origin = domain.strip().strip(".").lower()
-    for line_number, raw_line in enumerate(zone_text.splitlines(), start=1):
-        line = raw_line.split(";", 1)[0].strip()
-        if not line or line.startswith("$TTL"):
+    scoped_domain = origin
+    metadata = authoritative_zone_metadata(dns_settings, scoped_domain) if dns_settings and dns_settings.authoritative else None
+    for line_number, line in _zone_logical_lines(zone_text):
+        if line.upper().startswith("$TTL"):
+            parts = line.split()
+            if metadata and len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) != metadata["ttl"]:
+                errors.append(
+                    f"Line {line_number}: zone TTL must match the Authoritative DNS setting ({metadata['ttl']})."
+                )
             continue
         if line.upper().startswith("$ORIGIN"):
             parts = line.split()
             if len(parts) >= 2:
                 origin = parts[1].strip().strip(".").lower()
+                if origin != scoped_domain:
+                    errors.append(f"Line {line_number}: zone origin must remain {scoped_domain}.")
             continue
         parts = line.split()
         if len(parts) < 3:
@@ -356,12 +478,56 @@ def parse_zone_records(zone_text: str, domain: str) -> tuple[list[dict[str, str 
             errors.append(f"Line {line_number}: expected a record type and value.")
             continue
         record_type = tokens[0].upper()
+        hostname = _zone_hostname(host, origin)
+        if record_type in {"SOA", "NS"}:
+            if not metadata:
+                errors.append(
+                    f"Line {line_number}: enable Authoritative DNS before importing {record_type} structural records."
+                )
+                continue
+            if hostname != scoped_domain:
+                errors.append(f"Line {line_number}: {record_type} must be owned by the zone apex (@).")
+                continue
+            if record_type == "NS":
+                imported_server = _absolute_zone_name(tokens[1], origin)
+                if imported_server != metadata["server"]:
+                    errors.append(
+                        f"Line {line_number}: primary NS must match the Authoritative DNS setting ({metadata['server']})."
+                    )
+                continue
+            values = tokens[1:]
+            if len(values) < 7:
+                errors.append(
+                    f"Line {line_number}: SOA requires primary server, administrator, serial, refresh, retry, expire, and minimum TTL."
+                )
+                continue
+            imported = {
+                "server": _absolute_zone_name(values[0], origin),
+                "contact": _absolute_zone_name(values[1], origin),
+                "serial": values[2],
+                "refresh": values[3],
+                "retry": values[4],
+                "expire": values[5],
+                "ttl": values[6],
+            }
+            expected = {key: str(metadata[key]) for key in imported}
+            imported = {key: str(value) for key, value in imported.items()}
+            if imported != expected:
+                errors.append(
+                    f"Line {line_number}: SOA metadata must match the shared Authoritative DNS settings."
+                )
+            continue
         if record_type in {"TXT", "SRV", "MX", "CAA"}:
             value = " ".join(tokens[1:]).strip()
         else:
             value = tokens[1].strip().strip(".").lower()
         value = dns_record_value_from_zone_file(record_type, value)
-        hostname = _zone_hostname(host, origin)
+        if metadata and record_type in {"A", "AAAA"} and hostname == metadata["server"]:
+            if value not in metadata["glue_addresses"]:
+                errors.append(
+                    f"Line {line_number}: nameserver glue must use a selected DNS listen address."
+                )
+            continue
         record_errors = validate_dns_record(hostname, record_type, value)
         if record_errors:
             errors.extend(f"Line {line_number}: {error}" for error in record_errors)
@@ -417,6 +583,13 @@ def dns_settings_to_dict(settings: DnsSettings, conditional_forwarders: str | No
         "cache_size": settings.cache_size,
         "expand_hosts": settings.expand_hosts,
         "authoritative": settings.authoritative,
+        "authoritative_server": authoritative_server_name(settings),
+        "authoritative_contact": authoritative_contact_name(settings),
+        "authoritative_ttl": settings.authoritative_ttl,
+        "authoritative_serial": settings.authoritative_serial,
+        "authoritative_refresh": settings.authoritative_refresh,
+        "authoritative_retry": settings.authoritative_retry,
+        "authoritative_expire": settings.authoritative_expire,
         "dnssec_enabled": settings.dnssec_enabled,
         "rebind_protection_enabled": settings.rebind_protection_enabled,
         "rebind_domain_exemptions": settings.rebind_domain_exemptions,
@@ -521,6 +694,47 @@ def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord], condi
     for domain in split_domains(settings.domain):
         if any(character.isspace() for character in domain):
             errors.append(f"DNS domain {domain} must not contain whitespace.")
+        elif not _valid_dns_hostname(domain):
+            errors.append(f"DNS domain {domain} must be a valid domain name.")
+    if settings.authoritative:
+        domains = split_domains(settings.domain)
+        server = authoritative_server_name(settings)
+        contact = authoritative_contact_name(settings)
+        listen_addresses = split_addresses(settings.listen_address)
+        if not _valid_dns_hostname(server):
+            errors.append("Authoritative DNS primary nameserver must be a valid fully qualified DNS name.")
+        elif not any(server == domain or server.endswith(f".{domain}") for domain in domains):
+            errors.append("Authoritative DNS primary nameserver must belong to one of the managed domains.")
+        if not _valid_dns_hostname(contact):
+            errors.append("Authoritative DNS administrator must be a valid SOA DNS name.")
+        if settings.enabled and not listen_addresses:
+            errors.append("Authoritative DNS requires at least one selected listen address for nameserver glue.")
+        timer_values = {
+            "TTL": settings.authoritative_ttl,
+            "refresh": settings.authoritative_refresh,
+            "retry": settings.authoritative_retry,
+            "expire": settings.authoritative_expire,
+        }
+        for label, value in timer_values.items():
+            if not value or value <= 0 or value > 2147483647:
+                errors.append(f"Authoritative DNS {label} must be between 1 and 2147483647 seconds.")
+        if settings.authoritative_expire and settings.authoritative_expire <= max(
+            settings.authoritative_refresh or 0,
+            settings.authoritative_retry or 0,
+        ):
+            errors.append("Authoritative DNS expire must be greater than both refresh and retry.")
+        if not settings.authoritative_serial or not 1 <= settings.authoritative_serial <= 4294967295:
+            errors.append("Authoritative DNS serial must be between 1 and 4294967295.")
+        for record in records:
+            if record.enabled is False or record.hostname.strip().strip(".").lower() != server:
+                continue
+            record_type = record.record_type.strip().upper()
+            if record_type == "CNAME":
+                errors.append(f"Authoritative DNS primary nameserver {server} cannot also be a CNAME.")
+            elif record_type in {"A", "AAAA"} and record.address not in listen_addresses:
+                errors.append(
+                    f"Authoritative DNS glue record {server} must use a selected DNS listen address; remove {record.address}."
+                )
     for address in split_addresses(settings.listen_address):
         _validate_ip(address, f"DNS listen address {address}", errors)
     for server in split_servers(settings.upstream_servers):
@@ -551,6 +765,32 @@ def validate_dns_settings(settings: DnsSettings, records: list[DnsRecord], condi
     if (settings.cache_size or 0) < 0:
         errors.append("DNS cache size must be zero or greater.")
     return errors
+
+
+def validate_authoritative_dns_record(
+    settings: DnsSettings,
+    hostname: str,
+    record_type: str,
+    address: str,
+) -> list[str]:
+    """Reject operator records that conflict with generated nameserver glue."""
+    if not settings.authoritative:
+        return []
+    server = authoritative_server_name(settings)
+    if hostname.strip().strip(".").lower() != server:
+        return []
+    normalized_type = record_type.strip().upper()
+    if normalized_type == "CNAME":
+        return [
+            f"{server} is the generated authoritative nameserver and cannot also be a CNAME; "
+            "change Primary nameserver in Authoritative DNS settings instead."
+        ]
+    if normalized_type in {"A", "AAAA"} and address not in split_addresses(settings.listen_address):
+        return [
+            f"{server} glue is generated from selected DNS listen addresses; "
+            "change DNS listen interfaces or Primary nameserver instead of adding this record."
+        ]
+    return []
 
 
 def validate_dns_listen_targets(settings: DnsSettings, available_interface_names: set[str]) -> list[str]:
@@ -791,6 +1031,7 @@ def render_dnsmasq_config(
     fallback_upstream_servers: list[str] | None = None,
     esxi_pxe_boot: dict | None = None,
 ) -> str:
+    ensure_dns_authoritative_defaults(dns_settings)
     domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
     scopes = dhcp_scopes if dhcp_scopes else [_legacy_scope(dhcp_settings)]
     lines = [
@@ -813,7 +1054,23 @@ def render_dnsmasq_config(
             lines.append(f"rebind-domain-ok=/{domain}/")
     for domain in domains:
         lines.append(f"domain={domain}")
-        lines.append(f"local=/{domain}/")
+        if dns_settings.authoritative:
+            lines.append(f"auth-zone={domain}")
+        else:
+            lines.append(f"local=/{domain}/")
+    if dns_settings.authoritative:
+        server = authoritative_server_name(dns_settings)
+        authoritative_interfaces = split_interfaces(dns_settings.listen_interface)
+        auth_server = ",".join([server, *authoritative_interfaces])
+        lines.append(f"auth-server={auth_server}")
+        lines.append(
+            "auth-soa="
+            f"{dns_settings.authoritative_serial},{authoritative_contact_name(dns_settings)},"
+            f"{dns_settings.authoritative_refresh},{dns_settings.authoritative_retry},{dns_settings.authoritative_expire}"
+        )
+        lines.append(f"auth-ttl={dns_settings.authoritative_ttl}")
+        for listen_address in split_addresses(dns_settings.listen_address):
+            lines.append(f"host-record={server},{listen_address}")
     if dns_settings.expand_hosts:
         lines.append("expand-hosts")
     if dhcp_settings.enabled and dhcp_settings.authoritative:
@@ -831,6 +1088,8 @@ def render_dnsmasq_config(
         if record.enabled is False:
             continue
         record_type = record.record_type.upper()
+        if dns_settings.authoritative and record_type in {"A", "AAAA"} and record.hostname.strip().strip(".").lower() == authoritative_server_name(dns_settings):
+            continue
         if record_type in {"A", "AAAA"}:
             # dnsmasq host-record also creates the matching PTR record.
             lines.append(f"host-record={record.hostname},{record.address}")

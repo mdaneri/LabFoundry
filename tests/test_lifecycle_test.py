@@ -157,6 +157,31 @@ def test_full_lifecycle_plan_includes_passwordless_web_terminal_acceptance():
     assert any("Managed LDAP desired state" in check for check in plan["checks"])
 
 
+def test_authoritative_dns_lifecycle_probe_covers_authority_reverse_nxdomain_and_recursion():
+    import base64
+
+    lifecycle = load_lifecycle_module()
+    command = lifecycle.authoritative_dns_probe_command("labfoundry.internal", "192.168.50.1", "192.168.50.1")
+    encoded = command.split()[2]
+    script = base64.b64decode(encoded).decode("utf-8")
+
+    assert '(domain, 6, 0, 6, True)' in script
+    assert '(domain, 2, 0, 2, True)' in script
+    assert '("ns1." + domain, 1, 0, 1, True)' in script
+    assert '("interop-appliance." + domain, 1, 0, 1, True)' in script
+    assert 'query("missing-authoritative." + domain, 1)' in script
+    assert "assert 6 in sections[1]" in script
+
+    recursive_command = lifecycle.recursive_dns_probe_command("127.0.0.1", "192.168.50.1")
+    recursive_script = base64.b64decode(recursive_command.split()[2]).decode("utf-8")
+    assert "1.50.168.192.in-addr.arpa" in recursive_script
+    assert 'query("example.com", 1)' in recursive_script
+
+    source = Path(lifecycle.__file__).read_text(encoding="utf-8")
+    assert 'run_step(results, "authoritative-dns-state-check", authoritative_dns_state_check, args)' in source
+    assert 'run_step(results, "recursive-dns-state-check", recursive_dns_state_check, args)' in source
+
+
 def test_apply_units_retries_once_when_desired_state_drifts(monkeypatch):
     lifecycle = load_lifecycle_module()
 

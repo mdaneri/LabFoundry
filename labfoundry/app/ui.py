@@ -171,6 +171,7 @@ from labfoundry.app.services.dnsmasq import (
     DHCP_DENY_RESERVATION_DESCRIPTION_PREFIX,
     DNS_CONDITIONAL_FORWARDERS_SETTING_KEY,
     DNS_HOSTNAME_PATTERN,
+    authoritative_zone_metadata,
     dump_dns_record_data,
     compact_dhcp_range_expression,
     dhcp_bind_target_families,
@@ -180,6 +181,7 @@ from labfoundry.app.services.dnsmasq import (
     dhcp_scope_to_dict,
     dnsmasq_tag,
     effective_dns_upstream_servers,
+    ensure_dns_authoritative_defaults,
     join_conditional_forwarders,
     join_addresses,
     join_domains,
@@ -204,6 +206,7 @@ from labfoundry.app.services.dnsmasq import (
     validate_dhcp_bind_targets,
     validate_dhcp_settings,
     validate_dns_listen_targets,
+    validate_authoritative_dns_record,
     validate_dns_settings,
 )
 from labfoundry.app.services.ca import (
@@ -775,6 +778,9 @@ def get_dns_settings_row(db: Session) -> DnsSettings:
     if settings is None:
         settings = DnsSettings()
         db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    if ensure_dns_authoritative_defaults(settings):
         db.commit()
         db.refresh(settings)
     return settings
@@ -3933,7 +3939,7 @@ def dnsmasq_context(db: Session, *, reconcile: bool = True) -> dict:
         validation_errors.append("ESXi PXE boot services require DHCP to be enabled so clients receive boot files.")
     dns_domains = split_domains(dns_settings.domain) or ["labfoundry.internal"]
     dns_warnings = dns_domain_warnings(dns_domains)
-    dns_record_groups = dns_records_by_domain(dns_records, dns_domains)
+    dns_record_groups = dns_records_by_domain(dns_records, dns_domains, dns_settings)
     for group in dns_record_groups:
         group["suggested_ipv4"] = dns_record_suggested_ipv4(dns_records, group["domain"], dhcp_scopes, dhcp_reservations)
     reverse_zone_groups = reverse_records_by_zone(dns_reverse_records(dns_records))
@@ -4723,7 +4729,7 @@ def available_service_listen_addresses(current_addresses: str | None, listen_opt
     return choices
 
 
-def dns_records_by_domain(records: list[DnsRecord], domains: list[str]) -> list[dict]:
+def dns_records_by_domain(records: list[DnsRecord], domains: list[str], dns_settings: DnsSettings | None = None) -> list[dict]:
     groups = [{"domain": domain, "records": []} for domain in domains]
     group_map = {group["domain"]: group for group in groups}
     for record in records:
@@ -4732,7 +4738,8 @@ def dns_records_by_domain(records: list[DnsRecord], domains: list[str]) -> list[
         group_map[domain]["records"].append(dns_record_payload(record, domain))
     for group in groups:
         group["hosts_editor_text"] = render_zone_hosts_records(group["records"])
-        group["zone_file_text"] = render_zone_file(group["domain"], group["records"])
+        group["authority"] = authoritative_zone_metadata(dns_settings, group["domain"]) if dns_settings and dns_settings.authoritative else None
+        group["zone_file_text"] = render_zone_file(group["domain"], group["records"], dns_settings)
     return groups
 
 
@@ -7031,6 +7038,12 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
             context=dnsmasq,
             summary=[
                 "DNS enabled" if dnsmasq["dns_settings"].enabled else "DNS disabled",
+                (
+                    f"{len(split_domains(dnsmasq['dns_settings'].domain))} authoritative zones via "
+                    f"{dnsmasq['dns_settings'].authoritative_server} (serial {dnsmasq['dns_settings'].authoritative_serial})"
+                    if dnsmasq["dns_settings"].authoritative
+                    else f"{len(split_domains(dnsmasq['dns_settings'].domain))} local zones"
+                ),
                 "DHCP enabled" if dnsmasq["dhcp_settings"].enabled else "DHCP disabled",
                 f"{len(dnsmasq['dns_records'])} DNS records",
                 f"{len(dnsmasq['dhcp_scopes'])} DHCP scopes",
@@ -7246,6 +7259,12 @@ def dnsmasq_apply_status(db: Session, dnsmasq: dict[str, Any]) -> dict[str, Any]
         context=dnsmasq,
         summary=[
             "DNS enabled" if dnsmasq["dns_settings"].enabled else "DNS disabled",
+            (
+                f"{len(split_domains(dnsmasq['dns_settings'].domain))} authoritative zones via "
+                f"{dnsmasq['dns_settings'].authoritative_server} (serial {dnsmasq['dns_settings'].authoritative_serial})"
+                if dnsmasq["dns_settings"].authoritative
+                else f"{len(split_domains(dnsmasq['dns_settings'].domain))} local zones"
+            ),
             "DHCP enabled" if dnsmasq["dhcp_settings"].enabled else "DHCP disabled",
             f"{len(dnsmasq['dns_records'])} DNS records",
             f"{len(dnsmasq['dhcp_scopes'])} DHCP scopes",
@@ -11834,6 +11853,12 @@ def update_dns_from_ui(
     cache_size: int = Form(1000),
     expand_hosts: str | None = Form(None),
     authoritative: str | None = Form(None),
+    authoritative_server: str = Form(""),
+    authoritative_contact: str = Form(""),
+    authoritative_ttl: int = Form(3600),
+    authoritative_refresh: int = Form(1200),
+    authoritative_retry: int = Form(180),
+    authoritative_expire: int = Form(1209600),
     dnssec_enabled: str | None = Form(None),
     rebind_protection_enabled: str | None = Form(None),
     rebind_domain_exemptions: str = Form(""),
@@ -11879,13 +11904,31 @@ def update_dns_from_ui(
     settings.cache_size = cache_size
     settings.expand_hosts = expand_hosts == "on"
     settings.authoritative = authoritative == "on"
+    settings.authoritative_server = authoritative_server.strip().strip(".").lower()
+    settings.authoritative_contact = authoritative_contact.strip().strip(".").lower()
+    settings.authoritative_ttl = authoritative_ttl
+    settings.authoritative_refresh = authoritative_refresh
+    settings.authoritative_retry = authoritative_retry
+    settings.authoritative_expire = authoritative_expire
     settings.dnssec_enabled = dnssec_enabled == "on"
     settings.rebind_protection_enabled = rebind_protection_enabled == "on"
     settings.rebind_domain_exemptions = join_domains(split_domains(rebind_domain_exemptions))
     settings.query_logging_mode = query_logging_mode if query_logging_mode in {"off", "queries-extra"} else "off"
     settings.updated_at = utcnow()
     db.commit()
-    record_audit(db, actor=identity.username, action="update_dns_settings", resource_type="dns", resource_id=str(settings.id))
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_dns_settings",
+        resource_type="dns",
+        resource_id=str(settings.id),
+        detail=(
+            f"authoritative={settings.authoritative}; primary={settings.authoritative_server}; "
+            f"contact={settings.authoritative_contact}; ttl={settings.authoritative_ttl}; "
+            f"serial={settings.authoritative_serial}; refresh={settings.authoritative_refresh}; "
+            f"retry={settings.authoritative_retry}; expire={settings.authoritative_expire}"
+        ),
+    )
     if request.headers.get("X-LabFoundry-Autosave") == "1":
         context = dnsmasq_context(db)
         return JSONResponse(
@@ -11904,6 +11947,7 @@ def update_dns_from_ui(
                 "dnssec_enabled": context["dns_settings"].dnssec_enabled,
                 "rebind_protection_enabled": context["dns_settings"].rebind_protection_enabled,
                 "query_logging_mode": context["dns_settings"].query_logging_mode,
+                "authoritative_serial": context["dns_settings"].authoritative_serial,
             }
         )
     return RedirectResponse("/dns", status_code=303)
@@ -12006,6 +12050,7 @@ def create_dns_record_from_ui(
     address = address.strip()
     record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
+    validation_errors.extend(validate_authoritative_dns_record(get_dns_settings_row(db), hostname, record_type, address))
     if validation_errors:
         return render(
             request,
@@ -12103,6 +12148,7 @@ def edit_dns_record_from_ui(
     address = address.strip()
     record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
+    validation_errors.extend(validate_authoritative_dns_record(get_dns_settings_row(db), hostname, record_type, address))
     if validation_errors:
         return render(
             request,
@@ -12181,16 +12227,38 @@ def import_dns_hosts_from_ui(
             },
             status_code=422,
     )
-    replace = replace_existing == "on"
     scoped_domain = domain.strip().strip(".").lower()
+    dns_settings = get_dns_settings_row(db)
+    for item in parsed_records:
+        if scoped_domain:
+            item["hostname"] = normalize_dns_hostname(str(item["hostname"]), scoped_domain)
+        errors.extend(
+            validate_authoritative_dns_record(
+                dns_settings,
+                str(item["hostname"]),
+                str(item["record_type"]),
+                str(item["address"]),
+            )
+        )
+    if errors:
+        return render(
+            request,
+            "dns.html",
+            {
+                "identity": identity,
+                **dnsmasq_context(db),
+                "bulk_error": " ".join(errors),
+                "hosts_editor_text": hosts_text,
+            },
+            status_code=422,
+        )
+    replace = replace_existing == "on"
     if replace:
         records_to_delete = records_for_domain(db, scoped_domain) if scoped_domain else db.execute(select(DnsRecord)).scalars().all()
         for record in records_to_delete:
             db.delete(record)
         db.flush()
     for item in parsed_records:
-        if scoped_domain:
-            item["hostname"] = normalize_dns_hostname(str(item["hostname"]), scoped_domain)
         existing = None
         if not replace:
             existing = db.execute(
@@ -12245,7 +12313,7 @@ def import_dns_zone_from_ui(
 ) -> RedirectResponse | HTMLResponse:
     verify_csrf(request, csrf)
     scoped_domain = domain.strip().strip(".").lower()
-    parsed_records, errors = parse_zone_records(zone_text, scoped_domain)
+    parsed_records, errors = parse_zone_records(zone_text, scoped_domain, get_dns_settings_row(db))
     if errors:
         return render(
             request,

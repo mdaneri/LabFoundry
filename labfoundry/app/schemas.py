@@ -553,6 +553,12 @@ class DnsSettingsUpdate(BaseModel):
     cache_size: int = Field(default=1000, ge=0, le=100000)
     expand_hosts: bool = True
     authoritative: bool = True
+    authoritative_server: str = Field(default="ns1.labfoundry.internal", min_length=1, max_length=253)
+    authoritative_contact: str = Field(default="hostmaster.labfoundry.internal", min_length=1, max_length=253)
+    authoritative_ttl: int = Field(default=3600, ge=1, le=2147483647)
+    authoritative_refresh: int = Field(default=1200, ge=1, le=2147483647)
+    authoritative_retry: int = Field(default=180, ge=1, le=2147483647)
+    authoritative_expire: int = Field(default=1209600, ge=1, le=2147483647)
     dnssec_enabled: bool = False
     rebind_protection_enabled: bool = False
     rebind_domain_exemptions: str = ""
@@ -563,6 +569,7 @@ class DnsSettingsResponse(DnsSettingsUpdate):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    authoritative_serial: int
     config_path: str
     updated_at: datetime
 
