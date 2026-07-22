@@ -185,6 +185,44 @@ def test_esx_storage_lifecycle_plan_is_dual_stack_and_format_is_explicit():
     assert any("NFS 3 and 4.1" in check and "IPv4/IPv6" in check for check in plan["checks"])
 
 
+def test_esx_storage_only_lifecycle_runs_no_unrelated_service_configuration(monkeypatch):
+    lifecycle = load_lifecycle_module()
+    args = lifecycle.parse_args(["--password", "test", "--esx-storage-test", "--esx-storage-only"])
+    called: list[str] = []
+
+    monkeypatch.setattr(
+        lifecycle,
+        "run_step",
+        lambda _results, name, _function, *_args: called.append(name),
+    )
+
+    lifecycle.run_esx_storage_lifecycle([], object(), args)
+
+    assert called == [
+        "appliance-health",
+        "configure-network",
+        "configure-dns-dhcp",
+        "configure-esx-storage",
+        "configure-esxi-pxe",
+        "configure-firewall",
+        "apply-esx-storage-connectivity",
+        "esx-storage-host-state-checks",
+    ]
+    assert "configure-ntp" not in called
+
+
+def test_esxi_kickstart_configures_equal_storage_families_and_management_path():
+    lifecycle = load_lifecycle_module()
+    args = lifecycle.parse_args(["--password", "test"])
+
+    content = lifecycle.lifecycle_esxi_kickstart_content(args)
+
+    assert "--interface-name=vmk0 --type=static --ipv4=192.168.50.210 --netmask=255.255.255.0" in content
+    assert "--interface-name=vmk0 --ipv6=fd00:50::210/64" in content
+    assert "--interface-name=vmk1 --type=static --ipv4=192.168.49.210 --netmask=255.255.255.0" in content
+    assert "--server=192.168.50.1" in content
+
+
 def test_apply_units_requires_and_submits_esx_format_confirmation(monkeypatch):
     lifecycle = load_lifecycle_module()
 
@@ -238,6 +276,22 @@ def test_authoritative_dns_lifecycle_probe_covers_authority_reverse_nxdomain_and
     recursive_command = lifecycle.recursive_dns_probe_command("127.0.0.1", "192.168.50.1")
     recursive_script = base64.b64decode(recursive_command.split()[2]).decode("utf-8")
     assert "1.50.168.192.in-addr.arpa" in recursive_script
+
+
+def test_direct_aaaa_probe_uses_qtype_28_without_guest_dig_dependency():
+    import base64
+
+    lifecycle = load_lifecycle_module()
+    command = lifecycle.direct_dns_aaaa_query_command(
+        "nfs-fd00-50-0-0-0-0-0-1.labfoundry.internal",
+        "127.0.0.1",
+        "fd00:50::1",
+    )
+    script = base64.b64decode(command.split()[2]).decode("utf-8")
+
+    assert 'struct.pack("!HH", 28, 1)' in script
+    assert "socket.inet_ntop(socket.AF_INET6, rdata)" in script
+    assert "dig" not in command
     assert 'query("example.com", 1)' in recursive_script
 
     source = Path(lifecycle.__file__).read_text(encoding="utf-8")
@@ -347,7 +401,7 @@ def test_esxi_pxe_payload_uses_dhcp_lifecycle_host():
     args = lifecycle.parse_args(["--password", "test", "--pxe-test-mode", "esxi", "--pxe-client-mac", "00:50:56:20:01:02"])
 
     assert lifecycle.pxe_client_ip(args) == "192.168.50.210"
-    content = lifecycle.lifecycle_esxi_kickstart_content()
+    content = lifecycle.lifecycle_esxi_kickstart_content(args)
 
     assert "network --bootproto=dhcp" in content
     assert "{{" not in content

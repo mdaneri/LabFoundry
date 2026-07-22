@@ -79,6 +79,28 @@ policy-compliant value because Local Users enforces the appliance password
 policy before OS sync. Override them with `-AdminPassword`, `-SshPassword`, and
 `-VcfBackupPassword` when testing a different image.
 
+Run the destructive ESX Storage acceptance explicitly with an ESX 9 installer
+ISO and a separate formatting confirmation:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File scripts/windows/hyperv/invoke-lifecycle-test.ps1 `
+  -EsxIsoPath test-results/esxi-9.1/VMware-VMvisor-Installer-9.1.0.0100.25433460.x86_64.iso `
+  -EsxStorageTest `
+  -ConfirmEsxStorageFormat `
+  -SkipBackupRestoreTest
+```
+
+This mode creates a dedicated 20 GiB blank VHDX for the appliance and an 80
+GiB ESX system VHDX. It deploys the current checkout to the lifecycle appliance
+before configuring desired state; pass `-SkipCurrentSourceDeploy` only when the
+selected parent image already contains the exact code under test. The ESX VM
+uses `192.168.12.210` and `fd00:12::210` on the storage VMkernel and
+`192.168.49.210` on a separate management VMkernel. IPv4 and IPv6 are tested as
+equal paths, not as preferred and fallback families. This switch intentionally
+runs the focused network, DNS, Firewall, ESX Storage, and ESXi PXE path so an
+unrelated optional service cannot mask the storage acceptance result.
+
 The lifecycle web probe defaults to `https://<ApplianceIPAddress>`. Fresh
 appliance images install nginx with CA-backed management HTTPS/443 and
 redirect public HTTP/80 to HTTPS; override the probe with `-ApplianceUrl` only
@@ -187,7 +209,7 @@ The lifecycle runner records structured evidence in
 The runner submits only global `/appliance-apply` units. It does not call
 service-specific apply routes.
 
-ESX Storage acceptance records the global job IDs, stable disk identity and fingerprint, generated family names, direct A/AAAA answers, `exportfs -v`, listening TCP sockets, nftables `ip saddr`/`ip6 saddr` rules, ESX datastore listings, and post-reboot data probes. IPv4 and IPv6 must both pass before the feature PR is ready.
+ESX Storage acceptance records the global job IDs, stable disk identity and fingerprint, generated family names, direct A/AAAA answers, `exportfs -v`, listening TCP sockets, nftables `ip saddr`/`ip6 saddr` rules, ESX datastore listings, all four protocol/family write-read-delete probes, and post-reboot data probes in `esx-nfs-acceptance-initial.json` and `esx-nfs-acceptance-after-reboot.json`. IPv4 and IPv6 must both pass before the feature PR is ready.
 
 ## Dry-Run Boundary
 

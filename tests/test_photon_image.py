@@ -400,10 +400,25 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
     assert "$clientBName = \"$LabName-ClientB\"" in script
     assert "$pxeClientName = \"$LabName-PxeBoot\"" in script
     assert "New-LifecyclePxeVm -Name $pxeClientName -SwitchName 'LabFoundry-SiteA'" in script
+    assert "Set-VMNetworkAdapter -VMName $Name -Name 'PXE-SiteA' -StaticMacAddress" in script
     assert "Invoke-PxeBootSmoke -Name $pxeClientName -MacAddress $pxeClientMac" in script
     assert "[string]$EsxIsoPath = ''" in script
     assert "[string]$EsxIsoPath = ''" in wrapper
     assert "'-EsxIsoPath', $EsxIsoPath" in wrapper
+    assert "[switch]$EsxStorageTest" in script
+    assert "[switch]$ConfirmEsxStorageFormat" in script
+    assert "New-VHD -Path $esxStorageDisk -Dynamic -SizeBytes $EsxStorageDiskSizeBytes" in script
+    assert "Ensure-HardDisk -VMName $applianceName -Path $lifecycleDepotDisk" in script
+    assert "Ensure-HardDisk -VMName $applianceName -Path $lifecycleBackupDisk" in script
+    assert "Ensure-HardDisk -VMName $applianceName -Path $esxStorageDisk" in script
+    assert "'--site-ipv6-cidr', $SiteIPv6Cidr" in script
+    assert "'--esx-storage-test'" in script
+    assert "'--esx-storage-only'" in script
+    assert "'--confirm-esx-storage-format'" in script
+    assert "Invoke-EsxNfsAcceptance" in script
+    assert "vmkping -6 -I vmk0" in script
+    assert "esx-nfs-acceptance-after-reboot.json" in script
+    assert "-ConfirmEsxStorageFormat" in wrapper
     assert "--pxe-test-mode" in runner
     assert "--pxe-client-mac" in runner
     assert "--pxe-installer-iso-path" in runner

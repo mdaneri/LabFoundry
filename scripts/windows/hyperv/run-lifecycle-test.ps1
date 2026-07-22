@@ -15,7 +15,16 @@ param(
     [int]$ClientProcessorCount = 1,
     [string]$SiteInterface = 'eth1.12',
     [string]$SiteCidr = '192.168.12.1/24',
+    [string]$SiteIPv6Cidr = 'fd00:12::1/64',
     [int]$SiteVlanId = 12,
+    [switch]$EsxStorageTest,
+    [switch]$ConfirmEsxStorageFormat,
+    [int64]$EsxStorageDiskSizeBytes = 20GB,
+    [string]$EsxStorageIPv4Client = '192.168.12.210/32',
+    [string]$EsxStorageIPv6Client = 'fd00:12::210/128',
+    [string]$EsxManagementCidr = '192.168.49.210/24',
+    [string]$EsxRootPassword = 'vmware01!',
+    [switch]$SkipCurrentSourceDeploy,
     [int]$VlanId = 50,
     [string]$TaggedVlanCidr = '192.168.60.1/24',
     [string]$WanCidr = '172.31.50.1/24',
@@ -49,6 +58,13 @@ $resultRoot = Join-Path $repoRoot "test-results\hyperv-lifecycle\$resultStamp"
 $diskRoot = Join-Path $resultRoot 'disks'
 $seedRoot = Join-Path $resultRoot 'seed'
 $createdVms = New-Object System.Collections.Generic.List[string]
+
+if ($EsxStorageTest -and -not $EsxIsoPath) {
+    throw '-EsxStorageTest requires -EsxIsoPath so the NFS acceptance runs on ESX 9.'
+}
+if ($EsxStorageTest -and -not $ConfirmEsxStorageFormat) {
+    throw '-EsxStorageTest requires explicit -ConfirmEsxStorageFormat authorization for the lifecycle blank disk.'
+}
 
 function Assert-SafeLifecycleName {
     param([string]$Name)
@@ -244,6 +260,12 @@ function Set-LifecycleNetworkTopology {
     Ensure-NetworkAdapter -VMName $clientAName -Name 'Appliance-Mgmt-Test' -SwitchName 'LabFoundry-Mgmt'
     Ensure-NetworkAdapter -VMName $clientBName -Name 'WAN-Test' -SwitchName 'LabFoundry-SiteB'
     Ensure-NetworkAdapter -VMName $pxeClientName -Name 'PXE-SiteA' -SwitchName 'LabFoundry-SiteA'
+    if ($EsxIsoPath) {
+        Ensure-NetworkAdapter -VMName $pxeClientName -Name 'ESX-Management' -SwitchName 'LabFoundry-Mgmt'
+        if ($PSCmdlet.ShouldProcess("$pxeClientName/ESX-Management", 'Use untagged management traffic')) {
+            Set-VMNetworkAdapterVlan -VMName $pxeClientName -VMNetworkAdapterName 'ESX-Management' -Untagged
+        }
+    }
 
     if ($PSCmdlet.ShouldProcess("$applianceName/Trunk", "Enable trunk VLAN $VlanId")) {
         Set-VMNetworkAdapterVlan -VMName $applianceName -VMNetworkAdapterName 'Trunk' -Trunk -AllowedVlanIdList "$VlanId" -NativeVlanId 0
@@ -350,8 +372,13 @@ function New-LifecyclePxeVm {
         Write-Host "Reusing lifecycle PXE VM: $Name"
     }
     elseif ($PSCmdlet.ShouldProcess($Name, 'Create lifecycle PXE-only Hyper-V VM')) {
-        New-VM -Name $Name -Generation 2 -MemoryStartupBytes 1GB -SwitchName $SwitchName | Out-Null
-        Set-VMProcessor -VMName $Name -Count 1
+        $memoryBytes = if ($EsxIsoPath) { 12GB } else { 1GB }
+        $processorCount = if ($EsxIsoPath) { 4 } else { 1 }
+        New-VM -Name $Name -Generation 2 -MemoryStartupBytes $memoryBytes -SwitchName $SwitchName | Out-Null
+        Set-VMProcessor -VMName $Name -Count $processorCount
+        if ($EsxIsoPath) {
+            Set-VMProcessor -VMName $Name -ExposeVirtualizationExtensions $true
+        }
         Set-VMFirmware -VMName $Name -EnableSecureBoot Off
         if (-not $createdVms.Contains($Name)) {
             $createdVms.Add($Name)
@@ -362,6 +389,11 @@ function New-LifecyclePxeVm {
     $adapter = Get-VMNetworkAdapter -VMName $Name | Select-Object -First 1
     if ($adapter -and $adapter.Name -ne 'PXE-SiteA' -and -not (Get-VMNetworkAdapter -VMName $Name -Name 'PXE-SiteA' -ErrorAction SilentlyContinue)) {
         Rename-VMNetworkAdapter -VMName $Name -Name $adapter.Name -NewName 'PXE-SiteA'
+        $adapter = Get-VMNetworkAdapter -VMName $Name -Name 'PXE-SiteA'
+    }
+    if ($adapter -and $adapter.MacAddress -eq '000000000000') {
+        $suffix = (Get-VM -Name $Name).Id.ToString('N').Substring(0, 6).ToUpperInvariant()
+        Set-VMNetworkAdapter -VMName $Name -Name 'PXE-SiteA' -StaticMacAddress "00155D$suffix"
         $adapter = Get-VMNetworkAdapter -VMName $Name -Name 'PXE-SiteA'
     }
     if ($adapter -and $PSCmdlet.ShouldProcess($Name, 'Prefer network adapter for PXE boot')) {
@@ -397,23 +429,32 @@ function Copy-EsxIsoToAppliance {
     $quotedPath = ConvertTo-ShellSingleQuoted -Value $remotePath
     $quotedPassword = ConvertTo-ShellSingleQuoted -Value $SshPassword
 
-    & plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" "printf '%s\n' $quotedPassword | sudo -S mkdir -p $quotedRoot"
+    $plinkArguments = @('-batch', '-ssh')
+    $pscpArguments = @('-batch')
+    if ($script:applianceHostKey) {
+        $plinkArguments += @('-hostkey', $script:applianceHostKey)
+        $pscpArguments += @('-hostkey', $script:applianceHostKey)
+    }
+    $plinkArguments += @('-pw', $SshPassword, "$ApplianceSshUser@$ApplianceIPAddress")
+    $pscpArguments += @('-pw', $SshPassword)
+
+    & plink @plinkArguments "printf '%s\n' $quotedPassword | sudo -S mkdir -p $quotedRoot" | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to create remote ESX ISO directory on the appliance."
     }
-    & pscp -batch -pw $SshPassword $Path "$ApplianceSshUser@${ApplianceIPAddress}:$remoteTmp"
+    & pscp @pscpArguments $Path "$ApplianceSshUser@${ApplianceIPAddress}:$remoteTmp" | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to copy ESX ISO to appliance staging path."
     }
-    & plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" "printf '%s\n' $quotedPassword | sudo -S mv $quotedTmp $quotedPath"
+    & plink @plinkArguments "printf '%s\n' $quotedPassword | sudo -S mv $quotedTmp $quotedPath" | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install ESX ISO under $remoteRoot on the appliance."
     }
-    & plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" "printf '%s\n' $quotedPassword | sudo -S chmod 0644 $quotedPath"
+    & plink @plinkArguments "printf '%s\n' $quotedPassword | sudo -S chmod 0644 $quotedPath" | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to chmod ESX ISO under $remoteRoot on the appliance."
     }
-    & plink -batch -ssh -pw $SshPassword "$ApplianceSshUser@$ApplianceIPAddress" "printf '%s\n' $quotedPassword | sudo -S chown labfoundry:labfoundry $quotedPath"
+    & plink @plinkArguments "printf '%s\n' $quotedPassword | sudo -S chown labfoundry:labfoundry $quotedPath" | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to chown ESX ISO under $remoteRoot on the appliance."
     }
@@ -543,14 +584,15 @@ function Get-PlinkHostKey {
     param(
         [string]$HostName,
         [string]$UserName,
-        [string]$Password
+        [string]$Password,
+        [int]$TimeoutMinutes = 4
     )
 
     if (-not $HostName -or -not $Password -or -not (Get-Command plink -ErrorAction SilentlyContinue)) {
         return ''
     }
 
-    $deadline = (Get-Date).AddMinutes(4)
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
     while ((Get-Date) -lt $deadline) {
         if (-not (Test-TcpPort -HostName $HostName -Port 22 -TimeoutMilliseconds 1000)) {
             Start-Sleep -Seconds 5
@@ -577,6 +619,127 @@ function Get-PlinkHostKey {
     }
     Write-Warning "Timed out waiting for SSH host key from $UserName@$HostName; continuing without host key pinning."
     return ''
+}
+
+function ConvertTo-IPv6DnsToken {
+    param([string]$Address)
+
+    $bytes = [System.Net.IPAddress]::Parse($Address).GetAddressBytes()
+    $groups = for ($index = 0; $index -lt 16; $index += 2) {
+        (($bytes[$index] -shl 8) -bor $bytes[$index + 1]).ToString('x')
+    }
+    return ($groups -join '-')
+}
+
+function Invoke-EsxCommand {
+    param(
+        [string]$HostName,
+        [string]$HostKey,
+        [string]$Command
+    )
+
+    $plinkArguments = @('-batch', '-ssh')
+    if ($HostKey) {
+        $plinkArguments += @('-hostkey', $HostKey)
+    }
+    $plinkArguments += @('-pw', $EsxRootPassword, "root@$HostName", $Command)
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & plink @plinkArguments 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $text = ($output | Out-String).Trim()
+    if ($exitCode -ne 0) {
+        throw "ESX command failed with exit code ${exitCode}: $text"
+    }
+    return $text
+}
+
+function Invoke-EsxNfsAcceptance {
+    param(
+        [string]$HostName,
+        [string]$HostKey,
+        [string]$OutputPath,
+        [switch]$AfterReboot
+    )
+
+    $siteIPv4 = $SiteCidr.Split('/')[0]
+    $siteIPv6 = $SiteIPv6Cidr.Split('/')[0]
+    $ipv4Target = "nfs-$($siteIPv4.Replace('.', '-')).labfoundry.internal"
+    $ipv6Target = "nfs-$(ConvertTo-IPv6DnsToken -Address $siteIPv6).labfoundry.internal"
+    if ($AfterReboot) {
+        $command = @(
+            'set -e',
+            "vmkping -I vmk0 $siteIPv4",
+            "vmkping -6 -I vmk0 $siteIPv6",
+            "nslookup $ipv4Target $siteIPv4",
+            "nslookup $ipv6Target $siteIPv4",
+            "grep -Fx lifecycle-persist-v4 /vmfs/volumes/lf-persist-v4/lifecycle-persist-v4.txt",
+            "grep -Fx lifecycle-persist-v6 /vmfs/volumes/lf-persist-v6/lifecycle-persist-v6.txt",
+            'esxcli storage nfs list',
+            'esxcli storage nfs41 list',
+            'esxcli storage filesystem list'
+        ) -join ' && '
+    }
+    else {
+        $command = @(
+            'set -e',
+            "vmkping -I vmk0 $siteIPv4",
+            "vmkping -6 -I vmk0 $siteIPv6",
+            "nslookup $ipv4Target $siteIPv4",
+            "nslookup $ipv6Target $siteIPv4",
+            'esxcli storage nfs remove --volume-name=lf-nfs3-ipv4 >/dev/null 2>&1 || true',
+            'esxcli storage nfs remove --volume-name=lf-nfs3-ipv6 >/dev/null 2>&1 || true',
+            'esxcli storage nfs41 remove --volume-name=lf-nfs41-ipv4 >/dev/null 2>&1 || true',
+            'esxcli storage nfs41 remove --volume-name=lf-nfs41-ipv6 >/dev/null 2>&1 || true',
+            'esxcli storage nfs remove --volume-name=lf-persist-v4 >/dev/null 2>&1 || true',
+            'esxcli storage nfs41 remove --volume-name=lf-persist-v6 >/dev/null 2>&1 || true',
+            "esxcli storage nfs add --host=$ipv4Target --share=/srv/labfoundry/esx-storage/lifecycle-nfs3 --volume-name=lf-nfs3-ipv4",
+            "printf '%s\n' nfs3-ipv4 > /vmfs/volumes/lf-nfs3-ipv4/probe.txt",
+            'grep -Fx nfs3-ipv4 /vmfs/volumes/lf-nfs3-ipv4/probe.txt',
+            'rm /vmfs/volumes/lf-nfs3-ipv4/probe.txt',
+            'esxcli storage nfs remove --volume-name=lf-nfs3-ipv4',
+            "esxcli storage nfs add --host=$ipv6Target --share=/srv/labfoundry/esx-storage/lifecycle-nfs3 --volume-name=lf-nfs3-ipv6",
+            "printf '%s\n' nfs3-ipv6 > /vmfs/volumes/lf-nfs3-ipv6/probe.txt",
+            'grep -Fx nfs3-ipv6 /vmfs/volumes/lf-nfs3-ipv6/probe.txt',
+            'rm /vmfs/volumes/lf-nfs3-ipv6/probe.txt',
+            'esxcli storage nfs remove --volume-name=lf-nfs3-ipv6',
+            "esxcli storage nfs41 add --hosts=$ipv4Target --share=/lifecycle-nfs41 --volume-name=lf-nfs41-ipv4",
+            "printf '%s\n' nfs41-ipv4 > /vmfs/volumes/lf-nfs41-ipv4/probe.txt",
+            'grep -Fx nfs41-ipv4 /vmfs/volumes/lf-nfs41-ipv4/probe.txt',
+            'rm /vmfs/volumes/lf-nfs41-ipv4/probe.txt',
+            'esxcli storage nfs41 remove --volume-name=lf-nfs41-ipv4',
+            "esxcli storage nfs41 add --hosts=$ipv6Target --share=/lifecycle-nfs41 --volume-name=lf-nfs41-ipv6",
+            "printf '%s\n' nfs41-ipv6 > /vmfs/volumes/lf-nfs41-ipv6/probe.txt",
+            'grep -Fx nfs41-ipv6 /vmfs/volumes/lf-nfs41-ipv6/probe.txt',
+            'rm /vmfs/volumes/lf-nfs41-ipv6/probe.txt',
+            'esxcli storage nfs41 remove --volume-name=lf-nfs41-ipv6',
+            "esxcli storage nfs add --host=$ipv4Target --share=/srv/labfoundry/esx-storage/lifecycle-nfs3 --volume-name=lf-persist-v4",
+            "esxcli storage nfs41 add --hosts=$ipv6Target --share=/lifecycle-nfs41 --volume-name=lf-persist-v6",
+            "printf '%s\n' lifecycle-persist-v4 > /vmfs/volumes/lf-persist-v4/lifecycle-persist-v4.txt",
+            "printf '%s\n' lifecycle-persist-v6 > /vmfs/volumes/lf-persist-v6/lifecycle-persist-v6.txt",
+            'esxcli storage nfs list',
+            'esxcli storage nfs41 list',
+            'esxcli storage filesystem list'
+        ) -join ' && '
+    }
+    $output = Invoke-EsxCommand -HostName $HostName -HostKey $HostKey -Command $command
+    [pscustomobject]@{
+        esx_host = $HostName
+        phase = if ($AfterReboot) { 'after-reboot' } else { 'initial' }
+        ipv4_target = $ipv4Target
+        ipv6_target = $ipv6Target
+        nfs3_ipv4 = $true
+        nfs3_ipv6 = $true
+        nfs41_ipv4 = $true
+        nfs41_ipv6 = $true
+        output = $output
+        observed_at = (Get-Date).ToUniversalTime().ToString('o')
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $OutputPath -Encoding UTF8
 }
 
 function Resolve-SafeChildPath {
@@ -615,6 +778,11 @@ function Reset-LifecycleApplianceVm {
 
     New-LifecycleDifferencingDisk -ParentPath $ApplianceVhdxPath -ChildPath $safeApplianceDisk -Label 'restored appliance'
     New-LifecycleVm -Name $applianceName -VhdxPath $safeApplianceDisk -SwitchName 'LabFoundry-Mgmt' -MemoryStartupBytes $ApplianceMemoryStartupBytes -ProcessorCount $ApplianceProcessorCount
+    if ($EsxStorageTest) {
+        Ensure-HardDisk -VMName $applianceName -Path $lifecycleDepotDisk
+        Ensure-HardDisk -VMName $applianceName -Path $lifecycleBackupDisk
+        Ensure-HardDisk -VMName $applianceName -Path $esxStorageDisk
+    }
     Set-LifecycleNetworkTopology
     if ((Get-VM -Name $applianceName).State -ne 'Running') {
         if ($PSCmdlet.ShouldProcess($applianceName, 'Start redeployed lifecycle appliance VM')) {
@@ -623,13 +791,40 @@ function Reset-LifecycleApplianceVm {
     }
     Wait-VMRunning -Name $applianceName
     Start-Sleep -Seconds 20
-    return Get-PlinkHostKey -HostName $ApplianceIPAddress -UserName $ApplianceSshUser -Password $SshPassword
+    $resetHostKey = Get-PlinkHostKey -HostName $ApplianceIPAddress -UserName $ApplianceSshUser -Password $SshPassword
+    if (-not $SkipCurrentSourceDeploy) {
+        & (Join-Path $repoRoot 'scripts\windows\vmware\deploy-wheel.ps1') `
+            -RepoRoot $repoRoot `
+            -IpAddress $ApplianceIPAddress `
+            -SshUser $ApplianceSshUser `
+            -SshPassword $SshPassword `
+            -ReadinessTimeoutSeconds 120
+        if (-not $?) {
+            throw 'Deploying the current LabFoundry source to the restored lifecycle appliance failed.'
+        }
+    }
+    if ($EsxStorageTest) {
+        $quotedPassword = ConvertTo-ShellSingleQuoted -Value $SshPassword
+        $packageCommand = "printf '%s\n' $quotedPassword | sudo -S tdnf -y install nfs-utils rpcbind"
+        $plinkArguments = @('-batch', '-ssh')
+        if ($resetHostKey) { $plinkArguments += @('-hostkey', $resetHostKey) }
+        $plinkArguments += @('-pw', $SshPassword, "$ApplianceSshUser@$ApplianceIPAddress", $packageCommand)
+        & plink @plinkArguments | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Installing ESX Storage runtime packages on the restored lifecycle appliance failed.'
+        }
+    }
+    return $resetHostKey
 }
 
 $applianceName = "$LabName-Appliance"
 $clientAName = "$LabName-ClientA"
 $clientBName = "$LabName-ClientB"
 $pxeClientName = "$LabName-PxeBoot"
+$lifecycleDepotDisk = Join-Path $diskRoot "$applianceName-Depot.vhdx"
+$lifecycleBackupDisk = Join-Path $diskRoot "$applianceName-Backups.vhdx"
+$esxStorageDisk = Join-Path $diskRoot "$applianceName-EsxStorage.vhdx"
+$esxSystemDisk = Join-Path $diskRoot "$pxeClientName-System.vhdx"
 
 foreach ($name in @($applianceName, $clientAName, $clientBName, $pxeClientName)) {
     Assert-SafeLifecycleName -Name $name
@@ -665,8 +860,18 @@ if ($PlanOnly) {
         pxe_boot_test            = $true
         pxe_boot_mode            = if ($EsxIsoPath) { 'esxi' } else { 'linux' }
         esx_iso_path             = if ($EsxIsoPath) { (Resolve-Path -LiteralPath $EsxIsoPath).Path } else { '' }
+        esx_storage_test         = [bool]$EsxStorageTest
+        esx_storage_disk         = if ($EsxStorageTest) { $esxStorageDisk } else { '' }
+        lifecycle_depot_disk     = if ($EsxStorageTest) { $lifecycleDepotDisk } else { '' }
+        lifecycle_backup_disk    = if ($EsxStorageTest) { $lifecycleBackupDisk } else { '' }
+        esx_storage_disk_bytes   = if ($EsxStorageTest) { $EsxStorageDiskSizeBytes } else { 0 }
+        esx_storage_ipv4_client  = $EsxStorageIPv4Client
+        esx_storage_ipv6_client  = $EsxStorageIPv6Client
+        esx_management_cidr      = $EsxManagementCidr
+        deploy_current_source    = -not [bool]$SkipCurrentSourceDeploy
         site_interface           = $SiteInterface
         site_cidr                = $SiteCidr
+        site_ipv6_cidr           = $SiteIPv6Cidr
         site_vlan_id             = $SiteVlanId
         tagged_vlan_id           = $VlanId
         tagged_vlan_cidr         = $TaggedVlanCidr
@@ -709,6 +914,27 @@ $clientBDisk = Join-Path $diskRoot "$clientBName.vhdx"
 $clientASeedIso = Join-Path $seedRoot "$clientAName-seed.iso"
 $clientBSeedIso = Join-Path $seedRoot "$clientBName-seed.iso"
 
+if ($EsxStorageTest -and -not (Test-Path -LiteralPath $esxStorageDisk)) {
+    if ($PSCmdlet.ShouldProcess($esxStorageDisk, "Create $EsxStorageDiskSizeBytes-byte blank ESX Storage lifecycle disk")) {
+        New-VHD -Path $esxStorageDisk -Dynamic -SizeBytes $EsxStorageDiskSizeBytes | Out-Null
+    }
+}
+if ($EsxStorageTest -and -not (Test-Path -LiteralPath $lifecycleDepotDisk)) {
+    if ($PSCmdlet.ShouldProcess($lifecycleDepotDisk, 'Create 20 GiB lifecycle depot disk')) {
+        New-VHD -Path $lifecycleDepotDisk -Dynamic -SizeBytes 20GB | Out-Null
+    }
+}
+if ($EsxStorageTest -and -not (Test-Path -LiteralPath $lifecycleBackupDisk)) {
+    if ($PSCmdlet.ShouldProcess($lifecycleBackupDisk, 'Create 20 GiB lifecycle backup disk')) {
+        New-VHD -Path $lifecycleBackupDisk -Dynamic -SizeBytes 20GB | Out-Null
+    }
+}
+if ($EsxIsoPath -and -not (Test-Path -LiteralPath $esxSystemDisk)) {
+    if ($PSCmdlet.ShouldProcess($esxSystemDisk, 'Create 80 GiB ESX lifecycle system disk')) {
+        New-VHD -Path $esxSystemDisk -Dynamic -SizeBytes 80GB | Out-Null
+    }
+}
+
 if (-not $AllowExistingLifecycleLab) {
     New-LifecycleDifferencingDisk -ParentPath $ApplianceVhdxPath -ChildPath $applianceDisk -Label 'appliance'
     New-LifecycleDifferencingDisk -ParentPath $ClientVhdxPath -ChildPath $clientADisk -Label 'client A'
@@ -725,9 +951,22 @@ New-CloudInitSeedIso -Path $clientBSeedIso -HostName ($clientBName.ToLowerInvari
 
 try {
     New-LifecycleVm -Name $applianceName -VhdxPath $applianceDisk -SwitchName 'LabFoundry-Mgmt' -MemoryStartupBytes $ApplianceMemoryStartupBytes -ProcessorCount $ApplianceProcessorCount
+    if ($EsxStorageTest) {
+        Ensure-HardDisk -VMName $applianceName -Path $lifecycleDepotDisk
+        Ensure-HardDisk -VMName $applianceName -Path $lifecycleBackupDisk
+        Ensure-HardDisk -VMName $applianceName -Path $esxStorageDisk
+    }
     New-LifecycleVm -Name $clientAName -VhdxPath $clientADisk -SwitchName $ClientManagementSwitch -MemoryStartupBytes $ClientMemoryStartupBytes -ProcessorCount $ClientProcessorCount
     New-LifecycleVm -Name $clientBName -VhdxPath $clientBDisk -SwitchName $ClientManagementSwitch -MemoryStartupBytes $ClientMemoryStartupBytes -ProcessorCount $ClientProcessorCount
     New-LifecyclePxeVm -Name $pxeClientName -SwitchName 'LabFoundry-SiteA'
+    if ($EsxIsoPath) {
+        Ensure-HardDisk -VMName $pxeClientName -Path $esxSystemDisk
+        $esxDiskDrive = Get-VMHardDiskDrive -VMName $pxeClientName | Where-Object { $_.Path -eq (Resolve-Path -LiteralPath $esxSystemDisk).Path } | Select-Object -First 1
+        $esxPxeAdapter = Get-VMNetworkAdapter -VMName $pxeClientName -Name 'PXE-SiteA'
+        if ($esxDiskDrive -and $esxPxeAdapter -and $PSCmdlet.ShouldProcess($pxeClientName, 'Prefer installed ESX disk, then PXE network')) {
+            Set-VMFirmware -VMName $pxeClientName -BootOrder $esxDiskDrive, $esxPxeAdapter -EnableSecureBoot Off
+        }
+    }
 
     Ensure-DvdDrive -VMName $clientAName -Path $clientASeedIso
     Ensure-DvdDrive -VMName $clientBName -Path $clientBSeedIso
@@ -745,6 +984,28 @@ try {
 
     Start-Sleep -Seconds 20
     $applianceHostKey = Get-PlinkHostKey -HostName $ApplianceIPAddress -UserName $ApplianceSshUser -Password $SshPassword
+    if (-not $SkipCurrentSourceDeploy) {
+        & (Join-Path $repoRoot 'scripts\windows\vmware\deploy-wheel.ps1') `
+            -RepoRoot $repoRoot `
+            -IpAddress $ApplianceIPAddress `
+            -SshUser $ApplianceSshUser `
+            -SshPassword $SshPassword `
+            -ReadinessTimeoutSeconds 120
+        if (-not $?) {
+            throw 'Deploying the current LabFoundry source to the lifecycle appliance failed.'
+        }
+    }
+    if ($EsxStorageTest) {
+        $quotedPassword = ConvertTo-ShellSingleQuoted -Value $SshPassword
+        $packageCommand = "printf '%s\n' $quotedPassword | sudo -S tdnf -y install nfs-utils rpcbind"
+        $plinkArguments = @('-batch', '-ssh')
+        if ($applianceHostKey) { $plinkArguments += @('-hostkey', $applianceHostKey) }
+        $plinkArguments += @('-pw', $SshPassword, "$ApplianceSshUser@$ApplianceIPAddress", $packageCommand)
+        & plink @plinkArguments | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Installing ESX Storage runtime packages on the lifecycle appliance failed.'
+        }
+    }
     $clientAHost = Wait-GuestIPv4 -Name $clientAName
     $clientBHost = Wait-GuestIPv4 -Name $clientBName
     $clientAHostKey = Get-PlinkHostKey -HostName $clientAHost -UserName $ClientSshUser -Password $SshPassword
@@ -763,6 +1024,7 @@ try {
         '--vcf-backup-password', $VcfBackupPassword,
         '--site-interface', $SiteInterface,
         '--site-cidr', $SiteCidr,
+        '--site-ipv6-cidr', $SiteIPv6Cidr,
         '--vlan-id', "$VlanId",
         '--vlan-cidr', $TaggedVlanCidr,
         '--wan-cidr', $WanCidr,
@@ -770,6 +1032,16 @@ try {
         '--pxe-client-mac', $pxeClientMac
     )
     if ($remoteEsxIsoPath) { $basePythonArgs += @('--pxe-installer-iso-path', $remoteEsxIsoPath) }
+    if ($EsxStorageTest) {
+        $basePythonArgs += @(
+            '--esx-storage-test',
+            '--esx-storage-only',
+            '--esx-storage-ipv4-client', $EsxStorageIPv4Client,
+            '--esx-storage-ipv6-client', $EsxStorageIPv6Client,
+            '--esx-management-cidr', $EsxManagementCidr
+        )
+    }
+    if ($ConfirmEsxStorageFormat) { $basePythonArgs += '--confirm-esx-storage-format' }
     if ($SshUser) { $basePythonArgs += @('--ssh-user', $SshUser) }
     if ($SshKeyPath) { $basePythonArgs += @('--ssh-key', $SshKeyPath) }
     if ($SshPassword) { $basePythonArgs += @('--ssh-password', $SshPassword) }
@@ -817,6 +1089,24 @@ try {
             throw "Lifecycle interop runner failed with exit code $LASTEXITCODE"
         }
         Invoke-PxeBootSmoke -Name $pxeClientName -MacAddress $pxeClientMac -OutputPath (Join-Path $resultRoot 'pxe-boot-smoke.json')
+        if ($EsxStorageTest) {
+            $esxManagementAddress = $EsxManagementCidr.Split('/')[0]
+            $esxHostKey = Get-PlinkHostKey -HostName $esxManagementAddress -UserName 'root' -Password $EsxRootPassword -TimeoutMinutes 45
+            if (-not (Test-TcpPort -HostName $esxManagementAddress -Port 22 -TimeoutMilliseconds 2000)) {
+                throw "ESX 9 did not expose SSH at $esxManagementAddress after PXE installation."
+            }
+            Invoke-EsxNfsAcceptance -HostName $esxManagementAddress -HostKey $esxHostKey -OutputPath (Join-Path $resultRoot 'esx-nfs-acceptance-initial.json')
+            if ($PSCmdlet.ShouldProcess("$applianceName and $pxeClientName", 'Restart appliance and ESX for NFS persistence acceptance')) {
+                Restart-VM -Name $applianceName -Force
+                Restart-VM -Name $pxeClientName -Force
+            }
+            Wait-VMRunning -Name $applianceName
+            Wait-VMRunning -Name $pxeClientName
+            Start-Sleep -Seconds 90
+            $applianceHostKey = Get-PlinkHostKey -HostName $ApplianceIPAddress -UserName $ApplianceSshUser -Password $SshPassword -TimeoutMinutes 8
+            $esxHostKey = Get-PlinkHostKey -HostName $esxManagementAddress -UserName 'root' -Password $EsxRootPassword -TimeoutMinutes 15
+            Invoke-EsxNfsAcceptance -HostName $esxManagementAddress -HostKey $esxHostKey -OutputPath (Join-Path $resultRoot 'esx-nfs-acceptance-after-reboot.json') -AfterReboot
+        }
         if (-not $SkipBackupRestoreTest) {
             if (-not (Test-Path -LiteralPath $backupArchivePath)) {
                 throw "Lifecycle backup archive was not created: $backupArchivePath"

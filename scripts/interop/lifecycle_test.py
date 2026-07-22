@@ -124,9 +124,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pxe-client-ip", default="")
     parser.add_argument("--pxe-installer-iso-path", default="")
     parser.add_argument("--esx-storage-test", action="store_true", help="Configure and apply one dual-stack ESX NFS datastore.")
+    parser.add_argument("--esx-storage-only", action="store_true", help="Run only the network, DNS, firewall, ESX Storage, and ESXi PXE acceptance path.")
     parser.add_argument("--esx-storage-device-id", default="", help="Exact eligible /dev/disk/by-id identity; required when inventory has multiple blank disks.")
     parser.add_argument("--esx-storage-ipv4-client", default="192.168.50.210/32")
     parser.add_argument("--esx-storage-ipv6-client", default="fd00:50::210/128")
+    parser.add_argument("--esx-management-cidr", default="192.168.49.210/24")
     parser.add_argument("--confirm-esx-storage-format", action="store_true", help="Authorize the selected lifecycle blank disk to be formatted as ext4.")
     parser.add_argument("--ssh-user", default="", help="Compatibility override for both appliance and client SSH users.")
     parser.add_argument("--appliance-ssh-user", default="admin")
@@ -514,6 +516,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "client DNS/DHCP/routing probes",
         ],
         "client_checks_enabled": not args.skip_client_checks,
+        "esx_storage_only": bool(args.esx_storage_only),
         "routing_wan_only": bool(args.routing_wan_only),
         "settings_backup_export": bool(args.export_settings_backup),
         "settings_backup_restore": bool(args.restore_settings_backup),
@@ -754,7 +757,7 @@ def configure_esxi_pxe(client: HttpClient, args: argparse.Namespace) -> dict[str
     if args.pxe_test_mode == "esxi":
         if not args.pxe_installer_iso_path:
             raise LifecycleError("--pxe-installer-iso-path is required when --pxe-test-mode esxi is used.")
-        kickstart = ensure_lifecycle_esxi_kickstart(client)
+        kickstart = ensure_lifecycle_esxi_kickstart(client, args)
         kickstart_id = kickstart["id"]
 
     host_payload = {
@@ -767,7 +770,15 @@ def configure_esxi_pxe(client: HttpClient, args: argparse.Namespace) -> dict[str
         "enabled": True,
     }
     existing_hosts = client.json_request("GET", "/api/v1/esxi-pxe/hosts")
-    existing_host = next((row for row in existing_hosts if row.get("mac_address", "").lower() == host_payload["mac_address"]), None)
+    existing_host = next(
+        (
+            row
+            for row in existing_hosts
+            if row.get("mac_address", "").lower() == host_payload["mac_address"]
+            or row.get("hostname", "").lower() == host_payload["hostname"]
+        ),
+        None,
+    )
     if existing_host:
         host = client.json_request("PUT", f"/api/v1/esxi-pxe/hosts/{existing_host['id']}", json_body=host_payload)
     else:
@@ -807,8 +818,14 @@ def configure_esxi_pxe(client: HttpClient, args: argparse.Namespace) -> dict[str
     }
 
 
-def lifecycle_esxi_kickstart_content() -> str:
-    return """#
+def lifecycle_esxi_kickstart_content(args: argparse.Namespace) -> str:
+    storage_ipv4 = ip_interface(args.esx_storage_ipv4_client)
+    storage_ipv4_network = ip_interface(args.site_cidr).network
+    storage_ipv6 = ip_interface(args.esx_storage_ipv6_client)
+    storage_ipv6_network = ip_interface(args.site_ipv6_cidr).network
+    management_ipv4 = ip_interface(args.esx_management_cidr)
+    dns_server = str(ip_interface(args.site_cidr).ip)
+    return f"""#
 # LabFoundry lifecycle ESXi scripted install.
 vmaccepteula
 rootpw vmware01!
@@ -820,15 +837,26 @@ reboot
 vim-cmd hostsvc/enable_ssh
 vim-cmd hostsvc/start_ssh
 esxcli network firewall ruleset set -e true -r sshServer
+esxcli network ip interface ipv4 set --interface-name=vmk0 --type=static --ipv4={storage_ipv4.ip} --netmask={storage_ipv4_network.netmask}
+esxcli network ip interface ipv6 set --interface-name=vmk0 --enable-ipv6=true --type=static
+esxcli network ip interface ipv6 address add --interface-name=vmk0 --ipv6={storage_ipv6.ip}/{storage_ipv6_network.prefixlen}
+esxcli network vswitch standard add --vswitch-name=vSwitch1
+esxcli network vswitch standard uplink add --uplink-name=vmnic1 --vswitch-name=vSwitch1
+esxcli network vswitch standard portgroup add --portgroup-name=Lifecycle-Management --vswitch-name=vSwitch1
+esxcli network ip interface add --interface-name=vmk1 --portgroup-name=Lifecycle-Management
+esxcli network ip interface ipv4 set --interface-name=vmk1 --type=static --ipv4={management_ipv4.ip} --netmask={management_ipv4.netmask}
+esxcli network ip interface tag add --interface-name=vmk1 --tag-name=Management
+esxcli network ip dns server add --server={dns_server}
+esxcli network ip dns search add --domain={args.domain}
 """
 
 
-def ensure_lifecycle_esxi_kickstart(client: HttpClient) -> dict[str, Any]:
+def ensure_lifecycle_esxi_kickstart(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
     name = "Lifecycle ESXi install"
     payload = {
         "name": name,
         "description": "Created by the LabFoundry lifecycle ESXi PXE install check.",
-        "content": lifecycle_esxi_kickstart_content(),
+        "content": lifecycle_esxi_kickstart_content(args),
         "enabled": True,
     }
     kickstarts = client.json_request("GET", "/api/v1/esxi-pxe/kickstarts")
@@ -1953,6 +1981,52 @@ if expected_ip not in answers:
     return f"printf %s {encoded} | base64 -d | python3 -"
 
 
+def direct_dns_aaaa_query_command(name: str, server: str, expected_ip: str) -> str:
+    script = f"""
+import random
+import socket
+import struct
+import sys
+
+name = {name!r}
+server = {server!r}
+expected_ip = {expected_ip!r}
+query_id = random.randrange(0, 65536)
+qname = b"".join(bytes([len(part)]) + part.encode("ascii") for part in name.rstrip(".").split(".")) + b"\\0"
+packet = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + qname + struct.pack("!HH", 28, 1)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(5)
+sock.sendto(packet, (server, 53))
+data, _ = sock.recvfrom(512)
+response_id, flags, _qdcount, ancount, _nscount, _arcount = struct.unpack("!HHHHHH", data[:12])
+if response_id != query_id or flags & 0x000F:
+    sys.exit("DNS AAAA query failed")
+offset = 12
+while offset < len(data) and data[offset] != 0:
+    offset += data[offset] + 1
+offset += 5
+answers = []
+for _ in range(ancount):
+    if data[offset] & 0xC0 == 0xC0:
+        offset += 2
+    else:
+        while offset < len(data) and data[offset] != 0:
+            offset += data[offset] + 1
+        offset += 1
+    rtype, rclass, _ttl, rdlen = struct.unpack("!HHIH", data[offset:offset + 10])
+    offset += 10
+    rdata = data[offset:offset + rdlen]
+    offset += rdlen
+    if rtype == 28 and rclass == 1 and rdlen == 16:
+        answers.append(socket.inet_ntop(socket.AF_INET6, rdata))
+print("\\n".join(answers))
+if expected_ip not in answers:
+    sys.exit(f"expected {{expected_ip}} from {{server}} for {{name}}, got {{answers}}")
+"""
+    encoded = base64.b64encode(script.strip().encode("utf-8")).decode("ascii")
+    return f"printf %s {encoded} | base64 -d | python3 -"
+
+
 def authoritative_dns_probe_command(domain: str, server: str, expected_ip: str) -> str:
     script = f'''
 import random
@@ -2278,17 +2352,44 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
         ipv4_target = f"nfs-{site_ip.replace('.', '-')}.{args.domain}"
         ipv6_token = "-".join(format(int(group, 16), "x") for group in ip_interface(args.site_ipv6_cidr).ip.exploded.split(":"))
         ipv6_target = f"nfs-{ipv6_token}.{args.domain}"
+        ipv4_dns_probe = direct_dns_a_query_command(ipv4_target, "127.0.0.1", site_ip)
+        ipv6_dns_probe = direct_dns_aaaa_query_command(ipv6_target, "127.0.0.1", site_ipv6)
         checks["esx_storage"] = (
             "systemctl is-active rpcbind.service && systemctl is-active nfs-server.service && "
             "/opt/labfoundry/bin/labfoundry-helper esx-storage status --real && "
             "exportfs -v && grep -F lifecycle-nfs3 /etc/exports.d/labfoundry-esx-storage.exports && "
             "grep -F lifecycle-nfs41 /etc/exports.d/labfoundry-esx-storage.exports && "
-            "ss -lnt | grep -E ':(111|2049|20048)[[:space:]]' && "
+            "ss -lnt && "
             "nft list ruleset | grep -F esx-nfs- && "
-            f"dig +short A {ipv4_target} @127.0.0.1 | grep -Fx {site_ip} && "
-            f"dig +short AAAA {ipv6_target} @127.0.0.1 | grep -Fx {site_ipv6}"
+            f"{ipv4_dns_probe} && {ipv6_dns_probe}"
         )
     return run_host_checks(args, checks)
+
+
+def esx_storage_host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
+    site_ip = str(ip_interface(args.site_cidr).ip)
+    site_ipv6 = str(ip_interface(args.site_ipv6_cidr).ip)
+    ipv4_target = f"nfs-{site_ip.replace('.', '-')}.{args.domain}"
+    ipv6_token = "-".join(format(int(group, 16), "x") for group in ip_interface(args.site_ipv6_cidr).ip.exploded.split(":"))
+    ipv6_target = f"nfs-{ipv6_token}.{args.domain}"
+    ipv4_dns_probe = direct_dns_a_query_command(ipv4_target, "127.0.0.1", site_ip)
+    ipv6_dns_probe = direct_dns_aaaa_query_command(ipv6_target, "127.0.0.1", site_ipv6)
+    return run_host_checks(
+        args,
+        {
+            "network": "ip -br addr && ip route && ip -6 route",
+            "dnsmasq": "test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && systemctl is-active dnsmasq",
+            "esx_storage": (
+                "systemctl is-active rpcbind.service && systemctl is-active nfs-server.service && "
+                "/opt/labfoundry/bin/labfoundry-helper esx-storage status --real && "
+                "exportfs -v && grep -F lifecycle-nfs3 /etc/exports.d/labfoundry-esx-storage.exports && "
+                "grep -F lifecycle-nfs41 /etc/exports.d/labfoundry-esx-storage.exports && "
+                "ss -lnt && "
+                "nft list ruleset | grep -F esx-nfs- && "
+                f"{ipv4_dns_probe} && {ipv6_dns_probe}"
+            ),
+        },
+    )
 
 
 def authoritative_dns_state_check(args: argparse.Namespace) -> dict[str, Any]:
@@ -2991,6 +3092,26 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
         run_step(results, "export-settings-backup", export_settings_backup, client, args, args.export_settings_backup)
 
 
+def run_esx_storage_lifecycle(results: list[StepResult], client: HttpClient, args: argparse.Namespace) -> None:
+    if not args.esx_storage_test:
+        raise LifecycleError("--esx-storage-only requires --esx-storage-test.")
+    run_step(results, "appliance-health", appliance_health, client, args)
+    run_step(results, "configure-network", configure_network, client, args)
+    run_step(results, "configure-dns-dhcp", configure_dns_dhcp, client, args)
+    run_step(results, "configure-esx-storage", configure_esx_storage, client, args)
+    run_step(results, "configure-esxi-pxe", configure_esxi_pxe, client, args)
+    run_step(results, "configure-firewall", configure_firewall, client, args)
+    run_step(
+        results,
+        "apply-esx-storage-connectivity",
+        apply_units,
+        client,
+        ["network", "dnsmasq", "firewall", "esxi_pxe", "esx_storage"],
+        args,
+    )
+    run_step(results, "esx-storage-host-state-checks", esx_storage_host_state_checks, args)
+
+
 def run_routing_wan_lifecycle(results: list[StepResult], client: HttpClient, args: argparse.Namespace) -> None:
     run_step(results, "appliance-health", appliance_health, client, args)
     run_step(results, "configure-network", configure_network, client, args)
@@ -3160,7 +3281,9 @@ def main() -> int:
 
     client = HttpClient(args.appliance_url)
     try:
-        if args.routing_wan_only:
+        if args.esx_storage_only:
+            run_esx_storage_lifecycle(results, client, args)
+        elif args.routing_wan_only:
             run_routing_wan_lifecycle(results, client, args)
         elif args.restored_state_run:
             run_restored_lifecycle(results, client, args)

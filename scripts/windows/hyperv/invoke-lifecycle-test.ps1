@@ -40,7 +40,43 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
+    [string]$SiteIPv6Cidr = 'fd00:12::1/64',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
     [int]$SiteVlanId = 12,
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [switch]$EsxStorageTest,
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [switch]$ConfirmEsxStorageFormat,
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [int64]$EsxStorageDiskSizeBytes = 20GB,
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [string]$EsxStorageIPv4Client = '192.168.12.210/32',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [string]$EsxStorageIPv6Client = 'fd00:12::210/128',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [string]$EsxManagementCidr = '192.168.49.210/24',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [string]$EsxRootPassword = 'vmware01!',
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [switch]$SkipCurrentSourceDeploy,
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Plan')]
@@ -181,6 +217,12 @@ if ($EsxIsoPath) {
         throw "-EsxIsoPath must point to an .iso file."
     }
 }
+if ($EsxStorageTest -and -not $EsxIsoPath) {
+    throw '-EsxStorageTest requires -EsxIsoPath so the NFS acceptance runs on ESX 9.'
+}
+if ($EsxStorageTest -and -not $ConfirmEsxStorageFormat) {
+    throw '-EsxStorageTest requires explicit -ConfirmEsxStorageFormat authorization for the lifecycle blank disk.'
+}
 $effectiveApplianceUrl = if ($ApplianceUrl) { $ApplianceUrl } else { "https://${ApplianceIPAddress}" }
 
 if (-not $SkipClientPrepare -and -not $PlanOnly) {
@@ -201,6 +243,7 @@ $arguments = @(
     '-ApplianceUrl', $effectiveApplianceUrl,
     '-SiteInterface', $SiteInterface,
     '-SiteCidr', $SiteCidr,
+    '-SiteIPv6Cidr', $SiteIPv6Cidr,
     '-SiteVlanId', "$SiteVlanId",
     '-AdminUsername', $AdminUsername,
     '-AdminPassword', $AdminPassword,
@@ -214,6 +257,22 @@ $arguments = @(
 )
 if ($EsxIsoPath) {
     $arguments += @('-EsxIsoPath', $EsxIsoPath)
+}
+if ($EsxStorageTest) {
+    $arguments += @(
+        '-EsxStorageTest',
+        '-EsxStorageDiskSizeBytes', "$EsxStorageDiskSizeBytes",
+        '-EsxStorageIPv4Client', $EsxStorageIPv4Client,
+        '-EsxStorageIPv6Client', $EsxStorageIPv6Client,
+        '-EsxManagementCidr', $EsxManagementCidr,
+        '-EsxRootPassword', $EsxRootPassword
+    )
+}
+if ($ConfirmEsxStorageFormat) {
+    $arguments += '-ConfirmEsxStorageFormat'
+}
+if ($SkipCurrentSourceDeploy) {
+    $arguments += '-SkipCurrentSourceDeploy'
 }
 
 if (-not $KeepVms) {
@@ -235,6 +294,7 @@ Write-Host "Client VHDX: $ClientVhdxPath"
 Write-Host "Appliance URL: $effectiveApplianceUrl"
 Write-Host ("Backup/restore validation: {0}" -f (-not $SkipBackupRestoreTest))
 Write-Host ("Cleanup created VMs: {0}" -f (-not $KeepVms))
+Write-Host ("ESX Storage acceptance: {0}" -f [bool]$EsxStorageTest)
 
 & powershell.exe @arguments
 if ($LASTEXITCODE -ne 0) {
