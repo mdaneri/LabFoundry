@@ -6806,14 +6806,57 @@ textarea {
   min-width: 0;
 }
 
+.monitor-panel-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.monitor-chart-expand .button-icon {
+  fill: none;
+  height: 14px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  width: 14px;
+}
+
 .monitor-chart-panel.has-monitor-table {
   align-content: start;
   grid-template-rows: auto auto minmax(0, auto);
   min-height: 0;
 }
 
-.monitor-network-panel {
-  align-self: start;
+.monitor-network-panel,
+.monitor-disk-activity-panel {
+  align-self: stretch;
+}
+
+.monitor-disk-activity-table-scroll {
+  max-height: min(240px, 28vh);
+}
+
+.monitor-disk-usage-panel {
+  align-content: stretch;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  grid-template-rows: auto minmax(360px, 1fr);
+  min-height: 420px;
+}
+
+.monitor-disk-usage-panel .panel-head {
+  grid-column: 1 / -1;
+}
+
+.monitor-disk-usage-panel .monitor-chart {
+  height: 100%;
+  min-height: 360px;
+}
+
+.monitor-disk-usage-panel .monitor-table-scroll {
+  align-self: stretch;
+  max-height: none;
 }
 
 .monitor-chart {
@@ -6825,9 +6868,113 @@ textarea {
 }
 
 .monitor-chart canvas {
+  cursor: crosshair;
   display: block;
   height: 100%;
   width: 100%;
+}
+
+.monitor-chart-modal {
+  background: transparent;
+  border: 0;
+  height: 100vh;
+  margin: 0;
+  max-height: none;
+  max-width: none;
+  padding: 20px;
+  width: 100vw;
+}
+
+.monitor-chart-modal::backdrop {
+  background: rgba(15, 23, 42, 0.68);
+}
+
+.monitor-chart-modal-panel {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.25);
+  display: grid;
+  gap: 14px;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: calc(100vh - 40px);
+  padding: 16px;
+}
+
+.monitor-chart-modal-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.monitor-chart-modal-head h2,
+.monitor-chart-modal-head p {
+  margin: 0;
+}
+
+.monitor-chart-modal-head .kicker {
+  margin-bottom: 3px;
+}
+
+.monitor-chart-expanded {
+  height: auto;
+  min-height: 0;
+}
+
+.monitor-chart-zoom-controls {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid #dbe5f1;
+  border-radius: 8px;
+  box-shadow: 0 5px 16px rgba(15, 23, 42, 0.12);
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  z-index: 2;
+}
+
+.monitor-chart-zoom-controls .button-icon {
+  fill: none;
+  height: 15px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  width: 15px;
+}
+
+.monitor-chart-zoom-input {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: #475569;
+  display: flex;
+  height: 28px;
+  padding-right: 7px;
+}
+
+.monitor-chart-zoom-input input {
+  appearance: textfield;
+  border: 0;
+  font: inherit;
+  height: 26px;
+  min-height: 0;
+  padding: 0 3px 0 7px;
+  text-align: right;
+  width: 52px;
+}
+
+.monitor-chart-zoom-input input:focus {
+  box-shadow: none;
+  outline: 0;
+}
+
+.monitor-chart-zoom-input:focus-within {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
 }
 
 .monitor-table-scroll {
@@ -6919,6 +7066,45 @@ textarea {
   .monitor-chart-grid {
     grid-template-rows: none;
     min-height: 0;
+  }
+
+  .monitor-disk-usage-panel {
+    grid-column: auto;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto;
+    min-height: 0;
+  }
+
+  .monitor-disk-usage-panel .panel-head {
+    grid-column: auto;
+  }
+
+  .monitor-disk-usage-panel .monitor-chart {
+    height: 240px;
+    min-height: 0;
+  }
+
+  .monitor-disk-usage-panel .monitor-table-scroll {
+    max-height: min(500px, 60vh);
+  }
+
+  .monitor-chart-modal {
+    padding: 10px;
+  }
+
+  .monitor-chart-modal-panel {
+    height: calc(100vh - 20px);
+    padding: 12px;
+  }
+
+  .monitor-chart-modal-head {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .monitor-chart-zoom-controls {
+    right: 8px;
+    top: 8px;
   }
 
   .sidebar {

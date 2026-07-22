@@ -9052,7 +9052,7 @@ def monitor_page(
 def monitor_data(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
-    hours: int = Query(default=6, ge=1, le=6),
+    hours: int = Query(default=6, ge=1, le=24),
 ) -> JSONResponse:
     require_monitoring_read(identity)
     return JSONResponse(monitor_payload(db, hours=hours))

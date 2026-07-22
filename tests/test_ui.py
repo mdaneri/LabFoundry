@@ -755,7 +755,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v139" in service_worker.text
+    assert "labfoundry-pwa-v148" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -767,8 +767,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=dns-authority-20260722-1" in service_worker.text
-    assert "/static/app.js?v=apply-notice-refresh-20260722-1" in service_worker.text
+    assert "/static/app.css?v=monitor-apply-ux-20260722-10" in service_worker.text
+    assert "/static/app.js?v=monitor-apply-ux-20260722-10" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -777,7 +777,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=dns-authority-20260722-1" in offline.text
+    assert "/static/app.css?v=monitor-apply-ux-20260722-10" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -790,12 +790,27 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "CPU Utilization" in page.text
     assert "Network Throughput" in page.text
     assert "monitor-network-panel" in page.text
+    assert "monitor-disk-activity-panel" in page.text
+    assert "monitor-disk-usage-panel" in page.text
+    assert "Disk Usage" in page.text
     assert "Unprivileged control plane" not in page.text
-    assert page.text.count("has-monitor-table") == 2
+    assert page.text.count("has-monitor-table") == 3
     assert 'data-monitor-page' in page.text
+    assert page.text.count("data-monitor-chart-expand=") == 5
+    assert page.text.count("data-monitor-range=") == 5
+    assert 'data-monitor-range="12"' in page.text
+    assert 'data-monitor-range="24"' in page.text
+    assert "data-monitor-chart-modal" in page.text
+    assert "data-monitor-expanded-chart" in page.text
+    assert "data-monitor-chart-zoom-in" in page.text
+    assert "data-monitor-chart-zoom-out" in page.text
+    assert "data-monitor-chart-zoom-percent" in page.text
+    assert "data-monitor-chart-zoom-reset" not in page.text
+    assert "data-monitor-disk-activity-table" in page.text
+    assert "<th>Device</th><th>Read/s</th><th>Write/s</th>" in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=dns-authority-20260722-1" in page.text
-    assert "/static/app.js?v=apply-notice-refresh-20260722-1" in page.text
+    assert "/static/app.css?v=monitor-apply-ux-20260722-10" in page.text
+    assert "/static/app.js?v=monitor-apply-ux-20260722-10" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -806,11 +821,53 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert ".validation-preview-source" in app_css.text
     assert ".monitor-chart-panel.has-monitor-table" in app_css.text
     assert "grid-template-rows: auto auto minmax(0, auto);" in app_css.text
-    assert ".monitor-network-panel" in app_css.text
-    assert "align-self: start;" in app_css.text
+    assert ".monitor-network-panel,\n.monitor-disk-activity-panel" in app_css.text
+    assert "align-self: stretch;" in app_css.text
+    assert ".monitor-disk-usage-panel" in app_css.text
+    assert "grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);" in app_css.text
+    assert ".monitor-chart-zoom-controls" in app_css.text
+    assert "position: absolute;" in app_css.text
+    assert "max-height: min(500px, 60vh);" in app_css.text
     app_js = client.get("/static/app.js").text
-    assert "monitorHistoryChartData(payload.cpu_cores" in app_js
-    assert "monitorHistoryChartData(payload.networks" in app_js
+    assert '{ name: "Total", points: payload.cpu, aggregate: true' in app_js
+    assert '{ name: "Total", points: payload.network_totals, aggregate: true' in app_js
+    assert '{ name: "Total", points: payload.disk_io, aggregate: true' in app_js
+    assert "payload.disk_devices" in app_js
+    assert 'diskUsage: "Disk Usage"' in app_js
+    assert '{ field: "used_percent", label: "" }' in app_js
+    assert "(aggregate ? 3 : 1)" in app_js
+    assert "(aggregate ? 0.45 : 1)" in app_js
+    assert "Number(right.aggregate) - Number(left.aggregate)" in app_js
+    assert "context.globalAlpha = highlighted ? 1 : Number(line.alpha || 1);" in app_js
+    assert "function drawMonitorChartType(canvas, type, payload, chartOptions = {})" in app_js
+    assert "modal.showModal();" in app_js
+    assert "window.requestAnimationFrame(renderExpandedChart);" in app_js
+    assert "if (event.target === modal) modal.close();" in app_js
+    assert "const MONITOR_CHART_INTERACTIONS = new WeakMap();" in app_js
+    assert 'canvas.addEventListener("pointermove"' in app_js
+    assert 'canvas.addEventListener("pointerout", clearHighlight);' in app_js
+    assert "distance <= 196" in app_js
+    assert "Math.max(Number(line.lineWidth || 2) + 2, 4)" in app_js
+    assert 'context.arc(highlightedPoint.x, highlightedPoint.y, 5' in app_js
+    assert '`${highlighted ? "700 " : ""}11px system-ui, sans-serif`' in app_js
+    assert "const viewSpan = fullSpan / Number(options.zoom);" in app_js
+    assert "expandedZoomPercent = Math.min(800, expandedZoomPercent + 25);" in app_js
+    assert "expandedZoomCenterTime = highlightedTime;" in app_js
+    assert "expandedZoomPercent = Math.max(100, expandedZoomPercent - 25);" in app_js
+    assert "Math.round((fullSpan / selectedSpan) * 100)" in app_js
+    assert 'canvas.addEventListener("pointerdown"' in app_js
+    assert 'canvas.addEventListener("pointerup", finishAreaSelection);' in app_js
+    assert 'context.fillStyle = "rgba(37, 99, 235, 0.14)";' in app_js
+    assert "function renderMonitorDiskActivityTable(tbody, rows)" in app_js
+    assert "payload.disk_devices" in app_js
+    assert 'zoomPercentInput?.addEventListener("input"' in app_js
+    assert 'if (event.key === "Enter") event.currentTarget.blur();' in app_js
+    assert "function monitorNearestChartTarget(interaction, pointerX, pointerY)" in app_js
+    assert "interaction.hitSegments.forEach" in app_js
+    assert 'canvas.addEventListener("click"' in app_js
+    assert "interaction.pinned = Boolean(target);" in app_js
+    assert "interaction.legendTargets.find" in app_js
+    assert "interaction.highlightedField !== legendTarget.line.field" in app_js
 
     data = client.get("/monitor/data")
     assert data.status_code == 200, data.text
@@ -822,7 +879,12 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "cpu_cores" in payload
     assert "memory" in payload
     assert "network_totals" in payload
+    assert "disk_devices" in payload
     assert "disks" in payload
+
+    day_data = client.get("/monitor/data?hours=24")
+    assert day_data.status_code == 200, day_data.text
+    assert day_data.json()["window_hours"] == 24
 
 
 def test_login_page_includes_pwa_metadata(client):
@@ -5140,6 +5202,13 @@ def test_dns_and_dhcp_pages_render(client):
     assert "Submit appliance changes" in app_js.text
     assert "openApplianceApplyReview" in app_js.text
     assert "renderApplianceApplyTask" in app_js.text
+    assert "const APPLIANCE_APPLY_SUCCESS_AUTO_CLOSE_MS = 15000;" in app_js.text
+    assert "function clearApplianceApplyAutoClose()" in app_js.text
+    assert "function scheduleApplianceApplyAutoClose(task)" in app_js.text
+    assert 'task?.status !== "succeeded"' in app_js.text
+    assert 'modal.dataset.taskStatus === "succeeded"' in app_js.text
+    assert 'elements.modal.addEventListener("close", clearApplianceApplyAutoClose)' in app_js.text
+    assert "scheduleApplianceApplyAutoClose(task);" in app_js.text
     assert "Management connection warning" in app_js.text
     assert "applyConnectionWarnings" in app_js.text
     assert 'elements.submit.classList.add("hidden")' in app_js.text
@@ -10011,7 +10080,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "dns-authority-20260722-1" in page.text
+    assert "monitor-apply-ux-20260722-10" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

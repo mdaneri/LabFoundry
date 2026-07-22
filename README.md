@@ -50,11 +50,21 @@ verbosity and can also forward the same operational events to an external
 syslog receiver.
 
 The `Monitor` page is an operator-facing, read-only runtime view for appliance
-resource health. It charts each logical CPU, each interface's RX/TX throughput,
-memory pressure, and disk activity over the last one, three, or six hours, and
-shows compact per-interface, per-mount, and virtual-machine context. The sampler
-records one row about every
-30 seconds and keeps the six-hour window plus a small buffer. Collection uses
+resource health. It charts thick appliance totals alongside thin per-logical-CPU,
+per-interface RX/TX, and unique-device disk activity over the last one, three,
+or six hours, plus memory pressure and compact per-interface and virtual-machine
+context. A separate Disk Usage chart tracks used capacity per unique volume and
+keeps the per-mount capacity table alongside it. Disk Activity retains a
+deduplicated per-device read/write table. Disk activity totals count each
+underlying device once even when several mount rows share it. Each chart can be
+expanded into a near-full-screen view without changing its active time range;
+only that expanded view exposes editable percentage zoom and drag-to-select
+time-window zoom. Hovering near a sampled point or line segment emphasizes the
+associated series, legend entry, and exact sample; clicking the chart or a
+legend item pins that series until it is cleared or another series is selected.
+The 1h, 3h, 6h, 12h, and 24h history selectors use the same sampled data. The
+sampler records one row about every 30 seconds and keeps the 24-hour window plus
+a small buffer. Collection uses
 Linux `/proc`, `/sys`, filesystem usage, DMI data, `systemd-detect-virt`, and
 `vmtoolsd` when present; it does not call privileged helpers or mutate host
 services. Set `LABFOUNDRY_MONITOR_ENABLED=false` to disable both the background
@@ -331,6 +341,7 @@ Use `Appliance Apply` to review and submit appliance changes. The bottom-left pe
 - shows compact summaries with collapsed, on-demand rendered config previews or diffs;
 - lets operators unselect changed units that should stay pending;
 - atomically creates one `appliance-apply` master task plus an ordered child execution record for every selected component, then reuses the modal as a non-dismissible live task grid;
+- keeps failed and cancelled results open for inspection, while successful master-task results close automatically after 15 seconds;
 - hides submitted units from the sidebar pending count immediately, while unselected units remain available for review;
 - blocks other authenticated mutations with `423 Locked` while the master is active, while read-only inspection, authentication/session lifecycle actions, and safe parent cancellation remain available;
 - executes component children sequentially, persists each successful component baseline immediately, fails fast on the first component failure, and marks remaining children skipped;

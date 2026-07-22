@@ -743,6 +743,7 @@ class MonitorResponse(BaseModel):
     network_totals: list[dict[str, Any]]
     networks: list[dict[str, Any]]
     disk_io: list[dict[str, Any]]
+    disk_devices: list[dict[str, Any]]
     disks: list[dict[str, Any]]
 
 
