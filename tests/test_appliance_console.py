@@ -159,6 +159,74 @@ def test_console_refresh_interval_defaults_to_five_seconds_and_is_bounded(monkey
     assert appliance_console._console_refresh_seconds() == 5
 
 
+def test_console_missing_network_inventory_is_initializing_only_during_startup_grace():
+    error = appliance_console.ConsoleNetworkInventoryUnavailable("No management interface is available.")
+
+    assert appliance_console._console_status_failure(error, started_at=100.0, now=100.0) == (
+        "Initializing appliance networking...",
+        False,
+    )
+    assert appliance_console._console_status_failure(error, started_at=100.0, now=129.99) == (
+        "Initializing appliance networking...",
+        False,
+    )
+    assert appliance_console._console_status_failure(error, started_at=100.0, now=130.0) == (
+        "Status unavailable: No management interface is available.",
+        True,
+    )
+
+
+def test_console_unrelated_status_failures_are_not_hidden_during_startup():
+    error = RuntimeError("database unavailable")
+
+    assert appliance_console._console_status_failure(error, started_at=100.0, now=100.0) == (
+        "Status unavailable: database unavailable",
+        True,
+    )
+
+
+def test_console_draws_initializing_network_message_during_startup(monkeypatch):
+    class FakeCurses:
+        A_BOLD = 0x100
+
+        @staticmethod
+        def color_pair(value):
+            return value
+
+    class FakeScreen:
+        @staticmethod
+        def getmaxyx():
+            return (30, 80)
+
+        @staticmethod
+        def clear():
+            return None
+
+        @staticmethod
+        def erase():
+            return None
+
+    def fail_status_load():
+        raise appliance_console.ConsoleNetworkInventoryUnavailable("No management interface is available.")
+
+    rendered: list[tuple[int, int, str, int]] = []
+    console = CursesConsole.__new__(CursesConsole)
+    console.curses = FakeCurses
+    console.stdscr = FakeScreen()
+    console._force_clear = True
+    console._started_at = 100.0
+    console._safe_add = lambda row, column, value, attr=0, **_kwargs: rendered.append((row, column, value, attr))
+    console._fill_line = lambda *_args: None
+    console._draw_footer = lambda *_args: None
+    console._refresh_screen = lambda: None
+    monkeypatch.setattr(appliance_console, "load_console_status", fail_status_load)
+    monkeypatch.setattr(appliance_console.time, "monotonic", lambda: 105.0)
+
+    console.draw_main()
+
+    assert (5, 4, "Initializing appliance networking...", 1 | FakeCurses.A_BOLD) in rendered
+
+
 def test_console_text_editor_supports_cursor_navigation_insertion_and_deletion():
     class FakeCurses:
         KEY_LEFT = 1

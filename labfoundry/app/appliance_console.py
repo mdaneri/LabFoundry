@@ -49,6 +49,7 @@ PHOTON_RELEASE_PATH = Path("/etc/photon-release")
 MAINTENANCE_STATE_PATH = Path("/var/lib/labfoundry/console/services.json")
 CONSOLE_ACTOR = "console:root"
 CONSOLE_REFRESH_ENV = "LABFOUNDRY_CONSOLE_REFRESH_SECONDS"
+CONSOLE_STARTUP_GRACE_SECONDS = 30
 BASH_PATH = "/usr/bin/bash"
 SERVICE_CATALOG = (
     ("Authentication", "auth", None),
@@ -164,6 +165,22 @@ CONSOLE_REFRESH_SECONDS = _console_refresh_seconds()
 
 class ConsoleOperationError(RuntimeError):
     pass
+
+
+class ConsoleNetworkInventoryUnavailable(ConsoleOperationError):
+    pass
+
+
+def _console_status_failure(
+    exc: Exception,
+    *,
+    started_at: float,
+    now: float | None = None,
+) -> tuple[str, bool]:
+    current = time.monotonic() if now is None else now
+    if isinstance(exc, ConsoleNetworkInventoryUnavailable) and current - started_at < CONSOLE_STARTUP_GRACE_SECONDS:
+        return "Initializing appliance networking...", False
+    return f"Status unavailable: {exc}", True
 
 
 @dataclass(frozen=True)
@@ -407,7 +424,9 @@ def _management_interface(db: Any) -> PhysicalInterface:
     if interface is None:
         interface = db.scalar(select(PhysicalInterface).where(PhysicalInterface.name == "eth0"))
     if interface is None:
-        raise ConsoleOperationError("No management interface is available. Discover appliance interfaces in LabFoundry first.")
+        raise ConsoleNetworkInventoryUnavailable(
+            "No management interface is available. Discover appliance interfaces in LabFoundry first."
+        )
     return interface
 
 
@@ -917,6 +936,7 @@ class CursesConsole:
         self.message_error = False
         self._force_clear = True
         self._force_redraw = False
+        self._started_at = time.monotonic()
         self._initialize_screen()
 
     def _initialize_screen(self) -> None:
@@ -1033,8 +1053,10 @@ class CursesConsole:
         try:
             status = load_console_status()
         except Exception as exc:  # noqa: BLE001 - recovery console must remain visible.
+            status_message, message_error = _console_status_failure(exc, started_at=self._started_at)
             self._safe_add(2, 4, "LabFoundry Appliance", curses.color_pair(1) | curses.A_BOLD)
-            self._safe_add(5, 4, f"Status unavailable: {exc}", curses.color_pair(7))
+            message_attr = curses.color_pair(7) if message_error else curses.color_pair(1) | curses.A_BOLD
+            self._safe_add(5, 4, status_message, message_attr)
             self._draw_footer(height, width)
             self._refresh_screen()
             return
