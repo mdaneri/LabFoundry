@@ -225,6 +225,17 @@ def test_bundled_ipxe_bootloaders_have_provenance_and_expected_hashes():
     assert "GNU GENERAL PUBLIC LICENSE" in gpl
 
 
+def test_packer_templates_stage_shared_boot_branding_assets():
+    for template_path in (
+        Path("image/hyperv/labfoundry-photon.pkr.hcl"),
+        Path("image/vmware-workstation/labfoundry-photon.pkr.hcl"),
+    ):
+        template = template_path.read_text(encoding="utf-8")
+
+        assert 'source      = "../common/boot"' in template
+        assert 'destination = "/tmp/labfoundry-src/image/common/boot"' in template
+
+
 def test_packer_build_uses_labfoundry_management_network_by_default():
     template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
     docs = Path("image/hyperv/README.md").read_text(encoding="utf-8")
@@ -512,7 +523,12 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "[switch]$ResetDataDisks" in script
     assert "[switch]$WaitForIp" in script
     assert "[switch]$TrustRootCa" in script
+    assert "[int]$TimeoutSeconds = 300" in script
     assert "Install-ApplianceRootCa" in script
+    assert "Waiting up to $TimeoutSeconds seconds for the LabFoundry root CA" in script
+    assert "LabFoundry root CA is not ready; retrying in $PollSeconds seconds." in script
+    assert "-TimeoutSec $requestTimeoutSeconds" in script
+    assert "Install-ApplianceRootCa -IpAddress $ip -Name $Name -TimeoutSeconds $TimeoutSeconds" in script
     assert "Write-ConnectionSummary" in script
     assert "Write-SummaryRow" in script
     assert "-ForegroundColor Cyan" in script

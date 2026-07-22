@@ -21,7 +21,7 @@ param(
     [switch]$SkipNetworkPrepare,
     [switch]$WaitForIp,
     [switch]$TrustRootCa,
-    [int]$TimeoutSeconds = 180
+    [int]$TimeoutSeconds = 300
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,14 +46,42 @@ function Find-LatestApplianceVmx {
 function Install-ApplianceRootCa {
     param(
         [Parameter(Mandatory = $true)][string]$IpAddress,
-        [Parameter(Mandatory = $true)][string]$Name
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [int]$PollSeconds = 5
     )
 
     $rootPemPath = Join-Path $env:TEMP "labfoundry-$Name-root-ca.pem"
     $rootCerPath = Join-Path $env:TEMP "labfoundry-$Name-root-ca.cer"
     $rootUrl = "http://$IpAddress/ca/downloads/root-ca.pem"
-    Write-Host "Downloading LabFoundry root CA from $rootUrl"
-    Invoke-WebRequest -Uri $rootUrl -UseBasicParsing -TimeoutSec $TimeoutSeconds -OutFile $rootPemPath
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $downloaded = $false
+    $lastError = ''
+    Write-Host "Waiting up to $TimeoutSeconds seconds for the LabFoundry root CA at $rootUrl"
+    do {
+        $remainingSeconds = [Math]::Max(1, [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds))
+        $requestTimeoutSeconds = [Math]::Min(10, $remainingSeconds)
+        try {
+            Invoke-WebRequest `
+                -Uri $rootUrl `
+                -UseBasicParsing `
+                -TimeoutSec $requestTimeoutSeconds `
+                -OutFile $rootPemPath
+            $downloaded = $true
+            break
+        } catch {
+            $lastError = $_.Exception.Message
+            Remove-Item -LiteralPath $rootPemPath -Force -ErrorAction SilentlyContinue
+            if ((Get-Date) -lt $deadline) {
+                Write-Host "LabFoundry root CA is not ready; retrying in $PollSeconds seconds." -ForegroundColor DarkGray
+                Start-Sleep -Seconds $PollSeconds
+            }
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    if (-not $downloaded) {
+        throw "Timed out after $TimeoutSeconds seconds waiting for the LabFoundry root CA at $rootUrl. Last error: $lastError"
+    }
 
     $pem = Get-Content -LiteralPath $rootPemPath -Raw
     $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::CreateFromPem($pem)
@@ -241,7 +269,7 @@ if (($WaitForIp -or $TrustRootCa) -and -not $NoStart -and -not $WhatIfPreference
         Write-Host "Management IP: $ip"
     }
     if ($TrustRootCa) {
-        Install-ApplianceRootCa -IpAddress $ip -Name $Name
+        Install-ApplianceRootCa -IpAddress $ip -Name $Name -TimeoutSeconds $TimeoutSeconds
     }
     Write-ConnectionSummary -IpAddress $ip -Name $Name -VmxPath $targetVmx -RootCaTrusted ([bool]$TrustRootCa)
 } elseif (-not $NoStart -and -not $WhatIfPreference) {
