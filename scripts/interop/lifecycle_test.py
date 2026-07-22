@@ -1920,7 +1920,6 @@ if expected_ip not in answers:
 
 
 def authoritative_dns_probe_command(domain: str, server: str, expected_ip: str) -> str:
-    reverse_name = ip_address(expected_ip).reverse_pointer
     script = f'''
 import random
 import socket
@@ -1981,14 +1980,63 @@ assert flags & 0x000F == 3, (flags, sections)
 assert flags & 0x0400, (flags, sections)
 assert 6 in sections[1], (flags, sections)
 
-flags, sections = query({reverse_name!r}, 12, "127.0.0.1")
+print("authoritative DNS lifecycle probes passed")
+'''
+    encoded = base64.b64encode(script.strip().encode("utf-8")).decode("ascii")
+    return f"printf %s {encoded} | base64 -d | python3 -"
+
+
+def recursive_dns_probe_command(server: str, expected_ip: str) -> str:
+    reverse_name = ip_address(expected_ip).reverse_pointer
+    script = f'''
+import random
+import socket
+import struct
+
+server = {server!r}
+
+def skip_name(data, offset):
+    while True:
+        length = data[offset]
+        if length & 0xC0 == 0xC0:
+            return offset + 2
+        offset += 1
+        if length == 0:
+            return offset
+        offset += length
+
+def query(name, qtype):
+    query_id = random.randrange(0, 65536)
+    qname = b"".join(bytes([len(part)]) + part.encode("ascii") for part in name.rstrip(".").split(".")) + b"\\0"
+    packet = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + qname + struct.pack("!HH", qtype, 1)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(5)
+    sock.sendto(packet, (server, 53))
+    data, _ = sock.recvfrom(4096)
+    response_id, flags, qd, an, ns, ar = struct.unpack("!HHHHHH", data[:12])
+    assert response_id == query_id
+    offset = 12
+    for _ in range(qd):
+        offset = skip_name(data, offset) + 4
+    types = []
+    for count in (an, ns, ar):
+        section = []
+        for _ in range(count):
+            offset = skip_name(data, offset)
+            rtype, _rclass, _ttl, rdlen = struct.unpack("!HHIH", data[offset:offset + 10])
+            offset += 10 + rdlen
+            section.append(rtype)
+        types.append(section)
+    return flags, types
+
+flags, sections = query({reverse_name!r}, 12)
 assert flags & 0x000F == 0, (flags, sections)
 assert 12 in sections[0], (flags, sections)
 
-flags, sections = query("example.com", 1, "127.0.0.1")
+flags, sections = query("example.com", 1)
 assert flags & 0x000F == 0, (flags, sections)
 assert sections[0], (flags, sections)
-print("authoritative DNS and recursive-loopback lifecycle probes passed")
+print("recursive DNS and PTR lifecycle probes passed")
 '''
     encoded = base64.b64encode(script.strip().encode("utf-8")).decode("ascii")
     return f"printf %s {encoded} | base64 -d | python3 -"
@@ -2123,9 +2171,34 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
             "systemctl is-active sshd"
         ),
     }
-    checks["dnsmasq"] = f"test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && {direct_dns_a_query_command(f'interop-appliance.{args.domain}', site_ip, site_ip)}"
-    checks["authoritative_dns"] = authoritative_dns_probe_command(args.domain, site_ip, site_ip)
+    checks["dnsmasq"] = "test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && systemctl is-active dnsmasq"
     return run_host_checks(args, checks)
+
+
+def authoritative_dns_state_check(args: argparse.Namespace) -> dict[str, Any]:
+    site_ip = str(ip_interface(args.site_cidr).ip)
+    if args.skip_client_checks or not args.client_a_host:
+        return {"skipped": "client A host not provided"}
+    authoritative = ssh_command(
+        args.client_a_host,
+        args,
+        authoritative_dns_probe_command(args.domain, site_ip, site_ip),
+        role="client",
+    )
+    require_success(authoritative, "client A authoritative DNS probe")
+    return {"authoritative": authoritative}
+
+
+def recursive_dns_state_check(args: argparse.Namespace) -> dict[str, Any]:
+    site_ip = str(ip_interface(args.site_cidr).ip)
+    recursive = ssh_command(
+        args.appliance_ssh_host,
+        args,
+        recursive_dns_probe_command("127.0.0.1", site_ip),
+        role="appliance",
+    )
+    require_success(recursive, "appliance recursive DNS and PTR probe")
+    return {"recursive_and_ptr": recursive}
 
 
 def vcf_backup_client_check(args: argparse.Namespace) -> dict[str, Any]:
@@ -2781,6 +2854,8 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "apply-ntp-unit", apply_units, client, ["ntpd", "firewall"], args)
     run_step(results, "apply-vcf-offline-depot-unit", apply_units, client, ["dnsmasq", "firewall", "vcf_offline_depot", "public_services"], args)
     run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "wan", "kms"], args)
+    run_step(results, "authoritative-dns-state-check", authoritative_dns_state_check, args)
+    run_step(results, "recursive-dns-state-check", recursive_dns_state_check, args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
     run_step(results, "ntp-client-checks", ntp_client_checks, args)
@@ -2834,6 +2909,8 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
     run_step(results, "apply-ntp-unit", apply_units, client, ["ntpd", "firewall"], args)
     run_step(results, "apply-vcf-offline-depot-unit", apply_units, client, ["dnsmasq", "firewall", "vcf_offline_depot", "public_services"], args)
     run_step(results, "apply-kms-unit", apply_units, client, ["dnsmasq", "firewall", "wan", "kms"], args)
+    run_step(results, "authoritative-dns-state-check", authoritative_dns_state_check, args)
+    run_step(results, "recursive-dns-state-check", recursive_dns_state_check, args)
     run_step(results, "host-state-checks", host_state_checks, args)
     run_step(results, "client-checks", client_checks, args)
     run_step(results, "ntp-client-checks", ntp_client_checks, args)
