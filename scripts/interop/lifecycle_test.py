@@ -619,6 +619,12 @@ def configure_dns_dhcp(client: HttpClient, args: argparse.Namespace) -> dict[str
             "cache_size": 1000,
             "expand_hosts": True,
             "authoritative": True,
+            "authoritative_server": f"ns1.{args.domain}",
+            "authoritative_contact": f"hostmaster.{args.domain}",
+            "authoritative_ttl": 3600,
+            "authoritative_refresh": 1200,
+            "authoritative_retry": 180,
+            "authoritative_expire": 1209600,
         },
     )
     records = client.json_request("GET", "/api/v1/dns/records")
@@ -1913,6 +1919,78 @@ if expected_ip not in answers:
     return f"printf %s {encoded} | base64 -d | python3 -"
 
 
+def authoritative_dns_probe_command(domain: str, server: str, expected_ip: str) -> str:
+    reverse_name = ip_address(expected_ip).reverse_pointer
+    script = f'''
+import random
+import socket
+import struct
+
+server = {server!r}
+
+def skip_name(data, offset):
+    while True:
+        length = data[offset]
+        if length & 0xC0 == 0xC0:
+            return offset + 2
+        offset += 1
+        if length == 0:
+            return offset
+        offset += length
+
+def query(name, qtype):
+    query_id = random.randrange(0, 65536)
+    qname = b"".join(bytes([len(part)]) + part.encode("ascii") for part in name.rstrip(".").split(".")) + b"\\0"
+    packet = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + qname + struct.pack("!HH", qtype, 1)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(5)
+    sock.sendto(packet, (server, 53))
+    data, _ = sock.recvfrom(4096)
+    response_id, flags, qd, an, ns, ar = struct.unpack("!HHHHHH", data[:12])
+    assert response_id == query_id
+    offset = 12
+    for _ in range(qd):
+        offset = skip_name(data, offset) + 4
+    types = []
+    for count in (an, ns, ar):
+        section = []
+        for _ in range(count):
+            offset = skip_name(data, offset)
+            rtype, _rclass, _ttl, rdlen = struct.unpack("!HHIH", data[offset:offset + 10])
+            offset += 10 + rdlen
+            section.append(rtype)
+        types.append(section)
+    return flags, types
+
+domain = {domain!r}
+expected = [
+    (domain, 6, 0, 6, True),
+    (domain, 2, 0, 2, True),
+    ("ns1." + domain, 1, 0, 1, True),
+    ("interop-appliance." + domain, 1, 0, 1, True),
+    ({reverse_name!r}, 12, 0, 12, True),
+]
+for name, qtype, expected_rcode, expected_type, authoritative in expected:
+    flags, sections = query(name, qtype)
+    assert flags & 0x000F == expected_rcode, (name, flags, sections)
+    assert expected_type in sections[0], (name, flags, sections)
+    if authoritative:
+        assert flags & 0x0400, (name, flags, sections)
+
+flags, sections = query("missing-authoritative." + domain, 1)
+assert flags & 0x000F == 3, (flags, sections)
+assert flags & 0x0400, (flags, sections)
+assert 6 in sections[1], (flags, sections)
+
+flags, sections = query("example.com", 1)
+assert flags & 0x000F == 0, (flags, sections)
+assert sections[0], (flags, sections)
+print("authoritative DNS lifecycle probes passed")
+'''
+    encoded = base64.b64encode(script.strip().encode("utf-8")).decode("ascii")
+    return f"printf %s {encoded} | base64 -d | python3 -"
+
+
 def run_host_checks(args: argparse.Namespace, checks: dict[str, str]) -> dict[str, Any]:
     evidence: dict[str, Any] = {}
     for name, command in checks.items():
@@ -2042,7 +2120,8 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
             "systemctl is-active sshd"
         ),
     }
-    checks["dnsmasq"] = f"test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && {direct_dns_a_query_command('interop-appliance.labfoundry.internal', site_ip, site_ip)}"
+    checks["dnsmasq"] = f"test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && {direct_dns_a_query_command(f'interop-appliance.{args.domain}', site_ip, site_ip)}"
+    checks["authoritative_dns"] = authoritative_dns_probe_command(args.domain, site_ip, site_ip)
     return run_host_checks(args, checks)
 
 

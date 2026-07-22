@@ -68,6 +68,22 @@
             </div>
           {% endif %}
 
+          {% if group.authority %}
+            <div class="dns-authority-summary" aria-label="Generated authoritative records for {{ group.domain }}">
+              <div class="dns-authority-summary-head">
+                <strong>Generated authoritative records</strong>
+                <span class="status-pill good">SOA + NS + {{ group.authority.glue_addresses | length }} glue</span>
+              </div>
+              <dl class="dns-authority-records">
+                <div><dt>SOA</dt><dd><code>{{ group.authority.server }}. {{ group.authority.contact }}. {{ group.authority.serial }} {{ group.authority.refresh }} {{ group.authority.retry }} {{ group.authority.expire }} {{ group.authority.ttl }}</code></dd></div>
+                <div><dt>NS</dt><dd><code>{{ group.authority.server }}.</code></dd></div>
+                {% for address in group.authority.glue_addresses %}
+                  <div><dt>{{ "AAAA" if ":" in address else "A" }}</dt><dd><code>{{ group.authority.server }}. {{ address }}</code></dd></div>
+                {% endfor %}
+              </dl>
+            </div>
+          {% endif %}
+
           <div class="tab-buttons tool-tabs" role="tablist" aria-label="{{ group.domain }} tools">
             <button class="tab-button active" type="button" role="tab" data-tab-target="dns-zone-{{ loop.index }}-records" aria-selected="true">Records</button>
             <button class="tab-button" type="button" role="tab" data-tab-target="dns-zone-{{ loop.index }}-hosts" aria-selected="false">Import Hosts</button>
@@ -204,29 +220,32 @@
         </div>
         {% if reverse_zone_groups %}
           {% for group in reverse_zone_groups %}
-            <section class="reverse-zone-card">
-              <div class="zone-head compact">
+            <details class="reverse-zone-card">
+              <summary class="reverse-zone-summary">
                 <div>
                   <strong>{{ group.zone }}</strong>
                   <span class="muted">{{ group.records | length }} PTR records</span>
                 </div>
+                <span class="reverse-zone-chevron" aria-hidden="true"></span>
+              </summary>
+              <div class="reverse-zone-records">
+                <table class="data-table compact">
+                  <thead>
+                    <tr><th>Owner</th><th>Address</th><th>PTR target</th><th>Type</th></tr>
+                  </thead>
+                  <tbody>
+                    {% for record in group.records %}
+                      <tr>
+                        <td>{{ record.owner }}</td>
+                        <td>{{ record.address }}</td>
+                        <td>{{ record.target }}</td>
+                        <td>{{ record.record_type }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
               </div>
-              <table class="data-table compact">
-                <thead>
-                  <tr><th>Owner</th><th>Address</th><th>PTR target</th><th>Type</th></tr>
-                </thead>
-                <tbody>
-                  {% for record in group.records %}
-                    <tr>
-                      <td>{{ record.owner }}</td>
-                      <td>{{ record.address }}</td>
-                      <td>{{ record.target }}</td>
-                      <td>{{ record.record_type }}</td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </section>
+            </details>
           {% endfor %}
         {% else %}
           <div class="empty-state">
@@ -311,7 +330,19 @@
         <label><span class="field-label"><span>Conditional forwarders</span><button class="help-icon" type="button" data-help="Routes a DNS domain and its subdomains to specific upstream resolvers. Use one domain=server1,server2 entry per line; global upstream servers still handle everything else.">i</button></span><textarea name="conditional_forwarders" rows="3" placeholder="sddc.internal=192.168.10.10,192.168.10.11">{{ conditional_forwarders }}</textarea></label>
         <label><span class="field-label"><span>Cache size</span><button class="help-icon" type="button" data-help="Maximum number of DNS responses dnsmasq keeps in memory to speed repeated lookups.">i</button></span><input type="number" name="cache_size" min="0" value="{{ dns_settings.cache_size }}"></label>
         <label class="switch-field"><span class="field-label"><span>Expand hosts</span><button class="help-icon" type="button" data-help="Adds the primary managed domain to simple hostnames so short names can resolve inside the lab.">i</button></span><input class="switch-input" type="checkbox" name="expand_hosts" {{ "checked" if dns_settings.expand_hosts else "" }}><span class="switch-track" aria-hidden="true"></span></label>
-        <label class="switch-field"><span class="field-label"><span>Authoritative</span><button class="help-icon" type="button" data-help="Marks LabFoundry dnsmasq as authoritative for this lab network's local DNS/DHCP data.">i</button></span><input class="switch-input" type="checkbox" name="authoritative" {{ "checked" if dns_settings.authoritative else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="switch-field"><span class="field-label"><span>Authoritative</span><button class="help-icon" type="button" data-help="Serves every managed forward domain as a dnsmasq authoritative zone. Generated SOA, NS, and nameserver glue become active only after global appliance apply.">i</button></span><input class="switch-input" type="checkbox" name="authoritative" {{ "checked" if dns_settings.authoritative else "" }}><span class="switch-track" aria-hidden="true"></span></label>
+        <fieldset class="form-stack authoritative-dns-fields">
+          <legend>Authoritative DNS</legend>
+          <label><span class="field-label"><span>Primary nameserver</span><button class="help-icon" type="button" data-help="Shared primary NS identity for all managed zones. It must belong to one managed zone; A and AAAA glue is generated from selected DNS listen addresses.">i</button></span><input name="authoritative_server" value="{{ dns_settings.authoritative_server }}" placeholder="ns1.{{ dns_record_groups[0].domain if dns_record_groups else 'labfoundry.internal' }}"></label>
+          <label><span class="field-label"><span>SOA administrator</span><button class="help-icon" type="button" data-help="DNS-form administrator name placed in generated SOA records, for example hostmaster.example.internal. The first dot represents the email @ convention.">i</button></span><input name="authoritative_contact" value="{{ dns_settings.authoritative_contact }}" placeholder="hostmaster.{{ dns_record_groups[0].domain if dns_record_groups else 'labfoundry.internal' }}"></label>
+          <div class="form-grid compact-grid">
+            <label><span class="field-label"><span>TTL</span><button class="help-icon" type="button" data-help="Shared authoritative answer and generated zone-file TTL in seconds.">i</button></span><input type="number" name="authoritative_ttl" min="1" max="2147483647" value="{{ dns_settings.authoritative_ttl }}"></label>
+            <label><span class="field-label"><span>Serial</span><button class="help-icon" type="button" data-help="Server-managed SOA serial. LabFoundry advances it monotonically whenever authoritative settings, zones, or records change.">i</button></span><input type="number" value="{{ dns_settings.authoritative_serial }}" readonly aria-readonly="true"></label>
+            <label><span class="field-label"><span>Refresh</span><button class="help-icon" type="button" data-help="SOA refresh interval in seconds. Reserved for authoritative metadata; secondary transfers are outside v1.">i</button></span><input type="number" name="authoritative_refresh" min="1" max="2147483647" value="{{ dns_settings.authoritative_refresh }}"></label>
+            <label><span class="field-label"><span>Retry</span><button class="help-icon" type="button" data-help="SOA retry interval in seconds. It must be positive and lower than expiry.">i</button></span><input type="number" name="authoritative_retry" min="1" max="2147483647" value="{{ dns_settings.authoritative_retry }}"></label>
+            <label><span class="field-label"><span>Expiry</span><button class="help-icon" type="button" data-help="SOA expiry interval in seconds. It must be greater than refresh and retry.">i</button></span><input type="number" name="authoritative_expire" min="1" max="2147483647" value="{{ dns_settings.authoritative_expire }}"></label>
+          </div>
+        </fieldset>
         <label class="switch-field"><span class="field-label"><span>DNSSEC validation</span><button class="help-icon" type="button" data-help="Renders dnsmasq DNSSEC validation and uses package-provided trust anchors during appliance validation. Existing labs stay unchanged until this desired state is applied.">i</button></span><input class="switch-input" type="checkbox" name="dnssec_enabled" {{ "checked" if dns_settings.dnssec_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label class="switch-field"><span class="field-label"><span>Rebind protection</span><button class="help-icon" type="button" data-help="Blocks upstream DNS answers that point public names at private addresses. Add exemptions for intentional split-horizon lab domains before applying.">i</button></span><input class="switch-input" type="checkbox" name="rebind_protection_enabled" {{ "checked" if dns_settings.rebind_protection_enabled else "" }}><span class="switch-track" aria-hidden="true"></span></label>
         <label><span class="field-label"><span>Rebind exemptions</span><button class="help-icon" type="button" data-help="One domain per line that may legitimately resolve to private or lab addresses through upstream DNS when rebind protection is enabled.">i</button></span><textarea name="rebind_domain_exemptions" rows="2" placeholder="corp.example.com">{{ dns_settings.rebind_domain_exemptions }}</textarea></label>

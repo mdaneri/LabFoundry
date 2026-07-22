@@ -20,6 +20,7 @@ from labfoundry.app.services.dnsmasq import (
     render_dnsmasq_config,
     render_zone_file,
     split_conditional_forwarders,
+    validate_authoritative_dns_record,
     validate_dns_record,
     validate_dhcp_bind_targets,
     validate_dns_listen_targets,
@@ -105,6 +106,105 @@ def test_dnsmasq_renderer_binds_dhcp_to_sitea_interface_only():
     assert f"dhcp-leasefile={DNSMASQ_LEASE_FILE_PATH}" in config
     assert "dhcp-host=02:15:5d:00:20:20,client1,192.168.50.120" in config
     assert "dhcp-host=02:15:5d:00:20:99,ignore" in config
+
+
+def test_dnsmasq_renderer_emits_shared_authoritative_zones_and_generated_glue():
+    settings = DnsSettings(
+        enabled=True,
+        listen_interface="eth1\neth2",
+        listen_address="192.168.50.1\n2001:db8::53",
+        domain="labfoundry.internal\nsitea.internal",
+        authoritative=True,
+        authoritative_server="ns1.labfoundry.internal",
+        authoritative_contact="hostmaster.labfoundry.internal",
+        authoritative_ttl=3600,
+        authoritative_serial=2026072201,
+        authoritative_refresh=1200,
+        authoritative_retry=180,
+        authoritative_expire=1209600,
+    )
+
+    config = render_dnsmasq_config(
+        dns_settings=settings,
+        dns_records=[DnsRecord(hostname="app.sitea.internal", record_type="A", address="192.168.50.20")],
+        dhcp_settings=DhcpSettings(enabled=False),
+        dhcp_reservations=[],
+    )
+
+    assert "auth-zone=labfoundry.internal" in config
+    assert "auth-zone=sitea.internal" in config
+    assert "local=/labfoundry.internal/" not in config
+    assert "auth-server=ns1.labfoundry.internal,eth1,eth2" in config
+    assert "auth-soa=2026072201,hostmaster.labfoundry.internal,1200,180,1209600" in config
+    assert "auth-ttl=3600" in config
+    assert "host-record=ns1.labfoundry.internal,192.168.50.1" in config
+    assert "host-record=ns1.labfoundry.internal,2001:db8::53" in config
+    assert "host-record=app.sitea.internal,192.168.50.20" in config
+
+
+def test_authoritative_validation_rejects_bad_identity_timers_and_conflicting_glue():
+    settings = DnsSettings(
+        enabled=True,
+        listen_interface="eth1",
+        listen_address="192.168.50.1",
+        domain="labfoundry.internal",
+        authoritative=True,
+        authoritative_server="ns1.outside.example",
+        authoritative_contact="bad contact",
+        authoritative_ttl=0,
+        authoritative_serial=0,
+        authoritative_refresh=1200,
+        authoritative_retry=180,
+        authoritative_expire=100,
+    )
+    errors = validate_dns_settings(settings, [])
+
+    assert any("must belong to one of the managed domains" in error for error in errors)
+    assert any("administrator must be a valid" in error for error in errors)
+    assert any("TTL must be between" in error for error in errors)
+    assert any("expire must be greater" in error for error in errors)
+    assert any("serial must be between" in error for error in errors)
+
+    settings.authoritative_server = "ns1.labfoundry.internal"
+    assert validate_authoritative_dns_record(settings, "ns1.labfoundry.internal", "A", "192.168.50.99")
+    assert validate_authoritative_dns_record(settings, "ns1.labfoundry.internal", "CNAME", "other.labfoundry.internal")
+    assert validate_authoritative_dns_record(settings, "ns1.labfoundry.internal", "A", "192.168.50.1") == []
+
+
+def test_authoritative_zone_file_round_trip_ignores_matching_structural_records():
+    settings = DnsSettings(
+        listen_address="192.168.50.1\n2001:db8::53",
+        domain="labfoundry.internal",
+        authoritative=True,
+        authoritative_server="ns1.labfoundry.internal",
+        authoritative_contact="hostmaster.labfoundry.internal",
+        authoritative_ttl=3600,
+        authoritative_serial=2026072201,
+        authoritative_refresh=1200,
+        authoritative_retry=180,
+        authoritative_expire=1209600,
+    )
+    zone_text = render_zone_file(
+        "labfoundry.internal",
+        [{"hostname": "app.labfoundry.internal", "host_label": "app", "record_type": "A", "address": "192.168.50.20", "enabled": True}],
+        settings,
+    )
+    records, errors = parse_zone_records(zone_text, "labfoundry.internal", settings)
+
+    assert errors == []
+    assert len(records) == 1
+    assert records[0]["hostname"] == "app.labfoundry.internal"
+    assert "IN SOA" in zone_text
+    assert "IN NS" in zone_text
+    assert "ns1" in zone_text
+
+    conflicting = zone_text.replace("hostmaster.labfoundry.internal.", "admin.labfoundry.internal.")
+    _, errors = parse_zone_records(conflicting, "labfoundry.internal", settings)
+    assert any("SOA metadata must match" in error for error in errors)
+
+    second_zone = render_zone_file("sitea.internal", [], settings)
+    assert "ns1.labfoundry.internal. IN A" in second_zone
+    assert "@                        IN A" not in second_zone
 
 
 def test_dnsmasq_renderer_uses_dhcp_upstreams_when_desired_upstreams_empty():
@@ -960,6 +1060,44 @@ def test_dns_api_requires_scope_and_returns_config_preview(client):
     assert updated.json()["hostname"] == "api-renamed.labfoundry.internal"
     assert updated.json()["address"] == "192.168.50.32"
     assert updated.json()["enabled"] is False
+
+
+def test_dns_api_exposes_read_only_authoritative_settings_and_advances_serial(client):
+    dns_token = create_token(client, ["read:dns", "write:dns"])
+    headers = {"Authorization": f"Bearer {dns_token}"}
+    initial = client.get("/api/v1/dns/settings", headers=headers)
+    assert initial.status_code == 200
+    initial_body = initial.json()
+    initial_serial = initial_body["authoritative_serial"]
+
+    assert initial_body["authoritative_server"] == "ns1.labfoundry.internal"
+    assert initial_body["authoritative_contact"] == "hostmaster.labfoundry.internal"
+    assert initial_body["authoritative_ttl"] == 3600
+    assert initial_body["authoritative_refresh"] == 1200
+    assert initial_body["authoritative_retry"] == 180
+    assert initial_body["authoritative_expire"] == 1209600
+
+    created = client.post(
+        "/api/v1/dns/records",
+        headers=headers,
+        json={"hostname": "serial.labfoundry.internal", "record_type": "A", "address": "192.168.50.88"},
+    )
+    assert created.status_code == 201, created.text
+    after_create = client.get("/api/v1/dns/settings", headers=headers).json()["authoritative_serial"]
+    assert after_create > initial_serial
+
+    updated = client.patch(
+        f"/api/v1/dns/records/{created.json()['id']}",
+        headers=headers,
+        json={"hostname": "serial.labfoundry.internal", "record_type": "A", "address": "192.168.50.89"},
+    )
+    assert updated.status_code == 200, updated.text
+    after_update = client.get("/api/v1/dns/settings", headers=headers).json()["authoritative_serial"]
+    assert after_update > after_create
+
+    schema = client.get("/openapi.json").json()["components"]["schemas"]
+    assert "authoritative_serial" in schema["DnsSettingsResponse"]["properties"]
+    assert "authoritative_serial" not in schema["DnsSettingsUpdate"]["properties"]
 
 
 def test_dns_api_update_rejects_duplicate_record(client):

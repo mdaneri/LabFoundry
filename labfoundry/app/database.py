@@ -1,7 +1,8 @@
 from collections.abc import Generator
+from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from labfoundry.app.config import get_settings
@@ -26,6 +27,54 @@ engine = create_engine(
     connect_args={"check_same_thread": False} if _engine_url().startswith("sqlite") else {},
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+DNS_AUTHORITY_SERIAL_FIELDS = {
+    "domain",
+    "authoritative",
+    "authoritative_server",
+    "authoritative_contact",
+    "authoritative_ttl",
+    "authoritative_refresh",
+    "authoritative_retry",
+    "authoritative_expire",
+    "listen_interface",
+    "listen_address",
+}
+
+
+@event.listens_for(Session, "before_flush")
+def _advance_dns_authoritative_serial(session: Session, _flush_context, _instances) -> None:
+    from labfoundry.app.models import DnsRecord, DnsSettings
+
+    record_changed = any(isinstance(item, DnsRecord) for item in session.new | session.deleted)
+    if not record_changed:
+        record_changed = any(
+            isinstance(item, DnsRecord) and session.is_modified(item, include_collections=False)
+            for item in session.dirty
+        )
+
+    settings_changed = False
+    for item in session.dirty:
+        if not isinstance(item, DnsSettings):
+            continue
+        state = inspect(item)
+        if any(state.attrs[field].history.has_changes() for field in DNS_AUTHORITY_SERIAL_FIELDS):
+            settings_changed = True
+            break
+
+    if not record_changed and not settings_changed:
+        return
+
+    settings = next((item for item in session.new if isinstance(item, DnsSettings)), None)
+    if settings is None:
+        settings = session.execute(select(DnsSettings)).scalar_one_or_none()
+    if settings is None:
+        return
+
+    current = int(settings.authoritative_serial or 0)
+    now = int(datetime.now(timezone.utc).timestamp())
+    settings.authoritative_serial = max(current + 1, now)
 
 
 def init_db() -> None:
@@ -206,6 +255,13 @@ def _ensure_sqlite_dns_security_columns() -> None:
         if "dns_settings" in table_names:
             existing = {column["name"] for column in inspector.get_columns("dns_settings")}
             columns = {
+                "authoritative_server": "VARCHAR(253) DEFAULT ''",
+                "authoritative_contact": "VARCHAR(253) DEFAULT ''",
+                "authoritative_ttl": "INTEGER DEFAULT 3600",
+                "authoritative_serial": "INTEGER DEFAULT 0",
+                "authoritative_refresh": "INTEGER DEFAULT 1200",
+                "authoritative_retry": "INTEGER DEFAULT 180",
+                "authoritative_expire": "INTEGER DEFAULT 1209600",
                 "dnssec_enabled": "BOOLEAN DEFAULT 0",
                 "rebind_protection_enabled": "BOOLEAN DEFAULT 0",
                 "rebind_domain_exemptions": "TEXT DEFAULT ''",
@@ -214,6 +270,12 @@ def _ensure_sqlite_dns_security_columns() -> None:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(text(f"ALTER TABLE dns_settings ADD COLUMN {name} {definition}"))
+            connection.execute(
+                text(
+                    "UPDATE dns_settings SET authoritative_serial = CAST(strftime('%s', 'now') AS INTEGER) "
+                    "WHERE COALESCE(authoritative_serial, 0) <= 0"
+                )
+            )
         if "dns_records" in table_names:
             existing = {column["name"] for column in inspector.get_columns("dns_records")}
             if "record_data_json" not in existing:

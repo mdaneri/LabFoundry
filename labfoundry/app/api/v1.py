@@ -185,6 +185,7 @@ from labfoundry.app.services.dnsmasq import (
     dnsmasq_test_command,
     dump_dns_record_data,
     effective_dns_upstream_servers,
+    ensure_dns_authoritative_defaults,
     join_conditional_forwarders,
     join_domains,
     join_servers,
@@ -199,6 +200,7 @@ from labfoundry.app.services.dnsmasq import (
     validate_dhcp_bind_targets,
     validate_dhcp_settings,
     validate_dns_listen_targets,
+    validate_authoritative_dns_record,
     validate_dns_settings,
 )
 from labfoundry.app.services.appliance_settings import (
@@ -1450,6 +1452,9 @@ def get_dns_settings_row(db: Session) -> DnsSettings:
         db.add(settings)
         db.commit()
         db.refresh(settings)
+    if ensure_dns_authoritative_defaults(settings):
+        db.commit()
+        db.refresh(settings)
     return settings
 
 
@@ -1578,7 +1583,19 @@ def update_dns_settings(
     settings.updated_at = utcnow()
     db.commit()
     db.refresh(settings)
-    record_audit(db, actor=identity.username, action="update_dns_settings", resource_type="dns", resource_id=str(settings.id))
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_dns_settings",
+        resource_type="dns",
+        resource_id=str(settings.id),
+        detail=(
+            f"authoritative={settings.authoritative}; primary={settings.authoritative_server}; "
+            f"contact={settings.authoritative_contact}; ttl={settings.authoritative_ttl}; "
+            f"serial={settings.authoritative_serial}; refresh={settings.authoritative_refresh}; "
+            f"retry={settings.authoritative_retry}; expire={settings.authoritative_expire}"
+        ),
+    )
     return DnsSettingsResponse(
         **dns_settings_to_dict(
             settings,
@@ -1603,6 +1620,7 @@ def create_dns_record(
     address = payload.address.strip()
     record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
+    validation_errors.extend(validate_authoritative_dns_record(get_dns_settings_row(db), hostname, record_type, address))
     if validation_errors:
         raise HTTPException(status_code=422, detail=" ".join(validation_errors))
     existing = db.execute(
@@ -1648,6 +1666,7 @@ def update_dns_record(
     address = payload.address.strip()
     record_data_json = dump_dns_record_data(record_type, address)
     validation_errors = validate_dns_record(hostname, record_type, address)
+    validation_errors.extend(validate_authoritative_dns_record(get_dns_settings_row(db), hostname, record_type, address))
     if validation_errors:
         raise HTTPException(status_code=422, detail=" ".join(validation_errors))
     existing = db.execute(
@@ -1683,6 +1702,16 @@ def import_dns_hosts_file(
     db: Session = Depends(get_db),
 ) -> DnsHostsImportResponse:
     parsed_records, errors = parse_hosts_records(payload.hosts_text)
+    dns_settings = get_dns_settings_row(db)
+    for item in parsed_records:
+        errors.extend(
+            validate_authoritative_dns_record(
+                dns_settings,
+                str(item["hostname"]),
+                str(item["record_type"]),
+                str(item["address"]),
+            )
+        )
     if errors:
         raise HTTPException(status_code=422, detail="; ".join(errors))
     if payload.replace_existing:

@@ -755,7 +755,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v138" in service_worker.text
+    assert "labfoundry-pwa-v139" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -767,7 +767,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=monitor-series-20260722-1" in service_worker.text
+    assert "/static/app.css?v=dns-authority-20260722-1" in service_worker.text
     assert "/static/app.js?v=apply-notice-refresh-20260722-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
@@ -777,7 +777,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=monitor-series-20260722-1" in offline.text
+    assert "/static/app.css?v=dns-authority-20260722-1" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -794,7 +794,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=monitor-series-20260722-1" in page.text
+    assert "/static/app.css?v=dns-authority-20260722-1" in page.text
     assert "/static/app.js?v=apply-notice-refresh-20260722-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
@@ -2474,6 +2474,42 @@ def test_settings_archive_round_trips_management_ipv6_gateway(client):
         assert restored.ipv6_gateway == "fe80::1"
 
 
+def test_settings_archive_round_trips_authoritative_dns_policy(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import DnsSettings
+    from labfoundry.app.services.settings_archive import export_settings_archive, restore_settings_archive
+
+    with SessionLocal() as db:
+        settings = db.scalar(select(DnsSettings))
+        settings.authoritative_server = "ns-primary.labfoundry.internal"
+        settings.authoritative_contact = "dns-admin.labfoundry.internal"
+        settings.authoritative_ttl = 7200
+        settings.authoritative_serial = 2026072201
+        settings.authoritative_refresh = 2400
+        settings.authoritative_retry = 300
+        settings.authoritative_expire = 2419200
+        db.commit()
+
+        archive = export_settings_archive(db, actor="test")
+        archived = archive["data"]["dns_settings"][0]
+        assert archived["authoritative_server"] == "ns-primary.labfoundry.internal"
+        archived_serial = archived["authoritative_serial"]
+        assert archived_serial > 2026072201
+
+        restore_settings_archive(db, archive)
+        db.commit()
+        restored = db.scalar(select(DnsSettings))
+        assert restored.authoritative_server == "ns-primary.labfoundry.internal"
+        assert restored.authoritative_contact == "dns-admin.labfoundry.internal"
+        assert restored.authoritative_ttl == 7200
+        assert restored.authoritative_serial >= archived_serial
+        assert restored.authoritative_refresh == 2400
+        assert restored.authoritative_retry == 300
+        assert restored.authoritative_expire == 2419200
+
+
 def test_settings_restore_and_factory_reset_clear_staged_ldap_recovery(client):
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import LdapRecoveryArchive
@@ -3578,6 +3614,13 @@ def test_backup_restore_factory_reset_resets_desired_state_and_stops_services(cl
         dns_settings = db.execute(select(DnsSettings)).scalar_one()
         assert dns_settings.listen_interface == ""
         assert dns_settings.listen_address in ("", None)
+        assert dns_settings.authoritative_server == "ns1.labfoundry.internal"
+        assert dns_settings.authoritative_contact == "hostmaster.labfoundry.internal"
+        assert dns_settings.authoritative_ttl == 3600
+        assert dns_settings.authoritative_refresh == 1200
+        assert dns_settings.authoritative_retry == 180
+        assert dns_settings.authoritative_expire == 1209600
+        assert dns_settings.authoritative_serial > 0
         dhcp_settings = db.execute(select(DhcpSettings)).scalar_one()
         assert dhcp_settings.interface_name == ""
         assert dhcp_settings.site_address == ""
@@ -9968,7 +10011,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "monitor-series-20260722-1" in page.text
+    assert "dns-authority-20260722-1" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -11886,6 +11929,23 @@ def test_dns_zone_create_adds_domain_tab(client):
     refreshed = client.get("/dns")
     assert "sitea.internal" in refreshed.text
     assert 'data-domain="sitea.internal"' in refreshed.text
+
+
+def test_dns_reverse_zones_are_closed_native_disclosures_with_authority_summary(client):
+    login(client)
+    page = client.get("/dns")
+
+    assert page.status_code == 200
+    assert '<details class="reverse-zone-card">' in page.text
+    assert '<details class="reverse-zone-card" open' not in page.text
+    assert '<summary class="reverse-zone-summary">' in page.text
+    assert 'class="reverse-zone-chevron" aria-hidden="true"' in page.text
+    assert "Generated authoritative records" in page.text
+    assert "SOA + NS +" in page.text
+    assert 'name="authoritative_server"' in page.text
+    assert 'name="authoritative_contact"' in page.text
+    assert 'name="authoritative_ttl"' in page.text
+    assert "Server-managed SOA serial" in page.text
 
 
 def test_dns_zone_delete_removes_domain_and_scoped_records(client):

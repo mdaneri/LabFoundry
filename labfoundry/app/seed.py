@@ -39,7 +39,7 @@ from labfoundry.app.models import (
 from labfoundry.app.services.appliance_settings import APPLIANCE_DNS_RECORD_DESCRIPTION, normalize_fqdn
 from labfoundry.app.services.local_users import DEFAULT_LOCAL_USER_SHELL, POWERSHELL_LOCAL_USER_SHELL, stage_user_os_password
 from labfoundry.app.services.ldap import LDAP_DEFAULT_HOSTNAME, LDAP_STAGED_CONFIG_PATH
-from labfoundry.app.services.dnsmasq import join_domains, split_domains, validate_dns_record
+from labfoundry.app.services.dnsmasq import ensure_dns_authoritative_defaults, join_domains, split_domains, validate_dns_record
 from labfoundry.app.services.networking import normalize_interface_mode, normalize_ipv4_method
 from labfoundry.app.services.ntp import NTP_DEFAULT_HOSTNAME, NTP_STAGED_CONFIG_PATH, default_ntp_upstream_fields
 from labfoundry.app.services.service_registry import RETIRED_SERVICE_IDS, SERVICE_STATE_DEFAULTS
@@ -287,6 +287,7 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
         if appliance_dns_domain not in domains:
             dns_settings.domain = join_domains([appliance_dns_domain, *domains])
             db.add(dns_settings)
+    ensure_dns_authoritative_defaults(dns_settings)
 
     _ensure_appliance_dns_record(db, appliance_settings)
 

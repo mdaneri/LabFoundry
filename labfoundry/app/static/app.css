@@ -2158,16 +2158,101 @@ textarea {
 }
 
 .reverse-zone-card {
-  display: grid;
-  gap: 6px;
   border: 1px solid var(--border);
   border-radius: 7px;
-  padding: 10px;
   background: #f8fafc;
+  overflow: hidden;
 }
 
 .reverse-zone-card + .reverse-zone-card {
   margin-top: 10px;
+}
+
+.reverse-zone-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.reverse-zone-summary::-webkit-details-marker {
+  display: none;
+}
+
+.reverse-zone-summary strong,
+.reverse-zone-summary span {
+  display: block;
+}
+
+.reverse-zone-chevron {
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform 120ms ease;
+}
+
+.reverse-zone-card[open] .reverse-zone-chevron {
+  transform: rotate(225deg);
+}
+
+.reverse-zone-records {
+  padding: 0 10px 10px;
+}
+
+.dns-authority-summary {
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.dns-authority-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.dns-authority-records {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.dns-authority-records > div {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.dns-authority-records dt {
+  font-weight: 700;
+}
+
+.dns-authority-records dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.authoritative-dns-fields {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.authoritative-dns-fields legend {
+  padding: 0 5px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .zone-editor-toolbar {

@@ -1,5 +1,9 @@
 # LabFoundry Agent Notes
 
+## Repository Delivery Workflow
+
+- Every repository change requires a GitHub issue created or linked before implementation begins, relevant documentation updated in the same change, and a pull request linked with `Closes #<issue>`. Do not commit changes directly to `main`.
+
 ## UI Defaults
 
 - Every configurable setting should include an adjacent `i` help control using the `.field-label` and `.help-icon` pattern.
@@ -29,6 +33,7 @@
 - Use tab groups when two editing modes solve the same job. Do not show single-record forms, bulk import, and raw/config editors all at once if tabs can make the workflow clearer.
 - Use tag editors for one-or-more selections such as interfaces, addresses, networks, domains, or labels. Tag editors should allow typed custom values and a `+` menu for known existing options.
 - Use domain- or scope-specific tabs for resources that naturally belong under a parent, such as DNS records under zones. Each tab should keep edits scoped to that parent.
+- When DNS authoritative mode is enabled, every managed forward domain is a dnsmasq `auth-zone` using the shared primary nameserver, SOA administrator, timers, TTL, and server-managed monotonic serial. Generate SOA and NS records plus A/AAAA nameserver glue from selected DNS listen addresses; keep those structural records read-only, accept only matching structural metadata during zone-file import, and reject conflicting operator records. Authoritative mode does not make generated reverse zones authoritative, and reverse-zone cards start as collapsed native disclosures on every page load.
 - Preserve active tab context after autosave, record creation, deletion, or import whenever possible.
 - Prefer explicit status language over generic button text. Avoid labels such as `Save DNS` or `Apply` when the action really means "save desired state", "review appliance changes", "submit appliance changes", "import into this domain", or "apply zone file".
 - Destructive UI actions such as deleting a domain, scope, record set, backup, token, or appliance-owned config should require the shared modal confirmation pattern (`data-confirm-modal`) instead of a browser confirm or immediate submit. The modal copy should name the object, explain what will be removed, and mention whether the appliance is affected immediately or only after global appliance apply.
