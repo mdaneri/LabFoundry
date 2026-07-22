@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Keep LabFoundry's repository version sources synchronized."""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+PYTHON_FALLBACK_RE = re.compile(r'(?m)^(\s*BUILD_VERSION\s*=\s*")[^"]+("\s*)$')
+POWERSHELL_MODULE_RE = re.compile(r"(?m)^(\s*ModuleVersion\s*=\s*')[^']+('\s*)$")
+PROJECT_VERSION_RE = re.compile(r'(?m)^(version\s*=\s*")[^"]+("\s*)$')
+
+
+class VersionError(ValueError):
+    """Raised when repository version state is invalid."""
+
+
+@dataclass(frozen=True, order=True)
+class Version:
+    major: int
+    minor: int
+    patch: int
+
+    @classmethod
+    def parse(cls, value: str, *, source: str = "version") -> Version:
+        match = SEMVER_RE.fullmatch(value.strip())
+        if match is None:
+            raise VersionError(f"{source} must use X.Y.Z semantic versioning; found {value!r}")
+        return cls(*(int(part) for part in match.groups()))
+
+    def next_patch(self) -> Version:
+        return Version(self.major, self.minor, self.patch + 1)
+
+    def __str__(self) -> str:
+        return f"{self.major}.{self.minor}.{self.patch}"
+
+
+VERSION_PATHS = {
+    "Python project": Path("pyproject.toml"),
+    "Python runtime fallback": Path("labfoundry/__init__.py"),
+    "PowerShell module": Path("clients/powershell/LabFoundry/LabFoundry.psd1"),
+}
+
+
+def _read_text(root: Path, source: str) -> str:
+    path = root / VERSION_PATHS[source]
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise VersionError(f"Cannot read {source} version from {path}: {exc}") from exc
+
+
+def read_versions(root: Path) -> dict[str, Version]:
+    root = root.resolve()
+    project_text = _read_text(root, "Python project")
+    try:
+        project_value = tomllib.loads(project_text)["project"]["version"]
+    except (KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+        raise VersionError(f"{root / VERSION_PATHS['Python project']} must define [project].version") from exc
+    if not isinstance(project_value, str):
+        raise VersionError(f"{root / VERSION_PATHS['Python project']} [project].version must be a string")
+
+    python_text = _read_text(root, "Python runtime fallback")
+    python_match = PYTHON_FALLBACK_RE.search(python_text)
+    if python_match is None:
+        raise VersionError(
+            f"{root / VERSION_PATHS['Python runtime fallback']} must define the BUILD_VERSION fallback"
+        )
+
+    powershell_text = _read_text(root, "PowerShell module")
+    powershell_match = POWERSHELL_MODULE_RE.search(powershell_text)
+    if powershell_match is None:
+        raise VersionError(f"{root / VERSION_PATHS['PowerShell module']} must define ModuleVersion")
+
+    return {
+        "Python project": Version.parse(project_value, source="Python project version"),
+        "Python runtime fallback": Version.parse(
+            python_match.group(0).split('"', 2)[1], source="Python runtime fallback version"
+        ),
+        "PowerShell module": Version.parse(
+            powershell_match.group(0).split("'", 2)[1], source="PowerShell module version"
+        ),
+    }
+
+
+def consistent_version(root: Path) -> Version:
+    versions = read_versions(root)
+    unique = set(versions.values())
+    if len(unique) != 1:
+        detail = ", ".join(f"{source}={version}" for source, version in versions.items())
+        raise VersionError(f"Repository version sources disagree: {detail}")
+    return next(iter(unique))
+
+
+def expected_version(base_root: Path) -> Version:
+    return consistent_version(base_root).next_patch()
+
+
+def check(root: Path, base_root: Path | None = None) -> Version:
+    current = consistent_version(root)
+    if base_root is not None:
+        expected = expected_version(base_root)
+        if current != expected:
+            raise VersionError(f"PR version must be {expected}, exactly one patch above its base; found {current}")
+    return current
+
+
+def _replace_version(path: Path, pattern: re.Pattern[str], version: Version, source: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    updated, count = pattern.subn(rf"\g<1>{version}\g<2>", text, count=1)
+    if count != 1:
+        raise VersionError(f"Could not update {source} version in {path}")
+    path.write_text(updated, encoding="utf-8")
+
+
+def bump(root: Path, base_root: Path | None = None) -> tuple[Version, bool]:
+    root = root.resolve()
+    base_root = root if base_root is None else base_root.resolve()
+    current = consistent_version(root)
+    base = consistent_version(base_root)
+    expected = base.next_patch()
+    if current == expected:
+        return current, False
+    if current != base:
+        raise VersionError(
+            f"Cannot automatically replace {current}; target must match base {base} or expected patch {expected}"
+        )
+
+    _replace_version(root / VERSION_PATHS["Python project"], PROJECT_VERSION_RE, expected, "Python project")
+    _replace_version(
+        root / VERSION_PATHS["Python runtime fallback"],
+        PYTHON_FALLBACK_RE,
+        expected,
+        "Python runtime fallback",
+    )
+    _replace_version(
+        root / VERSION_PATHS["PowerShell module"], POWERSHELL_MODULE_RE, expected, "PowerShell module"
+    )
+    check(root)
+    return expected, True
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("bump", "check"))
+    parser.add_argument("--root", type=Path, default=ROOT, help="Repository checkout to inspect or update.")
+    parser.add_argument(
+        "--base-root",
+        type=Path,
+        help="Base-branch checkout; check requires exactly one patch above it and bump derives from it.",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        if args.command == "check":
+            version = check(args.root, args.base_root)
+            print(f"Version policy passed: {version}")
+        else:
+            version, changed = bump(args.root, args.base_root)
+            action = "Bumped repository version to" if changed else "Repository version already at"
+            print(f"{action} {version}")
+    except VersionError as exc:
+        print(f"Version policy failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
