@@ -2520,6 +2520,7 @@ def test_dnsmasq_helper_rejects_dnssec_when_package_lacks_support(monkeypatch, t
 def test_dnsmasq_helper_apply_installs_config_dropin_and_enables_service(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "dnsmasq"
+    state_dir = tmp_path / "var" / "lib" / "labfoundry" / "dnsmasq"
     config_dir = tmp_path / "etc" / "labfoundry" / "dnsmasq.d"
     dropin_dir = tmp_path / "etc" / "systemd" / "system" / "dnsmasq.service.d"
     networkd_dir = tmp_path / "etc" / "systemd" / "network"
@@ -2551,6 +2552,7 @@ def test_dnsmasq_helper_apply_installs_config_dropin_and_enables_service(monkeyp
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_STATE_DIR", state_dir)
     monkeypatch.setattr(helper, "DNSMASQ_CONFIG_DIR", config_dir)
     monkeypatch.setattr(helper, "DNSMASQ_CONFIG_PATH", config_dir / "labfoundry.conf")
     monkeypatch.setattr(helper, "DNSMASQ_SERVICE_DROPIN_DIR", dropin_dir)
@@ -2579,6 +2581,7 @@ def test_dnsmasq_helper_apply_installs_config_dropin_and_enables_service(monkeyp
 def test_dnsmasq_helper_apply_creates_allowlisted_tftp_root(monkeypatch, tmp_path):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "dnsmasq"
+    state_dir = tmp_path / "var" / "lib" / "labfoundry" / "dnsmasq"
     config_dir = tmp_path / "etc" / "labfoundry" / "dnsmasq.d"
     dropin_dir = tmp_path / "etc" / "systemd" / "system" / "dnsmasq.service.d"
     tftp_root = tmp_path / "var" / "lib" / "labfoundry" / "pxe" / "tftp"
@@ -2593,6 +2596,7 @@ def test_dnsmasq_helper_apply_creates_allowlisted_tftp_root(monkeypatch, tmp_pat
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(helper, "DNSMASQ_APPLY_DIR", apply_dir)
+    monkeypatch.setattr(helper, "DNSMASQ_STATE_DIR", state_dir)
     monkeypatch.setattr(helper, "DNSMASQ_CONFIG_DIR", config_dir)
     monkeypatch.setattr(helper, "DNSMASQ_CONFIG_PATH", config_dir / "labfoundry.conf")
     monkeypatch.setattr(helper, "DNSMASQ_SERVICE_DROPIN_DIR", dropin_dir)
@@ -3305,6 +3309,7 @@ def test_vcf_offline_depot_helper_applies_nginx_site(monkeypatch, tmp_path):
     monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
     monkeypatch.setattr(helper, "NGINX_CONF_INCLUDE_PATH", nginx_include)
+    monkeypatch.setattr(helper, "NGINX_MAIN_CONFIG_PATH", tmp_path / "nginx" / "nginx.conf")
     monkeypatch.setattr(helper, "NGINX_SITES_DIR", site_dir)
     monkeypatch.setattr(helper, "VCF_DEPOT_SITE_PATH", site_dir / "vcf-offline-depot.conf")
     monkeypatch.setattr(helper, "_prepare_vcf_depot_web_tree", lambda text: None)
@@ -3445,6 +3450,7 @@ def test_vcf_offline_depot_helper_uses_browser_session_or_basic_auth_for_authent
     monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "CA_MANAGED_PATH_BASE", managed_root)
     monkeypatch.setattr(helper, "NGINX_CONF_INCLUDE_PATH", nginx_include)
+    monkeypatch.setattr(helper, "NGINX_MAIN_CONFIG_PATH", tmp_path / "nginx" / "nginx.conf")
     monkeypatch.setattr(helper, "NGINX_SITES_DIR", site_dir)
     monkeypatch.setattr(helper, "VCF_DEPOT_SITE_PATH", site_dir / "vcf-offline-depot.conf")
     monkeypatch.setattr(helper, "VCF_DEPOT_HTPASSWD_PATH", htpasswd_path)
@@ -3813,6 +3819,7 @@ def test_vcf_offline_depot_helper_removes_disabled_nginx_site(monkeypatch, tmp_p
 
     monkeypatch.setattr(helper, "VCF_DEPOT_APPLY_DIR", apply_dir)
     monkeypatch.setattr(helper, "NGINX_CONF_INCLUDE_PATH", tmp_path / "nginx" / "conf.d" / "labfoundry.conf")
+    monkeypatch.setattr(helper, "NGINX_MAIN_CONFIG_PATH", tmp_path / "nginx" / "nginx.conf")
     monkeypatch.setattr(helper, "NGINX_SITES_DIR", site_dir)
     monkeypatch.setattr(helper, "VCF_DEPOT_SITE_PATH", site_path)
     monkeypatch.setattr(helper, "_run", fake_run)
@@ -4223,6 +4230,7 @@ def test_appliance_settings_helper_writes_management_nginx_proxy(monkeypatch, tm
     monkeypatch.setattr(helper, "SSHD_CONFIG_DIR", sshd_config_dir)
     monkeypatch.setattr(helper, "SSHD_MAIN_CONFIG_PATH", sshd_main)
     monkeypatch.setattr(helper, "SSHD_ROOT_LOGIN_CONFIG_PATH", sshd_root_login)
+    monkeypatch.setattr(helper.shutil, "chown", lambda *args, **kwargs: None)
     monkeypatch.setattr(helper, "_ca_key_matches_certificate", lambda certificate_pem, private_key_pem: True)
     monkeypatch.setattr(helper, "_run", fake_run)
     monkeypatch.setattr(

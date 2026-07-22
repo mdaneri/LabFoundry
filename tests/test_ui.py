@@ -2276,6 +2276,7 @@ def test_appliance_apply_failure_renders_command_details(client, monkeypatch):
     import labfoundry.app.ui as ui_module
 
     base_system_adapter = ui_module.SystemAdapter
+    monkeypatch.setattr(ui_module, "stage_appliance_apply_config", lambda path, _config: path)
 
     class FailingApplianceSettingsAdapter(base_system_adapter):
         def __init__(self) -> None:
@@ -2332,6 +2333,7 @@ def test_appliance_apply_stops_unit_after_validation_failure(client, monkeypatch
     import labfoundry.app.ui as ui_module
 
     base_system_adapter = ui_module.SystemAdapter
+    monkeypatch.setattr(ui_module, "stage_appliance_apply_config", lambda path, _config: path)
 
     class ValidationFailingApplianceSettingsAdapter(base_system_adapter):
         def __init__(self) -> None:
