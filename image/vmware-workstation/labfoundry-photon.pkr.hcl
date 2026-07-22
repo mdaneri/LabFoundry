@@ -240,6 +240,11 @@ build {
   }
 
   provisioner "file" {
+    source      = "../common/boot"
+    destination = "/tmp/labfoundry-src/image/common/boot"
+  }
+
+  provisioner "file" {
     source      = "sudoers.d"
     destination = "/tmp/labfoundry-src/image/vmware-workstation/sudoers.d"
   }
