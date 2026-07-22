@@ -109,7 +109,9 @@ def test_login_and_dashboard_render(client):
     assert 'body class="bg-slate-100 text-slate-900"' not in response.text
     assert "/static/brand/labfoundry-mark.svg" in response.text
     assert 'class="management-info-footnote"' in response.text
-    assert "LabFoundry 0.1.0" in response.text
+    from labfoundry import __version__
+
+    assert f"LabFoundry {__version__}" in response.text
     assert 'href="/api/docs"' in response.text
     assert "Python " in response.text
     assert '<link rel="icon" href="/favicon.ico" type="image/svg+xml">' in response.text

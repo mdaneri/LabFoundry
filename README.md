@@ -212,6 +212,28 @@ parsing, Markdown fence/local-link checks, SVG XML parsing, UTF-8 validation,
 and unresolved merge-conflict marker detection. It skips vendored static assets,
 bundled third-party payloads, build output, and test-result artifacts.
 
+### Pull requests and versions
+
+`main` is protected and accepts squash merges only after the version policy,
+repository checks, and complete pytest suite pass. Each pull request carries one
+SemVer patch increment. The trusted `Version bump` workflow updates the Python
+project version, Python runtime fallback, and PowerShell module version together
+on branches in this repository. Fork pull requests must run the same command
+before they can pass the required version check:
+
+```bash
+python scripts/version.py bump --base-root /path/to/main-checkout
+```
+
+Do not edit only one version source. `python scripts/version.py check` verifies
+that all three sources agree; when `--base-root` is supplied, it also requires
+the pull request to be exactly one patch above its base. Updating an older pull
+request from `main` lets the workflow recalculate the next unused patch version.
+
+The application update build continues to append `+g<commit>` metadata to wheel
+versions. A merged pull request does not create a Git tag, GitHub release, or
+changelog entry; those remain deliberate release-management actions.
+
 Run from Windows PowerShell using the WSL development virtualenv:
 
 ```powershell
