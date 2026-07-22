@@ -523,7 +523,12 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "[switch]$ResetDataDisks" in script
     assert "[switch]$WaitForIp" in script
     assert "[switch]$TrustRootCa" in script
+    assert "[int]$TimeoutSeconds = 300" in script
     assert "Install-ApplianceRootCa" in script
+    assert "Waiting up to $TimeoutSeconds seconds for the LabFoundry root CA" in script
+    assert "LabFoundry root CA is not ready; retrying in $PollSeconds seconds." in script
+    assert "-TimeoutSec $requestTimeoutSeconds" in script
+    assert "Install-ApplianceRootCa -IpAddress $ip -Name $Name -TimeoutSeconds $TimeoutSeconds" in script
     assert "Write-ConnectionSummary" in script
     assert "Write-SummaryRow" in script
     assert "-ForegroundColor Cyan" in script
