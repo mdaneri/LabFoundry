@@ -8,6 +8,7 @@ on:
       - synchronize
 
 permissions:
+  actions: write
   contents: write
   pull-requests: read
 
@@ -22,13 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out trusted base automation
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: trusted
           persist-credentials: false
       - name: Check out pull request branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
@@ -57,3 +58,13 @@ jobs:
           git -C target add pyproject.toml labfoundry/__init__.py clients/powershell/LabFoundry/LabFoundry.psd1
           git -C target commit -m "chore: bump version to ${version}"
           git -C target push origin "HEAD:${HEAD_REF}"
+      - name: Run required checks for version commit
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/dispatches" \
+            -f ref="${HEAD_REF}" \
+            -f "inputs[base_sha]=${BASE_SHA}"

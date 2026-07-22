@@ -6467,7 +6467,7 @@ def _safe_extract_archive(archive_path: Path, destination: Path) -> None:
             target = (destination / member.name).resolve()
             if target != destination_resolved and destination_resolved not in target.parents:
                 raise ValueError("VCF Download Tool archive contains an unsafe path.")
-        archive.extractall(destination)
+        archive.extractall(destination, filter="data")
 
 
 def _prepare_vcf_download_tool_tree(extraction_dir: Path) -> None:
