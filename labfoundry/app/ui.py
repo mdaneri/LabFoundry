@@ -369,6 +369,7 @@ from labfoundry.app.services.esx_storage import (
     normalize_relative_path as normalize_esx_storage_relative_path,
     parse_disk_inventory_output as parse_esx_storage_disk_inventory_output,
     render_manifest as render_esx_storage_manifest,
+    rpcbind_required as esx_storage_rpcbind_required,
     select_inventory_candidate as select_esx_storage_inventory_candidate,
     split_lines as split_esx_storage_lines,
     storage_slug as esx_storage_slug,
@@ -17678,11 +17679,17 @@ def vcf_depot_service_grid_row(service: ServiceState, db: Session) -> dict[str, 
 def esx_storage_service_grid_row(service: ServiceState, db: Session) -> dict[str, object]:
     row = service_state_status_row(service)
     settings = get_esx_storage_settings_row(db)
+    shares = db.execute(select(EsxNfsShare).where(EsxNfsShare.enabled.is_(True))).scalars().all()
+    requires_rpcbind = esx_storage_rpcbind_required(shares)
     row["enabled"] = settings.enabled
     row["detail"] = "NFS 3 / 4.1 over equivalent IPv4 and IPv6 listeners"
     if not settings.enabled:
         row["running"] = False
         row["health"] = "disabled"
+    elif requires_rpcbind and not get_settings().dry_run_system_adapters and backing_systemd_unit_active("rpcbind.service") is not True:
+        row["running"] = False
+        row["health"] = "degraded"
+        row["detail"] += "; rpcbind.service is required by an enabled NFS 3 share but is not active"
     elif row.get("running"):
         row["health"] = "healthy"
     else:

@@ -154,6 +154,7 @@ from labfoundry.app.services.esx_storage import (
     normalize_families,
     normalize_relative_path,
     render_manifest as render_esx_storage_manifest,
+    rpcbind_required as esx_storage_rpcbind_required,
     select_inventory_candidate,
     split_lines as split_esx_storage_lines,
     storage_slug,
@@ -389,6 +390,22 @@ def service_state_response(row: ServiceState, db: Session | None = None) -> Serv
         data.update(vcf_depot_service_state(get_vcf_offline_depot_settings(db), nginx_active=backing_systemd_unit_active("nginx.service")))
         data.pop("label", None)
         data.pop("pill", None)
+        return ServiceStateResponse(**data)
+    if row.service == "esx-storage" and db is not None:
+        settings = db.execute(select(EsxStorageSettings)).scalar_one_or_none() or EsxStorageSettings()
+        shares = db.execute(select(EsxNfsShare).where(EsxNfsShare.enabled.is_(True))).scalars().all()
+        nfs_active = backing_systemd_unit_active("nfs-server.service")
+        requires_rpcbind = esx_storage_rpcbind_required(shares)
+        rpcbind_active = backing_systemd_unit_active("rpcbind.service") if requires_rpcbind else True
+        data["enabled"] = settings.enabled
+        if nfs_active is not None:
+            data["running"] = nfs_active
+        if requires_rpcbind and not get_settings().dry_run_system_adapters and rpcbind_active is not True:
+            data["running"] = False
+            data["detail"] = "NFS 3 / 4.1 over equivalent IPv4 and IPv6 listeners; rpcbind.service is required by an enabled NFS 3 share but is not active"
+        else:
+            data["detail"] = "NFS 3 / 4.1 over equivalent IPv4 and IPv6 listeners"
+        data["health"] = "healthy" if data["enabled"] and data["running"] else "degraded" if data["enabled"] else "disabled"
         return ServiceStateResponse(**data)
     unit = SERVICE_SYSTEMD_UNITS.get(row.service)
     if unit and not get_settings().dry_run_system_adapters:

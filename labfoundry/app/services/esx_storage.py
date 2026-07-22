@@ -29,6 +29,12 @@ class StorageInterface:
     ipv6: tuple[str, ...] = ()
 
 
+def rpcbind_required(shares: Iterable[EsxNfsShare]) -> bool:
+    """Return whether an enabled NFS 3 share requires rpcbind at runtime."""
+
+    return any(share.enabled is not False and share.preferred_nfs_version == "3" for share in shares)
+
+
 def split_lines(value: str | Iterable[str] | None) -> list[str]:
     if value is None:
         return []

@@ -54,6 +54,8 @@ Share paths are relative to a selected volume. LabFoundry rejects an empty/root 
 
 NFS 3 and NFS 4.1 are enabled globally over TCP; NFS 2, NFS 4.0, and UDP transport are disabled. `rpcbind.service` and `nfs-server.service` remain disabled until at least one valid share is active. Mountd uses fixed TCP port 20048. Exports use `rw,sync,no_subtree_check,no_root_squash` with AUTH_SYS and are restricted to the IPv4 and IPv6 VMkernel allowlists. `no_root_squash` follows [Broadcom’s ESX NFS access guidance](https://knowledge.broadcom.com/external/article/433826/esxi-host-fails-to-mount-nfs-datastore-w.html), so narrow client allowlists and the dedicated storage network are security requirements.
 
+Live service health requires `nfs-server.service` for every enabled share. When any enabled share prefers NFS 3, it also requires `rpcbind.service`; a stopped, failed, or unreadable rpcbind state reports ESX Storage as degraded in Services, the REST service status, and the appliance console. NFS 4.1-only desired state does not depend on rpcbind health.
+
 The preferred version controls the generated command and remote path:
 
 - NFS 3: `/srv/labfoundry/esx-storage/<share-slug>` and TCP 111, 20048, and 2049;
