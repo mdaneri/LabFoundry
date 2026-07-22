@@ -205,6 +205,9 @@ def test_authoritative_zone_file_round_trip_ignores_matching_structural_records(
     second_zone = render_zone_file("sitea.internal", [], settings)
     assert "ns1.labfoundry.internal. IN A" in second_zone
     assert "@                        IN A" not in second_zone
+    second_records, second_errors = parse_zone_records(second_zone, "sitea.internal", settings)
+    assert second_errors == []
+    assert second_records == []
 
 
 def test_dnsmasq_renderer_uses_dhcp_upstreams_when_desired_upstreams_empty():
