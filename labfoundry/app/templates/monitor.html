@@ -134,28 +134,6 @@
       </div>
     </article>
 
-    <article class="panel monitor-chart-panel has-monitor-table monitor-disk-usage-panel">
-      <div class="panel-head compact">
-        <h2>Disk Usage</h2>
-        <div class="monitor-panel-actions">
-          <span class="status-pill muted">Used capacity</span>
-          <button class="button ghost icon-button monitor-chart-expand" type="button" data-monitor-chart-expand="diskUsage" aria-label="Expand disk usage chart" title="Expand chart">
-            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/></svg>
-          </button>
-        </div>
-      </div>
-      <div class="monitor-chart"><canvas data-monitor-chart="diskUsage" aria-label="Disk usage trend"></canvas></div>
-      <div class="monitor-table-scroll">
-        <table class="data-table compact">
-          <thead>
-            <tr><th>Mount</th><th>Device</th><th>Used</th><th>Free</th></tr>
-          </thead>
-          <tbody data-monitor-disk-table>
-            <tr><td colspan="4" class="muted">Loading disks</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </article>
   </section>
 
   <dialog class="monitor-chart-modal" data-monitor-chart-modal aria-labelledby="monitor-chart-modal-title">

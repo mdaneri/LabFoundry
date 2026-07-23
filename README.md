@@ -53,10 +53,10 @@ The `Monitor` page is an operator-facing, read-only runtime view for appliance
 resource health. It charts thick appliance totals alongside thin per-logical-CPU,
 per-interface RX/TX, and unique-device disk activity over the last one, three,
 or six hours, plus memory pressure and compact per-interface and virtual-machine
-context. A separate Disk Usage chart tracks used capacity per unique volume and
-keeps the per-mount capacity table alongside it. Disk Activity retains a
-deduplicated per-device read/write table. Disk activity totals count each
-underlying device once even when several mount rows share it. Each chart can be
+context. Disk Activity retains a deduplicated per-device read/write table; the
+noisy per-mount Disk Usage chart and table are intentionally omitted. Disk
+activity totals count each underlying device once even when several mount rows
+share it. Each chart can be
 expanded into a near-full-screen view without changing its active time range;
 only that expanded view exposes editable percentage zoom and drag-to-select
 time-window zoom. Hovering near a sampled point or line segment emphasizes the

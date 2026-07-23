@@ -12853,43 +12853,6 @@ function renderMonitorNetworkTable(tbody, rows) {
   }));
 }
 
-function renderMonitorDiskTable(tbody, rows) {
-  if (!(tbody instanceof HTMLElement)) {
-    return;
-  }
-  const disks = Array.isArray(rows) ? rows : [];
-  if (!disks.length) {
-    tbody.replaceChildren(Object.assign(document.createElement("tr"), { innerHTML: '<td colspan="4" class="muted">No disks sampled</td>' }));
-    return;
-  }
-  tbody.replaceChildren(...disks.map((disk) => {
-    const row = document.createElement("tr");
-    const mountCell = document.createElement("td");
-    mountCell.textContent = disk.mount_point || "--";
-    const deviceCell = document.createElement("td");
-    deviceCell.textContent = disk.device || "--";
-    const usedCell = document.createElement("td");
-    usedCell.className = "monitor-usage-cell";
-    const percent = monitorFinite(disk.used_percent) || 0;
-    const label = document.createElement("span");
-    label.textContent = formatMonitorPercent(percent);
-    const bar = document.createElement("span");
-    bar.className = "monitor-usage-bar";
-    const fill = document.createElement("span");
-    fill.className = `monitor-usage-fill ${percent >= 90 ? "danger" : percent >= 75 ? "warn" : ""}`.trim();
-    fill.style.width = `${Math.max(2, Math.min(100, percent))}%`;
-    bar.append(fill);
-    usedCell.append(label, bar);
-    [mountCell, deviceCell, usedCell].forEach((cell) => row.append(cell));
-    [formatMonitorBytes(disk.free_bytes)].forEach((value) => {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    });
-    return row;
-  }));
-}
-
 function renderMonitorDiskActivityTable(tbody, rows) {
   if (!(tbody instanceof HTMLElement)) return;
   const devices = Array.isArray(rows) ? rows : [];
@@ -12913,7 +12876,6 @@ const MONITOR_CHART_TITLES = {
   memory: "Memory Pressure",
   network: "Network Throughput",
   disk: "Disk Activity",
-  diskUsage: "Disk Usage",
 };
 
 function drawMonitorChartType(canvas, type, payload, chartOptions = {}) {
@@ -12954,13 +12916,6 @@ function drawMonitorChartType(canvas, type, payload, chartOptions = {}) {
     drawMonitorChart(canvas, chart.rows, chart.lines, { min: 0, formatY: formatMonitorBytes, ...chartOptions });
     return;
   }
-  if (type === "diskUsage") {
-    const chart = monitorHistoryChartData(
-      Array.isArray(payload.disk_devices) ? payload.disk_devices : [],
-      [{ field: "used_percent", label: "" }],
-    );
-    drawMonitorChart(canvas, chart.rows, chart.lines, { min: 0, max: 100, formatY: formatMonitorPercent, ...chartOptions });
-  }
 }
 
 function renderMonitorPage(root, payload) {
@@ -12995,7 +12950,6 @@ function renderMonitorPage(root, payload) {
   });
   renderMonitorNetworkTable(root.querySelector("[data-monitor-network-table]"), payload.networks);
   renderMonitorDiskActivityTable(root.querySelector("[data-monitor-disk-activity-table]"), payload.disk_devices);
-  renderMonitorDiskTable(root.querySelector("[data-monitor-disk-table]"), payload.disks);
 }
 
 function initializeMonitorPage() {

@@ -6,13 +6,13 @@
 - Desktop viewport: 1968 × 1562 CSS pixels at the browser's native device density.
 - Narrow viewport: 900 × 1200 CSS pixels.
 - Live implementation: VMware appliance `192.168.167.219`, deployed with the repository VMware wheel helper.
-- Final shared cache revision: `monitor-apply-ux-20260722-11` / `labfoundry-pwa-v149`.
+- Current shared cache revision: `monitor-no-disk-usage-20260722-1` / `labfoundry-pwa-v151`.
 
 ## Comparison
 
 ![Before and after Monitor comparison](images/monitor-apply-ux/monitor-comparison.png)
 
-The final desktop capture keeps the existing LabFoundry shell while making the metric hierarchy explicit: aggregate lines remain visible beneath thin detail lines, Disk Activity owns unique-device I/O, and Disk Usage owns capacity. Network Throughput and Disk Activity stretch to the same row height. The Disk Activity device table and Disk Usage mount table remain visible.
+The captured desktop comparison records the earlier hierarchy where Disk Activity owned unique-device I/O and Disk Usage owned capacity. The current Monitor removes the noisy Disk Usage chart and mount table while retaining Network Throughput and Disk Activity at matching row heights.
 
 ## Interaction evidence
 
@@ -37,7 +37,8 @@ At 900 × 1200 the dashboard returns to natural stacked sizing; full-width contr
 4. Expanded hit testing from sampled points to complete line segments.
 5. Equalized Network Throughput and Disk Activity desktop card heights.
 6. Added clickable legend selection plus 12h and 24h history ranges.
+7. Removed the Disk Usage chart and per-mount table after live operator review found them not useful.
 
 ## Final result
 
-The live implementation matches the requested Monitor organization and interactions at the supplied desktop viewport and preserves a usable narrow layout. No remaining visual mismatch was found in the scoped cards and full-screen chart flow.
+The current implementation preserves the useful chart interactions and responsive layout without the removed Disk Usage panel.

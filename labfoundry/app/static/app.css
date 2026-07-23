@@ -6837,28 +6837,6 @@ textarea {
   max-height: min(240px, 28vh);
 }
 
-.monitor-disk-usage-panel {
-  align-content: stretch;
-  grid-column: 1 / -1;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-  grid-template-rows: auto minmax(360px, 1fr);
-  min-height: 420px;
-}
-
-.monitor-disk-usage-panel .panel-head {
-  grid-column: 1 / -1;
-}
-
-.monitor-disk-usage-panel .monitor-chart {
-  height: 100%;
-  min-height: 360px;
-}
-
-.monitor-disk-usage-panel .monitor-table-scroll {
-  align-self: stretch;
-  max-height: none;
-}
-
 .monitor-chart {
   border: 1px solid #e2e8f0;
   border-radius: 8px;
@@ -7083,26 +7061,6 @@ textarea {
   .monitor-chart-grid {
     grid-template-rows: none;
     min-height: 0;
-  }
-
-  .monitor-disk-usage-panel {
-    grid-column: auto;
-    grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto;
-    min-height: 0;
-  }
-
-  .monitor-disk-usage-panel .panel-head {
-    grid-column: auto;
-  }
-
-  .monitor-disk-usage-panel .monitor-chart {
-    height: 240px;
-    min-height: 0;
-  }
-
-  .monitor-disk-usage-panel .monitor-table-scroll {
-    max-height: min(500px, 60vh);
   }
 
   .monitor-chart-modal {
