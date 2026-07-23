@@ -184,6 +184,8 @@ def validate_schedule_values(
         streams = config.get("selected_streams")
         if not isinstance(streams, list) or not streams:
             errors.append("Appliance update schedules require selected_streams.")
+        elif any(stream not in {"photon_os", "powershell_modules", "labfoundry_release"} for stream in streams):
+            errors.append("Appliance update schedule contains a retired or unsupported stream.")
     elif task_type == "vcf_depot_download" and not isinstance(config.get("profile_id"), int):
         errors.append("VCF Offline Depot schedules require an integer profile_id.")
     elif task_type == "managed_script":

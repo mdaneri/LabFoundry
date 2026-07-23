@@ -1,6 +1,8 @@
 from collections.abc import Generator
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -93,6 +95,187 @@ def init_db() -> None:
     _ensure_sqlite_esxi_pxe_columns()
     _ensure_sqlite_ldap_columns()
     _ensure_sqlite_job_schedule_columns()
+    _migrate_appliance_update_release_state()
+
+
+def _migrate_appliance_update_release_state() -> None:
+    """Retire live pip updates and normalize persisted release stream identifiers."""
+    from labfoundry.app.models import AuditEvent, Job, JobStatus, ManagedPackage, Schedule, UpdateSource
+
+    changed: list[str] = []
+
+    def normalized_streams(raw_value: object) -> list[str]:
+        if not isinstance(raw_value, list):
+            return []
+        normalized: list[str] = []
+        for value in raw_value:
+            stream = "labfoundry_release" if value == "labfoundry_wheel" else str(value)
+            if stream == "python_libraries" or stream not in {"photon_os", "powershell_modules", "labfoundry_release"}:
+                continue
+            if stream not in normalized:
+                normalized.append(stream)
+        return normalized
+
+    with SessionLocal() as session:
+        python_sources = session.execute(select(UpdateSource).where(UpdateSource.kind == "python")).scalars().all()
+        for source in python_sources:
+            for package in session.execute(select(ManagedPackage).where(ManagedPackage.source_id == source.id)).scalars().all():
+                session.delete(package)
+            session.delete(source)
+        if python_sources:
+            changed.append(f"removed_python_sources={len(python_sources)}")
+
+        retired_packages = session.execute(
+            select(ManagedPackage).where(ManagedPackage.ecosystem.in_(["python", "labfoundry"]))
+        ).scalars().all()
+        for package in retired_packages:
+            session.delete(package)
+        if retired_packages:
+            changed.append(f"removed_retired_managed_packages={len(retired_packages)}")
+
+        labfoundry_sources = session.execute(select(UpdateSource).where(UpdateSource.kind == "labfoundry")).scalars().all()
+        normalized_release_sources = 0
+        disabled_release_sources = 0
+        for source in labfoundry_sources:
+            parsed = urlsplit(source.url.strip())
+            if (
+                not source.url.strip()
+                or parsed.scheme != "https"
+                or not parsed.netloc
+                or parsed.username
+                or parsed.password
+            ):
+                if source.enabled:
+                    source.enabled = False
+                    source.validation_status = "invalid"
+                    source.validation_message = "Disabled during signed-release migration because the source was not an HTTPS v2 base URL."
+                    source.validated_at = None
+                    session.add(source)
+                    disabled_release_sources += 1
+                continue
+            path = parsed.path.rstrip("/")
+            if path.endswith("/manifest.json"):
+                path = path[: -len("/manifest.json")]
+            normalized_url = urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+            try:
+                settings = json.loads(source.settings_json or "{}")
+            except json.JSONDecodeError:
+                settings = {}
+            settings = settings if isinstance(settings, dict) else {}
+            settings = {"channel": str(settings.get("channel") or "stable").lower()}
+            if settings["channel"] not in {"stable", "preview", "development"}:
+                settings["channel"] = "stable"
+            normalized_settings = json.dumps(settings, sort_keys=True)
+            if source.url != normalized_url or source.settings_json != normalized_settings:
+                source.url = normalized_url
+                source.settings_json = normalized_settings
+                source.validation_status = "not_checked"
+                source.validation_message = ""
+                source.validated_at = None
+                session.add(source)
+                normalized_release_sources += 1
+        if normalized_release_sources:
+            changed.append(f"normalized_release_sources={normalized_release_sources}")
+        if disabled_release_sources:
+            changed.append(f"disabled_invalid_release_sources={disabled_release_sources}")
+
+        if labfoundry_sources and not any(source.enabled for source in labfoundry_sources):
+            public_source = next((source for source in labfoundry_sources if source.name == "GitHub Releases"), None)
+            if public_source is not None:
+                public_source.url = "https://mdaneri.github.io/LabFoundry/updates"
+                public_source.enabled = True
+                public_source.priority = 10
+                public_source.settings_json = '{"channel": "stable"}'
+                public_source.validation_status = "not_checked"
+                public_source.validation_message = ""
+                public_source.validated_at = None
+                session.add(public_source)
+            else:
+                session.add(
+                    UpdateSource(
+                        kind="labfoundry",
+                        name="GitHub Releases",
+                        url="https://mdaneri.github.io/LabFoundry/updates",
+                        enabled=True,
+                        priority=10,
+                        settings_json='{"channel": "stable"}',
+                    )
+                )
+            changed.append("seeded_signed_github_source=1")
+
+        schedules_changed = 0
+        schedules_disabled = 0
+        schedules = session.execute(
+            select(Schedule).where(Schedule.task_type.in_(["appliance_update_check", "appliance_update_install"]))
+        ).scalars().all()
+        for schedule in schedules:
+            try:
+                config = json.loads(schedule.task_config_json or "{}")
+            except json.JSONDecodeError:
+                config = {}
+            config = config if isinstance(config, dict) else {}
+            old_streams = config.get("selected_streams")
+            streams = normalized_streams(old_streams)
+            if old_streams != streams:
+                config["selected_streams"] = streams
+                schedules_changed += 1
+            if not streams and schedule.enabled:
+                schedule.enabled = False
+                schedule.next_run_at = None
+                config["_migration_notice"] = "Disabled because Python Libraries was the schedule's only update stream."
+                schedules_disabled += 1
+            schedule.task_config_json = json.dumps(config, sort_keys=True)
+            session.add(schedule)
+        if schedules_changed:
+            changed.append(f"migrated_schedules={schedules_changed}")
+        if schedules_disabled:
+            changed.append(f"disabled_python_only_schedules={schedules_disabled}")
+
+        pending_jobs_changed = 0
+        job_columns = (
+            {column["name"] for column in inspect(engine).get_columns("jobs")}
+            if "jobs" in inspect(engine).get_table_names()
+            else set()
+        )
+        pending_jobs = (
+            session.execute(
+                select(Job).where(
+                    Job.type == "appliance-update",
+                    Job.status == JobStatus.PENDING.value,
+                )
+            ).scalars().all()
+            if "type" in job_columns
+            else []
+        )
+        for job in pending_jobs:
+            try:
+                config = json.loads(job.task_config_json or "{}")
+            except json.JSONDecodeError:
+                config = {}
+            if not isinstance(config, dict):
+                continue
+            old_streams = config.get("selected_streams")
+            streams = normalized_streams(old_streams)
+            if old_streams == streams:
+                continue
+            config["selected_streams"] = streams
+            job.task_config_json = json.dumps(config, sort_keys=True)
+            session.add(job)
+            pending_jobs_changed += 1
+        if pending_jobs_changed:
+            changed.append(f"migrated_pending_jobs={pending_jobs_changed}")
+
+        if changed:
+            session.add(
+                AuditEvent(
+                    actor="system:migration",
+                    action="migrate_signed_release_updates",
+                    resource_type="appliance_update",
+                    resource_id="v2",
+                    detail="; ".join(changed),
+                )
+            )
+        session.commit()
 
 
 def _ensure_sqlite_job_schedule_columns() -> None:

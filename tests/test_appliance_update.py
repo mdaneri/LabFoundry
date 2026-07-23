@@ -2,7 +2,6 @@ import importlib.machinery
 import importlib.util
 import json
 import logging
-import subprocess
 from pathlib import Path
 
 from sqlalchemy import select
@@ -43,17 +42,17 @@ def test_appliance_update_page_and_dry_run_job(client):
 
     with SessionLocal() as db:
         source = db.execute(select(UpdateSource).where(UpdateSource.kind == "labfoundry")).scalar_one()
-        source.url = "http://localhost:18080/update"
+        source.url = "https://updates.example.test/releases"
         db.add(source)
         db.commit()
     page = client.get("/appliance-update")
     assert page.status_code == 200
     assert "Appliance Update" in page.text
     assert "Photon OS" in page.text
-    assert "Python Libraries" in page.text
+    assert "Python Libraries" not in page.text
     assert "PowerShell Modules" in page.text
-    assert "LabFoundry Wheel" in page.text
-    assert "http://localhost:18080/update" in page.text
+    assert "LabFoundry Release" in page.text
+    assert "https://updates.example.test/releases" in page.text
     assert "channels/&lt;channel&gt;/manifest.json" in page.text
     assert "labfoundry-helper appliance-update check" not in page.text
 
@@ -62,7 +61,7 @@ def test_appliance_update_page_and_dry_run_job(client):
         "/appliance-update/run",
         data={
             "csrf": csrf,
-            "selected_streams": ["photon_os", "python_libraries", "labfoundry_wheel"],
+            "selected_streams": ["photon_os", "labfoundry_release"],
         },
     )
     assert response.status_code == 200
@@ -94,13 +93,12 @@ def test_appliance_update_settings_validate_urls(client):
         data={
             "csrf": csrf,
             "photon_source": "configured Photon repositories",
-            "python_index_url": "not-a-url",
-            "labfoundry_manifest_url": "http://localhost:18080/update/manifest.json",
+            "labfoundry_manifest_url": "not-a-url",
         },
         headers={"X-LabFoundry-Autosave": "1"},
     )
     assert response.status_code == 422
-    assert "Python index URL must be an http or https URL" in response.text
+    assert "LabFoundry manifest URL must be an http or https URL" in response.text
 
 
 def test_appliance_update_settings_reject_embedded_credentials(client):
@@ -112,8 +110,7 @@ def test_appliance_update_settings_reject_embedded_credentials(client):
         data={
             "csrf": csrf,
             "photon_source": "configured Photon repositories",
-            "python_index_url": "https://user:token@example.test/simple",
-            "labfoundry_manifest_url": "http://localhost:18080/update/manifest.json",
+            "labfoundry_manifest_url": "https://user:token@example.test/manifest.json",
         },
         headers={"X-LabFoundry-Autosave": "1"},
     )
@@ -295,7 +292,7 @@ def test_labfoundry_repository_url_derives_channel_manifest(client):
     assert settings["labfoundry_manifest_url"] == "https://updates.example.test/labfoundry/channels/preview/manifest.json"
 
 
-def test_runtime_package_client_source_details(monkeypatch, tmp_path):
+def test_runtime_photon_source_details(tmp_path):
     from labfoundry.app.services import appliance_update
 
     (tmp_path / "photon.repo").write_text(
@@ -314,20 +311,6 @@ def test_runtime_package_client_source_details(monkeypatch, tmp_path):
         }
     ]
     assert "photon | Photon 5 release | baseurl=https://packages.example.test" in appliance_update.photon_repository_summary(tmp_path)
-
-    monkeypatch.setattr(
-        appliance_update.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, ":env:.index-url='https://mirror.example.test/simple'\n", ""),
-    )
-    appliance_update.effective_pip_index.cache_clear()
-    assert appliance_update.effective_pip_index() == {
-        "url": "https://mirror.example.test/simple",
-        "source": "pip environment",
-        "error": "",
-    }
-    appliance_update.effective_pip_index.cache_clear()
-
 
 def test_source_sync_is_queued_and_records_validation_status(client):
     from labfoundry.app.database import SessionLocal
@@ -374,9 +357,9 @@ def test_software_source_and_managed_module_lifecycle(client):
     assert package_created.status_code == 303
     grouped_page = client.get("/appliance-update")
     assert "data-runtime-photon-repositories" in grouped_page.text
-    assert "data-runtime-python-index" in grouped_page.text
-    assert "https://pypi.org/simple" in grouped_page.text
-    assert grouped_page.text.count("aligned-control-grid") >= 4
+    assert "data-runtime-python-index" not in grouped_page.text
+    assert "https://pypi.org/simple" not in grouped_page.text
+    assert grouped_page.text.count("aligned-control-grid") >= 3
     assert 'aria-label="Appliance update workspace"' in grouped_page.text
     assert 'data-tab-target="appliance-update-sources"' in grouped_page.text
     assert 'data-tab-target="appliance-update-streams"' in grouped_page.text
@@ -448,7 +431,6 @@ def test_effective_update_settings_preserves_all_enabled_repository_sources(clie
     with SessionLocal() as db:
         db.add_all(
             [
-                UpdateSource(kind="python", name="Backup Python", url="https://python-backup.example.test/simple", priority=80, enabled=True),
                 UpdateSource(
                     kind="labfoundry",
                     name="Backup releases",
@@ -459,28 +441,23 @@ def test_effective_update_settings_preserves_all_enabled_repository_sources(clie
                 ),
             ]
         )
-        primary_python = db.execute(select(UpdateSource).where(UpdateSource.kind == "python")).scalars().first()
         primary_labfoundry = db.execute(select(UpdateSource).where(UpdateSource.kind == "labfoundry")).scalars().first()
-        primary_python.url = "https://python-primary.example.test/simple"
         primary_labfoundry.url = "https://updates-primary.example.test/labfoundry"
         db.commit()
 
         settings = effective_update_settings(db)
 
-    assert settings["python_index_urls"] == [
-        "https://python-primary.example.test/simple",
-        "https://python-backup.example.test/simple",
-    ]
+    assert "python_index_urls" not in settings
     assert settings["labfoundry_manifest_urls"] == [
         "https://updates-primary.example.test/labfoundry/channels/stable/manifest.json",
         "https://updates-backup.example.test/labfoundry/channels/preview/manifest.json",
     ]
     manifest = json.loads(
         __import__("labfoundry.app.services.appliance_update", fromlist=["render_update_manifest"]).render_update_manifest(
-            selected_streams=["python_libraries", "labfoundry_wheel"], settings=settings, actor="test"
+            selected_streams=["labfoundry_release"], settings=settings, actor="test"
         )
     )
-    assert manifest["sources"]["python_index_urls"] == settings["python_index_urls"]
+    assert "python_index_urls" not in manifest["sources"]
     assert manifest["sources"]["labfoundry_manifest_urls"] == settings["labfoundry_manifest_urls"]
 
 
@@ -493,50 +470,27 @@ def test_source_credentials_use_protected_runtime_channel_without_manifest_discl
 
     client.get("/login")
     with SessionLocal() as db:
-        source = db.execute(select(UpdateSource).where(UpdateSource.kind == "python")).scalars().first()
-        source.url = "https://private.example.test/simple"
+        source = db.execute(select(UpdateSource).where(UpdateSource.kind == "labfoundry")).scalars().first()
+        source.url = "https://private.example.test/releases"
         source.credential_encrypted = encrypt_secret(json.dumps({"username": "repo-user", "secret": "repo-token"}))
         db.commit()
         source_id = source.id
         settings = effective_update_settings(db)
         credentials = update_source_credentials(db)
 
-    preview = render_update_manifest(selected_streams=["python_libraries"], settings=settings, actor="test")
+    preview = render_update_manifest(selected_streams=["labfoundry_release"], settings=settings, actor="test")
     assert "repo-user" not in preview
     assert "repo-token" not in preview
     assert credentials[str(source_id)] == {"username": "repo-user", "secret": "repo-token"}
 
 
-def test_helper_uses_all_python_indexes_and_credentials_without_logging_them(monkeypatch):
+def test_helper_rejects_retired_python_library_stream():
     helper = load_helper_module()
-    captured = {}
-
-    def fake_command(command, *, success_codes=None, env=None):
-        captured["command"] = command
-        captured["env"] = env or {}
-        return {"command": command, "returncode": 0, "success": True, "stdout": "", "stderr": ""}
-
-    monkeypatch.setattr(helper, "_command_payload", fake_command)
-    payload = {
-        "selected_streams": ["python_libraries"],
-        "sources": {
-            "python_index_url": "https://primary.example.test/simple",
-            "python_index_urls": ["https://primary.example.test/simple", "https://backup.example.test/simple"],
-        },
-        "source_definitions": [
-            {"id": 10, "kind": "python", "url": "https://primary.example.test/simple", "enabled": True},
-            {"id": 11, "kind": "python", "url": "https://backup.example.test/simple", "enabled": True},
-        ],
-    }
-    result = helper._check_appliance_update(
-        payload,
-        {"10": {"username": "primary", "secret": "token-one"}, "11": {"username": "backup", "secret": "token-two"}},
+    errors = helper._appliance_update_config_errors(
+        {"selected_streams": ["python_libraries"], "sources": {}},
+        require_streams=True,
     )
-    assert result["checks"]["python_libraries"] == "pip outdated check completed."
-    assert captured["env"]["PIP_INDEX_URL"] == "https://primary:token-one@primary.example.test/simple"
-    assert captured["env"]["PIP_EXTRA_INDEX_URL"] == "https://backup:token-two@backup.example.test/simple"
-    assert "token-one" not in " ".join(captured["command"])
-    assert "token-two" not in " ".join(captured["command"])
+    assert errors == ["unsupported update stream python_libraries."]
 
 
 def test_helper_redacts_repository_credentials_from_package_client_output(monkeypatch):
@@ -566,24 +520,20 @@ def test_helper_redacts_repository_credentials_from_package_client_output(monkey
     assert "[redacted]" in rendered
 
 
-def test_helper_falls_back_to_next_labfoundry_release_source(monkeypatch):
+def test_helper_falls_back_to_next_signed_labfoundry_release_source(monkeypatch):
     helper = load_helper_module()
     attempted = []
-    expected_manifest = {
-        "version": "0.2.0",
-        "git_commit": "a" * 40,
-        "wheel": "labfoundry-0.2.0.whl",
-        "sha256": "b" * 64,
-    }
+    expected_channel = {"channel": "preview", "release_manifest_url": "https://backup.example.test/release.json"}
+    expected_manifest = {"version": "0.9.0", "git_commit": "a" * 40}
 
-    def fake_manifest(url, credential=None):
+    def fake_release(url, credential=None):
         attempted.append((url, credential))
         if "primary" in url:
             raise OSError("primary unavailable")
-        return expected_manifest
+        return expected_channel, expected_manifest, credential
 
-    monkeypatch.setattr(helper, "_download_labfoundry_update_manifest", fake_manifest)
-    manifest, url, credential = helper._download_labfoundry_manifest_from_sources(
+    monkeypatch.setattr(helper, "_download_signed_release", fake_release)
+    channel, manifest, url, credential = helper._download_signed_release_from_sources(
         {
             "sources": {
                 "labfoundry_manifest_urls": [
@@ -598,8 +548,9 @@ def test_helper_falls_back_to_next_labfoundry_release_source(monkeypatch):
         },
         {"2": {"username": "backup", "secret": "token"}},
     )
+    assert channel == expected_channel
     assert manifest == expected_manifest
-    assert url == "https://backup.example.test/manifest.json"
+    assert url == "https://backup.example.test/release.json"
     assert credential == {"username": "backup", "secret": "token"}
     assert [item[0] for item in attempted] == [
         "https://primary.example.test/manifest.json",
@@ -607,13 +558,11 @@ def test_helper_falls_back_to_next_labfoundry_release_source(monkeypatch):
     ]
 
 
-def test_helper_syncs_owned_photon_and_python_sources(monkeypatch, tmp_path):
+def test_helper_syncs_only_owned_photon_and_powershell_sources(monkeypatch, tmp_path):
     helper = load_helper_module()
     photon_path = tmp_path / "labfoundry-managed.repo"
-    pip_path = tmp_path / "pip.conf"
     state_path = tmp_path / "update-sources.json"
     monkeypatch.setattr(helper, "MANAGED_PHOTON_REPO_PATH", photon_path)
-    monkeypatch.setattr(helper, "LABFOUNDRY_PIP_CONFIG_PATH", pip_path)
     monkeypatch.setattr(helper, "UPDATE_SOURCE_STATE_PATH", state_path)
     monkeypatch.setattr(helper, "_command_path", lambda _name: None)
     payload = {
@@ -625,20 +574,12 @@ def test_helper_syncs_owned_photon_and_python_sources(monkeypatch, tmp_path):
                 "enabled": True,
                 "settings": {"managed": True, "gpgcheck": True, "tls_verify": True},
             },
-            {
-                "kind": "python",
-                "name": "Internal Python",
-                "url": "https://packages.example.test/simple",
-                "enabled": True,
-                "settings": {"tls_verify": True},
-            },
         ]
     }
     result = helper._sync_appliance_update_sources(payload)
     assert result["status"] == "succeeded"
     assert "[internal-photon]" in photon_path.read_text(encoding="utf-8")
     assert "gpgcheck=1" in photon_path.read_text(encoding="utf-8")
-    assert "index-url = https://packages.example.test/simple" in pip_path.read_text(encoding="utf-8")
     assert json.loads(state_path.read_text(encoding="utf-8")) == {"powershell_repositories": []}
 
 
@@ -801,7 +742,7 @@ def test_helper_rejects_appliance_update_config_outside_apply_dir(tmp_path):
         raise AssertionError("expected helper to reject config outside appliance update apply dir")
 
 
-def test_helper_rejects_labfoundry_wheel_sha_mismatch(monkeypatch, tmp_path, capsys):
+def test_helper_rejects_unsigned_v1_release_manifest(monkeypatch, tmp_path, capsys):
     helper = load_helper_module()
     apply_dir = tmp_path / "apply" / "appliance-update"
     apply_dir.mkdir(parents=True)
@@ -809,15 +750,15 @@ def test_helper_rejects_labfoundry_wheel_sha_mismatch(monkeypatch, tmp_path, cap
     config_path.write_text(
         json.dumps(
             {
-                "selected_streams": ["labfoundry_wheel"],
-                "sources": {"labfoundry_manifest_url": "http://updates.local/manifest.json"},
+                "selected_streams": ["labfoundry_release"],
+                "sources": {"labfoundry_manifest_url": "https://updates.local/manifest.json"},
             }
         ),
         encoding="utf-8",
     )
     monkeypatch.setattr(helper, "APPLIANCE_UPDATE_APPLY_DIR", apply_dir)
 
-    def fake_fetch(url: str) -> bytes:
+    def fake_fetch(url: str, _credential=None) -> bytes:
         if url.endswith("manifest.json"):
             return json.dumps(
                 {
@@ -827,13 +768,13 @@ def test_helper_rejects_labfoundry_wheel_sha_mismatch(monkeypatch, tmp_path, cap
                     "sha256": "0" * 64,
                 }
             ).encode("utf-8")
-        return b"wheel-content"
+        return b"not-a-detached-signature"
 
     monkeypatch.setattr(helper, "_fetch_http_bytes", fake_fetch)
 
     assert helper._handle_appliance_update("apply", [str(config_path)]) == 1
     captured = capsys.readouterr()
-    assert "sha256 mismatch" in captured.err
+    assert "signature" in captured.err
 
 
 def test_helper_rejects_credentialed_update_urls(tmp_path, capsys):
@@ -844,7 +785,7 @@ def test_helper_rejects_credentialed_update_urls(tmp_path, capsys):
     config_path.write_text(
         json.dumps(
             {
-                "selected_streams": ["labfoundry_wheel"],
+                "selected_streams": ["labfoundry_release"],
                 "sources": {"labfoundry_manifest_url": "https://user:token@example.test/manifest.json"},
             }
         ),
@@ -871,7 +812,7 @@ def test_helper_writes_failed_update_info_for_failed_commands(monkeypatch):
     result = helper._apply_appliance_update({"selected_streams": ["photon_os"], "sources": {}})
     assert result["status"] == "failed"
     assert result["applied"] == {}
-    assert result["attempted"]["photon_os"] == "Photon OS packages updated from configured repositories."
+    assert result["attempted"]["photon_os"]["automatic_rpm_rollback"] is False
     assert result["reboot_recommended"] is False
     assert "error" in result
     assert written["status"] == "failed"

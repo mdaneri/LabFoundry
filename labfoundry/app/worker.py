@@ -14,6 +14,7 @@ from labfoundry.app.adapters.system import SystemAdapter
 from labfoundry.app.config import get_settings
 from labfoundry.app.database import SessionLocal, init_db
 from labfoundry.app.models import AuditEvent, AutomationScriptRevision, Job, JobStatus, utcnow
+from labfoundry.app.services.appliance_update import APPLIANCE_UPDATE_FINALIZER_PATH
 from labfoundry.app.services.automation import enqueue_due_schedules, json_object
 
 
@@ -49,16 +50,51 @@ def claim_next_job(db: Session) -> Job | None:
     return job
 
 
+def _release_finalizer() -> dict[str, Any]:
+    try:
+        payload = json.loads(Path(APPLIANCE_UPDATE_FINALIZER_PATH).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def recover_interrupted_worker_jobs(db: Session) -> int:
     jobs = db.execute(
         select(Job).where(Job.type.in_(WORKER_JOB_TYPES), Job.status == JobStatus.RUNNING.value)
     ).scalars().all()
     now = utcnow()
+    finalizer = _release_finalizer()
     for job in jobs:
-        job.status = JobStatus.FAILED.value
+        definitive = (
+            finalizer
+            if job.type == "appliance-update" and str(finalizer.get("job_id") or "") == job.id
+            else {}
+        )
+        finalizer_status = str(definitive.get("status") or "")
+        recovered = finalizer_status in {JobStatus.SUCCEEDED.value, JobStatus.FAILED.value}
+        job.status = finalizer_status if recovered else JobStatus.FAILED.value
         job.finished_at = now
         job.progress_percent = 100
-        job.error = "The LabFoundry worker restarted while this task was running. The task was not rerun automatically."
+        job.error = (
+            None
+            if recovered and job.status == JobStatus.SUCCEEDED.value
+            else str(definitive.get("error") or "The LabFoundry worker restarted while this task was running. The task was not rerun automatically.")
+        )
+        try:
+            result = json.loads(job.result or "{}")
+        except json.JSONDecodeError:
+            result = {}
+        result.update(
+            {
+                "status": job.status,
+                "success": job.status == JobStatus.SUCCEEDED.value,
+                "release_transaction": definitive,
+                "worker_recovery": "root_finalizer" if recovered else "interrupted",
+            }
+        )
+        if job.error:
+            result["error"] = job.error
+        job.result = json.dumps(result, indent=2, sort_keys=True)
         db.add(job)
     if jobs:
         db.commit()
@@ -97,23 +133,30 @@ def _run_appliance_update(job_id: str) -> None:
         selected = [str(value) for value in config.get("selected_streams", [])]
         settings = config.get("settings") if isinstance(config.get("settings"), dict) else appliance_update_settings(db)
         mode = str(config.get("mode") or "check")
-        try:
-            update_result = execute_appliance_update_job(
-                selected_stream_ids=selected,
-                settings=settings,
-                actor=job.created_by,
-                mode=mode,
-                credentials=update_source_credentials(db),
-            )
-        except Exception as exc:  # noqa: BLE001 - workers must persist a terminal job state.
-            LOGGER.exception("Appliance update job %s failed before helper completion", job.id)
-            update_result = appliance_update_exception_result(
-                selected_stream_ids=selected,
-                settings=settings,
-                actor=job.created_by,
-                mode=mode,
-                exc=exc,
-            )
+        actor = job.created_by
+        credentials = update_source_credentials(db)
+    try:
+        update_result = execute_appliance_update_job(
+            selected_stream_ids=selected,
+            settings=settings,
+            actor=actor,
+            mode=mode,
+            job_id=job_id,
+            credentials=credentials,
+        )
+    except Exception as exc:  # noqa: BLE001 - workers must persist a terminal job state.
+        LOGGER.exception("Appliance update job %s failed before helper completion", job_id)
+        update_result = appliance_update_exception_result(
+            selected_stream_ids=selected,
+            settings=settings,
+            actor=actor,
+            mode=mode,
+            exc=exc,
+        )
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        if job is None:
+            return
         complete_appliance_update_task(db, job=job, update_result=update_result)
 
 

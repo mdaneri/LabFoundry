@@ -16,6 +16,7 @@ import hmac
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -26,8 +27,8 @@ import hashlib
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote, unquote, urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import unquote, urljoin, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 try:
     import grp
@@ -122,7 +123,16 @@ AUTOMATION_RUN_DIR = LABFOUNDRY_STATE_DIR / "automation" / "runs"
 AUTOMATION_USER = "labfoundry-automation"
 UPDATE_SOURCE_STATE_PATH = Path("/etc/labfoundry/update-sources.json")
 MANAGED_PHOTON_REPO_PATH = Path("/etc/yum.repos.d/labfoundry-managed.repo")
-LABFOUNDRY_PIP_CONFIG_PATH = Path("/opt/labfoundry/.venv/pip.conf")
+LABFOUNDRY_HOME = Path("/opt/labfoundry")
+LABFOUNDRY_RELEASES_DIR = LABFOUNDRY_HOME / "releases"
+LABFOUNDRY_CURRENT_LINK = LABFOUNDRY_HOME / "current"
+LABFOUNDRY_VENV_LINK = LABFOUNDRY_HOME / ".venv"
+LABFOUNDRY_UPDATE_TRUST_DIR = Path("/etc/labfoundry/update-trust.d")
+LABFOUNDRY_UPDATE_BACKUP_DIR = LABFOUNDRY_STATE_DIR / "update-backups"
+LABFOUNDRY_DATABASE_PATH = LABFOUNDRY_STATE_DIR / "labfoundry.db"
+LABFOUNDRY_UPDATE_FINALIZER_PATH = LABFOUNDRY_STATE_DIR / "apply/appliance-update/finalizer-status.json"
+LABFOUNDRY_UPDATE_MAINTENANCE_PATH = Path("/run/labfoundry-update-maintenance")
+SUPPORTED_RELEASE_PYTHON_ABIS = {"cp312", "cp313", "cp314"}
 CONSOLE_STATE_DIR = LABFOUNDRY_STATE_DIR / "console"
 CONSOLE_SERVICE_STATE_PATH = CONSOLE_STATE_DIR / "services.json"
 CONSOLE_MANAGED_SERVICE_UNITS = (
@@ -3708,6 +3718,7 @@ def _handle_public_services(action: str, args: list[str]) -> int:
 def _management_proxy_location(upstream_host: str, upstream_port: int, forwarded_proto: str) -> list[str]:
     return [
         "  client_max_body_size 1g;",
+        f"  if (-f {LABFOUNDRY_UPDATE_MAINTENANCE_PATH}) {{ return 503; }}",
         "  location / {",
         f"    proxy_pass http://{upstream_host}:{upstream_port};",
         "    proxy_http_version 1.1;",
@@ -6931,7 +6942,7 @@ def _appliance_update_config_errors(payload: dict, *, require_streams: bool = Tr
     if not isinstance(selected, list) or (require_streams and not selected):
         errors.append("selected_streams must include at least one update stream.")
     else:
-        allowed = {"photon_os", "python_libraries", "powershell_modules", "labfoundry_wheel"}
+        allowed = {"photon_os", "powershell_modules", "labfoundry_release"}
         for stream in selected:
             if stream not in allowed:
                 errors.append(f"unsupported update stream {stream}.")
@@ -6948,30 +6959,15 @@ def _appliance_update_config_errors(payload: dict, *, require_streams: bool = Tr
     manifest_url = str(sources.get("labfoundry_manifest_url") or "").strip()
     if not manifest_urls and manifest_url:
         manifest_urls = [manifest_url]
-    if "labfoundry_wheel" in (selected or []):
+    if "labfoundry_release" in (selected or []):
         if not manifest_urls:
-            errors.append("at least one labfoundry manifest URL is required when LabFoundry Wheel is selected.")
+            errors.append("at least one LabFoundry channel manifest URL is required when LabFoundry Release is selected.")
         for value in manifest_urls:
             parsed = urlparse(value)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                errors.append("each labfoundry manifest URL must be an http or https URL.")
+            if parsed.scheme != "https" or not parsed.netloc:
+                errors.append("each LabFoundry channel manifest URL must be an HTTPS URL.")
             if parsed.username or parsed.password:
                 errors.append("labfoundry manifest URLs must not include embedded credentials.")
-    python_urls_value = sources.get("python_index_urls")
-    python_urls = (
-        [str(value).strip() for value in python_urls_value if str(value).strip()]
-        if isinstance(python_urls_value, list)
-        else []
-    )
-    python_index_url = str(sources.get("python_index_url") or "").strip()
-    if not python_urls and python_index_url:
-        python_urls = [python_index_url]
-    for value in python_urls:
-        parsed = urlparse(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            errors.append("each python index URL must be an http or https URL.")
-        if parsed.username or parsed.password:
-            errors.append("python index URLs must not include embedded credentials.")
     powershell_repository_url = str(sources.get("powershell_repository_url") or "").strip()
     powershell_repository_name = str(sources.get("powershell_repository_name") or "").strip()
     if "powershell_modules" in (selected or []) and not powershell_repository_url:
@@ -6982,9 +6978,6 @@ def _appliance_update_config_errors(payload: dict, *, require_streams: bool = Tr
             errors.append("powershell_repository_url must be an http or https URL.")
         if parsed.username or parsed.password:
             errors.append("powershell_repository_url must not include embedded credentials.")
-    requirements = payload.get("python_requirements", [])
-    if requirements and (not isinstance(requirements, list) or not all(isinstance(item, str) and item.strip() for item in requirements)):
-        errors.append("python_requirements must be a list of requirement strings.")
     powershell_modules = payload.get("powershell_modules", [])
     if powershell_modules and (
         not isinstance(powershell_modules, list)
@@ -7028,55 +7021,50 @@ def _command_payload(
     }
 
 
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(url)
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme.lower() == "https" else 80 if parsed.scheme.lower() == "http" else None
+    return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
+
+
+class _UpdateRedirectHandler(HTTPRedirectHandler):
+    def __init__(self, *, authenticated_origin: tuple[str, str, int | None] | None) -> None:
+        super().__init__()
+        self.authenticated_origin = authenticated_origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        redirect_url = urljoin(req.full_url, newurl)
+        source_origin = _url_origin(req.full_url)
+        target_origin = _url_origin(redirect_url)
+        if source_origin[0] == "https" and target_origin[0] != "https":
+            raise ValueError("update downloads cannot redirect from HTTPS to a less secure scheme")
+        if self.authenticated_origin is not None and target_origin != self.authenticated_origin:
+            raise ValueError("authenticated update downloads cannot redirect to another origin")
+        return super().redirect_request(req, fp, code, msg, headers, redirect_url)
+
+
 def _fetch_http_bytes(url: str, credential: dict[str, str] | None = None) -> bytes:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"unsupported update URL: {url}")
     request: str | Request = url
+    authenticated_origin: tuple[str, str, int | None] | None = None
     if credential and str(credential.get("secret") or ""):
         token = base64.b64encode(
             f"{credential.get('username', '')}:{credential['secret']}".encode("utf-8")
         ).decode("ascii")
         request = Request(url, headers={"Authorization": f"Basic {token}"})
-    with urlopen(request, timeout=60) as response:
+        authenticated_origin = _url_origin(url)
+    opener = build_opener(_UpdateRedirectHandler(authenticated_origin=authenticated_origin))
+    with opener.open(request, timeout=60) as response:
         return response.read()
-
-
-def _download_labfoundry_update_manifest(
-    manifest_url: str, credential: dict[str, str] | None = None
-) -> dict:
-    raw = _fetch_http_bytes(manifest_url, credential) if credential else _fetch_http_bytes(manifest_url)
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"LabFoundry manifest is not valid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("LabFoundry manifest must be a JSON object")
-    for key in ("version", "git_commit", "wheel", "sha256"):
-        if not str(payload.get(key) or "").strip():
-            raise ValueError(f"LabFoundry manifest missing {key}")
-    if not re.fullmatch(r"[0-9a-fA-F]{40}", str(payload["git_commit"])):
-        raise ValueError("LabFoundry manifest git_commit must be a full 40-character hexadecimal commit")
-    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(payload["sha256"])):
-        raise ValueError("LabFoundry manifest sha256 must be a 64-character hex digest")
-    return payload
 
 
 def _source_credential(source: dict, credentials: dict[str, dict[str, str]]) -> dict[str, str] | None:
     credential = credentials.get(str(source.get("id") or ""))
     return credential if isinstance(credential, dict) and str(credential.get("secret") or "") else None
-
-
-def _authenticated_url(url: str, credential: dict[str, str] | None) -> str:
-    if not credential:
-        return url
-    parsed = urlparse(url)
-    username = quote(str(credential.get("username") or ""), safe="")
-    secret = quote(str(credential.get("secret") or ""), safe="")
-    host = parsed.hostname or ""
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
-    return parsed._replace(netloc=f"{username}:{secret}@{host}").geturl()
 
 
 def _enabled_sources(payload: dict, kind: str) -> list[dict]:
@@ -7085,28 +7073,6 @@ def _enabled_sources(payload: dict, kind: str) -> list[dict]:
         source for source in definitions
         if isinstance(source, dict) and source.get("kind") == kind and source.get("enabled") is True
     ]
-
-
-def _python_index_urls(payload: dict) -> list[str]:
-    sources = payload.get("sources") or {}
-    configured = sources.get("python_index_urls")
-    if isinstance(configured, list):
-        urls = [str(value).strip() for value in configured if str(value).strip()]
-        if urls:
-            return urls
-    legacy = str(sources.get("python_index_url") or "").strip()
-    return [legacy] if legacy else []
-
-
-def _python_source_pairs(payload: dict) -> list[tuple[str, dict]]:
-    pairs = [
-        (str(source.get("url") or "").strip(), source)
-        for source in _enabled_sources(payload, "python")
-        if str(source.get("url") or "").strip()
-    ]
-    if pairs:
-        return pairs
-    return [(url, {}) for url in _python_index_urls(payload)]
 
 
 def _labfoundry_manifest_sources(payload: dict) -> list[tuple[str, dict]]:
@@ -7131,17 +7097,198 @@ def _labfoundry_manifest_sources(payload: dict) -> list[tuple[str, dict]]:
     return [(url, {}) for url in urls]
 
 
-def _download_labfoundry_manifest_from_sources(
+def _current_python_abi() -> str:
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
+def _validated_update_https_url(value: object, label: str) -> str:
+    url = str(value or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise ValueError(f"{label} must be an HTTPS URL without embedded credentials")
+    return url
+
+
+def _validated_update_timestamp(value: object, label: str) -> str:
+    timestamp = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO 8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must include a timezone")
+    return timestamp
+
+
+def _verify_signed_update_document(raw_document: bytes, raw_signature: bytes, *, kind: str) -> dict:
+    try:
+        signature_document = json.loads(raw_signature.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{kind} detached signature is not valid JSON: {exc}") from exc
+    if not isinstance(signature_document, dict) or signature_document.get("schema_version") != 1:
+        raise ValueError(f"{kind} detached signature schema is unsupported")
+    key_id = str(signature_document.get("key_id") or "").strip()
+    if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", key_id) is None:
+        raise ValueError(f"{kind} detached signature key id is invalid")
+    try:
+        signature = base64.b64decode(str(signature_document.get("signature") or ""), validate=True)
+    except ValueError as exc:
+        raise ValueError(f"{kind} detached signature is not valid base64") from exc
+    if len(signature) != 64:
+        raise ValueError(f"{kind} detached Ed25519 signature must be 64 bytes")
+    public_key = LABFOUNDRY_UPDATE_TRUST_DIR / f"{key_id}.pem"
+    if not public_key.is_file():
+        raise ValueError(f"{kind} signing key {key_id} is not trusted")
+    openssl = _command_path("openssl")
+    if openssl is None:
+        raise ValueError("openssl is required to verify signed LabFoundry releases")
+    with tempfile.TemporaryDirectory(prefix="labfoundry-signature-") as temporary:
+        document_path = Path(temporary) / "document.json"
+        signature_path = Path(temporary) / "document.sig"
+        document_path.write_bytes(raw_document)
+        signature_path.write_bytes(signature)
+        result = _run(
+            [
+                openssl,
+                "pkeyutl",
+                "-verify",
+                "-pubin",
+                "-inkey",
+                str(public_key),
+                "-rawin",
+                "-in",
+                str(document_path),
+                "-sigfile",
+                str(signature_path),
+            ]
+        )
+    if result.returncode != 0:
+        raise ValueError(f"{kind} detached signature is invalid")
+    try:
+        document = json.loads(raw_document.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"signed {kind} manifest is not valid JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError(f"signed {kind} manifest must be an object")
+    if document.get("signing_key_id") != key_id:
+        raise ValueError(f"{kind} manifest and detached signature key ids do not match")
+    return document
+
+
+def _validate_channel_manifest(channel: dict) -> dict:
+    if channel.get("schema_version") != 2 or channel.get("kind") != "labfoundry-channel":
+        raise ValueError("LabFoundry channel manifest schema is unsupported")
+    if channel.get("channel") not in {"stable", "preview", "development"}:
+        raise ValueError("LabFoundry channel name is invalid")
+    if re.fullmatch(r"[0-9a-f]{40}", str(channel.get("git_commit") or "").lower()) is None:
+        raise ValueError("LabFoundry channel git commit is invalid")
+    _validated_update_https_url(channel.get("release_manifest_url"), "LabFoundry release manifest URL")
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(channel.get("version") or "")) is None:
+        raise ValueError("LabFoundry channel version must use X.Y.Z semantic versioning")
+    _validated_update_timestamp(channel.get("issued_at"), "LabFoundry channel issue time")
+    if not str(channel.get("signing_key_id") or "").strip():
+        raise ValueError("LabFoundry channel manifest missing signing_key_id")
+    return channel
+
+
+def _validate_release_manifest(release: dict) -> dict:
+    if release.get("schema_version") != 2 or release.get("kind") != "labfoundry-release":
+        raise ValueError("LabFoundry release manifest schema is unsupported")
+    updater_protocol = release.get("updater_protocol")
+    if (
+        not isinstance(updater_protocol, int)
+        or isinstance(updater_protocol, bool)
+        or updater_protocol < 1
+        or updater_protocol > 2
+    ):
+        raise ValueError("LabFoundry release updater protocol is missing or unsupported")
+    database_schema_version = release.get("database_schema_version")
+    if (
+        not isinstance(database_schema_version, int)
+        or isinstance(database_schema_version, bool)
+        or database_schema_version < 1
+    ):
+        raise ValueError("LabFoundry release database schema version must be a positive integer")
+    if re.fullmatch(r"[0-9a-f]{40}", str(release.get("git_commit") or "").lower()) is None:
+        raise ValueError("LabFoundry release git commit is invalid")
+    python_abis = release.get("supported_python_abis")
+    if (
+        not isinstance(python_abis, list)
+        or not python_abis
+        or any(str(value) not in SUPPORTED_RELEASE_PYTHON_ABIS for value in python_abis)
+        or len(set(python_abis)) != len(python_abis)
+    ):
+        raise ValueError("LabFoundry release supported Python ABIs are invalid")
+    bundle = release.get("bundle")
+    if not isinstance(bundle, dict):
+        raise ValueError("LabFoundry release bundle metadata is missing")
+    _validated_update_https_url(bundle.get("url"), "LabFoundry release bundle URL")
+    if re.fullmatch(r"[0-9a-f]{64}", str(bundle.get("sha256") or "").lower()) is None:
+        raise ValueError("LabFoundry release bundle SHA256 is invalid")
+    if not isinstance(bundle.get("size"), int) or int(bundle["size"]) <= 0:
+        raise ValueError("LabFoundry release bundle size is invalid")
+    content_hashes = release.get("content_hashes")
+    if not isinstance(content_hashes, dict) or not content_hashes:
+        raise ValueError("LabFoundry release content hashes are missing")
+    for name, digest in content_hashes.items():
+        path = PurePosixPath(str(name))
+        if not str(name) or path.is_absolute() or "\\" in str(name) or ".." in path.parts:
+            raise ValueError("LabFoundry release content hashes contain an unsafe path")
+        if re.fullmatch(r"[0-9a-f]{64}", str(digest).lower()) is None:
+            raise ValueError(f"LabFoundry release content hash is invalid for {name}")
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(release.get("version") or "")) is None:
+        raise ValueError("LabFoundry release version must use X.Y.Z semantic versioning")
+    _validated_update_timestamp(release.get("built_at"), "LabFoundry release build time")
+    if not str(release.get("signing_key_id") or "").strip():
+        raise ValueError("LabFoundry release manifest missing signing_key_id")
+    return release
+
+
+def _credential_for_related_url(
+    source_url: str, target_url: str, credential: dict[str, str] | None
+) -> dict[str, str] | None:
+    if not credential:
+        return None
+    source = urlparse(source_url)
+    target = urlparse(target_url)
+    return credential if (source.scheme, source.netloc) == (target.scheme, target.netloc) else None
+
+
+def _download_signed_release(
+    channel_url: str, credential: dict[str, str] | None = None
+) -> tuple[dict, dict, dict[str, str] | None]:
+    raw_channel = _fetch_http_bytes(channel_url, credential)
+    raw_channel_signature = _fetch_http_bytes(f"{channel_url}.sig", credential)
+    channel = _validate_channel_manifest(
+        _verify_signed_update_document(raw_channel, raw_channel_signature, kind="channel")
+    )
+    release_url = str(channel["release_manifest_url"])
+    release_credential = _credential_for_related_url(channel_url, release_url, credential)
+    raw_release = _fetch_http_bytes(release_url, release_credential)
+    raw_release_signature = _fetch_http_bytes(f"{release_url}.sig", release_credential)
+    release = _validate_release_manifest(
+        _verify_signed_update_document(raw_release, raw_release_signature, kind="release")
+    )
+    if release.get("version") != channel.get("version") or release.get("git_commit") != channel.get("git_commit"):
+        raise ValueError("LabFoundry channel pointer does not match its immutable release manifest")
+    abi = _current_python_abi()
+    if abi not in release["supported_python_abis"]:
+        raise ValueError(f"LabFoundry release {release['version']} does not support appliance Python ABI {abi}")
+    return channel, release, release_credential
+
+
+def _download_signed_release_from_sources(
     payload: dict, credentials: dict[str, dict[str, str]]
-) -> tuple[dict, str, dict[str, str] | None]:
+) -> tuple[dict, dict, str, dict[str, str] | None]:
     failures: list[str] = []
-    for manifest_url, source in _labfoundry_manifest_sources(payload):
+    for channel_url, source in _labfoundry_manifest_sources(payload):
         credential = _source_credential(source, credentials)
         try:
-            return _download_labfoundry_update_manifest(manifest_url, credential), manifest_url, credential
-        except Exception as exc:  # noqa: BLE001 - ordered repositories are explicit failover sources.
-            failures.append(f"{manifest_url}: {exc}")
-    raise ValueError("No enabled LabFoundry manifest source succeeded: " + " ; ".join(failures))
+            channel, release, release_credential = _download_signed_release(channel_url, credential)
+            return channel, release, str(channel["release_manifest_url"]), release_credential
+        except Exception as exc:  # noqa: BLE001 - configured release mirrors are ordered failover sources.
+            failures.append(f"{channel_url}: {exc}")
+    raise ValueError("No enabled signed LabFoundry release source succeeded: " + " ; ".join(failures))
 
 
 def _restore_labfoundry_venv_permissions() -> None:
@@ -7231,29 +7378,6 @@ def _sync_appliance_update_sources(payload: dict, credentials: dict[str, dict[st
         photon_path.unlink()
         commands.append({"command": ["remove", str(photon_path)], "returncode": 0, "success": True, "stdout": "removed managed Photon repository file", "stderr": ""})
 
-    pip_path = LABFOUNDRY_PIP_CONFIG_PATH
-    python_pairs = _python_source_pairs(payload)
-    if python_pairs:
-        authenticated_urls = [
-            _authenticated_url(url, _source_credential(source, credentials))
-            for url, source in python_pairs
-        ]
-        pip_lines = ["[global]", f"index-url = {authenticated_urls[0]}"]
-        if len(authenticated_urls) > 1:
-            pip_lines.append("extra-index-url =\n    " + "\n    ".join(authenticated_urls[1:]))
-        trusted_hosts = [
-            urlparse(url).hostname or "" for url, source in python_pairs
-            if isinstance(source.get("settings"), dict) and source["settings"].get("tls_verify") is False
-        ]
-        if trusted_hosts:
-            pip_lines.append("trusted-host =\n    " + "\n    ".join(trusted_hosts))
-        pip_path.write_text("\n".join(pip_lines) + "\n", encoding="utf-8")
-        pip_path.chmod(0o600 if any(_source_credential(source, credentials) for _, source in python_pairs) else 0o644)
-        commands.append({"command": ["write", str(pip_path)], "returncode": 0, "success": True, "stdout": f"configured {len(python_pairs)} LabFoundry virtualenv pip indexes", "stderr": ""})
-    elif pip_path.exists():
-        pip_path.unlink()
-        commands.append({"command": ["remove", str(pip_path)], "returncode": 0, "success": True, "stdout": "restored LabFoundry virtualenv pip defaults", "stderr": ""})
-
     pwsh = _command_path("pwsh")
     try:
         previous_state = json.loads(UPDATE_SOURCE_STATE_PATH.read_text(encoding="utf-8")) if UPDATE_SOURCE_STATE_PATH.exists() else {}
@@ -7317,23 +7441,12 @@ def _check_appliance_update(payload: dict, credentials: dict[str, dict[str, str]
         tdnf = _command_path("tdnf") or "tdnf"
         commands.append(_command_payload([tdnf, "makecache"], success_codes={0}))
         commands.append(_command_payload([tdnf, "check-update"], success_codes={0, 100}))
-        checks["photon_os"] = "tdnf check-update completed; exit 100 means updates are available."
-    if "python_libraries" in selected:
-        command = [_appliance_update_python(), "-m", "pip", "list", "--outdated", "--format=json"]
-        python_pairs = _python_source_pairs(payload)
-        env = os.environ.copy()
-        if python_pairs:
-            authenticated = [
-                _authenticated_url(url, _source_credential(source, credentials))
-                for url, source in python_pairs
-            ]
-            env["PIP_INDEX_URL"] = authenticated[0]
-            if len(authenticated) > 1:
-                env["PIP_EXTRA_INDEX_URL"] = " ".join(authenticated[1:])
-            commands.append(_command_payload(command, success_codes={0}, env=env))
-        else:
-            commands.append(_command_payload(command, success_codes={0}))
-        checks["python_libraries"] = "pip outdated check completed."
+        compatibility = _photon_python_compatibility()
+        commands.append(compatibility)
+        checks["photon_os"] = {
+            "message": "tdnf check-update completed; exit 100 means updates are available.",
+            "python_compatibility": compatibility.get("compatibility", {}),
+        }
     if "powershell_modules" in selected:
         pwsh = _command_path("pwsh") or "pwsh"
         default_repository = str(sources.get("powershell_repository_name") or "").strip()
@@ -7360,39 +7473,18 @@ def _check_appliance_update(payload: dict, credentials: dict[str, dict[str, str]
             commands.append(command)
             module_checks.append({"name": name, "repository": repository, "target_version": target, "success": command["success"]})
         checks["powershell_modules"] = module_checks
-    if "labfoundry_wheel" in selected:
-        manifest, manifest_url, _credential = _download_labfoundry_manifest_from_sources(payload, credentials)
-        checks["labfoundry_wheel"] = {
-            "version": manifest.get("version"),
-            "git_commit": manifest.get("git_commit"),
-            "wheel": manifest.get("wheel"),
-            "sha256": manifest.get("sha256"),
+    if "labfoundry_release" in selected:
+        channel, release, manifest_url, _credential = _download_signed_release_from_sources(payload, credentials)
+        checks["labfoundry_release"] = {
+            "channel": channel.get("channel"),
+            "version": release.get("version"),
+            "git_commit": release.get("git_commit"),
+            "supported_python_abis": release.get("supported_python_abis"),
+            "signing_key_id": release.get("signing_key_id"),
             "manifest_url": manifest_url,
+            "bundle_sha256": (release.get("bundle") or {}).get("sha256"),
         }
     return {"checks": checks, "commands": commands}
-
-
-def _apply_python_libraries(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> list[dict]:
-    credentials = credentials or {}
-    sources = payload.get("sources") or {}
-    requirements = [str(item).strip() for item in payload.get("python_requirements", []) if str(item).strip()]
-    python = _appliance_update_python()
-    bootstrap_command = [python, "-m", "pip", "install", "--upgrade"]
-    python_pairs = _python_source_pairs(payload)
-    env = os.environ.copy()
-    if python_pairs:
-        authenticated = [_authenticated_url(url, _source_credential(source, credentials)) for url, source in python_pairs]
-        env["PIP_INDEX_URL"] = authenticated[0]
-        if len(authenticated) > 1:
-            env["PIP_EXTRA_INDEX_URL"] = " ".join(authenticated[1:])
-    bootstrap_command.extend(["pip", "setuptools", "wheel"])
-    commands = [_command_payload(bootstrap_command, env=env) if python_pairs else _command_payload(bootstrap_command)]
-    if requirements:
-        command = [python, "-m", "pip", "install", "--upgrade"]
-        command.extend(requirements)
-        commands.append(_command_payload(command, env=env) if python_pairs else _command_payload(command))
-    _restore_labfoundry_venv_permissions()
-    return commands
 
 
 def _apply_powershell_modules(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> list[dict]:
@@ -7448,28 +7540,569 @@ def _apply_powershell_modules(payload: dict, credentials: dict[str, dict[str, st
     return commands
 
 
-def _apply_labfoundry_wheel(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> tuple[dict, list[dict]]:
-    credentials = credentials or {}
-    failures: list[str] = []
-    for manifest_url, source in _labfoundry_manifest_sources(payload):
-        credential = _source_credential(source, credentials)
+def _active_release_metadata() -> tuple[Path, dict]:
+    if not LABFOUNDRY_CURRENT_LINK.is_symlink():
+        raise ValueError("Install a signed LabFoundry release before applying Photon OS updates")
+    release_root = LABFOUNDRY_CURRENT_LINK.resolve()
+    metadata_path = release_root / "bundle-metadata.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("Active LabFoundry release metadata is unavailable") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError("Active LabFoundry release metadata is invalid")
+    return release_root, metadata
+
+
+def _candidate_photon_python_abi() -> tuple[dict, str]:
+    tdnf = _command_path("tdnf") or "tdnf"
+    command = _command_payload([tdnf, "repoquery", "--latest-limit", "1", "python3"])
+    if not command["success"]:
+        return command, ""
+    versions = [
+        (int(match.group(1)), int(match.group(2)))
+        for match in re.finditer(
+            r"(?m)^python3-([0-9]+)\.([0-9]+)(?:\.[0-9]+)?-",
+            command["stdout"],
+        )
+    ]
+    if not versions:
+        command["success"] = False
+        command["returncode"] = 1
+        command["stderr"] = "Could not determine the candidate Photon python3 ABI from repository metadata."
+        return command, ""
+    major, minor = max(versions)
+    return command, f"cp{major}{minor}"
+
+
+def _photon_python_compatibility() -> dict:
+    try:
+        _release_root, metadata = _active_release_metadata()
+    except ValueError as exc:
+        return {
+            "command": ["photon-python-compatibility"],
+            "returncode": 1,
+            "success": False,
+            "stdout": "",
+            "stderr": str(exc),
+            "compatibility": {},
+        }
+    query, candidate = _candidate_photon_python_abi()
+    supported = [str(value) for value in metadata.get("supported_python_abis", [])]
+    query["compatibility"] = {
+        "candidate_python_abi": candidate,
+        "supported_python_abis": supported,
+        "active_release": metadata.get("version"),
+    }
+    if query["success"] and candidate not in supported:
+        query["success"] = False
+        query["returncode"] = 1
+        query["stderr"] = (
+            f"Photon proposes Python ABI {candidate}, but active LabFoundry release "
+            f"{metadata.get('version')} supports {', '.join(supported) or 'none'}."
+        )
+    return query
+
+
+def _rebuild_active_release_for_python(previous_abi: str) -> tuple[list[dict], bool]:
+    current_abi = _current_python_abi()
+    if current_abi == previous_abi:
+        return [], False
+    release_root, metadata = _active_release_metadata()
+    supported = [str(value) for value in metadata.get("supported_python_abis", [])]
+    if current_abi not in supported:
+        raise ValueError(
+            f"Photon changed Python from {previous_abi} to unsupported ABI {current_abi}; "
+            "automatic RPM rollback is not available"
+        )
+    commands = [_service_command("stop", "labfoundry.service", "labfoundry-console.service")]
+    if commands[-1]["success"]:
+        commands.extend(_install_release_venv(release_root, current_abi))
+    if all(command["success"] for command in commands):
+        commands.append(_service_command("start", "labfoundry.service", "labfoundry-console.service"))
+        commands.append(_wait_for_labfoundry_health())
+        commands.append(
+            _service_command(
+                "is-active",
+                "labfoundry.service",
+                "labfoundry-worker.service",
+                "labfoundry-console.service",
+            )
+        )
+    if not all(command["success"] for command in commands):
+        raise ValueError(
+            f"Photon changed Python from {previous_abi} to {current_abi}, but the active "
+            "LabFoundry release environment could not be reconstructed. Automatic RPM rollback is not available."
+        )
+    return commands, True
+
+
+def _safe_extract_release(bundle_path: Path, destination: Path) -> None:
+    with tarfile.open(bundle_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            member_path = PurePosixPath(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts or member.issym() or member.islnk():
+                raise ValueError(f"LabFoundry release bundle contains unsafe member {member.name}")
+        archive.extractall(destination, filter="data")
+
+
+def _validate_release_content(release: dict, root: Path) -> None:
+    expected = release["content_hashes"]
+    actual_files = {
+        path.relative_to(root).as_posix(): path
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    if set(actual_files) != set(expected):
+        missing = sorted(set(expected) - set(actual_files))
+        extra = sorted(set(actual_files) - set(expected))
+        raise ValueError(f"LabFoundry release content set mismatch; missing={missing}; extra={extra}")
+    for relative, path in actual_files.items():
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if not hmac.compare_digest(digest, str(expected[relative]).lower()):
+            raise ValueError(f"LabFoundry release content SHA256 mismatch for {relative}")
+
+
+def _install_release_venv(release_root: Path, abi: str) -> list[dict]:
+    wheelhouse = release_root / "wheelhouse" / abi
+    lock_path = wheelhouse / "requirements-wheelhouse.lock"
+    application_wheels = sorted((release_root / "packages").glob("labfoundry-*.whl"))
+    if not wheelhouse.is_dir() or not any(wheelhouse.glob("*.whl")):
+        raise ValueError(f"LabFoundry release does not contain wheelhouse {abi}")
+    if not lock_path.is_file() or len(application_wheels) != 1:
+        raise ValueError("LabFoundry release is missing its dependency lock or application wheel")
+    venv_path = release_root / ".venv"
+    temporary_venv = release_root / ".venv-new"
+    if temporary_venv.exists():
+        shutil.rmtree(temporary_venv)
+    commands: list[dict] = []
+    create = _command_payload([sys.executable, "-m", "venv", str(temporary_venv)])
+    commands.append(create)
+    if not create["success"]:
+        return commands
+    python = temporary_venv / "bin" / "python"
+    env = os.environ.copy()
+    env.update({"PIP_CONFIG_FILE": "/dev/null", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_INDEX": "1"})
+    dependency_install = _command_payload(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--find-links",
+            str(wheelhouse),
+            "--require-hashes",
+            "-r",
+            str(lock_path),
+        ],
+        env=env,
+    )
+    commands.append(dependency_install)
+    if not dependency_install["success"]:
+        return commands
+    application_install = _command_payload(
+        [str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(application_wheels[0])],
+        env=env,
+    )
+    commands.append(application_install)
+    if not application_install["success"]:
+        return commands
+    commands.extend(
+        [
+            _command_payload([str(python), "-m", "pip", "check"], env=env),
+            _command_payload(
+                [
+                    str(python),
+                    "-c",
+                    "import labfoundry.app.main, labfoundry.app.worker, labfoundry.app.appliance_console",
+                ],
+                env=env,
+            ),
+        ]
+    )
+    if not all(command["success"] for command in commands):
+        return commands
+    if venv_path.exists():
+        shutil.rmtree(venv_path)
+    os.replace(temporary_venv, venv_path)
+    for root, directories, files in os.walk(venv_path):
+        for directory in directories:
+            Path(root, directory).chmod(0o755)
+        for filename in files:
+            path = Path(root, filename)
+            path.chmod(0o755 if path.parent.name == "bin" else 0o644)
+    return commands
+
+
+def _atomic_symlink(target: Path, link: Path) -> None:
+    temporary = link.with_name(f".{link.name}.tmp")
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(target)
+    os.replace(temporary, link)
+
+
+def _ensure_versioned_release_layout() -> Path:
+    LABFOUNDRY_RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+    if LABFOUNDRY_CURRENT_LINK.is_symlink():
+        return LABFOUNDRY_CURRENT_LINK.resolve()
+    if LABFOUNDRY_VENV_LINK.is_dir() and not LABFOUNDRY_VENV_LINK.is_symlink():
+        legacy = LABFOUNDRY_RELEASES_DIR / f"legacy-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        legacy.mkdir()
+        os.replace(LABFOUNDRY_VENV_LINK, legacy / ".venv")
+        _atomic_symlink(legacy, LABFOUNDRY_CURRENT_LINK)
+        _atomic_symlink(Path("current/.venv"), LABFOUNDRY_VENV_LINK)
+        return legacy
+    if LABFOUNDRY_VENV_LINK.is_symlink():
+        resolved = LABFOUNDRY_VENV_LINK.resolve().parent
+        _atomic_symlink(resolved, LABFOUNDRY_CURRENT_LINK)
+        return resolved
+    raise ValueError("Existing LabFoundry virtualenv could not be migrated into the versioned release layout")
+
+
+def _sqlite_backup(destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not LABFOUNDRY_DATABASE_PATH.exists():
+        return
+    source = sqlite3.connect(LABFOUNDRY_DATABASE_PATH)
+    backup = sqlite3.connect(destination)
+    try:
+        source.backup(backup)
+        backup.commit()
+    finally:
+        backup.close()
+        source.close()
+    destination.chmod(0o600)
+
+
+def _restore_sqlite_backup(source: Path) -> None:
+    if not source.exists():
+        return
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{LABFOUNDRY_DATABASE_PATH}{suffix}").unlink(missing_ok=True)
+    shutil.copy2(source, LABFOUNDRY_DATABASE_PATH)
+
+
+def _service_command(action: str, *units: str) -> dict:
+    systemctl = _command_path("systemctl") or "systemctl"
+    return _command_payload([systemctl, action, *units])
+
+
+def _wait_for_labfoundry_health(timeout_seconds: int = 60) -> dict:
+    deadline = time.monotonic() + timeout_seconds
+    error = ""
+    while time.monotonic() < deadline:
         try:
-            manifest = _download_labfoundry_update_manifest(manifest_url, credential)
-            wheel_url = urljoin(manifest_url, str(manifest["wheel"]))
-            wheel_bytes = _fetch_http_bytes(wheel_url, credential) if credential else _fetch_http_bytes(wheel_url)
-            digest = hashlib.sha256(wheel_bytes).hexdigest()
-            if digest.lower() != str(manifest["sha256"]).lower():
-                raise ValueError(f"LabFoundry wheel sha256 mismatch: expected {manifest['sha256']} got {digest}")
-            with tempfile.TemporaryDirectory(prefix="labfoundry-update-") as temp_root:
-                wheel_path = Path(temp_root) / Path(str(manifest["wheel"])).name
-                wheel_path.write_bytes(wheel_bytes)
-                command = [_appliance_update_python(), "-m", "pip", "install", "--force-reinstall", "--no-deps", str(wheel_path)]
-                commands = [_command_payload(command)]
-            _restore_labfoundry_venv_permissions()
-            return manifest, commands
-        except Exception as exc:  # noqa: BLE001 - try the next explicitly configured repository.
-            failures.append(f"{manifest_url}: {exc}")
-    raise ValueError("No enabled LabFoundry release source succeeded: " + " ; ".join(failures))
+            with urlopen("http://127.0.0.1:8000/openapi.json", timeout=3) as response:
+                if response.status == 200:
+                    return {
+                        "command": ["health-check", "http://127.0.0.1:8000/openapi.json"],
+                        "returncode": 0,
+                        "success": True,
+                        "stdout": "LabFoundry OpenAPI readiness passed.",
+                        "stderr": "",
+                    }
+        except Exception as exc:  # noqa: BLE001 - readiness retries until its bounded deadline.
+            error = str(exc)
+        time.sleep(1)
+    return {
+        "command": ["health-check", "http://127.0.0.1:8000/openapi.json"],
+        "returncode": 1,
+        "success": False,
+        "stdout": "",
+        "stderr": f"LabFoundry readiness did not pass within {timeout_seconds} seconds: {error}",
+    }
+
+
+def _install_release_owned_files(release_root: Path, backup_root: Path) -> list[tuple[Path | None, Path]]:
+    owned = [
+        (release_root / "bin/labfoundry-helper", Path("/opt/labfoundry/bin/labfoundry-helper"), 0o755),
+        (release_root / "systemd/labfoundry.service", Path("/etc/systemd/system/labfoundry.service"), 0o644),
+        (release_root / "systemd/labfoundry-worker.service", Path("/etc/systemd/system/labfoundry-worker.service"), 0o644),
+        (release_root / "systemd/labfoundry-console.service", Path("/etc/systemd/system/labfoundry-console.service"), 0o644),
+    ]
+    trust = release_root / "trust"
+    if trust.is_dir():
+        for key in trust.glob("*.pem"):
+            owned.append((key, LABFOUNDRY_UPDATE_TRUST_DIR / key.name, 0o644))
+
+    backups: list[tuple[Path | None, Path]] = []
+    for source, destination, mode in owned:
+        if not source.is_file():
+            raise ValueError(f"LabFoundry release is missing {source.relative_to(release_root)}")
+        if (
+            destination.parent == LABFOUNDRY_UPDATE_TRUST_DIR
+            and destination.exists()
+            and destination.read_bytes() != source.read_bytes()
+        ):
+            raise ValueError(f"LabFoundry release cannot replace trusted key {destination.stem}")
+        backup = backup_root / destination.relative_to("/")
+        if destination.exists():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(destination, backup)
+            backups.append((backup, destination))
+        else:
+            backups.append((None, destination))
+
+    try:
+        for source, destination, mode in owned:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_suffix(destination.suffix + ".update")
+            shutil.copy2(source, temporary)
+            temporary.chmod(mode)
+            os.replace(temporary, destination)
+    except Exception:
+        _restore_release_owned_files(backups)
+        raise
+    return backups
+
+
+def _restore_release_owned_files(backups: list[tuple[Path | None, Path]]) -> None:
+    for backup, destination in backups:
+        if backup is None:
+            destination.unlink(missing_ok=True)
+        else:
+            shutil.copy2(backup, destination)
+
+
+def _set_release_maintenance(enabled: bool) -> dict:
+    if enabled:
+        LABFOUNDRY_UPDATE_MAINTENANCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LABFOUNDRY_UPDATE_MAINTENANCE_PATH.touch(mode=0o644, exist_ok=True)
+        if NGINX_MANAGEMENT_SITE_PATH.is_file():
+            text = NGINX_MANAGEMENT_SITE_PATH.read_text(encoding="utf-8")
+            condition = f"  if (-f {LABFOUNDRY_UPDATE_MAINTENANCE_PATH}) {{ return 503; }}"
+            if condition not in text:
+                previous = text
+                text = text.replace("server {\n", f"server {{\n{condition}\n")
+                NGINX_MANAGEMENT_SITE_PATH.write_text(text, encoding="utf-8")
+                validation = _nginx_test_command()
+                if validation.returncode != 0:
+                    NGINX_MANAGEMENT_SITE_PATH.write_text(previous, encoding="utf-8")
+                    LABFOUNDRY_UPDATE_MAINTENANCE_PATH.unlink(missing_ok=True)
+                    return _command_payload(["nginx", "-t"])
+        result = _service_command("reload", "nginx.service")
+        result["command"] = ["maintenance", "enable"]
+        return result
+    LABFOUNDRY_UPDATE_MAINTENANCE_PATH.unlink(missing_ok=True)
+    return {
+        "command": ["maintenance", "disable"],
+        "returncode": 0,
+        "success": True,
+        "stdout": "LabFoundry management maintenance response disabled.",
+        "stderr": "",
+    }
+
+
+def _write_release_finalizer(payload: dict) -> None:
+    LABFOUNDRY_UPDATE_FINALIZER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = LABFOUNDRY_UPDATE_FINALIZER_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.chmod(0o644)
+    os.replace(temporary, LABFOUNDRY_UPDATE_FINALIZER_PATH)
+
+
+def _prune_old_releases(*, current: Path, previous: Path) -> None:
+    keep = {current.resolve(), previous.resolve()}
+    for path in LABFOUNDRY_RELEASES_DIR.iterdir():
+        if not path.is_dir() or path.resolve() in keep:
+            continue
+        shutil.rmtree(path)
+
+
+def _apply_labfoundry_release(
+    payload: dict, credentials: dict[str, dict[str, str]] | None = None
+) -> tuple[dict, dict, list[dict]]:
+    credentials = credentials or {}
+    channel, release, release_manifest_url, release_credential = _download_signed_release_from_sources(payload, credentials)
+    bundle = release["bundle"]
+    bundle_url = str(bundle["url"])
+    bundle_credential = _credential_for_related_url(release_manifest_url, bundle_url, release_credential)
+    bundle_bytes = _fetch_http_bytes(bundle_url, bundle_credential)
+    digest = hashlib.sha256(bundle_bytes).hexdigest()
+    if len(bundle_bytes) != int(bundle["size"]):
+        raise ValueError("LabFoundry release bundle size does not match its signed manifest")
+    if not hmac.compare_digest(digest, str(bundle["sha256"]).lower()):
+        raise ValueError("LabFoundry release bundle SHA256 does not match its signed manifest")
+
+    version = str(release["version"])
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        raise ValueError("LabFoundry release version must use X.Y.Z semantic versioning")
+    commands: list[dict] = []
+    staging = LABFOUNDRY_RELEASES_DIR / f".staging-{version}-{os.getpid()}"
+    release_root = LABFOUNDRY_RELEASES_DIR / version
+    LABFOUNDRY_RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+    created_release_root = False
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir()
+    try:
+        bundle_path = staging / "release.tar.gz"
+        bundle_path.write_bytes(bundle_bytes)
+        extracted = staging / "content"
+        extracted.mkdir()
+        _safe_extract_release(bundle_path, extracted)
+        _validate_release_content(release, extracted)
+        (extracted / ".release-manifest.json").write_text(
+            json.dumps(release, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        install_commands = _install_release_venv(extracted, _current_python_abi())
+        commands.extend(install_commands)
+        if not all(command["success"] for command in install_commands):
+            raise ValueError("Offline LabFoundry release environment validation failed")
+        bundle_path.unlink()
+        content = staging / "content"
+        if release_root.exists():
+            receipt_path = release_root / ".release-manifest.json"
+            try:
+                installed_release = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"LabFoundry release directory {version} has no valid signed-release receipt"
+                ) from exc
+            if installed_release != release:
+                raise ValueError(f"LabFoundry release directory {version} already contains different content")
+            shutil.rmtree(staging)
+        else:
+            os.replace(content, release_root)
+            created_release_root = True
+            shutil.rmtree(staging)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        if created_release_root and release_root.exists():
+            shutil.rmtree(release_root, ignore_errors=True)
+        raise
+
+    previous = _ensure_versioned_release_layout()
+    python_abi = _current_python_abi()
+    finalizer_evidence = {
+        "job_id": str(payload.get("job_id") or ""),
+        "channel": channel.get("channel"),
+        "release": version,
+        "git_commit": release.get("git_commit"),
+        "release_manifest_url": release_manifest_url,
+        "release_manifest_sha256": hashlib.sha256(
+            json.dumps(release, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "verified_key_id": release.get("signing_key_id") or channel.get("signing_key_id"),
+        "bundle_sha256": bundle.get("sha256"),
+        "bundle_size": bundle.get("size"),
+        "content_hashes": release.get("content_hashes"),
+        "compatibility": {
+            "python_abi": python_abi,
+            "supported_python_abis": release.get("supported_python_abis"),
+            "supported": python_abi in set(release.get("supported_python_abis") or []),
+            "updater_protocol": release.get("updater_protocol"),
+            "database_schema_version": release.get("database_schema_version"),
+        },
+    }
+    LABFOUNDRY_UPDATE_FINALIZER_PATH.unlink(missing_ok=True)
+    if previous.resolve() == release_root.resolve():
+        _write_release_finalizer(
+            {
+                **finalizer_evidence,
+                "status": "succeeded",
+                "rolled_back": False,
+                "no_change": True,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return channel, release, commands
+    transaction_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    backup_root = LABFOUNDRY_UPDATE_BACKUP_DIR / transaction_id
+    database_backup = backup_root / "labfoundry.db"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    file_backups: list[tuple[Path | None, Path]] = []
+    maintenance = _set_release_maintenance(True)
+    commands.append(maintenance)
+    if not maintenance["success"]:
+        raise ValueError("Could not enter the nginx maintenance response before release transaction")
+    database_backed_up = False
+    try:
+        stopped = _service_command("stop", "labfoundry.service", "labfoundry-console.service")
+        commands.append(stopped)
+        if not stopped["success"]:
+            raise ValueError("Could not stop LabFoundry services before release transaction")
+        _sqlite_backup(database_backup)
+        database_backed_up = True
+        file_backups = _install_release_owned_files(release_root, backup_root)
+        _atomic_symlink(release_root, LABFOUNDRY_CURRENT_LINK)
+        commands.append(_service_command("daemon-reload"))
+        commands.append(_service_command("start", "labfoundry.service"))
+        health = _wait_for_labfoundry_health()
+        commands.append(health)
+        if not all(command["success"] for command in commands):
+            raise ValueError("Candidate LabFoundry release failed service validation")
+        commands.append(_service_command("start", "labfoundry-console.service"))
+        commands.append(
+            _service_command(
+                "is-active",
+                "labfoundry.service",
+                "labfoundry-worker.service",
+                "labfoundry-console.service",
+            )
+        )
+        commands.append(_set_release_maintenance(False))
+        if not all(command["success"] for command in commands):
+            raise ValueError("Candidate LabFoundry release failed final service validation")
+    except Exception as exc:
+        _service_command("stop", "labfoundry.service", "labfoundry-console.service")
+        _atomic_symlink(previous, LABFOUNDRY_CURRENT_LINK)
+        if database_backed_up:
+            _restore_sqlite_backup(database_backup)
+        _restore_release_owned_files(file_backups)
+        _service_command("daemon-reload")
+        _service_command("start", "labfoundry.service", "labfoundry-console.service")
+        rollback_health = _wait_for_labfoundry_health()
+        rollback_services = _service_command(
+            "is-active",
+            "labfoundry.service",
+            "labfoundry-worker.service",
+            "labfoundry-console.service",
+        )
+        _set_release_maintenance(False)
+        _write_update_info(
+            {
+                "status": "failed",
+                "success": False,
+                "release": version,
+                "rolled_back": True,
+                "rollback_health": {
+                    "openapi": rollback_health,
+                    "services": rollback_services,
+                },
+                "error": str(exc),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        _write_release_finalizer(
+            {
+                **finalizer_evidence,
+                "status": "failed",
+                "rolled_back": True,
+                "rollback_health": bool(
+                    rollback_health.get("success", False)
+                    and rollback_services.get("success", False)
+                ),
+                "rollback_service_checks": rollback_services,
+                "error": str(exc),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        shutil.rmtree(release_root, ignore_errors=True)
+        raise ValueError(f"LabFoundry release {version} failed and was rolled back: {exc}") from exc
+    _prune_old_releases(current=release_root, previous=previous)
+    _write_release_finalizer(
+        {
+            **finalizer_evidence,
+            "status": "succeeded",
+            "rolled_back": False,
+            "service_health": True,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return channel, release, commands
 
 
 def _apply_appliance_update(payload: dict, credentials: dict[str, dict[str, str]] | None = None) -> dict:
@@ -7478,24 +8111,76 @@ def _apply_appliance_update(payload: dict, credentials: dict[str, dict[str, str]
     commands: list[dict] = []
     attempted: dict[str, object] = {}
     reboot_recommended = False
-    if "photon_os" in selected:
-        tdnf = _command_path("tdnf") or "tdnf"
-        commands.append(_command_payload([tdnf, "-y", "makecache"]))
-        commands.append(_command_payload([tdnf, "-y", "update"]))
-        attempted["photon_os"] = "Photon OS packages updated from configured repositories."
-        reboot_recommended = True
-    if "python_libraries" in selected:
-        python_commands = _apply_python_libraries(payload, credentials)
-        commands.extend(python_commands)
-        attempted["python_libraries"] = "LabFoundry virtualenv Python libraries updated."
+    restart_required = False
+    if "labfoundry_release" in selected:
+        channel, release, release_commands = _apply_labfoundry_release(payload, credentials)
+        commands.extend(release_commands)
+        attempted["labfoundry_release"] = {
+            "channel": channel.get("channel"),
+            "version": release.get("version"),
+            "git_commit": release.get("git_commit"),
+            "signing_key_id": release.get("signing_key_id"),
+            "supported_python_abis": release.get("supported_python_abis"),
+            "bundle_sha256": (release.get("bundle") or {}).get("sha256"),
+            "rolled_back": False,
+        }
+        restart_required = True
     if "powershell_modules" in selected:
         powershell_commands = _apply_powershell_modules(payload, credentials)
         commands.extend(powershell_commands)
         attempted["powershell_modules"] = "Managed PowerShell modules updated from the configured repository."
-    if "labfoundry_wheel" in selected:
-        manifest, wheel_commands = _apply_labfoundry_wheel(payload, credentials)
-        commands.extend(wheel_commands)
-        attempted["labfoundry_wheel"] = manifest
+    if "photon_os" in selected:
+        if not all(command.get("success") for command in commands):
+            attempted["photon_os"] = {
+                "message": "Photon OS update was not started because an earlier selected stream failed.",
+                "automatic_rpm_rollback": False,
+            }
+        else:
+            tdnf = _command_path("tdnf") or "tdnf"
+            commands.append(_command_payload([tdnf, "-y", "makecache"]))
+            transaction = _command_payload([tdnf, "-y", "update", "--testonly"])
+            transaction["inspection_only"] = True
+            commands.append(transaction)
+            compatibility = _photon_python_compatibility()
+            commands.append(compatibility)
+            previous_abi = _current_python_abi()
+            update_command: dict | None = None
+            if all(command.get("success") for command in commands):
+                update_command = _command_payload([tdnf, "-y", "update"])
+                commands.append(update_command)
+            if all(command.get("success") for command in commands):
+                rebuild_commands, rebuilt = _rebuild_active_release_for_python(previous_abi)
+                commands.extend(rebuild_commands)
+                restart_required = restart_required or rebuilt
+                if not rebuilt:
+                    commands.append(_service_command("restart", "labfoundry.service", "labfoundry-console.service"))
+                    commands.append(_wait_for_labfoundry_health())
+                    commands.append(
+                        _service_command(
+                            "is-active",
+                            "labfoundry.service",
+                            "labfoundry-worker.service",
+                            "labfoundry-console.service",
+                        )
+                    )
+            photon_succeeded = all(command.get("success") for command in commands)
+            attempted["photon_os"] = {
+                "message": (
+                    "Photon OS packages updated and LabFoundry health checks passed."
+                    if photon_succeeded
+                    else "Photon OS maintenance did not leave LabFoundry healthy; automatic RPM rollback was not attempted."
+                ),
+                "python_compatibility": compatibility.get("compatibility", {}),
+                "transaction_inspected": transaction.get("success", False),
+                "packages_installed": bool(update_command and update_command.get("success")),
+                "automatic_rpm_rollback": False,
+                "recovery": (
+                    ""
+                    if photon_succeeded
+                    else "Review tdnf history, the recorded command output, and LabFoundry service journals before manual recovery."
+                ),
+            }
+            reboot_recommended = bool(update_command and update_command.get("success"))
     succeeded = all(command.get("success") for command in commands)
     result = {
         "status": "succeeded" if succeeded else "failed",
@@ -7503,8 +8188,9 @@ def _apply_appliance_update(payload: dict, credentials: dict[str, dict[str, str]
         "attempted": attempted,
         "commands": commands,
         "reboot_recommended": reboot_recommended if succeeded else False,
-        "restart_required": "labfoundry_wheel" in selected and succeeded,
+        "restart_required": restart_required and succeeded,
         "finished_at": datetime.now(timezone.utc).isoformat(),
+        "finalizer_status_path": str(LABFOUNDRY_UPDATE_FINALIZER_PATH) if "labfoundry_release" in selected else "",
     }
     if not succeeded:
         failed = [" ".join(command.get("command") or []) for command in commands if not command.get("success")]
@@ -7527,11 +8213,12 @@ def _restart_labfoundry_service_after_update() -> int:
             systemd_run,
             "--quiet",
             "--on-active=3",
-            "--unit=labfoundry-update-restart",
+            f"--unit=labfoundry-update-restart-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
             systemctl,
             "restart",
             "labfoundry.service",
             "labfoundry-worker.service",
+            "labfoundry-console.service",
         ]
     )
     print(result.stdout, end="")

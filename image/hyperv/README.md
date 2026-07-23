@@ -237,13 +237,20 @@ backup portability.
 Appliance Update is runtime maintenance and stays separate from desired-state
 `/appliance-apply`. It stages
 `/var/lib/labfoundry/apply/appliance-update/labfoundry-update.json` and uses
-`labfoundry-helper appliance-update` for Photon OS, Python library, PowerShell
-module, and LabFoundry wheel streams. Sources are synchronized from repository
-definitions, and the LabFoundry release base URL derives a channel manifest at
-`channels/<channel>/manifest.json`. LabFoundry wheel updates verify the manifest SHA256,
-install with `pip --force-reinstall --no-deps`, restore virtualenv
-permissions, and schedule a delayed `labfoundry.service` restart. V1 records
-Photon reboot guidance but does not auto-reboot.
+`labfoundry-helper appliance-update` for Photon OS, PowerShell modules, and
+signed LabFoundry releases. Provisioning installs the named Ed25519 trust keys
+under `/etc/labfoundry/update-trust.d` and creates the versioned
+`/opt/labfoundry/releases/<version>` layout with `current` and `.venv`
+compatibility symlinks. Release updates verify signed channel and release
+manifests, build from a hash-locked offline ABI wheelhouse, atomically switch
+the release, and restore the previous release and SQLite snapshot on failure.
+Photon updates fail closed when their candidate Python ABI is not in the active
+release and never perform automatic RPM rollback or reboot.
+Pass `-SignedReleaseRepositoryUrl https://<fixture>/updates` to
+`scripts/windows/hyperv/invoke-lifecycle-test.ps1` to add a signed preview
+upgrade and deliberately broken development-channel rollback. The fixture
+contract and database/service assertions are documented in
+[`docs/appliance-update.md`](../../docs/appliance-update.md).
 The image also enables `labfoundry-worker.service`, which owns queued updates,
 VCF Offline Depot downloads, five-field cron/one-time schedules, and unprivileged
 managed-script execution.

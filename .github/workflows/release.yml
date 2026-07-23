@@ -1,0 +1,183 @@
+name: Publish appliance release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appliance-release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  wheelhouse:
+    name: Build ${{ matrix.abi }} wheelhouse
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - python: '3.12'
+            abi: cp312
+          - python: '3.13'
+            abi: cp313
+          - python: '3.14'
+            abi: cp314
+    steps:
+      - name: Check out the successful main commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install exact locked wheel build tools
+        env:
+          PIP_CONFIG_FILE: /dev/null
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+        run: |
+          python -m pip install --require-hashes --upgrade --requirement requirements-release-tools.lock
+          python -m pip install --require-hashes --upgrade --requirement requirements-appliance-bootstrap.lock
+      - name: Build the exact locked wheelhouse
+        env:
+          PIP_CONFIG_FILE: /dev/null
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct '${{ github.event.workflow_run.head_sha }}')"
+          python -m pip wheel \
+            --require-hashes \
+            --no-build-isolation \
+            --wheel-dir wheelhouse/${{ matrix.abi }} \
+            --requirement requirements-appliance.lock
+          python scripts/write_wheelhouse_lock.py --wheelhouse wheelhouse/${{ matrix.abi }}
+      - name: Upload wheelhouse
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheelhouse-${{ matrix.abi }}
+          path: wheelhouse/${{ matrix.abi }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Sign and publish release
+    needs:
+      - wheelhouse
+    runs-on: ubuntu-latest
+    environment: appliance-release
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the successful main commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - name: Confirm the commit is still on main
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install locked release tooling
+        env:
+          PIP_CONFIG_FILE: /dev/null
+        run: python -m pip install --require-hashes --requirement requirements-release-tools.lock
+      - name: Download CPython 3.12 wheelhouse
+        uses: actions/download-artifact@v4
+        with:
+          name: wheelhouse-cp312
+          path: wheelhouses/cp312
+      - name: Download CPython 3.13 wheelhouse
+        uses: actions/download-artifact@v4
+        with:
+          name: wheelhouse-cp313
+          path: wheelhouses/cp313
+      - name: Download CPython 3.14 wheelhouse
+        uses: actions/download-artifact@v4
+        with:
+          name: wheelhouse-cp314
+          path: wheelhouses/cp314
+      - name: Materialize the protected signing key
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+        run: |
+          test -n "$RELEASE_SIGNING_PRIVATE_KEY"
+          umask 077
+          printf '%s\n' "$RELEASE_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/release-signing-key.pem"
+      - name: Build and sign the immutable release
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_KEY_ID: labfoundry-release-2026-01
+        run: |
+          BUILT_AT="$(git show -s --format=%cI "$RELEASE_SHA")"
+          python scripts/build_release_bundle.py \
+            --wheelhouses wheelhouses \
+            --signing-key "$RUNNER_TEMP/release-signing-key.pem" \
+            --signing-key-id "$RELEASE_KEY_ID" \
+            --commit "$RELEASE_SHA" \
+            --built-at "$BUILT_AT"
+      - name: Publish the idempotent tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python scripts/publish_release.py --commit "$RELEASE_SHA" --assets dist/release
+      - name: Advance the signed development channel
+        env:
+          RELEASE_KEY_ID: labfoundry-release-2026-01
+        run: |
+          VERSION="$(python scripts/version.py get)"
+          SITE_ROOT="$RUNNER_TEMP/site"
+          git clone --branch gh-pages --single-branch \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
+            "$SITE_ROOT" 2>/dev/null || git init "$SITE_ROOT"
+          if test "$VERSION" = "0.9.0"; then
+            git -C "$SITE_ROOT" rm -r --ignore-unmatch .
+          fi
+          python scripts/promote_release_channel.py \
+            --channel development \
+            --expected-version "$VERSION" \
+            --release-manifest-url "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/release-manifest.json" \
+            --release-manifest dist/release/release-manifest.json \
+            --release-signature dist/release/release-manifest.json.sig \
+            --trusted-key image/common/update-trust/${RELEASE_KEY_ID}.pem \
+            --site-root "$SITE_ROOT/updates" \
+            --signing-key "$RUNNER_TEMP/release-signing-key.pem" \
+            --signing-key-id "$RELEASE_KEY_ID"
+          if test "$VERSION" = "0.9.0"; then
+            install -m 0644 dist/release/legacy-manifest.json "$SITE_ROOT/updates/manifest.json"
+          else
+            test "$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"version\"])' "$SITE_ROOT/updates/manifest.json")" = "0.9.0"
+          fi
+          touch "$SITE_ROOT/.nojekyll"
+          git -C "$SITE_ROOT" add --all
+          if git -C "$SITE_ROOT" diff --cached --quiet; then
+            exit 0
+          fi
+          git -C "$SITE_ROOT" config user.name github-actions[bot]
+          git -C "$SITE_ROOT" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "$SITE_ROOT" commit -m "Advance development to v${VERSION}"
+          if git -C "$SITE_ROOT" remote get-url origin >/dev/null 2>&1; then
+            git -C "$SITE_ROOT" push origin HEAD:gh-pages
+          else
+            git -C "$SITE_ROOT" remote add origin \
+              "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+            git -C "$SITE_ROOT" push origin HEAD:gh-pages
+          fi

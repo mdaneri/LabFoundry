@@ -28,6 +28,7 @@ param(
     [string]$SshKeyPath = '',
     [string]$SshPassword = '',
     [string]$VcfBackupPassword = 'VMware01!Test',
+    [string]$SignedReleaseRepositoryUrl = '',
     [switch]$AllowDryRunApply,
     [switch]$SkipBackupRestoreTest,
     [switch]$AllowExistingLifecycleLab,
@@ -673,6 +674,7 @@ if ($PlanOnly) {
         wan_cidr                 = $WanCidr
         result_root              = $resultRoot
         appliance_url            = $ApplianceUrl
+        signed_release_repository = $SignedReleaseRepositoryUrl
         backup_restore_test      = -not [bool]$SkipBackupRestoreTest
         cleanup_created_lab      = [bool]$CleanupCreatedLab
         reserved_vms_not_touched = @('LabFoundry', 'LabFoundry-Photon-Builder')
@@ -774,6 +776,9 @@ try {
     if ($SshKeyPath) { $basePythonArgs += @('--ssh-key', $SshKeyPath) }
     if ($SshPassword) { $basePythonArgs += @('--ssh-password', $SshPassword) }
     if ($AllowDryRunApply) { $basePythonArgs += '--allow-dry-run' }
+    if ($SignedReleaseRepositoryUrl) {
+        $basePythonArgs += @('--signed-release-repository-url', $SignedReleaseRepositoryUrl)
+    }
 
     function New-LifecyclePythonArgs {
         param(

@@ -243,6 +243,14 @@ fi
 
 log_step "installing LabFoundry Python environment"
 install -d -o root -g root -m 0755 "$PIP_CACHE_DIR"
+install -d -o root -g root -m 0755 "$LABFOUNDRY_HOME/releases"
+LABFOUNDRY_RELEASE_VERSION="$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' "$LABFOUNDRY_HOME/pyproject.toml" | head -n 1)"
+if [ -z "$LABFOUNDRY_RELEASE_VERSION" ]; then
+  echo "Could not determine LabFoundry release version from pyproject.toml" >&2
+  exit 2
+fi
+LABFOUNDRY_RELEASE_DIR="$LABFOUNDRY_HOME/releases/bootstrap-$LABFOUNDRY_RELEASE_VERSION"
+install -d -o root -g root -m 0755 "$LABFOUNDRY_RELEASE_DIR"
 write_pip_config /etc/pip.conf
 export HOME=/root
 export PIP_CACHE_DIR
@@ -251,7 +259,12 @@ if [ -n "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL" ]; then
   export PIP_INDEX_URL="$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"
 fi
 
-python3 -m venv "$LABFOUNDRY_HOME/.venv"
+python3 -m venv "$LABFOUNDRY_RELEASE_DIR/.venv"
+LABFOUNDRY_BOOTSTRAP_PYTHON_ABI="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
+printf '{\n  "schema_version": 1,\n  "version": "%s",\n  "bootstrap": true,\n  "supported_python_abis": ["%s"]\n}\n' \
+  "$LABFOUNDRY_RELEASE_VERSION" "$LABFOUNDRY_BOOTSTRAP_PYTHON_ABI" >"$LABFOUNDRY_RELEASE_DIR/bundle-metadata.json"
+ln -sfn "releases/bootstrap-$LABFOUNDRY_RELEASE_VERSION" "$LABFOUNDRY_HOME/current"
+ln -sfn "current/.venv" "$LABFOUNDRY_HOME/.venv"
 write_pip_config "$LABFOUNDRY_HOME/.venv/pip.conf"
 "$LABFOUNDRY_HOME/.venv/bin/python" -m pip install "$LABFOUNDRY_HOME"
 "$LABFOUNDRY_HOME/.venv/bin/python" "$LABFOUNDRY_HOME/scripts/check_photon_compatibility.py"
@@ -285,6 +298,11 @@ install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-h
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-install-boot-branding" "$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-bootstrap-https" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
+install -d -o root -g root -m 0755 /etc/labfoundry/update-trust.d
+for trust_key in "$LABFOUNDRY_HOME"/image/common/update-trust/*.pem; do
+  [ -f "$trust_key" ] || continue
+  install -o root -g root -m 0644 "$trust_key" "/etc/labfoundry/update-trust.d/$(basename "$trust_key")"
+done
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-vmware-ovf-customize.py" "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py"
   install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry-vmware-ovf-customize.service" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
@@ -300,9 +318,9 @@ chown -R root:root "$LABFOUNDRY_HOME"
 chmod 0755 /opt "$LABFOUNDRY_HOME"
 find "$LABFOUNDRY_HOME/labfoundry" "$LABFOUNDRY_HOME/scripts" "$LABFOUNDRY_HOME/image" -type d -exec chmod 0755 {} +
 find "$LABFOUNDRY_HOME/labfoundry" "$LABFOUNDRY_HOME/scripts" "$LABFOUNDRY_HOME/image" -type f -exec chmod 0644 {} +
-find "$LABFOUNDRY_HOME/.venv" -type d -exec chmod 0755 {} +
-find "$LABFOUNDRY_HOME/.venv" -type f -exec chmod u+rw,go+r {} +
-find "$LABFOUNDRY_HOME/.venv/bin" -type f -exec chmod a+rx {} +
+find "$LABFOUNDRY_RELEASE_DIR/.venv" -type d -exec chmod 0755 {} +
+find "$LABFOUNDRY_RELEASE_DIR/.venv" -type f -exec chmod u+rw,go+r {} +
+find "$LABFOUNDRY_RELEASE_DIR/.venv/bin" -type f -exec chmod a+rx {} +
 chmod 0755 "$LABFOUNDRY_HOME/bin" "$LABFOUNDRY_HOME/bin/labfoundry-helper" "$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding"
 "$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding" \
   "$LABFOUNDRY_HOME/image/common/boot/grub/theme.txt" \

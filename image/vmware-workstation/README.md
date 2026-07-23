@@ -141,6 +141,11 @@ apply fixes because the privileged helper is installed outside the Python
 virtualenv and is not updated by `pip install`. If the app takes longer to
 become reachable after restart, pass `-ReadinessTimeoutSeconds 120`.
 
+`deploy-wheel.ps1` remains a development-only live-patching path. Production
+Appliance Update uses signed GitHub release bundles, retained ABI-specific
+wheelhouses, `/opt/labfoundry/releases/<version>`, and transactional rollback;
+it does not use this direct wheel deployment path.
+
 ## OVF / OVA Export
 
 After a VMware image build, export a deployable OVF folder and OVA archive:
