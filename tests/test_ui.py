@@ -1361,6 +1361,9 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "VMware CEIP participation" in response.text
     assert 'action="/settings/vmware-ceip"' in response.text
     assert 'name="vmware_ceip_enabled"' in response.text
+    assert 'data-vmware-ceip-pill' in response.text
+    assert 'data-vmware-ceip-status' in response.text
+    assert 'action="/settings/vmware-ceip" method="post" data-autosave-form data-appliance-settings' in response.text
     assert "Service DNS target names" in response.text
     assert response.text.count('class="settings-inline-field"') >= 2
     assert 'select name="service_dns_target_naming"' in response.text
@@ -1409,6 +1412,9 @@ def test_vmware_ceip_autosave_updates_global_policy_and_pending_preview(client):
     payload = response.json()
     assert payload["status"] == "saved"
     assert payload["vmware_ceip_enabled"] is True
+    assert payload["fqdn"] == "labfoundry.labfoundry.internal"
+    assert payload["management_interface"]["name"] == "eth0"
+    assert payload["resolver_mode"] in {"dhcp", "external", "local_dns"}
     assert '"vmware_ceip_enabled": true' in payload["config_preview"]
     with SessionLocal() as db:
         settings = db.execute(select(ApplianceSettings)).scalar_one()
@@ -1422,7 +1428,7 @@ def test_vmware_ceip_autosave_updates_global_policy_and_pending_preview(client):
     unit = next(item for item in status["units"] if item["id"] == "appliance_settings")
     assert unit["changed"] is True
     updated_page = client.get("/settings")
-    assert '<span class="status-pill good">CEIP on</span>' in updated_page.text
+    assert 'data-vmware-ceip-pill class="status-pill good">CEIP on</span>' in updated_page.text
     assert "Appliance Settings has pending appliance changes" in updated_page.text
 
 
