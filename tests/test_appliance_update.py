@@ -719,6 +719,11 @@ def test_helper_reports_powershell_permission_normalization_failure(monkeypatch,
 
     monkeypatch.setattr(helper, "POWERSHELL_SYSTEM_ROOT", powershell_root)
     monkeypatch.setattr(helper, "POWERSHELL_MODULE_ROOT", module_root)
+    monkeypatch.setattr(
+        helper,
+        "APPLIANCE_UPDATE_INFO_PATH",
+        tmp_path / "labfoundry-update-info.json",
+    )
     monkeypatch.setattr(helper, "_command_path", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(helper, "_command_payload", fake_command)
 
