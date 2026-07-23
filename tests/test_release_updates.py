@@ -759,3 +759,61 @@ def test_failed_revalidation_does_not_delete_an_existing_release(monkeypatch, tm
 
     assert marker.read_text(encoding="utf-8") == "preserve"
     assert current.resolve() == previous.resolve()
+
+
+def test_authenticated_release_redirect_rejects_another_origin():
+    from tests.test_appliance_update import load_helper_module
+
+    helper = load_helper_module()
+    source = "https://updates.example.test/channels/stable/manifest.json"
+    request = helper.Request(source, headers={"Authorization": "Basic protected"})
+    handler = helper._UpdateRedirectHandler(authenticated_origin=helper._url_origin(source))
+
+    with pytest.raises(ValueError, match="another origin"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://redirect.example.test/manifest.json",
+        )
+
+
+def test_authenticated_release_redirect_preserves_same_origin_authorization():
+    from tests.test_appliance_update import load_helper_module
+
+    helper = load_helper_module()
+    source = "https://updates.example.test/channels/stable/manifest.json"
+    request = helper.Request(source, headers={"Authorization": "Basic protected"})
+    handler = helper._UpdateRedirectHandler(authenticated_origin=helper._url_origin(source))
+
+    redirected = handler.redirect_request(
+        request,
+        None,
+        302,
+        "Found",
+        {},
+        "https://updates.example.test/releases/v0.9.0/manifest.json",
+    )
+
+    assert redirected.full_url == "https://updates.example.test/releases/v0.9.0/manifest.json"
+    assert redirected.get_header("Authorization") == "Basic protected"
+
+
+def test_release_redirect_rejects_https_downgrade_without_credentials():
+    from tests.test_appliance_update import load_helper_module
+
+    helper = load_helper_module()
+    source = "https://updates.example.test/channels/stable/manifest.json"
+    handler = helper._UpdateRedirectHandler(authenticated_origin=None)
+
+    with pytest.raises(ValueError, match="less secure scheme"):
+        handler.redirect_request(
+            helper.Request(source),
+            None,
+            302,
+            "Found",
+            {},
+            "http://updates.example.test/manifest.json",
+        )

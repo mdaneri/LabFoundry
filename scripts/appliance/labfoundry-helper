@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from ipaddress import ip_address, ip_interface, ip_network
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 try:
     import grp
@@ -7021,17 +7021,44 @@ def _command_payload(
     }
 
 
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(url)
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme.lower() == "https" else 80 if parsed.scheme.lower() == "http" else None
+    return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
+
+
+class _UpdateRedirectHandler(HTTPRedirectHandler):
+    def __init__(self, *, authenticated_origin: tuple[str, str, int | None] | None) -> None:
+        super().__init__()
+        self.authenticated_origin = authenticated_origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        redirect_url = urljoin(req.full_url, newurl)
+        source_origin = _url_origin(req.full_url)
+        target_origin = _url_origin(redirect_url)
+        if source_origin[0] == "https" and target_origin[0] != "https":
+            raise ValueError("update downloads cannot redirect from HTTPS to a less secure scheme")
+        if self.authenticated_origin is not None and target_origin != self.authenticated_origin:
+            raise ValueError("authenticated update downloads cannot redirect to another origin")
+        return super().redirect_request(req, fp, code, msg, headers, redirect_url)
+
+
 def _fetch_http_bytes(url: str, credential: dict[str, str] | None = None) -> bytes:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"unsupported update URL: {url}")
     request: str | Request = url
+    authenticated_origin: tuple[str, str, int | None] | None = None
     if credential and str(credential.get("secret") or ""):
         token = base64.b64encode(
             f"{credential.get('username', '')}:{credential['secret']}".encode("utf-8")
         ).decode("ascii")
         request = Request(url, headers={"Authorization": f"Basic {token}"})
-    with urlopen(request, timeout=60) as response:
+        authenticated_origin = _url_origin(url)
+    opener = build_opener(_UpdateRedirectHandler(authenticated_origin=authenticated_origin))
+    with opener.open(request, timeout=60) as response:
         return response.read()
 
 
