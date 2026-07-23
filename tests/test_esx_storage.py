@@ -374,6 +374,10 @@ def test_esx_storage_page_and_dual_stack_api_contract(client):
     assert "+ Add storage volume here" in page.text
     assert 'id="esx-storage-volume-modal"' in page.text
     assert 'data-esx-storage-wizard="volume"' in page.text
+    assert "Select an eligible blank disk" not in page.text
+    assert "Select an eligible mounted ext4 volume" not in page.text
+    assert "No eligible blank disks available" in page.text
+    assert "No eligible mounted ext4 volumes available" in page.text
     assert 'data-esx-storage-wizard-open="share"' in page.text
     assert "+ Add NFS datastore here" in page.text
     assert 'id="esx-storage-share-modal"' in page.text
