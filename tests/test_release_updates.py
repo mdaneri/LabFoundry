@@ -138,7 +138,16 @@ def test_release_workflows_use_successful_main_sha_and_promote_without_rebuildin
     promotion = (ROOT / ".github/workflows/promote-release.yml").read_text(encoding="utf-8")
     assert "github.event.workflow_run.head_branch == 'main'" in publication
     assert "github.event.workflow_run.event == 'push'" in publication
-    assert publication.count("ref: ${{ github.event.workflow_run.head_sha }}") == 2
+    assert "github.event_name == 'workflow_dispatch'" in publication
+    assert "-f head_sha=\"$RELEASE_SHA\"" in publication
+    assert "-f status=success" in publication
+    assert "has no successful main push CI run" in publication
+    assert "Publish or recover the v0.9.0 bridge release" in publication
+    assert publication.count("ref: ${{ needs.prepare.outputs.release_sha }}") == 2
+    assert "actions/upload-artifact@v7" in publication
+    assert publication.count("actions/download-artifact@v8") == 3
+    assert "actions/upload-artifact@v4" not in publication
+    assert "actions/download-artifact@v4" not in publication
     assert '--commit "$RELEASE_SHA"' in publication
     assert "--expected-version \"$VERSION\"" in publication
     assert '--site-root "$SITE_ROOT/updates"' in publication
@@ -174,6 +183,50 @@ def test_idempotent_publisher_refuses_existing_tag_for_another_commit(monkeypatc
     )
     with pytest.raises(SystemExit, match="already identifies"):
         module.main()
+
+
+def test_idempotent_publisher_creates_annotated_tag_without_global_git_identity(
+    monkeypatch,
+    tmp_path,
+):
+    spec = importlib.util.spec_from_file_location("publish_release", ROOT / "scripts/publish_release.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "release-manifest.json").write_text("{}", encoding="utf-8")
+    requested = "a" * 40
+    commands: list[list[str]] = []
+
+    def fake_run(command, *, check=True):
+        import subprocess
+
+        commands.append(command)
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ["gh", "release", "view"]:
+            return subprocess.CompletedProcess(command, 1, "", "release not found")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(module, "version", lambda: "0.9.0")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["publish_release.py", "--commit", requested, "--assets", str(assets)],
+    )
+
+    assert module.main() == 0
+    tag_command = next(command for command in commands if "tag" in command)
+    assert tag_command[:6] == [
+        "git",
+        "-c",
+        "user.name=github-actions[bot]",
+        "-c",
+        "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+        "tag",
+    ]
+    assert ["git", "push", "origin", "refs/tags/v0.9.0"] in commands
 
 
 def test_deterministic_release_archive_normalizes_metadata(tmp_path):

@@ -166,19 +166,20 @@ Firewall desired state is nftables-backed. The image installs nftables and
 boots with management access to SSH, HTTPS, and the LabFoundry web UI.
 
 Appliance Update is a separate runtime-maintenance workflow from global
-`/appliance-apply`. Repository-style sources cover Photon/tdnf, Python/pip,
-PowerShell Gallery or an internal PowerShell repository, and LabFoundry release
-channels. Update work is queued to `labfoundry-worker.service`; the same worker
-runs Automation schedules, managed scripts, and VCF Offline Depot downloads.
-Build a versioned wheel repository with:
+`/appliance-apply`. Repository-style sources cover Photon/tdnf, PowerShell
+Gallery or internal PowerShell repositories, and signed LabFoundry release
+channels; the retired Python Libraries and independent wheel streams are not
+available. Update work is queued to `labfoundry-worker.service`; the same
+worker runs Automation schedules, managed scripts, and VCF Offline Depot
+downloads.
 
-```bash
-python scripts/build_update_wheel.py --channel stable
-```
-
-Publish the complete `dist/update` tree and configure its base URL; LabFoundry
-derives `channels/<channel>/manifest.json`. The manifest records the full git
-commit, build time, relative wheel name, and SHA256. See
+Successful `main` CI publishes immutable signed release bundles to GitHub
+Releases and advances the signed `development` pointer on GitHub Pages.
+`preview` and `stable` promotions reuse an existing verified release. A
+protected manual publication dispatch can recover an exact commit only when it
+already has a successful `main` push CI run. Publication blocks later versions
+until the fixed `v0.9.0` legacy bridge exists, and it refuses any existing tag
+or release whose commit or asset bytes differ. See
 [`docs/appliance-update.md`](docs/appliance-update.md) and
 [`docs/automation.md`](docs/automation.md).
 

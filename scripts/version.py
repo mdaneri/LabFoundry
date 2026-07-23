@@ -129,7 +129,7 @@ def _replace_version(path: Path, pattern: re.Pattern[str], version: Version, sou
     updated, count = pattern.subn(rf"\g<1>{version}\g<2>", text, count=1)
     if count != 1:
         raise VersionError(f"Could not update {source} version in {path}")
-    path.write_text(updated, encoding="utf-8")
+    path.write_text(updated, encoding="utf-8", newline="\n")
 
 
 def bump(root: Path, base_root: Path | None = None) -> tuple[Version, bool]:

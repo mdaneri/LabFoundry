@@ -33,6 +33,10 @@ GitHub is the default distribution origin:
   pointers.
 - A successful `main` CI run publishes the exact successful commit as
   `vX.Y.Z` and advances `development`.
+- A protected manual dispatch may recover a failed publication only by naming
+  a full commit that already has a successful `main` push CI run. The workflow
+  verifies that provenance and that the commit remains on `main` before
+  rebuilding and signing its deterministic release inputs.
 - The manual promotion workflow advances `preview` or `stable` to an existing
   verified release. Promotion never rebuilds the artifact.
 
@@ -194,7 +198,20 @@ python scripts/build_release_bundle.py \
 ```
 
 Publication is idempotent. An existing tag or release must identify the same
-commit and exact asset bytes or the workflow fails. To promote, run
+commit and exact asset bytes or the workflow fails. Annotated release tags use
+an explicit GitHub Actions bot identity and do not depend on runner-global Git
+configuration.
+
+The fixed legacy manifest must publish `v0.9.0` before any later release. The
+publication preflight rejects later versions while that bridge is absent. If
+an otherwise successful `main` release fails after signing but before
+publication, run **Publish appliance release**, provide the exact successful
+`main` commit in `release_sha`, and verify the recovered tag, release assets,
+signatures, and `development` pointer. The dispatch refuses commits without a
+successful `main` push CI run and preserves the normal tag/release mismatch
+checks.
+
+To promote, run
 **Promote appliance release**, choose `preview` or `stable`, and provide an
 existing version without the `v` prefix.
 
