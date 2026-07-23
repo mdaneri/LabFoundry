@@ -11685,6 +11685,9 @@ function initializeTabs() {
         rememberDnsActiveZone(button.dataset.domain || "");
       }
       rememberActiveTab(tabList.dataset.tabStorageKey || "", targetId);
+      if (tabList.dataset.tabStorageKey === "labfoundry:esx-storage:active-tab") {
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#${targetId}`);
+      }
       tabList.querySelectorAll(".tab-button").forEach((item) => {
         item.classList.toggle("active", item === button);
         item.setAttribute("aria-selected", item === button ? "true" : "false");
@@ -15348,6 +15351,7 @@ function initializeEsxStorageWizards() {
       ["Define the datastore", "Choose its ESX identity and contained directory."],
       ["Choose the endpoint", "Select one interface/VLAN, NFS version, and equal IPv4/IPv6 exposure."],
       ["Choose VMkernel access", "Restrict each enabled family to specific clients, or leave it empty to allow anyone."],
+      ["Choose datastore state", "Enable the datastore now or keep it disabled desired state without deleting backing data."],
       ["Review the datastore", "Confirm the datastore, endpoint, and family-aware client allowlists."],
     ],
   };
