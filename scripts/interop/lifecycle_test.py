@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import http.cookiejar
 import json
@@ -141,6 +142,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vcf-depot-password", default="VMware01!Depot")
     parser.add_argument("--vcf-depot-new-password", default="VMware02!Depot")
     parser.add_argument("--allow-dry-run", action="store_true", help="Allow apply units to report dry-run instead of failing.")
+    parser.add_argument(
+        "--signed-release-repository-url",
+        default="",
+        help="Run signed release success/rollback coverage against an HTTPS fixture whose preview channel succeeds and development channel fails after database startup.",
+    )
     parser.add_argument("--skip-client-checks", action="store_true")
     parser.add_argument("--export-settings-backup", default="", help="Write a settings backup archive after the full lifecycle run passes.")
     parser.add_argument("--restore-settings-backup", default="", help="Restore a settings backup archive before running restored-state checks.")
@@ -513,12 +519,14 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "ESX NFS 3 and 4.1 desired state, blank-disk initialization, equal IPv4/IPv6 DNS targets, exports, sockets, firewall rules, and persistence evidence",
             "passwordless admin web terminal on management and one selected extra interface",
             "client DNS/DHCP/routing probes",
+            "optional signed release preview upgrade plus deliberately broken development rollback with database identity verification",
         ],
         "client_checks_enabled": not args.skip_client_checks,
         "routing_wan_only": bool(args.routing_wan_only),
         "settings_backup_export": bool(args.export_settings_backup),
         "settings_backup_restore": bool(args.restore_settings_backup),
         "certificate_baseline_check": bool(args.certificate_baseline_result),
+        "signed_release_update_check": bool(args.signed_release_repository_url),
     }
 
 
@@ -1879,6 +1887,198 @@ def apply_units(client: HttpClient, units: list[str], args: argparse.Namespace) 
     }
 
 
+def _configure_signed_release_source(
+    client: HttpClient,
+    args: argparse.Namespace,
+    *,
+    channel: str,
+) -> dict[str, Any]:
+    status, body, _headers = client.request("GET", "/appliance-update")
+    if status >= 400:
+        raise LifecycleError(f"GET /appliance-update failed with HTTP {status}")
+    section_match = re.search(
+        r'<details\b[^>]*data-update-source-group="labfoundry"[^>]*>(.*?)</details>',
+        body,
+        flags=re.DOTALL,
+    )
+    if not section_match:
+        raise LifecycleError("LabFoundry release source group was not found in Appliance Update.")
+    section = section_match.group(1)
+    source_match = re.search(
+        r'<form\b[^>]*action="/appliance-update/sources/(\d+)"[^>]*>(.*?)</form>',
+        section,
+        flags=re.DOTALL,
+    )
+    if not source_match:
+        raise LifecycleError("No configured LabFoundry release source was found.")
+    source_id, form_body = source_match.groups()
+
+    def field_value(name: str, default: str) -> str:
+        match = re.search(rf'<input\b[^>]*name="{re.escape(name)}"[^>]*value="([^"]*)"', form_body)
+        return html.unescape(match.group(1)) if match else default
+
+    csrf = extract_csrf(form_body)
+    source_name = field_value("name", "Lifecycle signed releases")
+    priority = field_value("priority", "1")
+    status, response_body, _headers = client.request(
+        "POST",
+        f"/appliance-update/sources/{source_id}",
+        form={
+            "csrf": csrf,
+            "name": source_name,
+            "url": args.signed_release_repository_url.rstrip("/"),
+            "priority": priority,
+            "enabled_present": "1",
+            "enabled": "on",
+            "channel": channel,
+        },
+        headers={"X-LabFoundry-Autosave": "1", "Accept": "application/json"},
+        follow_redirects=False,
+    )
+    if status != 200:
+        raise LifecycleError(
+            f"Signed release source update failed with HTTP {status}: {summarize_html_response(response_body)}"
+        )
+    return {
+        "source_id": int(source_id),
+        "source_name": source_name,
+        "base_url": args.signed_release_repository_url.rstrip("/"),
+        "channel": channel,
+    }
+
+
+def _submit_signed_release_update(
+    client: HttpClient,
+    *,
+    expected_status: str,
+    timeout_seconds: int = 360,
+) -> dict[str, Any]:
+    before = client.json_request("GET", "/tasks/status?size=100")
+    before_ids = {str(row.get("id") or "") for row in before.get("tasks", [])}
+    status, body, _headers = client.request("GET", "/appliance-update")
+    if status >= 400:
+        raise LifecycleError(f"GET /appliance-update failed with HTTP {status}")
+    csrf = extract_csrf(body)
+    status, response_body, _headers = client.request(
+        "POST",
+        "/appliance-update/run",
+        form=[("csrf", csrf), ("selected_streams", "labfoundry_release")],
+        follow_redirects=False,
+        timeout=30,
+    )
+    if status != 200:
+        raise LifecycleError(
+            f"Signed release submission failed with HTTP {status}: {summarize_html_response(response_body)}"
+        )
+
+    deadline = time.monotonic() + timeout_seconds
+    task: dict[str, Any] = {}
+    job_id = ""
+    while time.monotonic() < deadline:
+        if not job_id:
+            rows = client.json_request("GET", "/tasks/status?size=100").get("tasks", [])
+            created = [
+                row
+                for row in rows
+                if str(row.get("id") or "") not in before_ids and row.get("type") == "appliance-update"
+            ]
+            if created:
+                job_id = str(created[0]["id"])
+        if job_id:
+            task = dict(client.json_request("GET", f"/tasks/{job_id}/status").get("task") or {})
+            if str(task.get("status") or "") not in {"pending", "running"}:
+                break
+        time.sleep(2)
+    else:
+        raise LifecycleError("Signed release update did not finish within the lifecycle timeout.")
+    if task.get("status") != expected_status:
+        detail = task.get("error") or "; ".join(str(value) for value in task.get("error_messages", []))
+        raise LifecycleError(
+            f"Signed release task {job_id} ended {task.get('status')}; expected {expected_status}: {detail}"
+        )
+    return task
+
+
+def _release_database_identity(args: argparse.Namespace) -> dict[str, Any]:
+    script = """
+import hashlib
+import json
+import os
+import sqlite3
+
+database = "/var/lib/labfoundry/labfoundry.db"
+connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+try:
+    schema = connection.execute(
+        "select type, name, coalesce(sql, '') from sqlite_master "
+        "where name not like 'sqlite_%' order by type, name"
+    ).fetchall()
+    users = connection.execute("select id, username from users order by id").fetchall()
+finally:
+    connection.close()
+canonical_schema = json.dumps(schema, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+print(json.dumps({
+    "current_release": os.path.realpath("/opt/labfoundry/current"),
+    "compatibility_venv": os.path.realpath("/opt/labfoundry/.venv"),
+    "schema_sha256": hashlib.sha256(canonical_schema).hexdigest(),
+    "users": users,
+}, sort_keys=True))
+"""
+    encoded = base64.b64encode(script.strip().encode("utf-8")).decode("ascii")
+    result = ssh_command(
+        args.appliance_ssh_host,
+        args,
+        appliance_ssh_command(args, f"printf %s {encoded} | base64 -d | python3 -"),
+        role="appliance",
+    )
+    require_success(result, "release database identity probe")
+    try:
+        payload = json.loads(result["stdout"])
+    except json.JSONDecodeError as exc:
+        raise LifecycleError("Release database identity probe did not return JSON.") from exc
+    payload["ssh_command"] = result["command"]
+    return payload
+
+
+def signed_release_update_check(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    parsed_url = urllib.parse.urlparse(args.signed_release_repository_url)
+    if parsed_url.scheme != "https" or not parsed_url.netloc:
+        raise LifecycleError("--signed-release-repository-url must be an absolute HTTPS base URL.")
+
+    before = _release_database_identity(args)
+    preview_source = _configure_signed_release_source(client, args, channel="preview")
+    successful_task = _submit_signed_release_update(client, expected_status="succeeded")
+    time.sleep(8)
+    after_success = _release_database_identity(args)
+    if after_success["current_release"] == before["current_release"]:
+        raise LifecycleError("The preview lifecycle release did not switch /opt/labfoundry/current.")
+
+    broken_source = _configure_signed_release_source(client, args, channel="development")
+    broken_baseline = _release_database_identity(args)
+    failed_task = _submit_signed_release_update(client, expected_status="failed")
+    time.sleep(4)
+    after_rollback = _release_database_identity(args)
+    for key in ("current_release", "compatibility_venv", "schema_sha256", "users"):
+        if after_rollback[key] != broken_baseline[key]:
+            raise LifecycleError(f"Broken release rollback did not restore database/release identity field {key}.")
+    transaction = (failed_task.get("result") or {}).get("release_transaction") or {}
+    if transaction.get("rolled_back") is not True or transaction.get("rollback_health") is not True:
+        raise LifecycleError("Broken release task did not record a healthy automatic rollback.")
+    health = appliance_health(client, args)
+    return {
+        "preview_source": preview_source,
+        "successful_task_id": successful_task.get("id"),
+        "installed_release": after_success["current_release"],
+        "broken_source": broken_source,
+        "failed_task_id": failed_task.get("id"),
+        "verified_key_id": transaction.get("verified_key_id"),
+        "bundle_sha256": transaction.get("bundle_sha256"),
+        "rolled_back": transaction.get("rolled_back"),
+        "database_identity_restored": True,
+        "service_health": health,
+    }
+
+
 def appliance_health(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
     openapi = client.request("GET", "/openapi.json")
     if openapi[0] >= 400:
@@ -3010,6 +3210,8 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "apply-appliance-settings-unit", apply_units, client, ["appliance_settings", "firewall", "public_services"], args)
     run_step(results, "management-https-check", management_https_check, client, args)
     run_step(results, "web-terminal-check", web_terminal_check, client, args)
+    if args.signed_release_repository_url:
+        run_step(results, "signed-release-update-check", signed_release_update_check, client, args)
     if args.export_settings_backup:
         run_step(results, "export-settings-backup", export_settings_backup, client, args, args.export_settings_backup)
 

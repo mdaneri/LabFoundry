@@ -116,6 +116,7 @@ from labfoundry.app.services.appliance_settings import (
     web_terminal_listener_interfaces,
 )
 from labfoundry.app.services.appliance_update import (
+    APPLIANCE_UPDATE_FINALIZER_PATH,
     APPLIANCE_UPDATE_INFO_PATH,
     APPLIANCE_UPDATE_SETTINGS_KEY,
     APPLIANCE_UPDATE_STAGED_CONFIG_PATH,
@@ -124,7 +125,6 @@ from labfoundry.app.services.appliance_update import (
     UPDATE_STREAM_LABELS,
     UPDATE_STREAMS,
     current_version_info,
-    effective_pip_index,
     parse_latest_update_result,
     photon_repository_details,
     photon_repository_summary,
@@ -7930,7 +7930,6 @@ def appliance_update_context(db: Session) -> dict[str, Any]:
     selected = list(UPDATE_STREAMS)
     manifest_preview = render_update_manifest(selected_streams=selected, settings=settings, actor="preview")
     photon_repositories = photon_repository_details()
-    pip_index = effective_pip_index()
     return {
         "update_settings": settings,
         "update_sources": source_payloads,
@@ -7945,7 +7944,6 @@ def appliance_update_context(db: Session) -> dict[str, Any]:
         "photon_repository_details": photon_repositories,
         "photon_repository_summary": photon_repository_summary(),
         "photon_repository_rows": min(max(len(photon_repositories), 2), 8),
-        "effective_pip_index": pip_index,
         "labfoundry_channels": sorted(LABFOUNDRY_CHANNELS),
         "update_streams": [{"id": stream, "label": UPDATE_STREAM_LABELS[stream]} for stream in UPDATE_STREAMS],
         "default_labfoundry_manifest_url": DEFAULT_LABFOUNDRY_MANIFEST_URL,
@@ -8108,10 +8106,16 @@ def execute_appliance_update_job(
     settings: dict[str, str],
     actor: str,
     mode: str,
+    job_id: str = "",
     credentials: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     adapter = SystemAdapter()
-    manifest_preview = render_update_manifest(selected_streams=selected_stream_ids, settings=settings, actor=actor)
+    manifest_preview = render_update_manifest(
+        selected_streams=selected_stream_ids,
+        settings=settings,
+        actor=actor,
+        job_id=job_id,
+    )
     config_path = APPLIANCE_UPDATE_STAGED_CONFIG_PATH
     credentials_path = ""
     if not adapter.dry_run:
@@ -8146,6 +8150,15 @@ def execute_appliance_update_job(
             Path(credentials_path).unlink(missing_ok=True)
 
     succeeded = all(result.returncode == 0 for result in results)
+    finalizer = read_appliance_file(APPLIANCE_UPDATE_FINALIZER_PATH)
+    release_transaction: dict[str, Any] = {}
+    if finalizer.get("available"):
+        try:
+            parsed_finalizer = json.loads(str(finalizer.get("content") or "{}"))
+        except json.JSONDecodeError:
+            parsed_finalizer = {}
+        if isinstance(parsed_finalizer, dict) and (not job_id or parsed_finalizer.get("job_id") == job_id):
+            release_transaction = parsed_finalizer
     return {
         "unit_id": "appliance_update",
         "label": "Appliance Update",
@@ -8155,10 +8168,13 @@ def execute_appliance_update_job(
         "status": JobStatus.SUCCEEDED.value if succeeded else JobStatus.FAILED.value,
         "success": succeeded,
         "dry_run": any(result.dry_run for result in results),
-        "restart_after_commit": mode == "run" and succeeded and "labfoundry_wheel" in selected_stream_ids,
+        "restart_after_commit": mode == "run"
+        and succeeded
+        and bool({"labfoundry_release", "photon_os"} & set(selected_stream_ids)),
         "commands": [adapter_result_to_payload(result) for result in results],
         "config_path": config_path,
         "config_preview": manifest_preview,
+        "release_transaction": release_transaction,
     }
 
 
@@ -9372,7 +9388,6 @@ def appliance_update_page(
 def update_appliance_update_settings(
     request: Request,
     photon_source: str = Form("configured Photon repositories"),
-    python_index_url: str = Form(""),
     labfoundry_manifest_url: str = Form(DEFAULT_LABFOUNDRY_MANIFEST_URL),
     csrf: str = Form(...),
     identity: Identity = Depends(require_session_identity),
@@ -9382,7 +9397,6 @@ def update_appliance_update_settings(
     require_admin_identity(identity)
     settings = {
         "photon_source": photon_source.strip() or "configured Photon repositories",
-        "python_index_url": python_index_url.strip(),
         "labfoundry_manifest_url": labfoundry_manifest_url.strip() or DEFAULT_LABFOUNDRY_MANIFEST_URL,
     }
     errors = validate_update_settings(settings)
@@ -9448,8 +9462,6 @@ def update_appliance_update_source(
         settings["channel"] = channel.strip().lower()
     elif source.kind == "photon":
         settings.update({"managed": managed == "on", "gpgcheck": gpgcheck == "on", "gpgkey": gpgkey.strip(), "tls_verify": tls_verify == "on"})
-    elif source.kind == "python":
-        settings["tls_verify"] = tls_verify == "on"
     source.settings_json = json.dumps(settings, sort_keys=True)
     if clear_credential == "on":
         source.credential_encrypted = ""
@@ -9735,8 +9747,8 @@ def submit_appliance_update(
     errors = validate_update_settings(settings)
     if not selected:
         errors.append("Select at least one update stream.")
-    if "labfoundry_wheel" in selected and not str(settings.get("labfoundry_manifest_url") or "").strip():
-        errors.append("Configure a LabFoundry release repository before selecting LabFoundry Wheel.")
+    if "labfoundry_release" in selected and not str(settings.get("labfoundry_manifest_url") or "").strip():
+        errors.append("Configure a signed LabFoundry release repository before selecting LabFoundry Release.")
     if "powershell_modules" in selected and not str(settings.get("powershell_repository_url") or "").strip():
         errors.append("Configure an enabled PowerShell repository before selecting PowerShell Modules.")
     if errors:

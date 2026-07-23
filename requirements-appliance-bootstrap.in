@@ -1,0 +1,5 @@
+# Bootstrap tools are part of the offline appliance release and are installed
+# from the same ABI-specific wheelhouse as runtime dependencies.
+pip==25.1.1
+setuptools==83.0.0
+wheel==0.45.1

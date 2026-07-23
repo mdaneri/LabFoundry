@@ -42,6 +42,9 @@ class Version:
         return f"{self.major}.{self.minor}.{self.patch}"
 
 
+PRE_GA_RELEASE_LINE = Version(0, 9, 0)
+
+
 VERSION_PATHS = {
     "Python project": Path("pyproject.toml"),
     "Python runtime fallback": Path("labfoundry/__init__.py"),
@@ -103,12 +106,21 @@ def expected_version(base_root: Path) -> Version:
     return consistent_version(base_root).next_patch()
 
 
+def allowed_pr_versions(base_root: Path) -> set[Version]:
+    base = consistent_version(base_root)
+    allowed = {base.next_patch()}
+    if base.major == 0 and base < PRE_GA_RELEASE_LINE:
+        allowed.add(PRE_GA_RELEASE_LINE)
+    return allowed
+
+
 def check(root: Path, base_root: Path | None = None) -> Version:
     current = consistent_version(root)
     if base_root is not None:
-        expected = expected_version(base_root)
-        if current != expected:
-            raise VersionError(f"PR version must be {expected}, exactly one patch above its base; found {current}")
+        allowed = allowed_pr_versions(base_root)
+        if current not in allowed:
+            expected = " or ".join(str(value) for value in sorted(allowed))
+            raise VersionError(f"PR version must be {expected}; found {current}")
     return current
 
 
@@ -126,7 +138,8 @@ def bump(root: Path, base_root: Path | None = None) -> tuple[Version, bool]:
     current = consistent_version(root)
     base = consistent_version(base_root)
     expected = base.next_patch()
-    if current == expected:
+    allowed = allowed_pr_versions(base_root)
+    if current in allowed:
         return current, False
     if current != base:
         raise VersionError(
@@ -149,7 +162,7 @@ def bump(root: Path, base_root: Path | None = None) -> tuple[Version, bool]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("bump", "check"))
+    parser.add_argument("command", choices=("bump", "check", "get"))
     parser.add_argument("--root", type=Path, default=ROOT, help="Repository checkout to inspect or update.")
     parser.add_argument(
         "--base-root",
@@ -159,7 +172,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        if args.command == "check":
+        if args.command == "get":
+            version = consistent_version(args.root)
+            print(version)
+        elif args.command == "check":
             version = check(args.root, args.base_root)
             print(f"Version policy passed: {version}")
         else:

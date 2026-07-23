@@ -361,7 +361,14 @@ def test_photon_image_optional_pip_global_index_configuration():
     assert 'printf \'index-url = %s\\n\' "$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"' in script
     assert 'printf \'cache-dir = %s\\n\' "$PIP_CACHE_DIR"' in script
     assert 'write_pip_config /etc/pip.conf' in script
+    assert 'python3 -m venv "$LABFOUNDRY_RELEASE_DIR/.venv"' in script
+    assert 'LABFOUNDRY_RELEASE_DIR="$LABFOUNDRY_HOME/releases/bootstrap-$LABFOUNDRY_RELEASE_VERSION"' in script
+    assert '"$LABFOUNDRY_RELEASE_DIR/bundle-metadata.json"' in script
+    assert 'ln -sfn "releases/bootstrap-$LABFOUNDRY_RELEASE_VERSION" "$LABFOUNDRY_HOME/current"' in script
+    assert 'ln -sfn "current/.venv" "$LABFOUNDRY_HOME/.venv"' in script
     assert 'write_pip_config "$LABFOUNDRY_HOME/.venv/pip.conf"' in script
+    assert "/etc/labfoundry/update-trust.d" in script
+    assert "image/common/update-trust/*.pem" in script
     assert 'export PIP_DISABLE_PIP_VERSION_CHECK=1' in script
     assert 'export PIP_INDEX_URL="$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"' in script
     assert "pip install --upgrade pip setuptools wheel" not in script
@@ -414,6 +421,14 @@ def test_lifecycle_hyperv_script_uses_separate_vm_set_by_default():
     assert "--pxe-test-mode" in runner
     assert "--pxe-client-mac" in runner
     assert "--pxe-installer-iso-path" in runner
+    assert "[string]$SignedReleaseRepositoryUrl = ''" in script
+    assert "[string]$SignedReleaseRepositoryUrl = ''" in wrapper
+    assert "'--signed-release-repository-url', $SignedReleaseRepositoryUrl" in script
+    assert "'-SignedReleaseRepositoryUrl', $SignedReleaseRepositoryUrl" in wrapper
+    assert "signed_release_update_check" in runner
+    assert '"signed-release-update-check"' in runner
+    assert '"schema_sha256"' in runner
+    assert 'transaction.get("rolled_back") is not True' in runner
     assert '"esxi_pxe"' in runner
     assert "configure-esxi-pxe" in runner
     assert "Refusing to use reserved VM name" in script

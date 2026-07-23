@@ -157,6 +157,37 @@ def test_full_lifecycle_plan_includes_passwordless_web_terminal_acceptance():
     assert any("Managed LDAP desired state" in check for check in plan["checks"])
 
 
+def test_release_database_identity_uses_privileged_appliance_command(monkeypatch):
+    lifecycle = load_lifecycle_module()
+    args = lifecycle.parse_args(["--password", "test", "--ssh-password", "test", "--plan-only"])
+    captured: dict[str, str] = {}
+
+    def fake_ssh_command(host, command_args, command, *, role):  # type: ignore[no-untyped-def]
+        captured.update(host=host, command=command, role=role)
+        return {
+            "returncode": 0,
+            "stdout": json.dumps(
+                {
+                    "current_release": "/opt/labfoundry/releases/0.9.0",
+                    "compatibility_venv": "/opt/labfoundry/releases/0.9.0/venv",
+                    "schema_sha256": "abc123",
+                    "users": [[1, "admin"]],
+                }
+            ),
+            "stderr": "",
+            "command": "redacted",
+        }
+
+    monkeypatch.setattr(lifecycle, "ssh_command", fake_ssh_command)
+
+    identity = lifecycle._release_database_identity(args)
+
+    assert captured["role"] == "appliance"
+    assert "sudo -S" in captured["command"]
+    assert "base64 -d | python3 -" in captured["command"]
+    assert identity["schema_sha256"] == "abc123"
+
+
 def test_esx_storage_lifecycle_plan_is_dual_stack_and_format_is_explicit():
     lifecycle = load_lifecycle_module()
     args = lifecycle.parse_args(
