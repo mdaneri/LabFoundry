@@ -208,6 +208,7 @@ class EsxNfsShareResponse(BaseModel):
     local_path: str
     remote_path: str
     connection_commands: dict[str, list[str]]
+    powercli_commands: dict[str, list[str]]
     enabled: bool
 
 

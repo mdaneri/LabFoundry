@@ -15253,6 +15253,37 @@ function initializeEsxStorageTables() {
     const canWrite = shareElement.dataset.canWrite === "true";
     const tableRows = canWrite ? [...rows, { is_new: true, datastore_name: "" }] : rows;
     const shareValue = (cell, formatter = (value) => value) => cell.getRow().getData().is_new ? "" : formatter(cell.getValue());
+    const saveEnabledState = async (cell) => {
+      const row = cell.getRow().getData();
+      if (!canWrite || row.is_new) return;
+      const body = new FormData();
+      body.set("csrf", shareElement.dataset.csrf || "");
+      body.set("datastore_name", row.datastore_name || "");
+      body.set("volume_id", String(row.volume_id || ""));
+      body.set("relative_path", row.relative_path || "");
+      body.set("preferred_nfs_version", row.preferred_nfs_version || "4.1");
+      body.set("interface_name", row.interface_name || "");
+      for (const family of row.address_families || []) body.append("address_families", family);
+      body.set("ipv4_clients", (row.ipv4_clients || []).join("\n"));
+      body.set("ipv6_clients", (row.ipv6_clients || []).join("\n"));
+      if (row.enabled) body.set("enabled", "on");
+      try {
+        const response = await fetch(`/esx-storage/shares/${row.id}`, {
+          method: "POST",
+          headers: { Accept: "application/json" },
+          body,
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.detail || "The datastore state could not be saved.");
+        }
+        window.history.replaceState(null, "", "/esx-storage#nfs-datastores");
+        window.location.reload();
+      } catch (error) {
+        cell.restoreOldValue();
+        showTransientGridStatus(error instanceof Error ? error.message : "The datastore state could not be saved.");
+      }
+    };
     const editRow = (row) => {
       const data = row?.getData?.() || row;
       if (!canWrite || !data || data.is_new) return;
@@ -15289,7 +15320,17 @@ function initializeEsxStorageTables() {
         { title: "Families", field: "address_families", formatter: (cell) => shareValue(cell, (value) => (value || []).map((family) => family === "ipv4" ? "IPv4" : "IPv6").join(" + ")) },
         { title: "IPv4 VMkernel clients", field: "ipv4_clients", formatter: (cell) => shareValue(cell, (value) => (value || []).join(", ") || "any"), minWidth: 170 },
         { title: "IPv6 VMkernel clients", field: "ipv6_clients", formatter: (cell) => shareValue(cell, (value) => (value || []).join(", ") || "any"), minWidth: 180 },
-        { title: "Enabled", field: "enabled", formatter: (cell) => shareValue(cell, (value) => value ? "enabled" : "disabled") },
+        {
+          title: "Enabled",
+          field: "enabled",
+          width: 82,
+          hozAlign: "center",
+          headerHozAlign: "center",
+          formatter: (cell) => cell.getRow().getData().is_new ? "" : labFoundryBooleanFormatter(cell),
+          editor: "tickCross",
+          editable: (cell) => canWrite && !cell.getRow().getData().is_new,
+          cellEdited: saveEnabledState,
+        },
       ],
     });
     document.getElementById(shareElement.dataset.fallbackId || "")?.classList.add("hidden");
@@ -15357,6 +15398,7 @@ function initializeEsxStorageWizards() {
       if (families.includes("IPv4")) clients.push(`IPv4: ${String(form.elements.ipv4_clients.value || "").trim() || "any IPv4 client"}`);
       if (families.includes("IPv6")) clients.push(`IPv6: ${String(form.elements.ipv6_clients.value || "").trim() || "any IPv6 client"}`);
       setReviewValue(form, "share-name", form.elements.datastore_name.value);
+      setReviewValue(form, "share-state", form.elements.enabled.checked ? "Enabled" : "Disabled");
       setReviewValue(form, "share-path", `${form.elements.volume_id.selectedOptions[0]?.textContent?.trim() || "volume"} / ${form.elements.relative_path.value}`);
       setReviewValue(form, "share-protocol", `NFS ${form.elements.preferred_nfs_version.value}`);
       setReviewValue(form, "share-endpoint", `${form.elements.interface_name.value} · ${families.join(" + ")}`);
@@ -15412,7 +15454,7 @@ function initializeEsxStorageWizards() {
         });
         form.elements.ipv4_clients.value = (row.ipv4_clients || []).join("\n");
         form.elements.ipv6_clients.value = (row.ipv6_clients || []).join("\n");
-        form.elements.enabled.value = row.enabled ? "on" : "";
+        form.elements.enabled.checked = row.enabled !== false;
       }
       highestStep = 0;
       form.querySelector("[data-esx-storage-volume-source]")?.dispatchEvent(new Event("change"));

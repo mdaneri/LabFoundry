@@ -2037,6 +2037,20 @@ textarea {
   margin-bottom: 14px;
 }
 
+.esx-storage-command-row {
+  grid-template-columns: minmax(155px, 210px) minmax(0, 1fr) auto !important;
+  align-items: center;
+}
+
+.esx-storage-command-row code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.esx-storage-command-row .icon-button {
+  justify-self: end;
+}
+
 .zone-tool-panels {
   gap: 10px;
   min-width: 0;

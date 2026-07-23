@@ -2545,6 +2545,7 @@ def esx_share_response(share: EsxNfsShare, manifest: dict[str, Any]) -> EsxNfsSh
         local_path=rendered["source_path"],
         remote_path=rendered["remote_path"],
         connection_commands=rendered["connection_commands"],
+        powercli_commands=rendered["powercli_commands"],
         enabled=share.enabled,
     )
 

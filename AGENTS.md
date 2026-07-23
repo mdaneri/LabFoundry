@@ -124,6 +124,7 @@
 ## ESX Storage
 
 - Real ESX Storage apply stages JSON under `/var/lib/labfoundry/apply/esx-storage/labfoundry-esx-storage.json`. IPv4 and IPv6 are equal v1 requirements: one share may enable either or both on one selected interface/VLAN, and each enabled family requires its own listener, generated A/AAAA target name, VMkernel client allowlist, ESX command, and nftables rule.
+- Keep datastore enablement editable through the standard boolean grid icon and the add/edit wizard. Put enabled-share mount guidance in the dedicated Connection Instructions tab, render equivalent family-specific ESXCLI and PowerCLI commands with compact copy actions, and preserve the active ESX Storage tab across reloads.
 - Blank disks require stable `/dev/disk/by-id` identity plus job/manifest/device-bound `FORMAT <volume-name>` authorization and immediate helper revalidation before whole-device ext4 formatting. Mount by UUID under `/mnt/labfoundry-esx-storage`, bind shares under `/srv/labfoundry/esx-storage`, preserve formatted data on later failure, and never add wipe/reformat/data-delete behavior.
 - Apply only through global `/appliance-apply`. Settings backup and restore include volume/share desired state but never format authorization. iSCSI remains a separate kernel/target-stack feasibility issue.
 
