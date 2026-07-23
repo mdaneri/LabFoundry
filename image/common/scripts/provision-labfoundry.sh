@@ -81,7 +81,7 @@ case "$LABFOUNDRY_GUEST_PLATFORM" in
     exit 2
     ;;
 esac
-tdnf -y install python3 python3-pip python3-devel python3-virtualenv python3-curses python3-ntp sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite procps-ng $GUEST_INTEGRATION_PACKAGES nftables dnsmasq ntpsec openldap openldap-servers ipxe syslinux nginx powershell
+tdnf -y install python3 python3-pip python3-devel python3-virtualenv python3-curses python3-ntp sudo openssh-server curl rsync tar gzip shadow e2fsprogs sqlite procps-ng $GUEST_INTEGRATION_PACKAGES nftables dnsmasq ntpsec nfs-utils rpcbind openldap openldap-servers ipxe syslinux nginx powershell
 
 log_step "installing VCF PowerCLI $LABFOUNDRY_POWERCLI_VERSION"
 export LABFOUNDRY_POWERCLI_VERSION
@@ -106,6 +106,21 @@ log_step "leaving only Photon NTPsec available for desired-state activation"
 systemctl disable --now ntpd.service 2>/dev/null || true
 systemctl disable --now systemd-timesyncd.service 2>/dev/null || true
 systemctl disable --now chronyd.service 2>/dev/null || true
+
+log_step "leaving ESX NFS services disabled until global appliance apply"
+systemctl disable --now nfs-server.service 2>/dev/null || true
+systemctl disable --now rpcbind.service rpcbind.socket 2>/dev/null || true
+
+log_step "installing stable virtual-disk identity policy"
+install -d -o root -g root -m 0755 /etc/udev/rules.d
+cat > /etc/udev/rules.d/99-labfoundry-disk-identity.rules <<'EOF'
+# Some virtual SCSI controllers do not expose a serial/WWN. Preserve a stable
+# controller-path identity under /dev/disk/by-id so LabFoundry never claims a
+# transient /dev/sdX name. Native serial/WWN identities remain preferred.
+SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_SERIAL}=="", IMPORT{builtin}="path_id", ENV{ID_PATH_TAG}=="?*", SYMLINK+="disk/by-id/labfoundry-path-$env{ID_PATH_TAG}"
+EOF
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=block --action=add
 
 log_step "disabling systemd SSH-over-vsock auto generator"
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "hyperv" ]; then
@@ -136,6 +151,7 @@ install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/kms"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/ldap"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/local-users"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/ntpd"
+install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/esx-storage"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-backups"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/apply/vcf-offline-depot"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_STATE/vcfDownloadTool/active-tool"
@@ -148,6 +164,7 @@ install -d -o labfoundry -g labfoundry-automation -m 0750 "$LABFOUNDRY_STATE/aut
 install -d -o labfoundry -g labfoundry-automation -m 0750 "$LABFOUNDRY_STATE/automation/scripts"
 install -d -o labfoundry-automation -g labfoundry-automation -m 0750 "$LABFOUNDRY_STATE/automation/runs"
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG"
+install -d -o root -g root -m 0755 /mnt/labfoundry-esx-storage /srv/labfoundry/esx-storage /etc/exports.d /etc/nfs.conf.d
 install -d -o labfoundry -g labfoundry -m 0750 "$LABFOUNDRY_LOG/kms"
 install -d -o root -g root -m 0755 /etc/labfoundry
 install -d -o root -g root -m 0755 /etc/labfoundry/dnsmasq.d

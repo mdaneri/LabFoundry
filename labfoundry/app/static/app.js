@@ -12005,6 +12005,40 @@ function applianceApplyReviewRow(unit) {
   });
   row.append(head, summary);
 
+  if (Array.isArray(unit.format_volumes) && unit.format_volumes.length) {
+    const formatPanel = document.createElement("div");
+    formatPanel.className = "alert warning esx-storage-format-confirmations";
+    const title = document.createElement("strong");
+    title.textContent = "Destructive disk initialization authorization";
+    formatPanel.append(title);
+    unit.format_volumes.forEach((volume) => {
+      const fingerprint = volume.fingerprint || {};
+      const label = document.createElement("label");
+      label.className = "form-field";
+      const caption = document.createElement("span");
+      caption.className = "field-label";
+      caption.textContent = `${volume.name}: ${volume.stable_device_id} · ${fingerprint.model || "model unknown"} · serial ${fingerprint.serial || "unknown"} · WWN ${fingerprint.wwn || "unknown"} · ${Number(fingerprint.size_bytes || 0).toLocaleString()} bytes`;
+      const input = document.createElement("input");
+      input.type = "text";
+      input.placeholder = volume.confirmation || `FORMAT ${volume.name}`;
+      input.autocomplete = "off";
+      input.dataset.esxFormatConfirmation = "";
+      input.dataset.expected = volume.confirmation || `FORMAT ${volume.name}`;
+      const hidden = document.createElement("input");
+      hidden.type = "hidden";
+      hidden.name = "format_confirmations";
+      hidden.disabled = true;
+      hidden.value = JSON.stringify({ volume_id: volume.id, confirmation: input.dataset.expected });
+      input.addEventListener("input", () => {
+        hidden.disabled = input.value !== input.dataset.expected;
+        updateApplianceApplySelection();
+      });
+      label.append(caption, input, hidden);
+      formatPanel.append(label);
+    });
+    row.append(formatPanel);
+  }
+
   const messages = [...(unit.validation_errors || []), ...(unit.validation_warnings || [])];
   if (messages.length) {
     const alert = document.createElement("div");
@@ -12037,11 +12071,18 @@ function updateApplianceApplySelection() {
   if (!(modal instanceof HTMLDialogElement)) return;
   const selectedCheckboxes = Array.from(modal.querySelectorAll("[data-appliance-apply-review-checkbox]:checked"));
   const selected = selectedCheckboxes.length;
+  const incompleteFormatConfirmations = selectedCheckboxes.some((checkbox) => {
+    const row = checkbox.closest("[data-apply-unit-id]");
+    if (!(row instanceof HTMLElement)) return false;
+    return Array.from(row.querySelectorAll("[data-esx-format-confirmation]")).some((input) => input instanceof HTMLInputElement && input.value !== input.dataset.expected);
+  });
   if (selectionSummary instanceof HTMLElement) {
-    selectionSummary.textContent = `${selected} component${selected === 1 ? "" : "s"} selected`;
+    selectionSummary.textContent = incompleteFormatConfirmations
+      ? `${selected} component${selected === 1 ? "" : "s"} selected · complete disk format confirmation`
+      : `${selected} component${selected === 1 ? "" : "s"} selected`;
   }
   if (submit instanceof HTMLButtonElement) {
-    submit.disabled = selected === 0;
+    submit.disabled = selected === 0 || incompleteFormatConfirmations;
   }
   if (connectionWarning instanceof HTMLElement) {
     const messages = new Set();
@@ -12223,6 +12264,11 @@ function renderApplianceApplyTask(task) {
   scheduleApplianceApplyAutoClose(task);
 }
 
+function refreshCurrentWorkflowAfterApplianceApply(task) {
+  if (task?.status !== "succeeded" || window.location.pathname !== "/esx-storage") return;
+  window.setTimeout(() => window.location.reload(), 300);
+}
+
 async function submitApplianceApplyForm(form) {
   const elements = applianceApplyModalElements();
   if (!(form instanceof HTMLFormElement) || !(elements.modal instanceof HTMLDialogElement)) return;
@@ -12275,6 +12321,7 @@ async function pollGlobalApplianceApply() {
       if (taskResponse.ok) {
         const taskPayload = await taskResponse.json();
         renderApplianceApplyTask(taskPayload.task);
+        refreshCurrentWorkflowAfterApplianceApply(taskPayload.task);
       }
       applianceApplyActiveJobId = "";
     }
@@ -15221,7 +15268,290 @@ function initializeManagedPackagePolicies() {
   });
 }
 
+function initializeEsxStorageTables() {
+  const volumeElement = document.getElementById("esx-storage-volumes-table");
+  const shareElement = document.getElementById("esx-storage-shares-table");
+  if (!(volumeElement instanceof HTMLElement) && !(shareElement instanceof HTMLElement)) return;
+  if (typeof Tabulator === "undefined") return;
+
+  if (volumeElement instanceof HTMLElement) {
+    const rows = JSON.parse(volumeElement.dataset.esxStorageVolumes || "[]");
+    const canWrite = volumeElement.dataset.canWrite === "true";
+    const tableRows = canWrite ? [...rows, { is_new: true, name: "" }] : rows;
+    const volumeValue = (cell, formatter = (value) => value) => cell.getRow().getData().is_new ? "" : formatter(cell.getValue());
+    new Tabulator(volumeElement, {
+      data: tableRows,
+      layout: "fitColumns",
+      placeholder: "No storage volumes are configured.",
+      rowFormatter: (row) => markNewRecordRow(row, "name"),
+      columns: [
+        { title: "Name", field: "name", minWidth: 130, formatter: (cell) => cell.getRow().getData().is_new ? '<button class="add-row-button" type="button" data-esx-storage-wizard-open="volume">+ Add storage volume here</button>' : escapeHtml(cell.getValue()) },
+        { title: "Source", field: "source_type", formatter: (cell) => volumeValue(cell, (value) => value === "blank_disk" ? "blank disk" : "mounted ext4") },
+        { title: "Stable identity / mount", field: "stable_device_id", minWidth: 260, formatter: (cell) => cell.getRow().getData().is_new ? "" : `<code>${escapeHtml(cell.getValue() || cell.getRow().getData().mount_path || "")}</code>` },
+        { title: "Capacity", field: "capacity_bytes", formatter: (cell) => volumeValue(cell, (value) => Number(value || 0).toLocaleString()) },
+        { title: "Filesystem", field: "filesystem_uuid", formatter: (cell) => volumeValue(cell, (value) => value || "pending ext4 format") },
+        { title: "State", field: "state", formatter: (cell) => volumeValue(cell) },
+      ],
+    });
+    document.getElementById(volumeElement.dataset.fallbackId || "")?.classList.add("hidden");
+  }
+
+  if (shareElement instanceof HTMLElement) {
+    const rows = JSON.parse(shareElement.dataset.esxStorageShares || "[]");
+    const interfaces = JSON.parse(shareElement.dataset.interfaces || "[]");
+    const canWrite = shareElement.dataset.canWrite === "true";
+    const tableRows = canWrite ? [...rows, { is_new: true, datastore_name: "" }] : rows;
+    const shareValue = (cell, formatter = (value) => value) => cell.getRow().getData().is_new ? "" : formatter(cell.getValue());
+    const editRow = (row) => {
+      const data = row?.getData?.() || row;
+      if (!canWrite || !data || data.is_new) return;
+      const form = document.querySelector('[data-esx-storage-wizard="share"]');
+      form?.esxStorageOpenWizard?.(data);
+    };
+    new Tabulator(shareElement, {
+      data: tableRows,
+      layout: "fitColumns",
+      placeholder: "No NFS datastores are configured.",
+      rowFormatter: (row) => markNewRecordRow(row, "datastore_name"),
+      rowContextMenu: canWrite ? [
+        {
+          label: "Edit datastore",
+          disabled: (component) => component.getData().is_new,
+          action: (_event, row) => editRow(row),
+        },
+        {
+          label: "Remove datastore",
+          disabled: (component) => component.getData().is_new,
+          action: (_event, row) => {
+            const form = document.getElementById(`esx-storage-remove-share-${row.getData().id}`);
+            if (form instanceof HTMLFormElement) form.requestSubmit();
+          },
+        },
+      ] : [],
+      rowDblClick: (_event, row) => editRow(row),
+      columns: [
+        { title: "Datastore", field: "datastore_name", formatter: (cell) => cell.getRow().getData().is_new ? '<button class="add-row-button" type="button" data-esx-storage-wizard-open="share">+ Add NFS datastore here</button>' : escapeHtml(cell.getValue()), minWidth: 205, widthGrow: 1.4 },
+        { title: "Volume", field: "volume_name", minWidth: 120, formatter: (cell) => shareValue(cell) },
+        { title: "Path", field: "relative_path", formatter: (cell) => shareValue(cell), minWidth: 150 },
+        { title: "NFS", field: "preferred_nfs_version", formatter: (cell) => shareValue(cell) },
+        { title: "Interface / VLAN", field: "interface_name", formatter: (cell) => shareValue(cell), minWidth: 130 },
+        { title: "Families", field: "address_families", formatter: (cell) => shareValue(cell, (value) => (value || []).map((family) => family === "ipv4" ? "IPv4" : "IPv6").join(" + ")) },
+        { title: "IPv4 VMkernel clients", field: "ipv4_clients", formatter: (cell) => shareValue(cell, (value) => (value || []).join(", ") || "any"), minWidth: 170 },
+        { title: "IPv6 VMkernel clients", field: "ipv6_clients", formatter: (cell) => shareValue(cell, (value) => (value || []).join(", ") || "any"), minWidth: 180 },
+        { title: "Enabled", field: "enabled", formatter: (cell) => shareValue(cell, (value) => value ? "enabled" : "disabled") },
+      ],
+    });
+    document.getElementById(shareElement.dataset.fallbackId || "")?.classList.add("hidden");
+  }
+}
+
+function initializeEsxStorageWizards() {
+  const configurations = {
+    volume: [
+      ["Name the volume", "Choose a stable LabFoundry name and how storage is supplied."],
+      ["Select storage", "Choose the eligible whole disk or mounted ext4 filesystem backing this volume."],
+      ["Review the volume", "Confirm the desired state and the formatting safety boundary."],
+    ],
+    share: [
+      ["Define the datastore", "Choose its ESX identity and contained directory."],
+      ["Choose the endpoint", "Select one interface/VLAN, NFS version, and equal IPv4/IPv6 exposure."],
+      ["Choose VMkernel access", "Restrict each enabled family to specific clients, or leave it empty to allow anyone."],
+      ["Review the datastore", "Confirm the datastore, endpoint, and family-aware client allowlists."],
+    ],
+  };
+  const forms = new Map();
+  const setReviewValue = (form, key, value) => {
+    const target = form.querySelector(`[data-esx-storage-review="${key}"]`);
+    if (target instanceof HTMLElement) target.textContent = value || "not configured";
+  };
+
+  document.querySelectorAll("[data-esx-storage-wizard]").forEach((form) => {
+    if (!(form instanceof HTMLFormElement)) return;
+    const kind = form.dataset.esxStorageWizard;
+    const steps = configurations[kind];
+    const modal = form.closest("dialog");
+    if (!steps || !(modal instanceof HTMLDialogElement)) return;
+    forms.set(kind, { form, modal });
+    const pages = [...form.querySelectorAll("[data-esx-storage-wizard-step]")];
+    const navButtons = [...form.querySelectorAll("[data-esx-storage-wizard-nav]")];
+    const kicker = form.querySelector("[data-esx-storage-wizard-kicker]");
+    const title = form.querySelector("[data-esx-storage-wizard-title]");
+    const description = form.querySelector("[data-esx-storage-wizard-description]");
+    const error = form.querySelector("[data-esx-storage-wizard-error]");
+    const modalTitle = form.querySelector("[data-esx-storage-wizard-modal-title]");
+    const back = form.querySelector("[data-esx-storage-wizard-back]");
+    const next = form.querySelector("[data-esx-storage-wizard-next]");
+    const submit = form.querySelector("[data-esx-storage-wizard-submit]");
+    let currentStep = 0;
+    let highestStep = 0;
+
+    const showError = (message = "") => {
+      if (!(error instanceof HTMLElement)) return;
+      error.textContent = message;
+      error.classList.toggle("hidden", !message);
+    };
+    const populateReview = () => {
+      if (kind === "volume") {
+        const source = form.elements.source_type;
+        const blankDisk = form.elements.stable_device_id;
+        const mountedVolume = form.elements.mount_path;
+        const target = source.value === "blank_disk" ? blankDisk : mountedVolume;
+        setReviewValue(form, "volume-name", form.elements.name.value);
+        setReviewValue(form, "volume-source", source.selectedOptions[0]?.textContent?.trim());
+        setReviewValue(form, "volume-target", target.selectedOptions[0]?.textContent?.trim());
+        return;
+      }
+      const families = [...form.querySelectorAll('input[name="address_families"]:checked')].map((input) => input.value === "ipv4" ? "IPv4" : "IPv6");
+      const clients = [];
+      if (families.includes("IPv4")) clients.push(`IPv4: ${String(form.elements.ipv4_clients.value || "").trim() || "any IPv4 client"}`);
+      if (families.includes("IPv6")) clients.push(`IPv6: ${String(form.elements.ipv6_clients.value || "").trim() || "any IPv6 client"}`);
+      setReviewValue(form, "share-name", form.elements.datastore_name.value);
+      setReviewValue(form, "share-path", `${form.elements.volume_id.selectedOptions[0]?.textContent?.trim() || "volume"} / ${form.elements.relative_path.value}`);
+      setReviewValue(form, "share-protocol", `NFS ${form.elements.preferred_nfs_version.value}`);
+      setReviewValue(form, "share-endpoint", `${form.elements.interface_name.value} · ${families.join(" + ")}`);
+      setReviewValue(form, "share-clients", clients.join(" · "));
+    };
+    const showStep = (index) => {
+      currentStep = Math.max(0, Math.min(index, pages.length - 1));
+      highestStep = Math.max(highestStep, currentStep);
+      pages.forEach((page, pageIndex) => page.classList.toggle("hidden", pageIndex !== currentStep));
+      navButtons.forEach((button, buttonIndex) => {
+        button.classList.toggle("active", buttonIndex === currentStep);
+        button.classList.toggle("complete", buttonIndex < currentStep);
+        button.disabled = buttonIndex > highestStep;
+      });
+      if (kicker instanceof HTMLElement) kicker.textContent = `Step ${currentStep + 1} of ${pages.length}`;
+      if (title instanceof HTMLElement) title.textContent = steps[currentStep][0];
+      if (description instanceof HTMLElement) description.textContent = steps[currentStep][1];
+      back?.classList.toggle("hidden", currentStep === 0);
+      next?.classList.toggle("hidden", currentStep === pages.length - 1);
+      submit?.classList.toggle("hidden", currentStep !== pages.length - 1);
+      if (currentStep === pages.length - 1) populateReview();
+      showError();
+    };
+    const validateStep = () => {
+      const page = pages[currentStep];
+      if (!(page instanceof HTMLElement)) return true;
+      const invalid = [...page.querySelectorAll("input, select, textarea")].find((control) => !control.closest("[hidden], .hidden") && !control.checkValidity());
+      if (invalid) {
+        invalid.reportValidity();
+        return false;
+      }
+      if (kind === "share" && currentStep === 1 && !form.querySelector('input[name="address_families"]:checked')) {
+        showError("Enable IPv4, IPv6, or both for this datastore.");
+        return false;
+      }
+      return true;
+    };
+    const defaultAction = form.action;
+    const openWizard = (row = null) => {
+      form.reset();
+      const editing = kind === "share" && row && row.id;
+      form.action = editing ? `/esx-storage/shares/${row.id}` : defaultAction;
+      if (modalTitle instanceof HTMLElement) modalTitle.textContent = editing ? "Edit NFS datastore" : kind === "share" ? "Add NFS datastore" : "Add storage volume";
+      if (submit instanceof HTMLButtonElement) submit.textContent = editing ? "Update NFS datastore" : kind === "share" ? "Add NFS datastore" : "Add storage volume";
+      if (editing) {
+        form.elements.datastore_name.value = row.datastore_name || "";
+        form.elements.volume_id.value = String(row.volume_id || "");
+        form.elements.relative_path.value = row.relative_path || "";
+        form.elements.preferred_nfs_version.value = row.preferred_nfs_version || "4.1";
+        form.elements.interface_name.value = row.interface_name || "";
+        form.querySelectorAll('input[name="address_families"]').forEach((checkbox) => {
+          checkbox.checked = (row.address_families || []).includes(checkbox.value);
+        });
+        form.elements.ipv4_clients.value = (row.ipv4_clients || []).join("\n");
+        form.elements.ipv6_clients.value = (row.ipv6_clients || []).join("\n");
+        form.elements.enabled.value = row.enabled ? "on" : "";
+      }
+      highestStep = 0;
+      form.querySelector("[data-esx-storage-volume-source]")?.dispatchEvent(new Event("change"));
+      if (!editing) form.querySelector("[data-esx-storage-interface]")?.dispatchEvent(new Event("change"));
+      showStep(0);
+      modal.showModal();
+      window.requestAnimationFrame(() => pages[0]?.querySelector("input, select")?.focus({ preventScroll: true }));
+    };
+    form.esxStorageOpenWizard = openWizard;
+    next?.addEventListener("click", () => { if (validateStep()) showStep(currentStep + 1); });
+    back?.addEventListener("click", () => showStep(currentStep - 1));
+    navButtons.forEach((button, index) => button.addEventListener("click", () => { if (index <= highestStep) showStep(index); }));
+    form.querySelector("[data-esx-storage-wizard-cancel]")?.addEventListener("click", () => modal.close());
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (currentStep !== pages.length - 1 || !validateStep()) return;
+      if (submit instanceof HTMLButtonElement) submit.disabled = true;
+      showError();
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          headers: { Accept: "application/json" },
+          body: new FormData(form),
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          showError(payload.detail || "The ESX Storage change could not be saved.");
+          return;
+        }
+        const target = kind === "volume" ? "/esx-storage#storage-volumes" : "/esx-storage#nfs-datastores";
+        modal.close();
+        window.history.replaceState(null, "", target);
+        window.location.reload();
+      } catch (_error) {
+        showError("The ESX Storage change could not be saved. Check the connection and try again.");
+      } finally {
+        if (submit instanceof HTMLButtonElement) submit.disabled = false;
+      }
+    });
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const trigger = event.target.closest("[data-esx-storage-wizard-open]");
+    if (!(trigger instanceof HTMLElement)) return;
+    const entry = forms.get(trigger.dataset.esxStorageWizardOpen);
+    entry?.form.esxStorageOpenWizard?.();
+  });
+}
+
+function initializeEsxStorageFamilyDefaults() {
+  const form = document.querySelector("[data-esx-storage-share-form]");
+  const select = form?.querySelector("[data-esx-storage-interface]");
+  if (!(form instanceof HTMLFormElement) || !(select instanceof HTMLSelectElement)) return;
+  const update = () => {
+    const option = select.selectedOptions[0];
+    for (const family of ["ipv4", "ipv6"]) {
+      const checkbox = form.querySelector(`input[name="address_families"][value="${family}"]`);
+      if (!(checkbox instanceof HTMLInputElement)) continue;
+      checkbox.checked = Boolean(option?.dataset[family]);
+    }
+  };
+  select.addEventListener("change", update);
+  update();
+}
+
+function initializeEsxStorageVolumeSource() {
+  const form = document.querySelector("[data-esx-storage-volume-form]");
+  const source = form?.querySelector("[data-esx-storage-volume-source]");
+  const blank = form?.querySelector("[data-esx-storage-blank-source]");
+  const mounted = form?.querySelector("[data-esx-storage-mounted-source]");
+  if (!(form instanceof HTMLFormElement) || !(source instanceof HTMLSelectElement)) return;
+  const update = () => {
+    const usesBlankDisk = source.value === "blank_disk";
+    blank?.toggleAttribute("hidden", !usesBlankDisk);
+    mounted?.toggleAttribute("hidden", usesBlankDisk);
+    const stableIdentity = blank?.querySelector('select[name="stable_device_id"]');
+    const mountPath = mounted?.querySelector('select[name="mount_path"]');
+    if (stableIdentity instanceof HTMLSelectElement) stableIdentity.required = usesBlankDisk;
+    if (mountPath instanceof HTMLSelectElement) mountPath.required = !usesBlankDisk;
+  };
+  source.addEventListener("change", update);
+  update();
+}
+
 document.addEventListener("DOMContentLoaded", initializeDashboard);
+document.addEventListener("DOMContentLoaded", initializeEsxStorageTables);
+document.addEventListener("DOMContentLoaded", initializeEsxStorageWizards);
+document.addEventListener("DOMContentLoaded", initializeEsxStorageFamilyDefaults);
+document.addEventListener("DOMContentLoaded", initializeEsxStorageVolumeSource);
 document.addEventListener("DOMContentLoaded", initializeDnsRecordsTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpScopesTable);
 document.addEventListener("DOMContentLoaded", initializeDhcpOptionsTable);

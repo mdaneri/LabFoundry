@@ -193,6 +193,7 @@ if (-not (Test-Path -LiteralPath $targetVmx)) {
 }
 
 Set-VmxValue -Path $targetVmx -Key 'displayName' -Value $Name
+Set-VmxValue -Path $targetVmx -Key 'disk.EnableUUID' -Value 'TRUE'
 New-DataVmdk -Path $resolvedDepotVmdkPath -Size $DepotDiskSize -Label 'VCF Offline Depot'
 New-DataVmdk -Path $resolvedBackupVmdkPath -Size $BackupDiskSize -Label 'VCF Backups'
 Set-VmxScsiDisk -Path $targetVmx -Unit 1 -DiskPath $resolvedDepotVmdkPath

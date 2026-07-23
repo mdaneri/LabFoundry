@@ -28,6 +28,10 @@ Maintenance isolation snapshots service enable/active state under `/var/lib/labf
 
 Every entry into `F12` separately requires the root password. Restart and shutdown require confirmation and use the delayed, auditable constrained appliance-power helper. `F12` remains separate from the F2 customization list.
 
+## ESX Storage status
+
+The Appliance services list includes **ESX Storage NFS** with desired enablement from `/esx-storage` and live `nfs-server.service` state. Maintenance isolation snapshots and restores both `nfs-server.service` and `rpcbind.service`; it never unmounts or deletes ESX datastore data.
+
 ## Runtime ownership
 
 `labfoundry-console.service` owns `/dev/tty1`, conflicts with and replaces only `getty@tty1.service`, and restarts automatically. Image provisioning masks `getty@tty1.service` without changing the getty template or later virtual terminals. It also masks `ctrl-alt-del.target` and sets systemd `CtrlAltDelBurstAction=none`, so Ctrl+Alt+Del cannot bypass the authenticated F12 reboot and shutdown workflow. The appliance sets systemd `ShowStatus=no`: unit progress remains available in the journal but is not written over the full-screen tty1 UI. Completed recovery actions and return from interactive processes force a physical redraw. Additional bounded redraws at 1, 3, and 8 seconds repair late terminal writes while startup or service jobs settle, without introducing continuous redraw flicker.

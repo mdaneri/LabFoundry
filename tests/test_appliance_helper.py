@@ -4853,3 +4853,48 @@ def test_appliance_settings_hostname_fallback_writes_etc_hostname(monkeypatch, t
 
     assert hostname_path.read_text(encoding="utf-8") == "fallback.labfoundry.internal\n"
     assert commands == [["/usr/bin/hostname", "fallback.labfoundry.internal"]]
+
+
+def test_esx_storage_existing_bind_mount_is_recognized_by_inode(monkeypatch):
+    helper = load_helper_module()
+    source = Path("/mnt/labfoundry-esx-storage/data/share")
+    target = Path("/srv/labfoundry/esx-storage/share")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, str(target), "")
+
+    def fake_stat(path: os.PathLike[str], *, follow_symlinks: bool = True) -> SimpleNamespace:
+        assert follow_symlinks is True
+        assert Path(path) in {source, target}
+        return SimpleNamespace(st_dev=2049, st_ino=8192)
+
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.os, "stat", fake_stat)
+
+    assert helper._esx_storage_bind_mount_matches("/usr/bin/findmnt", source, target) is True
+    assert commands == [["/usr/bin/findmnt", "-n", "--mountpoint", str(target)]]
+
+
+def test_esx_storage_rejects_wrong_mount_at_bind_target(monkeypatch):
+    helper = load_helper_module()
+    source = Path("/mnt/labfoundry-esx-storage/data/share")
+    target = Path("/srv/labfoundry/esx-storage/share")
+
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda command: subprocess.CompletedProcess(command, 0, str(target), ""),
+    )
+    monkeypatch.setattr(
+        helper.os,
+        "stat",
+        lambda path, *, follow_symlinks=True: SimpleNamespace(
+            st_dev=2049,
+            st_ino=8192 if Path(path) == source else 16384,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not match ESX Storage source"):
+        helper._esx_storage_bind_mount_matches("/usr/bin/findmnt", source, target)

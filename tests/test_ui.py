@@ -64,6 +64,7 @@ def test_login_and_dashboard_render(client):
         "/certificate-authority",
         "/kms",
         "/esxi-pxe",
+        "/esx-storage",
         "/vcf-helper",
         "/vcf-offline-depot",
         "/vcf-private-registry",
@@ -755,7 +756,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v150" in service_worker.text
+    assert "labfoundry-pwa-v155" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -767,8 +768,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=monitor-apply-ux-20260722-11" in service_worker.text
-    assert "/static/app.js?v=ipv6-nginx-listeners-20260722-1" in service_worker.text
+    assert "/static/app.css?v=monitor-apply-ux-20260722-12" in service_worker.text
+    assert "/static/app.js?v=esx-storage-ipv6-nginx-20260722-2" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -777,7 +778,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=monitor-apply-ux-20260722-11" in offline.text
+    assert "/static/app.css?v=monitor-apply-ux-20260722-12" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -811,8 +812,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "data-monitor-disk-activity-table" in page.text
     assert "<th>Device</th><th>Read/s</th><th>Write/s</th>" in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=monitor-apply-ux-20260722-11" in page.text
-    assert "/static/app.js?v=ipv6-nginx-listeners-20260722-1" in page.text
+    assert "/static/app.css?v=monitor-apply-ux-20260722-12" in page.text
+    assert "/static/app.js?v=esx-storage-ipv6-nginx-20260722-2" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -4861,6 +4862,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert "LDAP / LDAPS" in response.text
     assert "KMS" in response.text
     assert "NTP / NTS" in response.text
+    assert "ESX Storage NFS" in response.text
     assert "Nginx" in response.text
     assert "HTTP Access" in response.text
     assert "HTTP Errors" in response.text
@@ -4890,7 +4892,7 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
     assert '<option value="500" >500</option>' in response.text
     assert "Refresh 5s" in response.text
     assert 'class="language-labfoundry-log" data-log-lines-output' in response.text
-    assert response.text.count('data-terminal-note-open="false"') == 10
+    assert response.text.count('data-terminal-note-open="false"') == 11
     toolbar = response.text.split('<div class="logs-toolbar">', 1)[1].split("</div>", 1)[0]
     assert toolbar.index("data-log-refresh-status") < toolbar.index("data-log-lines")
     assert "logs-refresh-status" in toolbar
@@ -4924,9 +4926,10 @@ def test_logs_page_renders_refreshable_fixed_source_tabs_and_redacts_logs(client
         "dnsmasq-dns",
         "dnsmasq-dhcp",
         "dnsmasq-tftp",
-        "ldap",
-        "ntp",
-        "nginx",
+            "ldap",
+            "ntp",
+            "esx-storage",
+            "nginx",
         "nginx-access",
         "nginx-error",
         "kms",
@@ -10084,7 +10087,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "monitor-apply-ux-20260722-11" in page.text
+    assert "monitor-apply-ux-20260722-12" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text
@@ -11215,6 +11218,89 @@ def test_services_and_service_pages_derive_composite_runtime_status(client, monk
     assert client.get("/api/v1/services/ca", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
     assert client.get("/api/v1/services/repository", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
     assert client.get("/api/v1/services/vcf-backups", headers={"Authorization": f"Bearer {token}"}).json()["running"] is True
+
+
+def test_esx_storage_live_status_requires_rpcbind_only_for_nfs3(client, monkeypatch):
+    import html
+    import json
+
+    from sqlalchemy import select
+
+    from labfoundry.app.adapters.system import AdapterResult
+    from labfoundry.app.config import get_settings
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import EsxNfsShare, EsxStorageSettings, EsxStorageVolume
+
+    def fake_service_status(self, unit: str):
+        active = "inactive" if unit == "rpcbind.service" else "active"
+        enabled = "disabled" if unit == "rpcbind.service" else "enabled"
+        return AdapterResult(
+            command=["systemctl", "is-active", unit, "&&", "systemctl", "is-enabled", unit],
+            dry_run=False,
+            stdout=json.dumps({"active": active, "enabled": enabled}),
+        )
+
+    monkeypatch.setenv("LABFOUNDRY_DRY_RUN_SYSTEM_ADAPTERS", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr("labfoundry.app.ui.SystemAdapter.service_status", fake_service_status)
+    monkeypatch.setattr("labfoundry.app.api.v1.SystemAdapter.service_status", fake_service_status)
+
+    with SessionLocal() as db:
+        settings = db.execute(select(EsxStorageSettings)).scalar_one_or_none()
+        if settings is None:
+            settings = EsxStorageSettings(enabled=True, hostname="nfs.labfoundry.internal")
+            db.add(settings)
+        else:
+            settings.enabled = True
+        volume = EsxStorageVolume(
+            name="rpcbind-health",
+            source_type="mounted_ext4",
+            stable_device_id="/dev/disk/by-uuid/rpcbind-health",
+            filesystem_uuid="rpcbind-health",
+            mount_path="/mnt/labfoundry-esx-storage/rpcbind-health",
+            state="mounted",
+            applied=True,
+        )
+        db.add(volume)
+        db.flush()
+        share = EsxNfsShare(
+            datastore_name="rpcbind-health",
+            volume_id=volume.id,
+            relative_path="datastore",
+            preferred_nfs_version="3",
+            interface_name="eth1",
+            address_families="ipv4\nipv6",
+            ipv4_clients="192.168.50.10/32",
+            ipv6_clients="fd00:50::10/128",
+            enabled=True,
+        )
+        db.add(share)
+        db.commit()
+
+    login(client)
+    page = client.get("/services")
+    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    esx_row = next(row for row in service_rows if row["service"] == "esx-storage")
+    assert esx_row["running"] is False
+    assert esx_row["health"] == "degraded"
+    assert "rpcbind.service is required" in esx_row["detail"]
+
+    token = create_api_token(client, ["read:services"])
+    api_row = client.get("/api/v1/services/esx-storage", headers={"Authorization": f"Bearer {token}"}).json()
+    assert api_row["running"] is False
+    assert api_row["health"] == "degraded"
+    assert "rpcbind.service is required" in api_row["detail"]
+
+    with SessionLocal() as db:
+        share = db.execute(select(EsxNfsShare).where(EsxNfsShare.datastore_name == "rpcbind-health")).scalar_one()
+        share.preferred_nfs_version = "4.1"
+        db.commit()
+
+    page = client.get("/services")
+    service_rows = json.loads(html.unescape(page.text.split("data-services='", 1)[1].split("'", 1)[0]))
+    esx_row = next(row for row in service_rows if row["service"] == "esx-storage")
+    assert esx_row["running"] is True
+    assert esx_row["health"] == "healthy"
 
 
 def test_services_dns_dhcp_rows_use_desired_enabled_state(client):

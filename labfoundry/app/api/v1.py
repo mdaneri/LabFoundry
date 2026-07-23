@@ -30,6 +30,9 @@ from labfoundry.app.models import (
     DnsSettings,
     EsxiKickstart,
     EsxiPxeHost,
+    EsxNfsShare,
+    EsxStorageSettings,
+    EsxStorageVolume,
     FirewallRule,
     FirewallSettings,
     Job,
@@ -91,6 +94,15 @@ from labfoundry.app.schemas import (
     EsxiInstallerIsoResponse,
     EsxiPxeHostCreate,
     EsxiPxeHostResponse,
+    EsxNfsShareCreate,
+    EsxNfsShareResponse,
+    EsxNfsShareUpdate,
+    EsxStorageDiskResponse,
+    EsxStorageSettingsUpdate,
+    EsxStorageStatusResponse,
+    EsxStorageVolumeCreate,
+    EsxStorageVolumeResponse,
+    EsxStorageVolumeUpdate,
     FirewallRuleCreate,
     FirewallRuleResponse,
     FirewallSettingsResponse,
@@ -134,6 +146,20 @@ from labfoundry.app.schemas import (
     WanStatusResponse,
 )
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY, firewall_interface_networks, firewall_source_group_state
+from labfoundry.app.services.esx_storage import (
+    ESX_STORAGE_MOUNT_ROOT,
+    StorageInterface,
+    firewall_rule_specs as esx_storage_firewall_rule_specs,
+    parse_disk_inventory_output,
+    normalize_families,
+    normalize_relative_path,
+    render_manifest as render_esx_storage_manifest,
+    rpcbind_required as esx_storage_rpcbind_required,
+    select_inventory_candidate,
+    split_lines as split_esx_storage_lines,
+    storage_slug,
+    validate_mounted_volume_path,
+)
 from labfoundry.app.services.monitoring import monitor_payload
 from labfoundry.app.services.ldap import (
     LDAP_GROUP_PATTERN,
@@ -365,6 +391,22 @@ def service_state_response(row: ServiceState, db: Session | None = None) -> Serv
         data.update(vcf_depot_service_state(get_vcf_offline_depot_settings(db), nginx_active=backing_systemd_unit_active("nginx.service")))
         data.pop("label", None)
         data.pop("pill", None)
+        return ServiceStateResponse(**data)
+    if row.service == "esx-storage" and db is not None:
+        settings = db.execute(select(EsxStorageSettings)).scalar_one_or_none() or EsxStorageSettings()
+        shares = db.execute(select(EsxNfsShare).where(EsxNfsShare.enabled.is_(True))).scalars().all()
+        nfs_active = backing_systemd_unit_active("nfs-server.service")
+        requires_rpcbind = esx_storage_rpcbind_required(shares)
+        rpcbind_active = backing_systemd_unit_active("rpcbind.service") if requires_rpcbind else True
+        data["enabled"] = settings.enabled
+        if nfs_active is not None:
+            data["running"] = nfs_active
+        if requires_rpcbind and not get_settings().dry_run_system_adapters and rpcbind_active is not True:
+            data["running"] = False
+            data["detail"] = "NFS 3 / 4.1 over equivalent IPv4 and IPv6 listeners; rpcbind.service is required by an enabled NFS 3 share but is not active"
+        else:
+            data["detail"] = "NFS 3 / 4.1 over equivalent IPv4 and IPv6 listeners"
+        data["health"] = "healthy" if data["enabled"] and data["running"] else "degraded" if data["enabled"] else "disabled"
         return ServiceStateResponse(**data)
     unit = SERVICE_SYSTEMD_UNITS.get(row.service)
     if unit and not get_settings().dry_run_system_adapters:
@@ -644,6 +686,7 @@ def firewall_validation_payload(db: Session) -> tuple[FirewallSettings, list[Fir
         source_groups=source_group_state["groups"],
         source_group_assignments=source_group_state["assignments"],
         ldap_settings=db.execute(select(LdapSettings)).scalar_one_or_none() or LdapSettings(),
+        esx_storage_rules=esx_storage_firewall_rule_specs(esx_storage_state(db)[4]),
     )
     generated_rules.extend(
         managed_routing_firewall_rules(
@@ -2432,6 +2475,324 @@ def get_vcf_backups_status(
         config_path=payload["config_path"],
         dry_run=get_settings().dry_run_system_adapters,
     )
+
+
+def get_esx_storage_settings(db: Session) -> EsxStorageSettings:
+    row = db.execute(select(EsxStorageSettings).order_by(EsxStorageSettings.id)).scalars().first()
+    if row is None:
+        dns = db.execute(select(DnsSettings).order_by(DnsSettings.id)).scalars().first()
+        domain = (dns.domain if dns else "labfoundry.internal").splitlines()[0].strip().strip(".")
+        row = EsxStorageSettings(enabled=False, hostname=f"nfs.{domain}")
+        db.add(row)
+        db.flush()
+    return row
+
+
+def esx_storage_interfaces(db: Session) -> dict[str, StorageInterface]:
+    interfaces: dict[str, StorageInterface] = {}
+    for row in db.execute(select(PhysicalInterface).order_by(PhysicalInterface.name)).scalars().all():
+        if row.oper_state == "missing" or row.mode == "trunk" or row.role not in {"access", "services", "storage", "route"}:
+            continue
+        interfaces[row.name] = StorageInterface(
+            row.name,
+            tuple(value for value in [row.ip_cidr] if value),
+            tuple(value for value in [row.ipv6_cidr] if value and row.ipv6_enabled),
+        )
+    for row in db.execute(select(VlanInterface).order_by(VlanInterface.name)).scalars().all():
+        if not row.enabled or row.role not in {"access", "services", "storage", "route"}:
+            continue
+        interfaces[row.name] = StorageInterface(
+            row.name,
+            tuple(value for value in [row.ip_cidr] if value),
+            tuple(value for value in [row.ipv6_cidr] if value),
+        )
+    return interfaces
+
+
+def esx_storage_state(db: Session) -> tuple[EsxStorageSettings, list[EsxStorageVolume], list[EsxNfsShare], dict[str, StorageInterface], dict[str, Any]]:
+    settings = get_esx_storage_settings(db)
+    volumes = db.execute(select(EsxStorageVolume).order_by(EsxStorageVolume.name)).scalars().all()
+    shares = db.execute(select(EsxNfsShare).order_by(EsxNfsShare.datastore_name)).scalars().all()
+    interfaces = esx_storage_interfaces(db)
+    dns = db.execute(select(DnsSettings).order_by(DnsSettings.id)).scalars().first()
+    appliance = get_appliance_settings(db)
+    manifest = render_esx_storage_manifest(
+        settings,
+        volumes,
+        shares,
+        interfaces,
+        dns_enabled=bool(dns and dns.enabled),
+        dns_naming_mode=appliance.service_dns_target_naming or "ip",
+    )
+    return settings, volumes, shares, interfaces, manifest
+
+
+def esx_share_response(share: EsxNfsShare, manifest: dict[str, Any]) -> EsxNfsShareResponse:
+    rendered = next(item for item in manifest["shares"] if item["id"] == share.id)
+    return EsxNfsShareResponse(
+        id=share.id,
+        datastore_name=share.datastore_name,
+        volume_id=share.volume_id,
+        volume_name=rendered["volume_name"],
+        relative_path=share.relative_path,
+        preferred_nfs_version=share.preferred_nfs_version,
+        interface_name=share.interface_name,
+        address_families=rendered["address_families"],
+        ipv4_clients=rendered["clients"]["ipv4"],
+        ipv6_clients=rendered["clients"]["ipv6"],
+        listeners=rendered["listeners"],
+        target_hostnames=rendered["target_hostnames"],
+        local_path=rendered["source_path"],
+        remote_path=rendered["remote_path"],
+        connection_commands=rendered["connection_commands"],
+        enabled=share.enabled,
+    )
+
+
+def reconcile_esx_storage_dns(db: Session, actor: str, *, previous_hostname: str | None = None) -> None:
+    from labfoundry.app import ui as ui_module
+
+    ui_module.ensure_dns_for_esx_storage(db, actor, previous_hostname=previous_hostname)
+
+
+@router.get("/esx-storage/status", response_model=EsxStorageStatusResponse, tags=["ESX Storage"], operation_id="getEsxStorageStatus")
+def get_esx_storage_status(
+    identity: Annotated[Identity, Depends(require_scope("read:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> EsxStorageStatusResponse:
+    settings, volumes, shares, _interfaces, manifest = esx_storage_state(db)
+    return EsxStorageStatusResponse(
+        enabled=settings.enabled,
+        hostname=settings.hostname,
+        valid=not manifest["validation"]["errors"],
+        validation_errors=manifest["validation"]["errors"],
+        validation_warnings=manifest["validation"]["warnings"],
+        volume_count=len(volumes),
+        share_count=len(shares),
+        active_share_count=len([row for row in shares if row.enabled]),
+        dry_run=get_settings().dry_run_system_adapters,
+    )
+
+
+@router.patch("/esx-storage/status", response_model=EsxStorageStatusResponse, tags=["ESX Storage"], operation_id="updateEsxStorageSettings")
+def update_esx_storage_settings(
+    payload: EsxStorageSettingsUpdate,
+    identity: Annotated[Identity, Depends(require_scope("write:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> EsxStorageStatusResponse:
+    row = get_esx_storage_settings(db)
+    previous_hostname = row.hostname
+    hostname = payload.hostname.strip().lower().rstrip(".")
+    if "." not in hostname:
+        raise HTTPException(status_code=422, detail="ESX Storage hostname must be a fully qualified DNS name.")
+    row.enabled = payload.enabled
+    row.hostname = hostname
+    row.updated_at = utcnow()
+    reconcile_esx_storage_dns(db, identity.username, previous_hostname=previous_hostname)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_esx_storage_settings", resource_type="esx_storage", resource_id=str(row.id))
+    return get_esx_storage_status(identity, db)
+
+
+@router.get("/esx-storage/disks", response_model=list[EsxStorageDiskResponse], tags=["ESX Storage"], operation_id="getEsxStorageDisks")
+def get_esx_storage_disks(
+    identity: Annotated[Identity, Depends(require_scope("read:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> list[EsxStorageDiskResponse]:
+    result = SystemAdapter().esx_storage_inventory()
+    if result.returncode:
+        raise HTTPException(status_code=503, detail=result.stderr or "ESX Storage disk inventory failed.")
+    claimed = set(db.execute(select(EsxStorageVolume.stable_device_id)).scalars().all())
+    try:
+        entries = parse_disk_inventory_output(result.stdout, claimed_ids=claimed)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="ESX Storage disk inventory returned invalid JSON.") from exc
+    return [EsxStorageDiskResponse(**item) for item in entries]
+
+
+@router.get("/esx-storage/volumes", response_model=list[EsxStorageVolumeResponse], tags=["ESX Storage"], operation_id="getEsxStorageVolumes")
+def get_esx_storage_volumes(
+    identity: Annotated[Identity, Depends(require_scope("read:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> list[EsxStorageVolumeResponse]:
+    return [EsxStorageVolumeResponse.model_validate(row) for row in db.execute(select(EsxStorageVolume).order_by(EsxStorageVolume.name)).scalars().all()]
+
+
+@router.post("/esx-storage/volumes", response_model=EsxStorageVolumeResponse, status_code=201, tags=["ESX Storage"], operation_id="createEsxStorageVolume")
+def create_esx_storage_volume(
+    payload: EsxStorageVolumeCreate,
+    identity: Annotated[Identity, Depends(require_scope("write:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> EsxStorageVolumeResponse:
+    name = payload.name.strip()
+    if payload.source_type == "blank_disk" and not payload.stable_device_id.startswith("/dev/disk/by-id/"):
+        raise HTTPException(status_code=422, detail="Blank disks require a stable /dev/disk/by-id identity.")
+    if payload.source_type == "mounted_ext4":
+        try:
+            validate_mounted_volume_path(payload.mount_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    candidate: dict[str, Any] = {}
+    if not get_settings().dry_run_system_adapters:
+        result = SystemAdapter(dry_run=False).esx_storage_inventory()
+        if result.returncode:
+            raise HTTPException(status_code=503, detail=result.stderr or "ESX Storage disk inventory failed.")
+        try:
+            inventory = parse_disk_inventory_output(
+                result.stdout,
+                claimed_ids=set(db.execute(select(EsxStorageVolume.stable_device_id)).scalars().all()),
+            )
+            candidate = select_inventory_candidate(
+                inventory,
+                source_type=payload.source_type,
+                stable_device_id=payload.stable_device_id,
+                mount_path=payload.mount_path,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    row = EsxStorageVolume(
+        name=name,
+        source_type=payload.source_type,
+        stable_device_id=str(candidate.get("stable_device_id") or payload.stable_device_id).strip(),
+        device_path=str(candidate.get("device_path") or ""),
+        device_model=str(candidate.get("model") or ""),
+        device_serial=str(candidate.get("serial") or ""),
+        device_wwn=str(candidate.get("wwn") or ""),
+        capacity_bytes=int(candidate.get("size_bytes") or 0),
+        filesystem_uuid=str(candidate.get("filesystem_uuid") or ""),
+        filesystem_label=str(candidate.get("filesystem_label") or ""),
+        mount_path=str(candidate.get("mount_path") or payload.mount_path).strip() or f"{ESX_STORAGE_MOUNT_ROOT}/{storage_slug(name)}",
+        state="pending_format" if payload.source_type == "blank_disk" else "mounted",
+        applied=False,
+    )
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="The volume name or stable disk identity is already claimed.") from exc
+    db.refresh(row)
+    reconcile_esx_storage_dns(db, identity.username)
+    db.commit()
+    record_audit(db, actor=identity.username, action="create_esx_storage_volume", resource_type="esx_storage_volume", resource_id=str(row.id), detail=f"name={row.name} source_type={row.source_type}")
+    return EsxStorageVolumeResponse.model_validate(row)
+
+
+@router.patch("/esx-storage/volumes/{volume_id}", response_model=EsxStorageVolumeResponse, tags=["ESX Storage"], operation_id="updateEsxStorageVolume")
+def update_esx_storage_volume(
+    volume_id: int,
+    payload: EsxStorageVolumeUpdate,
+    identity: Annotated[Identity, Depends(require_scope("write:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> EsxStorageVolumeResponse:
+    row = db.get(EsxStorageVolume, volume_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="ESX Storage volume not found.")
+    if any(value is not None for value in [payload.stable_device_id, payload.mount_path]):
+        raise HTTPException(status_code=409, detail="Volume identity and mount path are immutable after the inventory-backed claim is created.")
+    if payload.name is not None:
+        row.name = payload.name.strip()
+    if payload.stable_device_id is not None:
+        if row.source_type == "blank_disk" and not payload.stable_device_id.startswith("/dev/disk/by-id/"):
+            raise HTTPException(status_code=422, detail="Blank disks require a stable /dev/disk/by-id identity.")
+        row.stable_device_id = payload.stable_device_id.strip()
+    if payload.mount_path is not None:
+        row.mount_path = payload.mount_path.strip()
+    row.updated_at = utcnow()
+    db.commit()
+    db.refresh(row)
+    reconcile_esx_storage_dns(db, identity.username)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_esx_storage_volume", resource_type="esx_storage_volume", resource_id=str(row.id))
+    return EsxStorageVolumeResponse.model_validate(row)
+
+
+@router.get("/esx-storage/shares", response_model=list[EsxNfsShareResponse], tags=["ESX Storage"], operation_id="getEsxNfsShares")
+def get_esx_nfs_shares(
+    identity: Annotated[Identity, Depends(require_scope("read:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> list[EsxNfsShareResponse]:
+    _settings, _volumes, shares, _interfaces, manifest = esx_storage_state(db)
+    return [esx_share_response(row, manifest) for row in shares]
+
+
+def apply_esx_share_payload(row: EsxNfsShare, payload: EsxNfsShareCreate | EsxNfsShareUpdate) -> None:
+    values = payload.model_dump(exclude_unset=True)
+    if "relative_path" in values:
+        values["relative_path"] = normalize_relative_path(values["relative_path"])
+    if "address_families" in values:
+        families = normalize_families(values["address_families"])
+        if not families:
+            raise HTTPException(status_code=422, detail="Enable IPv4, IPv6, or both.")
+        values["address_families"] = "\n".join(families)
+    if "ipv4_clients" in values:
+        values["ipv4_clients"] = "\n".join(split_esx_storage_lines(values["ipv4_clients"]))
+    if "ipv6_clients" in values:
+        values["ipv6_clients"] = "\n".join(split_esx_storage_lines(values["ipv6_clients"]))
+    for key, value in values.items():
+        setattr(row, key, value)
+    row.updated_at = utcnow()
+
+
+@router.post("/esx-storage/shares", response_model=EsxNfsShareResponse, status_code=201, tags=["ESX Storage"], operation_id="createEsxNfsShare")
+def create_esx_nfs_share(
+    payload: EsxNfsShareCreate,
+    identity: Annotated[Identity, Depends(require_scope("write:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> EsxNfsShareResponse:
+    if db.get(EsxStorageVolume, payload.volume_id) is None:
+        raise HTTPException(status_code=422, detail="Selected ESX Storage volume does not exist.")
+    row = EsxNfsShare(datastore_name=payload.datastore_name, volume_id=payload.volume_id)
+    apply_esx_share_payload(row, payload)
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Datastore name already exists.") from exc
+    db.refresh(row)
+    reconcile_esx_storage_dns(db, identity.username)
+    db.commit()
+    record_audit(db, actor=identity.username, action="create_esx_nfs_share", resource_type="esx_nfs_share", resource_id=str(row.id), detail=f"datastore={row.datastore_name}")
+    return esx_share_response(row, esx_storage_state(db)[4])
+
+
+@router.patch("/esx-storage/shares/{share_id}", response_model=EsxNfsShareResponse, tags=["ESX Storage"], operation_id="updateEsxNfsShare")
+def update_esx_nfs_share(
+    share_id: int,
+    payload: EsxNfsShareUpdate,
+    identity: Annotated[Identity, Depends(require_scope("write:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> EsxNfsShareResponse:
+    row = db.get(EsxNfsShare, share_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="NFS datastore share not found.")
+    if payload.volume_id is not None and db.get(EsxStorageVolume, payload.volume_id) is None:
+        raise HTTPException(status_code=422, detail="Selected ESX Storage volume does not exist.")
+    apply_esx_share_payload(row, payload)
+    reconcile_esx_storage_dns(db, identity.username)
+    db.commit()
+    db.refresh(row)
+    record_audit(db, actor=identity.username, action="update_esx_nfs_share", resource_type="esx_nfs_share", resource_id=str(row.id), detail=f"datastore={row.datastore_name}")
+    return esx_share_response(row, esx_storage_state(db)[4])
+
+
+@router.delete("/esx-storage/shares/{share_id}", status_code=204, tags=["ESX Storage"], operation_id="deleteEsxNfsShare")
+def delete_esx_nfs_share(
+    share_id: int,
+    identity: Annotated[Identity, Depends(require_scope("write:esx-storage"))],
+    db: Session = Depends(get_db),
+) -> Response:
+    row = db.get(EsxNfsShare, share_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="NFS datastore share not found.")
+    name = row.datastore_name
+    db.delete(row)
+    db.flush()
+    reconcile_esx_storage_dns(db, identity.username)
+    db.commit()
+    record_audit(db, actor=identity.username, action="delete_esx_nfs_share", resource_type="esx_nfs_share", resource_id=str(share_id), detail=f"datastore={name}; data preserved")
+    return Response(status_code=204)
 
 
 def build_vcf_offline_depot_status(db: Session) -> VcfOfflineDepotStatusResponse:

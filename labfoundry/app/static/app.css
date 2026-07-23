@@ -1995,6 +1995,48 @@ textarea {
   background: var(--surface-soft);
 }
 
+.esx-storage-command-details {
+  padding: 0;
+  overflow: hidden;
+}
+
+.esx-storage-command-details > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.esx-storage-command-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.esx-storage-command-details > summary::before {
+  content: "▸";
+  color: var(--muted);
+}
+
+.esx-storage-command-details[open] > summary::before {
+  content: "▾";
+}
+
+.esx-storage-command-details > summary strong {
+  margin-right: auto;
+}
+
+.esx-storage-command-details > p,
+.esx-storage-command-details > .settings-list {
+  margin-left: 14px;
+  margin-right: 14px;
+}
+
+.esx-storage-command-details > .settings-list {
+  margin-bottom: 14px;
+}
+
 .zone-tool-panels {
   gap: 10px;
   min-width: 0;

@@ -61,6 +61,8 @@ ALL_SCOPES = [
     "write:repository",
     "read:esxi-pxe",
     "write:esxi-pxe",
+    "read:esx-storage",
+    "write:esx-storage",
     "read:vcf-registry",
     "write:vcf-registry",
     "read:vcf-backups",
@@ -108,6 +110,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--wan-interface", default="eth3")
     parser.add_argument("--vlan-id", type=int, default=50)
     parser.add_argument("--site-cidr", default="192.168.50.1/24")
+    parser.add_argument("--site-ipv6-cidr", default="fd00:50::1/64")
     parser.add_argument("--vlan-cidr", default="192.168.60.1/24")
     parser.add_argument("--wan-cidr", default="172.31.50.1/24")
     parser.add_argument("--domain", default="labfoundry.internal")
@@ -120,6 +123,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pxe-client-mac", default="")
     parser.add_argument("--pxe-client-ip", default="")
     parser.add_argument("--pxe-installer-iso-path", default="")
+    parser.add_argument("--esx-storage-test", action="store_true", help="Configure and apply one dual-stack ESX NFS datastore.")
+    parser.add_argument("--esx-storage-device-id", default="", help="Exact eligible /dev/disk/by-id identity; required when inventory has multiple blank disks.")
+    parser.add_argument("--esx-storage-ipv4-client", default="192.168.50.210/32")
+    parser.add_argument("--esx-storage-ipv6-client", default="fd00:50::210/128")
+    parser.add_argument("--confirm-esx-storage-format", action="store_true", help="Authorize the selected lifecycle blank disk to be formatted as ext4.")
     parser.add_argument("--ssh-user", default="", help="Compatibility override for both appliance and client SSH users.")
     parser.add_argument("--appliance-ssh-user", default="admin")
     parser.add_argument("--client-ssh-user", default="alpine")
@@ -464,7 +472,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "appliance_url": args.appliance_url,
         "interfaces": {
-            "site": {"name": args.site_interface, "ip_cidr": args.site_cidr, "mode": "access"},
+            "site": {"name": args.site_interface, "ip_cidr": args.site_cidr, "ipv6_cidr": args.site_ipv6_cidr, "mode": "access"},
             "trunk": {"name": args.trunk_interface, "mode": "trunk"},
             "vlan": {"name": vlan_name, "parent": args.trunk_interface, "vlan_id": args.vlan_id, "ip_cidr": args.vlan_cidr},
             "wan": {"name": args.wan_interface, "ip_cidr": args.wan_cidr, "mode": "access"},
@@ -474,7 +482,14 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "url": args.client_ca_request_url or args.appliance_url,
             },
         },
-        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "ca", "ntpd", "kms", "ldap", "appliance_settings", "vcf_backups", "vcf_offline_depot", "public_services"],
+        "apply_units": ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "esx_storage", "ca", "ntpd", "kms", "ldap", "appliance_settings", "vcf_backups", "vcf_offline_depot", "public_services"],
+        "esx_storage": {
+            "enabled": bool(args.esx_storage_test),
+            "device_id": args.esx_storage_device_id,
+            "ipv4_client": args.esx_storage_ipv4_client,
+            "ipv6_client": args.esx_storage_ipv6_client,
+            "format_authorized": bool(args.confirm_esx_storage_format),
+        },
         "pxe_boot": {
             "enabled": bool(args.pxe_client_mac),
             "mode": args.pxe_test_mode,
@@ -494,6 +509,7 @@ def lifecycle_plan(args: argparse.Namespace) -> dict[str, Any]:
             "VCF Backup desired state, local user sync, SFTP listener, and client probe",
             "VCF Offline Depot browser login, curl/wget Basic auth, and Local Users password rotation",
             "ESXi PXE desired state, DHCP boot options, TFTP artifacts, and Hyper-V PXE VM smoke",
+            "ESX NFS 3 and 4.1 desired state, blank-disk initialization, equal IPv4/IPv6 DNS targets, exports, sockets, firewall rules, and persistence evidence",
             "passwordless admin web terminal on management and one selected extra interface",
             "client DNS/DHCP/routing probes",
         ],
@@ -544,13 +560,14 @@ def configure_network(client: HttpClient, args: argparse.Namespace) -> dict[str,
         client.json_request(
             "PATCH",
             f"/api/v1/interfaces/physical/{site_parent}",
-            json_body={"admin_state": "up", "mode": "trunk", "role": "unused", "ip_cidr": ""},
+            json_body={"admin_state": "up", "mode": "trunk", "role": "unused", "ip_cidr": "", "ipv6_enabled": False, "ipv6_cidr": ""},
         )
         ensure_vlan(
             client,
             parent_interface=site_parent,
             vlan_id=int(site_vlan_raw),
             ip_cidr=args.site_cidr,
+            ipv6_cidr=args.site_ipv6_cidr,
             role="access",
         )
         evidence["site_vlan"] = args.site_interface
@@ -558,7 +575,7 @@ def configure_network(client: HttpClient, args: argparse.Namespace) -> dict[str,
         client.json_request(
             "PATCH",
             f"/api/v1/interfaces/physical/{args.site_interface}",
-            json_body={"admin_state": "up", "mode": "access", "role": "access", "ip_cidr": args.site_cidr},
+            json_body={"admin_state": "up", "mode": "access", "role": "access", "ip_cidr": args.site_cidr, "ipv6_enabled": True, "ipv6_cidr": args.site_ipv6_cidr},
         )
     client.json_request(
         "PATCH",
@@ -580,7 +597,7 @@ def configure_network(client: HttpClient, args: argparse.Namespace) -> dict[str,
     return evidence
 
 
-def ensure_vlan(client: HttpClient, *, parent_interface: str, vlan_id: int, ip_cidr: str, role: str) -> dict[str, Any]:
+def ensure_vlan(client: HttpClient, *, parent_interface: str, vlan_id: int, ip_cidr: str, role: str, ipv6_cidr: str = "") -> dict[str, Any]:
     existing_vlans = client.json_request("GET", "/api/v1/vlans")
     vlan_name = f"{parent_interface}.{vlan_id}"
     existing = next((row for row in existing_vlans if row.get("name") == vlan_name), None)
@@ -588,6 +605,7 @@ def ensure_vlan(client: HttpClient, *, parent_interface: str, vlan_id: int, ip_c
         "parent_interface": parent_interface,
         "vlan_id": vlan_id,
         "ip_cidr": ip_cidr,
+        "ipv6_cidr": ipv6_cidr,
         "mtu": 1500,
         "role": role,
         "enabled": True,
@@ -600,6 +618,7 @@ def ensure_vlan(client: HttpClient, *, parent_interface: str, vlan_id: int, ip_c
 def configure_dns_dhcp(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
     site = ip_interface(args.site_cidr)
     site_ip = str(site.ip)
+    site_ipv6 = str(ip_interface(args.site_ipv6_cidr).ip)
     site_network = site.network
     hosts = list(site_network.hosts())
     if len(hosts) < 181:
@@ -612,7 +631,7 @@ def configure_dns_dhcp(client: HttpClient, args: argparse.Namespace) -> dict[str
         json_body={
             "enabled": True,
             "listen_interface": args.site_interface,
-            "listen_address": site_ip,
+            "listen_address": f"{site_ip}\n{site_ipv6}",
             "domain": args.domain,
             "upstream_servers": ["1.1.1.1", "9.9.9.9"],
             "conditional_forwarders": [],
@@ -1784,6 +1803,21 @@ def apply_units(client: HttpClient, units: list[str], args: argparse.Namespace) 
         csrf = extract_csrf(body)
         form: list[tuple[str, Any]] = [("csrf", csrf)]
         form.extend(("selected_units", unit) for unit in units)
+        if "esx_storage" in units:
+            review = client.json_request("GET", "/appliance-apply/review")
+            esx_unit = next((item for item in review.get("units", []) if item.get("id") == "esx_storage"), None)
+            format_volumes = list((esx_unit or {}).get("format_volumes") or [])
+            if format_volumes and not args.confirm_esx_storage_format:
+                raise LifecycleError(
+                    "ESX Storage apply requires --confirm-esx-storage-format after reviewing the complete disk fingerprint."
+                )
+            for volume in format_volumes:
+                form.append(
+                    (
+                        "format_confirmations",
+                        json.dumps({"volume_id": volume["id"], "confirmation": volume["confirmation"]}, separators=(",", ":")),
+                    )
+                )
         status, response_body, _headers = client.request(
             "POST",
             "/appliance-apply",
@@ -2051,6 +2085,73 @@ def run_host_checks(args: argparse.Namespace, checks: dict[str, str]) -> dict[st
     return evidence
 
 
+def configure_esx_storage(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
+    """Configure one volume and equivalent dual-stack NFS 3 and 4.1 datastores."""
+    if not args.esx_storage_test:
+        return {"skipped": "--esx-storage-test was not selected"}
+    volumes = client.json_request("GET", "/api/v1/esx-storage/volumes")
+    volume = next((item for item in volumes if item.get("name") == "lifecycle-esx-data"), None)
+    selected_disk: dict[str, Any] = {}
+    if volume is None:
+        disks = client.json_request("GET", "/api/v1/esx-storage/disks")
+        candidates = [item for item in disks if item.get("eligible") and item.get("candidate_type") == "blank_disk"]
+        if args.esx_storage_device_id:
+            candidates = [item for item in candidates if item.get("stable_device_id") == args.esx_storage_device_id]
+        if len(candidates) != 1:
+            raise LifecycleError(
+                "ESX Storage lifecycle requires exactly one eligible blank disk after --esx-storage-device-id filtering; "
+                f"found {len(candidates)}."
+            )
+        selected_disk = candidates[0]
+        volume = client.json_request(
+            "POST",
+            "/api/v1/esx-storage/volumes",
+            json_body={
+                "name": "lifecycle-esx-data",
+                "source_type": "blank_disk",
+                "stable_device_id": selected_disk["stable_device_id"],
+                "mount_path": "",
+            },
+        )
+    shares = client.json_request("GET", "/api/v1/esx-storage/shares")
+    desired_shares = [
+        ("lifecycle-nfs3", "nfs3", "3"),
+        ("lifecycle-nfs41", "nfs41", "4.1"),
+    ]
+    configured_shares: list[dict[str, Any]] = []
+    for datastore_name, relative_path, version in desired_shares:
+        payload = {
+            "datastore_name": datastore_name,
+            "volume_id": volume["id"],
+            "relative_path": relative_path,
+            "preferred_nfs_version": version,
+            "interface_name": args.site_interface,
+            "address_families": ["ipv4", "ipv6"],
+            "ipv4_clients": [args.esx_storage_ipv4_client],
+            "ipv6_clients": [args.esx_storage_ipv6_client],
+            "enabled": True,
+        }
+        existing = next((item for item in shares if item.get("datastore_name") == datastore_name), None)
+        if existing:
+            configured = client.json_request("PATCH", f"/api/v1/esx-storage/shares/{existing['id']}", json_body=payload)
+        else:
+            configured = client.json_request("POST", "/api/v1/esx-storage/shares", json_body=payload)
+        configured_shares.append(configured)
+    status = client.json_request(
+        "PATCH",
+        "/api/v1/esx-storage/status",
+        json_body={"enabled": True, "hostname": f"nfs.{args.domain}"},
+    )
+    return {
+        "status": status,
+        "volume": volume,
+        "selected_disk": selected_disk,
+        "shares": configured_shares,
+        "ipv4_client": args.esx_storage_ipv4_client,
+        "ipv6_client": args.esx_storage_ipv6_client,
+    }
+
+
 def routing_host_check_commands(args: argparse.Namespace) -> dict[str, str]:
     wan_network = str(ip_interface(args.wan_cidr).network)
     return {
@@ -2172,6 +2273,21 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
         ),
     }
     checks["dnsmasq"] = "test -f /etc/labfoundry/dnsmasq.d/labfoundry.conf && systemctl is-active dnsmasq"
+    if args.esx_storage_test:
+        site_ipv6 = str(ip_interface(args.site_ipv6_cidr).ip)
+        ipv4_target = f"nfs-{site_ip.replace('.', '-')}.{args.domain}"
+        ipv6_token = "-".join(format(int(group, 16), "x") for group in ip_interface(args.site_ipv6_cidr).ip.exploded.split(":"))
+        ipv6_target = f"nfs-{ipv6_token}.{args.domain}"
+        checks["esx_storage"] = (
+            "systemctl is-active rpcbind.service && systemctl is-active nfs-server.service && "
+            "/opt/labfoundry/bin/labfoundry-helper esx-storage status --real && "
+            "exportfs -v && grep -F lifecycle-nfs3 /etc/exports.d/labfoundry-esx-storage.exports && "
+            "grep -F lifecycle-nfs41 /etc/exports.d/labfoundry-esx-storage.exports && "
+            "ss -lnt | grep -E ':(111|2049|20048)[[:space:]]' && "
+            "nft list ruleset | grep -F esx-nfs- && "
+            f"dig +short A {ipv4_target} @127.0.0.1 | grep -Fx {site_ip} && "
+            f"dig +short AAAA {ipv6_target} @127.0.0.1 | grep -Fx {site_ipv6}"
+        )
     return run_host_checks(args, checks)
 
 
@@ -2832,6 +2948,7 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "appliance-health", appliance_health, client, args)
     run_step(results, "configure-network", configure_network, client, args)
     run_step(results, "configure-dns-dhcp", configure_dns_dhcp, client, args)
+    run_step(results, "configure-esx-storage", configure_esx_storage, client, args)
     run_step(results, "configure-esxi-pxe", configure_esxi_pxe, client, args)
     run_step(results, "configure-firewall-wan", configure_firewall_wan, client, args)
     run_step(results, "configure-ca", configure_ca, client, args)
@@ -2848,6 +2965,8 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
         ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "vcf_backups", "ldap"],
         args,
     )
+    if args.esx_storage_test:
+        run_step(results, "apply-esx-storage-units", apply_units, client, ["esx_storage", "dnsmasq", "firewall"], args)
     run_step(results, "ca-client-certificate-request", ca_client_certificate_request, client, args)
     run_step(results, "ca-generated-certificate-request-check", ca_generated_certificate_request_check, client, args)
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
@@ -2895,6 +3014,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
     run_step(results, "appliance-health", appliance_health, client, args)
     run_step(results, "restore-settings-backup", restore_settings_backup, client, args)
     run_step(results, "configure-ldap", configure_ldap, client, args)
+    run_step(results, "configure-esx-storage", configure_esx_storage, client, args)
     run_step(results, "stage-vcf-backup-password", stage_vcf_backup_password, client, args)
     run_step(results, "stage-vcf-depot-password", stage_vcf_depot_password, client, args)
     run_step(
@@ -2905,6 +3025,8 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
         ["local_users", "network", "firewall", "wan", "dnsmasq", "esxi_pxe", "vcf_backups", "ldap"],
         args,
     )
+    if args.esx_storage_test:
+        run_step(results, "apply-esx-storage-units", apply_units, client, ["esx_storage", "dnsmasq", "firewall"], args)
     run_step(results, "apply-ca-unit", apply_units, client, ["ca"], args)
     run_step(results, "apply-ntp-unit", apply_units, client, ["ntpd", "firewall"], args)
     run_step(results, "apply-vcf-offline-depot-unit", apply_units, client, ["dnsmasq", "firewall", "vcf_offline_depot", "public_services"], args)

@@ -25,7 +25,7 @@ import configparser
 import hashlib
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_interface, ip_network
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
@@ -67,6 +67,7 @@ COMMANDS: dict[str, set[str]] = {
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
     "vcf-offline-depot": {"validate", "stage-tool", "reset-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties"},
     "esxi-pxe": {"validate", "apply"},
+    "esx-storage": {"inventory", "validate", "apply", "status", "logs"},
     "public-services": {"validate", "apply"},
     "appliance-update": {"check", "apply", "sync-sources", "restart-service"},
     "automation": {"run"},
@@ -109,6 +110,9 @@ NO_PATH_ACTIONS = {
     ("console", "status"),
     ("vcf-offline-depot", "generate-software-depot-id"),
     ("vcf-offline-depot", "reset-tool"),
+    ("esx-storage", "inventory"),
+    ("esx-storage", "status"),
+    ("esx-storage", "logs"),
 }
 NON_PATH_ARGUMENT_ACTIONS = {("local-users", "authenticate"), ("automation", "run")}
 LABFOUNDRY_SERVICE_USER = "labfoundry"
@@ -129,6 +133,8 @@ CONSOLE_MANAGED_SERVICE_UNITS = (
     "ntpd.service",
     "slapd.service",
     "labfoundry-kms.service",
+    "rpcbind.service",
+    "nfs-server.service",
 )
 FIREWALL_APPLY_DIR = Path("/var/lib/labfoundry/apply/firewall")
 LABFOUNDRY_APPLY_DIR = LABFOUNDRY_STATE_DIR / "apply"
@@ -160,6 +166,18 @@ ESXI_INSTALLER_ISO_ROOT = Path("/mnt/labfoundry-vcf-offline-depot/PROD/COMP/ESX_
 ESXI_PXE_NGINX_SITE_PATH = Path("/etc/labfoundry/nginx/sites.d/esxi-pxe.conf")
 ESXI_PXE_SCHEMA_VERSION = 2
 ESXI_PXE_DEFAULT_HTTP_PORT = 8080
+ESX_STORAGE_APPLY_DIR = Path("/var/lib/labfoundry/apply/esx-storage")
+ESX_STORAGE_MOUNT_ROOT = Path("/mnt/labfoundry-esx-storage")
+ESX_STORAGE_RESERVED_MOUNT_PATHS = {
+    PurePosixPath("/mnt/labfoundry-vcf-backups"): "VCF Backups",
+    PurePosixPath("/mnt/labfoundry-vcf-offline-depot"): "VCF Offline Depot / VCFDT",
+}
+ESX_STORAGE_EXPORT_ROOT = Path("/srv/labfoundry/esx-storage")
+ESX_STORAGE_EXPORTS_PATH = Path("/etc/exports.d/labfoundry-esx-storage.exports")
+ESX_STORAGE_NFS_CONFIG_PATH = Path("/etc/nfs.conf.d/labfoundry-esx-storage.conf")
+ESX_STORAGE_FSTAB_PATH = Path("/etc/fstab")
+ESX_STORAGE_FSTAB_BEGIN = "# BEGIN LABFOUNDRY ESX STORAGE"
+ESX_STORAGE_FSTAB_END = "# END LABFOUNDRY ESX STORAGE"
 PXE_BOOT_BINARY_DIRS = [
     PXE_BOOTLOADER_STAGING_DIR,
     Path("/usr/share/ipxe"),
@@ -7620,6 +7638,514 @@ def _handle_console(action: str, args: list[str]) -> int:
     return 2
 
 
+def _esx_storage_safe_slug(value: object) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    if not slug:
+        raise ValueError("ESX Storage names must contain at least one letter or number")
+    return slug[:63]
+
+
+def _esx_storage_config_path(value: str) -> Path:
+    path = Path(value).resolve(strict=True)
+    root = ESX_STORAGE_APPLY_DIR.resolve(strict=True)
+    if not path.is_relative_to(root) or path.name != "labfoundry-esx-storage.json":
+        raise ValueError(f"ESX Storage manifest must be {ESX_STORAGE_APPLY_DIR / 'labfoundry-esx-storage.json'}")
+    return path
+
+
+def _esx_storage_manifest(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("ESX Storage manifest must be a JSON object")
+    return payload
+
+
+def _esx_storage_manifest_hash(payload: dict[str, object]) -> str:
+    desired = dict(payload)
+    desired.pop("format_authorizations", None)
+    encoded = json.dumps(desired, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _esx_storage_by_id_map() -> dict[str, str]:
+    result: dict[str, str] = {}
+    root = Path("/dev/disk/by-id")
+    if not root.is_dir():
+        return result
+    for link in sorted(root.iterdir()):
+        if "-part" in link.name:
+            continue
+        try:
+            target = str(link.resolve(strict=True))
+        except OSError:
+            continue
+        current = result.get(target)
+        if current is None or ("wwn-" in link.name and "wwn-" not in current):
+            result[target] = str(link)
+    return result
+
+
+def _esx_storage_os_devices() -> set[str]:
+    findmnt = _command_path("findmnt")
+    lsblk = _command_path("lsblk")
+    if findmnt is None or lsblk is None:
+        return set()
+    source_result = _run([findmnt, "-nro", "SOURCE", "/"])
+    source = source_result.stdout.strip()
+    if source_result.returncode != 0 or not source.startswith("/dev/"):
+        return set()
+    result = _run([lsblk, "-sno", "PATH", source])
+    return {line.strip() for line in result.stdout.splitlines() if line.strip().startswith("/dev/")}
+
+
+def _esx_storage_inventory() -> list[dict[str, object]]:
+    lsblk = _command_path("lsblk")
+    if lsblk is None:
+        raise ValueError("lsblk is required for ESX Storage disk inventory")
+    result = _run(
+        [
+            lsblk,
+            "-J",
+            "-b",
+            "-o",
+            "NAME,KNAME,PATH,TYPE,SIZE,MODEL,SERIAL,WWN,FSTYPE,UUID,LABEL,MOUNTPOINTS,PKNAME,RO,RM",
+        ]
+    )
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or "lsblk inventory failed")
+    payload = json.loads(result.stdout)
+    by_id = _esx_storage_by_id_map()
+    os_devices = _esx_storage_os_devices()
+    swap_devices = {
+        line.split()[0]
+        for line in Path("/proc/swaps").read_text(encoding="utf-8").splitlines()[1:]
+        if line.split()
+    } if Path("/proc/swaps").exists() else set()
+    inventory: list[dict[str, object]] = []
+
+    def walk(item: dict[str, object], parent_disk: str = "") -> None:
+        device_path = str(item.get("path") or "")
+        device_type = str(item.get("type") or "")
+        disk_path = device_path if device_type == "disk" else parent_disk
+        mountpoints = [str(value) for value in (item.get("mountpoints") or []) if value]
+        primary_mount_path = next(
+            (path for path in mountpoints if path.startswith(f"{ESX_STORAGE_MOUNT_ROOT.as_posix().rstrip('/')}/")),
+            mountpoints[0] if mountpoints else "",
+        )
+        kname = str(item.get("kname") or item.get("name") or "")
+        holders_root = Path("/sys/class/block") / kname / "holders"
+        holders = sorted(path.name for path in holders_root.iterdir()) if holders_root.is_dir() else []
+        children = list(item.get("children") or [])
+        filesystem_type = str(item.get("fstype") or "")
+        filesystem_uuid = str(item.get("uuid") or "")
+        stable_id = by_id.get(device_path, "") or (f"UUID={filesystem_uuid}" if filesystem_uuid else "")
+        candidate_type = ""
+        if device_type == "disk" and not children and not filesystem_type and not mountpoints:
+            candidate_type = "blank_disk"
+        elif filesystem_type == "ext4" and mountpoints and not any(path in {"/", "/boot", "/boot/efi"} for path in mountpoints):
+            candidate_type = "mounted_ext4"
+        inventory.append(
+            {
+                "stable_device_id": stable_id,
+                "device_path": device_path,
+                "type": device_type,
+                "parent_disk": disk_path,
+                "model": str(item.get("model") or "").strip(),
+                "serial": str(item.get("serial") or "").strip(),
+                "wwn": str(item.get("wwn") or "").strip(),
+                "size_bytes": int(item.get("size") or 0),
+                "filesystem_type": filesystem_type,
+                "filesystem_uuid": filesystem_uuid,
+                "filesystem_label": str(item.get("label") or ""),
+                "mount_path": primary_mount_path,
+                "mount_paths": mountpoints,
+                "partitions": [str(child.get("path") or child.get("name") or "") for child in children],
+                "swap": device_path in swap_devices or filesystem_type == "swap",
+                "lvm": filesystem_type == "LVM2_member" or any("dm-" in holder for holder in holders),
+                "raid": filesystem_type == "linux_raid_member" or any("md" in holder for holder in holders),
+                "holders": holders,
+                "read_only": bool(item.get("ro")),
+                "removable": bool(item.get("rm")),
+                "os_related": device_path in os_devices or disk_path in os_devices,
+                "candidate_type": candidate_type,
+            }
+        )
+        for child in children:
+            walk(child, disk_path)
+
+    for block_device in payload.get("blockdevices", []):
+        walk(block_device)
+    return inventory
+
+
+def _esx_storage_blank_disk_errors(entry: dict[str, object]) -> list[str]:
+    errors: list[str] = []
+    if str(entry.get("type")) != "disk":
+        errors.append("not a whole disk")
+    if not str(entry.get("stable_device_id") or "").startswith("/dev/disk/by-id/"):
+        errors.append("missing stable /dev/disk/by-id identity")
+    for key, label in [
+        ("partitions", "has partitions"),
+        ("filesystem_type", "has a filesystem"),
+        ("mount_path", "is mounted"),
+        ("swap", "is swap"),
+        ("lvm", "belongs to LVM"),
+        ("raid", "belongs to RAID"),
+        ("holders", "has holders"),
+        ("os_related", "is related to the operating-system disk"),
+        ("read_only", "is read-only"),
+    ]:
+        if entry.get(key):
+            errors.append(label)
+    return errors
+
+
+def _esx_storage_disk_is_initialized(entry: dict[str, object], *, label: str, mount_path: Path) -> bool:
+    return (
+        str(entry.get("filesystem_type") or "") == "ext4"
+        and str(entry.get("filesystem_label") or "") == label
+        and bool(entry.get("filesystem_uuid"))
+        and not entry.get("partitions")
+        and (
+            not entry.get("mount_paths")
+            or str(mount_path) in [str(path) for path in entry.get("mount_paths", [])]
+        )
+        and not entry.get("holders")
+        and not entry.get("os_related")
+    )
+
+
+def _esx_storage_reserved_mount_owner(value: str) -> str:
+    raw = value.strip()
+    if not raw.startswith("/"):
+        return ""
+    path = PurePosixPath(raw)
+    for reserved, owner in ESX_STORAGE_RESERVED_MOUNT_PATHS.items():
+        if path == reserved or reserved in path.parents:
+            return owner
+    return ""
+
+
+def _esx_storage_manifest_errors(payload: dict[str, object], *, require_authorization: bool = False) -> list[str]:
+    errors: list[str] = []
+    if payload.get("schema_version") != 1:
+        errors.append("ESX Storage schema_version must be 1")
+    validation = payload.get("validation") if isinstance(payload.get("validation"), dict) else {}
+    errors.extend(str(error) for error in validation.get("errors", []) if str(error))
+    volumes = payload.get("volumes") if isinstance(payload.get("volumes"), list) else []
+    shares = payload.get("shares") if isinstance(payload.get("shares"), list) else []
+    volumes_by_id: dict[object, dict[str, object]] = {}
+    for volume in volumes:
+        if not isinstance(volume, dict):
+            errors.append("ESX Storage volume entries must be objects")
+            continue
+        volumes_by_id[volume.get("id")] = volume
+        source_type = str(volume.get("source_type") or "")
+        if source_type not in {"blank_disk", "mounted_ext4"}:
+            errors.append(f"volume {volume.get('name')} has unsupported source_type")
+        if source_type == "blank_disk" and not str(volume.get("stable_device_id") or "").startswith("/dev/disk/by-id/"):
+            errors.append(f"volume {volume.get('name')} must use /dev/disk/by-id identity")
+        mount_value = str(volume.get("mount_path") or "")
+        if not mount_value.startswith("/"):
+            errors.append(f"volume {volume.get('name')} mount path must be absolute")
+        elif source_type == "blank_disk" and not mount_value.startswith(f"{ESX_STORAGE_MOUNT_ROOT.as_posix().rstrip('/')}/"):
+            errors.append(f"new volume {volume.get('name')} mount path must be under {ESX_STORAGE_MOUNT_ROOT}")
+        elif source_type == "mounted_ext4":
+            owner = _esx_storage_reserved_mount_owner(mount_value)
+            if owner:
+                errors.append(f"existing volume {volume.get('name')} mount path is reserved for {owner}")
+    enabled_shares = [share for share in shares if isinstance(share, dict) and share.get("enabled")]
+    if payload.get("enabled") and not enabled_shares:
+        errors.append("enabled ESX Storage requires at least one enabled share")
+    for share in enabled_shares:
+        if share.get("volume_id") not in volumes_by_id:
+            errors.append(f"share {share.get('datastore_name')} references an unknown volume")
+        if str(share.get("preferred_nfs_version")) not in {"3", "4.1"}:
+            errors.append(f"share {share.get('datastore_name')} must prefer NFS 3 or 4.1")
+        families = share.get("address_families") if isinstance(share.get("address_families"), list) else []
+        if not families or any(family not in {"ipv4", "ipv6"} for family in families):
+            errors.append(f"share {share.get('datastore_name')} must enable IPv4, IPv6, or both")
+        clients = share.get("clients") if isinstance(share.get("clients"), dict) else {}
+        for family in families:
+            values = clients.get(family) if isinstance(clients.get(family), list) else []
+            if not values:
+                values = ["0.0.0.0/0" if family == "ipv4" else "::/0"]
+                clients[family] = values
+            for value in values:
+                try:
+                    network = ip_network(str(value), strict=False)
+                    if network.version != (4 if family == "ipv4" else 6):
+                        raise ValueError
+                except ValueError:
+                    errors.append(f"share {share.get('datastore_name')} has invalid {family} client {value}")
+    if require_authorization:
+        manifest_sha256 = _esx_storage_manifest_hash(payload)
+        authorizations = payload.get("format_authorizations") if isinstance(payload.get("format_authorizations"), list) else []
+        by_device = {str(item.get("stable_device_id") or ""): item for item in authorizations if isinstance(item, dict)}
+        for volume in volumes:
+            if not isinstance(volume, dict) or not volume.get("requires_format"):
+                continue
+            stable_id = str(volume.get("stable_device_id") or "")
+            authorization = by_device.get(stable_id)
+            expected = f"FORMAT {volume.get('name')}"
+            if not authorization:
+                errors.append(f"volume {volume.get('name')} is missing job-scoped format authorization")
+            elif authorization.get("manifest_sha256") != manifest_sha256 or authorization.get("confirmation") != expected or not authorization.get("job_id"):
+                errors.append(f"volume {volume.get('name')} format authorization does not match this job and manifest")
+    return errors
+
+
+def _esx_storage_replace_managed_fstab(lines: list[str]) -> None:
+    existing = ESX_STORAGE_FSTAB_PATH.read_text(encoding="utf-8") if ESX_STORAGE_FSTAB_PATH.exists() else ""
+    pattern = re.compile(
+        rf"(?ms)^\s*{re.escape(ESX_STORAGE_FSTAB_BEGIN)}\s*$.*?^\s*{re.escape(ESX_STORAGE_FSTAB_END)}\s*$\n?"
+    )
+    cleaned = pattern.sub("", existing).rstrip()
+    block = "\n".join([ESX_STORAGE_FSTAB_BEGIN, *lines, ESX_STORAGE_FSTAB_END])
+    _write_secret_file(ESX_STORAGE_FSTAB_PATH, f"{cleaned}\n\n{block}\n" if cleaned else f"{block}\n", 0o644)
+
+
+def _esx_storage_write_runtime_config(payload: dict[str, object]) -> None:
+    enabled_shares = [share for share in payload.get("shares", []) if isinstance(share, dict) and share.get("enabled")]
+    root_clients: list[str] = []
+    export_lines: list[str] = []
+    for share in enabled_shares:
+        clients = share.get("clients") if isinstance(share.get("clients"), dict) else {}
+        share_clients = list(
+            dict.fromkeys(
+                str(value)
+                for family in ("ipv4", "ipv6")
+                for value in (clients.get(family, []) or (["0.0.0.0/0"] if family == "ipv4" else ["::/0"]))
+                if family in share.get("address_families", [])
+            )
+        )
+        root_clients.extend(share_clients)
+        options = "rw,sync,no_subtree_check,no_root_squash"
+        export_lines.append(f"{share['bind_path']} " + " ".join(f"{client}({options})" for client in share_clients))
+    root_options = "ro,fsid=0,crossmnt,sync,no_subtree_check,root_squash"
+    if root_clients:
+        export_lines.insert(0, f"{ESX_STORAGE_EXPORT_ROOT} " + " ".join(f"{client}({root_options})" for client in dict.fromkeys(root_clients)))
+    _write_secret_file(ESX_STORAGE_EXPORTS_PATH, "\n".join(export_lines) + ("\n" if export_lines else ""), 0o644)
+    nfs_config = """[nfsd]
+vers2=n
+vers3=y
+vers4=y
+vers4.0=n
+vers4.1=y
+tcp=y
+udp=n
+
+[mountd]
+port=20048
+manage-gids=y
+"""
+    _write_secret_file(ESX_STORAGE_NFS_CONFIG_PATH, nfs_config, 0o644)
+
+
+def _esx_storage_bind_mount_matches(findmnt: str, source: Path, target: Path) -> bool:
+    mounted = _run([findmnt, "-n", "--mountpoint", str(target)])
+    if mounted.returncode != 0:
+        return False
+    source_stat = os.stat(source, follow_symlinks=True)
+    target_stat = os.stat(target, follow_symlinks=True)
+    if (source_stat.st_dev, source_stat.st_ino) != (target_stat.st_dev, target_stat.st_ino):
+        raise ValueError(f"existing mount at {target} does not match ESX Storage source {source}")
+    return True
+
+
+def _esx_storage_apply(payload: dict[str, object]) -> dict[str, object]:
+    inventory = _esx_storage_inventory()
+    inventory_by_id = {str(item.get("stable_device_id") or ""): item for item in inventory}
+    fstab_lines: list[str] = []
+    commands: list[list[str]] = []
+    volumes_by_id: dict[object, dict[str, object]] = {}
+    for volume in payload.get("volumes", []):
+        if not isinstance(volume, dict):
+            continue
+        volumes_by_id[volume.get("id")] = volume
+        mount_path = Path(str(volume["mount_path"]))
+        mount_path.mkdir(parents=True, exist_ok=True)
+        if volume.get("source_type") == "blank_disk":
+            stable_id = str(volume["stable_device_id"])
+            entry = inventory_by_id.get(stable_id)
+            if volume.get("requires_format"):
+                if entry is None:
+                    raise ValueError(f"approved disk disappeared before format: {stable_id}")
+                label = f"lf-{hashlib.sha256(str(volume['name']).encode()).hexdigest()[:12]}"
+                fingerprint = volume.get("fingerprint") if isinstance(volume.get("fingerprint"), dict) else {}
+                for manifest_key, inventory_key, label_name in [
+                    ("model", "model", "model"),
+                    ("serial", "serial", "serial"),
+                    ("wwn", "wwn", "WWN"),
+                    ("size_bytes", "size_bytes", "capacity"),
+                ]:
+                    expected_value = fingerprint.get(manifest_key)
+                    if expected_value in {None, "", 0}:
+                        continue
+                    if str(entry.get(inventory_key) or "") != str(expected_value):
+                        raise ValueError(f"disk {stable_id} {label_name} changed after approval")
+                already_initialized = _esx_storage_disk_is_initialized(entry, label=label, mount_path=mount_path)
+                if not already_initialized:
+                    safety_errors = _esx_storage_blank_disk_errors(entry)
+                    if safety_errors:
+                        raise ValueError(f"disk {stable_id} is no longer blank and eligible: {', '.join(safety_errors)}")
+                    mkfs = _command_path("mkfs.ext4")
+                    if mkfs is None:
+                        raise ValueError("mkfs.ext4 is required for ESX Storage initialization")
+                    command = [mkfs, "-F", "-L", label, stable_id]
+                    result = _run(command, timeout=300)
+                    commands.append(command)
+                    if result.returncode != 0:
+                        raise ValueError(result.stderr.strip() or f"mkfs.ext4 failed for {stable_id}")
+            blkid = _command_path("blkid")
+            if blkid is None:
+                raise ValueError("blkid is required for ESX Storage UUID mounts")
+            uuid_result = _run([blkid, "-s", "UUID", "-o", "value", stable_id])
+            fs_uuid = uuid_result.stdout.strip()
+            type_result = _run([blkid, "-s", "TYPE", "-o", "value", stable_id])
+            if uuid_result.returncode != 0 or not fs_uuid or type_result.stdout.strip() != "ext4":
+                raise ValueError(f"disk {stable_id} is not a readable ext4 filesystem after initialization")
+            fstab_lines.append(f"UUID={fs_uuid} {mount_path} ext4 defaults,nofail,x-systemd.device-timeout=30 0 2")
+            volume["filesystem_uuid"] = fs_uuid
+        else:
+            findmnt = _command_path("findmnt")
+            if findmnt is None:
+                raise ValueError("findmnt is required for existing ESX Storage volumes")
+            find_result = _run([findmnt, "-nro", "FSTYPE", "--target", str(mount_path)])
+            if find_result.returncode != 0 or find_result.stdout.strip() != "ext4":
+                raise ValueError(f"existing volume {volume.get('name')} is not mounted as ext4 at {mount_path}")
+    _esx_storage_replace_managed_fstab(fstab_lines)
+    mount = _command_path("mount")
+    if mount is None:
+        raise ValueError("mount is required for ESX Storage")
+    for volume in payload.get("volumes", []):
+        if isinstance(volume, dict) and volume.get("source_type") == "blank_disk":
+            result = _run([mount, str(volume["mount_path"])])
+            commands.append([mount, str(volume["mount_path"])])
+            if result.returncode != 0 and "already mounted" not in result.stderr.lower():
+                raise ValueError(result.stderr.strip() or f"unable to mount {volume['mount_path']}")
+    ESX_STORAGE_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    desired_bind_paths = {
+        str(share.get("bind_path"))
+        for share in payload.get("shares", [])
+        if isinstance(share, dict) and share.get("enabled")
+    }
+    findmnt_command = _command_path("findmnt")
+    if findmnt_command is None:
+        raise ValueError("findmnt is required for ESX Storage bind mounts")
+    umount_command = _command_path("umount")
+    if umount_command:
+        mounted_targets = _run([findmnt_command, "-rn", "-o", "TARGET"]).stdout.splitlines()
+        for raw_target in sorted(mounted_targets, key=len, reverse=True):
+            target = raw_target.strip()
+            if not target.startswith(f"{ESX_STORAGE_EXPORT_ROOT}/") or target in desired_bind_paths:
+                continue
+            result = _run([umount_command, target])
+            commands.append([umount_command, target])
+            if result.returncode != 0:
+                raise ValueError(result.stderr.strip() or f"unable to remove stale ESX Storage bind mount {target}")
+            try:
+                Path(target).rmdir()
+            except OSError:
+                pass
+    for share in payload.get("shares", []):
+        if not isinstance(share, dict) or not share.get("enabled"):
+            continue
+        volume = volumes_by_id[share["volume_id"]]
+        volume_root = Path(str(volume["mount_path"])).resolve(strict=True)
+        source = Path(str(share["source_path"]))
+        source.mkdir(parents=True, exist_ok=True)
+        resolved_source = source.resolve(strict=True)
+        if not resolved_source.is_relative_to(volume_root):
+            raise ValueError(f"share {share.get('datastore_name')} escapes its backing volume")
+        bind_path = Path(str(share["bind_path"]))
+        bind_path.mkdir(parents=True, exist_ok=True)
+        if not _esx_storage_bind_mount_matches(findmnt_command, resolved_source, bind_path):
+            bind_result = _run([mount, "--bind", str(resolved_source), str(bind_path)])
+            commands.append([mount, "--bind", str(resolved_source), str(bind_path)])
+            if bind_result.returncode != 0:
+                raise ValueError(bind_result.stderr.strip() or f"unable to bind {resolved_source} to {bind_path}")
+        fstab_lines.append(f"{resolved_source} {bind_path} none bind,nofail,x-systemd.requires-mounts-for={volume_root} 0 0")
+    _esx_storage_replace_managed_fstab(fstab_lines)
+    _esx_storage_write_runtime_config(payload)
+    systemctl = _command_path("systemctl")
+    exportfs = _command_path("exportfs")
+    if systemctl is None or exportfs is None:
+        raise ValueError("systemctl and exportfs from nfs-utils are required for ESX Storage")
+    if payload.get("enabled") and any(isinstance(share, dict) and share.get("enabled") for share in payload.get("shares", [])):
+        daemon_reload = _run([systemctl, "daemon-reload"])
+        if daemon_reload.returncode != 0:
+            raise ValueError(daemon_reload.stderr.strip() or "systemd daemon-reload failed")
+        enable = _run([systemctl, "enable", "--now", "rpcbind.service", "nfs-server.service"], timeout=120)
+        commands.append([systemctl, "enable", "--now", "rpcbind.service", "nfs-server.service"])
+        if enable.returncode != 0:
+            raise ValueError(enable.stderr.strip() or "unable to start NFS services")
+        exports = _run([exportfs, "-rav"])
+        commands.append([exportfs, "-rav"])
+        if exports.returncode != 0:
+            raise ValueError(exports.stderr.strip() or "exportfs refresh failed")
+    else:
+        _run([exportfs, "-ua"])
+        _run([systemctl, "disable", "--now", "nfs-server.service", "rpcbind.service", "rpcbind.socket"], timeout=120)
+    return {"status": "applied", "volumes": payload.get("volumes", []), "shares": len(payload.get("shares", [])), "commands": commands}
+
+
+def _handle_esx_storage(action: str, args: list[str]) -> int:
+    if action == "inventory":
+        try:
+            print(json.dumps(_esx_storage_inventory(), sort_keys=True, separators=(",", ":")))
+            return 0
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    if action == "status":
+        status: dict[str, object] = {"rpcbind": "unknown", "nfs_server": "unknown", "exports": []}
+        systemctl = _command_path("systemctl")
+        exportfs = _command_path("exportfs")
+        if systemctl:
+            status["rpcbind"] = _run([systemctl, "is-active", "rpcbind.service"]).stdout.strip() or "inactive"
+            status["nfs_server"] = _run([systemctl, "is-active", "nfs-server.service"]).stdout.strip() or "inactive"
+        if exportfs:
+            status["exports"] = [line for line in _run([exportfs, "-v"]).stdout.splitlines() if line.strip()]
+        print(json.dumps(status, sort_keys=True, separators=(",", ":")))
+        return 0
+    if action == "logs":
+        journalctl = _command_path("journalctl")
+        if journalctl is None:
+            print("journalctl command not found", file=sys.stderr)
+            return 127
+        result = _run([journalctl, "-u", "nfs-server.service", "-u", "rpcbind.service", "-n", "200", "--no-pager"])
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        return result.returncode
+    if len(args) != 1:
+        print(f"esx-storage {action} requires exactly one staged manifest path", file=sys.stderr)
+        return 2
+    try:
+        config_path = _esx_storage_config_path(args[0])
+        payload = _esx_storage_manifest(config_path)
+        errors = _esx_storage_manifest_errors(payload, require_authorization=action == "apply")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    if action == "validate":
+        print(json.dumps({"esx_storage": "validation complete", "config_path": str(config_path)}, sort_keys=True))
+        return 0
+    if action == "apply":
+        try:
+            print(json.dumps(_esx_storage_apply(payload), sort_keys=True))
+            return 0
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    print(f"unsupported esx-storage action: {action}", file=sys.stderr)
+    return 2
+
+
 def _handle_automation(action: str, args: list[str]) -> int:
     if action != "run" or len(args) < 3:
         print("automation run requires script path, interpreter, timeout seconds, and optional arguments after --", file=sys.stderr)
@@ -7832,6 +8358,8 @@ def main(argv: list[str]) -> int:
         return _handle_dnsmasq(action, normalized_args)
     if group == "esxi-pxe":
         return _handle_esxi_pxe(action, normalized_args)
+    if group == "esx-storage":
+        return _handle_esx_storage(action, normalized_args)
     if group == "appliance-settings":
         return _handle_appliance_settings(action, normalized_args)
     if group == "web-terminal":

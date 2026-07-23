@@ -175,6 +175,7 @@ source "vmware-iso" "photon" {
 
   vmx_data = {
     "firmware"                 = "efi"
+    "disk.EnableUUID"          = "TRUE"
     "uefi.secureBoot.enabled"  = "FALSE"
     "ethernet1.present"        = "TRUE"
     "ethernet1.connectionType" = "custom"
