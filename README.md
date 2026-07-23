@@ -175,6 +175,8 @@ downloads.
 
 Successful `main` CI publishes immutable signed release bundles to GitHub
 Releases and advances the signed `development` pointer on GitHub Pages.
+The Pages root provides a static release-repository landing page, while
+appliances use the signed machine-readable documents under `/updates`.
 `preview` and `stable` promotions reuse an existing verified release. A
 protected manual publication dispatch can recover an exact commit only when it
 already has a successful `main` push CI run. Publication blocks later versions

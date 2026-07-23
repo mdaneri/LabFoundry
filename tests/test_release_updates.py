@@ -145,6 +145,10 @@ def test_release_workflows_use_successful_main_sha_and_promote_without_rebuildin
     assert "Publish or recover the v0.9.0 bridge release" in publication
     assert 'json.load(open(sys.argv[1]))["version"]' in publication
     assert 'json.load(open(sys.argv[1]))[\\"version\\"]' not in publication
+    assert 'cat > "$SITE_ROOT/index.html"' in publication
+    assert "Signed release repository" in publication
+    assert "The HTML page is informational." in publication
+    assert "<script" not in publication
     assert publication.count("ref: ${{ needs.prepare.outputs.release_sha }}") == 2
     assert "actions/upload-artifact@v7" in publication
     assert publication.count("actions/download-artifact@v8") == 3
