@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import configparser
 import hashlib
 import json
@@ -8,7 +7,6 @@ import os
 import platform
 import re
 import subprocess
-import sys
 from datetime import datetime, timezone
 from functools import lru_cache
 from importlib import metadata as importlib_metadata
@@ -24,40 +22,22 @@ APPLIANCE_UPDATE_SETTINGS_KEY = "appliance_update.settings.v1"
 APPLIANCE_UPDATE_STAGED_CONFIG_PATH = "/var/lib/labfoundry/apply/appliance-update/labfoundry-update.json"
 APPLIANCE_UPDATE_STAGED_CREDENTIALS_PATH = "/var/lib/labfoundry/apply/appliance-update/labfoundry-update-credentials.json"
 APPLIANCE_UPDATE_INFO_PATH = "/etc/labfoundry/update-info"
+APPLIANCE_UPDATE_FINALIZER_PATH = "/var/lib/labfoundry/apply/appliance-update/finalizer-status.json"
 PHOTON_REPOSITORY_DIR = Path("/etc/yum.repos.d")
-PIP_BUILTIN_INDEX_URL = "https://pypi.org/simple"
-DEFAULT_LABFOUNDRY_MANIFEST_URL = ""
-UPDATE_STREAMS = ("photon_os", "python_libraries", "powershell_modules", "labfoundry_wheel")
+DEFAULT_LABFOUNDRY_RELEASE_URL = "https://mdaneri.github.io/LabFoundry/updates"
+DEFAULT_LABFOUNDRY_MANIFEST_URL = f"{DEFAULT_LABFOUNDRY_RELEASE_URL}/channels/stable/manifest.json"
+UPDATE_STREAMS = ("photon_os", "powershell_modules", "labfoundry_release")
 UPDATE_STREAM_LABELS = {
     "photon_os": "Photon OS",
-    "python_libraries": "Python Libraries",
     "powershell_modules": "PowerShell Modules",
-    "labfoundry_wheel": "LabFoundry Wheel",
+    "labfoundry_release": "LabFoundry Release",
 }
 DEFAULT_UPDATE_SETTINGS = {
     "photon_source": "configured Photon repositories",
-    "python_index_url": "",
     "labfoundry_manifest_url": DEFAULT_LABFOUNDRY_MANIFEST_URL,
     "powershell_repository_name": "",
     "powershell_repository_url": "",
 }
-DIRECT_PYTHON_REQUIREMENTS = [
-    "argon2-cffi>=23.1.0",
-    "cryptography>=42.0.0",
-    "fastapi>=0.115.0",
-    "httpx>=0.27.2",
-    "itsdangerous>=2.2.0",
-    "jinja2>=3.1.4",
-    "pyjwt>=2.9.0",
-    "pydantic-settings>=2.6.0",
-    "paramiko>=3.5.0",
-    "pykmip==0.10.0",
-    "python-multipart>=0.0.12",
-    "sqlalchemy>=2.0.36",
-    "uvicorn[standard]>=0.32.0",
-]
-
-
 def _git_value(args: list[str]) -> str:
     try:
         result = subprocess.run(["git", *args], cwd=Path(__file__).resolve().parents[3], check=False, capture_output=True, text=True)
@@ -148,14 +128,17 @@ def validate_update_url(value: str, label: str) -> list[str]:
 
 def validate_update_settings(settings: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    errors.extend(validate_update_url(settings.get("python_index_url", ""), "Python index URL"))
     errors.extend(validate_update_url(settings.get("labfoundry_manifest_url", ""), "LabFoundry manifest URL"))
+    release_url = urlparse(str(settings.get("labfoundry_manifest_url") or ""))
+    if release_url.scheme and release_url.scheme != "https":
+        errors.append("LabFoundry manifest URL must use HTTPS.")
     errors.extend(validate_update_url(settings.get("powershell_repository_url", ""), "PowerShell repository URL"))
     return errors
 
 
 def selected_update_streams(raw_streams: list[str] | tuple[str, ...]) -> list[str]:
-    selected = [stream for stream in UPDATE_STREAMS if stream in set(raw_streams)]
+    normalized = {"labfoundry_release" if stream == "labfoundry_wheel" else stream for stream in raw_streams}
+    selected = [stream for stream in UPDATE_STREAMS if stream in normalized]
     return selected
 
 
@@ -169,16 +152,21 @@ def redact_url_userinfo(value: str) -> str:
     return parsed._replace(netloc=f"[redacted]@{host}").geturl()
 
 
-def render_update_manifest(*, selected_streams: list[str], settings: dict[str, Any], actor: str) -> str:
+def render_update_manifest(
+    *,
+    selected_streams: list[str],
+    settings: dict[str, Any],
+    actor: str,
+    job_id: str = "",
+) -> str:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": actor,
+        "job_id": job_id,
         "selected_streams": selected_streams,
         "sources": {
             "photon_os": settings.get("photon_source") or DEFAULT_UPDATE_SETTINGS["photon_source"],
-            "python_index_url": redact_url_userinfo(settings.get("python_index_url", "")),
-            "python_index_urls": [redact_url_userinfo(str(value)) for value in settings.get("python_index_urls", []) if str(value).strip()],
             "labfoundry_manifest_url": redact_url_userinfo(settings.get("labfoundry_manifest_url") or DEFAULT_LABFOUNDRY_MANIFEST_URL),
             "labfoundry_manifest_urls": [
                 redact_url_userinfo(str(value)) for value in settings.get("labfoundry_manifest_urls", []) if str(value).strip()
@@ -188,12 +176,12 @@ def render_update_manifest(*, selected_streams: list[str], settings: dict[str, A
         },
         "powershell_modules": settings.get("powershell_modules") if isinstance(settings.get("powershell_modules"), list) else [],
         "source_definitions": settings.get("source_definitions") if isinstance(settings.get("source_definitions"), list) else [],
-        "python_requirements": DIRECT_PYTHON_REQUIREMENTS,
         "current": current_version_info(),
         "policy": {
             "auto_reboot": False,
-            "restart_labfoundry_after_wheel": "delayed",
-            "wheel_install_mode": "force-reinstall-no-deps",
+            "release_install_mode": "signed-offline-transactional",
+            "supported_python_abis": ["cp312", "cp313", "cp314"],
+            "runtime_python_indexes": False,
         },
     }
     return json.dumps(payload, indent=2, sort_keys=True)
@@ -272,40 +260,3 @@ def photon_repository_summary(repository_dir: Path | None = None) -> str:
         else f"{row['id']} | {row['name']} | {row['file']}"
         for row in rows
     )
-
-
-@lru_cache(maxsize=1)
-def effective_pip_index() -> dict[str, str]:
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "config", "list"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"url": PIP_BUILTIN_INDEX_URL, "source": "pip built-in default", "error": str(exc)}
-    values: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        key, separator, raw_value = line.partition("=")
-        if not separator:
-            continue
-        value = raw_value.strip()
-        try:
-            parsed_value = ast.literal_eval(value)
-        except (SyntaxError, ValueError):
-            parsed_value = value.strip("'\"")
-        values[key.strip().lower()] = str(parsed_value).strip()
-    for key, source in (
-        (":env:.index-url", "pip environment"),
-        ("global.index-url", "pip global configuration"),
-        ("install.index-url", "pip install configuration"),
-    ):
-        if values.get(key):
-            return {"url": values[key], "source": source, "error": "" if result.returncode == 0 else result.stderr.strip()}
-    return {
-        "url": PIP_BUILTIN_INDEX_URL,
-        "source": "pip built-in default",
-        "error": "" if result.returncode == 0 else result.stderr.strip(),
-    }

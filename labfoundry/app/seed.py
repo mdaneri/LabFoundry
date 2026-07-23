@@ -519,51 +519,42 @@ def seed_initial_data(db: Session, *, include_examples: bool = True, appliance_m
 
 
 def seed_update_sources(db: Session) -> None:
-    if db.execute(select(UpdateSource)).first() is not None:
-        return
-    photon_source = UpdateSource(
-        kind="photon",
-        name="System Photon repositories",
-        url="",
-        enabled=True,
-        priority=10,
-        settings_json='{"managed": false, "source": "system"}',
-    )
-    python_source = UpdateSource(
-        kind="python",
-        name="Standard pip configuration",
-        url="",
-        enabled=True,
-        priority=50,
-        settings_json='{"extra_index_urls": [], "tls_verify": true}',
-    )
-    powershell_source = UpdateSource(
-        kind="powershell",
-        name="PSGallery",
-        url="https://www.powershellgallery.com/api/v2",
-        enabled=True,
-        priority=50,
-        settings_json='{"trusted": false}',
-    )
-    labfoundry_source = UpdateSource(
-        kind="labfoundry",
-        name="LabFoundry release repository",
-        url="",
-        enabled=True,
-        priority=50,
-        settings_json='{"channel": "stable"}',
-    )
-    db.add_all([photon_source, python_source, powershell_source, labfoundry_source])
+    photon_source = db.execute(select(UpdateSource).where(UpdateSource.kind == "photon")).scalars().first()
+    if photon_source is None:
+        photon_source = UpdateSource(
+            kind="photon",
+            name="System Photon repositories",
+            url="",
+            enabled=True,
+            priority=10,
+            settings_json='{"managed": false, "source": "system"}',
+        )
+        db.add(photon_source)
+    powershell_source = db.execute(select(UpdateSource).where(UpdateSource.kind == "powershell")).scalars().first()
+    if powershell_source is None:
+        powershell_source = UpdateSource(
+            kind="powershell",
+            name="PSGallery",
+            url="https://www.powershellgallery.com/api/v2",
+            enabled=True,
+            priority=50,
+            settings_json='{"trusted": false}',
+        )
+        db.add(powershell_source)
+    labfoundry_source = db.execute(select(UpdateSource).where(UpdateSource.kind == "labfoundry")).scalars().first()
+    if labfoundry_source is None:
+        labfoundry_source = UpdateSource(
+            kind="labfoundry",
+            name="GitHub Releases",
+            url="https://mdaneri.github.io/LabFoundry/updates",
+            enabled=True,
+            priority=10,
+            settings_json='{"channel": "stable"}',
+        )
+        db.add(labfoundry_source)
     db.flush()
-    db.add_all(
-        [
-            ManagedPackage(
-                ecosystem="labfoundry",
-                name="labfoundry",
-                source_id=labfoundry_source.id,
-                policy="latest_stable",
-                enabled=True,
-            ),
+    if db.execute(select(ManagedPackage).where(ManagedPackage.ecosystem == "powershell")).scalars().first() is None:
+        db.add(
             ManagedPackage(
                 ecosystem="powershell",
                 name="VCF.PowerCLI",
@@ -571,9 +562,8 @@ def seed_update_sources(db: Session) -> None:
                 policy="pinned",
                 target_version="9.1.0.25380678",
                 enabled=True,
-            ),
-        ]
-    )
+            )
+        )
 
 
 def _domain_from_fqdn(fqdn: str) -> str:

@@ -1,0 +1,84 @@
+name: Promote appliance release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Signed channel to advance
+        required: true
+        type: choice
+        options:
+          - preview
+          - stable
+      version:
+        description: Existing LabFoundry release version without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: appliance-promotion-${{ inputs.channel }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote existing signed release
+    runs-on: ubuntu-latest
+    environment: appliance-release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install locked release tooling
+        env:
+          PIP_CONFIG_FILE: /dev/null
+        run: python -m pip install --require-hashes --requirement requirements-release-tools.lock
+      - name: Download the existing immutable manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          mkdir release
+          gh release download "v${RELEASE_VERSION}" \
+            --pattern release-manifest.json \
+            --pattern release-manifest.json.sig \
+            --dir release
+      - name: Materialize the protected signing key
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+        run: |
+          test -n "$RELEASE_SIGNING_PRIVATE_KEY"
+          umask 077
+          printf '%s\n' "$RELEASE_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/release-signing-key.pem"
+      - name: Verify and promote without rebuilding
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_KEY_ID: labfoundry-release-2026-01
+        run: |
+          SITE_ROOT="$RUNNER_TEMP/site"
+          git clone --branch gh-pages --single-branch \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
+            "$SITE_ROOT"
+          python scripts/promote_release_channel.py \
+            --channel "$RELEASE_CHANNEL" \
+            --expected-version "$RELEASE_VERSION" \
+            --release-manifest-url "https://github.com/${{ github.repository }}/releases/download/v${RELEASE_VERSION}/release-manifest.json" \
+            --release-manifest release/release-manifest.json \
+            --release-signature release/release-manifest.json.sig \
+            --trusted-key image/common/update-trust/${RELEASE_KEY_ID}.pem \
+            --site-root "$SITE_ROOT/updates" \
+            --signing-key "$RUNNER_TEMP/release-signing-key.pem" \
+            --signing-key-id "$RELEASE_KEY_ID"
+          git -C "$SITE_ROOT" add --all
+          if git -C "$SITE_ROOT" diff --cached --quiet; then
+            exit 0
+          fi
+          git -C "$SITE_ROOT" config user.name github-actions[bot]
+          git -C "$SITE_ROOT" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "$SITE_ROOT" commit -m "Promote v${RELEASE_VERSION} to ${RELEASE_CHANNEL}"
+          git -C "$SITE_ROOT" push origin HEAD:gh-pages

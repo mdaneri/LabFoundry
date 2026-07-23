@@ -64,6 +64,7 @@ from labfoundry.app.services.esxi_pxe import host_variables_json, normalize_host
 from labfoundry.app.services.firewall import FIREWALL_SOURCE_GROUPS_SETTING_KEY
 from labfoundry.app.services.local_users import LOCAL_USERS_PASSWORD_POLICY_KEY
 from labfoundry.app.services.ldap import clear_ldap_recovery_payload, ensure_organization_bind_secret
+from labfoundry.app.services.update_sources import UPDATE_SOURCE_KINDS
 from labfoundry.app.services.vcf_backups import VCF_BACKUP_DEFAULT_USERNAME
 
 ARCHIVE_SCHEMA_VERSION = 1
@@ -561,6 +562,7 @@ def _insert_rows(db: Session, model: type, rows: list[dict[str, Any]]) -> int:
 
 
 def _restore_update_sources(db: Session, rows: list[dict[str, Any]]) -> int:
+    rows = [row for row in rows if str(row.get("kind") or "") in UPDATE_SOURCE_KINDS]
     if not rows:
         seed_update_sources(db)
         db.flush()
@@ -641,6 +643,14 @@ def _restore_schedules(db: Session, rows: list[dict[str, Any]]) -> int:
         except json.JSONDecodeError:
             config = {}
         task_type = str(payload.get("task_type") or "")
+        if task_type in {"appliance_update_check", "appliance_update_install"}:
+            streams = config.get("selected_streams")
+            normalized: list[str] = []
+            for value in streams if isinstance(streams, list) else []:
+                stream = "labfoundry_release" if value == "labfoundry_wheel" else str(value)
+                if stream in {"photon_os", "powershell_modules", "labfoundry_release"} and stream not in normalized:
+                    normalized.append(stream)
+            config["selected_streams"] = normalized
         if task_type == "vcf_depot_download":
             config["profile_id"] = profiles.get(str(row.get("vcf_profile_name") or ""), 0)
         elif task_type == "managed_script":

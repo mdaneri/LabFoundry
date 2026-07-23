@@ -105,6 +105,10 @@ param(
     [Parameter(ParameterSetName = 'Plan')]
     [switch]$SkipBackupRestoreTest,
 
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Plan')]
+    [string]$SignedReleaseRepositoryUrl = '',
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Plan')]
     [switch]$PlanOnly
 )
@@ -225,6 +229,9 @@ if ($AllowDryRunApply) {
 if ($SkipBackupRestoreTest) {
     $arguments += '-SkipBackupRestoreTest'
 }
+if ($SignedReleaseRepositoryUrl) {
+    $arguments += @('-SignedReleaseRepositoryUrl', $SignedReleaseRepositoryUrl)
+}
 if ($PlanOnly) {
     $arguments += '-PlanOnly'
 }
@@ -233,6 +240,7 @@ Write-Host "Lifecycle lab: $LabName"
 Write-Host "Appliance VHDX: $ApplianceVhdxPath"
 Write-Host "Client VHDX: $ClientVhdxPath"
 Write-Host "Appliance URL: $effectiveApplianceUrl"
+Write-Host "Signed release lifecycle repository: $SignedReleaseRepositoryUrl"
 Write-Host ("Backup/restore validation: {0}" -f (-not $SkipBackupRestoreTest))
 Write-Host ("Cleanup created VMs: {0}" -f (-not $KeepVms))
 

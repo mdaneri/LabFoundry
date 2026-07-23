@@ -1,142 +1,202 @@
-# Appliance Update and Software Sources
+# Signed Appliance Releases and Photon Updates
 
 Appliance Update is audited runtime maintenance, separate from desired-state
-enforcement and `/appliance-apply`. Update requests are queued as durable tasks
-and executed by `labfoundry-worker.service`; restarting the web application does
-not interrupt them. The page separates repository and managed-module editing in
-the secondary **Update Sources** tab from check, run, result, and manifest
-workflows in the primary **Update Streams** tab.
+enforcement and `/appliance-apply`. The web process queues work, and
+`labfoundry-worker.service` executes it as a durable `appliance-update` task.
+The task retains the selected channel and release, verified key ID, checksums,
+Python compatibility, service checks, rollback result, and bounded redacted
+helper output.
 
-## Sources
+## Update streams
 
-The **Update Sources** section supports multiple named source definitions per
-package ecosystem. Each ecosystem is a collapsible section with one tab per
-repository and a final **+ Repository** tab. Sources can be added, disabled,
-edited, and deleted. Managed PowerShell modules remain in a separate
-collapsible editor with one tab per module; each module selects one of the
-configured PowerShell repositories.
+LabFoundry has three update streams:
 
-- **Photon** uses the repositories installed with Photon by default. An operator
-  can instead enable a LabFoundry-managed HTTP(S) repository definition with
-  RPM signature and TLS verification settings. The built-in source reads the
-  enabled repository ids, names, and base/mirror locations from
-  `/etc/yum.repos.d` and does not rewrite those files.
-- **Python** leaves pip defaults intact when its URL is blank. Enabled HTTP(S)
-  Simple API sources are ordered by priority: the first is pip's primary index
-  and the remaining sources are extra indexes. Synchronization writes them to
-  the LabFoundry virtualenv's owned `pip.conf`.
-  The built-in source queries the LabFoundry virtualenv's pip configuration and
-  displays its effective index URL with no LabFoundry override.
-- **PowerShell** defaults to `PSGallery` at
-  `https://www.powershellgallery.com/api/v2`. Source synchronization registers
-  it with PowerShellGet. Managed modules have their own repository binding and
-  either an exact pinned version or a latest-version policy, so modules from
-  PSGallery and private galleries can coexist.
-- **LabFoundry** takes a repository base URL and a `stable`, `preview`, or
-  `development` channel. The UI derives the manifest URL, so operators no
-  longer need to invent a manifest path. Enabled repositories are tried in
-  priority order, allowing a secondary release repository to serve as a
-  manifest fallback.
+- **LabFoundry Release** installs one signed, self-contained application
+  release. It replaces the former independent LabFoundry wheel and Python
+  Libraries streams.
+- **Photon OS** checks or installs packages only after validating the proposed
+  system Python ABI against the active LabFoundry release.
+- **PowerShell Modules** checks or installs the explicitly managed modules from
+  their selected repositories.
 
-Repository credentials are encrypted in the database and are never rendered
-in the staged update manifest, task configuration, audit detail, or recorded
-helper command. Immediately before real helper execution, the worker decrypts
-credentials into a separate mode-0600 staging file. The helper uses that
-protected runtime channel for HTTP Basic requests, pip indexes, PowerShellGet,
-and LabFoundry-managed Photon repositories; the worker removes the staging file
-after the operation. Settings archives continue to omit source credentials.
+The appliance never performs a broad runtime `pip --upgrade` and never contacts
+PyPI during a LabFoundry release update. Application dependencies and bootstrap
+tools are exact, hash-locked wheels inside the release bundle.
 
-Saving source fields updates control-plane configuration only. **Synchronize
-repositories** queues a helper-backed synchronization task. Disabled or removed
-LabFoundry-owned Photon, pip, and PowerShell definitions are cleaned up by that
-task. In dry-run mode the task validates and records intent without modifying
-host package clients.
+## Release sources and channels
 
-Source editors autosave individual definitions, but synchronization remains an
-explicit audited runtime-maintenance action because it can write package-client
-configuration. The compact synchronization icon stays in the **Update
-Sources** header rather than interrupting the repository and managed-module
-editors. The UI reports the effective built-in Photon repositories and
-pip index discovered from the appliance rather than substituting explanatory
-placeholder strings. Repository fields use aligned compact controls, and the
-ecosystem/repository tabs preserve the active editing context after changes.
+GitHub is the default distribution origin:
 
-The Update Streams workspace keeps stream selection and task actions in the
-main pane. Its staged manifest is exposed from the compact **Validation** card
-at the bottom of the detail rail and opens in the shared preview modal instead
-of occupying the main workflow.
+- GitHub Releases stores immutable versioned manifests, signatures, bundles,
+  and the legacy bridge wheel.
+- GitHub Pages publishes signed `development`, `preview`, and `stable` channel
+  pointers.
+- A successful `main` CI run publishes the exact successful commit as
+  `vX.Y.Z` and advances `development`.
+- The manual promotion workflow advances `preview` or `stable` to an existing
+  verified release. Promotion never rebuilds the artifact.
 
-A source cannot be deleted while a managed package still references it. Rebind
-or delete those packages first. Removing a managed PowerShell module stops
-future checks and installs but does not uninstall an already installed module.
-Use **Check selected** to perform the package-client repository lookups without
-installing updates.
+The default source is:
 
-## Creating a LabFoundry release repository
+```text
+https://mdaneri.github.io/LabFoundry/updates
+```
 
-Run this from a clean source checkout:
+For the `stable` channel, the appliance reads:
+
+```text
+https://mdaneri.github.io/LabFoundry/updates/channels/stable/manifest.json
+https://mdaneri.github.io/LabFoundry/updates/channels/stable/manifest.json.sig
+```
+
+Operators may add HTTPS mirrors and failover sources. A mirror copies the
+original channel pointers, release manifests, signatures, and bundles without
+re-signing them. Every source must satisfy the same signed v2 contract.
+Credentials remain encrypted in the database and move to the privileged helper
+only in the existing mode-0600 transient file. They are not written to
+manifests, tasks, audits, URLs, or helper output.
+
+Photon and PowerShell source fields autosave as desired runtime-maintenance
+configuration. **Synchronize repositories** explicitly writes only
+LabFoundry-owned tdnf and PowerShell client configuration. Signed LabFoundry
+sources are read directly and do not configure pip.
+
+## Trust contract
+
+Appliances contain named Ed25519 public keys under:
+
+```text
+/etc/labfoundry/update-trust.d/<key-id>.pem
+```
+
+Private signing keys exist only in the protected `appliance-release` GitHub
+environment. The updater rejects missing, malformed, unknown-key, mismatched,
+or invalid signatures. A release may add a future public key because its
+contents are already signed by a currently trusted key. Old keys are retained
+until an overlapping signed release has provisioned the replacement.
+
+A signed channel pointer contains its channel, selected version and full
+commit, immutable release-manifest URL, issue time, and signing-key ID. The
+signed release manifest contains its version and commit, build time, updater
+protocol, database schema version, supported Python ABIs, bundle URL/size/hash,
+and a hash for every bundled file.
+
+The Pages root `manifest.json` is the fixed legacy v1 bridge for older clients.
+New clients accept only signed v2 channel and release documents. After the
+bridge installs once, the appliance uses signed channels.
+
+## Transactional installation
+
+The helper verifies the channel and release signatures, URL contract, updater
+protocol, current Python ABI, bundle size/hash, safe archive paths, exact
+content set, and per-file hashes before it can switch the running release.
+
+Each candidate is built under:
+
+```text
+/opt/labfoundry/releases/<version>
+```
+
+The helper creates the candidate virtualenv from the ABI-specific retained
+wheelhouse with `PIP_CONFIG_FILE=/dev/null`, `--no-index`,
+`--require-hashes`, and no network dependency resolution. It then runs
+`pip check`, imports the web/worker/console modules, and validates the installed
+entry points. `/opt/labfoundry/current` points at the active release, while
+`/opt/labfoundry/.venv` remains a compatibility symlink through `current`.
+
+Before switching, the helper enables the nginx maintenance response, pauses the
+web and console services, closes the worker's database session, and creates a
+consistent SQLite backup. It atomically changes `current`, installs the
+matching privileged helper and systemd definitions, starts the application,
+and probes internal `/openapi.json`.
+
+Any failure restores the previous release link, helper/systemd files, and
+database snapshot before maintenance mode is removed. A root-owned finalizer at
+`/var/lib/labfoundry/apply/appliance-update/finalizer-status.json` records the
+definitive transaction result so the worker can persist the durable task
+outcome. Only the current and previous known-good releases are retained; the UI
+does not expose arbitrary historical downgrades.
+
+## Photon OS boundary
+
+Manual and scheduled Photon checks/installations remain available. Before
+mutation, the helper records an inspection of the proposed tdnf transaction and
+queries its candidate `python3` minor ABI. It fails closed if that ABI is not
+listed in the active signed LabFoundry bundle.
+
+If Photon changes Python to another supported ABI, the helper reconstructs the
+active virtualenv from the retained offline wheelhouse before restarting and
+probing LabFoundry. It does not claim automatic RPM rollback and never reboots
+automatically. If OS maintenance leaves the appliance unhealthy, the task
+records the transaction evidence and manual recovery boundary.
+
+## Persisted-state migration
+
+On upgrade, LabFoundry:
+
+- renames `labfoundry_wheel` schedule/job selections to
+  `labfoundry_release`;
+- removes `python_libraries` from mixed schedules;
+- disables Python-only schedules with an explicit migration notice;
+- deletes retired Python source rows and encrypted credentials;
+- converts legacy HTTPS `.../manifest.json` release sources to v2 base URLs,
+  disables invalid non-HTTPS release sources, and removes retired per-package
+  LabFoundry/Python rows; and
+- records one `migrate_signed_release_updates` audit event.
+
+Appliances without a LabFoundry source receive the public GitHub Pages source.
+Existing HTTPS mirrors remain in priority order.
+
+## Signed lifecycle fixture
+
+Hyper-V lifecycle coverage can exercise the complete release transaction with:
+
+```powershell
+scripts/windows/hyperv/invoke-lifecycle-test.ps1 `
+  -SignedReleaseRepositoryUrl https://release-fixture.example.test/updates
+```
+
+The fixture must use the appliance's named test trust key. Its signed
+`preview` channel must select a healthy release newer than the image baseline;
+its signed `development` channel must select a candidate that reaches database
+startup and then fails the service-health probe. The lifecycle runner proves
+the preview upgrade, expects the development task to fail with
+`rolled_back=true`, and compares the active release, compatibility virtualenv,
+database schema hash, and user identities before and after rollback. It then
+rechecks the web, worker, console, internal `/openapi.json`, and host-facing
+API. Omitting the URL skips only this externally supplied fixture.
+
+## Release operator workflow
+
+The protected workflows use these checked-in inputs:
+
+```text
+requirements-appliance.lock
+requirements-appliance-bootstrap.in
+requirements-appliance-bootstrap.lock
+requirements-release-tools.lock
+image/common/update-trust/
+```
+
+The CI declaration fingerprint prevents dependency or Python-range changes
+without a regenerated hash lock. Release CI installs only the hash-locked
+bootstrap tools, verifies every downloaded wheel or source archive against the
+checked-in lock, builds any missing pure wheel without build isolation, and
+writes an ABI-specific `requirements-wheelhouse.lock` over the resulting wheel
+bytes. It does this for CPython 3.12, 3.13, and 3.14 before running:
 
 ```bash
-python scripts/build_update_wheel.py --channel stable
+python scripts/build_release_bundle.py \
+  --wheelhouses wheelhouses \
+  --signing-key /protected/release-key.pem \
+  --signing-key-id labfoundry-release-2026-01 \
+  --commit <successful-main-sha>
 ```
 
-It creates this publishable tree under `dist/update`:
+Publication is idempotent. An existing tag or release must identify the same
+commit and exact asset bytes or the workflow fails. To promote, run
+**Promote appliance release**, choose `preview` or `stable`, and provide an
+existing version without the `v` prefix.
 
-```text
-dist/update/
-  index.json
-  manifest.json                         # direct-URL compatibility
-  channels/stable/manifest.json         # channel contract
-  packages/labfoundry-<version>.whl
-```
-
-Serve or copy the complete `dist/update` directory to an HTTP(S) static host.
-If it is available as `https://updates.example/labfoundry`, enter that base URL
-in LabFoundry and choose `stable`; the appliance requests:
-
-```text
-https://updates.example/labfoundry/channels/stable/manifest.json
-```
-
-The channel manifest contains the version, full git commit, build timestamp,
-relative wheel path, Python floor, and SHA256. A direct HTTP(S) `.json` URL is
-still accepted for migration from the original single-manifest design.
-Subsequent builds preserve other channel entries and packages. Pass `--clean`
-when intentionally creating a fresh single-channel repository tree.
-
-For a temporary development server:
-
-```bash
-python -m http.server 18080 --directory dist
-```
-
-The repository base is then `http://<dev-host-ip>:18080/update`. From a Photon
-VM, do not use `localhost` unless the server actually runs inside that VM.
-
-## Streams
-
-- **Photon OS** runs `tdnf makecache`, `tdnf check-update`, and `tdnf -y update`.
-- **Python Libraries** checks and upgrades LabFoundry's direct virtualenv
-  dependencies through the configured Python source.
-- **PowerShell Modules** finds and installs enabled managed modules from the
-  registered PowerShell repository.
-- **LabFoundry Wheel** downloads the channel manifest and wheel, verifies the
-  SHA256 and full commit metadata, installs with
-  `pip install --force-reinstall --no-deps`, restores virtualenv permissions,
-  and schedules a delayed `labfoundry.service` restart.
-
-Every check, source synchronization, and install is an `appliance-update` task.
-Real execution stages its redacted configuration at:
-
-```text
-/var/lib/labfoundry/apply/appliance-update/labfoundry-update.json
-```
-
-Task results retain bounded redacted command output and are mirrored under the
-`labfoundry.appliance_update` logger. Photon updates may require a reboot;
-LabFoundry records that recommendation and does not reboot automatically.
-
-Schedules for update checks or installs are configured under **Operations →
-Automation**. Their wizard first captures the schedule name and task type, then
-offers the same update-stream selection used by this page. See
+Schedules for checks or installs live under **Operations → Automation**. See
 [`automation.md`](automation.md).
