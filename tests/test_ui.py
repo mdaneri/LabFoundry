@@ -755,7 +755,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v149" in service_worker.text
+    assert "labfoundry-pwa-v150" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -768,7 +768,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
     assert "/static/app.css?v=monitor-apply-ux-20260722-11" in service_worker.text
-    assert "/static/app.js?v=monitor-apply-ux-20260722-11" in service_worker.text
+    assert "/static/app.js?v=ipv6-nginx-listeners-20260722-1" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -812,7 +812,7 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "<th>Device</th><th>Read/s</th><th>Write/s</th>" in page.text
     assert "swagger-link-icon" in page.text
     assert "/static/app.css?v=monitor-apply-ux-20260722-11" in page.text
-    assert "/static/app.js?v=monitor-apply-ux-20260722-11" in page.text
+    assert "/static/app.js?v=ipv6-nginx-listeners-20260722-1" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -7492,6 +7492,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     app_js = client.get("/static/app.js")
     assert app_js.status_code == 200
     assert "initializeVcfDepotSettings" in app_js.text
+    assert "formatNginxListen(listenAddress, port)" in app_js.text
     software_depot_modal_js = app_js.text.split("function initializeVcfDepotSoftwareDepotIdGenerator", 1)[1].split("function ", 1)[0]
     assert 'modal.close("submit")' in software_depot_modal_js
     assert 'submitButton.textContent = "Creating task…"' in software_depot_modal_js

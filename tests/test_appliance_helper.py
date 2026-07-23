@@ -13,6 +13,8 @@ from ipaddress import ip_network
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 HELPER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "appliance" / "labfoundry-helper"
 
@@ -707,6 +709,14 @@ def test_nginx_site_conflict_detects_duplicate_sni_name_on_same_listener(monkeyp
     monkeypatch.setattr(helper, "NGINX_SITES_DIR", sites_dir)
 
     assert "duplicates server_name ca.labfoundry.internal" in helper._nginx_site_conflict(sites_dir / "public-services.conf", candidate)
+
+
+def test_nginx_listen_parser_requires_brackets_for_ipv6_literals():
+    helper = load_helper_module()
+
+    assert helper._listen_address_and_port("[fd87::254]:443 ssl") == ("fd87::254", 443)
+    with pytest.raises(ValueError, match="IPv6 listen address must be bracketed"):
+        helper._listen_address_and_port("fd87::254:443 ssl")
 
 
 def test_public_services_helper_rejects_broad_root_and_registry_proxy(monkeypatch, tmp_path, capsys):
