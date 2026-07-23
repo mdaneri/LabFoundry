@@ -755,7 +755,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert service_worker.headers["cache-control"] == "no-cache"
     assert service_worker.headers["service-worker-allowed"] == "/"
     assert "LABFOUNDRY_CACHE" in service_worker.text
-    assert "labfoundry-pwa-v151" in service_worker.text
+    assert "labfoundry-pwa-v152" in service_worker.text
     assert 'fetch(asset, { cache: "reload" })' in service_worker.text
     assert ".catch(() => undefined)" in service_worker.text
     assert 'request.mode === "navigate"' in service_worker.text
@@ -767,8 +767,8 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     assert "hasDownloadLikePath(url)" in service_worker.text
     assert "accept.includes(\"text/html\") && !hasDownloadLikePath(url)" in service_worker.text
     assert "/static/vendor/codemirror/labfoundry-codemirror.min.js" in service_worker.text
-    assert "/static/app.css?v=monitor-no-disk-usage-20260722-1" in service_worker.text
-    assert "/static/app.js?v=monitor-no-disk-usage-20260722-1" in service_worker.text
+    assert "/static/app.css?v=monitor-no-disk-usage-20260723-2" in service_worker.text
+    assert "/static/app.js?v=monitor-no-disk-usage-20260723-2" in service_worker.text
 
     registration = client.get("/static/pwa.js")
     assert registration.status_code == 200
@@ -777,7 +777,7 @@ def test_pwa_manifest_service_worker_and_offline_shell(client):
     offline = client.get("/static/offline.html")
     assert offline.status_code == 200
     assert "Appliance connection unavailable" in offline.text
-    assert "/static/app.css?v=monitor-no-disk-usage-20260722-1" in offline.text
+    assert "/static/app.css?v=monitor-no-disk-usage-20260723-2" in offline.text
 
 
 def test_monitor_page_renders_and_data_endpoint(client):
@@ -793,6 +793,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "monitor-disk-activity-panel" in page.text
     assert "monitor-disk-usage-panel" not in page.text
     assert "Disk Usage" not in page.text
+    assert "data-monitor-disk-current" not in page.text
+    assert "data-monitor-disk-detail" not in page.text
     assert "Unprivileged control plane" not in page.text
     assert page.text.count("has-monitor-table") == 2
     assert 'data-monitor-page' in page.text
@@ -811,8 +813,8 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "data-monitor-disk-activity-table" in page.text
     assert "<th>Device</th><th>Read/s</th><th>Write/s</th>" in page.text
     assert "swagger-link-icon" in page.text
-    assert "/static/app.css?v=monitor-no-disk-usage-20260722-1" in page.text
-    assert "/static/app.js?v=monitor-no-disk-usage-20260722-1" in page.text
+    assert "/static/app.css?v=monitor-no-disk-usage-20260723-2" in page.text
+    assert "/static/app.js?v=monitor-no-disk-usage-20260723-2" in page.text
     app_css = client.get("/static/app.css")
     assert app_css.status_code == 200
     assert ".split-workspace > .wide-panel" in app_css.text
@@ -836,6 +838,9 @@ def test_monitor_page_renders_and_data_endpoint(client):
     assert "payload.disk_devices" in app_js
     assert 'diskUsage: "Disk Usage"' not in app_js
     assert "function renderMonitorDiskTable" not in app_js
+    assert "disk.highest_used_percent" not in app_js
+    assert "disk.highest_used_mount" not in app_js
+    assert "disk.mount_count" not in app_js
     assert "(aggregate ? 3 : 1)" in app_js
     assert "(aggregate ? 0.45 : 1)" in app_js
     assert "Number(right.aggregate) - Number(left.aggregate)" in app_js
@@ -10082,7 +10087,7 @@ def test_firewall_settings_autosave_updates_desired_state_preview(client):
     page = client.get("/firewall")
     assert page.status_code == 200
     assert "data-firewall-enabled-status" in page.text
-    assert "monitor-no-disk-usage-20260722-1" in page.text
+    assert "monitor-no-disk-usage-20260723-2" in page.text
     codemirror = client.get("/static/vendor/codemirror/labfoundry-codemirror.min.js")
     assert codemirror.status_code == 200
     assert "LabFoundryCodeMirror" in codemirror.text

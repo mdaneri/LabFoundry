@@ -50,7 +50,7 @@
 ## Monitor Operations UX
 
 - Keep `/monitor` read-only and focused on appliance runtime health: CPU, memory pressure, network throughput, unique-device disk activity, interface state, and virtual-machine context.
-- Do not restore the per-mount Disk Usage chart or capacity table. Filesystem usage may remain in monitor samples and APIs for compatibility and other consumers, but it is intentionally omitted from the Monitor page because the dense mount-level view was not operationally useful.
+- Do not restore per-mount capacity presentation on the Monitor page, including the top-level Disks metric, Disk Usage chart, or capacity table. Filesystem usage may remain in monitor samples and APIs for compatibility and other consumers, but it is intentionally omitted from this page because the mount-level view was not operationally useful.
 - Count disk activity once per underlying device even when the same filesystem is visible through multiple mount or bind-mount paths. Preserve the aggregate-versus-detail hierarchy so appliance totals remain visually distinct from per-CPU, per-interface, and per-device series.
 - Keep chart expansion, series selection, and time-range controls consistent across the remaining charts. Full-screen-only zoom must not change the selected history range.
 

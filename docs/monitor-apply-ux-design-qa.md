@@ -6,13 +6,13 @@
 - Desktop viewport: 1968 × 1562 CSS pixels at the browser's native device density.
 - Narrow viewport: 900 × 1200 CSS pixels.
 - Historical validation target: VMware appliance `192.168.167.219`, deployed with the repository VMware wheel helper. The images below document the preceding layout and interaction work; they are not screenshots of the current panel set.
-- Current shared cache revision: `monitor-no-disk-usage-20260722-1` / `labfoundry-pwa-v151`.
+- Current shared cache revision: `monitor-no-disk-usage-20260723-2` / `labfoundry-pwa-v152`.
 
 ## Comparison
 
 ![Before and after Monitor comparison](images/monitor-apply-ux/monitor-comparison.png)
 
-The captured desktop comparison records the earlier hierarchy where Disk Activity owned unique-device I/O and Disk Usage owned capacity. It is retained as historical evidence, not as a representation of the current page. The current Monitor removes the noisy Disk Usage chart and mount table while retaining Network Throughput and Disk Activity at matching row heights.
+The captured desktop comparison records the earlier hierarchy where Disk Activity owned unique-device I/O and Disk Usage owned capacity. It is retained as historical evidence, not as a representation of the current page. The current Monitor removes the top-level Disks capacity metric, Disk Usage chart, and mount table while retaining Network Throughput and Disk Activity at matching row heights.
 
 ## Interaction evidence
 
@@ -37,7 +37,7 @@ At 900 × 1200 the dashboard returns to natural stacked sizing; full-width contr
 4. Expanded hit testing from sampled points to complete line segments.
 5. Equalized Network Throughput and Disk Activity desktop card heights.
 6. Added clickable legend selection plus 12h and 24h history ranges.
-7. Removed the Disk Usage chart and per-mount table after live operator review found them not useful.
+7. Removed the top-level Disks capacity metric, Disk Usage chart, and per-mount table after live operator review found capacity presentation not useful on this page.
 
 ## Final result
 
