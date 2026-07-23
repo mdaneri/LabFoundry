@@ -33,7 +33,8 @@ GitHub is the default distribution origin:
 - GitHub Releases stores immutable versioned manifests, signatures, bundles,
   and the legacy bridge wheel.
 - GitHub Pages publishes signed `development`, `preview`, and `stable` channel
-  pointers.
+  pointers. Its root serves a small informational release-repository page;
+  appliances continue to use only the signed JSON documents under `/updates`.
 - A successful `main` CI run publishes the exact successful commit as
   `vX.Y.Z` and advances `development`.
 - A protected manual dispatch may recover a failed publication only by naming
@@ -48,6 +49,11 @@ The default source is:
 ```text
 https://mdaneri.github.io/LabFoundry/updates
 ```
+
+The human-facing Pages URL is
+`https://mdaneri.github.io/LabFoundry/`. The repository name is case-sensitive
+in the project-site path. The landing page contains no updater state or trust
+material and does not replace signature verification.
 
 For the `stable` channel, the appliance reads:
 
