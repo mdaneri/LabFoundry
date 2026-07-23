@@ -136,6 +136,34 @@ def test_public_services_nginx_config_contains_per_ip_scoped_locations():
     assert "/registry" not in config
 
 
+def test_public_services_nginx_config_brackets_ipv6_https_and_http_listeners():
+    config = render_public_services_nginx_config(
+        [
+            {
+                "interface": "eth2",
+                "role": "access",
+                "address": "fd87::254",
+                "services": [
+                    {"id": "ca"},
+                    {"id": "esxi_pxe"},
+                    {"id": "vcf_offline_depot"},
+                ],
+                "web_terminal": True,
+            }
+        ],
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+        ca_certificate_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.crt",
+        ca_key_path="/etc/labfoundry/ca-portal/certs/ca.labfoundry.internal.key",
+        terminal_certificate_path="/etc/labfoundry/https/certs/appliance.crt",
+        terminal_key_path="/etc/labfoundry/https/private/appliance.key",
+    )
+
+    assert "listen [fd87::254]:443 ssl;" in config
+    assert "listen [fd87::254]:80;" in config
+    assert "listen fd87::254:443 ssl;" not in config
+    assert "listen fd87::254:80;" not in config
+
+
 def test_public_services_nginx_config_skips_non_pxe_http_services():
     config = render_public_services_nginx_config(
         [

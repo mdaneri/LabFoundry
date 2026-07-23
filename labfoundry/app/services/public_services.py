@@ -8,6 +8,7 @@ from labfoundry.app.services.ca import CA_DEFAULT_PORTAL_HOSTNAME
 from labfoundry.app.services.dnsmasq import split_addresses
 from labfoundry.app.services.esxi_pxe import ESXI_PXE_DEFAULT_HOSTNAME
 from labfoundry.app.services.networking import normalize_interface_role
+from labfoundry.app.services.nginx import format_nginx_listen
 from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_DEFAULT_HOSTNAME,
     VCF_DEPOT_DEFAULT_STORE_PATH,
@@ -232,7 +233,7 @@ def _ca_https_server_lines(
         "",
         "server {",
         "  # CA portal HTTPS front door.",
-        f"  listen {_nginx_listen(address, https_port)} ssl;",
+        f"  listen {format_nginx_listen(address, https_port)} ssl;",
         f"  server_name {hostname};",
         f"  ssl_certificate {ca_certificate_path};",
         f"  ssl_certificate_key {ca_key_path};",
@@ -280,7 +281,7 @@ def _ip_scoped_https_server_lines(
         "",
         "server {",
         "  # IP-scoped HTTPS public services front door.",
-        f"  listen {_nginx_listen(address, https_port)} ssl;",
+        f"  listen {format_nginx_listen(address, https_port)} ssl;",
         f"  server_name {_nginx_server_name(address)};",
         f"  ssl_certificate {ca_certificate_path};",
         f"  ssl_certificate_key {ca_key_path};",
@@ -352,7 +353,7 @@ def _terminal_https_server_lines(
         "",
         "server {",
         "  # Terminal-only HTTPS front door.",
-        f"  listen {_nginx_listen(address, https_port)} ssl;",
+        f"  listen {format_nginx_listen(address, https_port)} ssl;",
         f"  server_name {_nginx_server_name(address)};",
         f"  ssl_certificate {certificate_path};",
         f"  ssl_certificate_key {key_path};",
@@ -472,7 +473,7 @@ def _esxi_pxe_http_server_lines(address: str, upstream_host: str, upstream_port:
     return [
         "",
         "server {",
-        f"  listen {_nginx_listen(address, http_port)};",
+        f"  listen {format_nginx_listen(address, http_port)};",
         f"  server_name {_nginx_server_name(address)};",
         "  client_max_body_size 1g;",
         "",
@@ -549,11 +550,6 @@ def _service_port(service: dict[str, Any], default: int) -> int:
         return int(service.get("port") or default)
     except (TypeError, ValueError):
         return default
-
-
-def _nginx_listen(address: str, port: int) -> str:
-    normalized = _normalize_address(address)
-    return f"[{normalized}]:{port}" if ":" in normalized else f"{normalized}:{port}"
 
 
 def _nginx_server_name(address: str) -> str:

@@ -516,3 +516,19 @@ def test_vcf_depot_nginx_preview_uses_ca_paths_and_static_file_directives():
     assert "ssl_certificate /etc/labfoundry/vcf-offline-depot/certs/depot.crt;" in preview
     assert "ssl_certificate_key /etc/labfoundry/vcf-offline-depot/certs/depot.key;" in preview
     assert "BEGIN PRIVATE KEY" not in preview
+
+
+def test_vcf_depot_nginx_preview_brackets_ipv6_listeners():
+    settings = VcfOfflineDepotSettings(
+        enabled=True,
+        hostname="depot.labfoundry.internal",
+        listen_address="192.168.50.1\nfd87::254",
+        port=443,
+        depot_store_path="/mnt/labfoundry-vcf-offline-depot",
+    )
+
+    preview = render_nginx_depot_config(settings)
+
+    assert "listen 192.168.50.1:443 ssl;" in preview
+    assert "listen [fd87::254]:443 ssl;" in preview
+    assert "listen fd87::254:443 ssl;" not in preview

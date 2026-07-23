@@ -12,6 +12,7 @@ from pathlib import Path
 
 from labfoundry.app.models import Setting, User, VcfDepotDownloadProfile, VcfOfflineDepotSettings
 from labfoundry.app.services.dnsmasq import split_addresses, split_interfaces
+from labfoundry.app.services.nginx import format_nginx_listen
 
 
 VCF_DEPOT_DEFAULT_HOSTNAME = "depot.labfoundry.internal"
@@ -456,7 +457,7 @@ def render_nginx_depot_config(
         "",
         "server {",
         *[
-            f"  listen {address}:{settings.port} ssl;"
+            f"  listen {format_nginx_listen(address, settings.port)} ssl;"
             for address in (split_addresses(settings.listen_address) or ["0.0.0.0"])
         ],
         f"  server_name {settings.hostname};",
