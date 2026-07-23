@@ -179,7 +179,9 @@ Releases and advances the signed `development` pointer on GitHub Pages.
 protected manual publication dispatch can recover an exact commit only when it
 already has a successful `main` push CI run. Publication blocks later versions
 until the fixed `v0.9.0` legacy bridge exists, and it refuses any existing tag
-or release whose commit or asset bytes differ. See
+or release whose commit or asset bytes differ. The same dispatch safely retries
+channel advancement after a release has already published because it verifies
+the existing asset bytes first. See
 [`docs/appliance-update.md`](docs/appliance-update.md) and
 [`docs/automation.md`](docs/automation.md).
 

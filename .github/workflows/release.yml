@@ -245,7 +245,7 @@ jobs:
           if test "$VERSION" = "0.9.0"; then
             install -m 0644 dist/release/legacy-manifest.json "$SITE_ROOT/updates/manifest.json"
           else
-            test "$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"version\"])' "$SITE_ROOT/updates/manifest.json")" = "0.9.0"
+            test "$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$SITE_ROOT/updates/manifest.json")" = "0.9.0"
           fi
           touch "$SITE_ROOT/.nojekyll"
           git -C "$SITE_ROOT" add --all
