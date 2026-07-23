@@ -7942,6 +7942,17 @@ manage-gids=y
     _write_secret_file(ESX_STORAGE_NFS_CONFIG_PATH, nfs_config, 0o644)
 
 
+def _esx_storage_bind_mount_matches(findmnt: str, source: Path, target: Path) -> bool:
+    mounted = _run([findmnt, "-n", "--mountpoint", str(target)])
+    if mounted.returncode != 0:
+        return False
+    source_stat = os.stat(source, follow_symlinks=True)
+    target_stat = os.stat(target, follow_symlinks=True)
+    if (source_stat.st_dev, source_stat.st_ino) != (target_stat.st_dev, target_stat.st_ino):
+        raise ValueError(f"existing mount at {target} does not match ESX Storage source {source}")
+    return True
+
+
 def _esx_storage_apply(payload: dict[str, object]) -> dict[str, object]:
     inventory = _esx_storage_inventory()
     inventory_by_id = {str(item.get("stable_device_id") or ""): item for item in inventory}
@@ -8020,8 +8031,10 @@ def _esx_storage_apply(payload: dict[str, object]) -> dict[str, object]:
         if isinstance(share, dict) and share.get("enabled")
     }
     findmnt_command = _command_path("findmnt")
+    if findmnt_command is None:
+        raise ValueError("findmnt is required for ESX Storage bind mounts")
     umount_command = _command_path("umount")
-    if findmnt_command and umount_command:
+    if umount_command:
         mounted_targets = _run([findmnt_command, "-rn", "-o", "TARGET"]).stdout.splitlines()
         for raw_target in sorted(mounted_targets, key=len, reverse=True):
             target = raw_target.strip()
@@ -8047,8 +8060,7 @@ def _esx_storage_apply(payload: dict[str, object]) -> dict[str, object]:
             raise ValueError(f"share {share.get('datastore_name')} escapes its backing volume")
         bind_path = Path(str(share["bind_path"]))
         bind_path.mkdir(parents=True, exist_ok=True)
-        find_bind = _run([_command_path("findmnt") or "findmnt", "-nro", "SOURCE", "--target", str(bind_path)])
-        if find_bind.returncode != 0 or Path(find_bind.stdout.strip()).resolve() != resolved_source:
+        if not _esx_storage_bind_mount_matches(findmnt_command, resolved_source, bind_path):
             bind_result = _run([mount, "--bind", str(resolved_source), str(bind_path)])
             commands.append([mount, "--bind", str(resolved_source), str(bind_path)])
             if bind_result.returncode != 0:

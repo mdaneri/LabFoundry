@@ -77,7 +77,7 @@ labfoundry-helper esx-storage status
 labfoundry-helper esx-storage logs
 ```
 
-Global appliance apply is the only mutation path. Dry-run records intended validation, format, UUID mount, bind mount, export, DNS, firewall, and service commands without changing the host. Real apply writes a managed `/etc/fstab` block, `/etc/exports.d/labfoundry-esx-storage.exports`, and `/etc/nfs.conf.d/labfoundry-esx-storage.conf`, then refreshes exports and services.
+Global appliance apply is the only mutation path. Dry-run records intended validation, format, UUID mount, bind mount, export, DNS, firewall, and service commands without changing the host. Real apply writes a managed `/etc/fstab` block, `/etc/exports.d/labfoundry-esx-storage.exports`, and `/etc/nfs.conf.d/labfoundry-esx-storage.conf`, then refreshes exports and services. Reapply recognizes an existing bind target by its mountpoint and filesystem object identity, so a healthy share is not mounted again; an unexpected mount at a managed target fails closed instead of being replaced.
 
 Settings backups include the service, volume fingerprints/UUIDs/mounts, and shares but never a format authorization. Restore marks volumes for runtime verification before reapply. Factory reset removes LabFoundry desired state, exports, and service enablement after apply; it does not erase, reformat, or delete files on storage disks. Reattach preserved ext4 data as an existing mounted volume.
 
