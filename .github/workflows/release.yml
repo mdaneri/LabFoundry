@@ -247,6 +247,46 @@ jobs:
           else
             test "$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$SITE_ROOT/updates/manifest.json")" = "0.9.0"
           fi
+          cat > "$SITE_ROOT/index.html" <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>LabFoundry Release Repository</title>
+            <style>
+              :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+              body { margin: 0; background: #f4f7fb; color: #162033; }
+              main { width: min(720px, calc(100% - 40px)); margin: 12vh auto; }
+              article { padding: 40px; background: #fff; border: 1px solid #dce3ed; border-radius: 18px; box-shadow: 0 18px 50px rgb(25 44 74 / 8%); }
+              p { line-height: 1.65; color: #526075; }
+              h1 { margin: 8px 0 12px; font-size: clamp(2rem, 6vw, 3.5rem); line-height: 1.05; letter-spacing: -.04em; }
+              .eyebrow { color: #315cbd; font-size: .78rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+              .source { display: block; overflow-wrap: anywhere; margin: 24px 0; padding: 14px 16px; background: #f1f5fb; border-radius: 10px; color: #243959; }
+              nav { display: flex; flex-wrap: wrap; gap: 12px; }
+              a { color: #244fa8; font-weight: 650; text-decoration: none; }
+              a:hover, a:focus-visible { text-decoration: underline; }
+              footer { margin-top: 28px; font-size: .875rem; }
+            </style>
+          </head>
+          <body>
+            <main>
+              <article>
+                <div class="eyebrow">LabFoundry appliance updates</div>
+                <h1>Signed release repository</h1>
+                <p>This site publishes machine-readable channel pointers for transactional LabFoundry appliance updates. Appliances verify every pointer and release manifest with a named Ed25519 trust key before installation.</p>
+                <code class="source">https://mdaneri.github.io/LabFoundry/updates</code>
+                <nav aria-label="Release repository links">
+                  <a href="./updates/channels/development/manifest.json">Development channel</a>
+                  <a href="https://github.com/mdaneri/LabFoundry/releases">GitHub Releases</a>
+                  <a href="https://github.com/mdaneri/LabFoundry">Source repository</a>
+                </nav>
+                <footer><p>The HTML page is informational. Signed JSON documents under <code>/updates</code> remain the appliance protocol.</p></footer>
+              </article>
+            </main>
+          </body>
+          </html>
+          EOF
           touch "$SITE_ROOT/.nojekyll"
           git -C "$SITE_ROOT" add --all
           if git -C "$SITE_ROOT" diff --cached --quiet; then
