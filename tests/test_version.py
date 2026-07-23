@@ -63,6 +63,10 @@ def test_bump_synchronizes_all_sources_from_base(tmp_path):
         "Python runtime fallback": bumped,
         "PowerShell module": bumped,
     }
+    assert all(
+        b"\r\n" not in (target / relative_path).read_bytes()
+        for relative_path in versioning.VERSION_PATHS.values()
+    )
     assert versioning.check(target, base) == bumped
 
 
