@@ -6251,6 +6251,8 @@ def _listen_address_and_port(value: str) -> tuple[str, int]:
         host, port_text = listen.rsplit(":", 1)
         host = host.strip("[]")
     elif ":" in listen:
+        if listen.count(":") > 1:
+            raise ValueError(f"nginx IPv6 listen address must be bracketed: {listen}")
         host, port_text = listen.rsplit(":", 1)
     else:
         host, port_text = "0.0.0.0", listen

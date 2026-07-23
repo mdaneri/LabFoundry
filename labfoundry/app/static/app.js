@@ -10486,6 +10486,16 @@ function updateVcfDepotSoftwareDepotId(payload = {}) {
   }
 }
 
+function formatNginxListen(address, port) {
+  const rawAddress = String(address || "").trim();
+  const normalizedAddress = rawAddress.startsWith("[") && rawAddress.endsWith("]")
+    ? rawAddress.slice(1, -1)
+    : rawAddress;
+  return normalizedAddress.includes(":")
+    ? `[${normalizedAddress}]:${port}`
+    : `${normalizedAddress}:${port}`;
+}
+
 function updateVcfDepotHttpsPreview(payload = {}) {
   const httpsPreview = document.querySelector("[data-vcf-depot-https-preview]");
   if (!(httpsPreview instanceof HTMLElement)) {
@@ -10505,7 +10515,9 @@ function updateVcfDepotHttpsPreview(payload = {}) {
         .split(/[\n,]+/)
         .map((value) => value.trim())
         .filter(Boolean);
-  const listenLines = (listenAddresses.length ? listenAddresses : ["0.0.0.0"]).map((listenAddress) => `  listen ${listenAddress}:${port} ssl;`);
+  const listenLines = (listenAddresses.length ? listenAddresses : ["0.0.0.0"]).map(
+    (listenAddress) => `  listen ${formatNginxListen(listenAddress, port)} ssl;`,
+  );
   const depotStorePath = payload.depot_store_path || document.querySelector("[data-vcf-depot-store]")?.textContent || "/mnt/labfoundry-vcf-offline-depot";
   const certificateName = payload.server_certificate || hostname;
   const username = payload.http_username || "vcf-depot";
