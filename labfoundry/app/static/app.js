@@ -12264,6 +12264,11 @@ function renderApplianceApplyTask(task) {
   scheduleApplianceApplyAutoClose(task);
 }
 
+function refreshCurrentWorkflowAfterApplianceApply(task) {
+  if (task?.status !== "succeeded" || window.location.pathname !== "/esx-storage") return;
+  window.setTimeout(() => window.location.reload(), 300);
+}
+
 async function submitApplianceApplyForm(form) {
   const elements = applianceApplyModalElements();
   if (!(form instanceof HTMLFormElement) || !(elements.modal instanceof HTMLDialogElement)) return;
@@ -12316,6 +12321,7 @@ async function pollGlobalApplianceApply() {
       if (taskResponse.ok) {
         const taskPayload = await taskResponse.json();
         renderApplianceApplyTask(taskPayload.task);
+        refreshCurrentWorkflowAfterApplianceApply(taskPayload.task);
       }
       applianceApplyActiveJobId = "";
     }
@@ -15485,7 +15491,10 @@ function initializeEsxStorageWizards() {
           showError(payload.detail || "The ESX Storage change could not be saved.");
           return;
         }
-        window.location.assign(kind === "volume" ? "/esx-storage#storage-volumes" : "/esx-storage#nfs-datastores");
+        const target = kind === "volume" ? "/esx-storage#storage-volumes" : "/esx-storage#nfs-datastores";
+        modal.close();
+        window.history.replaceState(null, "", target);
+        window.location.reload();
       } catch (_error) {
         showError("The ESX Storage change could not be saved. Check the connection and try again.");
       } finally {

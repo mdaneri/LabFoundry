@@ -382,11 +382,14 @@ def test_esx_storage_page_and_dual_stack_api_contract(client):
     assert "+ Add NFS datastore here" in page.text
     assert 'id="esx-storage-share-modal"' in page.text
     assert 'data-esx-storage-wizard="share"' in page.text
+    assert 'data-tab-storage-key="labfoundry:esx-storage:active-tab"' in page.text
     assert "Leave empty to allow any IPv4 client (0.0.0.0/0)." in page.text
     assert "Leave empty to allow any IPv6 client (::/0)." in page.text
     assert "initializeEsxStorageWizards" in client.get("/static/app.js").text
     assert "any IPv4 client" in client.get("/static/app.js").text
     assert "await fetch(form.action" in client.get("/static/app.js").text
+    assert 'window.history.replaceState(null, "", target)' in client.get("/static/app.js").text
+    assert 'window.location.pathname !== "/esx-storage"' in client.get("/static/app.js").text
     assert 'label: "Edit datastore"' in client.get("/static/app.js").text
     assert "rowDblClick: (_event, row) => editRow(row)" in client.get("/static/app.js").text
 

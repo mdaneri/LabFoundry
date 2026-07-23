@@ -11,7 +11,7 @@
       <span class="status-pill {{ 'good' if esx_storage_settings.enabled else 'muted' }}">{{ "enabled" if esx_storage_settings.enabled else "disabled" }}</span>
     </div>
 
-    <div class="tab-buttons" role="tablist" aria-label="ESX Storage resources">
+    <div class="tab-buttons" role="tablist" aria-label="ESX Storage resources" data-tab-storage-key="labfoundry:esx-storage:active-tab">
       <button class="tab-button active" type="button" role="tab" data-tab-target="storage-volumes" aria-selected="true">Storage Volumes</button>
       <button class="tab-button" type="button" role="tab" data-tab-target="nfs-datastores" aria-selected="false">NFS Datastores</button>
     </div>
