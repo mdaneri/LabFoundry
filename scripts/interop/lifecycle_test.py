@@ -379,12 +379,13 @@ def ssh_command(
     command: str,
     *,
     role: str,
+    appliance_as_root: bool = True,
     redact_values: list[str] | None = None,
 ) -> dict[str, Any]:
     if not host:
         raise LifecycleError("SSH host was not provided.")
     user = ssh_username(args, role)
-    remote_command = appliance_ssh_command(args, command) if role == "appliance" else command
+    remote_command = appliance_ssh_command(args, command) if role == "appliance" and appliance_as_root else command
     secrets = [args.ssh_password, *(redact_values or [])]
     if args.ssh_password:
         plink_args = ["plink", "-batch", "-ssh", "-pw", args.ssh_password, f"{user}@{host}", remote_command]
@@ -2076,10 +2077,21 @@ print("recursive DNS and PTR lifecycle probes passed")
     return f"printf %s {encoded} | base64 -d | python3 -"
 
 
-def run_host_checks(args: argparse.Namespace, checks: dict[str, str]) -> dict[str, Any]:
+def run_host_checks(
+    args: argparse.Namespace,
+    checks: dict[str, str],
+    *,
+    appliance_as_root: bool = True,
+) -> dict[str, Any]:
     evidence: dict[str, Any] = {}
     for name, command in checks.items():
-        result = ssh_command(args.appliance_ssh_host, args, command, role="appliance")
+        result = ssh_command(
+            args.appliance_ssh_host,
+            args,
+            command,
+            role="appliance",
+            appliance_as_root=appliance_as_root,
+        )
         require_success(result, f"host {name} check")
         evidence[name] = result
     return evidence
@@ -2210,8 +2222,7 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
             f"printf %s {httpx_probe} | base64 -d | /opt/labfoundry/.venv/bin/python -"
         ),
         "vcf_automation_tooling": (
-            f"printf %s {vcf_sdk_probe} | base64 -d | /opt/labfoundry/.venv/bin/python - && "
-            f"pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand {powercli_probe}"
+            f"printf %s {vcf_sdk_probe} | base64 -d | /opt/labfoundry/.venv/bin/python -"
         ),
         "ca": "test -f /etc/labfoundry/ca/ca-bundle.pem && openssl x509 -in /etc/labfoundry/ca/root-ca.pem -noout -subject",
         "ntpsec": (
@@ -2288,7 +2299,19 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
             f"dig +short A {ipv4_target} @127.0.0.1 | grep -Fx {site_ip} && "
             f"dig +short AAAA {ipv6_target} @127.0.0.1 | grep -Fx {site_ipv6}"
         )
-    return run_host_checks(args, checks)
+    evidence = run_host_checks(args, checks)
+    evidence.update(
+        run_host_checks(
+            args,
+            {
+                "vcf_powercli_user": (
+                    f"pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand {powercli_probe}"
+                )
+            },
+            appliance_as_root=False,
+        )
+    )
+    return evidence
 
 
 def authoritative_dns_state_check(args: argparse.Namespace) -> dict[str, Any]:

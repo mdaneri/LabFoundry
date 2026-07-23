@@ -321,8 +321,12 @@ Provisioning creates the bootstrap admin OS account under
 bootstrap password used for the initial web login, so the admin account exists
 on Photon before first appliance apply. The image installs Photon's
 `powershell` package for this shell, installs system-wide VCF PowerCLI
-`9.1.0.25380678`, installs `vcf-sdk==9.1.0.0` in the LabFoundry virtualenv, and grants the bootstrap admin normal
-password-backed sudo through `/etc/sudoers.d/labfoundry-bootstrap-admin`.
+`9.1.0.25380678`, verifies the module and `Connect-VIServer` from the
+unprivileged bootstrap administrator's PowerShell session, installs
+`vcf-sdk==9.1.0.0` in the LabFoundry virtualenv, and grants the bootstrap admin
+normal password-backed sudo through `/etc/sudoers.d/labfoundry-bootstrap-admin`.
+The system PowerShell module tree remains root-owned and writable only by root,
+while every local `/usr/bin/pwsh` user can read and import its modules.
 
 VCF Backups desired state is OpenSSH-backed. Provisioning leaves the default
 `vcf-backup` account absent from Photon OS until Local Users apply creates it.

@@ -152,7 +152,8 @@ The lifecycle runner records structured evidence in
 - physical interface refresh, access NICs, trunk NIC, and VLAN desired state
 - tty1 LabFoundry console service ownership, masked tty1 getty, untouched tty2 getty template, installed console executable, and non-isolated recovery state
 - DNS and DHCP desired state plus dnsmasq host-state checks
-- first-boot `vcf-sdk` and VCF PowerCLI version/import checks, including `Connect-VIServer`
+- first-boot `vcf-sdk` plus unprivileged appliance-user VCF PowerCLI
+  version/import checks, including `Connect-VIServer` without sudo
 - firewall settings, NAT, WAN policy, nftables, routes, and `tc` state
 - WAN impairment evidence through a route-bound netem policy and a live
   `tc qdisc` assertion on the appliance WAN interface

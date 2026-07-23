@@ -2,9 +2,11 @@
 
 The base image includes Python `vcf-sdk==9.1.0.0` and system-wide
 `VCF.PowerCLI==9.1.0.25380678`. Provisioning fails if PowerCLI cannot import or
-`Connect-VIServer` is unavailable. Set `LABFOUNDRY_POWERCLI_MODULE_SOURCE` to a
-pre-staged module directory for offline image builds; otherwise PSGallery is
-used.
+`Connect-VIServer` is unavailable to the unprivileged bootstrap administrator.
+The system module tree remains root-owned and writable only by root, while
+every local `/usr/bin/pwsh` user can read and import its modules. Set
+`LABFOUNDRY_POWERCLI_MODULE_SOURCE` to a pre-staged module directory for offline
+image builds; otherwise PSGallery is used.
 
 This target builds a Photon OS 5.0 VMware Workstation VMX/VMDK appliance with
 the same LabFoundry control plane provisioning used by the Hyper-V image.

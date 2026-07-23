@@ -223,6 +223,8 @@ NETWORK_APPLY_DIR = Path("/var/lib/labfoundry/apply/network")
 WAN_APPLY_DIR = Path("/var/lib/labfoundry/apply/wan")
 APPLIANCE_UPDATE_APPLY_DIR = Path("/var/lib/labfoundry/apply/appliance-update")
 APPLIANCE_UPDATE_INFO_PATH = Path("/etc/labfoundry/update-info")
+POWERSHELL_SYSTEM_ROOT = Path("/usr/local/share/powershell")
+POWERSHELL_MODULE_ROOT = POWERSHELL_SYSTEM_ROOT / "Modules"
 WAN_NAT_CONFIG_DIR = Path("/etc/labfoundry/nftables.d")
 WAN_NAT_CONFIG_PATH = WAN_NAT_CONFIG_DIR / "labfoundry-nat.nft"
 WAN_NAT_SERVICE_PATH = Path("/etc/systemd/system/labfoundry-nat.service")
@@ -7421,6 +7423,28 @@ def _apply_powershell_modules(payload: dict, credentials: dict[str, dict[str, st
             env.update({"LF_REPO_USER": str(credential.get("username") or ""), "LF_REPO_SECRET": str(credential["secret"])})
         command_args = [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", _powershell_encoded_command(script)]
         commands.append(_command_payload(command_args, env=env) if credential else _command_payload(command_args))
+    if any(command.get("success") for command in commands):
+        chmod = _command_path("chmod") or "chmod"
+        commands.append(
+            _command_payload(
+                [
+                    chmod,
+                    "0755",
+                    str(POWERSHELL_SYSTEM_ROOT),
+                    str(POWERSHELL_MODULE_ROOT),
+                ]
+            )
+        )
+        commands.append(
+            _command_payload(
+                [
+                    chmod,
+                    "-R",
+                    "a+rX,go-w",
+                    str(POWERSHELL_MODULE_ROOT),
+                ]
+            )
+        )
     return commands
 
 
