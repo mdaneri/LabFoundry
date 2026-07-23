@@ -47,6 +47,13 @@
 - Fresh appliances remain in setup readiness until management networking is healthy and one global appliance-apply task has succeeded. Show management discovery, addressing/link state, Appliance Settings validity, desired-state validity, and first-apply readiness while that mode is active.
 - Merge recent tasks and audit events chronologically without rendering task results, command output, raw errors, or audit detail. Dashboard refresh runs every 30 seconds only while visible, refreshes immediately on visibility return, and preserves the last successful snapshot with a stale marker after failure.
 
+## Monitor Operations UX
+
+- Keep `/monitor` read-only and focused on appliance runtime health: CPU, memory pressure, network throughput, unique-device disk activity, interface state, and virtual-machine context.
+- Do not restore the per-mount Disk Usage chart or capacity table. Filesystem usage may remain in monitor samples and APIs for compatibility and other consumers, but it is intentionally omitted from the Monitor page because the dense mount-level view was not operationally useful.
+- Count disk activity once per underlying device even when the same filesystem is visible through multiple mount or bind-mount paths. Preserve the aggregate-versus-detail hierarchy so appliance totals remain visually distinct from per-CPU, per-interface, and per-device series.
+- Keep chart expansion, series selection, and time-range controls consistent across the remaining charts. Full-screen-only zoom must not change the selected history range.
+
 ## Photon OS Appliance Deployment
 
 - Default live appliance testing should use VMware Workstation. VMware Workstation is installed by default at `C:\Program Files\VMware\VMware Workstation`; use `vmrun.exe` there with the helpers under `scripts/windows/vmware/`.

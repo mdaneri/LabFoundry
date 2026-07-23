@@ -2,17 +2,17 @@
 
 ## Reference and capture setup
 
-- Source: browser annotation captured from `https://192.168.167.219/monitor` before the hierarchy changes.
+- Source: historical browser annotation captured from `https://192.168.167.219/monitor` before the hierarchy changes and before the Disk Usage panel was removed.
 - Desktop viewport: 1968 × 1562 CSS pixels at the browser's native device density.
 - Narrow viewport: 900 × 1200 CSS pixels.
-- Live implementation: VMware appliance `192.168.167.219`, deployed with the repository VMware wheel helper.
+- Historical validation target: VMware appliance `192.168.167.219`, deployed with the repository VMware wheel helper. The images below document the preceding layout and interaction work; they are not screenshots of the current panel set.
 - Current shared cache revision: `monitor-no-disk-usage-20260722-1` / `labfoundry-pwa-v151`.
 
 ## Comparison
 
 ![Before and after Monitor comparison](images/monitor-apply-ux/monitor-comparison.png)
 
-The captured desktop comparison records the earlier hierarchy where Disk Activity owned unique-device I/O and Disk Usage owned capacity. The current Monitor removes the noisy Disk Usage chart and mount table while retaining Network Throughput and Disk Activity at matching row heights.
+The captured desktop comparison records the earlier hierarchy where Disk Activity owned unique-device I/O and Disk Usage owned capacity. It is retained as historical evidence, not as a representation of the current page. The current Monitor removes the noisy Disk Usage chart and mount table while retaining Network Throughput and Disk Activity at matching row heights.
 
 ## Interaction evidence
 
@@ -42,3 +42,4 @@ At 900 × 1200 the dashboard returns to natural stacked sizing; full-width contr
 ## Final result
 
 The current implementation preserves the useful chart interactions and responsive layout without the removed Disk Usage panel.
+Filesystem-usage fields remain available to backend samples and API consumers for compatibility; their presence does not imply a Monitor page panel.

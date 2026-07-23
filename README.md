@@ -71,6 +71,9 @@ services. Set `LABFOUNDRY_MONITOR_ENABLED=false` to disable both the background
 sampler and request-time collection from `/monitor/data` or `/api/v1/monitor`.
 When disabled, LabFoundry may read existing monitor rows but it does not probe
 the host or create new `monitor_samples` rows.
+See [`docs/monitor-apply-ux-design-qa.md`](docs/monitor-apply-ux-design-qa.md)
+for the current hierarchy, interaction behavior, responsive expectations, and
+the history of the removed Disk Usage panel.
 
 The authenticated `/dashboard` page is the compact operations command center.
 Its server-rendered snapshot shows overall appliance state, setup readiness,
