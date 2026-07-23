@@ -1,4 +1,6 @@
-# LabFoundry local appliance console design QA
+# Design QA
+
+## LabFoundry local appliance console
 
 Source visual truth:
 
@@ -18,7 +20,7 @@ Full-view comparison evidence: `C:\Users\m_dan\AppData\Local\Temp\labfoundry-con
 
 Focused comparison evidence: `C:\Users\m_dan\AppData\Local\Temp\labfoundry-console-form-comparison-final.png`. The crop compares the supplied nmtui direction with the final management form at readable scale. The implementation preserves the framed terminal hierarchy, blue section labels, highlighted editable controls, paired Apply/Cancel actions, and keyboard guidance while removing unrelated profile, device, route, search-domain, and checkbox controls.
 
-## Findings
+### Findings
 
 No actionable P0, P1, or P2 visual differences remain.
 
@@ -28,13 +30,13 @@ No actionable P0, P1, or P2 visual differences remain.
 - Image quality and asset fidelity: no raster imagery, logos, icons, or decorative assets belong to this terminal UI. The captured terminal text and borders are sharp at native resolution.
 - Copy and content: labels match the approved appliance scope. IPv6 remains Disabled, Automatic RA/SLAAC, or Static; DHCPv6 is intentionally not implied.
 
-## Comparison history
+### Comparison history
 
 1. Earlier P1: embedded metadata from `/etc/photon-release` created a black strip and `PHOTKernel` text. Fix: normalize the release value to its first display line. Post-fix evidence: `labfoundry-console-final8.png` shows a clean Photon and Kernel separation.
 2. Earlier P1: systemd progress output and late service activity could overwrite tty1 until the normal refresh. Fix: keep systemd status in the journal, force full restoration after external processes, and use bounded non-blanking redraws at 1, 3, and 8 seconds. Post-fix evidence: the immediate post-deploy `labfoundry-console-final8.png` capture is clean.
 3. Earlier P2: the first framed form made the active mode less visually obvious than an inactive mode, and DHCP could retain observed lease values in its submit tuple. Fix: dark-blue active control, pale-blue inactive editable controls, neutral disabled fields, and mode-aware clearing on submit. Post-fix evidence: `labfoundry-console-management-form-final2.png`.
 
-## Primary interactions tested
+### Primary interactions tested
 
 - Left/Right, Home/End, insertion, Backspace, and Delete within text values.
 - Tab, Shift+Tab, Up/Down navigation and mode-dependent field skipping.
@@ -44,7 +46,7 @@ No actionable P0, P1, or P2 visual differences remain.
 - Five-second default refresh plus bounded 1-through-300-second environment configuration.
 - No browser console applies to this curses surface; Python compilation, focused tests, VMware service readiness, and native tty captures were checked instead.
 
-## Implementation checklist
+### Implementation checklist
 
 - [x] Main-screen hierarchy and palette match the approved direction.
 - [x] Management form matches the compact framed editor direction.
@@ -52,13 +54,13 @@ No actionable P0, P1, or P2 visual differences remain.
 - [x] Service-output corruption and post-process restoration are covered.
 - [x] VMware tty1 renders cleanly; tty2 ownership remains unchanged by the implementation.
 
-## Follow-up polish
+### Follow-up polish
 
 No P3 polish item is required for handoff.
 
 final result: passed
 
-## Managed LDAP web follow-up
+### Managed LDAP web follow-up
 
 Reference and implementation evidence:
 
@@ -81,7 +83,7 @@ Findings:
 
 Managed LDAP web follow-up final result: passed
 
-## Managed script revision comparison follow-up
+### Managed script revision comparison follow-up
 
 Reference and implementation evidence:
 
@@ -119,20 +121,20 @@ Managed script revision comparison final result: passed
 
 final result: passed
 
-# ESX Storage wizard design QA
+## ESX Storage wizard design QA
 
-## Result
+### Result
 
 Passed on the VMware test appliance at `https://192.168.167.219/esx-storage` using the annotated 1968 x 1562 browser captures as the source reference.
 
-## Visual comparison
+### Visual comparison
 
 - Preserved the ESX Storage page shell, compact Tabulator grids, resource tabs, right-side Service Settings and Validation rail, typography, spacing, and status treatments from the reference.
 - Replaced each expanded inline add form with the established LabFoundry grid add-row affordance and modal wizard pattern.
 - Verified the volume wizard at the storage-selection step and the NFS datastore wizard at identity and review steps at the same desktop viewport.
 - The modal layout, step rail, field density, help controls, action placement, overlay, borders, and radii match the existing LabFoundry wizard system without clipping or overlap.
 
-## Interaction verification
+### Interaction verification
 
 - `+ Add storage volume here` opens the three-step volume wizard.
 - Required volume identity and eligible-storage selection prevent invalid advancement.

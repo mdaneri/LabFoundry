@@ -1,3 +1,6 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '')]
+param()
+
 Set-StrictMode -Version Latest
 
 function Resolve-LabFoundryRepoPath {
