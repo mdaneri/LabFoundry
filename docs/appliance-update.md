@@ -17,7 +17,10 @@ LabFoundry has three update streams:
 - **Photon OS** checks or installs packages only after validating the proposed
   system Python ABI against the active LabFoundry release.
 - **PowerShell Modules** checks or installs the explicitly managed modules from
-  their selected repositories.
+  their selected repositories. After installing or updating `VCF.PowerCLI`,
+  the helper reapplies and verifies the centralized VMware CEIP preference at
+  PowerCLI `AllUsers` scope. Explicit `User` and `Session` overrides remain
+  outside LabFoundry ownership.
 
 The appliance never performs a broad runtime `pip --upgrade` and never contacts
 PyPI during a LabFoundry release update. Application dependencies and bootstrap

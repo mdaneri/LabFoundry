@@ -364,6 +364,7 @@ def test_host_state_checks_verify_vcf_trust_runtime_dependencies(monkeypatch):
         (
             '$m = Get-Module VCF.PowerCLI -ListAvailable | Where-Object Version -eq "9.1.0.25380678" | '
             'Select-Object -First 1; if (-not $m) { exit 1 }; Import-Module $m.Path -Force; '
+            '$configured = Get-PowerCLIConfiguration -Scope AllUsers; if ([bool]$configured.ParticipateInCEIP) { exit 1 }; '
             'if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { exit 1 }'
         ).encode("utf-16le")
     ).decode("ascii")

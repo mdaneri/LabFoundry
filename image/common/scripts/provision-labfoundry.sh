@@ -99,7 +99,7 @@ fi
 chmod 0755 /usr/local/share/powershell /usr/local/share/powershell/Modules
 chmod -R a+rX,go-w /usr/local/share/powershell/Modules
 pwsh -NoLogo -NoProfile -NonInteractive -Command \
-  '$ErrorActionPreference = "Stop"; $module = Get-Module -Name VCF.PowerCLI -ListAvailable | Where-Object Version -eq $env:LABFOUNDRY_POWERCLI_VERSION | Select-Object -First 1; if (-not $module) { throw "VCF.PowerCLI $env:LABFOUNDRY_POWERCLI_VERSION is not installed" }; Import-Module $module.Path -Force; if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { throw "Connect-VIServer is not available" }; Write-Host "VCF.PowerCLI $($module.Version) verified"'
+  '$ErrorActionPreference = "Stop"; $module = Get-Module -Name VCF.PowerCLI -ListAvailable | Where-Object Version -eq $env:LABFOUNDRY_POWERCLI_VERSION | Select-Object -First 1; if (-not $module) { throw "VCF.PowerCLI $env:LABFOUNDRY_POWERCLI_VERSION is not installed" }; Import-Module $module.Path -Force; Set-PowerCLIConfiguration -ParticipateInCeip $false -Scope AllUsers -Confirm:$false | Out-Null; $configured = Get-PowerCLIConfiguration -Scope AllUsers; if ([bool]$configured.ParticipateInCEIP) { throw "VCF.PowerCLI CEIP default was not disabled" }; if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { throw "Connect-VIServer is not available" }; Write-Host "VCF.PowerCLI $($module.Version) verified with appliance-wide CEIP disabled"'
 
 log_step "verifying Photon OS updates after package install"
 tdnf -y update
@@ -199,7 +199,7 @@ chmod 0440 /etc/sudoers.d/labfoundry-bootstrap-admin
 visudo -cf /etc/sudoers.d/labfoundry-bootstrap-admin
 sudo -H -u "$BOOTSTRAP_USERNAME" env -u PSModulePath LABFOUNDRY_POWERCLI_VERSION="$LABFOUNDRY_POWERCLI_VERSION" \
   pwsh -NoLogo -NoProfile -NonInteractive -Command \
-  '$ErrorActionPreference = "Stop"; $module = Get-Module -Name VCF.PowerCLI -ListAvailable | Where-Object Version -eq $env:LABFOUNDRY_POWERCLI_VERSION | Select-Object -First 1; if (-not $module) { throw "VCF.PowerCLI $env:LABFOUNDRY_POWERCLI_VERSION is not available to the bootstrap administrator" }; Import-Module $module.Path -Force; if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { throw "Connect-VIServer is not available to the bootstrap administrator" }; Write-Host "VCF.PowerCLI $($module.Version) verified as $([Environment]::UserName)"'
+  '$ErrorActionPreference = "Stop"; $module = Get-Module -Name VCF.PowerCLI -ListAvailable | Where-Object Version -eq $env:LABFOUNDRY_POWERCLI_VERSION | Select-Object -First 1; if (-not $module) { throw "VCF.PowerCLI $env:LABFOUNDRY_POWERCLI_VERSION is not available to the bootstrap administrator" }; Import-Module $module.Path -Force; $configured = Get-PowerCLIConfiguration -Scope AllUsers; if ([bool]$configured.ParticipateInCEIP) { throw "VCF.PowerCLI CEIP default is not disabled for the bootstrap administrator" }; if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { throw "Connect-VIServer is not available to the bootstrap administrator" }; Write-Host "VCF.PowerCLI $($module.Version) verified as $([Environment]::UserName) with appliance-wide CEIP disabled"'
 
 cat >/etc/labfoundry/build-info <<EOF
 build_time_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")

@@ -324,6 +324,8 @@ VCF Offline Depot uses the proprietary VCF Download Tool to stage disconnected V
 
 ## Public Service Front Door
 
+VMware CEIP consent is centralized under **Settings → VMware Product Preferences**. The single appliance-wide choice defaults to disabled and is used by VCF Download Tool command previews and runtime preparation, VCF PowerCLI at vendor `AllUsers` scope, and future LabFoundry-managed VMware product integrations. LabFoundry does not migrate or infer this value from the retired VCF Download Tool-specific choice. Explicit PowerCLI `User` and `Session` overrides remain outside LabFoundry ownership.
+
 LabFoundry renders a generated `public_services` nginx site for non-management service IPs. Requests to `/` on a management-role address keep the HTTPS management portal/login behavior. Requests to `/` on a non-management service IP render an unauthenticated public service directory scoped to the called host or IP. The generated HTTP nginx site serves only ESXi PXE paths; CA, certificate requests, VCF Offline Depot, and registry links use their app or service-owned HTTPS front doors.
 
 Direct public service paths remain scoped per IP in the app: Certificate Authority `/ca`, `/requests`, `/ca/downloads/root-ca.pem`, and `/ca/downloads/ca-bundle.pem`; ESXi PXE `/pxe/esxi/` with `/pxe/esxi` redirecting to `/pxe/esxi/`; VCF Offline Depot `/PROD/` with `/PROD` redirecting to `/PROD/`; and VCF Private Registry as a canonical registry URL link only. The generated public-services HTTP site proxies only dynamic ESXi Kickstart requests and serves PXE static content through a narrow nginx alias on matching PXE service IPs. It does not expose CA, depot, management, or `/registry` HTTP proxies.
@@ -422,6 +424,8 @@ The MVP follows these boundaries:
 - The global `/appliance-apply` workflow is the only appliance enforcement path.
 
 ## ESX Storage
+
+Photon image provisioning disables and verifies VCF PowerCLI CEIP participation at `AllUsers` scope. Appliance Settings apply enforces the central VMware CEIP choice for installed VCF PowerCLI and VCF Download Tool runtimes; missing optional products are skipped. Appliance Update reapplies the central choice after managed `VCF.PowerCLI` installs or updates.
 
 ESX Storage lives at `/esx-storage` under VCF Workflows and publishes ESX 9.x datastores over NFS 3 or NFS 4.1. IPv4 and IPv6 are equal v1 connection families: each share selects one addressed interface/VLAN and enables IPv4, IPv6, or both with matching VMkernel client allowlists. LabFoundry generates explicit family-specific A/AAAA target names, copyable ESXCLI and PowerCLI connection commands, the canonical `nfs.<domain>` alias, PTR-capable app-owned host records, and equivalent family-specific nftables rules. Datastore state is editable through the standard grid icon or the add/edit wizard, while a dedicated Connection Instructions tab keeps mount guidance separate from desired-state editing.
 

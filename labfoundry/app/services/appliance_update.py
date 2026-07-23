@@ -182,6 +182,7 @@ def render_update_manifest(
             "release_install_mode": "signed-offline-transactional",
             "supported_python_abis": ["cp312", "cp313", "cp314"],
             "runtime_python_indexes": False,
+            "vmware_ceip_enabled": bool(settings.get("vmware_ceip_enabled", False)),
         },
     }
     return json.dumps(payload, indent=2, sort_keys=True)

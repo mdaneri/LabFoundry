@@ -393,6 +393,7 @@ def _ensure_sqlite_appliance_settings_columns() -> None:
         "web_terminal_enabled": "BOOLEAN DEFAULT 0",
         "web_terminal_interfaces_json": "TEXT DEFAULT '[]'",
         "root_ssh_enabled": "BOOLEAN DEFAULT 0",
+        "vmware_ceip_enabled": "BOOLEAN DEFAULT 0",
         "service_dns_target_naming": "VARCHAR(20) DEFAULT 'ip'",
     }
     with engine.begin() as connection:

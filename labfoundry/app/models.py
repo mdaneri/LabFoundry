@@ -300,6 +300,7 @@ class ApplianceSettings(Base):
     web_terminal_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     web_terminal_interfaces_json: Mapped[str] = mapped_column(Text, default="[]")
     root_ssh_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    vmware_ceip_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     service_dns_target_naming: Mapped[str] = mapped_column(String(20), default="ip")
     external_dns_servers: Mapped[str] = mapped_column(Text, default="1.1.1.1\n9.9.9.9")
     config_path: Mapped[str] = mapped_column(String(240), default="/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json")
@@ -897,7 +898,6 @@ class VcfOfflineDepotSettings(Base):
     depot_store_path: Mapped[str] = mapped_column(String(240), default="/mnt/labfoundry-vcf-offline-depot")
     tool_archive_path: Mapped[str] = mapped_column(String(500), default="")
     tool_version: Mapped[str] = mapped_column(String(80), default="")
-    telemetry_choice: Mapped[str] = mapped_column(String(20), default="DISABLE")
     config_path: Mapped[str] = mapped_column(String(240), default="/etc/labfoundry/nginx/sites.d/vcf-offline-depot.conf")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

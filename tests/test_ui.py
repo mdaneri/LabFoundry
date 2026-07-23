@@ -1357,6 +1357,13 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "labfoundry.labfoundry.internal" in response.text
     assert "Management UI HTTPS" in response.text
     assert "Root SSH login" in response.text
+    assert "VMware Product Preferences" in response.text
+    assert "VMware CEIP participation" in response.text
+    assert 'action="/settings/vmware-ceip"' in response.text
+    assert 'name="vmware_ceip_enabled"' in response.text
+    assert 'data-vmware-ceip-pill' in response.text
+    assert 'data-vmware-ceip-status' in response.text
+    assert 'action="/settings/vmware-ceip" method="post" data-autosave-form data-appliance-settings' in response.text
     assert "Service DNS target names" in response.text
     assert response.text.count('class="settings-inline-field"') >= 2
     assert 'select name="service_dns_target_naming"' in response.text
@@ -1372,6 +1379,7 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "/var/lib/labfoundry/apply/appliance-settings/labfoundry-settings.json" in response.text
     assert "resolver_mode" in response.text
     assert "root_ssh_enabled" in response.text
+    assert "vmware_ceip_enabled" in response.text
     assert 'data-config-preview-open' in response.text
     assert 'data-appliance-settings-preview' in response.text
     assert 'class="validation-preview-source language-json"' in response.text
@@ -1382,6 +1390,46 @@ def test_settings_page_renders_autosave_validation_and_preview(client, monkeypat
     assert "overflow-wrap: anywhere;" in app_css.text
     assert ".settings-inline-field" in app_css.text
     assert "grid-template-columns: 160px minmax(0, 1fr);" in app_css.text
+
+
+def test_vmware_ceip_autosave_updates_global_policy_and_pending_preview(client):
+    from sqlalchemy import select
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import ApplianceSettings, AuditEvent
+
+    login(client)
+    page = client.get("/settings")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+
+    response = client.post(
+        "/settings/vmware-ceip",
+        data={"vmware_ceip_enabled": "on", "csrf": csrf},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "saved"
+    assert payload["vmware_ceip_enabled"] is True
+    assert payload["fqdn"] == "labfoundry.labfoundry.internal"
+    assert payload["management_interface"]["name"] == "eth0"
+    assert payload["resolver_mode"] in {"dhcp", "external", "local_dns"}
+    assert '"vmware_ceip_enabled": true' in payload["config_preview"]
+    with SessionLocal() as db:
+        settings = db.execute(select(ApplianceSettings)).scalar_one()
+        audit = db.execute(
+            select(AuditEvent).where(AuditEvent.action == "update_vmware_ceip_policy")
+        ).scalar_one()
+        assert settings.vmware_ceip_enabled is True
+        assert audit.detail == "enabled=true"
+
+    status = client.get("/appliance-apply/status").json()
+    unit = next(item for item in status["units"] if item["id"] == "appliance_settings")
+    assert unit["changed"] is True
+    updated_page = client.get("/settings")
+    assert 'data-vmware-ceip-pill class="status-pill good">CEIP on</span>' in updated_page.text
+    assert "Appliance Settings has pending appliance changes" in updated_page.text
 
 
 def test_settings_autosave_enables_passwordless_terminal_on_management_interface(client):
@@ -7453,8 +7501,10 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert "Server certificate" not in page.text
     assert 'name="server_certificate"' not in page.text
     assert "Telemetry choice" not in page.text
-    assert "<span>Telemetry</span>" in page.text
-    assert 'name="telemetry_enabled"' in page.text
+    assert "<span>Telemetry</span>" not in page.text
+    assert "<span>VMware CEIP</span>" in page.text
+    assert 'href="/settings#vmware-product-preferences"' in page.text
+    assert 'name="telemetry_enabled"' not in page.text
     assert 'name="telemetry_choice"' not in page.text
     assert "<span>HTTP user</span>" in page.text
     assert "vcf-depot (disabled)" in page.text
@@ -7651,7 +7701,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     assert payload["server_certificate"] == "depot.labfoundry.internal"
     assert payload["http_username"] == "vcf-depot"
     assert payload["allow_unauthenticated_access"] is False
-    assert payload["telemetry_choice"] == "DISABLE"
+    assert payload["vmware_ceip_enabled"] is False
     assert payload["tool_archive_name"] == "vcf-download-tool-9.1.0.test.tar.gz"
     assert payload["tool_archive_uploaded"] is True
     assert payload["tool_version"] == ""
@@ -7732,7 +7782,6 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
             "listen_interface": "eth2",
             "port": "443",
             "http_user_id": depot_user_id,
-            "telemetry_enabled": "on",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -7741,7 +7790,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
     moved_payload = moved_response.json()
     assert moved_payload["hostname"] == "offline-depot.labfoundry.internal"
     assert moved_payload["server_certificate"] == "offline-depot.labfoundry.internal"
-    assert moved_payload["telemetry_choice"] == "ENABLE"
+    assert moved_payload["vmware_ceip_enabled"] is False
     assert moved_payload["listen_address"] == "192.168.50.1"
     assert moved_payload["valid"] is True
     assert moved_payload["http_username"] == "vcf-depot"
@@ -7823,6 +7872,7 @@ def test_vcf_offline_depot_page_redirect_and_uploads_are_sanitized(client, tmp_p
         assert "stage-tool" in (job.result or "")
         assert "generate-software-depot-id" in (job.result or "")
         assert "apply-properties" in (job.result or "")
+        assert "apply-ceip DISABLE" in (job.result or "")
         assert "vcf-download-tool binaries download" in (job.result or "")
     assert "super-secret-token" not in (job.result or "")
     assert "secret-activation-property" not in (job.result or "")
@@ -7975,6 +8025,7 @@ def test_vcf_offline_depot_apply_stages_tool_without_download_profiles(client, t
         assert "stage-tool" in (job.result or "")
         assert "generate-software-depot-id" in (job.result or "")
         assert "apply-properties" in (job.result or "")
+        assert "apply-ceip DISABLE" in (job.result or "")
         assert "vcf-download-tool binaries download" not in (job.result or "")
 
 

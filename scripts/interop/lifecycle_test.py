@@ -1110,6 +1110,17 @@ def configure_management_https(client: HttpClient, args: argparse.Namespace) -> 
         raise LifecycleError("Management HTTPS desired state did not report an available CA-managed certificate.")
     if not payload.get("web_terminal_enabled") or payload.get("web_terminal_interfaces") != [management_interface, args.site_interface]:
         raise LifecycleError(f"Web terminal desired state did not retain the selected interfaces: {payload.get('web_terminal_interfaces')}")
+    ceip_status, ceip_body, _headers = client.request(
+        "POST",
+        "/settings/vmware-ceip",
+        form={"csrf": csrf},
+        headers={"X-LabFoundry-Autosave": "1"},
+    )
+    if ceip_status >= 400:
+        raise LifecycleError(f"VMware CEIP settings update failed with HTTP {ceip_status}: {ceip_body[:500]}")
+    ceip_payload = json.loads(ceip_body)
+    if ceip_payload.get("vmware_ceip_enabled") is not False:
+        raise LifecycleError("VMware CEIP desired state did not remain disabled.")
     return {
         "fqdn": payload.get("fqdn"),
         "management_https_enabled": payload.get("management_https_enabled"),
@@ -1117,6 +1128,7 @@ def configure_management_https(client: HttpClient, args: argparse.Namespace) -> 
         "web_terminal_enabled": payload.get("web_terminal_enabled"),
         "web_terminal_interfaces": payload.get("web_terminal_interfaces"),
         "web_terminal_addresses": payload.get("web_terminal_addresses"),
+        "vmware_ceip_enabled": ceip_payload.get("vmware_ceip_enabled"),
         "config_path": payload.get("config_path"),
     }
 
@@ -1564,7 +1576,6 @@ def configure_vcf_offline_depot(client: HttpClient, args: argparse.Namespace) ->
             "listen_interface": args.site_interface,
             "port": "443",
             "http_user_id": user_id,
-            "telemetry_choice": "DISABLE",
             "csrf": csrf,
         },
         headers={"X-LabFoundry-Autosave": "1"},
@@ -2403,6 +2414,7 @@ def host_state_checks(args: argparse.Namespace) -> dict[str, Any]:
         (
             '$m = Get-Module VCF.PowerCLI -ListAvailable | Where-Object Version -eq "9.1.0.25380678" | '
             'Select-Object -First 1; if (-not $m) { exit 1 }; Import-Module $m.Path -Force; '
+            '$configured = Get-PowerCLIConfiguration -Scope AllUsers; if ([bool]$configured.ParticipateInCEIP) { exit 1 }; '
             'if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) { exit 1 }'
         ).encode("utf-16le")
     ).decode("ascii")

@@ -8297,6 +8297,18 @@ function updateApplianceSettingsValidation(payload = {}) {
       : "";
     webTerminal.textContent = `${payload.web_terminal_enabled ? "enabled" : "disabled"}${addresses}`;
   }
+  if (payload.vmware_ceip_enabled !== undefined) {
+    const enabled = Boolean(payload.vmware_ceip_enabled);
+    document.querySelectorAll("[data-vmware-ceip-pill]").forEach((element) => {
+      if (!(element instanceof HTMLElement)) return;
+      element.textContent = enabled ? "CEIP on" : "CEIP off";
+      element.classList.toggle("good", enabled);
+      element.classList.toggle("muted", !enabled);
+    });
+    document.querySelectorAll("[data-vmware-ceip-status]").forEach((element) => {
+      if (element instanceof HTMLElement) element.textContent = enabled ? "enabled" : "disabled";
+    });
+  }
   updateApplianceSettingsDhcpDns(payload);
   const dnsStatus = document.querySelector("[data-appliance-settings-dns-status]");
   if (dnsStatus instanceof HTMLElement) {
