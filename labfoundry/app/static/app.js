@@ -12900,43 +12900,6 @@ function renderMonitorNetworkTable(tbody, rows) {
   }));
 }
 
-function renderMonitorDiskTable(tbody, rows) {
-  if (!(tbody instanceof HTMLElement)) {
-    return;
-  }
-  const disks = Array.isArray(rows) ? rows : [];
-  if (!disks.length) {
-    tbody.replaceChildren(Object.assign(document.createElement("tr"), { innerHTML: '<td colspan="4" class="muted">No disks sampled</td>' }));
-    return;
-  }
-  tbody.replaceChildren(...disks.map((disk) => {
-    const row = document.createElement("tr");
-    const mountCell = document.createElement("td");
-    mountCell.textContent = disk.mount_point || "--";
-    const deviceCell = document.createElement("td");
-    deviceCell.textContent = disk.device || "--";
-    const usedCell = document.createElement("td");
-    usedCell.className = "monitor-usage-cell";
-    const percent = monitorFinite(disk.used_percent) || 0;
-    const label = document.createElement("span");
-    label.textContent = formatMonitorPercent(percent);
-    const bar = document.createElement("span");
-    bar.className = "monitor-usage-bar";
-    const fill = document.createElement("span");
-    fill.className = `monitor-usage-fill ${percent >= 90 ? "danger" : percent >= 75 ? "warn" : ""}`.trim();
-    fill.style.width = `${Math.max(2, Math.min(100, percent))}%`;
-    bar.append(fill);
-    usedCell.append(label, bar);
-    [mountCell, deviceCell, usedCell].forEach((cell) => row.append(cell));
-    [formatMonitorBytes(disk.free_bytes)].forEach((value) => {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    });
-    return row;
-  }));
-}
-
 function renderMonitorDiskActivityTable(tbody, rows) {
   if (!(tbody instanceof HTMLElement)) return;
   const devices = Array.isArray(rows) ? rows : [];
@@ -12960,7 +12923,6 @@ const MONITOR_CHART_TITLES = {
   memory: "Memory Pressure",
   network: "Network Throughput",
   disk: "Disk Activity",
-  diskUsage: "Disk Usage",
 };
 
 function drawMonitorChartType(canvas, type, payload, chartOptions = {}) {
@@ -13001,13 +12963,6 @@ function drawMonitorChartType(canvas, type, payload, chartOptions = {}) {
     drawMonitorChart(canvas, chart.rows, chart.lines, { min: 0, formatY: formatMonitorBytes, ...chartOptions });
     return;
   }
-  if (type === "diskUsage") {
-    const chart = monitorHistoryChartData(
-      Array.isArray(payload.disk_devices) ? payload.disk_devices : [],
-      [{ field: "used_percent", label: "" }],
-    );
-    drawMonitorChart(canvas, chart.rows, chart.lines, { min: 0, max: 100, formatY: formatMonitorPercent, ...chartOptions });
-  }
 }
 
 function renderMonitorPage(root, payload) {
@@ -13015,7 +12970,6 @@ function renderMonitorPage(root, payload) {
   const cpu = summary.cpu || {};
   const memory = summary.memory || {};
   const network = summary.network || {};
-  const disk = summary.disk || {};
   const virt = payload.virtualization || {};
   monitorSetText(root, "[data-monitor-cpu-current]", formatMonitorPercent(cpu.current_percent));
   monitorSetText(root, "[data-monitor-cpu-detail]", `Load ${cpu.load1 ?? "--"} on ${cpu.cpu_count || "--"} vCPU`);
@@ -13025,8 +12979,6 @@ function renderMonitorPage(root, payload) {
   monitorSetText(root, "[data-monitor-memory-peak]", `peak ${formatMonitorPercent(memory.peak_percent)}`);
   monitorSetText(root, "[data-monitor-network-current]", `${formatMonitorRate(network.rx_bytes_per_sec)} down`);
   monitorSetText(root, "[data-monitor-network-detail]", `${formatMonitorRate(network.tx_bytes_per_sec)} up, ${network.interface_count || 0} interfaces`);
-  monitorSetText(root, "[data-monitor-disk-current]", formatMonitorPercent(disk.highest_used_percent));
-  monitorSetText(root, "[data-monitor-disk-detail]", `${disk.highest_used_mount || "--"} across ${disk.mount_count || 0} mounts`);
   monitorSetText(root, "[data-monitor-virt-detected]", virt.detected || "unknown");
   monitorSetText(root, "[data-monitor-virt-product]", [virt.sys_vendor, virt.product_name].filter(Boolean).join(" / ") || "--");
   monitorSetText(root, "[data-monitor-virt-tools]", virt.vmtools_version || "--");
@@ -13042,7 +12994,6 @@ function renderMonitorPage(root, payload) {
   });
   renderMonitorNetworkTable(root.querySelector("[data-monitor-network-table]"), payload.networks);
   renderMonitorDiskActivityTable(root.querySelector("[data-monitor-disk-activity-table]"), payload.disk_devices);
-  renderMonitorDiskTable(root.querySelector("[data-monitor-disk-table]"), payload.disks);
 }
 
 function initializeMonitorPage() {

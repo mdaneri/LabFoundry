@@ -54,10 +54,11 @@ The `Monitor` page is an operator-facing, read-only runtime view for appliance
 resource health. It charts thick appliance totals alongside thin per-logical-CPU,
 per-interface RX/TX, and unique-device disk activity over the last one, three,
 or six hours, plus memory pressure and compact per-interface and virtual-machine
-context. A separate Disk Usage chart tracks used capacity per unique volume and
-keeps the per-mount capacity table alongside it. Disk Activity retains a
-deduplicated per-device read/write table. Disk activity totals count each
-underlying device once even when several mount rows share it. Each chart can be
+context. Disk Activity retains a deduplicated per-device read/write table; all
+per-mount capacity presentation, including the top-level Disks metric, Disk
+Usage chart, and capacity table, is intentionally omitted. Disk
+activity totals count each underlying device once even when several mount rows
+share it. Each chart can be
 expanded into a near-full-screen view without changing its active time range;
 only that expanded view exposes editable percentage zoom and drag-to-select
 time-window zoom. Hovering near a sampled point or line segment emphasizes the
@@ -72,6 +73,9 @@ services. Set `LABFOUNDRY_MONITOR_ENABLED=false` to disable both the background
 sampler and request-time collection from `/monitor/data` or `/api/v1/monitor`.
 When disabled, LabFoundry may read existing monitor rows but it does not probe
 the host or create new `monitor_samples` rows.
+See [`docs/monitor-apply-ux-design-qa.md`](docs/monitor-apply-ux-design-qa.md)
+for the current hierarchy, interaction behavior, responsive expectations, and
+the history of the removed Disk Usage panel.
 
 The authenticated `/dashboard` page is the compact operations command center.
 Its server-rendered snapshot shows overall appliance state, setup readiness,
