@@ -85,6 +85,8 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "9.1.0.25380678" in script
     assert "Connect-VIServer" in script
     assert "LABFOUNDRY_POWERCLI_MODULE_SOURCE" in script
+    assert "chmod 0755 /usr/local/share/powershell /usr/local/share/powershell/Modules" in script
+    assert "chmod -R a+rX,go-w /usr/local/share/powershell/Modules" in script
     assert "tdnf -y install" in script and "ipxe" in script
     assert "tdnf -y install" in script and "syslinux" in script
     assert "IPXE_BOOTLOADER_SOURCE_DIR=\"$LABFOUNDRY_HOME/third_party/ipxe/bootloaders\"" in script
@@ -99,6 +101,11 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "labfoundry-bootstrap-admin" in script
     assert "$BOOTSTRAP_USERNAME ALL=(ALL) ALL" in script
     assert "visudo -cf /etc/sudoers.d/labfoundry-bootstrap-admin" in script
+    assert (
+        'sudo -H -u "$BOOTSTRAP_USERNAME" env -u PSModulePath '
+        'LABFOUNDRY_POWERCLI_VERSION="$LABFOUNDRY_POWERCLI_VERSION"'
+    ) in script
+    assert "is not available to the bootstrap administrator" in script
     assert 'chmod 0711 "$LABFOUNDRY_STATE"' in script
     assert 'chown "$BOOTSTRAP_USERNAME:$(id -gn "$BOOTSTRAP_USERNAME")" "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME"' in script
     assert 'chmod 0750 "$LABFOUNDRY_STATE/users/$BOOTSTRAP_USERNAME"' in script

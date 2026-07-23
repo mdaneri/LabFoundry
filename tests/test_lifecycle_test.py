@@ -311,9 +311,11 @@ def test_host_state_checks_verify_vcf_trust_runtime_dependencies(monkeypatch):
     lifecycle = load_lifecycle_module()
     args = lifecycle.parse_args(["--password", "test"])
     captured = {}
+    execution_contexts = {}
 
-    def fake_run_host_checks(_args, checks):
+    def fake_run_host_checks(_args, checks, *, appliance_as_root=True):
         captured.update(checks)
+        execution_contexts.update({name: appliance_as_root for name in checks})
         return checks
 
     monkeypatch.setattr(lifecycle, "run_host_checks", fake_run_host_checks)
@@ -335,11 +337,46 @@ def test_host_state_checks_verify_vcf_trust_runtime_dependencies(monkeypatch):
         ).encode("utf-16le")
     ).decode("ascii")
     assert encoded_vcf_sdk_probe in captured["vcf_automation_tooling"]
+    assert execution_contexts["vcf_automation_tooling"] is True
     assert "slapd.service" in captured["ldap_service"]
     assert "636" in captured["ldap_listeners"]
     assert "389" in captured["ldap_listeners"]
     assert "-verify_hostname ldap.labfoundry.internal" in captured["ldap_tls"]
-    assert encoded_powercli_probe in captured["vcf_automation_tooling"]
+    assert encoded_powercli_probe in captured["vcf_powercli_user"]
+    assert execution_contexts["vcf_powercli_user"] is False
+
+
+def test_appliance_user_ssh_command_does_not_wrap_with_sudo(monkeypatch):
+    lifecycle = load_lifecycle_module()
+    args = lifecycle.parse_args(
+        [
+            "--password",
+            "test",
+            "--ssh-password",
+            "ssh-secret",
+            "--appliance-ssh-host",
+            "192.0.2.10",
+        ]
+    )
+    captured = {}
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        return lifecycle.subprocess.CompletedProcess(command, 0, "ok\n", "")
+
+    monkeypatch.setattr(lifecycle.subprocess, "run", fake_run)
+
+    result = lifecycle.ssh_command(
+        args.appliance_ssh_host,
+        args,
+        "pwsh -NoLogo -NoProfile -NonInteractive -Command Get-Date",
+        role="appliance",
+        appliance_as_root=False,
+    )
+
+    assert result["returncode"] == 0
+    assert captured["command"][-1] == "pwsh -NoLogo -NoProfile -NonInteractive -Command Get-Date"
+    assert "sudo" not in captured["command"][-1]
 
 
 def test_esxi_pxe_payload_uses_dhcp_lifecycle_host():

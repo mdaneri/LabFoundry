@@ -668,6 +668,86 @@ def test_helper_uses_each_modules_bound_powershell_repository(monkeypatch):
     assert any("-Repository 'PrivateGallery'" in script for script in scripts)
 
 
+def test_helper_normalizes_system_powershell_module_permissions_after_install(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    powershell_root = tmp_path / "powershell"
+    module_root = powershell_root / "Modules"
+    commands = []
+
+    def fake_command(command, *, success_codes=None, env=None):
+        commands.append(command)
+        return {"command": command, "returncode": 0, "success": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(helper, "POWERSHELL_SYSTEM_ROOT", powershell_root)
+    monkeypatch.setattr(helper, "POWERSHELL_MODULE_ROOT", module_root)
+    monkeypatch.setattr(helper, "_command_path", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(helper, "_command_payload", fake_command)
+
+    result = helper._apply_powershell_modules(
+        {
+            "sources": {"powershell_repository_name": "PSGallery"},
+            "powershell_modules": [
+                {
+                    "name": "VCF.PowerCLI",
+                    "repository_name": "PSGallery",
+                    "target_version": "9.1.0.25380678",
+                    "policy": "pinned",
+                }
+            ],
+        }
+    )
+
+    assert len(result) == 3
+    assert commands[-2] == ["/usr/bin/chmod", "0755", str(powershell_root), str(module_root)]
+    assert commands[-1] == ["/usr/bin/chmod", "-R", "a+rX,go-w", str(module_root)]
+
+
+def test_helper_reports_powershell_permission_normalization_failure(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    powershell_root = tmp_path / "powershell"
+    module_root = powershell_root / "Modules"
+
+    def fake_command(command, *, success_codes=None, env=None):
+        failed = command[:3] == ["/usr/bin/chmod", "-R", "a+rX,go-w"]
+        return {
+            "command": command,
+            "returncode": 1 if failed else 0,
+            "success": not failed,
+            "stdout": "",
+            "stderr": "permission normalization failed" if failed else "",
+        }
+
+    monkeypatch.setattr(helper, "POWERSHELL_SYSTEM_ROOT", powershell_root)
+    monkeypatch.setattr(helper, "POWERSHELL_MODULE_ROOT", module_root)
+    monkeypatch.setattr(helper, "_command_path", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(helper, "_command_payload", fake_command)
+
+    result = helper._apply_appliance_update(
+        {
+            "selected_streams": ["powershell_modules"],
+            "sources": {"powershell_repository_name": "PSGallery"},
+            "powershell_modules": [
+                {
+                    "name": "VCF.PowerCLI",
+                    "repository_name": "PSGallery",
+                    "target_version": "9.1.0.25380678",
+                    "policy": "pinned",
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "failed"
+    assert result["applied"] == {}
+    assert result["commands"][-1]["command"] == [
+        "/usr/bin/chmod",
+        "-R",
+        "a+rX,go-w",
+        str(module_root),
+    ]
+    assert result["commands"][-1]["success"] is False
+
+
 def test_helper_runs_managed_script_in_unprivileged_systemd_sandbox(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
