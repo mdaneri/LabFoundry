@@ -178,6 +178,7 @@ The lifecycle runner records structured evidence in
   staging, browser-session login, curl and wget Basic-auth artifact downloads,
   and password rotation proven through Local Users apply without reapplying the
   depot service
+- ESX Storage with an attached blank VHDX, job-scoped format confirmation, ext4 UUID mount, generated A and AAAA targets, IPv4 and IPv6 storage VMkernel paths, NFS 3 and NFS 4.1 mounts, create/read/delete probes for every protocol/family pair, one dual-stack share, and appliance/ESX reboot persistence evidence
 - client-side DNS/DHCP/routing probes when client SSH addresses are available
 - settings backup export, appliance redeploy, settings restore, restored
   desired-state apply, downloaded Client A certificate comparison, and restored
@@ -185,6 +186,8 @@ The lifecycle runner records structured evidence in
 
 The runner submits only global `/appliance-apply` units. It does not call
 service-specific apply routes.
+
+ESX Storage acceptance records the global job IDs, stable disk identity and fingerprint, generated family names, direct A/AAAA answers, `exportfs -v`, listening TCP sockets, nftables `ip saddr`/`ip6 saddr` rules, ESX datastore listings, and post-reboot data probes. IPv4 and IPv6 must both pass before the feature PR is ready.
 
 ## Dry-Run Boundary
 

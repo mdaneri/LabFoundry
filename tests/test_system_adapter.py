@@ -3,6 +3,26 @@ import subprocess
 from labfoundry.app.adapters.system import SystemAdapter
 
 
+def test_esx_storage_inventory_executes_read_only_helper_during_dry_run(monkeypatch):
+    import labfoundry.app.adapters.system as system_adapter
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, '[{"device_path":"/dev/sde"}]', "")
+
+    monkeypatch.setattr(system_adapter.subprocess, "run", fake_run)
+
+    result = SystemAdapter(dry_run=True).esx_storage_inventory()
+
+    assert result.returncode == 0
+    assert result.dry_run is False
+    assert result.command == ["sudo", "-n", SystemAdapter.HELPER_PATH, "esx-storage", "inventory", "--real"]
+    assert commands == [result.command]
+    assert "/dev/sde" in result.stdout
+
+
 def test_real_appliance_power_action_uses_sudo_helper(monkeypatch):
     import labfoundry.app.adapters.system as system_adapter
 

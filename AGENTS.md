@@ -121,6 +121,12 @@
 - When testing real apply from the UI, select only the intended apply unit. Existing appliances that predate factory baseline initialization may still list units without a last-applied baseline as changed; unselect unrelated units before submitting.
 - Check the latest appliance apply job directly when behavior is unclear: query `Job` rows in the appliance SQLite database or inspect the rendered job JSON in the UI. A failed job can still leave host state unchanged if helper validation failed before apply.
 
+## ESX Storage
+
+- Real ESX Storage apply stages JSON under `/var/lib/labfoundry/apply/esx-storage/labfoundry-esx-storage.json`. IPv4 and IPv6 are equal v1 requirements: one share may enable either or both on one selected interface/VLAN, and each enabled family requires its own listener, generated A/AAAA target name, VMkernel client allowlist, ESX command, and nftables rule.
+- Blank disks require stable `/dev/disk/by-id` identity plus job/manifest/device-bound `FORMAT <volume-name>` authorization and immediate helper revalidation before whole-device ext4 formatting. Mount by UUID under `/mnt/labfoundry-esx-storage`, bind shares under `/srv/labfoundry/esx-storage`, preserve formatted data on later failure, and never add wipe/reformat/data-delete behavior.
+- Apply only through global `/appliance-apply`. Settings backup and restore include volume/share desired state but never format authorization. iSCSI remains a separate kernel/target-stack feasibility issue.
+
 ## Network And Service Binding
 
 - Physical Interfaces are for untagged/access networks. VLAN Interfaces are only for tagged VLAN networks on physical parent interfaces marked as trunk.

@@ -58,6 +58,7 @@ SERVICE_CATALOG = (
     ("DHCP", "dhcp", None),
     ("DNS", "dns", None),
     ("ESXi PXE", "esxi-pxe", None),
+    ("ESX Storage NFS", "esx-storage", "nfs-server.service"),
     ("Firewall", "firewall", "labfoundry-firewall.service"),
     ("KMS / KMIP", "kms", "labfoundry-kms.service"),
     ("Managed LDAP", "ldap", "slapd.service"),

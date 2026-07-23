@@ -101,6 +101,26 @@ class SystemAdapter:
     def apply_esxi_pxe_config(self, config_path: str) -> AdapterResult:
         return self._helper_result("esxi-pxe", "apply", config_path, dry_run_message="dry-run: ESXi PXE apply command recorded")
 
+    def esx_storage_inventory(self) -> AdapterResult:
+        return self._helper_result(
+            "esx-storage",
+            "inventory",
+            dry_run_message="dry-run: ESX Storage disk inventory command recorded",
+            execute_in_dry_run=True,
+        )
+
+    def validate_esx_storage_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("esx-storage", "validate", config_path, dry_run_message="dry-run: ESX Storage validation command recorded")
+
+    def apply_esx_storage_config(self, config_path: str) -> AdapterResult:
+        return self._helper_result("esx-storage", "apply", config_path, dry_run_message="dry-run: ESX Storage apply command recorded", timeout_seconds=180)
+
+    def esx_storage_status(self) -> AdapterResult:
+        return self._helper_result("esx-storage", "status", dry_run_message="dry-run: ESX Storage status command recorded", use_sudo=False, timeout_seconds=5)
+
+    def esx_storage_logs(self) -> AdapterResult:
+        return self._helper_result("esx-storage", "logs", dry_run_message="dry-run: ESX Storage log read command recorded", timeout_seconds=5)
+
     def read_dhcp_leases(self) -> AdapterResult:
         if self.dry_run:
             return self._record_only_result(
@@ -381,9 +401,10 @@ class SystemAdapter:
         timeout_seconds: float | None = None,
         input_text: str | None = None,
         dry_run_returncode: int = 0,
+        execute_in_dry_run: bool = False,
     ) -> AdapterResult:
         display_command = ["labfoundry-helper", group, action, *args]
-        if self.dry_run:
+        if self.dry_run and not execute_in_dry_run:
             return AdapterResult(command=display_command, dry_run=True, stdout=dry_run_message, returncode=dry_run_returncode)
 
         command = [self.HELPER_PATH, group, action, "--real", *args]

@@ -76,6 +76,10 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "systemctl disable --now chronyd.service" in script
     assert '"$LABFOUNDRY_STATE/apply/ntpd"' in script
     assert "tdnf -y install" in script and "openldap-servers" in script
+    assert "tdnf -y install" in script and "nfs-utils" in script and "rpcbind" in script
+    assert "99-labfoundry-disk-identity.rules" in script
+    assert 'IMPORT{builtin}="path_id"' in script
+    assert 'SYMLINK+="disk/by-id/labfoundry-path-$env{ID_PATH_TAG}"' in script
     assert "tdnf -y install" in script and "powershell" in script
     assert "VCF.PowerCLI" in script
     assert "9.1.0.25380678" in script
@@ -565,12 +569,14 @@ def test_create_labfoundry_vmware_test_vm_wrapper_uses_common_helpers():
     assert "$effectiveSkipLabNetworkAdapters = -not $IncludeLabNetworkAdapters" in script
     assert "LabFoundry-Depot.vmdk" in script
     assert "LabFoundry-Backups.vmdk" in script
+    assert '"disk.EnableUUID"          = "TRUE"' in packer_template
     assert "Refusing to reset VMware data disk outside the VM output directory" in script
     assert "vmrun.exe was not found" in vm_script
     assert "vmware-vdiskmanager.exe was not found" in vm_script
     assert "vmrun $($Arguments -join ' ') failed" in vm_script
     assert "New-DataVmdk" in vm_script
     assert "Set-VmxScsiDisk" in vm_script
+    assert "disk.EnableUUID" in vm_script
     assert "scsi0:$Unit" in vm_script
     assert "set-test-nics.ps1" in vm_script
     assert '"$prefix.vnet"' in nics_script
@@ -875,9 +881,10 @@ def test_lifecycle_runner_plan_includes_ca_and_global_apply_units():
         "network",
         "firewall",
         "wan",
-        "dnsmasq",
-        "esxi_pxe",
-        "ca",
+            "dnsmasq",
+            "esxi_pxe",
+            "esx_storage",
+            "ca",
         "ntpd",
         "kms",
         "ldap",

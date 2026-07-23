@@ -129,6 +129,116 @@ class VcfBackupStatusResponse(BaseModel):
     dry_run: bool
 
 
+class EsxStorageSettingsUpdate(BaseModel):
+    enabled: bool = False
+    hostname: str = Field(default="nfs.labfoundry.internal", min_length=1, max_length=253)
+
+
+class EsxStorageVolumeCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    source_type: Literal["blank_disk", "mounted_ext4"] = "blank_disk"
+    stable_device_id: str = Field(default="", max_length=500)
+    mount_path: str = Field(default="", max_length=500)
+
+
+class EsxStorageVolumeUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    stable_device_id: str | None = Field(default=None, max_length=500)
+    mount_path: str | None = Field(default=None, max_length=500)
+
+
+class EsxStorageVolumeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    source_type: str
+    stable_device_id: str
+    device_path: str
+    device_model: str
+    device_serial: str
+    device_wwn: str
+    capacity_bytes: int
+    filesystem_uuid: str
+    filesystem_label: str
+    mount_path: str
+    state: str
+    applied: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class EsxNfsShareCreate(BaseModel):
+    datastore_name: str = Field(min_length=1, max_length=120)
+    volume_id: int
+    relative_path: str = Field(min_length=1, max_length=500)
+    preferred_nfs_version: Literal["3", "4.1"] = "4.1"
+    interface_name: str = Field(min_length=1, max_length=80)
+    address_families: list[Literal["ipv4", "ipv6"]] = Field(default_factory=lambda: ["ipv4", "ipv6"])
+    ipv4_clients: list[str] = Field(default_factory=list)
+    ipv6_clients: list[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class EsxNfsShareUpdate(BaseModel):
+    datastore_name: str | None = Field(default=None, min_length=1, max_length=120)
+    volume_id: int | None = None
+    relative_path: str | None = Field(default=None, min_length=1, max_length=500)
+    preferred_nfs_version: Literal["3", "4.1"] | None = None
+    interface_name: str | None = Field(default=None, min_length=1, max_length=80)
+    address_families: list[Literal["ipv4", "ipv6"]] | None = None
+    ipv4_clients: list[str] | None = None
+    ipv6_clients: list[str] | None = None
+    enabled: bool | None = None
+
+
+class EsxNfsShareResponse(BaseModel):
+    id: int
+    datastore_name: str
+    volume_id: int
+    volume_name: str
+    relative_path: str
+    preferred_nfs_version: str
+    interface_name: str
+    address_families: list[str]
+    ipv4_clients: list[str]
+    ipv6_clients: list[str]
+    listeners: dict[str, list[str]]
+    target_hostnames: dict[str, list[str]]
+    local_path: str
+    remote_path: str
+    connection_commands: dict[str, list[str]]
+    enabled: bool
+
+
+class EsxStorageStatusResponse(BaseModel):
+    enabled: bool
+    hostname: str
+    valid: bool
+    validation_errors: list[str]
+    validation_warnings: list[str]
+    volume_count: int
+    share_count: int
+    active_share_count: int
+    dry_run: bool
+
+
+class EsxStorageDiskResponse(BaseModel):
+    candidate_type: Literal["blank_disk", "mounted_ext4", ""] = ""
+    stable_device_id: str
+    device_path: str
+    model: str = ""
+    serial: str = ""
+    wwn: str = ""
+    size_bytes: int = 0
+    filesystem_type: str = ""
+    filesystem_uuid: str = ""
+    filesystem_label: str = ""
+    mount_path: str = ""
+    eligible: bool
+    eligibility_reason: str = ""
+
+
 class VcfPrivateRegistryStatusResponse(BaseModel):
     enabled: bool
     service: ServiceStateResponse | None

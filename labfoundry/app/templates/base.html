@@ -12,7 +12,7 @@
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="icon" href="/static/brand/labfoundry-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/vendor/tabulator/tabulator.min.css">
-    <link rel="stylesheet" href="/static/app.css?v=monitor-no-disk-usage-20260723-2">
+    <link rel="stylesheet" href="/static/app.css?v=monitor-no-disk-usage-20260723-3">
     {% block extra_head %}{% endblock %}
   </head>
   <body>
@@ -53,6 +53,7 @@
             ]),
             ("VCF Workflows", [
               ("ESXi PXE", "/esxi-pxe", "read:esxi-pxe"),
+              ("ESX Storage", "/esx-storage", "read:esx-storage"),
               ("VCF Helper", "/vcf-helper", "read:dashboard"),
               ("VCF Offline Depot", "/vcf-offline-depot", "read:repository"),
               ("VCF Private Registry", "/vcf-private-registry", "read:vcf-registry"),
@@ -299,7 +300,7 @@
     <script src="/static/vendor/prism/prism-core.min.js"></script>
     <script src="/static/vendor/prism/prism-diff.min.js"></script>
     <script src="/static/vendor/codemirror/labfoundry-codemirror.min.js"></script>
-    <script src="/static/app.js?v=monitor-no-disk-usage-20260723-2"></script>
+    <script src="/static/app.js?v=monitor-no-disk-usage-20260723-3"></script>
     <script src="/static/pwa.js?v=pwa-20260627-1"></script>
     {% block extra_scripts %}{% endblock %}
   </body>

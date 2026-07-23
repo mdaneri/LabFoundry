@@ -8,6 +8,10 @@ LabFoundry can run a VMware Workstation lifecycle lab alongside the Hyper-V
 lab. The Workstation path uses VMX/VMDK artifacts and `vmrun.exe`, then
 delegates appliance behavior checks to the shared Python lifecycle runner.
 
+Appliance VMX files set `disk.EnableUUID = "TRUE"` so Photon exposes stable
+`/dev/disk/by-id` identities. ESX Storage blank-disk claims depend on those
+identities and reject transient `/dev/sdX` names.
+
 ## Topology
 
 The default lifecycle lab creates isolated VM directories under:
@@ -122,6 +126,8 @@ It defaults to the management vmnet only; pass `-IncludeLabNetworkAdapters`
 after creating the SiteA, WAN/SiteB, and trunk-like vmnets.
 
 ## Fidelity Boundary
+
+For ESX Storage appliance acceptance, attach an extra blank VMDK to the normal Workstation test appliance, initialize it only through global `esx_storage` apply, and apply the matching DNS/DHCP and Firewall units. Record the job ID, `/dev/disk/by-id` fingerprint, UUID mount, generated A/AAAA names, `exportfs -v`, TCP/111/2049/20048 sockets, nftables family rules, and persistence after appliance reboot. Workstation proves real Photon disk/NFS/DNS/firewall behavior; the Hyper-V/ESX 9 lifecycle remains authoritative for IPv4 and IPv6 VMkernel mounts and datastore I/O.
 
 VMware Workstation vmnets provide isolated layer-2 segments, but they do not
 match Hyper-V's explicit access/trunk VLAN port model. The Workstation lifecycle

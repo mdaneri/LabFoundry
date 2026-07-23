@@ -1,10 +1,10 @@
-const LABFOUNDRY_CACHE = "labfoundry-pwa-v152";
+const LABFOUNDRY_CACHE = "labfoundry-pwa-v156";
 const LABFOUNDRY_ASSETS = [
   "/manifest.webmanifest",
   "/favicon.ico",
   "/static/offline.html",
-  "/static/app.css?v=monitor-no-disk-usage-20260723-2",
-  "/static/app.js?v=monitor-no-disk-usage-20260723-2",
+  "/static/app.css?v=monitor-no-disk-usage-20260723-3",
+  "/static/app.js?v=monitor-no-disk-usage-20260723-3",
   "/static/terminal.js?v=web-terminal-review-20260716-3",
   "/static/vendor/xterm/xterm.css?v=5.5.0",
   "/static/vendor/xterm/xterm.js?v=5.5.0",

@@ -157,6 +157,69 @@ def test_full_lifecycle_plan_includes_passwordless_web_terminal_acceptance():
     assert any("Managed LDAP desired state" in check for check in plan["checks"])
 
 
+def test_esx_storage_lifecycle_plan_is_dual_stack_and_format_is_explicit():
+    lifecycle = load_lifecycle_module()
+    args = lifecycle.parse_args(
+        [
+            "--password",
+            "test",
+            "--plan-only",
+            "--esx-storage-test",
+            "--esx-storage-device-id",
+            "/dev/disk/by-id/wwn-test",
+            "--confirm-esx-storage-format",
+        ]
+    )
+
+    plan = lifecycle.lifecycle_plan(args)
+
+    assert plan["interfaces"]["site"]["ipv6_cidr"] == "fd00:50::1/64"
+    assert plan["esx_storage"] == {
+        "enabled": True,
+        "device_id": "/dev/disk/by-id/wwn-test",
+        "ipv4_client": "192.168.50.210/32",
+        "ipv6_client": "fd00:50::210/128",
+        "format_authorized": True,
+    }
+    assert "esx_storage" in plan["apply_units"]
+    assert any("NFS 3 and 4.1" in check and "IPv4/IPv6" in check for check in plan["checks"])
+
+
+def test_apply_units_requires_and_submits_esx_format_confirmation(monkeypatch):
+    lifecycle = load_lifecycle_module()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.form = []
+
+        def request(self, method, path, **kwargs):  # type: ignore[no-untyped-def]
+            if method == "GET":
+                return 200, '<input type="hidden" name="csrf" value="token">', {}
+            self.form = kwargs["form"]
+            return 202, json.dumps({"job_id": "job-1", "status_url": "/tasks/job-1/status"}), {}
+
+        def json_request(self, method, path, **_kwargs):  # type: ignore[no-untyped-def]
+            if path == "/appliance-apply/review":
+                return {
+                    "units": [
+                        {
+                            "id": "esx_storage",
+                            "format_volumes": [{"id": 7, "confirmation": "FORMAT lifecycle-esx-data"}],
+                        }
+                    ]
+                }
+            return {"task": {"status": "succeeded", "result": {"dry_run": False}, "_children": []}}
+
+    monkeypatch.setattr(lifecycle.time, "sleep", lambda _seconds: None)
+    client = FakeClient()
+    args = argparse.Namespace(allow_dry_run=False, confirm_esx_storage_format=True)
+
+    lifecycle.apply_units(client, ["esx_storage"], args)
+
+    confirmations = [value for key, value in client.form if key == "format_confirmations"]
+    assert json.loads(confirmations[0]) == {"volume_id": 7, "confirmation": "FORMAT lifecycle-esx-data"}
+
+
 def test_authoritative_dns_lifecycle_probe_covers_authority_reverse_nxdomain_and_recursion():
     import base64
 
