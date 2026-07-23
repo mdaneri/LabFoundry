@@ -18,7 +18,12 @@ ESX_STORAGE_MOUNT_ROOT = "/mnt/labfoundry-esx-storage"
 ESX_STORAGE_EXPORT_ROOT = "/srv/labfoundry/esx-storage"
 ESX_STORAGE_DNS_DESCRIPTION = "Created from ESX Storage endpoint."
 ESX_STORAGE_FORMAT_CONFIRMATION_PREFIX = "FORMAT"
+ESX_STORAGE_RESERVED_MOUNT_PATHS = {
+    "/mnt/labfoundry-vcf-backups": "VCF Backups",
+    "/mnt/labfoundry-vcf-offline-depot": "VCF Offline Depot / VCFDT",
+}
 ADDRESS_FAMILIES = ("ipv4", "ipv6")
+ANY_CLIENT_NETWORK = {"ipv4": "0.0.0.0/0", "ipv6": "::/0"}
 NFS_VERSIONS = ("3", "4.1")
 
 
@@ -66,6 +71,32 @@ def share_paths_overlap(left: str, right: str) -> bool:
     return left_parts[:common] == right_parts[:common]
 
 
+def reserved_mount_owner(value: str) -> str:
+    """Return the appliance service that exclusively owns a mounted path."""
+
+    raw = value.strip()
+    if not raw.startswith("/"):
+        return ""
+    path = PurePosixPath(raw)
+    for reserved_path, owner in ESX_STORAGE_RESERVED_MOUNT_PATHS.items():
+        reserved = PurePosixPath(reserved_path)
+        if path == reserved or reserved in path.parents:
+            return owner
+    return ""
+
+
+def validate_mounted_volume_path(value: str) -> str:
+    """Validate an existing ext4 mount before it can be claimed by ESX Storage."""
+
+    mount_path = value.strip()
+    if not PurePosixPath(mount_path or ".").is_absolute():
+        raise ValueError("An existing ext4 volume requires its absolute mount path.")
+    owner = reserved_mount_owner(mount_path)
+    if owner:
+        raise ValueError(f"Mount path {mount_path} is reserved for {owner} and cannot be used by ESX Storage.")
+    return mount_path
+
+
 def normalize_families(value: str | Iterable[str]) -> list[str]:
     families = split_lines(value)
     invalid = [family for family in families if family not in ADDRESS_FAMILIES]
@@ -93,6 +124,11 @@ def valid_clients_or_empty(values: str | Iterable[str], family: str) -> list[str
         return validate_clients(values, family)
     except ValueError:
         return []
+
+
+def effective_clients(values: str | Iterable[str], family: str) -> list[str]:
+    """Return the configured allowlist, or the explicit any-client network."""
+    return valid_clients_or_empty(values, family) or [ANY_CLIENT_NETWORK[family]]
 
 
 def interface_addresses(interface: StorageInterface, family: str) -> list[str]:
@@ -192,12 +228,9 @@ def validate_storage_state(
                 errors.append(f"Datastore {share.datastore_name} enables {family.upper()} but {share.interface_name} has no {family.upper()} address.")
             raw_clients = share.ipv4_clients if family == "ipv4" else share.ipv6_clients
             try:
-                clients = validate_clients(raw_clients, family)
+                validate_clients(raw_clients, family)
             except ValueError as exc:
                 errors.append(f"Datastore {share.datastore_name}: {exc}")
-                continue
-            if not clients:
-                errors.append(f"Datastore {share.datastore_name} requires at least one {family.upper()} VMkernel client IP/CIDR.")
 
     for index, left in enumerate(enabled_shares):
         for right in enabled_shares[index + 1 :]:
@@ -213,8 +246,11 @@ def validate_storage_state(
     for volume in volumes:
         if volume.source_type == "blank_disk" and not volume.stable_device_id.startswith("/dev/disk/by-id/"):
             errors.append(f"Volume {volume.name} must use a stable /dev/disk/by-id identity.")
-        if volume.source_type == "mounted_ext4" and not PurePosixPath(volume.mount_path or "/").is_absolute():
-            errors.append(f"Existing volume {volume.name} must use an absolute mount path.")
+        if volume.source_type == "mounted_ext4":
+            try:
+                validate_mounted_volume_path(volume.mount_path)
+            except ValueError as exc:
+                errors.append(f"Existing volume {volume.name}: {exc}")
         if not any(share.volume_id == volume.id for share in enabled_shares):
             warnings.append(f"Volume {volume.name} has no enabled datastore share.")
     return list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
@@ -274,8 +310,8 @@ def render_manifest(
                 "listeners": listeners,
                 "target_hostnames": hostnames,
                 "clients": {
-                    "ipv4": valid_clients_or_empty(share.ipv4_clients, "ipv4") if "ipv4" in families else [],
-                    "ipv6": valid_clients_or_empty(share.ipv6_clients, "ipv6") if "ipv6" in families else [],
+                    "ipv4": effective_clients(share.ipv4_clients, "ipv4") if "ipv4" in families else [],
+                    "ipv6": effective_clients(share.ipv6_clients, "ipv6") if "ipv6" in families else [],
                 },
                 "connection_commands": commands,
                 "enabled": share.enabled,
@@ -387,6 +423,9 @@ def normalize_disk_inventory_entry(entry: dict[str, Any], *, claimed_ids: set[st
             reasons.append("not a mounted ext4 filesystem")
         if entry.get("os_related"):
             reasons.append("is related to the operating-system disk")
+        owner = reserved_mount_owner(str(entry.get("mount_path") or ""))
+        if owner:
+            reasons.append(f"is reserved for {owner}")
     else:
         if not stable_id.startswith("/dev/disk/by-id/"):
             reasons.append("no stable /dev/disk/by-id identity")

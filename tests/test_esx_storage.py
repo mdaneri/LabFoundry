@@ -13,6 +13,7 @@ from labfoundry.app.services.esx_storage import (
     normalize_disk_inventory_entry,
     render_manifest,
     share_paths_overlap,
+    validate_mounted_volume_path,
 )
 
 
@@ -93,6 +94,18 @@ def test_mixed_family_client_allowlist_is_rejected():
     assert any("does not match the enabled IPV4 family" in message for message in manifest["validation"]["errors"])
 
 
+def test_empty_client_lists_explicitly_allow_any_client_per_enabled_family():
+    manifest = render(ipv4_clients="", ipv6_clients="")
+    share = manifest["shares"][0]
+
+    assert manifest["validation"]["errors"] == []
+    assert share["clients"] == {"ipv4": ["0.0.0.0/0"], "ipv6": ["::/0"]}
+    assert {rule["source_expression"] for rule in firewall_rule_specs(manifest)} == {
+        "ip saddr 0.0.0.0/0",
+        "ip6 saddr ::/0",
+    }
+
+
 def test_dns_records_include_canonical_alias_and_both_address_families():
     records = desired_dns_records(render())
     assert records[:2] == [{
@@ -149,6 +162,43 @@ def test_blank_disk_inventory_rejects_every_destructive_risk_and_claim():
     assert "already claimed" in rejected["eligibility_reason"]
 
 
+def test_mounted_ext4_inventory_rejects_vcf_backup_and_depot_mounts():
+    for mount_path, owner in [
+        ("/mnt/labfoundry-vcf-backups", "VCF Backups"),
+        ("/mnt/labfoundry-vcf-offline-depot", "VCF Offline Depot / VCFDT"),
+        ("/mnt/labfoundry-vcf-offline-depot/PROD", "VCF Offline Depot / VCFDT"),
+    ]:
+        candidate = normalize_disk_inventory_entry(
+            {
+                "candidate_type": "mounted_ext4",
+                "filesystem_type": "ext4",
+                "filesystem_uuid": f"uuid-{owner}",
+                "mount_path": mount_path,
+            }
+        )
+
+        assert candidate["eligible"] is False
+        assert f"reserved for {owner}" in candidate["eligibility_reason"]
+
+        try:
+            validate_mounted_volume_path(mount_path)
+        except ValueError as exc:
+            assert owner in str(exc)
+        else:
+            raise AssertionError(f"reserved mount {mount_path} was accepted")
+
+
+def test_desired_state_rejects_existing_volume_on_vcf_managed_mount():
+    settings, volumes, shares, interfaces = state()
+    volumes[0].source_type = "mounted_ext4"
+    volumes[0].stable_device_id = ""
+    volumes[0].mount_path = "/mnt/labfoundry-vcf-backups"
+
+    manifest = render_manifest(settings, volumes, shares, interfaces, dns_enabled=True)
+
+    assert any("reserved for VCF Backups" in error for error in manifest["validation"]["errors"])
+
+
 def test_format_authorization_is_job_manifest_and_device_bound():
     manifest = render()
     authorization = format_authorization(
@@ -184,6 +234,21 @@ def test_helper_requires_job_scoped_format_authorization_for_apply():
         )
     ]
     assert helper._esx_storage_manifest_errors(manifest, require_authorization=True) == []
+
+
+def test_helper_rejects_existing_volume_on_vcf_managed_mount():
+    helper = load_helper_module()
+    manifest = render()
+    manifest["volumes"][0].update(
+        {
+            "source_type": "mounted_ext4",
+            "stable_device_id": "",
+            "mount_path": "/mnt/labfoundry-vcf-offline-depot",
+            "requires_format": False,
+        }
+    )
+
+    assert "existing volume esx-data mount path is reserved for VCF Offline Depot / VCFDT" in helper._esx_storage_manifest_errors(manifest)
 
 
 def test_helper_blank_disk_revalidation_rejects_partition_mount_lvm_raid_and_os_relationship():
@@ -313,7 +378,13 @@ def test_esx_storage_page_and_dual_stack_api_contract(client):
     assert "+ Add NFS datastore here" in page.text
     assert 'id="esx-storage-share-modal"' in page.text
     assert 'data-esx-storage-wizard="share"' in page.text
+    assert "Leave empty to allow any IPv4 client (0.0.0.0/0)." in page.text
+    assert "Leave empty to allow any IPv6 client (::/0)." in page.text
     assert "initializeEsxStorageWizards" in client.get("/static/app.js").text
+    assert "any IPv4 client" in client.get("/static/app.js").text
+    assert "await fetch(form.action" in client.get("/static/app.js").text
+    assert 'label: "Edit datastore"' in client.get("/static/app.js").text
+    assert "rowDblClick: (_event, row) => editRow(row)" in client.get("/static/app.js").text
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import DnsRecord, DnsSettings, PhysicalInterface
@@ -342,6 +413,14 @@ def test_esx_storage_page_and_dual_stack_api_contract(client):
     headers = {"Authorization": f"Bearer {token}"}
     interfaces = client.get("/api/v1/interfaces/physical", headers=headers).json()
     interface = next(row for row in interfaces if row["name"] == "storage87")
+    for reserved_path in ["/mnt/labfoundry-vcf-backups", "/mnt/labfoundry-vcf-offline-depot"]:
+        rejected_volume = client.post(
+            "/api/v1/esx-storage/volumes",
+            headers=headers,
+            json={"name": f"reserved-{reserved_path.rsplit('/', 1)[-1]}", "source_type": "mounted_ext4", "mount_path": reserved_path},
+        )
+        assert rejected_volume.status_code == 422
+        assert "reserved for" in rejected_volume.json()["detail"]
     volume_response = client.post(
         "/api/v1/esx-storage/volumes",
         headers=headers,
@@ -367,6 +446,29 @@ def test_esx_storage_page_and_dual_stack_api_contract(client):
     assert share_response.json()["address_families"] == ["ipv4", "ipv6"]
     assert share_response.json()["connection_commands"]["ipv4"]
     assert share_response.json()["connection_commands"]["ipv6"]
+    edit_page = client.get("/esx-storage")
+    edit_csrf = edit_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    assert "esx-storage-command-details" in edit_page.text
+    updated_share = client.post(
+        f"/esx-storage/shares/{share_response.json()['id']}",
+        data={
+            "datastore_name": "dual-stack-ds",
+            "volume_id": volume_response.json()["id"],
+            "relative_path": "datastores/dual-stack",
+            "preferred_nfs_version": "4.1",
+            "interface_name": interface["name"],
+            "address_families": ["ipv4", "ipv6"],
+            "ipv4_clients": "",
+            "ipv6_clients": "",
+            "enabled": "on",
+            "csrf": edit_csrf,
+        },
+        follow_redirects=False,
+    )
+    assert updated_share.status_code == 303, updated_share.text
+    edited = client.get(f"/api/v1/esx-storage/shares", headers=headers).json()[0]
+    assert edited["ipv4_clients"] == ["0.0.0.0/0"]
+    assert edited["ipv6_clients"] == ["::/0"]
     status = client.patch(
         "/api/v1/esx-storage/status",
         headers=headers,

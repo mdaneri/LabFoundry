@@ -25,7 +25,7 @@ import configparser
 import hashlib
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_interface, ip_network
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
@@ -168,6 +168,10 @@ ESXI_PXE_SCHEMA_VERSION = 2
 ESXI_PXE_DEFAULT_HTTP_PORT = 8080
 ESX_STORAGE_APPLY_DIR = Path("/var/lib/labfoundry/apply/esx-storage")
 ESX_STORAGE_MOUNT_ROOT = Path("/mnt/labfoundry-esx-storage")
+ESX_STORAGE_RESERVED_MOUNT_PATHS = {
+    PurePosixPath("/mnt/labfoundry-vcf-backups"): "VCF Backups",
+    PurePosixPath("/mnt/labfoundry-vcf-offline-depot"): "VCF Offline Depot / VCFDT",
+}
 ESX_STORAGE_EXPORT_ROOT = Path("/srv/labfoundry/esx-storage")
 ESX_STORAGE_EXPORTS_PATH = Path("/etc/exports.d/labfoundry-esx-storage.exports")
 ESX_STORAGE_NFS_CONFIG_PATH = Path("/etc/nfs.conf.d/labfoundry-esx-storage.conf")
@@ -7809,6 +7813,17 @@ def _esx_storage_disk_is_initialized(entry: dict[str, object], *, label: str, mo
     )
 
 
+def _esx_storage_reserved_mount_owner(value: str) -> str:
+    raw = value.strip()
+    if not raw.startswith("/"):
+        return ""
+    path = PurePosixPath(raw)
+    for reserved, owner in ESX_STORAGE_RESERVED_MOUNT_PATHS.items():
+        if path == reserved or reserved in path.parents:
+            return owner
+    return ""
+
+
 def _esx_storage_manifest_errors(payload: dict[str, object], *, require_authorization: bool = False) -> list[str]:
     errors: list[str] = []
     if payload.get("schema_version") != 1:
@@ -7833,6 +7848,10 @@ def _esx_storage_manifest_errors(payload: dict[str, object], *, require_authoriz
             errors.append(f"volume {volume.get('name')} mount path must be absolute")
         elif source_type == "blank_disk" and not mount_value.startswith(f"{ESX_STORAGE_MOUNT_ROOT.as_posix().rstrip('/')}/"):
             errors.append(f"new volume {volume.get('name')} mount path must be under {ESX_STORAGE_MOUNT_ROOT}")
+        elif source_type == "mounted_ext4":
+            owner = _esx_storage_reserved_mount_owner(mount_value)
+            if owner:
+                errors.append(f"existing volume {volume.get('name')} mount path is reserved for {owner}")
     enabled_shares = [share for share in shares if isinstance(share, dict) and share.get("enabled")]
     if payload.get("enabled") and not enabled_shares:
         errors.append("enabled ESX Storage requires at least one enabled share")
@@ -7848,7 +7867,8 @@ def _esx_storage_manifest_errors(payload: dict[str, object], *, require_authoriz
         for family in families:
             values = clients.get(family) if isinstance(clients.get(family), list) else []
             if not values:
-                errors.append(f"share {share.get('datastore_name')} requires a {family} VMkernel client allowlist")
+                values = ["0.0.0.0/0" if family == "ipv4" else "::/0"]
+                clients[family] = values
             for value in values:
                 try:
                     network = ip_network(str(value), strict=False)
@@ -7889,7 +7909,14 @@ def _esx_storage_write_runtime_config(payload: dict[str, object]) -> None:
     export_lines: list[str] = []
     for share in enabled_shares:
         clients = share.get("clients") if isinstance(share.get("clients"), dict) else {}
-        share_clients = list(dict.fromkeys([str(value) for family in ("ipv4", "ipv6") for value in clients.get(family, [])]))
+        share_clients = list(
+            dict.fromkeys(
+                str(value)
+                for family in ("ipv4", "ipv6")
+                for value in (clients.get(family, []) or (["0.0.0.0/0"] if family == "ipv4" else ["::/0"]))
+                if family in share.get("address_families", [])
+            )
+        )
         root_clients.extend(share_clients)
         options = "rw,sync,no_subtree_check,no_root_squash"
         export_lines.append(f"{share['bind_path']} " + " ".join(f"{client}({options})" for client in share_clients))

@@ -373,6 +373,7 @@ from labfoundry.app.services.esx_storage import (
     select_inventory_candidate as select_esx_storage_inventory_candidate,
     split_lines as split_esx_storage_lines,
     storage_slug as esx_storage_slug,
+    validate_mounted_volume_path as validate_esx_storage_mounted_volume_path,
 )
 from labfoundry.app.services.kms import (
     KMS_BACKENDS,
@@ -7121,8 +7122,8 @@ def esx_storage_context(db: Session, *, reconcile: bool = True) -> dict[str, Any
                 "preferred_nfs_version": row.preferred_nfs_version,
                 "interface_name": row.interface_name,
                 "address_families": rendered["address_families"],
-                "ipv4_clients": rendered["clients"]["ipv4"],
-                "ipv6_clients": rendered["clients"]["ipv6"],
+                "ipv4_clients": split_esx_storage_lines(row.ipv4_clients),
+                "ipv6_clients": split_esx_storage_lines(row.ipv6_clients),
                 "listeners": rendered["listeners"],
                 "target_hostnames": rendered["target_hostnames"],
                 "remote_path": rendered["remote_path"],
@@ -17137,8 +17138,11 @@ def create_esx_storage_volume_from_ui(
         raise HTTPException(status_code=400, detail="Volume source must be a blank disk or mounted ext4 volume.")
     if source_type == "blank_disk" and not stable_device_id.startswith("/dev/disk/by-id/"):
         raise HTTPException(status_code=400, detail="Blank disks require a stable /dev/disk/by-id identity.")
-    if source_type == "mounted_ext4" and not mount_path.startswith("/"):
-        raise HTTPException(status_code=400, detail="Existing ext4 volumes require an absolute mount path.")
+    if source_type == "mounted_ext4":
+        try:
+            validate_esx_storage_mounted_volume_path(mount_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     candidate: dict[str, Any] = {}
     if not get_settings().dry_run_system_adapters:
         inventory_result = SystemAdapter(dry_run=False).esx_storage_inventory()
@@ -17227,6 +17231,56 @@ def create_esx_nfs_share_from_ui(
     ensure_dns_for_esx_storage(db, identity.username)
     db.commit()
     record_audit(db, actor=identity.username, action="create_esx_nfs_share", resource_type="esx_nfs_share", resource_id=str(row.id), detail=f"datastore={row.datastore_name} families={','.join(families)}")
+    return RedirectResponse("/esx-storage#nfs-datastores", status_code=303)
+
+
+@router.post("/esx-storage/shares/{share_id}", response_model=None)
+def update_esx_nfs_share_from_ui(
+    request: Request,
+    share_id: int,
+    datastore_name: str = Form(...),
+    volume_id: int = Form(...),
+    relative_path: str = Form(...),
+    preferred_nfs_version: str = Form("4.1"),
+    interface_name: str = Form(...),
+    address_families: list[str] = Form(default_factory=list),
+    ipv4_clients: str = Form(""),
+    ipv6_clients: str = Form(""),
+    enabled: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_esx_storage_write(identity)
+    row = db.get(EsxNfsShare, share_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="NFS datastore share not found.")
+    if db.get(EsxStorageVolume, volume_id) is None:
+        raise HTTPException(status_code=400, detail="Selected storage volume does not exist.")
+    if preferred_nfs_version not in {"3", "4.1"}:
+        raise HTTPException(status_code=400, detail="Preferred NFS version must be 3 or 4.1.")
+    families = normalize_esx_storage_families(address_families)
+    if not families:
+        raise HTTPException(status_code=400, detail="Select IPv4, IPv6, or both.")
+    row.datastore_name = datastore_name.strip()
+    row.volume_id = volume_id
+    row.relative_path = normalize_esx_storage_relative_path(relative_path)
+    row.preferred_nfs_version = preferred_nfs_version
+    row.interface_name = interface_name.strip()
+    row.address_families = "\n".join(families)
+    row.ipv4_clients = "\n".join(split_esx_storage_lines(ipv4_clients))
+    row.ipv6_clients = "\n".join(split_esx_storage_lines(ipv6_clients))
+    row.enabled = enabled == "on"
+    row.updated_at = utcnow()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="A datastore with this name already exists.") from exc
+    ensure_dns_for_esx_storage(db, identity.username)
+    db.commit()
+    record_audit(db, actor=identity.username, action="update_esx_nfs_share", resource_type="esx_nfs_share", resource_id=str(row.id), detail=f"datastore={row.datastore_name} families={','.join(families)}")
     return RedirectResponse("/esx-storage#nfs-datastores", status_code=303)
 
 

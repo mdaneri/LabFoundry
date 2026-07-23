@@ -81,13 +81,14 @@
         </table>
 
         {% for share in esx_storage_share_rows if share.enabled %}
-          <section class="info-band">
-            <div><h3>{{ share.datastore_name }}</h3><p class="muted">Use one explicit generated hostname per family. There is no resolver-selected family preference.</p></div>
+          <details class="info-band esx-storage-command-details">
+            <summary><strong>{{ share.datastore_name }}</strong><span class="muted">NFS {{ share.preferred_nfs_version }} connection instructions</span></summary>
+            <p class="muted">Use one explicit generated hostname per family. There is no resolver-selected family preference.</p>
             <div class="settings-list">
               {% for command in share.connection_commands.ipv4 %}<div><span>IPv4 · NFS {{ share.preferred_nfs_version }}</span><code>{{ command }}</code></div>{% endfor %}
               {% for command in share.connection_commands.ipv6 %}<div><span>IPv6 · NFS {{ share.preferred_nfs_version }}</span><code>{{ command }}</code></div>{% endfor %}
             </div>
-          </section>
+          </details>
         {% endfor %}
       </section>
     </div>
@@ -140,7 +141,7 @@
         </section>
         <section class="vcf-sddc-step-page hidden" data-esx-storage-wizard-step>
           <label data-esx-storage-blank-source><span class="field-label"><span>Blank disk</span><button class="help-icon" type="button" data-help="Only whole disks that pass live safety inventory are selectable. The complete model, serial, WWN, size, and /dev/disk/by-id identity are captured for format review and immediate pre-format revalidation.">i</button></span><select name="stable_device_id"><option value="">Select an eligible blank disk</option>{% for disk in esx_storage_disk_inventory if disk.candidate_type == 'blank_disk' and disk.eligible %}<option value="{{ disk.stable_device_id }}">{{ disk.model or 'Disk' }} · {{ disk.size_bytes }} bytes · {{ disk.serial or disk.wwn or disk.stable_device_id }}</option>{% endfor %}</select></label>
-          <label data-esx-storage-mounted-source hidden><span class="field-label"><span>Mounted ext4 volume</span><button class="help-icon" type="button" data-help="Only eligible mounted ext4 filesystems discovered by live inventory are selectable. The operating-system filesystem and already claimed volumes are excluded.">i</button></span><select name="mount_path"><option value="">Select an eligible mounted ext4 volume</option>{% for disk in esx_storage_disk_inventory if disk.candidate_type == 'mounted_ext4' and disk.eligible %}<option value="{{ disk.mount_path }}">{{ disk.mount_path }} · {{ disk.size_bytes }} bytes · UUID {{ disk.filesystem_uuid }}</option>{% endfor %}</select></label>
+          <label data-esx-storage-mounted-source hidden><span class="field-label"><span>Mounted ext4 volume</span><button class="help-icon" type="button" data-help="Only eligible mounted ext4 filesystems discovered by live inventory are selectable. Operating-system filesystems, claimed volumes, VCF Backups storage, and VCF Offline Depot / VCFDT storage are excluded.">i</button></span><select name="mount_path"><option value="">Select an eligible mounted ext4 volume</option>{% for disk in esx_storage_disk_inventory if disk.candidate_type == 'mounted_ext4' and disk.eligible %}<option value="{{ disk.mount_path }}">{{ disk.mount_path }} · {{ disk.size_bytes }} bytes · UUID {{ disk.filesystem_uuid }}</option>{% endfor %}</select></label>
           {% if esx_storage_inventory_error %}<p class="autosave-status" data-state="error">{{ esx_storage_inventory_error }}</p>{% endif %}
         </section>
         <section class="vcf-sddc-step-page hidden" data-esx-storage-wizard-step>
@@ -157,7 +158,7 @@
   <form class="confirm-modal-panel vcf-sddc-wizard-panel" action="/esx-storage/shares" method="post" data-esx-storage-share-form data-esx-storage-wizard="share">
     <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="enabled" value="on">
     <aside class="vcf-sddc-wizard-rail" aria-label="NFS datastore steps">
-      <p class="kicker">ESX Storage</p><h2 id="esx-storage-share-modal-title">Add NFS datastore</h2>
+      <p class="kicker">ESX Storage</p><h2 id="esx-storage-share-modal-title" data-esx-storage-wizard-modal-title>Add NFS datastore</h2>
       <ol class="vcf-sddc-step-list">
         <li><button class="vcf-sddc-step-button active" type="button" data-esx-storage-wizard-nav><span>1</span><strong>Datastore</strong><small>Name, volume, and path</small></button></li>
         <li><button class="vcf-sddc-step-button" type="button" data-esx-storage-wizard-nav disabled><span>2</span><strong>Endpoint</strong><small>Protocol and address families</small></button></li>
@@ -180,8 +181,8 @@
           <fieldset class="full"><legend><span class="field-label"><span>Address families</span><button class="help-icon" type="button" data-help="Enable IPv4, IPv6, or both. Neither family is preferred or used as fallback; LabFoundry generates a separate DNS name, firewall allowlist, and ESX command for every enabled family.">i</button></span></legend><label class="inline-check"><input type="checkbox" name="address_families" value="ipv4" checked> IPv4</label><label class="inline-check"><input type="checkbox" name="address_families" value="ipv6" checked> IPv6</label></fieldset>
         </div></section>
         <section class="vcf-sddc-step-page hidden" data-esx-storage-wizard-step><div class="form-grid">
-          <label><span class="field-label"><span>IPv4 VMkernel clients</span><button class="help-icon" type="button" data-help="One IPv4 VMkernel IP or CIDR per line. At least one is required when IPv4 is enabled; firewall and export access are restricted to these clients.">i</button></span><textarea name="ipv4_clients" rows="5" placeholder="192.168.87.11/32"></textarea></label>
-          <label><span class="field-label"><span>IPv6 VMkernel clients</span><button class="help-icon" type="button" data-help="One IPv6 VMkernel IP or CIDR per line. At least one is required when IPv6 is enabled; firewall and export access are restricted to these clients.">i</button></span><textarea name="ipv6_clients" rows="5" placeholder="2001:db8:87::11/128"></textarea></label>
+          <label><span class="field-label"><span>IPv4 VMkernel clients</span><button class="help-icon" type="button" data-help="One IPv4 VMkernel IP or CIDR per line restricts firewall and export access. Leave empty to allow any IPv4 client (0.0.0.0/0).">i</button></span><textarea name="ipv4_clients" rows="5" placeholder="Leave empty for any IPv4 client"></textarea></label>
+          <label><span class="field-label"><span>IPv6 VMkernel clients</span><button class="help-icon" type="button" data-help="One IPv6 VMkernel IP or CIDR per line restricts firewall and export access. Leave empty to allow any IPv6 client (::/0).">i</button></span><textarea name="ipv6_clients" rows="5" placeholder="Leave empty for any IPv6 client"></textarea></label>
         </div></section>
         <section class="vcf-sddc-step-page hidden" data-esx-storage-wizard-step>
           <div class="settings-list"><div><span>Datastore</span><strong data-esx-storage-review="share-name"></strong></div><div><span>Volume and path</span><code data-esx-storage-review="share-path"></code></div><div><span>Protocol</span><strong data-esx-storage-review="share-protocol"></strong></div><div><span>Interface and families</span><strong data-esx-storage-review="share-endpoint"></strong></div><div><span>VMkernel clients</span><code data-esx-storage-review="share-clients"></code></div></div>

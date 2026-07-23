@@ -158,6 +158,7 @@ from labfoundry.app.services.esx_storage import (
     select_inventory_candidate,
     split_lines as split_esx_storage_lines,
     storage_slug,
+    validate_mounted_volume_path,
 )
 from labfoundry.app.services.monitoring import monitor_payload
 from labfoundry.app.services.ldap import (
@@ -2626,8 +2627,11 @@ def create_esx_storage_volume(
     name = payload.name.strip()
     if payload.source_type == "blank_disk" and not payload.stable_device_id.startswith("/dev/disk/by-id/"):
         raise HTTPException(status_code=422, detail="Blank disks require a stable /dev/disk/by-id identity.")
-    if payload.source_type == "mounted_ext4" and not payload.mount_path.startswith("/"):
-        raise HTTPException(status_code=422, detail="An existing ext4 volume requires its absolute mount path.")
+    if payload.source_type == "mounted_ext4":
+        try:
+            validate_mounted_volume_path(payload.mount_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     candidate: dict[str, Any] = {}
     if not get_settings().dry_run_system_adapters:
         result = SystemAdapter(dry_run=False).esx_storage_inventory()
