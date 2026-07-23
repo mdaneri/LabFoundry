@@ -503,7 +503,6 @@ from labfoundry.app.services.vcf_offline_depot import (
     VCF_DEPOT_STAGED_CONFIG_PATH,
     VCF_DEPOT_STAGED_TOKEN_FILE,
     VCF_DEPOT_STAGED_TOOL_DIR,
-    VCF_DEPOT_TELEMETRY_CHOICES,
     VCF_DEPOT_TOOL_VERSION_SOURCE_COMMAND,
     VCF_DEPOT_TOOL_VERSION_SOURCE_KEY,
     VCF_DEPOT_TOKEN_NAME_KEY,
@@ -2585,6 +2584,7 @@ def vcf_depot_tool_installed(settings: VcfOfflineDepotSettings) -> bool:
 
 def vcf_offline_depot_context(db: Session, *, reconcile: bool = True) -> dict:
     settings = get_vcf_offline_depot_settings_row(db, reconcile_default_user=reconcile, reconcile=reconcile)
+    appliance_settings = get_appliance_settings_row(db)
     if reconcile and normalize_service_bind_settings(db, settings):
         db.commit()
         db.refresh(settings)
@@ -2623,6 +2623,7 @@ def vcf_offline_depot_context(db: Session, *, reconcile: bool = True) -> dict:
     command_preview = render_vcfdt_command_preview(
         settings,
         profiles,
+        vmware_ceip_enabled=bool(appliance_settings.vmware_ceip_enabled),
         download_token_present=bool(secrets["download_token_present"]),
         activation_code_present=bool(secrets["activation_code_present"]),
     )
@@ -2642,7 +2643,11 @@ def vcf_offline_depot_context(db: Session, *, reconcile: bool = True) -> dict:
             row["active_task_blocker"] = blocker
     return {
         "vcf_depot_settings": settings,
-        "vcf_depot_settings_json": vcf_depot_settings_to_dict(settings),
+        "vcf_depot_settings_json": {
+            **vcf_depot_settings_to_dict(settings),
+            "vmware_ceip_enabled": bool(appliance_settings.vmware_ceip_enabled),
+        },
+        "vmware_ceip_enabled": bool(appliance_settings.vmware_ceip_enabled),
         "vcf_depot_users": users,
         "vcf_depot_profiles": profiles,
         "vcf_depot_profile_rows": profile_rows,
@@ -2680,7 +2685,6 @@ def vcf_offline_depot_context(db: Session, *, reconcile: bool = True) -> dict:
             {"value": platform, "label": platform}
             for platform in VCF_DEPOT_ESX_DISABLED_PLATFORMS
         ],
-        "vcf_depot_telemetry_choices": sorted(VCF_DEPOT_TELEMETRY_CHOICES),
         "vcf_depot_archive_pattern": VCF_DEPOT_ARCHIVE_PATTERN,
     }
 
@@ -2838,10 +2842,10 @@ def prepare_vcf_depot_runtime(settings: VcfOfflineDepotSettings, db: Session) ->
     vdt_log_path.touch(exist_ok=True)
     stage_vcf_depot_runtime_secrets(db)
     stage_vcf_depot_runtime_application_properties(db, settings, tool_home)
-    telemetry_choice = settings.telemetry_choice if settings.telemetry_choice in VCF_DEPOT_TELEMETRY_CHOICES else "DISABLE"
-    if telemetry_choice != "NOT_PROVIDED":
-        telemetry_file = tool_home / "conf" / "telemetry" / "telemetry.flag"
-        write_vcf_depot_runtime_file(telemetry_file, f"obtu.telemetry.config={telemetry_choice}\n")
+    appliance_settings = get_appliance_settings_row(db)
+    telemetry_choice = "ENABLE" if appliance_settings.vmware_ceip_enabled else "DISABLE"
+    telemetry_file = tool_home / "conf" / "telemetry" / "telemetry.flag"
+    write_vcf_depot_runtime_file(telemetry_file, f"obtu.telemetry.config={telemetry_choice}\n")
     Path(settings.depot_store_path).mkdir(parents=True, exist_ok=True)
     return tool_path
 
@@ -2892,6 +2896,7 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
         job = db.get(Job, job_id)
         profile = db.get(VcfDepotDownloadProfile, profile_id)
         settings = get_vcf_offline_depot_settings_row(db)
+        appliance_settings = get_appliance_settings_row(db)
         started = utcnow()
         if job:
             job.status = JobStatus.RUNNING.value
@@ -2914,6 +2919,7 @@ def run_vcf_depot_download_job(job_id: str, profile_id: int) -> None:
             generated_script = render_vcfdt_command_preview(
                 settings,
                 [profile],
+                vmware_ceip_enabled=bool(appliance_settings.vmware_ceip_enabled),
                 download_token_present=bool(secrets["download_token_present"]),
                 activation_code_present=bool(secrets["activation_code_present"]),
                 include_disabled_profiles=True,
@@ -7259,6 +7265,7 @@ def appliance_apply_units(db: Session, *, reconcile: bool = True) -> list[dict[s
                 f"FQDN {appliance_settings['appliance_settings'].fqdn}",
                 f"resolver {'local DNS' if appliance_settings['local_dns_enabled'] else 'external DNS'}",
                 f"root SSH {'enabled' if appliance_settings['appliance_settings'].root_ssh_enabled else 'disabled'}",
+                f"VMware CEIP {'enabled' if appliance_settings['appliance_settings'].vmware_ceip_enabled else 'disabled'}",
             ],
             validation_errors=appliance_settings["appliance_settings_validation_errors"],
             validation_warnings=appliance_settings["appliance_settings_validation_warnings"],
@@ -7912,7 +7919,9 @@ def dashboard_snapshot(db: Session) -> dict[str, Any]:
 
 def appliance_update_settings(db: Session) -> dict[str, Any]:
     legacy = update_settings_from_json(setting_value(db, APPLIANCE_UPDATE_SETTINGS_KEY))
-    return effective_update_settings(db, legacy=legacy)
+    settings = effective_update_settings(db, legacy=legacy)
+    settings["vmware_ceip_enabled"] = bool(get_appliance_settings_row(db).vmware_ceip_enabled)
+    return settings
 
 
 def latest_appliance_update_job(db: Session) -> Job | None:
@@ -8782,6 +8791,7 @@ def execute_appliance_apply_unit(unit: dict[str, Any], *, adapter: SystemAdapter
                 [
                     lambda: adapter.stage_vcf_offline_depot_tool(settings.tool_archive_path),
                     lambda: adapter.apply_vcf_offline_depot_application_properties(properties_path),
+                    lambda: adapter.apply_vcf_offline_depot_ceip(bool(context["vmware_ceip_enabled"])),
                     lambda: adapter.generate_vcf_offline_depot_software_depot_id(),
                 ]
             )
@@ -16071,8 +16081,6 @@ def update_vcf_offline_depot_settings_from_ui(
     http_user_id: str = Form(""),
     allow_unauthenticated_access: str | None = Form(None),
     server_certificate: str | None = Form(None),
-    telemetry_choice: str | None = Form(None),
-    telemetry_enabled: str | None = Form(None),
     tool_archive_file: UploadFile | None = File(None),
     download_token_file: UploadFile | None = File(None),
     activation_code_file: UploadFile | None = File(None),
@@ -16106,10 +16114,6 @@ def update_vcf_offline_depot_settings_from_ui(
     settings.server_certificate = settings.hostname
     settings.depot_store_path = VCF_DEPOT_DEFAULT_STORE_PATH
     settings.config_path = VCF_DEPOT_DEFAULT_CONFIG_PATH
-    if telemetry_choice in VCF_DEPOT_TELEMETRY_CHOICES:
-        settings.telemetry_choice = telemetry_choice
-    else:
-        settings.telemetry_choice = "ENABLE" if telemetry_enabled == "on" else "DISABLE"
     uploaded_archive_name = store_uploaded_vcf_depot_archive(settings, tool_archive_file)
     uploaded_token_name = store_uploaded_vcf_depot_secret(
         db,
@@ -16188,7 +16192,7 @@ def update_vcf_offline_depot_settings_from_ui(
                 "application_properties_present": application_properties["present"],
                 "application_properties_source": application_properties["source"],
                 "application_properties_updated_at": application_properties["updated_at"],
-                "telemetry_choice": saved_settings.telemetry_choice,
+                "vmware_ceip_enabled": context["vmware_ceip_enabled"],
                 "dns_record_action": dns_record_action,
                 "config_path": saved_settings.config_path,
                 "valid": not validation_errors,
@@ -16520,10 +16524,12 @@ def preview_vcf_depot_profile_from_ui(
     if profile is None:
         raise HTTPException(status_code=404, detail="VCFDT download profile not found")
     settings = get_vcf_offline_depot_settings_row(db)
+    appliance_settings = get_appliance_settings_row(db)
     secrets = vcf_depot_secret_context(db)
     script = render_vcfdt_command_preview(
         settings,
         [profile],
+        vmware_ceip_enabled=bool(appliance_settings.vmware_ceip_enabled),
         download_token_present=bool(secrets["download_token_present"]),
         activation_code_present=bool(secrets["activation_code_present"]),
         include_disabled_profiles=True,
@@ -19024,6 +19030,47 @@ def update_settings_from_ui(
                 "local_dns_enabled": context["local_dns_enabled"],
                 "management_interface": context["management_interface"],
                 "dns_record_action": dns_record_action,
+                "valid": not context["appliance_settings_validation_errors"],
+                "validation_errors": context["appliance_settings_validation_errors"],
+                "validation_warnings": context["appliance_settings_validation_warnings"],
+                "config_path": saved.config_path,
+                "config_preview": context["appliance_settings_config_preview"],
+            }
+        )
+    return RedirectResponse("/settings", status_code=303)
+
+
+@router.post("/settings/vmware-ceip", response_model=None)
+def update_vmware_ceip_from_ui(
+    request: Request,
+    vmware_ceip_enabled: bool = Form(False),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse | JSONResponse:
+    verify_csrf(request, csrf)
+    settings = get_appliance_settings_row(db)
+    settings.vmware_ceip_enabled = bool(vmware_ceip_enabled)
+    settings.config_path = APPLIANCE_SETTINGS_STAGED_CONFIG_PATH
+    settings.updated_at = utcnow()
+    db.add(settings)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_vmware_ceip_policy",
+        resource_type="settings",
+        resource_id=str(settings.id),
+        detail=f"enabled={str(settings.vmware_ceip_enabled).lower()}",
+    )
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        context = appliance_settings_context(db)
+        saved = context["appliance_settings"]
+        return JSONResponse(
+            {
+                "status": "saved",
+                "updated_at": saved.updated_at.isoformat(),
+                "vmware_ceip_enabled": saved.vmware_ceip_enabled,
                 "valid": not context["appliance_settings_validation_errors"],
                 "validation_errors": context["appliance_settings_validation_errors"],
                 "validation_warnings": context["appliance_settings_validation_warnings"],

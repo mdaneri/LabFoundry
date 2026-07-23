@@ -3,6 +3,9 @@
 The base image includes Python `vcf-sdk==9.1.0.0` and system-wide
 `VCF.PowerCLI==9.1.0.25380678`. Provisioning fails if PowerCLI cannot import or
 `Connect-VIServer` is unavailable to the unprivileged bootstrap administrator.
+Provisioning also disables and verifies PowerCLI CEIP participation at
+`AllUsers` scope; Appliance Settings can change that central preference after
+deployment without product-specific prompts.
 The system module tree remains root-owned and writable only by root, while
 every local `/usr/bin/pwsh` user can read and import its modules. Set
 `LABFOUNDRY_POWERCLI_MODULE_SOURCE` to a pre-staged module directory for offline

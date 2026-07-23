@@ -84,6 +84,8 @@ def test_photon_provisioning_installs_default_nginx_management_proxy():
     assert "VCF.PowerCLI" in script
     assert "9.1.0.25380678" in script
     assert "Connect-VIServer" in script
+    assert "Set-PowerCLIConfiguration -ParticipateInCeip $false -Scope AllUsers -Confirm:$false" in script
+    assert "Get-PowerCLIConfiguration -Scope AllUsers" in script
     assert "LABFOUNDRY_POWERCLI_MODULE_SOURCE" in script
     assert "chmod 0755 /usr/local/share/powershell /usr/local/share/powershell/Modules" in script
     assert "chmod -R a+rX,go-w /usr/local/share/powershell/Modules" in script

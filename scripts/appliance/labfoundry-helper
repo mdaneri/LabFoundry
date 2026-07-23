@@ -66,7 +66,7 @@ COMMANDS: dict[str, set[str]] = {
     "nginx": {"logs", "access-logs", "error-logs"},
     "vcf-backups": {"validate", "apply"},
     "vcf-private-registry": {"validate", "apply", "relocate-bundles"},
-    "vcf-offline-depot": {"validate", "stage-tool", "reset-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties"},
+    "vcf-offline-depot": {"validate", "stage-tool", "reset-tool", "generate-software-depot-id", "sync", "apply-https", "apply-properties", "apply-ceip"},
     "esxi-pxe": {"validate", "apply"},
     "esx-storage": {"inventory", "validate", "apply", "status", "logs"},
     "public-services": {"validate", "apply"},
@@ -85,6 +85,7 @@ SYSTEMD_RUN_REAL_ACTIONS = {
     "sync",
     "apply-https",
     "apply-properties",
+    "apply-ceip",
     "relocate-bundles",
     "export",
     "restart-service",
@@ -115,7 +116,11 @@ NO_PATH_ACTIONS = {
     ("esx-storage", "status"),
     ("esx-storage", "logs"),
 }
-NON_PATH_ARGUMENT_ACTIONS = {("local-users", "authenticate"), ("automation", "run")}
+NON_PATH_ARGUMENT_ACTIONS = {
+    ("local-users", "authenticate"),
+    ("automation", "run"),
+    ("vcf-offline-depot", "apply-ceip"),
+}
 LABFOUNDRY_SERVICE_USER = "labfoundry"
 LABFOUNDRY_STATE_DIR = Path("/var/lib/labfoundry")
 AUTOMATION_SCRIPT_DIR = LABFOUNDRY_STATE_DIR / "automation" / "scripts"
@@ -422,12 +427,17 @@ def _run_real_action_with_systemd(group: str, action: str, args: list[str]) -> i
         "--collect",
         "--service-type=exec",
         f"--setenv={SYSTEMD_RUN_CHILD_ENV}=1",
-        helper_path,
-        group,
-        action,
-        "--real",
-        *args,
     ]
+    if group in {"appliance-settings", "appliance-update"}:
+        command.extend(
+            [
+                "--setenv=HOME=/root",
+                "--setenv=XDG_CACHE_HOME=/root/.cache",
+                "--setenv=XDG_CONFIG_HOME=/root/.config",
+                "--setenv=XDG_DATA_HOME=/root/.local/share",
+            ]
+        )
+    command.extend([helper_path, group, action, "--real", *args])
     result = _run(command)
     print(result.stdout, end="")
     print(result.stderr, end="", file=sys.stderr)
@@ -3295,6 +3305,8 @@ def _appliance_settings_config_errors(path: Path) -> list[str]:
         errors.append("management_upstream_host must be an IP address.")
     if not isinstance(payload.get("root_ssh_enabled", False), bool):
         errors.append("root_ssh_enabled must be a boolean.")
+    if not isinstance(payload.get("vmware_ceip_enabled", False), bool):
+        errors.append("vmware_ceip_enabled must be a boolean.")
     if not isinstance(payload.get("web_terminal_enabled", False), bool):
         errors.append("web_terminal_enabled must be a boolean.")
     terminal_interfaces = payload.get("web_terminal_interfaces") or []
@@ -4067,6 +4079,69 @@ def _apply_hostname(fqdn: str) -> int:
     return result.returncode
 
 
+def _configure_powercli_ceip(enabled: bool) -> tuple[int, str]:
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        return 0, "skipped: PowerShell is not installed"
+    enabled_literal = "$true" if enabled else "$false"
+    script = (
+        '$ErrorActionPreference = "Stop"; '
+        '$module = Get-Module -Name VCF.PowerCLI -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1; '
+        "if (-not $module) { Write-Output 'VCF.PowerCLI is not installed'; exit 3 }; "
+        'Import-Module $module.Path -Force; '
+        f"Set-PowerCLIConfiguration -ParticipateInCeip {enabled_literal} -Scope AllUsers -Confirm:$false | Out-Null; "
+        '$configured = Get-PowerCLIConfiguration -Scope AllUsers; '
+        f"if ([bool]$configured.ParticipateInCEIP -ne {enabled_literal}) {{ throw 'PowerCLI CEIP verification failed' }}; "
+        '$configured | Select-Object Scope,ParticipateInCEIP | ConvertTo-Json -Compress'
+    )
+    result = _run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            _powershell_encoded_command(script),
+        ]
+    )
+    if result.returncode == 3 and "VCF.PowerCLI is not installed" in result.stdout:
+        return 0, "skipped: VCF.PowerCLI is not installed"
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    if result.returncode != 0:
+        return result.returncode, "failed"
+    return 0, f"applied: AllUsers ParticipateInCEIP={'true' if enabled else 'false'}"
+
+
+def _apply_vcf_download_tool_ceip(enabled: bool) -> tuple[int, str]:
+    tool_candidates = [
+        VCF_DEPOT_RUNTIME_TOOL_DIR / "vcf-download-tool",
+        VCF_DEPOT_RUNTIME_TOOL_DIR / "bin" / "vcf-download-tool",
+    ]
+    if not any(path.is_file() for path in tool_candidates):
+        return 0, "skipped: VCF Download Tool is not installed"
+    telemetry_path = VCF_DEPOT_RUNTIME_TOOL_DIR / "conf" / "telemetry" / "telemetry.flag"
+    try:
+        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+        telemetry_path.write_text(
+            f"obtu.telemetry.config={'ENABLE' if enabled else 'DISABLE'}\n",
+            encoding="utf-8",
+        )
+        os.chmod(telemetry_path.parent, 0o750)
+        os.chmod(telemetry_path, 0o600)
+        try:
+            account = pwd.getpwnam(LABFOUNDRY_SERVICE_USER)
+        except KeyError:
+            account = None
+        if account is not None:
+            _chown_path(telemetry_path.parent, account.pw_uid, account.pw_gid)
+            _chown_path(telemetry_path, account.pw_uid, account.pw_gid)
+    except OSError as exc:
+        print(f"VCF Download Tool CEIP configuration failed: {exc}", file=sys.stderr)
+        return 2, "failed"
+    return 0, f"applied: obtu.telemetry.config={'ENABLE' if enabled else 'DISABLE'}"
+
+
 def _handle_appliance_settings(action: str, args: list[str]) -> int:
     if len(args) != 1:
         print(f"appliance-settings {action} requires exactly one staged JSON config path", file=sys.stderr)
@@ -4091,8 +4166,9 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                     "management_https_enabled": bool(payload.get("management_https_enabled")),
                     "web_terminal_enabled": bool(payload.get("web_terminal_enabled")),
                     "root_ssh_enabled": bool(payload.get("root_ssh_enabled")),
+                    "vmware_ceip_enabled": bool(payload.get("vmware_ceip_enabled")),
                     "management_interface": payload["management_interface"],
-                    "scope": "systemd-resolved, LabFoundry management UI, root SSH login, and web terminal trust",
+                    "scope": "systemd-resolved, LabFoundry management UI, root SSH login, web terminal trust, and VMware CEIP",
                 },
                 sort_keys=True,
             )
@@ -4121,6 +4197,13 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
     web_terminal = _configure_web_terminal(bool(payload.get("web_terminal_enabled")))
     if web_terminal != 0:
         return web_terminal
+    vmware_ceip_enabled = bool(payload.get("vmware_ceip_enabled"))
+    powercli_ceip, powercli_ceip_status = _configure_powercli_ceip(vmware_ceip_enabled)
+    if powercli_ceip != 0:
+        return powercli_ceip
+    vcfdt_ceip, vcfdt_ceip_status = _apply_vcf_download_tool_ceip(vmware_ceip_enabled)
+    if vcfdt_ceip != 0:
+        return vcfdt_ceip
     management_https = _configure_labfoundry_management_https(payload)
     if management_https != 0:
         return management_https
@@ -4133,6 +4216,11 @@ def _handle_appliance_settings(action: str, args: list[str]) -> int:
                 "root_ssh_enabled": bool(payload.get("root_ssh_enabled")),
                 "web_terminal_enabled": bool(payload.get("web_terminal_enabled")),
                 "web_terminal_interfaces": payload.get("web_terminal_interfaces") or [],
+                "vmware_ceip_enabled": vmware_ceip_enabled,
+                "vmware_ceip_products": {
+                    "vcf_powercli": powercli_ceip_status,
+                    "vcf_download_tool": vcfdt_ceip_status,
+                },
                 "resolver_mode": resolver_mode,
                 "resolver_servers": resolver_servers,
             },
@@ -6748,6 +6836,26 @@ def _generate_vcf_download_tool_software_depot_id() -> int:
     return 0
 
 
+def _apply_vcf_download_tool_ceip_choice(choice: str) -> int:
+    normalized = choice.strip().upper()
+    if normalized not in {"ENABLE", "DISABLE"}:
+        print("vcf-offline-depot apply-ceip requires ENABLE or DISABLE", file=sys.stderr)
+        return 2
+    returncode, status = _apply_vcf_download_tool_ceip(normalized == "ENABLE")
+    if returncode == 0:
+        print(
+            json.dumps(
+                {
+                    "vcf_offline_depot": "CEIP apply complete",
+                    "choice": normalized,
+                    "status": status,
+                },
+                sort_keys=True,
+            )
+        )
+    return returncode
+
+
 def _vcf_download_tool_home(tool_path: Path) -> Path:
     return tool_path.parent.parent if tool_path.parent.name == "bin" else tool_path.parent
 
@@ -6837,6 +6945,12 @@ def _handle_vcf_offline_depot(action: str, args: list[str]) -> int:
             print("vcf-offline-depot generate-software-depot-id does not accept arguments", file=sys.stderr)
             return 2
         return _generate_vcf_download_tool_software_depot_id()
+
+    if action == "apply-ceip":
+        if len(args) != 1:
+            print("vcf-offline-depot apply-ceip requires ENABLE or DISABLE", file=sys.stderr)
+            return 2
+        return _apply_vcf_download_tool_ceip_choice(args[0])
 
     if action == "apply-properties":
         if len(args) != 1:
@@ -6989,6 +7103,11 @@ def _appliance_update_config_errors(payload: dict, *, require_streams: bool = Tr
         )
     ):
         errors.append("powershell_modules must be a list of module objects with names and repositories.")
+    policy = payload.get("policy") or {}
+    if not isinstance(policy, dict):
+        errors.append("policy must be an object.")
+    elif not isinstance(policy.get("vmware_ceip_enabled", False), bool):
+        errors.append("policy.vmware_ceip_enabled must be a boolean.")
     return errors
 
 
@@ -7499,6 +7618,15 @@ def _apply_powershell_modules(payload: dict, credentials: dict[str, dict[str, st
         policy = str(module.get("policy") or "pinned")
         repository = str(module.get("repository_name") or default_repository).strip()
         version_argument = f" -RequiredVersion {_powershell_literal(target)}" if policy == "pinned" and target else ""
+        ceip_enabled = bool((payload.get("policy") or {}).get("vmware_ceip_enabled", False))
+        ceip_script = ""
+        if name.casefold() == "vcf.powercli":
+            ceip_literal = "$true" if ceip_enabled else "$false"
+            ceip_script = (
+                f"Set-PowerCLIConfiguration -ParticipateInCeip {ceip_literal} -Scope AllUsers -Confirm:$false | Out-Null; "
+                "$configured = Get-PowerCLIConfiguration -Scope AllUsers; "
+                f"if ([bool]$configured.ParticipateInCEIP -ne {ceip_literal}) {{ throw 'PowerCLI CEIP verification failed' }}; "
+            )
         script = (
             '$ErrorActionPreference = "Stop"; '
             "$credentialArgs = if ($env:LF_REPO_SECRET) { $credential = New-Object System.Management.Automation.PSCredential($env:LF_REPO_USER, (ConvertTo-SecureString $env:LF_REPO_SECRET -AsPlainText -Force)); @{Credential=$credential} } else { @{} }; "
@@ -7506,6 +7634,7 @@ def _apply_powershell_modules(payload: dict, credentials: dict[str, dict[str, st
             f"{version_argument} @credentialArgs -Scope AllUsers -Force -AllowClobber -AcceptLicense -Confirm:$false; "
             f"$module = Get-Module -Name {_powershell_literal(name)} -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1; "
             "if (-not $module) { throw 'Installed module could not be found' }; Import-Module $module.Path -Force; "
+            f"{ceip_script}"
             "$module | Select-Object Name,Version,Path | ConvertTo-Json -Compress"
         )
         source = next((item for item in _enabled_sources(payload, "powershell") if str(item.get("name") or "") == repository), {})

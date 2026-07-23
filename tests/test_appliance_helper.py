@@ -2205,6 +2205,40 @@ def test_real_mutating_helper_action_escapes_service_mount_namespace(monkeypatch
     assert commands[0][-4:] == ["dnsmasq", "apply", "--real", str(config_path)]
 
 
+def test_powercli_helper_actions_receive_writable_root_configuration_environment(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    config_path = tmp_path / "labfoundry-settings.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        helper.shutil,
+        "which",
+        lambda command: "/usr/bin/systemd-run" if command == "systemd-run" else None,
+    )
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda command: (
+            commands.append(command)
+            or subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+
+    assert helper._run_real_action_with_systemd(
+        "appliance-settings",
+        "apply",
+        [str(config_path)],
+    ) == 0
+
+    assert "--setenv=HOME=/root" in commands[0]
+    assert "--setenv=XDG_CACHE_HOME=/root/.cache" in commands[0]
+    assert "--setenv=XDG_CONFIG_HOME=/root/.config" in commands[0]
+    assert "--setenv=XDG_DATA_HOME=/root/.local/share" in commands[0]
+    helper_index = commands[0].index(str(Path(helper.__file__).resolve()))
+    assert commands[0].index("--setenv=HOME=/root") < helper_index
+
+
 def test_network_helper_renders_systemd_networkd_files(tmp_path):
     helper = load_helper_module()
     config_path = tmp_path / "labfoundry-network.conf"
@@ -3894,6 +3928,7 @@ def appliance_settings_json(
     management_https_cert_path: str = "",
     management_https_key_path: str = "",
     root_ssh_enabled: bool = False,
+    vmware_ceip_enabled: bool = False,
     web_terminal_enabled: bool = False,
     web_terminal_interfaces: list[str] | None = None,
     web_terminal_addresses: list[str] | None = None,
@@ -3913,6 +3948,7 @@ def appliance_settings_json(
         "web_terminal_interfaces": web_terminal_interfaces or [],
         "web_terminal_addresses": web_terminal_addresses or [],
         "root_ssh_enabled": root_ssh_enabled,
+        "vmware_ceip_enabled": vmware_ceip_enabled,
         "management_http_port": 8000,
         "management_public_http_port": 80,
         "management_public_https_port": 443,
@@ -3974,6 +4010,65 @@ def test_appliance_settings_helper_validates_staged_json(monkeypatch, tmp_path):
     monkeypatch.setattr(helper, "APPLIANCE_SETTINGS_APPLY_DIR", apply_dir)
 
     assert helper._handle_appliance_settings("validate", [str(config_path)]) == 0
+
+
+def test_powercli_ceip_uses_all_users_scope_and_verifies_choice(monkeypatch):
+    import base64
+
+    helper = load_helper_module()
+    captured = {}
+
+    def fake_run(command):
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, '{"Scope":"AllUsers","ParticipateInCEIP":true}\n', "")
+
+    monkeypatch.setattr(helper.shutil, "which", lambda name: "/usr/bin/pwsh" if name == "pwsh" else None)
+    monkeypatch.setattr(helper, "_run", fake_run)
+
+    returncode, status = helper._configure_powercli_ceip(True)
+
+    assert returncode == 0
+    assert status == "applied: AllUsers ParticipateInCEIP=true"
+    script = base64.b64decode(captured["command"][-1]).decode("utf-16-le")
+    assert "Set-PowerCLIConfiguration -ParticipateInCeip $true -Scope AllUsers -Confirm:$false" in script
+    assert "Get-PowerCLIConfiguration -Scope AllUsers" in script
+
+
+def test_powercli_ceip_skips_when_product_is_not_installed(monkeypatch):
+    helper = load_helper_module()
+    monkeypatch.setattr(helper.shutil, "which", lambda name: "/usr/bin/pwsh" if name == "pwsh" else None)
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda command: subprocess.CompletedProcess(command, 3, "VCF.PowerCLI is not installed\n", ""),
+    )
+
+    assert helper._configure_powercli_ceip(False) == (0, "skipped: VCF.PowerCLI is not installed")
+
+
+def test_vcfdt_ceip_writes_service_owned_runtime_flag(monkeypatch, tmp_path):
+    helper = load_helper_module()
+    runtime_tool_dir = tmp_path / "active-tool"
+    tool = runtime_tool_dir / "vcf-download-tool"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(helper, "VCF_DEPOT_RUNTIME_TOOL_DIR", runtime_tool_dir)
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda _name: (_ for _ in ()).throw(KeyError()))
+
+    returncode, status = helper._apply_vcf_download_tool_ceip(False)
+
+    telemetry = runtime_tool_dir / "conf" / "telemetry" / "telemetry.flag"
+    assert returncode == 0
+    assert status == "applied: obtu.telemetry.config=DISABLE"
+    assert telemetry.read_text(encoding="utf-8") == "obtu.telemetry.config=DISABLE\n"
+    if os.name != "nt":
+        assert telemetry.stat().st_mode & 0o777 == 0o600
+
+
+def test_vcfdt_apply_ceip_rejects_unset_choice():
+    helper = load_helper_module()
+
+    assert helper._apply_vcf_download_tool_ceip_choice("NOT_PROVIDED") == 2
 
 
 def test_appliance_settings_helper_requires_https_cert_files(tmp_path):

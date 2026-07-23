@@ -459,6 +459,7 @@ def test_effective_update_settings_preserves_all_enabled_repository_sources(clie
     )
     assert "python_index_urls" not in manifest["sources"]
     assert manifest["sources"]["labfoundry_manifest_urls"] == settings["labfoundry_manifest_urls"]
+    assert manifest["policy"]["vmware_ceip_enabled"] is False
 
 
 def test_source_credentials_use_protected_runtime_channel_without_manifest_disclosure(client):
@@ -641,6 +642,40 @@ def test_helper_normalizes_system_powershell_module_permissions_after_install(mo
     assert len(result) == 3
     assert commands[-2] == ["/usr/bin/chmod", "0755", str(powershell_root), str(module_root)]
     assert commands[-1] == ["/usr/bin/chmod", "-R", "a+rX,go-w", str(module_root)]
+
+
+def test_helper_reasserts_global_ceip_after_powercli_install(monkeypatch):
+    import base64
+
+    helper = load_helper_module()
+    scripts = []
+
+    def fake_command(command, *, success_codes=None, env=None):
+        if command[0].endswith("pwsh"):
+            scripts.append(base64.b64decode(command[-1]).decode("utf-16-le"))
+        return {"command": command, "returncode": 0, "success": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(helper, "_command_path", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(helper, "_command_payload", fake_command)
+
+    helper._apply_powershell_modules(
+        {
+            "sources": {"powershell_repository_name": "PSGallery"},
+            "powershell_modules": [
+                {
+                    "name": "VCF.PowerCLI",
+                    "repository_name": "PSGallery",
+                    "target_version": "9.1.0.25380678",
+                    "policy": "pinned",
+                }
+            ],
+            "policy": {"vmware_ceip_enabled": True},
+        }
+    )
+
+    assert len(scripts) == 1
+    assert "Set-PowerCLIConfiguration -ParticipateInCeip $true -Scope AllUsers -Confirm:$false" in scripts[0]
+    assert "Get-PowerCLIConfiguration -Scope AllUsers" in scripts[0]
 
 
 def test_helper_reports_powershell_permission_normalization_failure(monkeypatch, tmp_path):
