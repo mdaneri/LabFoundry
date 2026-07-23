@@ -181,10 +181,13 @@ def powercli_connection_command(*, version: str, hostname: str, remote_path: str
     def quote(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
 
+    file_system_version = {"3": "NFS", "4.1": "NFS41"}.get(version)
+    if file_system_version is None:
+        raise ValueError("PowerCLI connection commands require NFS 3 or NFS 4.1.")
     return (
         "New-Datastore -Nfs -VMHost $vmHost "
         f"-Name {quote(datastore_name)} -NfsHost {quote(hostname)} "
-        f"-Path {quote(remote_path)} -FileSystemVersion {quote(version)}"
+        f"-Path {quote(remote_path)} -FileSystemVersion {quote(file_system_version)}"
     )
 
 

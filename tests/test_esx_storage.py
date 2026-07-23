@@ -81,12 +81,12 @@ def test_dual_stack_share_renders_equal_family_endpoints_and_commands():
     assert share["powercli_commands"]["ipv4"] == [
         "New-Datastore -Nfs -VMHost $vmHost -Name 'esx-datastore' "
         "-NfsHost 'nfs-192-168-87-254.labfoundry.internal' -Path '/esx-datastore' "
-        "-FileSystemVersion '4.1'"
+        "-FileSystemVersion 'NFS41'"
     ]
     assert share["powercli_commands"]["ipv6"] == [
         "New-Datastore -Nfs -VMHost $vmHost -Name 'esx-datastore' "
         "-NfsHost 'nfs-2001-db8-87-0-0-0-0-fe.labfoundry.internal' -Path '/esx-datastore' "
-        "-FileSystemVersion '4.1'"
+        "-FileSystemVersion 'NFS41'"
     ]
 
 
@@ -100,7 +100,7 @@ def test_powercli_command_escapes_single_quoted_values():
 
     assert "-Name 'team''s-data'" in command
     assert "-Path '/srv/labfoundry/esx-storage/team''s-data'" in command
-    assert "-FileSystemVersion '3'" in command
+    assert "-FileSystemVersion 'NFS'" in command
 
 
 def test_ipv4_only_and_ipv6_only_do_not_create_implicit_fallback():
