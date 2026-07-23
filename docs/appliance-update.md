@@ -209,7 +209,9 @@ publication, run **Publish appliance release**, provide the exact successful
 `main` commit in `release_sha`, and verify the recovered tag, release assets,
 signatures, and `development` pointer. The dispatch refuses commits without a
 successful `main` push CI run and preserves the normal tag/release mismatch
-checks.
+checks. If the tag and release already published but channel advancement
+failed, dispatch the same successful SHA again: publication verifies the
+existing asset names and bytes before retrying the signed pointer update.
 
 To promote, run
 **Promote appliance release**, choose `preview` or `stable`, and provide an
