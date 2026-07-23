@@ -7128,6 +7128,7 @@ def esx_storage_context(db: Session, *, reconcile: bool = True) -> dict[str, Any
                 "target_hostnames": rendered["target_hostnames"],
                 "remote_path": rendered["remote_path"],
                 "connection_commands": rendered["connection_commands"],
+                "powercli_commands": rendered["powercli_commands"],
                 "enabled": row.enabled,
             }
         )

@@ -177,6 +177,20 @@ def connection_command(*, version: str, hostname: str, remote_path: str, datasto
     return f"esxcli storage nfs add --host={hostname} --share={remote_path} --volume-name={datastore_name}"
 
 
+def powercli_connection_command(*, version: str, hostname: str, remote_path: str, datastore_name: str) -> str:
+    def quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    file_system_version = {"3": "NFS", "4.1": "NFS41"}.get(version)
+    if file_system_version is None:
+        raise ValueError("PowerCLI connection commands require NFS 3 or NFS 4.1.")
+    return (
+        "New-Datastore -Nfs -VMHost $vmHost "
+        f"-Name {quote(datastore_name)} -NfsHost {quote(hostname)} "
+        f"-Path {quote(remote_path)} -FileSystemVersion {quote(file_system_version)}"
+    )
+
+
 def validate_storage_state(
     settings: EsxStorageSettings,
     volumes: list[EsxStorageVolume],
@@ -293,6 +307,18 @@ def render_manifest(
             ]
             for family in ADDRESS_FAMILIES
         }
+        powercli_commands = {
+            family: [
+                powercli_connection_command(
+                    version=share.preferred_nfs_version,
+                    hostname=hostname,
+                    remote_path=remote_path,
+                    datastore_name=share.datastore_name,
+                )
+                for hostname in hostnames[family]
+            ]
+            for family in ADDRESS_FAMILIES
+        }
         rendered_shares.append(
             {
                 "id": share.id,
@@ -314,6 +340,7 @@ def render_manifest(
                     "ipv6": effective_clients(share.ipv6_clients, "ipv6") if "ipv6" in families else [],
                 },
                 "connection_commands": commands,
+                "powercli_commands": powercli_commands,
                 "enabled": share.enabled,
             }
         )

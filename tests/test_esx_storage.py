@@ -11,6 +11,7 @@ from labfoundry.app.services.esx_storage import (
     firewall_rule_specs,
     format_authorization,
     normalize_disk_inventory_entry,
+    powercli_connection_command,
     render_manifest,
     share_paths_overlap,
     validate_mounted_volume_path,
@@ -77,6 +78,29 @@ def test_dual_stack_share_renders_equal_family_endpoints_and_commands():
     assert share["target_hostnames"]["ipv6"] == ["nfs-2001-db8-87-0-0-0-0-fe.labfoundry.internal"]
     assert "--hosts=nfs-192-168-87-254.labfoundry.internal" in share["connection_commands"]["ipv4"][0]
     assert "--hosts=nfs-2001-db8-87-0-0-0-0-fe.labfoundry.internal" in share["connection_commands"]["ipv6"][0]
+    assert share["powercli_commands"]["ipv4"] == [
+        "New-Datastore -Nfs -VMHost $vmHost -Name 'esx-datastore' "
+        "-NfsHost 'nfs-192-168-87-254.labfoundry.internal' -Path '/esx-datastore' "
+        "-FileSystemVersion 'NFS41'"
+    ]
+    assert share["powercli_commands"]["ipv6"] == [
+        "New-Datastore -Nfs -VMHost $vmHost -Name 'esx-datastore' "
+        "-NfsHost 'nfs-2001-db8-87-0-0-0-0-fe.labfoundry.internal' -Path '/esx-datastore' "
+        "-FileSystemVersion 'NFS41'"
+    ]
+
+
+def test_powercli_command_escapes_single_quoted_values():
+    command = powercli_connection_command(
+        version="3",
+        hostname="nfs.example.test",
+        remote_path="/srv/labfoundry/esx-storage/team's-data",
+        datastore_name="team's-data",
+    )
+
+    assert "-Name 'team''s-data'" in command
+    assert "-Path '/srv/labfoundry/esx-storage/team''s-data'" in command
+    assert "-FileSystemVersion 'NFS'" in command
 
 
 def test_ipv4_only_and_ipv6_only_do_not_create_implicit_fallback():
@@ -85,8 +109,10 @@ def test_ipv4_only_and_ipv6_only_do_not_create_implicit_fallback():
 
     assert ipv4["shares"][0]["listeners"]["ipv6"] == []
     assert ipv4["shares"][0]["connection_commands"]["ipv6"] == []
+    assert ipv4["shares"][0]["powercli_commands"]["ipv6"] == []
     assert ipv6["shares"][0]["listeners"]["ipv4"] == []
     assert ipv6["shares"][0]["connection_commands"]["ipv4"] == []
+    assert ipv6["shares"][0]["powercli_commands"]["ipv4"] == []
 
 
 def test_mixed_family_client_allowlist_is_rejected():
@@ -383,15 +409,25 @@ def test_esx_storage_page_and_dual_stack_api_contract(client):
     assert 'id="esx-storage-share-modal"' in page.text
     assert 'data-esx-storage-wizard="share"' in page.text
     assert 'data-tab-storage-key="labfoundry:esx-storage:active-tab"' in page.text
+    assert 'data-tab-target="connection-instructions"' in page.text
+    assert 'id="connection-instructions"' in page.text
+    assert 'name="enabled" checked' in page.text
+    assert 'data-esx-storage-review="share-state"' in page.text
+    assert "Step 1 of 5" in page.text
+    assert "<strong>State</strong><small>Enable or disable</small>" in page.text
+    assert "Choose datastore state" in client.get("/static/app.js").text
     assert "Leave empty to allow any IPv4 client (0.0.0.0/0)." in page.text
     assert "Leave empty to allow any IPv6 client (::/0)." in page.text
     assert "initializeEsxStorageWizards" in client.get("/static/app.js").text
     assert "any IPv4 client" in client.get("/static/app.js").text
     assert "await fetch(form.action" in client.get("/static/app.js").text
     assert 'window.history.replaceState(null, "", target)' in client.get("/static/app.js").text
+    assert '`${window.location.pathname}${window.location.search}#${targetId}`' in client.get("/static/app.js").text
     assert 'window.location.pathname !== "/esx-storage"' in client.get("/static/app.js").text
     assert 'label: "Edit datastore"' in client.get("/static/app.js").text
     assert "rowDblClick: (_event, row) => editRow(row)" in client.get("/static/app.js").text
+    assert 'editor: "tickCross"' in client.get("/static/app.js").text
+    assert "cellEdited: saveEnabledState" in client.get("/static/app.js").text
 
     from labfoundry.app.database import SessionLocal
     from labfoundry.app.models import DnsRecord, DnsSettings, PhysicalInterface
@@ -453,9 +489,14 @@ def test_esx_storage_page_and_dual_stack_api_contract(client):
     assert share_response.json()["address_families"] == ["ipv4", "ipv6"]
     assert share_response.json()["connection_commands"]["ipv4"]
     assert share_response.json()["connection_commands"]["ipv6"]
+    assert share_response.json()["powercli_commands"]["ipv4"]
+    assert share_response.json()["powercli_commands"]["ipv6"]
     edit_page = client.get("/esx-storage")
     edit_csrf = edit_page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
     assert "esx-storage-command-details" in edit_page.text
+    assert "PowerCLI · IPv4 · NFS 4.1" in edit_page.text
+    assert "PowerCLI · IPv6 · NFS 4.1" in edit_page.text
+    assert "data-copy-value=" in edit_page.text
     updated_share = client.post(
         f"/esx-storage/shares/{share_response.json()['id']}",
         data={
@@ -476,6 +517,40 @@ def test_esx_storage_page_and_dual_stack_api_contract(client):
     edited = client.get(f"/api/v1/esx-storage/shares", headers=headers).json()[0]
     assert edited["ipv4_clients"] == ["0.0.0.0/0"]
     assert edited["ipv6_clients"] == ["::/0"]
+    disabled_share = client.post(
+        f"/esx-storage/shares/{share_response.json()['id']}",
+        data={
+            "datastore_name": "dual-stack-ds",
+            "volume_id": volume_response.json()["id"],
+            "relative_path": "datastores/dual-stack",
+            "preferred_nfs_version": "4.1",
+            "interface_name": interface["name"],
+            "address_families": ["ipv4", "ipv6"],
+            "ipv4_clients": "",
+            "ipv6_clients": "",
+            "csrf": edit_csrf,
+        },
+        follow_redirects=False,
+    )
+    assert disabled_share.status_code == 303, disabled_share.text
+    assert client.get("/api/v1/esx-storage/shares", headers=headers).json()[0]["enabled"] is False
+    reenabled_share = client.post(
+        f"/esx-storage/shares/{share_response.json()['id']}",
+        data={
+            "datastore_name": "dual-stack-ds",
+            "volume_id": volume_response.json()["id"],
+            "relative_path": "datastores/dual-stack",
+            "preferred_nfs_version": "4.1",
+            "interface_name": interface["name"],
+            "address_families": ["ipv4", "ipv6"],
+            "ipv4_clients": "",
+            "ipv6_clients": "",
+            "enabled": "on",
+            "csrf": edit_csrf,
+        },
+        follow_redirects=False,
+    )
+    assert reenabled_share.status_code == 303, reenabled_share.text
     status = client.patch(
         "/api/v1/esx-storage/status",
         headers=headers,
