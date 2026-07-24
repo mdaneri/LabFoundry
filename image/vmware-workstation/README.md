@@ -137,17 +137,21 @@ will try to run that file and report a pipeline/document execution error. The
 helper builds `python -m pip wheel . -w dist`, uploads the newest
 `labfoundry-*.whl` with `scp`, installs it into `/opt/labfoundry/.venv`,
 syncs `scripts/appliance/labfoundry-helper` to
-`/opt/labfoundry/bin/labfoundry-helper`, restores virtualenv permissions,
-restarts `labfoundry.service`, and verifies `/openapi.json` from inside the
-guest and from the Windows host. The helper sync is required for appliance
-apply fixes because the privileged helper is installed outside the Python
-virtualenv and is not updated by `pip install`. If the app takes longer to
-become reachable after restart, pass `-ReadinessTimeoutSeconds 120`.
+`/opt/labfoundry/bin/labfoundry-helper`, synchronizes every checked-in public
+release key from `image/common/update-trust` into
+`/etc/labfoundry/update-trust.d`, restores virtualenv permissions, restarts
+`labfoundry.service`, and verifies `/openapi.json` from inside the guest and
+from the Windows host. The helper and trust-key syncs are required because
+those root-owned files live outside the Python virtualenv and are not updated
+by `pip install`. If the app takes longer to become reachable after restart,
+pass `-ReadinessTimeoutSeconds 120`.
 
 `deploy-wheel.ps1` remains a development-only live-patching path. Production
 Appliance Update uses signed GitHub release bundles, retained ABI-specific
 wheelhouses, `/opt/labfoundry/releases/<version>`, and transactional rollback;
 it does not use this direct wheel deployment path.
+The Packer build explicitly stages `image/common/update-trust` and fails when
+no valid public release key is available.
 
 ## OVF / OVA Export
 

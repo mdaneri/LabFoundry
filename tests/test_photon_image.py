@@ -341,6 +341,7 @@ def test_photon_image_optional_pip_global_index_configuration():
     wrapper = Path("scripts/windows/hyperv/build-photon-image.ps1").read_text(encoding="utf-8")
     build_module = Path("scripts/windows/common/LabFoundry.PhotonImage.psm1").read_text(encoding="utf-8")
     template = Path("image/hyperv/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
+    vmware_template = Path("image/vmware-workstation/labfoundry-photon.pkr.hcl").read_text(encoding="utf-8")
     script = Path("image/common/scripts/provision-labfoundry.sh").read_text(encoding="utf-8")
 
     assert "[string[]]$BuilderStaticDns = @()" in wrapper
@@ -370,7 +371,15 @@ def test_photon_image_optional_pip_global_index_configuration():
     assert 'ln -sfn "current/.venv" "$LABFOUNDRY_HOME/.venv"' in script
     assert 'write_pip_config "$LABFOUNDRY_HOME/.venv/pip.conf"' in script
     assert "/etc/labfoundry/update-trust.d" in script
-    assert "image/common/update-trust/*.pem" in script
+    assert 'trust_source_dir="$LABFOUNDRY_HOME/image/common/update-trust"' in script
+    assert 'for trust_key in "$trust_source_dir"/*.pem' in script
+    for packer_template in (template, vmware_template):
+        assert 'source      = "../common/update-trust"' in packer_template
+        assert 'destination = "/tmp/labfoundry-src/image/common/update-trust"' in packer_template
+    assert "LabFoundry release trust source directory is missing" in script
+    assert "No LabFoundry release trust keys were staged" in script
+    assert 'openssl pkey -pubin -in "$trust_key" -text -noout' in script
+    assert "*ED25519*" in script
     assert 'export PIP_DISABLE_PIP_VERSION_CHECK=1' in script
     assert 'export PIP_INDEX_URL="$LABFOUNDRY_PIP_GLOBAL_INDEX_URL"' in script
     assert "pip install --upgrade pip setuptools wheel" not in script
@@ -652,6 +661,15 @@ def test_vmware_deploy_wheel_supports_password_backed_noninteractive_deploy():
     assert "import paramiko" in script
     assert 'sys.stdout.reconfigure(errors="replace")' in script
     assert "--local-worker-service" in script
+    assert '--local-trust-key", action="append"' in script
+    assert '--remote-trust-key", action="append"' in script
+    assert "At least one matched local and remote LabFoundry release trust key is required." in script
+    assert "image\\common\\update-trust" in script
+    assert "No LabFoundry release trust keys found under" in script
+    assert "install -d -o root -g root -m 0755 /etc/labfoundry/update-trust.d" in script
+    assert 'install -o root -g root -m 0644 "$trust_key_path" "/etc/labfoundry/update-trust.d/$trust_key_name"' in script
+    assert "openssl pkey -pubin" in script
+    assert "LabFoundry release trust key is not Ed25519" in script
     assert "systemctl enable labfoundry-worker.service" in script
     assert "systemctl restart labfoundry-worker.service" in script
     assert "systemctl is-active labfoundry-worker.service" in script

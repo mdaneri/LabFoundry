@@ -88,6 +88,29 @@ or invalid signatures. A release may add a future public key because its
 contents are already signed by a currently trusted key. Old keys are retained
 until an overlapping signed release has provisioned the replacement.
 
+Photon image builds stage the checked-in `image/common/update-trust` directory
+and fail if it is missing, empty, or contains a malformed public key. The
+development-only VMware `deploy-wheel.ps1` bridge also synchronizes every
+checked-in `.pem` public key into the root-owned trust directory. Updating only
+the application wheel cannot repair a missing trust store because the
+unprivileged application does not write `/etc`.
+
+If an appliance reports that a named channel signing key is not trusted, first
+verify that the matching checked-in public key exists on the appliance:
+
+```sh
+sudo ls -l /etc/labfoundry/update-trust.d/
+sudo openssl pkey -pubin \
+  -in /etc/labfoundry/update-trust.d/<key-id>.pem \
+  -noout
+```
+
+Rebuild or redeploy an affected development appliance with the corrected image
+or `deploy-wheel.ps1`. Production operators must provision the exact published
+public key through a trusted out-of-band appliance maintenance path; never
+disable signature verification or copy private signing material to an
+appliance.
+
 A signed channel pointer contains its channel, selected version and full
 commit, immutable release-manifest URL, issue time, and signing-key ID. The
 signed release manifest contains its version and commit, build time, updater
