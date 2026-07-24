@@ -219,6 +219,11 @@ build {
   }
 
   provisioner "file" {
+    source      = "../common/update-trust"
+    destination = "/tmp/labfoundry-src/image/common/update-trust"
+  }
+
+  provisioner "file" {
     source      = "sudoers.d"
     destination = "/tmp/labfoundry-src/image/hyperv/sudoers.d"
   }

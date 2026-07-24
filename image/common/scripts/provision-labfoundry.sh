@@ -298,11 +298,33 @@ install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-h
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-install-boot-branding" "$LABFOUNDRY_HOME/bin/labfoundry-install-boot-branding"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-mount-data-disks" "$LABFOUNDRY_HOME/bin/labfoundry-mount-data-disks"
 install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-bootstrap-https" "$LABFOUNDRY_HOME/bin/labfoundry-bootstrap-https"
+trust_source_dir="$LABFOUNDRY_HOME/image/common/update-trust"
+if [ ! -d "$trust_source_dir" ]; then
+  echo "LabFoundry release trust source directory is missing: $trust_source_dir" >&2
+  exit 1
+fi
 install -d -o root -g root -m 0755 /etc/labfoundry/update-trust.d
-for trust_key in "$LABFOUNDRY_HOME"/image/common/update-trust/*.pem; do
+trust_key_count=0
+for trust_key in "$trust_source_dir"/*.pem; do
   [ -f "$trust_key" ] || continue
+  if ! trust_key_details="$(openssl pkey -pubin -in "$trust_key" -text -noout 2>/dev/null)"; then
+    echo "LabFoundry release trust key is not a valid public key: $trust_key" >&2
+    exit 1
+  fi
+  case "$trust_key_details" in
+    *ED25519*) ;;
+    *)
+      echo "LabFoundry release trust key is not Ed25519: $trust_key" >&2
+      exit 1
+      ;;
+  esac
   install -o root -g root -m 0644 "$trust_key" "/etc/labfoundry/update-trust.d/$(basename "$trust_key")"
+  trust_key_count=$((trust_key_count + 1))
 done
+if [ "$trust_key_count" -eq 0 ]; then
+  echo "No LabFoundry release trust keys were staged under $trust_source_dir" >&2
+  exit 1
+fi
 if [ "$LABFOUNDRY_GUEST_PLATFORM" = "vmware" ]; then
   install -o root -g root -m 0755 "$LABFOUNDRY_HOME/scripts/appliance/labfoundry-vmware-ovf-customize.py" "$LABFOUNDRY_HOME/bin/labfoundry-vmware-ovf-customize.py"
   install -o root -g root -m 0644 "$LABFOUNDRY_HOME/$LABFOUNDRY_IMAGE_ASSET_DIR/systemd/labfoundry-vmware-ovf-customize.service" /etc/systemd/system/labfoundry-vmware-ovf-customize.service
