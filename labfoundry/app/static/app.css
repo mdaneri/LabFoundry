@@ -4495,6 +4495,98 @@ textarea {
   gap: 5px;
 }
 
+.source-editor-form {
+  display: grid;
+  gap: 16px;
+  padding-top: 14px;
+}
+
+.source-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(150px, 1fr);
+  gap: 12px;
+  align-items: end;
+  min-width: 0;
+}
+
+.source-editor-grid > label {
+  min-width: 0;
+}
+
+.source-editor-full {
+  grid-column: 1 / -1;
+}
+
+.source-editor-form textarea[data-runtime-photon-repositories] {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.source-editor-options {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.source-editor-options > legend {
+  margin-bottom: 7px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.source-option-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.source-option {
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.source-option:hover {
+  border-color: #bfdbfe;
+  background: #f8fbff;
+}
+
+.source-option .field-label {
+  min-width: 0;
+  margin: 0;
+}
+
+.source-editor-footer {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.source-editor-state {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.source-editor-state .autosave-status {
+  min-height: 0;
+  margin: 0;
+}
+
+.source-editor-footer > .button {
+  flex: 0 0 auto;
+}
+
 .aligned-control-grid > .autosave-status,
 .aligned-control-grid > .form-actions {
   display: flex;
@@ -4513,6 +4605,29 @@ textarea {
 
 .automation-schedule-form > .full {
   grid-column: 1 / -1;
+}
+
+@media (max-width: 760px) {
+  .source-editor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .source-editor-grid > label {
+    grid-column: 1;
+  }
+
+  .source-option-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .source-editor-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .source-editor-footer > .button {
+    align-self: flex-start;
+  }
 }
 
 #automation-workspace {

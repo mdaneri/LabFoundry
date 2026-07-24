@@ -540,8 +540,14 @@ def test_software_source_and_managed_module_lifecycle(client):
     app_css = Path("labfoundry/app/static/app.css").read_text(encoding="utf-8")
     assert ".detail-rail .detail-panel {\n  position: static;" in app_css
     assert ".detail-rail {\n  position: sticky;\n  top: 22px;" in app_css
-    assert ".aligned-control-grid > .switch-field {\n  grid-template-columns: minmax(0, 1fr) auto;" in app_css
-    assert "grid-template-rows: 36px;" in app_css
+    assert 'class="source-editor-form"' in grouped_page.text
+    assert 'class="source-editor-options"' in grouped_page.text
+    assert 'class="source-option-grid"' in grouped_page.text
+    assert 'class="source-editor-footer"' in grouped_page.text
+    assert "Repository behavior" in grouped_page.text
+    assert ".source-editor-grid {\n  display: grid;" in app_css
+    assert ".source-option-grid {\n  display: grid;" in app_css
+    assert ".source-editor-footer {\n  display: flex;" in app_css
     assert "class=\"source-validation-state\"" in grouped_page.text
     with SessionLocal() as db:
         package = db.execute(select(ManagedPackage).where(ManagedPackage.name == "Private.PowerCLI.Tools")).scalar_one()

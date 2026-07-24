@@ -88,6 +88,11 @@ show whether that synchronization has not run, succeeded, or failed. Signed
 LabFoundry sources are read directly, are checked during each update, and do not
 configure pip or report package-client synchronization state.
 
+Each source editor presents repository identity first, then its location or
+discovered runtime data, followed by one grouped **Repository behavior** row.
+Autosave and synchronization state remain together in a separated footer, with
+repository deletion isolated as the destructive action.
+
 ## Trust contract
 
 Appliances contain named Ed25519 public keys under:
