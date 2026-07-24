@@ -17563,6 +17563,34 @@ def rotate_oidc_client_secret_from_ui(
     )
 
 
+@router.post("/authentication/oidc/clients/{client_record_id}/delete", response_model=None)
+def delete_oidc_client_from_ui(
+    request: Request,
+    client_record_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    try:
+        row = get_oidc_client(db, client_record_id)
+    except OidcConfigurationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    public_client_id = row.client_id
+    db.delete(row)
+    db.flush()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="delete_oidc_client",
+        resource_type="oidc_client",
+        resource_id=str(client_record_id),
+        detail=f"client_id={public_client_id}",
+    )
+    return RedirectResponse("/authentication#oidc-clients", status_code=303)
+
+
 @router.post("/authentication/oidc/signing-keys", response_model=None)
 def create_oidc_signing_key_from_ui(
     request: Request,

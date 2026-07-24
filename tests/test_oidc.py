@@ -305,3 +305,67 @@ def test_authentication_page_exposes_preparatory_oidc_ui(client):
     assert 'data-autosave-status-id="oidc-provider-autosave-status"' in page.text
     assert page.text.count('class="help-icon"') >= 10
     assert "Rotate OIDC signing key?" in page.text or "Generate first signing key" in page.text
+
+
+def test_authentication_ui_deletes_bound_client_before_ldap_organization(client):
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import LdapOrganization, OidcClient
+    from labfoundry.app.services.oidc import create_client
+
+    with SessionLocal() as db:
+        organization = LdapOrganization(
+            name="Bound organization",
+            slug="bound-organization",
+            suffix_dn="dc=bound-organization,dc=example,dc=test",
+            enabled=True,
+        )
+        db.add(organization)
+        db.flush()
+        client_row, _secret = create_client(
+            db,
+            name="Bound VCF client",
+            organization_id=organization.id,
+            redirect_uris=["https://vcf.example.test/identity/callback"],
+            post_logout_redirect_uris=[],
+            allowed_scopes=["openid", "profile", "email", "groups"],
+            allow_loopback_redirects=False,
+            access_token_lifetime_seconds=300,
+            id_token_lifetime_seconds=300,
+            authorization_code_lifetime_seconds=60,
+            enabled=True,
+        )
+        organization_id = organization.id
+        client_record_id = client_row.id
+        db.commit()
+
+    login = client.get("/login")
+    csrf = login.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    signed_in = client.post(
+        "/login",
+        data={"username": "admin", "password": "labfoundry-admin", "csrf": csrf},
+        follow_redirects=False,
+    )
+    assert signed_in.status_code == 303
+    page = client.get("/authentication")
+    csrf = page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+    assert f'action="/authentication/oidc/clients/{client_record_id}/delete"' in page.text
+    assert "Delete OIDC client Bound VCF client?" in page.text
+    assert 'data-confirm-label="Delete OIDC client"' in page.text
+
+    deleted = client.post(
+        f"/authentication/oidc/clients/{client_record_id}/delete",
+        data={"csrf": csrf},
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    assert deleted.headers["location"] == "/authentication#oidc-clients"
+    organization_deleted = client.post(
+        f"/ldap/organizations/{organization_id}/delete",
+        data={"csrf": csrf},
+        follow_redirects=False,
+    )
+    assert organization_deleted.status_code == 303
+
+    with SessionLocal() as db:
+        assert db.get(OidcClient, client_record_id) is None
+        assert db.get(LdapOrganization, organization_id) is None

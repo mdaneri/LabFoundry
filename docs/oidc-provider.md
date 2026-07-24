@@ -23,6 +23,8 @@ SQLite foreign-key enforcement is enabled on every connection. OIDC child record
 
 All clients are confidential and use `client_secret_basic`. Client IDs and secrets are generated from cryptographic randomness. Secrets are stored only as Argon2 hashes and plaintext is returned once on client creation or rotation. Rotation replaces the hash in the same transaction, so the previous secret is immediately invalid.
 
+Administrators can delete a client from the Authentication page through the shared confirmation modal. Deletion removes its secret hash and exact redirect records immediately from application state, requires no global appliance apply, and releases any restrictive organization reference so that a previously bound managed LDAP organization can be deleted afterward.
+
 Redirect and post-logout records are stored individually. Matching in the protocol phase will be byte-for-byte against those stored values. Wildcards, fragments, credentials in the authority, control characters, and non-HTTPS redirects are rejected. An operator can explicitly create a development client using HTTP only on a literal loopback address with an exact port; the VCF preset never enables that exception. The VCF 9.1 form requires the operator to paste the exact redirect URI reported by its Identity Broker.
 
 ## Signing keys and public metadata

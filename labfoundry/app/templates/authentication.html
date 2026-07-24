@@ -161,7 +161,7 @@
   </div>
 </section>
 
-<section class="panel">
+<section id="oidc-clients" class="panel">
   <div class="panel-head"><h2>OIDC Clients</h2><span class="muted">{{ oidc_clients|length }} records</span></div>
   <table class="data-table">
     <thead><tr><th>Name</th><th>Client ID</th><th>Organization</th><th>Exact redirects</th><th>Status</th><th>Actions</th></tr></thead>
@@ -171,7 +171,10 @@
           <td>{{ client.name }}</td><td><code>{{ client.client_id }}</code></td><td>{{ client.organization_slug or "Unbound" }}</td>
           <td>{% for uri in client.redirect_uris %}<code>{{ uri }}</code>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
           <td><span class="status-pill {{ 'good' if client.enabled else 'muted' }}">{{ "enabled" if client.enabled else "disabled" }}</span></td>
-          <td><form action="/authentication/oidc/clients/{{ client.id }}/rotate-secret" method="post" data-confirm-modal data-confirm-title="Rotate secret for {{ client.name }}?" data-confirm-message="The previous secret stops working immediately. The replacement is shown once and must be copied into the relying party." data-confirm-label="Rotate client secret"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button tiny secondary" type="submit">Rotate secret</button></form></td>
+          <td class="button-row">
+            <form action="/authentication/oidc/clients/{{ client.id }}/rotate-secret" method="post" data-confirm-modal data-confirm-title="Rotate secret for {{ client.name }}?" data-confirm-message="The previous secret stops working immediately. The replacement is shown once and must be copied into the relying party." data-confirm-label="Rotate client secret"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button tiny secondary" type="submit">Rotate secret</button></form>
+            <form action="/authentication/oidc/clients/{{ client.id }}/delete" method="post" data-confirm-modal data-confirm-title="Delete OIDC client {{ client.name }}?" data-confirm-message="This permanently removes the confidential client, its secret hash, and exact redirect records from LabFoundry. The relying party can no longer start new authorization requests. No appliance service is changed and global appliance apply is not required." data-confirm-label="Delete OIDC client"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button tiny danger" type="submit">Delete client</button></form>
+          </td>
         </tr>
       {% else %}<tr><td colspan="6" class="muted">No confidential clients registered.</td></tr>{% endfor %}
     </tbody>
