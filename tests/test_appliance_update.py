@@ -781,6 +781,7 @@ def test_helper_normalizes_system_powershell_module_permissions_after_install(mo
 
     monkeypatch.setattr(helper, "POWERSHELL_SYSTEM_ROOT", powershell_root)
     monkeypatch.setattr(helper, "POWERSHELL_MODULE_ROOT", module_root)
+    monkeypatch.setattr(helper, "LABFOUNDRY_POWERSHELL_HOME", tmp_path / "powershell-home")
     monkeypatch.setattr(helper, "_command_path", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(helper, "_command_payload", fake_command)
 
@@ -803,11 +804,12 @@ def test_helper_normalizes_system_powershell_module_permissions_after_install(mo
     assert commands[-1] == ["/usr/bin/chmod", "-R", "a+rX,go-w", str(module_root)]
 
 
-def test_helper_reasserts_global_ceip_after_powercli_install(monkeypatch):
+def test_helper_reasserts_global_ceip_after_powercli_install(monkeypatch, tmp_path):
     import base64
 
     helper = load_helper_module()
     scripts = []
+    monkeypatch.setattr(helper, "LABFOUNDRY_POWERSHELL_HOME", tmp_path / "powershell-home")
 
     def fake_command(command, *, success_codes=None, env=None):
         if command[0].endswith("pwsh"):
@@ -854,6 +856,7 @@ def test_helper_reports_powershell_permission_normalization_failure(monkeypatch,
 
     monkeypatch.setattr(helper, "POWERSHELL_SYSTEM_ROOT", powershell_root)
     monkeypatch.setattr(helper, "POWERSHELL_MODULE_ROOT", module_root)
+    monkeypatch.setattr(helper, "LABFOUNDRY_POWERSHELL_HOME", tmp_path / "powershell-home")
     monkeypatch.setattr(
         helper,
         "APPLIANCE_UPDATE_INFO_PATH",
