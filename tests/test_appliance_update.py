@@ -68,7 +68,7 @@ def test_appliance_update_page_and_dry_run_job(client):
     assert "Appliance update pending" in response.text
     assert "recorded as dry-run" in response.text
 
-    from labfoundry.app.models import Job
+    from labfoundry.app.models import Job, JobStep
     from labfoundry.app.worker import run_worker_once
 
     assert run_worker_once()
@@ -76,8 +76,19 @@ def test_appliance_update_page_and_dry_run_job(client):
     with SessionLocal() as db:
         job = db.execute(select(Job).where(Job.type == "appliance-update")).scalar_one()
         payload = json.loads(job.result or "{}")
+        steps = db.execute(
+            select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.position)
+        ).scalars().all()
     assert payload["mode"] == "run"
     assert payload["dry_run"] is True
+    assert [(step.component_key, step.status) for step in steps] == [
+        ("labfoundry_release", "succeeded"),
+        ("photon_os", "succeeded"),
+    ]
+    assert set(payload["stream_results"]) == {"labfoundry_release", "photon_os"}
+    task_payload = client.get(f"/tasks/{job.id}/status").json()["task"]
+    assert all(step["type"] == "appliance-update-step" for step in task_payload["_children"])
+    assert all(step["type_label"] == "Update stream" for step in task_payload["_children"])
     command_lines = [" ".join(command["command"]) for command in payload["commands"]]
     assert "labfoundry-helper appliance-update check /var/lib/labfoundry/apply/appliance-update/labfoundry-update.json" in command_lines
     assert "labfoundry-helper appliance-update apply /var/lib/labfoundry/apply/appliance-update/labfoundry-update.json" in command_lines
@@ -193,6 +204,135 @@ def test_appliance_update_staging_exception_records_failed_job_and_logs(client, 
     assert job.status == "failed"
     assert payload["commands"][0]["command_line"] == "stage-appliance-update /var/lib/labfoundry/apply/appliance-update/labfoundry-update.json"
     assert "staging ownership repair failed" in payload["commands"][0]["stderr"]
+
+
+def test_appliance_update_check_runs_every_child_after_failure(client, monkeypatch):
+    import labfoundry.app.ui as ui
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStep, JobStatus
+    from labfoundry.app.services.appliance_update import ensure_appliance_update_job_steps
+    from labfoundry.app.worker import run_worker_once
+
+    client.get("/login")
+    selected = ["photon_os", "powershell_modules", "labfoundry_release"]
+    calls = []
+
+    def fake_execute(**kwargs):
+        stream = kwargs["selected_stream_ids"][0]
+        calls.append(stream)
+        succeeded = stream != "labfoundry_release"
+        return {
+            "unit_id": stream,
+            "label": stream,
+            "mode": "check",
+            "selected_streams": [stream],
+            "selected_labels": [stream],
+            "status": "succeeded" if succeeded else "failed",
+            "success": succeeded,
+            "dry_run": False,
+            "restart_after_commit": False,
+            "commands": [],
+            "config_path": "",
+            "config_preview": "",
+            "error": "" if succeeded else "release check failed",
+        }
+
+    monkeypatch.setattr(ui, "execute_appliance_update_job", fake_execute)
+    with SessionLocal() as db:
+        job = Job(
+            id="job_update_check_children",
+            type="appliance-update",
+            status=JobStatus.PENDING.value,
+            created_by="admin",
+            task_config_json=json.dumps(
+                {"selected_streams": selected, "settings": {}, "mode": "check"}
+            ),
+            result="{}",
+        )
+        db.add(job)
+        db.flush()
+        ensure_appliance_update_job_steps(db, job=job, selected_streams=selected)
+        db.commit()
+
+    assert run_worker_once() == "job_update_check_children"
+    assert calls == ["labfoundry_release", "powershell_modules", "photon_os"]
+    with SessionLocal() as db:
+        job = db.get(Job, "job_update_check_children")
+        steps = db.execute(
+            select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.position)
+        ).scalars().all()
+        assert job.status == "failed"
+        assert [(step.component_key, step.status) for step in steps] == [
+            ("labfoundry_release", "failed"),
+            ("powershell_modules", "succeeded"),
+            ("photon_os", "succeeded"),
+        ]
+
+
+def test_appliance_update_install_skips_photon_after_earlier_failure(client, monkeypatch):
+    import labfoundry.app.ui as ui
+
+    from labfoundry.app.database import SessionLocal
+    from labfoundry.app.models import Job, JobStep, JobStatus
+    from labfoundry.app.services.appliance_update import ensure_appliance_update_job_steps
+    from labfoundry.app.worker import run_worker_once
+
+    client.get("/login")
+    selected = ["photon_os", "powershell_modules", "labfoundry_release"]
+    calls = []
+
+    def fake_execute(**kwargs):
+        stream = kwargs["selected_stream_ids"][0]
+        calls.append(stream)
+        succeeded = stream != "labfoundry_release"
+        return {
+            "unit_id": stream,
+            "label": stream,
+            "mode": "run",
+            "selected_streams": [stream],
+            "selected_labels": [stream],
+            "status": "succeeded" if succeeded else "failed",
+            "success": succeeded,
+            "dry_run": False,
+            "restart_after_commit": False,
+            "commands": [],
+            "config_path": "",
+            "config_preview": "",
+            "error": "" if succeeded else "release install failed",
+        }
+
+    monkeypatch.setattr(ui, "execute_appliance_update_job", fake_execute)
+    with SessionLocal() as db:
+        job = Job(
+            id="job_update_install_children",
+            type="appliance-update",
+            status=JobStatus.PENDING.value,
+            created_by="admin",
+            task_config_json=json.dumps(
+                {"selected_streams": selected, "settings": {}, "mode": "run"}
+            ),
+            result="{}",
+        )
+        db.add(job)
+        db.flush()
+        ensure_appliance_update_job_steps(db, job=job, selected_streams=selected)
+        db.commit()
+
+    assert run_worker_once() == "job_update_install_children"
+    assert calls == ["labfoundry_release", "powershell_modules"]
+    with SessionLocal() as db:
+        job = db.get(Job, "job_update_install_children")
+        steps = db.execute(
+            select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.position)
+        ).scalars().all()
+        assert job.status == "failed"
+        assert [(step.component_key, step.status) for step in steps] == [
+            ("labfoundry_release", "failed"),
+            ("powershell_modules", "succeeded"),
+            ("photon_os", "skipped"),
+        ]
+        assert "earlier selected update stream failed" in (steps[-1].error or "")
 
 
 def test_appliance_update_service_version_helpers():
@@ -328,8 +468,16 @@ def test_source_sync_is_queued_and_records_validation_status(client):
         job = db.execute(select(Job).where(Job.type == "appliance-update")).scalar_one()
         sources = db.execute(select(UpdateSource).where(UpdateSource.enabled.is_(True))).scalars().all()
         assert json.loads(job.result)["mode"] == "source_sync"
-        assert all(source.validation_status == "valid" for source in sources)
-        assert all("dry-run" in source.validation_message for source in sources)
+        package_sources = [source for source in sources if source.kind in {"photon", "powershell"}]
+        signed_sources = [source for source in sources if source.kind == "labfoundry"]
+        assert all(source.validation_status == "valid" for source in package_sources)
+        assert all("dry-run" in source.validation_message for source in package_sources)
+        assert all(source.validation_status == "not_checked" for source in signed_sources)
+
+    page = client.get("/appliance-update")
+    assert "Synchronized" in page.text
+    assert "Checked during update" in page.text
+    assert ">invalid<" not in page.text
 
 
 def test_software_source_and_managed_module_lifecycle(client):
@@ -389,6 +537,18 @@ def test_software_source_and_managed_module_lifecycle(client):
     assert 'data-tab-target="update-source-powershell-new"' in grouped_page.text
     assert "PSGallery" in grouped_page.text
     assert "PrivateGallery" in grouped_page.text
+    app_css = Path("labfoundry/app/static/app.css").read_text(encoding="utf-8")
+    assert ".detail-rail .detail-panel {\n  position: static;" in app_css
+    assert ".detail-rail {\n  position: sticky;\n  top: 22px;" in app_css
+    assert 'class="source-editor-form"' in grouped_page.text
+    assert 'class="source-editor-options"' in grouped_page.text
+    assert 'class="source-option-grid"' in grouped_page.text
+    assert 'class="source-editor-footer"' in grouped_page.text
+    assert "Repository behavior" in grouped_page.text
+    assert ".source-editor-grid {\n  display: grid;" in app_css
+    assert ".source-option-grid {\n  display: grid;" in app_css
+    assert ".source-editor-footer {\n  display: flex;" in app_css
+    assert "class=\"source-validation-state\"" in grouped_page.text
     with SessionLocal() as db:
         package = db.execute(select(ManagedPackage).where(ManagedPackage.name == "Private.PowerCLI.Tools")).scalar_one()
         package_id = package.id
@@ -584,15 +744,19 @@ def test_helper_syncs_only_owned_photon_and_powershell_sources(monkeypatch, tmp_
     assert json.loads(state_path.read_text(encoding="utf-8")) == {"powershell_repositories": []}
 
 
-def test_helper_uses_each_modules_bound_powershell_repository(monkeypatch):
+def test_helper_uses_each_modules_bound_powershell_repository(monkeypatch, tmp_path):
     import base64
 
     helper = load_helper_module()
     scripts = []
+    environments = []
+    powershell_home = tmp_path / "powershell"
+    monkeypatch.setattr(helper, "LABFOUNDRY_POWERSHELL_HOME", powershell_home)
     monkeypatch.setattr(helper, "_command_path", lambda _name: "/usr/bin/pwsh")
 
-    def fake_command(command, *, success_codes=None):
+    def fake_command(command, *, success_codes=None, env=None):
         scripts.append(base64.b64decode(command[-1]).decode("utf-16-le"))
+        environments.append(env)
         return {"command": command, "returncode": 0, "success": True, "stdout": "", "stderr": ""}
 
     monkeypatch.setattr(helper, "_command_payload", fake_command)
@@ -608,6 +772,7 @@ def test_helper_uses_each_modules_bound_powershell_repository(monkeypatch):
     )
     assert result["checks"]["powershell_modules"][1]["repository"] == "PrivateGallery"
     assert any("-Repository 'PrivateGallery'" in script for script in scripts)
+    assert all(environment["HOME"] == str(powershell_home) for environment in environments)
 
 
 def test_helper_normalizes_system_powershell_module_permissions_after_install(monkeypatch, tmp_path):
@@ -622,6 +787,7 @@ def test_helper_normalizes_system_powershell_module_permissions_after_install(mo
 
     monkeypatch.setattr(helper, "POWERSHELL_SYSTEM_ROOT", powershell_root)
     monkeypatch.setattr(helper, "POWERSHELL_MODULE_ROOT", module_root)
+    monkeypatch.setattr(helper, "LABFOUNDRY_POWERSHELL_HOME", tmp_path / "powershell-home")
     monkeypatch.setattr(helper, "_command_path", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(helper, "_command_payload", fake_command)
 
@@ -644,11 +810,12 @@ def test_helper_normalizes_system_powershell_module_permissions_after_install(mo
     assert commands[-1] == ["/usr/bin/chmod", "-R", "a+rX,go-w", str(module_root)]
 
 
-def test_helper_reasserts_global_ceip_after_powercli_install(monkeypatch):
+def test_helper_reasserts_global_ceip_after_powercli_install(monkeypatch, tmp_path):
     import base64
 
     helper = load_helper_module()
     scripts = []
+    monkeypatch.setattr(helper, "LABFOUNDRY_POWERSHELL_HOME", tmp_path / "powershell-home")
 
     def fake_command(command, *, success_codes=None, env=None):
         if command[0].endswith("pwsh"):
@@ -695,6 +862,7 @@ def test_helper_reports_powershell_permission_normalization_failure(monkeypatch,
 
     monkeypatch.setattr(helper, "POWERSHELL_SYSTEM_ROOT", powershell_root)
     monkeypatch.setattr(helper, "POWERSHELL_MODULE_ROOT", module_root)
+    monkeypatch.setattr(helper, "LABFOUNDRY_POWERSHELL_HOME", tmp_path / "powershell-home")
     monkeypatch.setattr(
         helper,
         "APPLIANCE_UPDATE_INFO_PATH",
@@ -851,3 +1019,28 @@ def test_helper_writes_failed_update_info_for_failed_commands(monkeypatch):
     assert result["reboot_recommended"] is False
     assert "error" in result
     assert written["status"] == "failed"
+
+
+def test_helper_queries_photon_python_without_unsupported_latest_limit(monkeypatch):
+    helper = load_helper_module()
+    captured = {}
+
+    monkeypatch.setattr(helper, "_command_path", lambda command: f"/usr/bin/{command}")
+
+    def fake_command_payload(command, **_kwargs):
+        captured["command"] = command
+        return {
+            "command": command,
+            "returncode": 0,
+            "success": True,
+            "stdout": "python3-3.12.9-1.ph5.x86_64\npython3-3.14.5-2.ph5.x86_64\n",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(helper, "_command_payload", fake_command_payload)
+
+    command, abi = helper._candidate_photon_python_abi()
+
+    assert captured["command"] == ["/usr/bin/tdnf", "repoquery", "python3"]
+    assert command["success"] is True
+    assert abi == "cp314"
