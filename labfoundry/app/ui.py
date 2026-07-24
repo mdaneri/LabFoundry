@@ -70,6 +70,7 @@ from labfoundry.app.models import (
     ManagedPackage,
     NatRule,
     NtpSettings,
+    OidcSigningKey,
     PhysicalInterface,
     Role,
     Route,
@@ -309,6 +310,23 @@ from labfoundry.app.services.settings_archive import (
     export_settings_archive,
     factory_reset_desired_state,
     restore_settings_archive,
+)
+from labfoundry.app.services.oidc import (
+    OIDC_AUTHORIZATION_FLOW_AVAILABLE,
+    OidcConfigurationError,
+    OidcConflictError,
+    create_client as create_oidc_client_record,
+    ensure_provider_settings as ensure_oidc_provider_settings,
+    generate_signing_key as generate_oidc_signing_key,
+    get_client as get_oidc_client,
+    issuer_endpoint_urls as oidc_issuer_endpoint_urls,
+    list_clients as list_oidc_clients,
+    list_subjects as list_oidc_subjects,
+    normalize_issuer_url as normalize_oidc_issuer_url,
+    oidc_client_to_dict,
+    provider_validation_errors as oidc_provider_validation_errors,
+    rotate_client_secret as rotate_oidc_client_secret_value,
+    signing_key_to_dict as oidc_signing_key_to_dict,
 )
 from labfoundry.app.services.local_users import (
     LOCAL_USERS_PASSWORD_POLICY_KEY,
@@ -17331,11 +17349,271 @@ def authentication(
     identity: Identity = Depends(require_session_identity),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
+    return render(
+        request,
+        "authentication.html",
+        authentication_context(db, identity, raw_token=None),
+    )
+
+
+def authentication_context(
+    db: Session,
+    identity: Identity,
+    *,
+    raw_token: str | None,
+    oidc_client_secret: str | None = None,
+    oidc_client_id: str | None = None,
+    oidc_error: str | None = None,
+) -> dict[str, Any]:
     query = select(ApiToken).order_by(desc(ApiToken.created_at))
     if not identity.has_role(Role.ADMIN.value):
         query = query.where(ApiToken.owner_user_id == identity.user_id)
     tokens = db.execute(query).scalars().all()
-    return render(request, "authentication.html", {"identity": identity, "tokens": tokens, "raw_token": None})
+    context: dict[str, Any] = {
+        "identity": identity,
+        "tokens": tokens,
+        "raw_token": raw_token,
+        "oidc_admin": identity.has_role(Role.ADMIN.value),
+        "oidc_client_secret": oidc_client_secret,
+        "oidc_client_id": oidc_client_id,
+        "oidc_error": oidc_error,
+    }
+    if not context["oidc_admin"]:
+        return context
+    provider = ensure_oidc_provider_settings(db)
+    try:
+        endpoint_urls = oidc_issuer_endpoint_urls(provider.issuer_url)
+    except OidcConfigurationError:
+        endpoint_urls = {
+            "issuer": provider.issuer_url,
+            "discovery_url": "",
+            "authorization_endpoint": "",
+            "token_endpoint": "",
+            "userinfo_endpoint": "",
+            "jwks_uri": "",
+            "end_session_endpoint": "",
+        }
+    context.update(
+        {
+            "oidc_provider": provider,
+            "oidc_flow_available": OIDC_AUTHORIZATION_FLOW_AVAILABLE,
+            "oidc_validation_errors": oidc_provider_validation_errors(db, provider),
+            "oidc_urls": endpoint_urls,
+            "oidc_clients": [oidc_client_to_dict(row) for row in list_oidc_clients(db)],
+            "oidc_keys": [
+                oidc_signing_key_to_dict(row)
+                for row in db.execute(
+                    select(OidcSigningKey).order_by(OidcSigningKey.created_at.desc())
+                ).scalars().all()
+            ],
+            "oidc_subjects": list_oidc_subjects(db),
+            "oidc_organizations": db.execute(
+                select(LdapOrganization)
+                .where(LdapOrganization.enabled.is_(True))
+                .order_by(LdapOrganization.name)
+            ).scalars().all(),
+        }
+    )
+    return context
+
+
+@router.post("/authentication/oidc/provider", response_model=None)
+def update_oidc_provider_from_ui(
+    request: Request,
+    issuer_url: str = Form(...),
+    access_token_lifetime_seconds: int = Form(300),
+    id_token_lifetime_seconds: int = Form(300),
+    authorization_code_lifetime_seconds: int = Form(60),
+    clock_skew_seconds: int = Form(120),
+    signing_key_overlap_seconds: int = Form(3600),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    provider = ensure_oidc_provider_settings(db)
+    try:
+        provider.issuer_url = normalize_oidc_issuer_url(issuer_url)
+    except OidcConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    provider.access_token_lifetime_seconds = max(60, min(access_token_lifetime_seconds, 3600))
+    provider.id_token_lifetime_seconds = max(60, min(id_token_lifetime_seconds, 3600))
+    provider.authorization_code_lifetime_seconds = max(
+        30, min(authorization_code_lifetime_seconds, 300)
+    )
+    provider.clock_skew_seconds = max(0, min(clock_skew_seconds, 300))
+    provider.signing_key_overlap_seconds = max(300, min(signing_key_overlap_seconds, 604800))
+    provider.enabled = False
+    provider.updated_at = utcnow()
+    db.add(provider)
+    db.commit()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="update_oidc_provider",
+        resource_type="oidc_provider",
+        resource_id=str(provider.id),
+    )
+    payload = {
+        "saved": True,
+        "valid": not oidc_provider_validation_errors(db, provider),
+        "validation_errors": oidc_provider_validation_errors(db, provider),
+    }
+    if request.headers.get("X-LabFoundry-Autosave") == "1":
+        return JSONResponse(payload)
+    return RedirectResponse("/authentication#oidc-provider", status_code=303)
+
+
+@router.post("/authentication/oidc/clients", response_class=HTMLResponse, response_model=None)
+def create_oidc_client_from_ui(
+    request: Request,
+    name: str = Form(...),
+    organization_id: str = Form(""),
+    redirect_uris: str = Form(...),
+    post_logout_redirect_uris: str = Form(""),
+    preset: str = Form("custom"),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    try:
+        if preset == "vcf-9.1" and not redirect_uris.strip():
+            raise OidcConfigurationError(
+                "Paste the exact redirect URI supplied by the VCF 9.1 Identity Broker."
+            )
+        row, raw_secret = create_oidc_client_record(
+            db,
+            name=name,
+            organization_id=int(organization_id) if organization_id.strip() else None,
+            redirect_uris=[value.strip() for value in redirect_uris.splitlines() if value.strip()],
+            post_logout_redirect_uris=[
+                value.strip() for value in post_logout_redirect_uris.splitlines() if value.strip()
+            ],
+            allowed_scopes=["openid", "profile", "email", "groups"],
+            allow_loopback_redirects=False,
+            access_token_lifetime_seconds=300,
+            id_token_lifetime_seconds=300,
+            authorization_code_lifetime_seconds=60,
+            enabled=True,
+        )
+    except (OidcConfigurationError, ValueError) as exc:
+        return render(
+            request,
+            "authentication.html",
+            authentication_context(db, identity, raw_token=None, oidc_error=str(exc)),
+            status_code=422,
+        )
+    record_audit(
+        db,
+        actor=identity.username,
+        action="create_oidc_client",
+        resource_type="oidc_client",
+        resource_id=str(row.id),
+        detail=f"client_id={row.client_id}; preset={preset}",
+    )
+    return render(
+        request,
+        "authentication.html",
+        authentication_context(
+            db,
+            identity,
+            raw_token=None,
+            oidc_client_secret=raw_secret,
+            oidc_client_id=row.client_id,
+        ),
+    )
+
+
+@router.post("/authentication/oidc/clients/{client_record_id}/rotate-secret", response_class=HTMLResponse, response_model=None)
+def rotate_oidc_client_secret_from_ui(
+    request: Request,
+    client_record_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    try:
+        row = get_oidc_client(db, client_record_id)
+    except OidcConfigurationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    raw_secret = rotate_oidc_client_secret_value(db, row)
+    record_audit(
+        db,
+        actor=identity.username,
+        action="rotate_oidc_client_secret",
+        resource_type="oidc_client",
+        resource_id=str(row.id),
+        detail=f"client_id={row.client_id}",
+    )
+    return render(
+        request,
+        "authentication.html",
+        authentication_context(
+            db,
+            identity,
+            raw_token=None,
+            oidc_client_secret=raw_secret,
+            oidc_client_id=row.client_id,
+        ),
+    )
+
+
+@router.post("/authentication/oidc/clients/{client_record_id}/delete", response_model=None)
+def delete_oidc_client_from_ui(
+    request: Request,
+    client_record_id: int,
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    try:
+        row = get_oidc_client(db, client_record_id)
+    except OidcConfigurationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    public_client_id = row.client_id
+    db.delete(row)
+    db.flush()
+    record_audit(
+        db,
+        actor=identity.username,
+        action="delete_oidc_client",
+        resource_type="oidc_client",
+        resource_id=str(client_record_id),
+        detail=f"client_id={public_client_id}",
+    )
+    return RedirectResponse("/authentication#oidc-clients", status_code=303)
+
+
+@router.post("/authentication/oidc/signing-keys", response_model=None)
+def create_oidc_signing_key_from_ui(
+    request: Request,
+    rotate: str | None = Form(None),
+    csrf: str = Form(...),
+    identity: Identity = Depends(require_session_identity),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    verify_csrf(request, csrf)
+    require_admin_identity(identity)
+    try:
+        row, previous = generate_oidc_signing_key(db, rotate=rotate == "true")
+    except OidcConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record_audit(
+        db,
+        actor=identity.username,
+        action="rotate_oidc_signing_key" if previous else "generate_oidc_signing_key",
+        resource_type="oidc_signing_key",
+        resource_id=str(row.id),
+        detail=f"kid={row.kid}; algorithm={row.algorithm}",
+    )
+    return RedirectResponse("/authentication#oidc-keys", status_code=303)
 
 
 @router.post("/authentication/api-tokens", response_model=None)
@@ -17359,14 +17637,10 @@ def create_token_from_ui(
         settings=get_settings(),
         actor=identity.username,
     )
-    query = select(ApiToken).order_by(desc(ApiToken.created_at))
-    if not identity.has_role(Role.ADMIN.value):
-        query = query.where(ApiToken.owner_user_id == identity.user_id)
-    tokens = db.execute(query).scalars().all()
     return render(
         request,
         "authentication.html",
-        {"identity": identity, "tokens": tokens, "raw_token": token_result.raw_token},
+        authentication_context(db, identity, raw_token=token_result.raw_token),
     )
 
 

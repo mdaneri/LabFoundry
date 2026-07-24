@@ -61,7 +61,7 @@ COMMANDS: dict[str, set[str]] = {
     "dnsmasq": {"validate", "apply", "reload", "leases", "logs"},
     "ca": {"validate", "apply"},
     "kms": {"validate", "apply"},
-    "ldap": {"validate", "apply", "status", "export", "logs"},
+    "ldap": {"validate", "apply", "status", "export", "logs", "authenticate"},
     "ntpd": {"validate", "apply", "status", "logs", "capabilities"},
     "nginx": {"logs", "access-logs", "error-logs"},
     "vcf-backups": {"validate", "apply"},
@@ -118,6 +118,7 @@ NO_PATH_ACTIONS = {
 }
 NON_PATH_ARGUMENT_ACTIONS = {
     ("local-users", "authenticate"),
+    ("ldap", "authenticate"),
     ("automation", "run"),
     ("vcf-offline-depot", "apply-ceip"),
 }
@@ -2443,6 +2444,59 @@ def _apply_ldap_config(payload: dict) -> int:
 
 
 def _handle_ldap(action: str, args: list[str]) -> int:
+    if action == "authenticate":
+        if len(args) != 1:
+            return 1
+        user_dn = args[0]
+        dn_parts = user_dn.split(",")
+        if (
+            len(user_dn) > 1000
+            or any(ord(character) < 0x20 for character in user_dn)
+            or len(dn_parts) < 4
+            or not re.fullmatch(r"uid=[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}", dn_parts[0])
+            or dn_parts[1].lower() != "ou=users"
+            or any("=" not in part or not part.split("=", 1)[0] for part in dn_parts[2:])
+        ):
+            return 1
+        password = sys.stdin.readline(4097).removesuffix("\n").removesuffix("\r")
+        if not password or len(password) > 4096:
+            return 1
+        ldapwhoami = shutil.which("ldapwhoami")
+        if ldapwhoami is None:
+            return 127
+        password_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix="labfoundry-ldap-password-",
+                dir="/run" if Path("/run").is_dir() else None,
+                delete=False,
+            ) as password_file:
+                password_file.write(password)
+                password_file.write("\n")
+                password_path = Path(password_file.name)
+            os.chmod(password_path, 0o600)
+            result = _run(
+                [
+                    ldapwhoami,
+                    "-x",
+                    "-H",
+                    "ldapi:///",
+                    "-D",
+                    user_dn,
+                    "-y",
+                    str(password_path),
+                ],
+                timeout=10,
+            )
+            return 0 if result.returncode == 0 else 1
+        except (OSError, subprocess.TimeoutExpired):
+            return 1
+        finally:
+            password = ""
+            if password_path is not None:
+                password_path.unlink(missing_ok=True)
     if action == "logs":
         if args:
             print("ldap logs does not accept a path", file=sys.stderr)

@@ -383,6 +383,8 @@ KMS / KMIP is PyKMIP-backed and intended for lab compatibility testing, not prod
 
 Managed LDAP provides an OpenLDAP 2.6 service for VCF Automation 9.1 while LabFoundry operator sign-in remains local. Each VCF organization receives an isolated suffix and LMDB database, organization-local users and nested groups, and a read-only bind identity whose secret is encrypted with `LABFOUNDRY_SECRETS_KEY`. Organizations use DNS-style tabs, users and groups use editable Tabulator grids with add rows and context menus, and operators can generate counted synthetic users/groups with complete profiles, memberships, and one-time passwords for lab testing. The `/ldap` page owns service settings and directory data; the Managed LDAP tile in `/vcf-helper` owns manual bundles and guided VCF configuration; Backup / Restore owns the separate passphrase-encrypted LDAP recovery workflow. CA-managed LDAPS is enabled by default with a configurable port; optional plaintext LDAP has its own configurable port and is disabled by default. External listeners are limited to addressed non-management access or route interfaces and enabled VLANs, while privileged reconciliation uses local `ldapi:///` with SASL EXTERNAL. VCF configuration includes the mandatory `serviceAccount` to `employeeType` mapping, but LabFoundry does not import groups or assign VCF roles. See [Managed LDAP for VCF Automation 9.1](docs/managed-ldap.md).
 
+The Authentication page also contains the preparatory administration surface for LabFoundry's constrained OIDC provider. Provider enablement, discovery, JWKS, and authorization traffic remain blocked until the Authorization Code phase is complete. PR 1 establishes stdin-only local/managed-LDAP credential verification for OIDC, opaque stable subjects, exact redirects, Argon2 confidential-client secrets, encrypted 3072-bit RSA signing keys, backup/reset integration, and a VCF 9.1 preset that requires the exact operator-supplied redirect URI. Managed LDAP principals do not gain operator UI access. See [Constrained OpenID Connect provider](docs/oidc-provider.md).
+
 On the Photon appliance, real mutating helper actions re-enter through a transient `systemd-run` service when `LABFOUNDRY_HELPER_USE_SYSTEMD_RUN=1` is set. This keeps the web control plane inside its restricted `labfoundry.service` sandbox while allowing the reviewed root helper to write approved `/etc` configuration files from outside the service's read-only mount namespace.
 
 More detail lives in [`docs/appliance-apply.md`](docs/appliance-apply.md).
@@ -742,7 +744,8 @@ path as the `-VmxPath` argument:
 
 Do not pipe the VMX path or put it on a separate line by itself; PowerShell will
 try to execute the `.vmx` file. The helper builds `python -m pip wheel . -w
-dist`, uploads the latest `labfoundry-*.whl`, installs it into
+dist`, uploads the latest `labfoundry-*.whl` and the OIDC `joserfc` runtime
+wheel, installs both into
 `/opt/labfoundry/.venv`, syncs `scripts/appliance/labfoundry-helper` to
 `/opt/labfoundry/bin/labfoundry-helper`, restores virtualenv permissions,
 restarts `labfoundry.service`, and verifies both guest loopback and host-facing

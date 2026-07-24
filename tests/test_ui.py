@@ -3650,6 +3650,9 @@ def test_backup_restore_recreates_default_vcf_backup_user_from_settings_archive(
 
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.username == "vcf-backup")).scalar_one()
+        settings = db.execute(select(VcfBackupSettings)).scalar_one()
+        settings.sftp_user_id = None
+        db.flush()
         db.delete(user)
         db.commit()
 

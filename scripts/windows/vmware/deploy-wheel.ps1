@@ -228,6 +228,7 @@ function Invoke-PasswordBackedDeploy {
         [Parameter(Mandatory = $true)][string]$UserName,
         [Parameter(Mandatory = $true)][string]$Password,
         [Parameter(Mandatory = $true)][string]$LocalWheelPath,
+        [Parameter(Mandatory = $true)][string]$LocalRuntimeDependencyPath,
         [string]$LocalHelperPath = '',
         [string]$LocalConsoleManagerPath = '',
         [string]$LocalBootInstallerPath = '',
@@ -238,6 +239,7 @@ function Invoke-PasswordBackedDeploy {
         [Parameter(Mandatory = $true)][string]$LocalScriptPath,
         [Parameter(Mandatory = $true)][string]$RemoteDirectoryPath,
         [Parameter(Mandatory = $true)][string]$RemoteWheel,
+        [Parameter(Mandatory = $true)][string]$RemoteRuntimeDependency,
         [string]$RemoteHelper = '',
         [string]$RemoteConsoleManager = '',
         [string]$RemoteBootInstaller = '',
@@ -285,6 +287,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--host", required=True)
 parser.add_argument("--user", required=True)
 parser.add_argument("--local-wheel", required=True)
+parser.add_argument("--local-runtime-dependency", required=True)
 parser.add_argument("--local-helper", default="")
 parser.add_argument("--local-console-manager", default="")
 parser.add_argument("--local-boot-installer", default="")
@@ -295,6 +298,7 @@ parser.add_argument("--local-worker-service", required=True)
 parser.add_argument("--local-script", required=True)
 parser.add_argument("--remote-dir", required=True)
 parser.add_argument("--remote-wheel", required=True)
+parser.add_argument("--remote-runtime-dependency", required=True)
 parser.add_argument("--remote-helper", default="")
 parser.add_argument("--remote-console-manager", default="")
 parser.add_argument("--remote-boot-installer", default="")
@@ -316,6 +320,7 @@ if not password:
 
 uploads = [
     (pathlib.Path(args.local_wheel), args.remote_wheel),
+    (pathlib.Path(args.local_runtime_dependency), args.remote_runtime_dependency),
     (pathlib.Path(args.local_script), args.remote_script),
     (pathlib.Path(args.local_worker_service), args.remote_worker_service),
 ]
@@ -377,6 +382,7 @@ try:
         f"{shell_quote(remote_boot_theme_argument)} "
         f"{shell_quote(remote_boot_background_argument)} "
         f"{shell_quote(args.remote_worker_service)} "
+        f"{shell_quote(args.remote_runtime_dependency)} "
         f"{shell_quote(remote_trust_keys_argument)}"
     )
     stdin, stdout, stderr = client.exec_command(command, get_pty=True, timeout=args.timeout + 60)
@@ -416,6 +422,7 @@ finally:
             '--host', $HostAddress,
             '--user', $UserName,
             '--local-wheel', $LocalWheelPath,
+            '--local-runtime-dependency', $LocalRuntimeDependencyPath,
             '--local-helper', $LocalHelperPath,
             '--local-console-manager', $LocalConsoleManagerPath,
             '--local-boot-installer', $LocalBootInstallerPath,
@@ -424,6 +431,7 @@ finally:
             '--local-script', $LocalScriptPath,
             '--remote-dir', $RemoteDirectoryPath,
             '--remote-wheel', $RemoteWheel,
+            '--remote-runtime-dependency', $RemoteRuntimeDependency,
             '--remote-helper', $RemoteHelper,
             '--remote-console-manager', $RemoteConsoleManager,
             '--remote-boot-installer', $RemoteBootInstaller,
@@ -468,6 +476,14 @@ if (-not $SkipBuild) {
 
 $resolvedWheelPath = Get-WheelPath -Path $WheelPath -Root $resolvedRepoRoot
 $wheelName = Split-Path -Leaf $resolvedWheelPath
+$runtimeDependency = Get-ChildItem -LiteralPath (Join-Path $resolvedRepoRoot 'dist') -Filter 'joserfc-*.whl' -File |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if (-not $runtimeDependency) {
+    throw "The joserfc runtime dependency wheel was not found under $(Join-Path $resolvedRepoRoot 'dist'). Rerun without -SkipBuild."
+}
+$runtimeDependencyPath = $runtimeDependency.FullName
+$runtimeDependencyName = $runtimeDependency.Name
 $helperPath = Join-Path $resolvedRepoRoot 'scripts\appliance\labfoundry-helper'
 $consoleManagerPath = Join-Path $resolvedRepoRoot 'image\common\systemd\labfoundry-console-manager.conf'
 $bootInstallerPath = Join-Path $resolvedRepoRoot 'scripts\appliance\labfoundry-install-boot-branding'
@@ -500,6 +516,7 @@ if ($trustKeyPaths.Count -eq 0) {
     throw "No LabFoundry release trust keys found under: $trustKeyDirectory"
 }
 $remoteWheelPath = "$($RemoteDirectory.TrimEnd('/'))/$wheelName"
+$remoteRuntimeDependencyPath = "$($RemoteDirectory.TrimEnd('/'))/$runtimeDependencyName"
 $remoteHelperPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-helper"
 $remoteConsoleManagerPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-console-manager.conf"
 $remoteBootInstallerPath = "$($RemoteDirectory.TrimEnd('/'))/labfoundry-install-boot-branding"
@@ -540,7 +557,8 @@ boot_installer_path="${6:-}"
 boot_theme_path="${7:-}"
 boot_background_path="${8:-}"
 worker_service_path="${9:?worker service path required}"
-trust_key_paths="${10:?release trust key paths required}"
+runtime_dependency_path="${10:?runtime dependency wheel path required}"
+trust_key_paths="${11:?release trust key paths required}"
 venv="/opt/labfoundry/.venv"
 python="$venv/bin/python"
 
@@ -549,7 +567,7 @@ if [ ! -x "$python" ]; then
     exit 2
 fi
 
-"$python" -m pip install --force-reinstall --no-deps "$wheel"
+"$python" -m pip install --force-reinstall --no-deps "$runtime_dependency_path" "$wheel"
 if [ -n "$helper_path" ]; then
     install -o root -g root -m 0755 "$helper_path" /opt/labfoundry/bin/labfoundry-helper
     sed -i 's/\r$//' /opt/labfoundry/bin/labfoundry-helper
@@ -640,7 +658,7 @@ $sshControlPath = Join-Path ([System.IO.Path]::GetTempPath()) "lf-ssh-$([guid]::
 $sshConnectionArguments = Get-SshConnectionArguments -ControlPath $sshControlPath
 
 try {
-    $uploadPaths = @($resolvedWheelPath) + $trustKeyPaths
+    $uploadPaths = @($resolvedWheelPath, $runtimeDependencyPath) + $trustKeyPaths
     if (-not $SkipHelperSync) {
         $uploadPaths += $helperPath
     }
@@ -672,6 +690,7 @@ try {
             -UserName $SshUser `
             -Password $SshPassword `
             -LocalWheelPath $resolvedWheelPath `
+            -LocalRuntimeDependencyPath $runtimeDependencyPath `
             -LocalHelperPath $localHelperArgument `
             -LocalConsoleManagerPath $localConsoleManagerArgument `
             -LocalBootInstallerPath $localBootInstallerArgument `
@@ -682,6 +701,7 @@ try {
             -LocalScriptPath $tempScript `
             -RemoteDirectoryPath $RemoteDirectory `
             -RemoteWheel $remoteWheelPath `
+            -RemoteRuntimeDependency $remoteRuntimeDependencyPath `
             -RemoteHelper $remoteHelperArgument `
             -RemoteConsoleManager $remoteConsoleManagerArgument `
             -RemoteBootInstaller $remoteBootInstallerArgument `
@@ -702,7 +722,7 @@ try {
         }
 
         Write-Host "Installing wheel and restarting labfoundry.service..."
-        Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument' '$remoteConsoleManagerArgument' '$remoteBootInstallerArgument' '$remoteBootThemeArgument' '$remoteBootBackgroundArgument' '$remoteWorkerServicePath' '$remoteTrustKeysArgument'")
+        Invoke-CheckedCommand -FilePath 'ssh' -Arguments @($sshConnectionArguments + '-t', "${SshUser}@${IpAddress}", "sudo sh '$remoteScriptPath' '$remoteWheelPath' '$ReadinessTimeoutSeconds' '$ReadinessPollSeconds' '$remoteHelperArgument' '$remoteConsoleManagerArgument' '$remoteBootInstallerArgument' '$remoteBootThemeArgument' '$remoteBootBackgroundArgument' '$remoteWorkerServicePath' '$remoteRuntimeDependencyPath' '$remoteTrustKeysArgument'")
     }
 
     if (-not $SkipHostCheck) {

@@ -75,6 +75,7 @@ ALL_SCOPES = [
     "write:backup",
     "admin:all",
 ]
+LIFECYCLE_LDAP_PASSWORD = "LifecycleLdap1!Strong"
 
 
 @dataclass
@@ -1707,7 +1708,7 @@ def configure_ldap(client: HttpClient, args: argparse.Namespace) -> dict[str, An
             )
         created.append(organization)
 
-    password = "LifecycleLdap1!Strong"
+    password = LIFECYCLE_LDAP_PASSWORD
     users: list[dict[str, Any]] = []
     for organization in created:
         organization_users = client.json_request("GET", f"/api/v1/ldap/organizations/{organization['id']}/users")
@@ -2306,6 +2307,69 @@ def run_host_checks(
         require_success(result, f"host {name} check")
         evidence[name] = result
     return evidence
+
+
+def managed_ldap_helper_authentication_check(args: argparse.Namespace) -> dict[str, Any]:
+    user_dn = "uid=operator,ou=users,dc=lifecycle-org-a,dc=ldap,dc=labfoundry,dc=internal"
+    helper_command = (
+        "IFS= read -r ldap_password; "
+        "printf '%s\\n' \"$ldap_password\" | "
+        f"/opt/labfoundry/bin/labfoundry-helper ldap authenticate --real {shell_single_quote(user_dn)}"
+    )
+    user = ssh_username(args, "appliance")
+    host = args.appliance_ssh_host
+    hostkey = ssh_hostkey(host, args, "appliance")
+    secrets = [args.ssh_password, LIFECYCLE_LDAP_PASSWORD]
+    if user == "root":
+        remote_command = f"sh -lc {shell_single_quote(helper_command)}"
+        input_text = f"{LIFECYCLE_LDAP_PASSWORD}\n"
+    elif args.ssh_password:
+        remote_command = f"sudo -S -p '' sh -lc {shell_single_quote(helper_command)}"
+        input_text = f"{args.ssh_password}\n{LIFECYCLE_LDAP_PASSWORD}\n"
+    else:
+        remote_command = f"sudo -n sh -lc {shell_single_quote(helper_command)}"
+        input_text = f"{LIFECYCLE_LDAP_PASSWORD}\n"
+
+    if args.ssh_password:
+        command = ["plink", "-batch", "-ssh", "-pw", args.ssh_password, f"{user}@{host}", remote_command]
+        if hostkey:
+            command[3:3] = ["-hostkey", hostkey]
+        redacted_command = redact_sequence(command, secrets)
+    else:
+        command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"]
+        if args.ssh_key:
+            command.extend(["-i", args.ssh_key])
+        command.extend([f"{user}@{host}", remote_command])
+        redacted_command = redact_sequence(command, secrets)
+    try:
+        completed = subprocess.run(
+            command,
+            input=input_text,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=120,
+        )
+        result = {
+            "command": redacted_command,
+            "returncode": completed.returncode,
+            "stdout": redact_text(completed.stdout, secrets),
+            "stderr": redact_text(completed.stderr, secrets),
+            "password_transport": "stdin-only",
+            "bind_transport": "ldapi:///",
+        }
+    except subprocess.TimeoutExpired:
+        result = {
+            "command": redacted_command,
+            "returncode": 124,
+            "stdout": "",
+            "stderr": "Managed LDAP helper authentication timed out after 120 seconds.",
+            "password_transport": "stdin-only",
+            "bind_transport": "ldapi:///",
+        }
+    require_success(result, "managed LDAP helper authentication")
+    return result
 
 
 def configure_esx_storage(client: HttpClient, args: argparse.Namespace) -> dict[str, Any]:
@@ -3211,6 +3275,7 @@ def run_full_lifecycle(results: list[StepResult], client: HttpClient, args: argp
     run_step(results, "authoritative-dns-state-check", authoritative_dns_state_check, args)
     run_step(results, "recursive-dns-state-check", recursive_dns_state_check, args)
     run_step(results, "host-state-checks", host_state_checks, args)
+    run_step(results, "managed-ldap-helper-authentication", managed_ldap_helper_authentication_check, args)
     run_step(results, "client-checks", client_checks, args)
     run_step(results, "ntp-client-checks", ntp_client_checks, args)
     run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)
@@ -3271,6 +3336,7 @@ def run_restored_lifecycle(results: list[StepResult], client: HttpClient, args: 
     run_step(results, "authoritative-dns-state-check", authoritative_dns_state_check, args)
     run_step(results, "recursive-dns-state-check", recursive_dns_state_check, args)
     run_step(results, "host-state-checks", host_state_checks, args)
+    run_step(results, "managed-ldap-helper-authentication", managed_ldap_helper_authentication_check, args)
     run_step(results, "client-checks", client_checks, args)
     run_step(results, "ntp-client-checks", ntp_client_checks, args)
     run_step(results, "wan-packet-loss-check", wan_packet_loss_check, client, args)

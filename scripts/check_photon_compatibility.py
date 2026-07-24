@@ -18,6 +18,7 @@ DEPENDENCY_IMPORTS = [
     "fastapi",
     "itsdangerous",
     "jinja2",
+    "joserfc",
     "jwt",
     "kmip",
     "multipart",
