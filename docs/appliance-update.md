@@ -3,9 +3,12 @@
 Appliance Update is audited runtime maintenance, separate from desired-state
 enforcement and `/appliance-apply`. The web process queues work, and
 `labfoundry-worker.service` executes it as a durable `appliance-update` task.
-The task retains the selected channel and release, verified key ID, checksums,
-Python compatibility, service checks, rollback result, and bounded redacted
-helper output.
+Each manual or scheduled check/install is one parent task with an ordered child
+step for every selected stream. The child owns its status, progress, timestamps,
+compatibility evidence, error, and bounded redacted helper output. The parent
+retains the shared source snapshot and aggregates the selected channel and
+release, verified key ID, checksums, service checks, rollback result, and final
+outcome.
 
 ## Update streams
 
@@ -20,11 +23,20 @@ LabFoundry has three update streams:
   their selected repositories. After installing or updating `VCF.PowerCLI`,
   the helper reapplies and verifies the centralized VMware CEIP preference at
   PowerCLI `AllUsers` scope. Explicit `User` and `Session` overrides remain
-  outside LabFoundry ownership.
+  outside LabFoundry ownership. Privileged PowerShell work uses the root-owned
+  home `/var/lib/labfoundry/powershell`, so synchronized repository state
+  persists without depending on the service's read-only `/root` view.
 
 The appliance never performs a broad runtime `pip --upgrade` and never contacts
 PyPI during a LabFoundry release update. Application dependencies and bootstrap
 tools are exact, hash-locked wheels inside the release bundle.
+
+Checks execute every selected child even when another check fails, which keeps
+diagnostics independent. Installations preserve the safety order LabFoundry
+Release, PowerShell Modules, then Photon OS. PowerShell remains independently
+observable after a release failure, while Photon is marked **skipped** with an
+explicit reason if either earlier selected stream failed. The parent succeeds
+only when every selected child succeeds.
 
 ## Release sources and channels
 
@@ -71,8 +83,10 @@ manifests, tasks, audits, URLs, or helper output.
 
 Photon and PowerShell source fields autosave as desired runtime-maintenance
 configuration. **Synchronize repositories** explicitly writes only
-LabFoundry-owned tdnf and PowerShell client configuration. Signed LabFoundry
-sources are read directly and do not configure pip.
+LabFoundry-owned tdnf and PowerShell client configuration. Their source cards
+show whether that synchronization has not run, succeeded, or failed. Signed
+LabFoundry sources are read directly, are checked during each update, and do not
+configure pip or report package-client synchronization state.
 
 ## Trust contract
 
@@ -157,8 +171,10 @@ does not expose arbitrary historical downgrades.
 
 Manual and scheduled Photon checks/installations remain available. Before
 mutation, the helper records an inspection of the proposed tdnf transaction and
-queries its candidate `python3` minor ABI. It fails closed if that ABI is not
-listed in the active signed LabFoundry bundle.
+queries all repository candidates with the Photon-supported
+`tdnf repoquery python3` interface, then deterministically selects the highest
+advertised minor ABI. It fails closed if that ABI is not listed in the active
+signed LabFoundry bundle.
 
 If Photon changes Python to another supported ABI, the helper reconstructs the
 active virtualenv from the retained offline wheelhouse before restarting and
@@ -196,7 +212,8 @@ The fixture must use the appliance's named test trust key. Its signed
 `preview` channel must select a healthy release newer than the image baseline;
 its signed `development` channel must select a candidate that reaches database
 startup and then fails the service-health probe. The lifecycle runner proves
-the preview upgrade, expects the development task to fail with
+that each release task exposes a LabFoundry Release child step, proves the
+preview upgrade, expects the development parent and child to fail with
 `rolled_back=true`, and compares the active release, compatibility virtualenv,
 database schema hash, and user identities before and after rollback. It then
 rechecks the web, worker, console, internal `/openapi.json`, and host-facing

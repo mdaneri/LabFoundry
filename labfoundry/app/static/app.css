@@ -1154,8 +1154,14 @@ textarea {
 }
 
 .detail-rail {
+  position: sticky;
+  top: 22px;
   align-self: start;
   min-width: 0;
+}
+
+.detail-rail .detail-panel {
+  position: static;
 }
 
 .detail-rail .settings-list > div {
@@ -4463,22 +4469,30 @@ textarea {
 }
 
 .aligned-control-grid > .switch-field {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(32px, auto) 36px;
-  align-items: start;
-  gap: 5px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 36px;
+  align-items: center;
+  align-self: end;
+  min-height: 36px;
+  gap: 8px;
 }
 
 .aligned-control-grid > .switch-field > .field-label {
-  min-height: 32px;
-  margin-bottom: 5px;
-  align-items: flex-start;
+  min-height: 0;
+  margin-bottom: 0;
+  align-items: center;
 }
 
 .aligned-control-grid > .switch-field > .switch-track {
-  grid-row: 2;
+  grid-row: 1;
   align-self: center;
   justify-self: end;
+}
+
+.source-validation-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .aligned-control-grid > .autosave-status,
