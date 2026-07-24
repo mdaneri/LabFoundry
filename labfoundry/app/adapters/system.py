@@ -174,6 +174,16 @@ class SystemAdapter:
             timeout_seconds=5,
         )
 
+    def authenticate_ldap_user(self, user_dn: str, password: str) -> AdapterResult:
+        return self._helper_result(
+            "ldap",
+            "authenticate",
+            user_dn,
+            dry_run_message="dry-run: managed LDAP authentication is unavailable",
+            input_text=f"{password}\n",
+            dry_run_returncode=1,
+        )
+
     def export_ldap_recovery(self, archive_path: str) -> AdapterResult:
         return self._helper_result("ldap", "export", archive_path, dry_run_message="dry-run: LDAP recovery export command recorded")
 

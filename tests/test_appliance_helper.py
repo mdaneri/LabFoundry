@@ -2885,6 +2885,59 @@ def test_local_users_helper_authenticates_shadow_password_without_leaking(monkey
     assert "valid-hash" not in invalid_output.out
 
 
+def test_ldap_helper_authenticates_with_mode_0600_password_file_and_redacts(monkeypatch, tmp_path, capsys):
+    helper = load_helper_module()
+    seen: dict[str, object] = {}
+
+    class ManagedTemporaryFile:
+        def __init__(self, **_kwargs):
+            self.path = tmp_path / "ldap-password"
+            self.handle = self.path.open("w", encoding="utf-8")
+            self.name = str(self.path)
+
+        def __enter__(self):
+            return self.handle
+
+        def __exit__(self, *_args):
+            self.handle.close()
+
+    def fake_run(command, **_kwargs):
+        password_path = Path(command[command.index("-y") + 1])
+        seen["command"] = command
+        seen["mode"] = stat.S_IMODE(password_path.stat().st_mode)
+        seen["password"] = password_path.read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "dn:uid=alice,ou=users,dc=example,dc=test\n", "")
+
+    real_chmod = helper.os.chmod
+
+    def capture_chmod(path, mode):
+        seen["chmod"] = (Path(path), mode)
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(helper.tempfile, "NamedTemporaryFile", ManagedTemporaryFile)
+    monkeypatch.setattr(helper.shutil, "which", lambda command: "/usr/bin/ldapwhoami" if command == "ldapwhoami" else None)
+    monkeypatch.setattr(helper.os, "chmod", capture_chmod)
+    monkeypatch.setattr(helper, "_run", fake_run)
+    monkeypatch.setattr(helper.sys, "stdin", io.StringIO("Secret-Ldap-Password!\n"))
+
+    assert helper.main(
+        [
+            "labfoundry-helper",
+            "ldap",
+            "authenticate",
+            "--real",
+            "uid=alice,ou=users,dc=example,dc=test",
+        ]
+    ) == 0
+    output = capsys.readouterr()
+    assert seen["chmod"][1] == 0o600
+    assert seen["password"] == "Secret-Ldap-Password!\n"
+    assert "Secret-Ldap-Password!" not in " ".join(seen["command"])
+    assert "Secret-Ldap-Password!" not in output.out
+    assert "Secret-Ldap-Password!" not in output.err
+    assert not (tmp_path / "ldap-password").exists()
+
+
 def test_local_users_helper_authentication_rejects_locked_missing_and_unsupported_hashes(monkeypatch):
     helper = load_helper_module()
 

@@ -378,6 +378,36 @@ def test_host_state_checks_verify_vcf_trust_runtime_dependencies(monkeypatch):
     assert execution_contexts["vcf_powercli_user"] is False
 
 
+def test_managed_ldap_lifecycle_check_sends_directory_password_only_through_stdin(monkeypatch):
+    lifecycle = load_lifecycle_module()
+    args = lifecycle.parse_args(
+        [
+            "--password",
+            "admin-secret",
+            "--ssh-password",
+            "ssh-secret",
+            "--appliance-ssh-host",
+            "192.0.2.10",
+        ]
+    )
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["input"] = kwargs.get("input")
+        return lifecycle.subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(lifecycle.subprocess, "run", fake_run)
+    evidence = lifecycle.managed_ldap_helper_authentication_check(args)
+
+    assert lifecycle.LIFECYCLE_LDAP_PASSWORD in captured["input"]
+    assert lifecycle.LIFECYCLE_LDAP_PASSWORD not in " ".join(captured["command"])
+    assert lifecycle.LIFECYCLE_LDAP_PASSWORD not in json.dumps(evidence)
+    assert evidence["password_transport"] == "stdin-only"
+    assert evidence["bind_transport"] == "ldapi:///"
+    assert "labfoundry-helper ldap authenticate --real" in " ".join(captured["command"])
+
+
 def test_appliance_user_ssh_command_does_not_wrap_with_sudo(monkeypatch):
     lifecycle = load_lifecycle_module()
     args = lifecycle.parse_args(

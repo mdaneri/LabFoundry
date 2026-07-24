@@ -670,6 +670,9 @@ def test_vmware_deploy_wheel_supports_password_backed_noninteractive_deploy():
     assert 'install -o root -g root -m 0644 "$trust_key_path" "/etc/labfoundry/update-trust.d/$trust_key_name"' in script
     assert "openssl pkey -pubin" in script
     assert "LabFoundry release trust key is not Ed25519" in script
+    assert "--local-runtime-dependency" in script
+    assert "'joserfc-*.whl'" in script
+    assert '"$python" -m pip install --force-reinstall --no-deps "$runtime_dependency_path" "$wheel"' in script
     assert "systemctl enable labfoundry-worker.service" in script
     assert "systemctl restart labfoundry-worker.service" in script
     assert "systemctl is-active labfoundry-worker.service" in script
